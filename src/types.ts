@@ -1,3 +1,8 @@
+export interface SessionConfig {
+  idleTimeoutMinutes?: number; // default 30
+  maxConcurrent?: number; // default 20
+}
+
 export interface AgentConfig {
   id: string;
   description: string;
@@ -17,6 +22,8 @@ export interface AgentConfig {
   heartbeat?: {
     rateLimitMinutes?: number; // default 30
   };
+  /** Session pool settings */
+  session?: SessionConfig;
 }
 
 export interface AgentStats {

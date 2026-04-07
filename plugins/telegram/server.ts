@@ -600,25 +600,82 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-await mcp.connect(new StdioServerTransport())
+const SEND_ONLY = process.env.TELEGRAM_SEND_ONLY === 'true'
+const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 
-// When Claude Code closes the MCP connection, stdin gets EOF. Without this
-// the bot keeps polling forever as a zombie, holding the token and blocking
-// the next session with 409 Conflict.
-let shuttingDown = false
-function shutdown(): void {
-  if (shuttingDown) return
-  shuttingDown = true
-  process.stderr.write('telegram channel: shutting down\n')
-  // bot.stop() signals the poll loop to end; the current getUpdates request
-  // may take up to its long-poll timeout to return. Force-exit after 2s.
-  setTimeout(() => process.exit(0), 2000)
-  void Promise.resolve(bot.stop()).finally(() => process.exit(0))
-}
-process.stdin.on('end', shutdown)
-process.stdin.on('close', shutdown)
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
+if (RECEIVER_MODE) {
+  // Receiver mode: standalone poller — POST to CLAUDE_CHANNEL_CALLBACK instead of MCP channel.
+  // No MCP connect. gateway spawns this directly (not via Claude Code MCP host).
+  const CALLBACK_URL = process.env.CLAUDE_CHANNEL_CALLBACK
+  if (!CALLBACK_URL) {
+    process.stderr.write('telegram channel: CLAUDE_CHANNEL_CALLBACK required in RECEIVER_MODE\n')
+    process.exit(1)
+  }
+
+  // Override the mcp.notification call in the message handler — in receiver mode
+  // we POST to the callback URL directly. We patch at runtime by starting polling
+  // and the existing handler already has the fetch(callbackUrl, ...) path which
+  // fires when CLAUDE_CHANNEL_CALLBACK is set. The mcp.notification call will
+  // fail (not connected) but is wrapped in .catch, so it won't crash. We start
+  // the bot without connecting MCP transport.
+  let shuttingDown = false
+  function shutdown(): void {
+    if (shuttingDown) return
+    shuttingDown = true
+    process.stderr.write('telegram channel (receiver): shutting down\n')
+    setTimeout(() => process.exit(0), 2000)
+    void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+  }
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
+  void (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await bot.start({
+          onStart: info => {
+            botUsername = info.username
+            process.stderr.write(`telegram channel (receiver): polling as @${info.username}\n`)
+          },
+        })
+        return
+      } catch (err) {
+        if (err instanceof GrammyError && err.error_code === 409) {
+          const delay = Math.min(1000 * attempt, 15000)
+          process.stderr.write(
+            `telegram channel (receiver): 409 Conflict, retrying in ${delay / 1000}s\n`,
+          )
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+        if (err instanceof Error && err.message === 'Aborted delay') return
+        process.stderr.write(`telegram channel (receiver): polling failed: ${err}\n`)
+        return
+      }
+    }
+  })()
+} else {
+  await mcp.connect(new StdioServerTransport())
+
+  // When Claude Code closes the MCP connection, stdin gets EOF. Without this
+  // the bot keeps polling forever as a zombie, holding the token and blocking
+  // the next session with 409 Conflict.
+  let shuttingDown = false
+  function shutdown(): void {
+    if (shuttingDown) return
+    shuttingDown = true
+    process.stderr.write('telegram channel: shutting down\n')
+    // bot.stop() signals the poll loop to end; the current getUpdates request
+    // may take up to its long-poll timeout to return. Force-exit after 2s.
+    setTimeout(() => process.exit(0), 2000)
+    void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+  }
+  process.stdin.on('end', shutdown)
+  process.stdin.on('close', shutdown)
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
+  if (!SEND_ONLY) {
 
 // Commands are DM-only. Responding in groups would: (1) leak pairing codes via
 // /status to other group members, (2) confirm bot presence in non-allowlisted
@@ -999,3 +1056,5 @@ void (async () => {
     }
   }
 })()
+  } // end if (!SEND_ONLY)
+} // end else (not RECEIVER_MODE)
