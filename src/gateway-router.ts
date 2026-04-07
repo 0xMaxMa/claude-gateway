@@ -28,6 +28,9 @@ export class GatewayRouter {
   /** Gateway start time */
   private readonly startedAt = new Date();
 
+  /** Optional gateway config (used to mount API router) */
+  private readonly gatewayConfig?: GatewayConfig;
+
   constructor(
     agents: Map<string, AgentRunner>,
     configs: Map<string, AgentConfig>,
@@ -36,13 +39,8 @@ export class GatewayRouter {
   ) {
     this.agents = agents;
     this.configs = configs;
+    this.gatewayConfig = gatewayConfig;
     this.app = express();
-
-    // Mount API router if api keys are configured
-    if (gatewayConfig?.gateway?.api?.keys?.length) {
-      const apiRouter = createApiRouter(agents, configs, gatewayConfig.gateway.api.keys);
-      this.app.use('/api', apiRouter);
-    }
 
     // Initialise counters for all known agents
     for (const [id, runner] of agents) {
@@ -70,6 +68,16 @@ export class GatewayRouter {
 
   private setupRoutes(): void {
     this.app.use(express.json());
+
+    // Mount API router after body parser so req.body is populated
+    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+      const apiRouter = createApiRouter(
+        this.agents,
+        this.configs,
+        this.gatewayConfig.gateway.api.keys,
+      );
+      this.app.use('/api', apiRouter);
+    }
 
     // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
