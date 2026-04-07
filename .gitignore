@@ -32,6 +32,7 @@ coverage/
 planning*.md
 design*.md
 testcase*.md
+feature*.md
 
 .claude-plugin/
 .claude

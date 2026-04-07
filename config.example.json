@@ -21,6 +21,10 @@
       },
       "heartbeat": {
         "rateLimitMinutes": 30
+      },
+      "session": {
+        "idleTimeoutMinutes": 30,
+        "maxConcurrent": 20
       }
     },
     {
@@ -37,6 +41,10 @@
         "model": "claude-sonnet-4-6",
         "dangerouslySkipPermissions": false,
         "extraFlags": []
+      },
+      "session": {
+        "idleTimeoutMinutes": 30,
+        "maxConcurrent": 20
       }
     }
   ]

@@ -124,6 +124,7 @@ async function main(): Promise<void> {
 
   console.log(`[gateway] Loading config from ${CONFIG_PATH}`);
   const config: GatewayConfig = loadConfig(CONFIG_PATH);
+  config.gateway.logDir = expandTilde(config.gateway.logDir);
 
   // ── Context isolation check ──────────────────────────────────────────────
   const guard = new ContextIsolationGuard();

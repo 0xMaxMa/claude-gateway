@@ -600,25 +600,134 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-await mcp.connect(new StdioServerTransport())
+const SEND_ONLY = process.env.TELEGRAM_SEND_ONLY === 'true'
+const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 
-// When Claude Code closes the MCP connection, stdin gets EOF. Without this
-// the bot keeps polling forever as a zombie, holding the token and blocking
-// the next session with 409 Conflict.
-let shuttingDown = false
-function shutdown(): void {
-  if (shuttingDown) return
-  shuttingDown = true
-  process.stderr.write('telegram channel: shutting down\n')
-  // bot.stop() signals the poll loop to end; the current getUpdates request
-  // may take up to its long-poll timeout to return. Force-exit after 2s.
-  setTimeout(() => process.exit(0), 2000)
-  void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+// ─── Message helpers (shared across all polling modes) ───────────────────────
+
+// Filenames and titles are uploader-controlled. They land inside the <channel>
+// notification — delimiter chars would let the uploader break out of the tag
+// or forge a second meta entry.
+function safeName(s: string | undefined): string | undefined {
+  return s?.replace(/[<>\[\]\r\n;]/g, '_')
 }
-process.stdin.on('end', shutdown)
-process.stdin.on('close', shutdown)
-process.on('SIGTERM', shutdown)
-process.on('SIGINT', shutdown)
+
+type AttachmentMeta = {
+  kind: string
+  file_id: string
+  size?: number
+  mime?: string
+  name?: string
+}
+
+async function handleInbound(
+  ctx: Context,
+  text: string,
+  downloadImage: (() => Promise<string | undefined>) | undefined,
+  attachment?: AttachmentMeta,
+): Promise<void> {
+  const result = gate(ctx)
+
+  if (result.action === 'drop') return
+
+  if (result.action === 'pair') {
+    const lead = result.isResend ? 'Still pending' : 'Pairing required'
+    await ctx.reply(
+      `${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`,
+    )
+    return
+  }
+
+  const access = result.access
+  const from = ctx.from!
+  const chat_id = String(ctx.chat!.id)
+  const msgId = ctx.message?.message_id
+
+  // Permission-reply intercept: if this looks like "yes xxxxx" for a
+  // pending permission request, emit the structured event instead of
+  // relaying as chat. The sender is already gate()-approved at this point
+  // (non-allowlisted senders were dropped above), so we trust the reply.
+  const permMatch = PERMISSION_REPLY_RE.exec(text)
+  if (permMatch) {
+    void mcp.notification({
+      method: 'notifications/claude/channel/permission',
+      params: {
+        request_id: permMatch[2]!.toLowerCase(),
+        behavior: permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
+      },
+    })
+    if (msgId != null) {
+      const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
+      void bot.api.setMessageReaction(chat_id, msgId, [
+        { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] },
+      ]).catch(() => {})
+    }
+    return
+  }
+
+  // Typing indicator — signals "processing" until we reply (or ~5s elapses).
+  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+
+  // Ack reaction — lets the user know we're processing. Fire-and-forget.
+  // Telegram only accepts a fixed emoji whitelist — if the user configures
+  // something outside that set the API rejects it and we swallow.
+  if (access.ackReaction && msgId != null) {
+    void bot.api
+      .setMessageReaction(chat_id, msgId, [
+        { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
+      ])
+      .catch(() => {})
+  }
+
+  const imagePath = downloadImage ? await downloadImage() : undefined
+
+  // image_path goes in meta only — an in-content "[image attached — read: PATH]"
+  // annotation is forgeable by any allowlisted sender typing that string.
+  const channelParams = {
+    content: text,
+    meta: {
+      chat_id,
+      ...(msgId != null ? { message_id: String(msgId) } : {}),
+      user: from.username ?? String(from.id),
+      user_id: String(from.id),
+      ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
+      ...(imagePath ? { image_path: imagePath } : {}),
+      ...(attachment ? {
+        attachment_kind: attachment.kind,
+        attachment_file_id: attachment.file_id,
+        ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
+        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
+        ...(attachment.name ? { attachment_name: attachment.name } : {}),
+      } : {}),
+    },
+  }
+
+  mcp.notification({
+    method: 'notifications/claude/channel',
+    params: channelParams,
+  }).catch(err => {
+    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
+  })
+
+  // Callback bridge: when agent-runner provides CLAUDE_CHANNEL_CALLBACK, POST
+  // the channel params there so the gateway can inject them as stream-json
+  // turns via Claude's stdin (MCP notifications alone don't trigger new LLM
+  // turns in --print --channels mode).
+  const callbackUrl = process.env.CLAUDE_CHANNEL_CALLBACK
+  if (callbackUrl) {
+    fetch(callbackUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(channelParams),
+    }).catch(err => {
+      process.stderr.write(`telegram channel: callback POST failed: ${err}\n`)
+    })
+  }
+}
+
+// ─── Register bot handlers (runs in both MCP mode and receiver mode) ──────────
+
+if (!SEND_ONLY) {
 
 // Commands are DM-only. Responding in groups would: (1) leak pairing codes via
 // /status to other group members, (2) confirm bot presence in non-allowlisted
@@ -833,169 +942,124 @@ bot.on('message:sticker', async ctx => {
   })
 })
 
-type AttachmentMeta = {
-  kind: string
-  file_id: string
-  size?: number
-  mime?: string
-  name?: string
-}
-
-// Filenames and titles are uploader-controlled. They land inside the <channel>
-// notification — delimiter chars would let the uploader break out of the tag
-// or forge a second meta entry.
-function safeName(s: string | undefined): string | undefined {
-  return s?.replace(/[<>\[\]\r\n;]/g, '_')
-}
-
-async function handleInbound(
-  ctx: Context,
-  text: string,
-  downloadImage: (() => Promise<string | undefined>) | undefined,
-  attachment?: AttachmentMeta,
-): Promise<void> {
-  const result = gate(ctx)
-
-  if (result.action === 'drop') return
-
-  if (result.action === 'pair') {
-    const lead = result.isResend ? 'Still pending' : 'Pairing required'
-    await ctx.reply(
-      `${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`,
-    )
-    return
-  }
-
-  const access = result.access
-  const from = ctx.from!
-  const chat_id = String(ctx.chat!.id)
-  const msgId = ctx.message?.message_id
-
-  // Permission-reply intercept: if this looks like "yes xxxxx" for a
-  // pending permission request, emit the structured event instead of
-  // relaying as chat. The sender is already gate()-approved at this point
-  // (non-allowlisted senders were dropped above), so we trust the reply.
-  const permMatch = PERMISSION_REPLY_RE.exec(text)
-  if (permMatch) {
-    void mcp.notification({
-      method: 'notifications/claude/channel/permission',
-      params: {
-        request_id: permMatch[2]!.toLowerCase(),
-        behavior: permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
-      },
-    })
-    if (msgId != null) {
-      const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
-      void bot.api.setMessageReaction(chat_id, msgId, [
-        { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] },
-      ]).catch(() => {})
-    }
-    return
-  }
-
-  // Typing indicator — signals "processing" until we reply (or ~5s elapses).
-  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
-
-  // Ack reaction — lets the user know we're processing. Fire-and-forget.
-  // Telegram only accepts a fixed emoji whitelist — if the user configures
-  // something outside that set the API rejects it and we swallow.
-  if (access.ackReaction && msgId != null) {
-    void bot.api
-      .setMessageReaction(chat_id, msgId, [
-        { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
-      ])
-      .catch(() => {})
-  }
-
-  const imagePath = downloadImage ? await downloadImage() : undefined
-
-  // image_path goes in meta only — an in-content "[image attached — read: PATH]"
-  // annotation is forgeable by any allowlisted sender typing that string.
-  const channelParams = {
-    content: text,
-    meta: {
-      chat_id,
-      ...(msgId != null ? { message_id: String(msgId) } : {}),
-      user: from.username ?? String(from.id),
-      user_id: String(from.id),
-      ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
-      ...(imagePath ? { image_path: imagePath } : {}),
-      ...(attachment ? {
-        attachment_kind: attachment.kind,
-        attachment_file_id: attachment.file_id,
-        ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
-        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
-        ...(attachment.name ? { attachment_name: attachment.name } : {}),
-      } : {}),
-    },
-  }
-
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: channelParams,
-  }).catch(err => {
-    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
-  })
-
-  // Callback bridge: when agent-runner provides CLAUDE_CHANNEL_CALLBACK, POST
-  // the channel params there so the gateway can inject them as stream-json
-  // turns via Claude's stdin (MCP notifications alone don't trigger new LLM
-  // turns in --print --channels mode).
-  const callbackUrl = process.env.CLAUDE_CHANNEL_CALLBACK
-  if (callbackUrl) {
-    fetch(callbackUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(channelParams),
-    }).catch(err => {
-      process.stderr.write(`telegram channel: callback POST failed: ${err}\n`)
-    })
-  }
-}
-
 // Without this, any throw in a message handler stops polling permanently
 // (grammy's default error handler calls bot.stop() and rethrows).
 bot.catch(err => {
   process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`)
 })
 
-// 409 Conflict = another getUpdates consumer is still active (zombie from a
-// previous session, or a second Claude Code instance). Retry with backoff
-// until the slot frees up instead of crashing on the first rejection.
-void (async () => {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await bot.start({
-        onStart: info => {
-          botUsername = info.username
-          process.stderr.write(`telegram channel: polling as @${info.username}\n`)
-          void bot.api.setMyCommands(
-            [
-              { command: 'start', description: 'Welcome and setup guide' },
-              { command: 'help', description: 'What this bot can do' },
-              { command: 'status', description: 'Check your pairing status' },
-            ],
-            { scope: { type: 'all_private_chats' } },
-          ).catch(() => {})
-        },
-      })
-      return // bot.stop() was called — clean exit from the loop
-    } catch (err) {
-      if (err instanceof GrammyError && err.error_code === 409) {
-        const delay = Math.min(1000 * attempt, 15000)
-        const detail = attempt === 1
-          ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
-          : ''
-        process.stderr.write(
-          `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
-        )
-        await new Promise(r => setTimeout(r, delay))
-        continue
-      }
-      // bot.stop() mid-setup rejects with grammy's "Aborted delay" — expected, not an error.
-      if (err instanceof Error && err.message === 'Aborted delay') return
-      process.stderr.write(`telegram channel: polling failed: ${err}\n`)
-      return
-    }
+} // end if (!SEND_ONLY)
+
+// ─── Mode startup ─────────────────────────────────────────────────────────────
+
+if (RECEIVER_MODE) {
+  // Receiver mode: standalone poller — POST to CLAUDE_CHANNEL_CALLBACK instead of MCP channel.
+  // No MCP connect. gateway spawns this directly (not via Claude Code MCP host).
+  // mcp.notification() calls in handlers fail silently (.catch wrapped) — only the
+  // CLAUDE_CHANNEL_CALLBACK fetch path is used here.
+  const CALLBACK_URL = process.env.CLAUDE_CHANNEL_CALLBACK
+  if (!CALLBACK_URL) {
+    process.stderr.write('telegram channel: CLAUDE_CHANNEL_CALLBACK required in RECEIVER_MODE\n')
+    process.exit(1)
   }
-})()
+
+  let shuttingDown = false
+  function shutdown(): void {
+    if (shuttingDown) return
+    shuttingDown = true
+    process.stderr.write('telegram channel (receiver): shutting down\n')
+    setTimeout(() => process.exit(0), 2000)
+    void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+  }
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
+  void (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await bot.start({
+          onStart: info => {
+            botUsername = info.username
+            process.stderr.write(`telegram channel (receiver): polling as @${info.username}\n`)
+          },
+        })
+        return
+      } catch (err) {
+        if (err instanceof GrammyError && err.error_code === 409) {
+          const delay = Math.min(1000 * attempt, 15000)
+          process.stderr.write(
+            `telegram channel (receiver): 409 Conflict, retrying in ${delay / 1000}s\n`,
+          )
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+        if (err instanceof Error && err.message === 'Aborted delay') return
+        process.stderr.write(`telegram channel (receiver): polling failed: ${err}\n`)
+        return
+      }
+    }
+  })()
+} else {
+  await mcp.connect(new StdioServerTransport())
+
+  // When Claude Code closes the MCP connection, stdin gets EOF. Without this
+  // the bot keeps polling forever as a zombie, holding the token and blocking
+  // the next session with 409 Conflict.
+  let shuttingDown = false
+  function shutdown(): void {
+    if (shuttingDown) return
+    shuttingDown = true
+    process.stderr.write('telegram channel: shutting down\n')
+    // bot.stop() signals the poll loop to end; the current getUpdates request
+    // may take up to its long-poll timeout to return. Force-exit after 2s.
+    setTimeout(() => process.exit(0), 2000)
+    void Promise.resolve(bot.stop()).finally(() => process.exit(0))
+  }
+  process.stdin.on('end', shutdown)
+  process.stdin.on('close', shutdown)
+  process.on('SIGTERM', shutdown)
+  process.on('SIGINT', shutdown)
+
+  if (!SEND_ONLY) {
+    // 409 Conflict = another getUpdates consumer is still active (zombie from a
+    // previous session, or a second Claude Code instance). Retry with backoff
+    // until the slot frees up instead of crashing on the first rejection.
+    void (async () => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await bot.start({
+            onStart: info => {
+              botUsername = info.username
+              process.stderr.write(`telegram channel: polling as @${info.username}\n`)
+              void bot.api.setMyCommands(
+                [
+                  { command: 'start', description: 'Welcome and setup guide' },
+                  { command: 'help', description: 'What this bot can do' },
+                  { command: 'status', description: 'Check your pairing status' },
+                ],
+                { scope: { type: 'all_private_chats' } },
+              ).catch(() => {})
+            },
+          })
+          return // bot.stop() was called — clean exit from the loop
+        } catch (err) {
+          if (err instanceof GrammyError && err.error_code === 409) {
+            const delay = Math.min(1000 * attempt, 15000)
+            const detail = attempt === 1
+              ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
+              : ''
+            process.stderr.write(
+              `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
+            )
+            await new Promise(r => setTimeout(r, delay))
+            continue
+          }
+          // bot.stop() mid-setup rejects with grammy's "Aborted delay" — expected, not an error.
+          if (err instanceof Error && err.message === 'Aborted delay') return
+          process.stderr.write(`telegram channel: polling failed: ${err}\n`)
+          return
+        }
+      }
+    })()
+  }
+}

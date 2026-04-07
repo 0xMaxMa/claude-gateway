@@ -72,6 +72,16 @@ function validateAgent(agent: Record<string, unknown>, index: number): void {
       `Agent "${agent.id}" has invalid dmPolicy "${telegram.dmPolicy}". Must be "allowlist" or "open".`
     );
   }
+
+  if (agent.session !== undefined && typeof agent.session === 'object') {
+    const session = agent.session as Record<string, unknown>;
+    if (session.idleTimeoutMinutes !== undefined && (typeof session.idleTimeoutMinutes !== 'number' || session.idleTimeoutMinutes <= 0)) {
+      throw new ConfigValidationError(`agent '${agent.id}': session.idleTimeoutMinutes must be > 0`);
+    }
+    if (session.maxConcurrent !== undefined && (typeof session.maxConcurrent !== 'number' || session.maxConcurrent <= 0)) {
+      throw new ConfigValidationError(`agent '${agent.id}': session.maxConcurrent must be > 0`);
+    }
+  }
 }
 
 /**
