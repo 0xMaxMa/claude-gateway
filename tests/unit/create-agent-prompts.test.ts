@@ -5,6 +5,7 @@
 import {
   parseGeneratedFiles,
   buildGenerationPrompt,
+  buildUpdatePrompt,
 } from '../../scripts/create-agent-prompts';
 
 describe('create-agent-prompts', () => {
@@ -160,6 +161,37 @@ Line 3.`;
       const prompt = buildGenerationPrompt('Agent', 'Description.');
       expect(typeof prompt).toBe('string');
       expect(prompt.length).toBeGreaterThan(0);
+    });
+
+    // T12: No "Acknowledge first"
+    it('T12: does not contain "Acknowledge first"', () => {
+      const prompt = buildGenerationPrompt('Bot', 'A helpful bot.');
+      expect(prompt).not.toContain('Acknowledge first');
+    });
+
+    // T13: No "emojiReactionMode"
+    it('T13: does not contain "emojiReactionMode"', () => {
+      const prompt = buildGenerationPrompt('Bot', 'A helpful bot.');
+      expect(prompt).not.toContain('emojiReactionMode');
+    });
+
+    // T14: Has "Report completion"
+    it('T14: contains "Report completion"', () => {
+      const prompt = buildGenerationPrompt('Bot', 'A helpful bot.');
+      expect(prompt).toContain('Report completion');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // buildUpdatePrompt — T15
+  // ---------------------------------------------------------------------------
+  describe('buildUpdatePrompt', () => {
+    // T15: No "Acknowledge first"
+    it('T15: does not contain "Acknowledge first" as a rule to add', () => {
+      const prompt = buildUpdatePrompt('Bot', '# Agent: Bot\n## Rules\nsome rules');
+      // The update prompt should instruct removal, not addition
+      expect(prompt).not.toMatch(/add.*Acknowledge first/i);
+      expect(prompt).toContain('REMOVE');
     });
   });
 

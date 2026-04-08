@@ -40,7 +40,6 @@
         "dangerouslySkipPermissions": true,
         "extraFlags": []
       },
-      "emojiReactionMode": "minimal",
       "signatureEmoji": "",
       "heartbeat": {
         "rateLimitMinutes": 30

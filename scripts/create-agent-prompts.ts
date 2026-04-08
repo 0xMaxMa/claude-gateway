@@ -8,12 +8,11 @@
 export function buildGenerationPrompt(
   name: string,
   description: string,
-  options?: { signatureEmoji?: string; emojiReactionMode?: string }
+  options?: { signatureEmoji?: string }
 ): string {
   const signatureNote = options?.signatureEmoji
     ? `\nThe agent has a signature emoji: ${options.signatureEmoji}. Include it in the Emoji Usage section as the signature emoji.`
     : '';
-  const reactionMode = options?.emojiReactionMode ?? 'minimal';
 
   return `You are helping configure a Claude Code agent for the claude-gateway multi-bot system.
 
@@ -34,20 +33,11 @@ Rules:
 - agent.md is REQUIRED. Start with "# Agent: ${name}" on line 1.
   Include: role, rules, what it can/cannot do, language to use.
   Always include these rules under ## Rules:
-  "Acknowledge first (mandatory): Every message MUST begin with a text reply acknowledgement
-   before taking any action or calling any tool. No exceptions. Emoji reaction alone does NOT count.
-   Examples: 'Got it!', 'On it!', 'Sure thing!', 'Let me check…'"
   "Report completion (mandatory): After finishing any task, ALWAYS send a reply summarising what
    was done before the session ends. Never silently complete work without reporting the result back
    to the user."
   Also include an "## Emoji Usage" section in agent.md with these guidelines:
-    - Text emoji: Use sparingly in messages. Occasional emoji is fine for warmth, but don't overdo it.
-    - Reactions: React to messages like a human would — use the react tool. Max 1 reaction per message.
-      Reaction mode is "${reactionMode}": ${{
-        minimal: 'only react when the message clearly warrants it (e.g. thanks, celebrations, humor).',
-        extensive: 'react to most messages with an appropriate emoji to show engagement.',
-        none: 'do not use emoji reactions at all.',
-      }[reactionMode] ?? 'only react when the message clearly warrants it.'}
+    - React to messages naturally — use the react tool. Max 1 reaction per message.
     - Signature emoji: ${options?.signatureEmoji ? `Use ${options.signatureEmoji} as your signature emoji in greetings or sign-offs.` : 'None assigned.'}${signatureNote}
 - soul.md: tone and personality only (not rules). Omit if no distinct style.
 - user.md: target user profile. Omit if public/unknown.
@@ -108,17 +98,15 @@ ${currentContent}
 
 Update this agent.md to follow current best practices:
 - Preserve the agent's role, purpose, and all existing rules
-- Ensure ## Rules section includes these rules (add if missing, strengthen if weak):
-  "Acknowledge first (mandatory): Every message MUST begin with a text reply acknowledgement
-   before taking any action or calling any tool. No exceptions. Emoji reaction alone does NOT count.
-   Examples: 'Got it!', 'On it!', 'Sure thing!', 'Let me check…'"
+- REMOVE any "Acknowledge first" rule if present — this is now handled at infrastructure level
+- Ensure ## Rules section includes this rule (add if missing, strengthen if weak):
   "Report completion (mandatory): After finishing any task, ALWAYS send a reply summarising what
    was done before the session ends. Never silently complete work without reporting the result back
    to the user."
 - Ensure an "## Emoji Usage" section exists with these guidelines:
-    - Text emoji: Use sparingly. Occasional emoji is fine for warmth, but don't overdo it.
-    - Reactions: React to messages like a human would — use the react tool. Max 1 reaction per message.
+    - React to messages naturally — use the react tool. Max 1 reaction per message.
     - Signature emoji: preserve any existing signature emoji setting.
+- Remove any mention of "emojiReactionMode" if present
 - Keep the file under 500 words
 
 Output ONLY the updated agent.md content — no preamble, no explanation, no commentary.

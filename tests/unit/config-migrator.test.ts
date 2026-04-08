@@ -350,7 +350,7 @@ describe('config-migrator', () => {
           {
             id: 'example',
             telegram: { botToken: '${TOKEN}', dmPolicy: 'allowlist' },
-            emojiReactionMode: 'minimal',
+            signatureEmoji: '',
           },
         ],
       };
@@ -361,7 +361,7 @@ describe('config-migrator', () => {
       expect(result.migrated).toBe(true);
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(updated.agents[0].id).toBe('agent-a');
-      expect(updated.agents[0].emojiReactionMode).toBe('minimal');
+      expect(updated.agents[0].signatureEmoji).toBe('');
       expect(updated.agents[0].telegram.botToken).toBe('tok-a');
       expect(updated.agents[0].telegram.dmPolicy).toBe('allowlist');
     });
@@ -440,7 +440,6 @@ describe('config-migrator', () => {
           {
             id: 'example',
             telegram: { botToken: '${TOKEN}', dmPolicy: 'allowlist' },
-            emojiReactionMode: 'minimal',
             signatureEmoji: '',
           },
         ],
@@ -450,16 +449,15 @@ describe('config-migrator', () => {
 
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(updated.agents[0].id).toBe('agent-a');
-      expect(updated.agents[0].emojiReactionMode).toBe('minimal');
       expect(updated.agents[0].signatureEmoji).toBe('');
       expect(updated.agents[0].telegram.botToken).toBe('tok-a');
       expect(updated.agents[0].telegram.dmPolicy).toBe('allowlist');
 
       expect(updated.agents[1].id).toBe('agent-b');
-      expect(updated.agents[1].emojiReactionMode).toBe('minimal');
+      expect(updated.agents[1].signatureEmoji).toBe('');
 
-      expect(result.addedFields).toContain('agents[0].emojiReactionMode');
-      expect(result.addedFields).toContain('agents[1].emojiReactionMode');
+      expect(result.addedFields).toContain('agents[0].signatureEmoji');
+      expect(result.addedFields).toContain('agents[1].signatureEmoji');
     });
 
     it('creates a .bak backup before writing', () => {
