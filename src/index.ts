@@ -126,10 +126,10 @@ async function main(): Promise<void> {
 
   // ── Auto-migrate config (add missing fields from template) ────────────────
   const templatePath = path.join(__dirname, '..', 'config.template.json');
-  const pkgPath = path.join(__dirname, '..', 'package.json');
-  const pkgVersion: string = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version;
+  const templateJson = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
+  const templateVersion: string = templateJson.configVersion ?? '0.0.0';
   try {
-    const detection = detectMigration(CONFIG_PATH, templatePath, pkgVersion);
+    const detection = detectMigration(CONFIG_PATH, templatePath, templateVersion);
     if (detection.needed) {
       let shouldMigrate = false;
 
@@ -159,10 +159,10 @@ async function main(): Promise<void> {
           CONFIG_PATH,
           detection.config,
           detection.template,
-          pkgVersion,
+          templateVersion,
           ignorePaths,
         );
-        console.log(`[gateway] Config migrated to v${pkgVersion}. Added: ${migration.addedFields.join(', ')}`);
+        console.log(`[gateway] Config migrated to v${templateVersion}. Added: ${migration.addedFields.join(', ')}`);
       } else {
         console.warn(`[gateway] Config migration skipped by user. Running with current config.`);
       }

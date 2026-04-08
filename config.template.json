@@ -7,7 +7,6 @@
   },
   "configVersion": "1.0.0",
   "gateway": {
-    "version": "1.0.0",
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
     "api": {

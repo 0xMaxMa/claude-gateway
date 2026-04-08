@@ -17,6 +17,7 @@ import { spawnSync } from 'child_process';
 import { loadWorkspace } from '../src/workspace-loader';
 import { buildUpdatePrompt } from './create-agent-prompts';
 import { expandHome, printFilePreview } from './create-agent';
+import { interactiveSelect } from './interactive-select';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -39,10 +40,14 @@ function configPath(): string {
 interface RawAgentEntry {
   id: string;
   workspace: string;
+  signatureEmoji?: string;
+  emojiReactionMode?: 'minimal' | 'extensive' | 'none';
+  [key: string]: unknown;
 }
 
 interface RawConfig {
   agents: RawAgentEntry[];
+  [key: string]: unknown;
 }
 
 function loadConfig(): RawConfig {
@@ -78,93 +83,7 @@ async function prompt(rl: readline.Interface, question: string): Promise<string>
 // Step 1 — Select agent
 // ---------------------------------------------------------------------------
 
-function interactiveSelect(items: string[], label: string): Promise<number> {
-  return new Promise((resolve) => {
-    let selected = 0;
-    const { stdin, stdout } = process;
-
-    // Pad item text to fixed width for consistent highlight bar
-    const maxLen = Math.max(...items.map((s) => s.length));
-
-    function renderItem(i: number): string {
-      const text = `    ${items[i]}`.padEnd(maxLen + 6);
-      if (i === selected) {
-        // Reverse video — uses terminal's default colors
-        return `\x1b[7m${text}\x1b[0m`;
-      }
-      return text;
-    }
-
-    // Total lines drawn: 1 (label) + 1 (blank) + items.length
-    const totalLines = items.length + 2;
-
-    function render(): void {
-      // Move cursor up to redraw list only (not label)
-      stdout.write(`\x1b[${items.length}A`);
-      for (let i = 0; i < items.length; i++) {
-        stdout.write(`\x1b[2K${renderItem(i)}\n`);
-      }
-    }
-
-    // Hide cursor during selection
-    stdout.write('\x1b[?25l');
-
-    // Initial render: label + blank line + items
-    stdout.write(`${label}\n\n`);
-    for (let i = 0; i < items.length; i++) {
-      stdout.write(`${renderItem(i)}\n`);
-    }
-
-    if (!stdin.isTTY) {
-      resolve(0);
-      return;
-    }
-
-    const wasRaw = stdin.isRaw;
-    stdin.setRawMode(true);
-    stdin.resume();
-
-    function onData(key: Buffer): void {
-      const s = key.toString();
-
-      if (s === '\x1b[A' || s === 'k') {
-        // Up arrow or k
-        selected = (selected - 1 + items.length) % items.length;
-        render();
-      } else if (s === '\x1b[B' || s === 'j') {
-        // Down arrow or j
-        selected = (selected + 1) % items.length;
-        render();
-      } else if (s === '\r' || s === '\n') {
-        // Enter
-        cleanup();
-        resolve(selected);
-      } else if (s === '\x03') {
-        // Ctrl+C
-        cleanup();
-        process.exit(0);
-      }
-    }
-
-    function cleanup(): void {
-      stdin.removeListener('data', onData);
-      stdin.setRawMode(wasRaw ?? false);
-      stdin.pause();
-      // Clear select UI (move up past all lines and clear each)
-      stdout.write(`\x1b[${totalLines}A`);
-      for (let i = 0; i < totalLines; i++) {
-        stdout.write('\x1b[2K\n');
-      }
-      stdout.write(`\x1b[${totalLines}A`);
-      // Restore cursor visibility
-      stdout.write('\x1b[?25h');
-    }
-
-    stdin.on('data', onData);
-  });
-}
-
-async function selectAgent(): Promise<{ agentId: string; wsDir: string }> {
+async function selectAgent(): Promise<{ agentId: string; wsDir: string; agent: RawAgentEntry; config: RawConfig }> {
   const config = loadConfig();
   const agents = config.agents;
 
@@ -178,7 +97,12 @@ async function selectAgent(): Promise<{ agentId: string; wsDir: string }> {
   const agent = agents[selected];
   const wsDir = expandHome(agent.workspace);
   console.log(`\n  Selected: ${agent.id}\n`);
-  return { agentId: agent.id, wsDir };
+  return { agentId: agent.id, wsDir, agent, config };
+}
+
+function saveConfig(config: RawConfig): void {
+  const cp = configPath();
+  fs.writeFileSync(cp, JSON.stringify(config, null, 2), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +128,14 @@ function generateUpdatedAgent(agentId: string, currentContent: string): string |
 
   // Claude should output only the agent.md content (no markers).
   // Strip any accidental preamble by finding the first markdown structure.
-  const raw = result.stdout.trim();
+  let raw = result.stdout.trim();
+
+  // Strip wrapping code fences (```markdown ... ``` or ``` ... ```)
+  const fenceMatch = raw.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/);
+  if (fenceMatch) {
+    raw = fenceMatch[1].trim();
+  }
+
   const yamlStart = raw.indexOf('---\n');
   const headingStart = raw.indexOf('# ');
   const start = yamlStart >= 0 ? yamlStart : headingStart;
@@ -212,7 +143,8 @@ function generateUpdatedAgent(agentId: string, currentContent: string): string |
     console.error('  Error: Could not parse agent.md from Claude output.');
     return null;
   }
-  return raw.slice(start).trim();
+  // Also strip any trailing code fence that wasn't caught above
+  return raw.slice(start).replace(/\n```\s*$/, '').trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +220,7 @@ async function main(): Promise<void> {
   console.log('═══════════════════════════════════════\n');
 
   // Step 1 — Select agent (before creating readline — interactiveSelect uses raw stdin)
-  const { agentId, wsDir } = await selectAgent();
+  const { agentId, wsDir, agent, config } = await selectAgent();
 
   // interactiveSelect pauses stdin in cleanup — resume it so readline can read
   process.stdin.resume();
@@ -323,9 +255,65 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Step 5 — Save
+  // Step 5 — Save agent.md
   fs.writeFileSync(agentMdPath, finalContent + '\n', 'utf8');
   console.log('  ✓ agent.md saved');
+
+  // Step 6 — Signature emoji
+  const currentEmoji = agent.signatureEmoji;
+  let signatureEmoji: string | undefined = currentEmoji;
+
+  if (!currentEmoji) {
+    // No emoji yet — ask Claude to suggest one
+    console.log('\n  No signature emoji set. Generating suggestion...');
+    const emojiResult = spawnSync('claude', ['--print'], {
+      input: `Based on this agent description, suggest a single emoji that best represents the agent's personality or role. Output ONLY the emoji, nothing else.\n\n${finalContent.slice(0, 500)}`,
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    const suggested = emojiResult.stdout?.trim() || '🤖';
+    // Take only first emoji-like character(s)
+    const defaultEmoji = suggested.length <= 8 ? suggested : '🤖';
+
+    process.stdin.resume();
+    const rlEmoji = createRl();
+    const emojiInput = await prompt(
+      rlEmoji,
+      `  Signature emoji [${defaultEmoji}] (Enter to accept, or type a new one): `
+    );
+    signatureEmoji = emojiInput.trim() || defaultEmoji;
+    rlEmoji.close();
+    console.log(`  ✓ Signature emoji: ${signatureEmoji}`);
+  } else {
+    console.log(`\n  Current signature emoji: ${currentEmoji}`);
+    process.stdin.resume();
+    const rlEmoji = createRl();
+    const emojiInput = await prompt(
+      rlEmoji,
+      `  Change emoji? [${currentEmoji}] (Enter to keep, or type a new one): `
+    );
+    if (emojiInput.trim()) {
+      signatureEmoji = emojiInput.trim();
+    }
+    rlEmoji.close();
+    console.log(`  ✓ Signature emoji: ${signatureEmoji}`);
+  }
+
+  // Step 7 — Reaction mode
+  const reactionModes = ['minimal — react only when clearly warranted', 'extensive — react to most messages', 'none — no emoji reactions'];
+  const modeKeys = ['minimal', 'extensive', 'none'] as const;
+  const currentModeIdx = modeKeys.indexOf((agent.emojiReactionMode ?? 'minimal') as typeof modeKeys[number]);
+  console.log(`\n  Current reaction mode: ${agent.emojiReactionMode ?? 'minimal'}`);
+
+  const modeIdx = await interactiveSelect(reactionModes, 'Select emoji reaction mode (↑/↓ to move, Enter to select):');
+  const emojiReactionMode = modeKeys[modeIdx];
+  console.log(`  ✓ Reaction mode: ${emojiReactionMode}`);
+
+  // Save emoji + reaction mode to config.json
+  agent.signatureEmoji = signatureEmoji;
+  agent.emojiReactionMode = emojiReactionMode;
+  saveConfig(config);
+  console.log('  ✓ config.json updated');
 
   // Regenerate CLAUDE.md
   try {

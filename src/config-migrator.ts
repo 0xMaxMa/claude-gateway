@@ -161,7 +161,7 @@ export function stripIgnoredPaths(
 export function detectMigration(
   configPath: string,
   templatePath: string,
-  currentVersion: string,
+  templateVersion: string,
 ): DetectMigrationResult {
   const noMigration = (
     config: Record<string, unknown>,
@@ -170,7 +170,7 @@ export function detectMigration(
   ): DetectMigrationResult => ({
     needed: false,
     fromVersion,
-    toVersion: currentVersion,
+    toVersion: templateVersion,
     addedFields: [],
     config,
     template,
@@ -201,7 +201,7 @@ export function detectMigration(
 
   // Version check
   const configVersion = (config.configVersion as string) ?? '0.0.0';
-  if (compareSemver(configVersion, currentVersion) >= 0) {
+  if (compareSemver(configVersion, templateVersion) >= 0) {
     return noMigration(config, template, configVersion);
   }
 
@@ -232,7 +232,7 @@ export function detectMigration(
   return {
     needed: true,
     fromVersion: configVersion,
-    toVersion: currentVersion,
+    toVersion: templateVersion,
     addedFields: added,
     config,
     template,
@@ -247,7 +247,7 @@ export function applyMigration(
   configPath: string,
   config: Record<string, unknown>,
   template: Record<string, unknown>,
-  currentVersion: string,
+  templateVersion: string,
   ignorePaths?: Set<string>,
 ): MigrationResult {
   const added: string[] = [];
@@ -268,7 +268,7 @@ export function applyMigration(
   }
 
   // Update configVersion
-  config.configVersion = currentVersion;
+  config.configVersion = templateVersion;
   if (!added.includes('configVersion')) {
     added.push('configVersion');
   }
@@ -294,9 +294,9 @@ export function applyMigration(
 export function migrateConfig(
   configPath: string,
   templatePath: string,
-  currentVersion: string,
+  templateVersion: string,
 ): MigrationResult {
-  const detection = detectMigration(configPath, templatePath, currentVersion);
+  const detection = detectMigration(configPath, templatePath, templateVersion);
 
   if (!detection.needed) {
     return { migrated: false, addedFields: [] };
@@ -315,7 +315,7 @@ export function migrateConfig(
     configPath,
     detection.config,
     detection.template,
-    currentVersion,
+    templateVersion,
     ignorePaths,
   );
 }
