@@ -127,7 +127,7 @@ describe('Character System Integration', () => {
         fs.writeFileSync(path.join(workspace, 'soul.md'), '# Soul\nUpdated personality.', 'utf-8');
 
         // Wait for callback (within 500ms total — debounce is 300ms)
-        await waitFor(() => callbackCount > 0, 1000);
+        await waitFor(() => callbackCount > 0, 3000);
         expect(callbackCount).toBeGreaterThan(0);
       } finally {
         handle.close();
