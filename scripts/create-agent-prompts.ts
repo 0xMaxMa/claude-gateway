@@ -70,3 +70,25 @@ export function parseGeneratedFiles(output: string): Map<string, string> {
 
   return files;
 }
+
+/**
+ * Build the Claude prompt for updating an existing agent.md.
+ * Claude should preserve the agent's role and strengthen missing rules.
+ */
+export function buildUpdatePrompt(name: string, currentContent: string): string {
+  return `You are updating the agent.md file for a Claude Gateway agent named "${name}".
+
+Current agent.md content:
+"""
+${currentContent}
+"""
+
+Update this agent.md to follow current best practices:
+- Preserve the agent's role, purpose, and all existing rules exactly
+- Ensure ## Rules section includes this rule (add if missing, strengthen if weak):
+  "Acknowledge first (mandatory): Every message MUST begin with a short acknowledgement
+   before taking any action or calling any tool. No exceptions.
+   Examples: 'Got it!', 'On it!', 'รับทราบค่ะ!'"
+- Keep the file under 500 words
+- Output ONLY the updated agent.md content, no explanation, no markdown code fences`;
+}

@@ -28,11 +28,13 @@ Thumbs.db
 # Test coverage
 coverage/
 
+# Claude
+.claude-plugin/
+.claude
+
 # Planning
 planning*.md
 design*.md
 testcase*.md
 feature*.md
-
-.claude-plugin/
-.claude
+task-imp*.md

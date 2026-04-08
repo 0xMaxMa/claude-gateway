@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start create-agent pair plugin-install
+.PHONY: help start create-agent update-agent pair plugin-install
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -17,6 +17,9 @@ start: ## Build and start the gateway
 
 create-agent: ## Run the interactive wizard to create a new agent
 	./node_modules/.bin/ts-node scripts/create-agent.ts
+
+update-agent: ## Update an existing agent's agent.md with Claude
+	./node_modules/.bin/ts-node scripts/update-agent.ts
 
 pair: ## Approve a Telegram pairing (e.g. make pair agent=alfred code=abc123)
 	./node_modules/.bin/ts-node scripts/pair.ts --agent=$(agent) --code=$(code)
