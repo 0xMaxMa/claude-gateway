@@ -232,33 +232,58 @@ export class SessionProcess extends EventEmitter {
     };
 
     function shortenPath(p: string): string {
+      // Keep last 2 segments for context (e.g. "src/api-router.ts" not just "api-router.ts")
       const parts = p.split('/');
-      return parts[parts.length - 1] || p;
+      return parts.length > 2 ? parts.slice(-2).join('/') : parts[parts.length - 1] || p;
     }
 
-    function truncateDetail(s: string, max = 80): string {
+    function truncateDetail(s: string, max = 200): string {
       return s.length > max ? s.slice(0, max) + '...' : s;
     }
 
     function extractToolDetail(name: string, input: Record<string, unknown>): string {
       const emoji = TOOL_EMOJI[name] ?? '🔧';
-      let desc = '';
+      const parts: string[] = [];
+
+      // Primary description (e.g. Bash.description, Agent.description)
       if (input.description && typeof input.description === 'string') {
-        desc = input.description;
-      } else if (input.file_path && typeof input.file_path === 'string') {
-        desc = shortenPath(input.file_path);
-      } else if (input.pattern && typeof input.pattern === 'string') {
-        desc = input.pattern;
-      } else if (input.url && typeof input.url === 'string') {
-        desc = input.url;
-      } else if (input.query && typeof input.query === 'string') {
-        desc = input.query;
-      } else if (input.command && typeof input.command === 'string') {
-        desc = input.command.slice(0, 60);
-      } else if (input.prompt && typeof input.prompt === 'string') {
-        desc = input.prompt.slice(0, 60);
+        parts.push(input.description);
       }
-      return truncateDetail(`${emoji} ${desc || name}`);
+      // File path context
+      if (input.file_path && typeof input.file_path === 'string') {
+        parts.push(shortenPath(input.file_path));
+      }
+      // Search pattern
+      if (input.pattern && typeof input.pattern === 'string') {
+        parts.push(input.pattern);
+      }
+      // URL
+      if (input.url && typeof input.url === 'string') {
+        parts.push(input.url);
+      }
+      // Search query
+      if (input.query && typeof input.query === 'string') {
+        parts.push(input.query);
+      }
+      // Bash command (when no description)
+      if (!parts.length && input.command && typeof input.command === 'string') {
+        parts.push(input.command);
+      }
+      // Agent/task prompt (when no description)
+      if (!parts.length && input.prompt && typeof input.prompt === 'string') {
+        parts.push(input.prompt);
+      }
+      // TodoWrite: summarize todo content
+      if (!parts.length && input.todos && Array.isArray(input.todos)) {
+        const active = (input.todos as { content?: string; status?: string }[])
+          .find(t => t.status === 'in_progress');
+        if (active?.content) {
+          parts.push(active.content);
+        }
+      }
+
+      const detail = parts.length ? parts.join(' — ') : name;
+      return truncateDetail(`${emoji} ${detail}`);
     }
 
     let assistantBuffer = '';
