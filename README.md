@@ -333,7 +333,7 @@ See [Quickstart: Using the Agent API](#quickstart-using-the-agent-api) for full 
 ```
 claude-gateway/
 ├── Makefile                            ← make start / create-agent / pair / plugin-install / add-user
-├── config.example.json                 ← config template
+├── config.template.json                ← config template (source of truth for migration)
 ├── src/                                ← gateway source (TypeScript)
 │   ├── index.ts                        ← entrypoint, loads config and starts agents
 │   ├── agent-runner.ts                 ← session pool manager (spawn/evict SessionProcesses)

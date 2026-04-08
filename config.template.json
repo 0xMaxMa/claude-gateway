@@ -1,4 +1,11 @@
 {
+  "_migration": {
+    "ignorePaths": [
+      "gateway.api",
+      "gateway.api.keys"
+    ]
+  },
+  "configVersion": "1.0.0",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -33,6 +40,8 @@
         "dangerouslySkipPermissions": true,
         "extraFlags": []
       },
+      "emojiReactionMode": "minimal",
+      "signatureEmoji": "",
       "heartbeat": {
         "rateLimitMinutes": 30
       },

@@ -22,6 +22,7 @@ import { randomBytes } from 'crypto';
 import { spawnSync } from 'child_process';
 import { loadWorkspace } from '../src/workspace-loader';
 import { buildGenerationPrompt, parseGeneratedFiles } from './create-agent-prompts';
+import { loadCleanTemplate, stripIgnoredPaths } from '../src/config-migrator';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -136,6 +137,8 @@ interface RawAgentEntry {
     dangerouslySkipPermissions: boolean;
     extraFlags: string[];
   };
+  emojiReactionMode?: 'minimal' | 'extensive' | 'none';
+  signatureEmoji?: string;
 }
 
 function loadOrCreateRawConfig(): RawConfig {
@@ -144,10 +147,21 @@ function loadOrCreateRawConfig(): RawConfig {
     const raw = fs.readFileSync(cp, 'utf8');
     return JSON.parse(raw) as RawConfig;
   }
-  return {
-    gateway: { logDir: '~/.claude-gateway/logs', timezone: 'UTC' },
-    agents: [],
-  };
+
+  // First run: try to load from template
+  const templatePath = path.join(__dirname, '..', 'config.template.json');
+  try {
+    const { template, ignorePaths } = loadCleanTemplate(templatePath);
+    stripIgnoredPaths(template, ignorePaths);
+    template.agents = [];
+    return template as unknown as RawConfig;
+  } catch {
+    // Template missing or unreadable — use hardcoded fallback
+    return {
+      gateway: { logDir: '~/.claude-gateway/logs', timezone: 'UTC' },
+      agents: [],
+    };
+  }
 }
 
 function saveConfig(config: RawConfig): void {
@@ -247,11 +261,15 @@ function fallbackFiles(agentId: string): Map<string, string> {
   return files;
 }
 
-async function generateFiles(agentId: string, description: string): Promise<Map<string, string>> {
+async function generateFiles(
+  agentId: string,
+  description: string,
+  options?: { signatureEmoji?: string; emojiReactionMode?: string }
+): Promise<Map<string, string>> {
   const agentName = agentId.charAt(0).toUpperCase() + agentId.slice(1);
   console.log('\nGenerating workspace files with Claude...');
 
-  const genPrompt = buildGenerationPrompt(agentName, description);
+  const genPrompt = buildGenerationPrompt(agentName, description, options);
   const result = spawnSync('claude', ['--print'], {
     input: genPrompt,
     encoding: 'utf8',
@@ -380,7 +398,8 @@ export async function createWorkspace(agentId: string, files: Map<string, string
 export async function appendToConfig(
   agentId: string,
   wsDir: string,
-  agentMdContent: string
+  agentMdContent: string,
+  options?: { emojiReactionMode?: 'minimal' | 'extensive' | 'none'; signatureEmoji?: string }
 ): Promise<void> {
   console.log('Updating config.json...');
 
@@ -406,6 +425,13 @@ export async function appendToConfig(
       extraFlags: [],
     },
   };
+
+  if (options?.emojiReactionMode) {
+    newAgent.emojiReactionMode = options.emojiReactionMode;
+  }
+  if (options?.signatureEmoji) {
+    newAgent.signatureEmoji = options.signatureEmoji;
+  }
 
   config.agents.push(newAgent);
   saveConfig(config);
@@ -787,13 +813,21 @@ async function main(): Promise<void> {
   console.log('Step 1/6 · Agent Name\n');
   const agentId = await promptAgentName(rl, existingIds);
   const agentName = agentId.charAt(0).toUpperCase() + agentId.slice(1);
+
+  // Prompt for optional signature emoji
+  const signatureEmojiInput = await prompt(
+    rl,
+    '\nSignature emoji for this agent (optional, press Enter to skip): '
+  );
+  const signatureEmoji = signatureEmojiInput.trim() || undefined;
+
   const state: WizardState = { agentId, agentName, lastCompletedStep: 1 };
   saveWizardState(state);
 
   // ── Step 2 ──────────────────────────────────────────────────────────────
   console.log('\nStep 2/6 · Describe Your Agent\n');
   const description = await promptDescription(rl);
-  const generatedFiles = await generateFiles(agentId, description);
+  const generatedFiles = await generateFiles(agentId, description, { signatureEmoji });
   const acceptedFiles = await previewAndAccept(rl, generatedFiles);
 
   if (!acceptedFiles.has('agent.md')) {
@@ -806,7 +840,10 @@ async function main(): Promise<void> {
   // ── Step 3 ──────────────────────────────────────────────────────────────
   console.log('\nStep 3/6 · Create Workspace\n');
   const wsDir = await createWorkspace(agentId, acceptedFiles);
-  await appendToConfig(agentId, wsDir, acceptedFiles.get('agent.md')!);
+  await appendToConfig(agentId, wsDir, acceptedFiles.get('agent.md')!, {
+    emojiReactionMode: 'minimal',
+    signatureEmoji,
+  });
   state.wsDir = wsDir;
   state.lastCompletedStep = 3;
   saveWizardState(state);

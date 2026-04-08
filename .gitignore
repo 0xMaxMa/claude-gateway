@@ -9,7 +9,7 @@ dist/
 .env.*
 !.env.example
 config.json
-!config.example.json
+!config.template.json
 
 # Logs
 *.log
@@ -28,11 +28,13 @@ Thumbs.db
 # Test coverage
 coverage/
 
+.claude-plugin/
+.claude
+
 # Planning
 planning*.md
 design*.md
 testcase*.md
 feature*.md
-
-.claude-plugin/
-.claude
+task-*.md
+research*.md

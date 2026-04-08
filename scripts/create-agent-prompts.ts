@@ -5,7 +5,16 @@
 /**
  * Build the Claude generation prompt for workspace markdown files.
  */
-export function buildGenerationPrompt(name: string, description: string): string {
+export function buildGenerationPrompt(
+  name: string,
+  description: string,
+  options?: { signatureEmoji?: string; emojiReactionMode?: string }
+): string {
+  const signatureNote = options?.signatureEmoji
+    ? `\nThe agent has a signature emoji: ${options.signatureEmoji}. Include it in the Emoji Usage section as the signature emoji.`
+    : '';
+  const reactionMode = options?.emojiReactionMode ?? 'minimal';
+
   return `You are helping configure a Claude Code agent for the claude-gateway multi-bot system.
 
 The user described the agent as:
@@ -27,7 +36,16 @@ Rules:
   Always include this rule under ## Rules:
   "Acknowledge first (mandatory): Every message MUST begin with a short acknowledgement
    before taking any action or calling any tool. No exceptions.
-   Examples: 'Got it!', 'On it!', 'รับทราบค่ะ!'"
+   Examples: 'Got it!', 'On it!', 'Sure thing!'"
+  Also include an "## Emoji Usage" section in agent.md with these guidelines:
+    - Text emoji: Use sparingly in messages. Occasional emoji is fine for warmth, but don't overdo it.
+    - Reactions: React to messages like a human would — use the react tool. Max 1 reaction per message.
+      Reaction mode is "${reactionMode}": ${{
+        minimal: 'only react when the message clearly warrants it (e.g. thanks, celebrations, humor).',
+        extensive: 'react to most messages with an appropriate emoji to show engagement.',
+        none: 'do not use emoji reactions at all.',
+      }[reactionMode] ?? 'only react when the message clearly warrants it.'}
+    - Signature emoji: ${options?.signatureEmoji ? `Use ${options.signatureEmoji} as your signature emoji in greetings or sign-offs.` : 'None assigned.'}${signatureNote}
 - soul.md: tone and personality only (not rules). Omit if no distinct style.
 - user.md: target user profile. Omit if public/unknown.
 - tools.md: available tools or capabilities. Omit if none specified.
@@ -89,7 +107,11 @@ Update this agent.md to follow current best practices:
 - Ensure ## Rules section includes this rule (add if missing, strengthen if weak):
   "Acknowledge first (mandatory): Every message MUST begin with a short acknowledgement
    before taking any action or calling any tool. No exceptions.
-   Examples: 'Got it!', 'On it!', 'รับทราบค่ะ!'"
+   Examples: 'Got it!', 'On it!', 'Sure thing!'"
+- Ensure an "## Emoji Usage" section exists with these guidelines:
+    - Text emoji: Use sparingly. Occasional emoji is fine for warmth, but don't overdo it.
+    - Reactions: React to messages like a human would — use the react tool. Max 1 reaction per message.
+    - Signature emoji: preserve any existing signature emoji setting.
 - Keep the file under 500 words
 - Output ONLY the updated agent.md content, no extra explanation`;
 }
