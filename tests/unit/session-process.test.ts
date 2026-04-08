@@ -456,4 +456,96 @@ describe('SessionProcess', () => {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
   });
+
+  // --------------------------------------------------------------------------
+  // T7-T11: Status file writes from stream-json parsing
+  // --------------------------------------------------------------------------
+
+  function statusPath(workspace: string, sessionId: string): string {
+    return path.join(workspace, '.telegram-state', 'typing', `${sessionId}.status`);
+  }
+
+  it('T7: stdout tool_use Write → writes "coding" to status file', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', name: 'Write' }],
+      },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('coding');
+  });
+
+  it('T8: stdout tool_use Bash → writes "tool" to status file', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', name: 'Bash' }],
+      },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('tool');
+  });
+
+  it('T9: stdout result ok → writes "done" to status file', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    const line = JSON.stringify({ type: 'result', is_error: false });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('done');
+  });
+
+  it('T10: stdout result is_error → writes "error" to status file', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    const line = JSON.stringify({ type: 'result', is_error: true });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('error');
+  });
+
+  it('T11: sendMessage() writes "queued" to status file for telegram source', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    sp.sendMessage('hello');
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('queued');
+  });
 });

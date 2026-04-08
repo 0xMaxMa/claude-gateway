@@ -32,12 +32,22 @@ export const ERROR_MESSAGES: Record<string, string> = {
   SPAWN_FAILED: '❌ Failed to start Claude session. Please try again.',
 }
 
+export const STATUS_EMOJI: Record<string, string> = {
+  queued:   '👀',
+  thinking: '🤔',
+  tool:     '🔥',
+  coding:   '👨\u200d💻',
+  done:     '👍',
+  error:    '😱',
+}
+
 export interface WorkingState {
   typingInterval: ReturnType<typeof setInterval>
   statusInterval: ReturnType<typeof setInterval>
   stalledInterval: ReturnType<typeof setInterval>
   statusMessageId: number | null
   startedAt: number
+  currentReaction: string | null
 }
 
 export interface BotApi {
@@ -45,6 +55,7 @@ export interface BotApi {
   sendMessage(chatId: string, text: string): Promise<{ message_id: number }>
   editMessageText(chatId: string, msgId: number, text: string): Promise<unknown>
   deleteMessage(chatId: string, msgId: number): Promise<unknown>
+  setMessageReaction(chatId: string, msgId: number, emoji: string): Promise<unknown>
 }
 
 export interface FsApi {
@@ -75,15 +86,38 @@ export function createWorkingStateManager(
     return `${typingDir}/${chatId}.heartbeat`
   }
 
+  function statusFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.status`
+  }
+
+  function msgIdFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.msgid`
+  }
+
   async function stop(chatId: string): Promise<void> {
     const state = states.get(chatId)
     if (!state) return
     clearInterval(state.typingInterval)
     clearInterval(state.statusInterval)
     clearInterval(state.stalledInterval)
+    // Read final status and set done/error reaction before cleanup
+    const statusPath = statusFilePath(chatId)
+    const msgIdPath = msgIdFilePath(chatId)
+    if (fsApi.existsSync(statusPath) && fsApi.existsSync(msgIdPath)) {
+      try {
+        const finalStatus = fsApi.readFileSync(statusPath, 'utf8').trim()
+        const msgId = parseInt(fsApi.readFileSync(msgIdPath, 'utf8').trim(), 10)
+        const emoji = STATUS_EMOJI[finalStatus] ?? STATUS_EMOJI['done']
+        if (!isNaN(msgId) && emoji && state.currentReaction !== emoji) {
+          await botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
+        }
+      } catch {}
+    }
     fsApi.rmSync(typingFilePath(chatId), { force: true })
     fsApi.rmSync(errorFilePath(chatId), { force: true })
     fsApi.rmSync(heartbeatFilePath(chatId), { force: true })
+    fsApi.rmSync(statusFilePath(chatId), { force: true })
+    fsApi.rmSync(msgIdFilePath(chatId), { force: true })
     if (state.statusMessageId !== null) {
       await botApi.deleteMessage(chatId, state.statusMessageId).catch(() => {})
     }
@@ -110,6 +144,7 @@ export function createWorkingStateManager(
       stalledInterval: null as unknown as ReturnType<typeof setInterval>,
       statusMessageId: null,
       startedAt,
+      currentReaction: null,
     }
     states.set(chatId, state)
 
@@ -127,6 +162,21 @@ export function createWorkingStateManager(
         return
       }
       void botApi.sendChatAction(chatId, 'typing').catch(() => {})
+      // Read .status + .msgid files and update reaction if state changed
+      const statusPath = statusFilePath(chatId)
+      const msgIdPath = msgIdFilePath(chatId)
+      if (fsApi.existsSync(statusPath) && fsApi.existsSync(msgIdPath)) {
+        try {
+          const status = fsApi.readFileSync(statusPath, 'utf8').trim()
+          const msgId = parseInt(fsApi.readFileSync(msgIdPath, 'utf8').trim(), 10)
+          const emoji = STATUS_EMOJI[status]
+          const s = states.get(chatId)
+          if (emoji && !isNaN(msgId) && s && s.currentReaction !== emoji) {
+            s.currentReaction = emoji
+            void botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
+          }
+        } catch {}
+      }
     }, TYPING_INTERVAL_MS)
 
     state.statusInterval = setInterval(async () => {

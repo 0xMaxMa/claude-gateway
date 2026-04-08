@@ -7,6 +7,7 @@ import {
   createWorkingStateManager,
   STATUS_MESSAGES,
   ERROR_MESSAGES,
+  STATUS_EMOJI,
   TYPING_INTERVAL_MS,
   STATUS_INTERVAL_MS,
   STALLED_TIMEOUT_MS,
@@ -23,6 +24,7 @@ function makeBotApi(): jest.Mocked<BotApi> {
     sendMessage: jest.fn().mockResolvedValue({ message_id: 100 }),
     editMessageText: jest.fn().mockResolvedValue({}),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
+    setMessageReaction: jest.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -342,6 +344,151 @@ describe('createWorkingStateManager', () => {
         CHAT_ID,
         '❌ An error occurred. Please try again.',
       )
+    })
+  })
+
+  // ── T1–T6: Status emoji reaction ─────────────────────────────────────────
+
+  describe('STATUS_EMOJI map', () => {
+    test('T1: covers all required states', () => {
+      const required = ['queued', 'thinking', 'tool', 'coding', 'done', 'error']
+      for (const state of required) {
+        expect(STATUS_EMOJI[state]).toBeDefined()
+        expect(STATUS_EMOJI[state]!.length).toBeGreaterThan(0)
+      }
+    })
+  })
+
+  describe('status reaction in typingInterval', () => {
+    test('T2: reads .status=thinking and calls setMessageReaction(🤔)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // Write status + msgid files (as SessionProcess would)
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'thinking')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '42')
+
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve()
+
+      expect(bot.setMessageReaction).toHaveBeenCalledWith(CHAT_ID, 42, STATUS_EMOJI['thinking'])
+
+      await mgr.stop(CHAT_ID)
+    })
+
+    test('T3: reads .status=done and calls setMessageReaction(👍)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'done')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '99')
+
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve()
+
+      expect(bot.setMessageReaction).toHaveBeenCalledWith(CHAT_ID, 99, STATUS_EMOJI['done'])
+
+      await mgr.stop(CHAT_ID)
+    })
+
+    test('T4: same reaction twice — setMessageReaction NOT called again', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'thinking')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '42')
+
+      // First tick — should call reaction
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve()
+      expect(bot.setMessageReaction).toHaveBeenCalledTimes(1)
+
+      // Second tick — same status, should NOT call again
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve()
+      expect(bot.setMessageReaction).toHaveBeenCalledTimes(1)
+
+      await mgr.stop(CHAT_ID)
+    })
+
+    test('T6: missing .status or .msgid — no error thrown, reaction unchanged', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // No .status or .msgid files written
+
+      expect(() => jest.advanceTimersByTime(TYPING_INTERVAL_MS)).not.toThrow()
+      await Promise.resolve()
+
+      expect(bot.setMessageReaction).not.toHaveBeenCalled()
+
+      await mgr.stop(CHAT_ID)
+    })
+  })
+
+  describe('stop() cleans up status files', () => {
+    test('T5: stop() deletes .status and .msgid files', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // Write the files
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'thinking')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '42')
+
+      await mgr.stop(CHAT_ID)
+
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.status`)).toBe(false)
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.msgid`)).toBe(false)
+    })
+
+    test('T5b: stop() sets final reaction before deleting files', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // Simulate status=done written by session-process before stop is called
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'done')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '55')
+
+      await mgr.stop(CHAT_ID)
+
+      // Should have set the final reaction to 👍 before cleanup
+      expect(bot.setMessageReaction).toHaveBeenCalledWith(CHAT_ID, 55, STATUS_EMOJI['done'])
+      // Files still cleaned up
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.status`)).toBe(false)
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.msgid`)).toBe(false)
+    })
+
+    test('T5c: stop() sets error reaction when status=error', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'error')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '77')
+
+      await mgr.stop(CHAT_ID)
+
+      expect(bot.setMessageReaction).toHaveBeenCalledWith(CHAT_ID, 77, STATUS_EMOJI['error'])
     })
   })
 })

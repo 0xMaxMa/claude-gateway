@@ -90,6 +90,10 @@ const typingManager = createWorkingStateManager(
     sendMessage: (chatId, text) => bot.api.sendMessage(chatId, text),
     editMessageText: (chatId, msgId, text) => bot.api.editMessageText(chatId, msgId, text),
     deleteMessage: (chatId, msgId) => bot.api.deleteMessage(chatId, msgId),
+    setMessageReaction: (chatId, msgId, emoji) =>
+      bot.api.setMessageReaction(chatId, msgId, [
+        { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }
+      ]),
   },
   { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync },
 )
@@ -130,6 +134,7 @@ function defaultAccess(): Access {
     allowFrom: [],
     groups: {},
     pending: {},
+    ackReaction: '👀',
   }
 }
 
@@ -694,6 +699,12 @@ async function handleInbound(
         { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
       ])
       .catch(() => {})
+  }
+
+  // Store message ID for status reaction updates during processing
+  if (msgId != null) {
+    const msgIdPath = join(TYPING_DIR, `${chat_id}.msgid`)
+    try { writeFileSync(msgIdPath, String(msgId)) } catch {}
   }
 
   const imagePath = downloadImage ? await downloadImage() : undefined

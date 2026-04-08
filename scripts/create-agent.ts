@@ -138,7 +138,6 @@ interface RawAgentEntry {
     dangerouslySkipPermissions: boolean;
     extraFlags: string[];
   };
-  emojiReactionMode?: 'minimal' | 'extensive' | 'none';
   signatureEmoji?: string;
 }
 
@@ -283,7 +282,7 @@ function extractLeadingEmoji(text: string): { emoji: string | undefined; rest: s
 async function generateFiles(
   agentId: string,
   description: string,
-  options?: { signatureEmoji?: string; emojiReactionMode?: string }
+  options?: { signatureEmoji?: string }
 ): Promise<GenerateResult> {
   const agentName = agentId.charAt(0).toUpperCase() + agentId.slice(1);
   console.log('\nGenerating workspace files with Claude...');
@@ -441,7 +440,7 @@ export async function appendToConfig(
   agentId: string,
   wsDir: string,
   agentMdContent: string,
-  options?: { emojiReactionMode?: 'minimal' | 'extensive' | 'none'; signatureEmoji?: string }
+  options?: { signatureEmoji?: string }
 ): Promise<void> {
   console.log('Updating config.json...');
 
@@ -468,9 +467,6 @@ export async function appendToConfig(
     },
   };
 
-  if (options?.emojiReactionMode) {
-    newAgent.emojiReactionMode = options.emojiReactionMode;
-  }
   if (options?.signatureEmoji) {
     newAgent.signatureEmoji = options.signatureEmoji;
   }
@@ -881,12 +877,6 @@ async function main(): Promise<void> {
   console.log(`  ✓ Signature emoji: ${signatureEmoji}`);
   rl2.close();
 
-  // ── Reaction mode selection ───────────────────────────────────────────
-  const reactionModes = ['minimal — react only when clearly warranted', 'extensive — react to most messages', 'none — no emoji reactions'];
-  const modeIdx = await interactiveSelect(reactionModes, 'Select emoji reaction mode (↑/↓ to move, Enter to select):');
-  const emojiReactionMode = (['minimal', 'extensive', 'none'] as const)[modeIdx];
-  console.log(`  ✓ Reaction mode: ${emojiReactionMode}`);
-
   // Resume stdin + new readline for file preview
   process.stdin.resume();
   const rl3 = createRl();
@@ -903,7 +893,6 @@ async function main(): Promise<void> {
   console.log('\nStep 3/6 · Create Workspace\n');
   const wsDir = await createWorkspace(agentId, acceptedFiles);
   await appendToConfig(agentId, wsDir, acceptedFiles.get('agent.md')!, {
-    emojiReactionMode,
     signatureEmoji,
   });
   state.wsDir = wsDir;

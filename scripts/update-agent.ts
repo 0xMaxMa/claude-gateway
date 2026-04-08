@@ -41,7 +41,6 @@ interface RawAgentEntry {
   id: string;
   workspace: string;
   signatureEmoji?: string;
-  emojiReactionMode?: 'minimal' | 'extensive' | 'none';
   [key: string]: unknown;
 }
 
@@ -299,19 +298,8 @@ async function main(): Promise<void> {
     console.log(`  ✓ Signature emoji: ${signatureEmoji}`);
   }
 
-  // Step 7 — Reaction mode
-  const reactionModes = ['minimal — react only when clearly warranted', 'extensive — react to most messages', 'none — no emoji reactions'];
-  const modeKeys = ['minimal', 'extensive', 'none'] as const;
-  const currentModeIdx = modeKeys.indexOf((agent.emojiReactionMode ?? 'minimal') as typeof modeKeys[number]);
-  console.log(`\n  Current reaction mode: ${agent.emojiReactionMode ?? 'minimal'}`);
-
-  const modeIdx = await interactiveSelect(reactionModes, 'Select emoji reaction mode (↑/↓ to move, Enter to select):');
-  const emojiReactionMode = modeKeys[modeIdx];
-  console.log(`  ✓ Reaction mode: ${emojiReactionMode}`);
-
-  // Save emoji + reaction mode to config.json
+  // Save emoji to config.json
   agent.signatureEmoji = signatureEmoji;
-  agent.emojiReactionMode = emojiReactionMode;
   saveConfig(config);
   console.log('  ✓ config.json updated');
 

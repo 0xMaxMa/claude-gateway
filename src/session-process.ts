@@ -205,9 +205,22 @@ export class SessionProcess extends EventEmitter {
     }
 
     // Capture stdout — emit output events + persist assistant replies
+    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
     const heartbeatPath = this.source === 'telegram'
-      ? path.join(this.agentConfig.workspace, '.telegram-state', 'typing', `${this.sessionId}.heartbeat`)
+      ? path.join(typingDir, `${this.sessionId}.heartbeat`)
       : null;
+    const statusPath = this.source === 'telegram'
+      ? path.join(typingDir, `${this.sessionId}.status`)
+      : null;
+
+    const writeStatus = (status: string): void => {
+      if (statusPath) {
+        try { fs.writeFileSync(statusPath, status) } catch {}
+      }
+    };
+
+    const CODING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
+
     let assistantBuffer = '';
     proc.stdout?.on('data', (data: Buffer) => {
       // Update heartbeat so the receiver's stalled detector knows Claude is active
@@ -219,7 +232,7 @@ export class SessionProcess extends EventEmitter {
         if (!line.trim()) continue;
         this.emit('output', line);
         this.logger.debug('session output', { line });
-        // Try to capture assistant text for SessionStore
+        // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
           // stream-json assistant message
@@ -227,19 +240,31 @@ export class SessionProcess extends EventEmitter {
             for (const block of obj.message.content) {
               if (block.type === 'text') assistantBuffer += block.text;
             }
+            // Detect tool use to write status
+            const toolBlock = obj.message.content.find(
+              (b: { type: string }) => b.type === 'tool_use',
+            );
+            if (toolBlock) {
+              writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool');
+            } else if (obj.message.content.some((b: { type: string }) => b.type === 'text')) {
+              writeStatus('thinking');
+            }
           }
           // text delta
           if (obj.type === 'text') assistantBuffer += obj.text ?? '';
           // result = end of turn
-          if (obj.type === 'result' && assistantBuffer.trim()) {
-            this.sessionStore
-              .appendMessage(this.agentConfig.id, this.sessionId, {
-                role: 'assistant',
-                content: assistantBuffer.trim(),
-                ts: Date.now(),
-              })
-              .catch(() => {});
-            assistantBuffer = '';
+          if (obj.type === 'result') {
+            writeStatus(obj.is_error ? 'error' : 'done');
+            if (assistantBuffer.trim()) {
+              this.sessionStore
+                .appendMessage(this.agentConfig.id, this.sessionId, {
+                  role: 'assistant',
+                  content: assistantBuffer.trim(),
+                  ts: Date.now(),
+                })
+                .catch(() => {});
+              assistantBuffer = '';
+            }
           }
         } catch {
           /* not JSON */
@@ -291,6 +316,16 @@ export class SessionProcess extends EventEmitter {
         sessionId: this.sessionId,
       });
       return;
+    }
+    // Signal queued state so the typing loop can update the reaction immediately
+    if (this.source === 'telegram') {
+      const statusPath = path.join(
+        this.agentConfig.workspace,
+        '.telegram-state',
+        'typing',
+        `${this.sessionId}.status`,
+      );
+      try { fs.writeFileSync(statusPath, 'queued') } catch {}
     }
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(text) + '\n');
   }

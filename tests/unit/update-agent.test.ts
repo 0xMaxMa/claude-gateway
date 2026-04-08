@@ -8,8 +8,8 @@ import {
 } from '../../scripts/create-agent-prompts';
 
 describe('buildUpdatePrompt', () => {
-  // U-UA-01: agent.md already has the acknowledge rule — output should still include it (no duplicate instruction needed)
-  it('U-UA-01: includes acknowledge rule instruction when rule already exists in current content', () => {
+  // U-UA-01: update prompt instructs to REMOVE acknowledge rule (now infra-driven)
+  it('U-UA-01: instructs to REMOVE "Acknowledge first" rule (infra-driven now)', () => {
     const currentContent = `# Agent: MyBot
 
 ## Rules
@@ -18,12 +18,12 @@ describe('buildUpdatePrompt', () => {
 
     const prompt = buildUpdatePrompt('MyBot', currentContent);
 
-    expect(prompt).toContain('Acknowledge first (mandatory)');
-    expect(prompt).toContain('Every message MUST begin with a short acknowledgement');
+    expect(prompt).toContain('REMOVE');
+    expect(prompt).not.toMatch(/add.*Acknowledge first/i);
   });
 
-  // U-UA-02: agent.md has no acknowledge rule — output must include instruction to add it
-  it('U-UA-02: includes acknowledge rule instruction when rule is missing from current content', () => {
+  // U-UA-02: update prompt includes Report completion rule
+  it('U-UA-02: includes Report completion rule instruction', () => {
     const currentContent = `# Agent: MyBot
 
 ## Rules
@@ -32,8 +32,7 @@ describe('buildUpdatePrompt', () => {
 
     const prompt = buildUpdatePrompt('MyBot', currentContent);
 
-    expect(prompt).toContain('Acknowledge first (mandatory)');
-    expect(prompt).toContain('add if missing, strengthen if weak');
+    expect(prompt).toContain('Report completion');
   });
 
   // U-UA-03: buildUpdatePrompt preserves the existing role section by embedding currentContent
@@ -76,20 +75,20 @@ Senior data analyst specialized in Python and SQL.`;
   });
 });
 
-describe('buildGenerationPrompt — strengthened acknowledge rule', () => {
-  it('contains the mandatory acknowledge rule wording', () => {
+describe('buildGenerationPrompt — report completion rule (no acknowledge)', () => {
+  it('does not contain "Acknowledge first" (infra handles it now)', () => {
     const prompt = buildGenerationPrompt('TestAgent', 'A test agent.');
-    expect(prompt).toContain('Acknowledge first (mandatory)');
+    expect(prompt).not.toContain('Acknowledge first');
   });
 
-  it('states that every message MUST begin with acknowledgement', () => {
+  it('does not contain "Every message MUST begin with acknowledgement"', () => {
     const prompt = buildGenerationPrompt('TestAgent', 'A test agent.');
-    expect(prompt).toContain('Every message MUST begin with a text reply acknowledgement');
+    expect(prompt).not.toContain('Every message MUST begin with a text reply acknowledgement');
   });
 
-  it('states no exceptions', () => {
+  it('contains "Report completion (mandatory)"', () => {
     const prompt = buildGenerationPrompt('TestAgent', 'A test agent.');
-    expect(prompt).toContain('No exceptions.');
+    expect(prompt).toContain('Report completion');
   });
 
   it('references the ## Rules section placement', () => {
@@ -97,8 +96,8 @@ describe('buildGenerationPrompt — strengthened acknowledge rule', () => {
     expect(prompt).toContain('## Rules');
   });
 
-  it('does not use the old weak wording', () => {
+  it('does not contain emojiReactionMode', () => {
     const prompt = buildGenerationPrompt('TestAgent', 'A test agent.');
-    expect(prompt).not.toContain('send a brief acknowledgement first');
+    expect(prompt).not.toContain('emojiReactionMode');
   });
 });
