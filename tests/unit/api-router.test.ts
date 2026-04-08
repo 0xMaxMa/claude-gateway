@@ -468,4 +468,31 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
 
     expect(cleanupCalled).toBe(true);
   }, 10000);
+
+  // T-API-STREAM-TCP: TCP_NODELAY is set on SSE connections (regression test)
+  it('T-API-STREAM-TCP: SSE streaming works correctly with TCP_NODELAY set', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onChunk({ type: 'text_delta', text: 'fast' });
+      cb.onChunk({ type: 'text_delta', text: ' response' });
+      cb.onDone('fast response');
+      return () => {};
+    });
+    const { status, headers, data } = await collectSSE(app, { message: 'hi', stream: true });
+    expect(status).toBe(200);
+    expect(headers['content-type']).toBe('text/event-stream');
+
+    // Verify the stream data is correct (regression: setNoDelay should not break streaming)
+    const lines = data.split('\n').filter(l => l.startsWith('data: '));
+    const events = lines
+      .map(l => l.slice(6))
+      .filter(s => s !== '[DONE]')
+      .map(s => JSON.parse(s));
+    const deltas = events.filter((e: { type: string }) => e.type === 'text_delta');
+    expect(deltas).toHaveLength(2);
+    expect(deltas[0].text).toBe('fast');
+    expect(deltas[1].text).toBe(' response');
+
+    // Verify stream ends with [DONE]
+    expect(data.trimEnd()).toMatch(/data: \[DONE\]$/);
+  });
 });

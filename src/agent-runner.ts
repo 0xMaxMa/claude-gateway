@@ -379,6 +379,8 @@ export class AgentRunner extends EventEmitter {
     return new Promise<string>((resolve, reject) => {
       const buffer: string[] = [];
       let quietTimer: ReturnType<typeof setTimeout> | undefined;
+      // Track partial message text for delta computation (--include-partial-messages)
+      let lastPartialText = '';
 
       const done = (result: string) => {
         cleanup();
@@ -415,15 +417,32 @@ export class AgentRunner extends EventEmitter {
       const onOutput = (line: string) => {
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
-          // Collect text deltas
-          const text =
-            (obj['text'] as string | undefined) ??
-            ((obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined) ??
-            '';
-          if (text) {
-            buffer.push(text);
-            resetQuiet();
+
+          // Handle partial assistant messages (from --include-partial-messages)
+          if (obj['type'] === 'assistant') {
+            const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+            if (Array.isArray(msg?.content)) {
+              let fullText = '';
+              for (const block of msg!.content) {
+                if (block.type === 'text' && block.text) fullText += block.text;
+              }
+              if (fullText.length > lastPartialText.length) {
+                buffer.push(fullText.slice(lastPartialText.length));
+                resetQuiet();
+              }
+              lastPartialText = fullText;
+            }
           }
+
+          // Standalone text delta
+          if (obj['type'] === 'text') {
+            const text = (obj['text'] as string) ?? '';
+            if (text) {
+              buffer.push(text);
+              resetQuiet();
+            }
+          }
+
           // result event = end of turn
           if (obj['type'] === 'result') {
             const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
@@ -442,7 +461,7 @@ export class AgentRunner extends EventEmitter {
       session.sendMessage(channelXml);
       // Do NOT call resetQuiet() here — the quiet timer should only start
       // after the first output line arrives, otherwise it fires before the
-      // subprocess has had time to respond (especially on first spawn).
+      // subprocess has had time to respond (especially on first turn).
     });
   }
 
@@ -486,6 +505,8 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
+    // Track partial message text for delta computation (--include-partial-messages)
+    let lastPartialText = '';
 
     const done = (result: string) => {
       if (settled) return;
@@ -521,14 +542,55 @@ export class AgentRunner extends EventEmitter {
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
 
-        // Text delta
-        const text =
-          (obj['text'] as string | undefined) ??
-          ((obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined) ??
-          '';
-        if (text) {
-          buffer.push(text);
-          callbacks.onChunk({ type: 'text_delta', text });
+        // Partial assistant message (from --include-partial-messages)
+        // Contains cumulative text; compute delta and emit as text_delta
+        if (obj['type'] === 'assistant') {
+          const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+          if (Array.isArray(msg?.content)) {
+            let fullText = '';
+            for (const block of msg!.content) {
+              if (block.type === 'text' && block.text) fullText += block.text;
+            }
+            if (fullText.length > lastPartialText.length) {
+              const delta = fullText.slice(lastPartialText.length);
+              buffer.push(delta);
+              callbacks.onChunk({ type: 'text_delta', text: delta });
+            }
+            lastPartialText = fullText;
+          }
+        }
+
+        // Standalone text delta (legacy format)
+        if (obj['type'] === 'text') {
+          const text = (obj['text'] as string) ?? '';
+          if (text) {
+            buffer.push(text);
+            callbacks.onChunk({ type: 'text_delta', text });
+          }
+        }
+
+        // stream_event from --output-format stream-json
+        // Format: {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+        if (obj['type'] === 'stream_event') {
+          const event = obj['event'] as Record<string, unknown> | undefined;
+          if (event?.['type'] === 'content_block_delta') {
+            const delta = event['delta'] as Record<string, unknown> | undefined;
+            if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
+              buffer.push(delta['text']);
+              // Update lastPartialText so the final 'assistant' message won't re-send the full text
+              lastPartialText += delta['text'];
+              callbacks.onChunk({ type: 'text_delta', text: delta['text'] });
+            }
+          }
+        }
+
+        // Text from delta field (other formats)
+        if (obj['type'] !== 'assistant' && obj['type'] !== 'text' && obj['type'] !== 'result' && obj['type'] !== 'stream_event') {
+          const deltaText = (obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined;
+          if (deltaText) {
+            buffer.push(deltaText);
+            callbacks.onChunk({ type: 'text_delta', text: deltaText });
+          }
         }
 
         // Tool use
@@ -550,6 +612,7 @@ export class AgentRunner extends EventEmitter {
 
         // Result = end of turn
         if (obj['type'] === 'result') {
+          lastPartialText = ''; // reset for next turn
           const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
           done(resultText);
         }

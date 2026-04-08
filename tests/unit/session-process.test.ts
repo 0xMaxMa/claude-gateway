@@ -554,4 +554,118 @@ describe('SessionProcess', () => {
     expect(fs.existsSync(sp_path)).toBe(true);
     expect(fs.readFileSync(sp_path, 'utf-8')).toBe('queued');
   });
+
+  // --------------------------------------------------------------------------
+  // U-SP-17: --include-partial-messages flag is in spawn args
+  // --------------------------------------------------------------------------
+  it('U-SP-17: --include-partial-messages flag is in spawn args', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(args).toContain('--include-partial-messages');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-18: Partial messages don't double-count in assistantBuffer
+  // --------------------------------------------------------------------------
+  it('U-SP-18: partial messages dont double-count in assistantBuffer', async () => {
+    const sp = new SessionProcess('chat:partial', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Partial assistant with cumulative text "Hello"
+    const partial1 = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Hello' }] },
+      stop_reason: null,
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(partial1 + '\n'));
+
+    // Partial assistant with cumulative text "Hello world"
+    const partial2 = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Hello world' }] },
+      stop_reason: null,
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(partial2 + '\n'));
+
+    // Result event triggers persistence
+    const result = JSON.stringify({ type: 'result', result: 'Hello world', is_error: false });
+    lastProcess!.stdout!.emit('data', Buffer.from(result + '\n'));
+
+    // Wait for async appendMessage to flush
+    await new Promise(r => setTimeout(r, 200));
+
+    // Load session from store — should contain "Hello world", not "HelloHello world"
+    const messages = await sessionStore.loadSession('alfred', 'chat:partial');
+    const assistantMessages = messages.filter(m => m.role === 'assistant');
+    expect(assistantMessages.length).toBeGreaterThanOrEqual(1);
+    const lastAssistant = assistantMessages[assistantMessages.length - 1];
+    expect(lastAssistant.content).toBe('Hello world');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-19: Partial messages don't spam status file with "thinking"
+  // --------------------------------------------------------------------------
+  it('U-SP-19: partial text-only messages do not write thinking status', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+
+    // Emit a partial assistant message (stop_reason: null) with only text content
+    const partial = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Thinking about it...' }] },
+      stop_reason: null,
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(partial + '\n'));
+
+    // Status file should NOT have been written with "thinking" for a partial text-only message
+    if (fs.existsSync(sp_path)) {
+      const content = fs.readFileSync(sp_path, 'utf-8');
+      // If status was written, it should not be a "thinking" status from this partial
+      try {
+        const parsed = JSON.parse(content);
+        expect(parsed.status).not.toBe('thinking');
+      } catch {
+        // Plain string status (like "queued" or "done") is fine
+        expect(content).not.toContain('thinking');
+      }
+    }
+    // If status file doesn't exist at all, that's the expected behavior — partial didn't write it
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-20: Status file still works for tool_use in partial messages
+  // --------------------------------------------------------------------------
+  it('U-SP-20: tool_use in partial assistant message still writes status', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
+    fs.mkdirSync(typingDir, { recursive: true });
+
+    // Emit an assistant message with a tool_use block (partial — stop_reason: null)
+    const partial = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Let me check...' },
+          { type: 'tool_use', name: 'Bash', input: { command: 'ls', description: 'List files' } },
+        ],
+      },
+      stop_reason: null,
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(partial + '\n'));
+
+    const sp_path = statusPath(agentConfig.workspace, 'chat:111');
+    expect(fs.existsSync(sp_path)).toBe(true);
+    const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
+    expect(written.status).toBe('tool');
+    expect(written.detail).toContain('List files');
+  });
 });

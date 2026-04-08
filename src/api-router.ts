@@ -94,6 +94,7 @@ export function createApiRouter(
           'X-Accel-Buffering': 'no',
         });
         res.flushHeaders();
+        res.socket?.setNoDelay(true);
 
         cleanup = await runner.sendApiMessageStream(
           sessionId,

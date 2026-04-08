@@ -440,9 +440,17 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const session = sessions.get('stream-t9')!;
     expect(session).toBeDefined();
 
-    // Simulate text output
-    session.emit('output', JSON.stringify({ type: 'assistant', text: 'Hello' }));
-    session.emit('output', JSON.stringify({ type: 'assistant', text: ' world' }));
+    // Simulate partial assistant messages (--include-partial-messages format)
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello' }] },
+      stop_reason: null,
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello world' }] },
+      stop_reason: null,
+    }));
     session.emit('output', JSON.stringify({ type: 'result', result: 'Hello world' }));
 
     const result = await donePromise;
@@ -612,5 +620,110 @@ describe('AgentRunner — sendApiMessageStream', () => {
         { timeoutMs: 5000 },
       ),
     ).resolves.toBeDefined();
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-15: Partial assistant messages produce incremental text_delta chunks
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-15: partial assistant messages produce incremental text_delta chunks', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-partial-15',
+        'hello',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const session = getSessions(runner).get('stream-partial-15')!;
+    expect(session).toBeDefined();
+
+    // Simulate partial assistant messages (cumulative text from --include-partial-messages)
+    const partial1 = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello' }] },
+      stop_reason: null,
+    });
+    session.emit('output', partial1);
+
+    const partial2 = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello world' }] },
+      stop_reason: null,
+    });
+    session.emit('output', partial2);
+
+    // Result event
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Hello world' }));
+
+    const result = await donePromise;
+    expect(result).toBe('Hello world');
+
+    const textDeltas = chunks.filter(c => c.type === 'text_delta');
+    expect(textDeltas).toHaveLength(2);
+    expect((textDeltas[0] as { text: string }).text).toBe('Hello');
+    expect((textDeltas[1] as { text: string }).text).toBe(' world');
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-16: No duplicate text in buffer from partial messages
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-16: no duplicate text in buffer from partial messages', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-partial-16',
+        'hello',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const session = getSessions(runner).get('stream-partial-16')!;
+    expect(session).toBeDefined();
+
+    // Simulate partial assistant messages (cumulative)
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello' }] },
+      stop_reason: null,
+    }));
+
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Hello world' }] },
+      stop_reason: null,
+    }));
+
+    // Result — the final text should be exactly "Hello world", not "HelloHello world"
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Hello world' }));
+
+    const result = await donePromise;
+    expect(result).toBe('Hello world');
+    // Also verify via chunks: concatenated deltas should equal "Hello world"
+    const allDeltaText = chunks
+      .filter(c => c.type === 'text_delta')
+      .map(c => (c as { text: string }).text)
+      .join('');
+    expect(allDeltaText).toBe('Hello world');
   }, 15000);
 });
