@@ -137,9 +137,9 @@ export function createWorkingStateManager(
       const mins = Math.floor((totalSecs % 3600) / 60)
       const secs = totalSecs % 60
       const elapsedStr = hours > 0
-        ? `${hours}h ${mins}m ${secs}s`
+        ? `${hours}h ${mins}m`
         : mins > 0
-          ? `${mins}m ${secs}s`
+          ? secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
           : `${secs}s`
       const msg = STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
       tick++
