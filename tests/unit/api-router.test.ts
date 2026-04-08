@@ -1,13 +1,26 @@
 import express from 'express';
 import { EventEmitter } from 'events';
 import * as supertest from 'supertest';
+import * as http from 'http';
 import { createApiRouter } from '../../src/api-router';
-import { AgentConfig, ApiKey } from '../../src/types';
+import { AgentConfig, ApiKey, StreamEvent } from '../../src/types';
 
 // ── Minimal mock AgentRunner ─────────────────────────────────────────────────
 
+interface StreamCallbacks {
+  onChunk: (event: StreamEvent) => void;
+  onDone: (fullText: string) => void;
+  onError: (err: Error) => void;
+}
+
 class MockAgentRunner extends EventEmitter {
   sendApiMessageImpl: (sessionId: string, message: string) => Promise<string>;
+  sendApiMessageStreamImpl?: (
+    sessionId: string,
+    message: string,
+    callbacks: StreamCallbacks,
+  ) => Promise<() => void>;
+  private _activeApiSessions = new Set<string>();
 
   constructor(impl: (sessionId: string, message: string) => Promise<string>) {
     super();
@@ -20,6 +33,26 @@ class MockAgentRunner extends EventEmitter {
     _opts: { timeoutMs: number },
   ): Promise<string> {
     return this.sendApiMessageImpl(sessionId, message);
+  }
+
+  async sendApiMessageStream(
+    sessionId: string,
+    message: string,
+    callbacks: StreamCallbacks,
+    _opts: { timeoutMs: number },
+  ): Promise<() => void> {
+    if (this.sendApiMessageStreamImpl) {
+      return this.sendApiMessageStreamImpl(sessionId, message, callbacks);
+    }
+    throw new Error('sendApiMessageStream not implemented in mock');
+  }
+
+  hasActiveApiSession(sessionId: string): boolean {
+    return this._activeApiSessions.has(sessionId);
+  }
+
+  markSessionActive(sessionId: string): void {
+    this._activeApiSessions.add(sessionId);
   }
 }
 
@@ -49,6 +82,23 @@ function buildApp(runnerImpl: (sessionId: string, msg: string) => Promise<string
   app.use(express.json());
   app.use('/api', createApiRouter(runners, configs, apiKeys));
   return app;
+}
+
+function buildStreamApp(
+  streamImpl: (
+    sessionId: string,
+    message: string,
+    callbacks: StreamCallbacks,
+  ) => Promise<() => void>,
+): { app: express.Express; runner: MockAgentRunner } {
+  const runner = new MockAgentRunner(async () => 'ok');
+  runner.sendApiMessageStreamImpl = streamImpl;
+  const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent-runner').AgentRunner]]);
+  const configs = new Map([[AGENT_ID, agentConfig]]);
+  const app = express();
+  app.use(express.json());
+  app.use('/api', createApiRouter(runners, configs, apiKeys));
+  return { app, runner };
 }
 
 const AUTH = { Authorization: 'Bearer sk-test-app' };
@@ -227,5 +277,222 @@ describe('GET /api/v1/agents', () => {
     const app = buildApp(async () => 'ok');
     const res = await supertest.default(app).get('/api/v1/agents');
     expect(res.status).toBe(401);
+  });
+});
+
+// ── SSE Streaming Tests ──────────────────────────────────────────────────────
+
+/**
+ * Helper to collect raw SSE response from a streaming POST request.
+ * Uses raw http to get access to chunked response.
+ */
+function collectSSE(
+  app: express.Express,
+  body: Record<string, unknown>,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; data: string }> {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(0, () => {
+      const addr = server.address() as { port: number };
+      const reqBody = JSON.stringify(body);
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port: addr.port,
+          path: POST_URL,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer sk-test-app',
+            'Content-Length': Buffer.byteLength(reqBody),
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            server.close();
+            resolve({ status: res.statusCode!, headers: res.headers, data });
+          });
+        },
+      );
+      req.on('error', (err) => { server.close(); reject(err); });
+      req.write(reqBody);
+      req.end();
+    });
+  });
+}
+
+describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
+  // T1: SSE headers
+  it('T1: returns SSE headers when stream=true', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onDone('Hello');
+      return () => {};
+    });
+    const { status, headers } = await collectSSE(app, { message: 'hi', stream: true });
+    expect(status).toBe(200);
+    expect(headers['content-type']).toBe('text/event-stream');
+    expect(headers['cache-control']).toBe('no-cache');
+  });
+
+  // T2: text_delta events
+  it('T2: stream receives text_delta events', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onChunk({ type: 'text_delta', text: 'Hello' });
+      cb.onChunk({ type: 'text_delta', text: ' world' });
+      cb.onDone('Hello world');
+      return () => {};
+    });
+    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    const lines = data.split('\n').filter(l => l.startsWith('data: '));
+    const events = lines
+      .map(l => l.slice(6))
+      .filter(s => s !== '[DONE]')
+      .map(s => JSON.parse(s));
+    const deltas = events.filter((e: { type: string }) => e.type === 'text_delta');
+    expect(deltas).toHaveLength(2);
+    expect(deltas[0].text).toBe('Hello');
+    expect(deltas[1].text).toBe(' world');
+  });
+
+  // T3: ends with [DONE]
+  it('T3: stream ends with [DONE]', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onDone('done');
+      return () => {};
+    });
+    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    expect(data.trimEnd()).toMatch(/data: \[DONE\]$/);
+  });
+
+  // T4: no message returns 400 JSON
+  it('T4: stream with no message returns 400 JSON', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onDone('ok');
+      return () => {};
+    });
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ stream: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/message is required/i);
+  });
+
+  // T5: conflict returns 409 JSON
+  it('T5: stream conflict returns 409 JSON', async () => {
+    const { app, runner } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onDone('ok');
+      return () => {};
+    });
+    runner.markSessionActive('conflict-session');
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'hi', session_id: 'conflict-session', stream: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/pending request/i);
+  });
+
+  // T6: timeout sends error event in SSE
+  it('T6: stream timeout sends error event in SSE', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onError(new Error('Agent response timeout'));
+      return () => {};
+    });
+    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    const lines = data.split('\n').filter(l => l.startsWith('data: '));
+    const events = lines.map(l => l.slice(6)).filter(s => s !== '[DONE]');
+    const errorEvent = JSON.parse(events[events.length - 1]);
+    expect(errorEvent.type).toBe('error');
+    expect(errorEvent.message).toMatch(/timeout/i);
+  });
+
+  // T7: stream=false still works (regression)
+  it('T7: stream=false returns existing JSON behavior', async () => {
+    const app = buildApp(async () => 'Hello!');
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'Hi', stream: false });
+    expect(res.status).toBe(200);
+    expect(res.body.response).toBe('Hello!');
+  });
+
+  // T8: client disconnect triggers cleanup
+  it('T8: client disconnect triggers cleanup function', async () => {
+    let cleanupCalled = false;
+    let sendChunk: ((event: StreamEvent) => void) | undefined;
+
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      sendChunk = cb.onChunk;
+      // Send initial chunk so client gets data
+      cb.onChunk({ type: 'text_delta', text: 'hi' });
+      return () => { cleanupCalled = true; };
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const server = app.listen(0, () => {
+        const addr = server.address() as { port: number };
+        const reqBody = JSON.stringify({ message: 'hi', stream: true });
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: addr.port,
+            path: POST_URL,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer sk-test-app',
+              'Content-Length': Buffer.byteLength(reqBody),
+            },
+          },
+          (res) => {
+            res.once('data', () => {
+              // Destroy the socket to simulate client disconnect
+              res.destroy();
+            });
+          },
+        );
+        req.on('error', () => { /* expected when we destroy */ });
+        req.write(reqBody);
+        req.end();
+
+        // Wait for the close event to propagate
+        setTimeout(() => {
+          server.close();
+          resolve();
+        }, 500);
+      });
+    });
+
+    expect(cleanupCalled).toBe(true);
+  }, 10000);
+
+  // T-API-STREAM-TCP: TCP_NODELAY is set on SSE connections (regression test)
+  it('T-API-STREAM-TCP: SSE streaming works correctly with TCP_NODELAY set', async () => {
+    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+      cb.onChunk({ type: 'text_delta', text: 'fast' });
+      cb.onChunk({ type: 'text_delta', text: ' response' });
+      cb.onDone('fast response');
+      return () => {};
+    });
+    const { status, headers, data } = await collectSSE(app, { message: 'hi', stream: true });
+    expect(status).toBe(200);
+    expect(headers['content-type']).toBe('text/event-stream');
+
+    // Verify the stream data is correct (regression: setNoDelay should not break streaming)
+    const lines = data.split('\n').filter(l => l.startsWith('data: '));
+    const events = lines
+      .map(l => l.slice(6))
+      .filter(s => s !== '[DONE]')
+      .map(s => JSON.parse(s));
+    const deltas = events.filter((e: { type: string }) => e.type === 'text_delta');
+    expect(deltas).toHaveLength(2);
+    expect(deltas[0].text).toBe('fast');
+    expect(deltas[1].text).toBe(' response');
+
+    // Verify stream ends with [DONE]
+    expect(data.trimEnd()).toMatch(/data: \[DONE\]$/);
   });
 });

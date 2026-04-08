@@ -143,6 +143,7 @@ export class SessionProcess extends EventEmitter {
       '--model', this.agentConfig.claude.model,
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
+      '--include-partial-messages',
       '--print',
       '--verbose',
     ];
@@ -317,6 +318,10 @@ export class SessionProcess extends EventEmitter {
     }
 
     let assistantBuffer = '';
+    // Track partial message text to avoid double-counting when --include-partial-messages is active.
+    // Each partial `type: 'assistant'` event contains the FULL text so far, not a delta.
+    let lastPartialText = '';
+
     proc.stdout?.on('data', (data: Buffer) => {
       // Update heartbeat so the receiver's stalled detector knows Claude is active
       if (heartbeatPath) {
@@ -330,19 +335,40 @@ export class SessionProcess extends EventEmitter {
         // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
-          // stream-json assistant message
+          // stream-json assistant message (partial or final)
           if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
+            // Extract full text from all text blocks in this message
+            let fullText = '';
             for (const block of obj.message.content) {
-              if (block.type === 'text') assistantBuffer += block.text;
+              if (block.type === 'text') fullText += block.text;
             }
-            // Detect tool use to write status
+
+            const isPartial = obj.stop_reason === null || obj.stop_reason === undefined;
+
+            if (isPartial) {
+              // Partial message: update assistantBuffer with only the delta
+              // (fullText is cumulative, so delta = new portion)
+              if (fullText.length > lastPartialText.length) {
+                assistantBuffer += fullText.slice(lastPartialText.length);
+              }
+              lastPartialText = fullText;
+            } else {
+              // Final message: use full text, reset partial tracking
+              if (fullText.length > lastPartialText.length) {
+                assistantBuffer += fullText.slice(lastPartialText.length);
+              }
+              lastPartialText = '';
+            }
+
+            // Detect tool use to write status (same as before)
             const toolBlock = obj.message.content.find(
               (b: { type: string }) => b.type === 'tool_use',
             );
             if (toolBlock) {
               const detail = extractToolDetail(toolBlock.name ?? '', toolBlock.input ?? {});
               writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool', detail);
-            } else if (obj.message.content.some((b: { type: string }) => b.type === 'text')) {
+            } else if (!isPartial && obj.message.content.some((b: { type: string }) => b.type === 'text')) {
+              // Only update thinking status on final messages, not every partial
               const textBlock = obj.message.content.find((b: { type: string; text?: string }) => b.type === 'text');
               const textSnippet = textBlock?.text ? truncateDetail(`🧠 ${textBlock.text}`) : undefined;
               writeStatus('thinking', textSnippet);
@@ -363,10 +389,11 @@ export class SessionProcess extends EventEmitter {
           if (obj.type === 'rate_limit_event') {
             writeStatus('waiting', '⏳ Rate limited, retrying...');
           }
-          // text delta
+          // text delta (standalone, not from assistant messages)
           if (obj.type === 'text') assistantBuffer += obj.text ?? '';
           // result = end of turn
           if (obj.type === 'result') {
+            lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
             if (assistantBuffer.trim()) {
               this.sessionStore
