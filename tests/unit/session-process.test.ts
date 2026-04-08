@@ -475,7 +475,7 @@ describe('SessionProcess', () => {
     const line = JSON.stringify({
       type: 'assistant',
       message: {
-        content: [{ type: 'tool_use', name: 'Write' }],
+        content: [{ type: 'tool_use', name: 'Write', input: { file_path: '/home/user/src/app.ts' } }],
       },
     });
     lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
@@ -484,7 +484,8 @@ describe('SessionProcess', () => {
     expect(fs.existsSync(sp_path)).toBe(true);
     const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
     expect(written.status).toBe('coding');
-    expect(written.detail).toContain('Write');
+    expect(written.detail).toContain('Writing');
+    expect(written.detail).toContain('src/app.ts');
   });
 
   it('T8: stdout tool_use Bash → writes "tool" to status file', async () => {
@@ -497,7 +498,7 @@ describe('SessionProcess', () => {
     const line = JSON.stringify({
       type: 'assistant',
       message: {
-        content: [{ type: 'tool_use', name: 'Bash' }],
+        content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'Run tests' } }],
       },
     });
     lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
@@ -506,7 +507,8 @@ describe('SessionProcess', () => {
     expect(fs.existsSync(sp_path)).toBe(true);
     const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
     expect(written.status).toBe('tool');
-    expect(written.detail).toContain('Bash');
+    expect(written.detail).toContain('Running');
+    expect(written.detail).toContain('Run tests');
   });
 
   it('T9: stdout result ok → writes "done" to status file', async () => {

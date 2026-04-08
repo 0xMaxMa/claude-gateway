@@ -24,7 +24,8 @@ export const STATUS_MESSAGES = [
 export const STALLED_TIMEOUT_MS = 120_000  // 2 minutes without heartbeat → warn + stop
 export const STALLED_CHECK_INTERVAL_MS = 15_000  // check heartbeat freshness every 15s
 export const TYPING_INTERVAL_MS = 4_000    // sendChatAction every 4s (Telegram expires at 5s)
-export const STATUS_INTERVAL_MS = 30_000   // status update every 30s
+export const STATUS_INTERVAL_MS = 10_000   // status update every 10s
+export const STATUS_INITIAL_DELAY_MS = 5_000  // first status message after 5s
 
 export const ERROR_MESSAGES: Record<string, string> = {
   PROCESS_FAILED: '❌ Claude stopped unexpectedly. Please try sending a new message.',
@@ -56,10 +57,12 @@ export interface WorkingState {
   typingInterval: ReturnType<typeof setInterval>
   statusInterval: ReturnType<typeof setInterval>
   stalledInterval: ReturnType<typeof setInterval>
+  initialStatusTimer: ReturnType<typeof setTimeout> | null
   statusMessageId: number | null
   startedAt: number
   currentReaction: string | null
   lastDetail: string | null
+  recentDetails: string[]
 }
 
 export interface BotApi {
@@ -106,12 +109,17 @@ export function createWorkingStateManager(
     return `${typingDir}/${chatId}.msgid`
   }
 
+  function forwardFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.forward`
+  }
+
   async function stop(chatId: string): Promise<void> {
     const state = states.get(chatId)
     if (!state) return
     clearInterval(state.typingInterval)
     clearInterval(state.statusInterval)
     clearInterval(state.stalledInterval)
+    if (state.initialStatusTimer) clearTimeout(state.initialStatusTimer)
     // Read final status and set done/error reaction before cleanup
     const statusPath = statusFilePath(chatId)
     const msgIdPath = msgIdFilePath(chatId)
@@ -125,6 +133,17 @@ export function createWorkingStateManager(
           await botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
         }
       } catch {}
+    }
+    // Auto-forward result text if agent didn't call reply tool
+    const forwardPath = forwardFilePath(chatId)
+    if (fsApi.existsSync(forwardPath)) {
+      try {
+        const text = fsApi.readFileSync(forwardPath, 'utf8').trim()
+        if (text) {
+          await botApi.sendMessage(chatId, text).catch(() => {})
+        }
+      } catch {}
+      fsApi.rmSync(forwardPath, { force: true })
     }
     fsApi.rmSync(typingFilePath(chatId), { force: true })
     fsApi.rmSync(errorFilePath(chatId), { force: true })
@@ -155,12 +174,52 @@ export function createWorkingStateManager(
       typingInterval: null as unknown as ReturnType<typeof setInterval>,
       statusInterval: null as unknown as ReturnType<typeof setInterval>,
       stalledInterval: null as unknown as ReturnType<typeof setInterval>,
+      initialStatusTimer: null,
       statusMessageId: null,
       startedAt,
       currentReaction: null,
       lastDetail: null,
+      recentDetails: [],
     }
     states.set(chatId, state)
+
+    // Shared function to send/edit the status message
+    let statusUpdatePending = false
+    async function sendStatusUpdate(): Promise<void> {
+      const s = states.get(chatId)
+      if (!s || statusUpdatePending) return
+      statusUpdatePending = true
+      try {
+        const totalSecs = Math.floor((Date.now() - s.startedAt) / 1000)
+        const hours = Math.floor(totalSecs / 3600)
+        const mins = Math.floor((totalSecs % 3600) / 60)
+        const secs = totalSecs % 60
+        const elapsedStr = hours > 0
+          ? `${hours}h ${mins}m`
+          : mins > 0
+            ? secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
+            : `${secs}s`
+        const currentLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
+        tick++
+        // Build multi-line status: recent history (dimmed) + current line + elapsed
+        const historyLines = s.recentDetails.slice(-4);
+        const lines = [...historyLines, currentLine, `(elapsed: ${elapsedStr})`]
+        const text = lines.join('\n')
+        if (s.statusMessageId === null) {
+          try {
+            const sent = await botApi.sendMessage(chatId, text)
+            s.statusMessageId = sent.message_id
+          } catch {}
+        } else {
+          await botApi.editMessageText(chatId, s.statusMessageId, text).catch(async () => {
+            const current = states.get(chatId)
+            if (current) current.statusMessageId = null
+          })
+        }
+      } finally {
+        statusUpdatePending = false
+      }
+    }
 
     state.typingInterval = setInterval(() => {
       // File deleted by SEND_ONLY (reply sent) → stop loop
@@ -190,41 +249,27 @@ export function createWorkingStateManager(
             s.currentReaction = emoji
             void botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
           }
-          // Update detail for status message
+          // Update detail and immediately send status when it changes
           if (s && detail && detail !== s.lastDetail) {
+            if (s.lastDetail) {
+              s.recentDetails.push(s.lastDetail)
+              // Keep only last 4 history entries
+              if (s.recentDetails.length > 4) s.recentDetails.shift()
+            }
             s.lastDetail = detail
+            void sendStatusUpdate()
           }
         } catch {}
       }
     }, TYPING_INTERVAL_MS)
 
+    // First status message after 5s, then recurring every 10s
+    state.initialStatusTimer = setTimeout(() => {
+      void sendStatusUpdate()
+    }, STATUS_INITIAL_DELAY_MS)
+
     state.statusInterval = setInterval(async () => {
-      const s = states.get(chatId)
-      if (!s) return
-      const totalSecs = Math.floor((Date.now() - s.startedAt) / 1000)
-      const hours = Math.floor(totalSecs / 3600)
-      const mins = Math.floor((totalSecs % 3600) / 60)
-      const secs = totalSecs % 60
-      const elapsedStr = hours > 0
-        ? `${hours}h ${mins}m`
-        : mins > 0
-          ? secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
-          : `${secs}s`
-      const statusLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
-      tick++
-      const text = `${statusLine}\n(elapsed: ${elapsedStr})`
-      if (s.statusMessageId === null) {
-        try {
-          const sent = await botApi.sendMessage(chatId, text)
-          s.statusMessageId = sent.message_id
-        } catch {}
-      } else {
-        await botApi.editMessageText(chatId, s.statusMessageId, text).catch(async () => {
-          // Message was deleted by user — resend on next tick
-          const current = states.get(chatId)
-          if (current) current.statusMessageId = null
-        })
-      }
+      await sendStatusUpdate()
     }, STATUS_INTERVAL_MS)
 
     // Stalled detection: check heartbeat file freshness every STALLED_CHECK_INTERVAL_MS.

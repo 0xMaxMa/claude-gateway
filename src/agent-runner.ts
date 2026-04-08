@@ -205,10 +205,29 @@ export class AgentRunner extends EventEmitter {
       });
       // Stop typing loop when Claude's turn truly ends (result event = end of turn).
       // This is deferred from the reply tool so typing stays active during multi-step work.
+      // Also auto-forward result text to Telegram if agent didn't call reply tool.
+      let replyCalled = false;
       proc.on('output', (line: string) => {
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
+          // Track mcp__telegram__reply tool calls
+          if (obj['type'] === 'assistant') {
+            const msg = obj['message'] as { content?: Array<{ type: string; name?: string }> } | undefined;
+            if (Array.isArray(msg?.content)) {
+              for (const block of msg!.content) {
+                if (block.type === 'tool_use' && block.name === 'mcp__telegram__reply') {
+                  replyCalled = true;
+                }
+              }
+            }
+          }
           if (obj['type'] === 'result') {
+            // Auto-forward result text if agent didn't call reply tool
+            const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
+            if (!replyCalled && resultText.trim()) {
+              this.writeAutoForward(sessionId, resultText.trim());
+            }
+            replyCalled = false; // reset for next turn
             this.writeTypingDone(sessionId);
           }
         } catch { /* non-JSON */ }
@@ -247,6 +266,20 @@ export class AgentRunner extends EventEmitter {
     const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
     try {
       fs.rmSync(path.join(typingDir, chatId), { force: true });
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * Write result text to a forward file so the typing plugin sends it to Telegram.
+   * Used when the agent produces text output but didn't call mcp__telegram__reply.
+   */
+  private writeAutoForward(chatId: string, text: string): void {
+    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
+    try {
+      fs.mkdirSync(typingDir, { recursive: true });
+      fs.writeFileSync(path.join(typingDir, `${chatId}.forward`), text);
     } catch {
       // Non-fatal
     }

@@ -224,41 +224,96 @@ export class SessionProcess extends EventEmitter {
 
     const CODING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
 
-    const TOOL_EMOJI: Record<string, string> = {
-      Read: '📖', Edit: '✏️', Write: '📝', NotebookEdit: '📝',
-      Grep: '🔍', Glob: '📂',
-      Bash: '⚡', WebFetch: '🌐', WebSearch: '🔎',
-      Agent: '🤖', Task: '🤖',
+    const TOOL_LABELS: Record<string, { emoji: string; verb: string }> = {
+      Read:         { emoji: '📖', verb: 'Reading' },
+      Edit:         { emoji: '✏️', verb: 'Editing' },
+      Write:        { emoji: '📝', verb: 'Writing' },
+      MultiEdit:    { emoji: '❤️‍🔥', verb: 'Editing' },
+      NotebookEdit: { emoji: '📕', verb: 'Editing notebook' },
+      Grep:         { emoji: '🔦', verb: 'Searching for' },
+      Glob:         { emoji: '📂', verb: 'Finding files' },
+      Bash:         { emoji: '💻', verb: 'Running' },
+      WebFetch:     { emoji: '🌐', verb: 'Fetching' },
+      WebSearch:    { emoji: '🔎', verb: 'Searching' },
+      Agent:        { emoji: '🤖', verb: 'Running agent' },
+      Task:         { emoji: '👉', verb: 'Running task' },
+      TodoWrite:    { emoji: '📋', verb: 'Updating tasks' },
     };
 
     function shortenPath(p: string): string {
+      // Keep last 2 segments for context (e.g. "src/api-router.ts" not just "api-router.ts")
       const parts = p.split('/');
-      return parts[parts.length - 1] || p;
+      return parts.length > 2 ? parts.slice(-2).join('/') : parts[parts.length - 1] || p;
     }
 
-    function truncateDetail(s: string, max = 80): string {
-      return s.length > max ? s.slice(0, max) + '...' : s;
+    function truncateDetail(s: string, maxLines = 5, maxChars = 300): string {
+      const lines = s.split('\n').filter(l => l.trim());
+      const trimmedByLines = lines.length > maxLines;
+      const kept = lines.slice(0, maxLines);
+      let result = kept.join('\n');
+      if (result.length > maxChars) {
+        result = result.slice(0, maxChars) + '...';
+      } else if (trimmedByLines) {
+        result += '\n...';
+      }
+      return result;
     }
 
     function extractToolDetail(name: string, input: Record<string, unknown>): string {
-      const emoji = TOOL_EMOJI[name] ?? '🔧';
-      let desc = '';
-      if (input.description && typeof input.description === 'string') {
-        desc = input.description;
-      } else if (input.file_path && typeof input.file_path === 'string') {
-        desc = shortenPath(input.file_path);
-      } else if (input.pattern && typeof input.pattern === 'string') {
-        desc = input.pattern;
-      } else if (input.url && typeof input.url === 'string') {
-        desc = input.url;
-      } else if (input.query && typeof input.query === 'string') {
-        desc = input.query;
-      } else if (input.command && typeof input.command === 'string') {
-        desc = input.command.slice(0, 60);
-      } else if (input.prompt && typeof input.prompt === 'string') {
-        desc = input.prompt.slice(0, 60);
+      const label = TOOL_LABELS[name] ?? { emoji: '🔧', verb: name };
+      const { emoji, verb } = label;
+
+      // Build context parts based on tool type
+      switch (name) {
+        case 'Read':
+        case 'Edit':
+        case 'Write':
+        case 'MultiEdit':
+        case 'NotebookEdit': {
+          const file = typeof input.file_path === 'string' ? shortenPath(input.file_path) : '';
+          const desc = typeof input.description === 'string' ? ` — ${input.description}` : '';
+          return truncateDetail(`${emoji} ${verb}: ${file}${desc}`);
+        }
+        case 'Grep': {
+          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
+          const path = typeof input.path === 'string' ? ` in ${shortenPath(input.path)}` : '';
+          return truncateDetail(`${emoji} ${verb}: ${pattern}${path}`);
+        }
+        case 'Glob': {
+          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
+          return truncateDetail(`${emoji} ${verb}: ${pattern}`);
+        }
+        case 'Bash': {
+          const desc = typeof input.description === 'string' ? input.description : '';
+          const cmd = typeof input.command === 'string' ? input.command : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || cmd}`);
+        }
+        case 'WebFetch': {
+          const url = typeof input.url === 'string' ? input.url : '';
+          return truncateDetail(`${emoji} ${verb}: ${url}`);
+        }
+        case 'WebSearch': {
+          const query = typeof input.query === 'string' ? input.query : '';
+          return truncateDetail(`${emoji} ${verb}: "${query}"`);
+        }
+        case 'Agent':
+        case 'Task': {
+          const desc = typeof input.description === 'string' ? input.description : '';
+          const prompt = typeof input.prompt === 'string' ? input.prompt : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || prompt}`);
+        }
+        case 'TodoWrite': {
+          const todos = Array.isArray(input.todos) ? input.todos as { content?: string; status?: string }[] : [];
+          const active = todos.find(t => t.status === 'in_progress');
+          const detail = active?.content ?? `${todos.length} items`;
+          return truncateDetail(`${emoji} ${verb}: ${detail}`);
+        }
+        default: {
+          // Generic fallback: try description, then name
+          const desc = typeof input.description === 'string' ? input.description : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || '...'}`);
+        }
       }
-      return truncateDetail(`${emoji} ${desc || name}`);
     }
 
     let assistantBuffer = '';
@@ -300,8 +355,8 @@ export class SessionProcess extends EventEmitter {
               writeStatus('tool', truncateDetail(`🤖 ${taskDesc}`));
             } else {
               const toolName = typeof obj.last_tool_name === 'string' ? obj.last_tool_name : '';
-              const emoji = TOOL_EMOJI[toolName] ?? '🔧';
-              writeStatus('tool', truncateDetail(`${emoji} ${taskDesc}`));
+              const toolLabel = TOOL_LABELS[toolName] ?? { emoji: '🔧', verb: toolName };
+              writeStatus('tool', truncateDetail(`${toolLabel.emoji} ${taskDesc}`));
             }
           }
           // rate_limit_event
