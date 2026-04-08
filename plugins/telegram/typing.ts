@@ -109,6 +109,10 @@ export function createWorkingStateManager(
     return `${typingDir}/${chatId}.msgid`
   }
 
+  function forwardFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.forward`
+  }
+
   async function stop(chatId: string): Promise<void> {
     const state = states.get(chatId)
     if (!state) return
@@ -129,6 +133,17 @@ export function createWorkingStateManager(
           await botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
         }
       } catch {}
+    }
+    // Auto-forward result text if agent didn't call reply tool
+    const forwardPath = forwardFilePath(chatId)
+    if (fsApi.existsSync(forwardPath)) {
+      try {
+        const text = fsApi.readFileSync(forwardPath, 'utf8').trim()
+        if (text) {
+          await botApi.sendMessage(chatId, text).catch(() => {})
+        }
+      } catch {}
+      fsApi.rmSync(forwardPath, { force: true })
     }
     fsApi.rmSync(typingFilePath(chatId), { force: true })
     fsApi.rmSync(errorFilePath(chatId), { force: true })
