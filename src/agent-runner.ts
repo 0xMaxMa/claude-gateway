@@ -135,10 +135,27 @@ export class AgentRunner extends EventEmitter {
       .filter(k => meta[k])
       .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
       .join('');
+
+    // Build nested <replied> block if this message is a reply to another
+    let repliedBlock = '';
+    if (meta['replied_message_id']) {
+      const repliedAttrs = [
+        'replied_image_path',
+      ]
+        .filter(k => meta[k])
+        .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
+        .join('');
+      repliedBlock =
+        `<replied message_id="${meta['replied_message_id']}" ` +
+        `user="${(meta['replied_user'] ?? '').replace(/"/g, '&quot;')}"${repliedAttrs}>` +
+        `${(meta['replied_text'] ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}` +
+        `</replied>`;
+    }
+
     return (
       `<channel source="telegram" chat_id="${meta['chat_id'] ?? ''}" ` +
       `message_id="${meta['message_id'] ?? ''}" user="${meta['user'] ?? ''}" ` +
-      `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${params.content ?? ''}</channel>`
+      `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${repliedBlock}${params.content ?? ''}</channel>`
     );
   }
 

@@ -681,6 +681,28 @@ async function handleInbound(
 
   const imagePath = downloadImage ? await downloadImage() : undefined
 
+  // Download photo from replied-to message if present
+  const replyMsg = ctx.message?.reply_to_message
+  let repliedImagePath: string | undefined
+  if (replyMsg?.photo) {
+    try {
+      const largest = replyMsg.photo[replyMsg.photo.length - 1]!
+      const file = await bot.api.getFile(largest.file_id)
+      if (file.file_path) {
+        const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+        const res = await fetch(url)
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer())
+          const ext = file.file_path.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || 'jpg'
+          const uniqueId = (largest.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'reply'
+          repliedImagePath = join(INBOX_DIR, `${Date.now()}-reply-${uniqueId}.${ext}`)
+          mkdirSync(INBOX_DIR, { recursive: true })
+          writeFileSync(repliedImagePath, buf)
+        }
+      }
+    } catch {}
+  }
+
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
   const channelParams = {
@@ -698,6 +720,12 @@ async function handleInbound(
         ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
         ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
         ...(attachment.name ? { attachment_name: attachment.name } : {}),
+      } : {}),
+      ...(replyMsg ? {
+        replied_message_id: String(replyMsg.message_id),
+        replied_user: replyMsg.from?.username ?? String(replyMsg.from?.id ?? ''),
+        ...(replyMsg.text ? { replied_text: replyMsg.text } : {}),
+        ...(repliedImagePath ? { replied_image_path: repliedImagePath } : {}),
       } : {}),
     },
   }
