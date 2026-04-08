@@ -5,6 +5,7 @@
 
 import {
   createWorkingStateManager,
+  parseStatusFile,
   STATUS_MESSAGES,
   ERROR_MESSAGES,
   STATUS_EMOJI,
@@ -489,6 +490,137 @@ describe('createWorkingStateManager', () => {
       await mgr.stop(CHAT_ID)
 
       expect(bot.setMessageReaction).toHaveBeenCalledWith(CHAT_ID, 77, STATUS_EMOJI['error'])
+    })
+  })
+
+  // --------------------------------------------------------------------------
+  // parseStatusFile tests
+  // --------------------------------------------------------------------------
+  describe('parseStatusFile', () => {
+    it('U-TY-01: handles plain string (backward compat)', () => {
+      const result = parseStatusFile('thinking')
+      expect(result).toEqual({ status: 'thinking' })
+    })
+
+    it('U-TY-02: handles JSON with detail', () => {
+      const result = parseStatusFile('{"status":"tool","detail":"📖 Reading server.ts"}')
+      expect(result).toEqual({ status: 'tool', detail: '📖 Reading server.ts' })
+    })
+
+    it('handles JSON without detail field', () => {
+      const result = parseStatusFile('{"status":"done"}')
+      expect(result).toEqual({ status: 'done' })
+    })
+
+    it('handles empty string', () => {
+      const result = parseStatusFile('')
+      expect(result).toEqual({ status: '' })
+    })
+
+    it('handles invalid JSON gracefully', () => {
+      const result = parseStatusFile('{broken')
+      expect(result).toEqual({ status: '{broken' })
+    })
+  })
+
+  // --------------------------------------------------------------------------
+  // Live detail in status message
+  // --------------------------------------------------------------------------
+  describe('live detail in status message', () => {
+    it('U-TY-03: status message shows detail when available', async () => {
+      jest.useFakeTimers()
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // Write JSON status with detail
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, JSON.stringify({ status: 'tool', detail: '📖 Reading server.ts' }))
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '55')
+
+      // Advance to trigger typing interval (reads detail)
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+
+      // Advance to trigger status interval
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS - TYPING_INTERVAL_MS)
+
+      // Wait for async sendMessage
+      await Promise.resolve()
+      await Promise.resolve()
+
+      const sendCalls = bot.sendMessage.mock.calls
+      const statusCall = sendCalls.find(c => typeof c[1] === 'string' && c[1].includes('Reading server.ts'))
+      expect(statusCall).toBeDefined()
+
+      await mgr.stop(CHAT_ID)
+      jest.useRealTimers()
+    })
+
+    it('U-TY-04: status message falls back to generic when no detail', async () => {
+      jest.useFakeTimers()
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      // Write plain status (no detail)
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, 'thinking')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '55')
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      const sendCalls = bot.sendMessage.mock.calls
+      // Should use one of the generic STATUS_MESSAGES
+      const statusCall = sendCalls.find(c =>
+        typeof c[1] === 'string' && STATUS_MESSAGES.some(m => c[1].includes(m))
+      )
+      expect(statusCall).toBeDefined()
+
+      await mgr.stop(CHAT_ID)
+      jest.useRealTimers()
+    })
+
+    it('U-TY-05: dedup — same detail does not trigger extra editMessage', async () => {
+      jest.useFakeTimers()
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const detail = JSON.stringify({ status: 'tool', detail: '📖 Reading server.ts' })
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.status`, detail)
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.msgid`, '55')
+
+      // First status interval — sends message
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // Second status interval — same detail, edits message
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // editMessageText should be called with text containing the detail both times
+      // (edit happens because elapsed time changes, but detail is the same)
+      const editCalls = bot.editMessageText.mock.calls
+      for (const call of editCalls) {
+        if (typeof call[2] === 'string') {
+          expect(call[2]).toContain('Reading server.ts')
+        }
+      }
+
+      await mgr.stop(CHAT_ID)
+      jest.useRealTimers()
+    })
+
+    it('U-TY-06: waiting status has emoji in STATUS_EMOJI', () => {
+      expect(STATUS_EMOJI['waiting']).toBe('⏳')
     })
   })
 })

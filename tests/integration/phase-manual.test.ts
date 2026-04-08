@@ -12,7 +12,7 @@ import * as http from 'http';
 import express from 'express';
 import supertest from 'supertest';
 
-import { loadConfig, MissingEnvVarError, DuplicateAgentIdError } from '../../src/config-loader';
+import { loadConfig, MissingEnvVarError, DuplicateAgentIdError, ConfigValidationError } from '../../src/config-loader';
 import { loadWorkspace, markBootstrapComplete, deleteBootstrap, watchWorkspace } from '../../src/workspace-loader';
 import { MemoryManager } from '../../src/memory-manager';
 import { parseHeartbeat, InvalidCronError } from '../../src/heartbeat-parser';
@@ -220,8 +220,8 @@ describe('Phase 1: Config Loader', () => {
     }
   });
 
-  // P1-02
-  it('P1-02: missing bot token env var throws MissingEnvVarError', () => {
+  // P1-02: agents with missing env vars are skipped; if none remain, throws ConfigValidationError
+  it('P1-02: missing bot token env var skips agents, throws when none remain', () => {
     const configPath = path.resolve(
       __dirname,
       '../fixtures/configs/valid-2-agents.json',
@@ -230,7 +230,8 @@ describe('Phase 1: Config Loader', () => {
     delete process.env.ALFRED_BOT_TOKEN;
     delete process.env.BAERBEL_BOT_TOKEN;
 
-    expect(() => loadConfig(configPath)).toThrow(MissingEnvVarError);
+    expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
+    expect(() => loadConfig(configPath)).toThrow(/no valid agents/i);
   });
 
   // P1-03

@@ -37,8 +37,19 @@ export const STATUS_EMOJI: Record<string, string> = {
   thinking: '🤔',
   tool:     '🔥',
   coding:   '👨\u200d💻',
+  waiting:  '⏳',
   done:     '👍',
   error:    '😱',
+}
+
+export function parseStatusFile(content: string): { status: string; detail?: string } {
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed === 'object' && parsed !== null && typeof parsed.status === 'string') {
+      return { status: parsed.status, detail: typeof parsed.detail === 'string' ? parsed.detail : undefined };
+    }
+  } catch {}
+  return { status: content.trim() };
 }
 
 export interface WorkingState {
@@ -48,6 +59,7 @@ export interface WorkingState {
   statusMessageId: number | null
   startedAt: number
   currentReaction: string | null
+  lastDetail: string | null
 }
 
 export interface BotApi {
@@ -105,7 +117,8 @@ export function createWorkingStateManager(
     const msgIdPath = msgIdFilePath(chatId)
     if (fsApi.existsSync(statusPath) && fsApi.existsSync(msgIdPath)) {
       try {
-        const finalStatus = fsApi.readFileSync(statusPath, 'utf8').trim()
+        const raw = fsApi.readFileSync(statusPath, 'utf8')
+        const { status: finalStatus } = parseStatusFile(raw)
         const msgId = parseInt(fsApi.readFileSync(msgIdPath, 'utf8').trim(), 10)
         const emoji = STATUS_EMOJI[finalStatus] ?? STATUS_EMOJI['done']
         if (!isNaN(msgId) && emoji && state.currentReaction !== emoji) {
@@ -145,6 +158,7 @@ export function createWorkingStateManager(
       statusMessageId: null,
       startedAt,
       currentReaction: null,
+      lastDetail: null,
     }
     states.set(chatId, state)
 
@@ -167,13 +181,18 @@ export function createWorkingStateManager(
       const msgIdPath = msgIdFilePath(chatId)
       if (fsApi.existsSync(statusPath) && fsApi.existsSync(msgIdPath)) {
         try {
-          const status = fsApi.readFileSync(statusPath, 'utf8').trim()
+          const raw = fsApi.readFileSync(statusPath, 'utf8')
+          const { status, detail } = parseStatusFile(raw)
           const msgId = parseInt(fsApi.readFileSync(msgIdPath, 'utf8').trim(), 10)
           const emoji = STATUS_EMOJI[status]
           const s = states.get(chatId)
           if (emoji && !isNaN(msgId) && s && s.currentReaction !== emoji) {
             s.currentReaction = emoji
             void botApi.setMessageReaction(chatId, msgId, emoji).catch(() => {})
+          }
+          // Update detail for status message
+          if (s && detail && detail !== s.lastDetail) {
+            s.lastDetail = detail
           }
         } catch {}
       }
@@ -191,9 +210,9 @@ export function createWorkingStateManager(
         : mins > 0
           ? secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
           : `${secs}s`
-      const msg = STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
+      const statusLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
       tick++
-      const text = `${msg}\n(elapsed: ${elapsedStr})`
+      const text = `${statusLine}\n(elapsed: ${elapsedStr})`
       if (s.statusMessageId === null) {
         try {
           const sent = await botApi.sendMessage(chatId, text)

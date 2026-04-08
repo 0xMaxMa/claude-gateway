@@ -213,13 +213,53 @@ export class SessionProcess extends EventEmitter {
       ? path.join(typingDir, `${this.sessionId}.status`)
       : null;
 
-    const writeStatus = (status: string): void => {
+    const writeStatus = (status: string, detail?: string): void => {
       if (statusPath) {
-        try { fs.writeFileSync(statusPath, status) } catch {}
+        const payload = detail
+          ? JSON.stringify({ status, detail })
+          : status;
+        try { fs.writeFileSync(statusPath, payload) } catch {}
       }
     };
 
     const CODING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
+
+    const TOOL_EMOJI: Record<string, string> = {
+      Read: '📖', Edit: '✏️', Write: '📝', NotebookEdit: '📝',
+      Grep: '🔍', Glob: '📂',
+      Bash: '⚡', WebFetch: '🌐', WebSearch: '🔎',
+      Agent: '🤖', Task: '🤖',
+    };
+
+    function shortenPath(p: string): string {
+      const parts = p.split('/');
+      return parts[parts.length - 1] || p;
+    }
+
+    function truncateDetail(s: string, max = 80): string {
+      return s.length > max ? s.slice(0, max) + '...' : s;
+    }
+
+    function extractToolDetail(name: string, input: Record<string, unknown>): string {
+      const emoji = TOOL_EMOJI[name] ?? '🔧';
+      let desc = '';
+      if (input.description && typeof input.description === 'string') {
+        desc = input.description;
+      } else if (input.file_path && typeof input.file_path === 'string') {
+        desc = shortenPath(input.file_path);
+      } else if (input.pattern && typeof input.pattern === 'string') {
+        desc = input.pattern;
+      } else if (input.url && typeof input.url === 'string') {
+        desc = input.url;
+      } else if (input.query && typeof input.query === 'string') {
+        desc = input.query;
+      } else if (input.command && typeof input.command === 'string') {
+        desc = input.command.slice(0, 60);
+      } else if (input.prompt && typeof input.prompt === 'string') {
+        desc = input.prompt.slice(0, 60);
+      }
+      return truncateDetail(`${emoji} ${desc || name}`);
+    }
 
     let assistantBuffer = '';
     proc.stdout?.on('data', (data: Buffer) => {
@@ -245,10 +285,28 @@ export class SessionProcess extends EventEmitter {
               (b: { type: string }) => b.type === 'tool_use',
             );
             if (toolBlock) {
-              writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool');
+              const detail = extractToolDetail(toolBlock.name ?? '', toolBlock.input ?? {});
+              writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool', detail);
             } else if (obj.message.content.some((b: { type: string }) => b.type === 'text')) {
-              writeStatus('thinking');
+              const textBlock = obj.message.content.find((b: { type: string; text?: string }) => b.type === 'text');
+              const textSnippet = textBlock?.text ? truncateDetail(`🧠 ${textBlock.text}`) : undefined;
+              writeStatus('thinking', textSnippet);
             }
+          }
+          // task_started / task_progress
+          if (obj.type === 'system' && (obj.subtype === 'task_started' || obj.subtype === 'task_progress')) {
+            const taskDesc = typeof obj.description === 'string' ? obj.description : '';
+            if (obj.subtype === 'task_started') {
+              writeStatus('tool', truncateDetail(`🤖 ${taskDesc}`));
+            } else {
+              const toolName = typeof obj.last_tool_name === 'string' ? obj.last_tool_name : '';
+              const emoji = TOOL_EMOJI[toolName] ?? '🔧';
+              writeStatus('tool', truncateDetail(`${emoji} ${taskDesc}`));
+            }
+          }
+          // rate_limit_event
+          if (obj.type === 'rate_limit_event') {
+            writeStatus('waiting', '⏳ Rate limited, retrying...');
           }
           // text delta
           if (obj.type === 'text') assistantBuffer += obj.text ?? '';

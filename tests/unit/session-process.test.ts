@@ -482,7 +482,9 @@ describe('SessionProcess', () => {
 
     const sp_path = statusPath(agentConfig.workspace, 'chat:111');
     expect(fs.existsSync(sp_path)).toBe(true);
-    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('coding');
+    const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
+    expect(written.status).toBe('coding');
+    expect(written.detail).toContain('Write');
   });
 
   it('T8: stdout tool_use Bash → writes "tool" to status file', async () => {
@@ -502,7 +504,9 @@ describe('SessionProcess', () => {
 
     const sp_path = statusPath(agentConfig.workspace, 'chat:111');
     expect(fs.existsSync(sp_path)).toBe(true);
-    expect(fs.readFileSync(sp_path, 'utf-8')).toBe('tool');
+    const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
+    expect(written.status).toBe('tool');
+    expect(written.detail).toContain('Bash');
   });
 
   it('T9: stdout result ok → writes "done" to status file', async () => {
