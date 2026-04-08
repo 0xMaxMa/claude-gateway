@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { AgentConfig, GatewayConfig } from './types';
 import { SessionStore } from './session-store';
@@ -64,6 +65,36 @@ export class SessionProcess extends EventEmitter {
     return `[Conversation history with this user:\n${historyText}]\n\n${CHANNELS_ACTIVATION_PROMPT}`;
   }
 
+  /**
+   * Read stdio MCP servers from Claude Code's user-scoped config (~/.claude/settings.json).
+   * Returns empty object if file doesn't exist, can't be parsed, or has no mcpServers.
+   */
+  private readUserScopedMcp(): Record<string, unknown> {
+    try {
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      return (parsed?.mcpServers as Record<string, unknown>) ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Read stdio MCP servers from Claude Code's project-scoped config (~/.claude.json).
+   * Looks up projects[workspace].mcpServers for the agent's workspace path.
+   * Returns empty object if not found or on any error.
+   */
+  private readProjectScopedMcp(): Record<string, unknown> {
+    try {
+      const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+      const parsed = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf-8'));
+      const projectServers = parsed?.projects?.[this.agentConfig.workspace]?.mcpServers;
+      return (projectServers as Record<string, unknown>) ?? {};
+    } catch {
+      return {};
+    }
+  }
+
   private writeMcpConfig(): string | null {
     if (this.source === 'api') return null; // API sessions don't need Telegram plugin
 
@@ -72,8 +103,20 @@ export class SessionProcess extends EventEmitter {
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
     const pluginPath = path.resolve(__dirname, '..', 'plugins', 'telegram', 'server.ts');
+
+    // Merge stdio servers from Claude Code user + project configs (project overrides user).
+    // Skip "telegram" from both — gateway always generates its own telegram config below.
+    const userServers = this.readUserScopedMcp();
+    const projectServers = this.readProjectScopedMcp();
+    const extraServers: Record<string, unknown> = {};
+    for (const [name, server] of Object.entries({ ...userServers, ...projectServers })) {
+      if (name !== 'telegram') extraServers[name] = server;
+    }
+
     const mcpConfig = {
       mcpServers: {
+        ...extraServers,
+        // Telegram always wins — must stay last to override any accidental collision
         telegram: {
           command: 'bun',
           args: [pluginPath],
@@ -88,6 +131,10 @@ export class SessionProcess extends EventEmitter {
 
     const configPath = path.join(sessionDir, 'mcp-config.json');
     fs.writeFileSync(configPath, JSON.stringify(mcpConfig, null, 2), { mode: 0o600 });
+
+    const serverNames = Object.keys(mcpConfig.mcpServers);
+    this.logger.debug('MCP config written', { sessionId: this.sessionId, servers: serverNames });
+
     return configPath;
   }
 
@@ -101,7 +148,10 @@ export class SessionProcess extends EventEmitter {
     ];
 
     if (mcpConfigPath) {
-      args.unshift('--mcp-config', mcpConfigPath, '--strict-mcp-config');
+      // NOTE: --strict-mcp-config is intentionally omitted.
+      // With --strict-mcp-config, Claude Code blocks all plugin MCP servers (e.g. figma).
+      // Without it, enabled plugins (figma, etc.) load automatically alongside --mcp-config.
+      args.unshift('--mcp-config', mcpConfigPath);
     }
 
     if (this.agentConfig.claude.dangerouslySkipPermissions) {

@@ -3,6 +3,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// ── os.homedir mock (set per-test) ────────────────────────────────────────────
+let mockHomeDir: string | null = null;
+jest.mock('os', () => {
+  const real = jest.requireActual<typeof os>('os');
+  return {
+    ...real,
+    homedir: () => mockHomeDir ?? real.homedir(),
+  };
+});
+
 // ── Minimal mock types ────────────────────────────────────────────────────────
 
 interface MockStdin {
@@ -110,12 +120,14 @@ describe('SessionProcess', () => {
     gatewayConfig = makeGatewayConfig();
     sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
     lastProcess = null;
+    mockHomeDir = null;
     spawnMock = require('child_process').spawn as jest.Mock;
     spawnMock.mockClear();
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    mockHomeDir = null;
     jest.clearAllMocks();
   });
 
@@ -269,5 +281,179 @@ describe('SessionProcess', () => {
     // Should contain Message 59 (last) but NOT Message 0 (first — truncated)
     expect(text).toContain('Message 59');
     expect(text).not.toContain('Message 0');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-10: --strict-mcp-config must NOT be in subprocess args
+  // --------------------------------------------------------------------------
+  it('U-SP-10: subprocess is spawned without --strict-mcp-config', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(args).not.toContain('--strict-mcp-config');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-11: --mcp-config is still present for telegram sessions
+  // --------------------------------------------------------------------------
+  it('U-SP-11: --mcp-config arg is present for telegram sessions', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(args).toContain('--mcp-config');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-12: User-scoped stdio MCP servers merged into mcp-config.json
+  // --------------------------------------------------------------------------
+  it('U-SP-12: user-scoped stdio mcpServers are merged into mcp-config.json', async () => {
+    // Setup fake home with settings.json containing a custom MCP server
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-'));
+    try {
+      fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+      fs.writeFileSync(
+        path.join(fakeHome, '.claude', 'settings.json'),
+        JSON.stringify({
+          mcpServers: {
+            github: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'] },
+          },
+        }),
+      );
+      mockHomeDir = fakeHome;
+
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(config.mcpServers.github).toBeDefined();
+      expect(config.mcpServers.github.command).toBe('npx');
+      expect(config.mcpServers.telegram).toBeDefined(); // gateway telegram still present
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-13: Project-scoped MCP servers override user-scoped on name collision
+  // --------------------------------------------------------------------------
+  it('U-SP-13: project-scoped servers override user-scoped on name collision', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-'));
+    try {
+      fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+
+      // User-scoped: github with command "old"
+      fs.writeFileSync(
+        path.join(fakeHome, '.claude', 'settings.json'),
+        JSON.stringify({
+          mcpServers: {
+            github: { command: 'old', args: [] },
+          },
+        }),
+      );
+
+      // Project-scoped: github with command "new" (should win)
+      fs.writeFileSync(
+        path.join(fakeHome, '.claude.json'),
+        JSON.stringify({
+          projects: {
+            [agentConfig.workspace]: {
+              mcpServers: {
+                github: { command: 'new', args: [] },
+              },
+            },
+          },
+        }),
+      );
+      mockHomeDir = fakeHome;
+
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(config.mcpServers.github.command).toBe('new');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-14: "telegram" in user/project config is skipped — gateway telegram wins
+  // --------------------------------------------------------------------------
+  it('U-SP-14: telegram server in user config is skipped, gateway telegram always wins', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-'));
+    try {
+      fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+      fs.writeFileSync(
+        path.join(fakeHome, '.claude', 'settings.json'),
+        JSON.stringify({
+          mcpServers: {
+            telegram: { command: 'bad-command', args: [] }, // should be ignored
+          },
+        }),
+      );
+      mockHomeDir = fakeHome;
+
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(config.mcpServers.telegram.command).toBe('bun'); // gateway version
+      expect(config.mcpServers.telegram.command).not.toBe('bad-command');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-15: Missing or corrupt Claude config files → no error, only telegram
+  // --------------------------------------------------------------------------
+  it('U-SP-15: missing or corrupt Claude config files produce no error, only telegram in config', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-'));
+    try {
+      // No settings.json, no .claude.json
+      mockHomeDir = fakeHome;
+
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await expect(sp.start()).resolves.not.toThrow();
+
+      const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      expect(Object.keys(config.mcpServers)).toEqual(['telegram']);
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-16: API session — no MCP config, no --mcp-config arg (unchanged)
+  // --------------------------------------------------------------------------
+  it('U-SP-16: api session still has no --mcp-config even with user-scoped servers', async () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-'));
+    try {
+      fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+      fs.writeFileSync(
+        path.join(fakeHome, '.claude', 'settings.json'),
+        JSON.stringify({ mcpServers: { github: { command: 'npx', args: [] } } }),
+      );
+      mockHomeDir = fakeHome;
+
+      const sp = new SessionProcess('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+      expect(args).not.toContain('--mcp-config');
+      expect(args).not.toContain('--strict-mcp-config');
+    } finally {
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 });
