@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from './types';
 import { SessionStore } from './session-store';
 import { createLogger } from './logger';
@@ -20,10 +21,14 @@ export class SessionProcess extends EventEmitter {
   private process: ChildProcess | null = null;
   private stopping = false;
   private restartCount = 0;
+  private restartRequested = false;
+  private restartWatcher: chokidar.FSWatcher | null = null;
   private readonly sessionStore: SessionStore;
   private readonly agentConfig: AgentConfig;
   private readonly gatewayConfig: GatewayConfig;
   private readonly logger: ReturnType<typeof createLogger>;
+  private readonly configPath: string;
+  private readonly restartSignalPath: string;
 
   constructor(
     sessionId: string,
@@ -42,12 +47,50 @@ export class SessionProcess extends EventEmitter {
       `${agentConfig.id}:session:${sessionId}`,
       gatewayConfig.gateway.logDir,
     );
+    // config.json lives 3 levels above workspace: <base>/<agentId>/workspace → <base>/config.json
+    this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
+    this.restartSignalPath = path.join(agentConfig.workspace, '.telegram-state', `restart-${sessionId}`);
+  }
+
+  /**
+   * Read model from config.json on disk so restarts pick up changes made after startup.
+   * Falls back to the cached agentConfig.claude.model if config can't be read.
+   */
+  private readFreshModel(): string {
+    try {
+      const raw = fs.readFileSync(this.configPath, 'utf-8');
+      const config = JSON.parse(raw) as { agents?: Array<{ id: string; claude?: { model?: string } }> };
+      const found = config.agents?.find(a => a.id === this.agentConfig.id);
+      if (found?.claude?.model) return found.claude.model;
+    } catch {
+      // fallback to cached value
+    }
+    return this.agentConfig.claude.model;
   }
 
   async start(): Promise<void> {
     this.stopping = false;
     this.restartCount = 0;
+    this.setupRestartWatcher();
     await this.spawnProcess();
+  }
+
+  /**
+   * Watch for a restart signal file written by the agent.
+   * When detected, kill the current Claude process — scheduleRestart() will
+   * re-spawn it with the latest model from config.json.
+   */
+  private setupRestartWatcher(): void {
+    if (this.restartWatcher) return;
+    this.restartWatcher = chokidar.watch(this.restartSignalPath, { ignoreInitial: true });
+    this.restartWatcher.on('add', () => {
+      try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
+      this.restartRequested = true;
+      this.logger.info('Graceful self-restart requested by agent', { sessionId: this.sessionId });
+      if (this.process) {
+        this.process.kill('SIGTERM');
+      }
+    });
   }
 
   private async buildInitialPrompt(): Promise<string> {
@@ -138,9 +181,9 @@ export class SessionProcess extends EventEmitter {
     return configPath;
   }
 
-  private buildArgs(mcpConfigPath: string | null): string[] {
+  private buildArgs(mcpConfigPath: string | null, model: string): string[] {
     const args: string[] = [
-      '--model', this.agentConfig.claude.model,
+      '--model', model,
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--include-partial-messages',
@@ -177,7 +220,8 @@ export class SessionProcess extends EventEmitter {
   private async spawnProcess(): Promise<void> {
     const initialPrompt = await this.buildInitialPrompt();
     const mcpConfigPath = this.writeMcpConfig();
-    const args = this.buildArgs(mcpConfigPath);
+    const freshModel = this.readFreshModel();
+    const args = this.buildArgs(mcpConfigPath, freshModel);
 
     const claudeBinRaw = process.env.CLAUDE_BIN ?? 'claude';
     const claudeBinParts = claudeBinRaw.split(' ');
@@ -190,7 +234,12 @@ export class SessionProcess extends EventEmitter {
     });
 
     const proc = spawn(claudeBin, allArgs, {
-      env: { ...process.env, CLAUDE_WORKSPACE: this.agentConfig.workspace, TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken },
+      env: {
+        ...process.env,
+        CLAUDE_WORKSPACE: this.agentConfig.workspace,
+        TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
+        GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
+      },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -432,6 +481,12 @@ export class SessionProcess extends EventEmitter {
   }
 
   private scheduleRestart(): void {
+    // Graceful self-restart requested by agent — reset counter so it doesn't
+    // count against MAX_RESTARTS (this is an intentional restart, not a crash).
+    if (this.restartRequested) {
+      this.restartRequested = false;
+      this.restartCount = 0;
+    }
     if (this.restartCount >= MAX_RESTARTS) {
       this.logger.error('Session max restarts reached', { sessionId: this.sessionId });
       this.emit('failed');
@@ -484,6 +539,9 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    await this.restartWatcher?.close();
+    this.restartWatcher = null;
+    try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
     if (!this.process) return;
 
     return new Promise((resolve) => {
