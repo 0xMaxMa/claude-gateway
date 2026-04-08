@@ -228,15 +228,15 @@ export class SessionProcess extends EventEmitter {
       Read:         { emoji: '📖', verb: 'Reading' },
       Edit:         { emoji: '✏️', verb: 'Editing' },
       Write:        { emoji: '📝', verb: 'Writing' },
-      MultiEdit:    { emoji: '✏️', verb: 'Editing' },
-      NotebookEdit: { emoji: '📝', verb: 'Editing notebook' },
-      Grep:         { emoji: '🔍', verb: 'Searching for' },
+      MultiEdit:    { emoji: '❤️‍🔥', verb: 'Editing' },
+      NotebookEdit: { emoji: '📕', verb: 'Editing notebook' },
+      Grep:         { emoji: '🔦', verb: 'Searching for' },
       Glob:         { emoji: '📂', verb: 'Finding files' },
-      Bash:         { emoji: '⚡', verb: 'Running' },
+      Bash:         { emoji: '💻', verb: 'Running' },
       WebFetch:     { emoji: '🌐', verb: 'Fetching' },
       WebSearch:    { emoji: '🔎', verb: 'Searching' },
       Agent:        { emoji: '🤖', verb: 'Running agent' },
-      Task:         { emoji: '🤖', verb: 'Running task' },
+      Task:         { emoji: '👉', verb: 'Running task' },
       TodoWrite:    { emoji: '📋', verb: 'Updating tasks' },
     };
 
@@ -246,8 +246,17 @@ export class SessionProcess extends EventEmitter {
       return parts.length > 2 ? parts.slice(-2).join('/') : parts[parts.length - 1] || p;
     }
 
-    function truncateDetail(s: string, max = 200): string {
-      return s.length > max ? s.slice(0, max) + '...' : s;
+    function truncateDetail(s: string, maxLines = 5, maxChars = 300): string {
+      const lines = s.split('\n').filter(l => l.trim());
+      const trimmedByLines = lines.length > maxLines;
+      const kept = lines.slice(0, maxLines);
+      let result = kept.join('\n');
+      if (result.length > maxChars) {
+        result = result.slice(0, maxChars) + '...';
+      } else if (trimmedByLines) {
+        result += '\n...';
+      }
+      return result;
     }
 
     function extractToolDetail(name: string, input: Record<string, unknown>): string {

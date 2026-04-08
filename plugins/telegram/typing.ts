@@ -187,7 +187,7 @@ export function createWorkingStateManager(
         const currentLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
         tick++
         // Build multi-line status: recent history (dimmed) + current line + elapsed
-        const historyLines = s.recentDetails.slice(-4).map(d => `  ${d}`);
+        const historyLines = s.recentDetails.slice(-4);
         const lines = [...historyLines, currentLine, `(elapsed: ${elapsedStr})`]
         const text = lines.join('\n')
         if (s.statusMessageId === null) {
