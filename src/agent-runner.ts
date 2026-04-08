@@ -203,13 +203,24 @@ export class AgentRunner extends EventEmitter {
         this.writeTypingError(sessionId, 'PROCESS_FAILED');
         this.sessions.delete(sessionId);
       });
-      // Stop typing loop when Claude's turn truly ends (result event = end of turn).
-      // This is deferred from the reply tool so typing stays active during multi-step work.
-      // Also auto-forward result text to Telegram if agent didn't call reply tool.
+      // Stop typing loop when Claude's turn truly ends.
+      // Typing done is delayed 3s after result event — if new output arrives within
+      // the delay, the timer is cancelled so typing persists during multi-step work.
+      // Auto-forward result text to Telegram if agent didn't call reply tool.
       let replyCalled = false;
+      let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
+      const TYPING_DONE_DELAY_MS = 3000;
+
       proc.on('output', (line: string) => {
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
+
+          // Cancel pending typing-done on any new output
+          if (typingDoneTimer) {
+            clearTimeout(typingDoneTimer);
+            typingDoneTimer = null;
+          }
+
           // Track mcp__telegram__reply tool calls
           if (obj['type'] === 'assistant') {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string }> } | undefined;
@@ -228,9 +239,22 @@ export class AgentRunner extends EventEmitter {
               this.writeAutoForward(sessionId, resultText.trim());
             }
             replyCalled = false; // reset for next turn
-            this.writeTypingDone(sessionId);
+            // Delay typing done — agent may continue with more work
+            typingDoneTimer = setTimeout(() => {
+              this.writeTypingDone(sessionId);
+              typingDoneTimer = null;
+            }, TYPING_DONE_DELAY_MS);
           }
         } catch { /* non-JSON */ }
+      });
+
+      // Clean up pending typing-done timer when session stops
+      proc.once('exit', () => {
+        if (typingDoneTimer) {
+          clearTimeout(typingDoneTimer);
+          typingDoneTimer = null;
+        }
+        this.writeTypingDone(sessionId);
       });
     }
 

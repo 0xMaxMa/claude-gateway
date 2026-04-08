@@ -21,7 +21,7 @@ export const STATUS_MESSAGES = [
   '🧠 Processing, please wait...',
 ]
 
-export const STALLED_TIMEOUT_MS = 120_000  // 2 minutes without heartbeat → warn + stop
+export const STALLED_TIMEOUT_MS = 300_000  // 5 minutes without heartbeat → warn + stop
 export const STALLED_CHECK_INTERVAL_MS = 15_000  // check heartbeat freshness every 15s
 export const TYPING_INTERVAL_MS = 4_000    // sendChatAction every 4s (Telegram expires at 5s)
 export const STATUS_INTERVAL_MS = 10_000   // status update every 10s
@@ -113,6 +113,10 @@ export function createWorkingStateManager(
     return `${typingDir}/${chatId}.forward`
   }
 
+  function repliedFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.replied`
+  }
+
   async function stop(chatId: string): Promise<void> {
     const state = states.get(chatId)
     if (!state) return
@@ -134,17 +138,23 @@ export function createWorkingStateManager(
         }
       } catch {}
     }
-    // Auto-forward result text if agent didn't call reply tool
+    // Auto-forward result text only if agent didn't already reply via tool.
+    // The .replied marker is written by the Telegram MCP reply handler.
     const forwardPath = forwardFilePath(chatId)
+    const repliedPath = repliedFilePath(chatId)
+    const alreadyReplied = fsApi.existsSync(repliedPath)
     if (fsApi.existsSync(forwardPath)) {
-      try {
-        const text = fsApi.readFileSync(forwardPath, 'utf8').trim()
-        if (text) {
-          await botApi.sendMessage(chatId, text).catch(() => {})
-        }
-      } catch {}
+      if (!alreadyReplied) {
+        try {
+          const text = fsApi.readFileSync(forwardPath, 'utf8').trim()
+          if (text) {
+            await botApi.sendMessage(chatId, text).catch(() => {})
+          }
+        } catch {}
+      }
       fsApi.rmSync(forwardPath, { force: true })
     }
+    fsApi.rmSync(repliedPath, { force: true })
     fsApi.rmSync(typingFilePath(chatId), { force: true })
     fsApi.rmSync(errorFilePath(chatId), { force: true })
     fsApi.rmSync(heartbeatFilePath(chatId), { force: true })

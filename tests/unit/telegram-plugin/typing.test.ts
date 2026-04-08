@@ -623,4 +623,64 @@ describe('createWorkingStateManager', () => {
       expect(STATUS_EMOJI['waiting']).toBe('⏳')
     })
   })
+
+  describe('auto-forward dedup (.replied guard)', () => {
+    it('U-TY-07: forwards text when .replied does NOT exist', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      // Simulate .forward file with result text (no .replied)
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.forward`, 'Hello from agent')
+
+      // Remove signal file to trigger stop on next tick
+      fsApi._files.delete(`${TYPING_DIR}/${CHAT_ID}`)
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve() // flush microtasks
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, 'Hello from agent')
+    })
+
+    it('U-TY-08: skips forward when .replied EXISTS (dedup)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      // Simulate both .forward and .replied exist
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.forward`, 'Hello from agent')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.replied`, String(Date.now()))
+
+      // Remove signal file to trigger stop on next tick
+      fsApi._files.delete(`${TYPING_DIR}/${CHAT_ID}`)
+      jest.advanceTimersByTime(TYPING_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // sendMessage should NOT be called with the forward text
+      const forwardCalls = bot.sendMessage.mock.calls.filter(
+        (c: unknown[]) => c[1] === 'Hello from agent'
+      )
+      expect(forwardCalls).toHaveLength(0)
+    })
+
+    it('U-TY-09: cleans up both .forward and .replied files after stop', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.forward`, 'text')
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.replied`, String(Date.now()))
+
+      await mgr.stop(CHAT_ID)
+
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
+      expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
+    })
+  })
 })

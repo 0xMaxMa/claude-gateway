@@ -562,8 +562,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
-        // Signal typing loop that reply was sent → stop typing indicator
-        typingManager.signalReplyDone(chat_id)
+        // Typing persists until agent-runner sees result event + delay.
+        // Removed signalReplyDone() — reply does not mean done, agent may continue working.
+        // Write .replied marker so auto-forward in typing.ts skips duplicate send.
+        try {
+          const typingDir = join(WORKSPACE, '.telegram-state', 'typing')
+          mkdirSync(typingDir, { recursive: true })
+          writeFileSync(join(typingDir, `${chat_id}.replied`), String(Date.now()))
+        } catch { /* non-fatal */ }
 
         const result =
           sentIds.length === 1

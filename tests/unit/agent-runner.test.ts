@@ -727,3 +727,192 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect(allDeltaText).toBe('Hello world');
   }, 15000);
 });
+
+// ── Typing persistence tests ──────────────────────────────────────────────────
+
+describe('AgentRunner — typing persistence', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-typing-persist-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    jest.useRealTimers();
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  function getTypingDir(): string {
+    return path.join(agentConfig.workspace, '.telegram-state', 'typing');
+  }
+
+  /**
+   * Helper: start runner, create a Telegram session, pre-create the typing signal file,
+   * and return the session for emitting events.
+   */
+  async function setupSessionWithTypingFile(chatId: string): Promise<SessionProcess> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, chatId, 'hello');
+    // Allow async session spawn to complete (must use real timer briefly)
+    jest.useRealTimers();
+    await new Promise(r => setTimeout(r, 150));
+    jest.useFakeTimers();
+
+    const session = getSessions(runner).get(chatId)!;
+    expect(session).toBeDefined();
+
+    // Pre-create typing signal file (normally created by typing plugin on receiver side)
+    const typingDir = getTypingDir();
+    fs.mkdirSync(typingDir, { recursive: true });
+    fs.writeFileSync(path.join(typingDir, chatId), '');
+
+    return session;
+  }
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-05: result event does not delete typing file immediately
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-05: result event does not delete typing file immediately', async () => {
+    const chatId = 'chat:t05';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Emit result event
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+
+    // Do NOT advance timers — check immediately (0ms after result)
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(true);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-06: result event deletes typing file after 3s delay
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-06: result event deletes typing file after 3s delay', async () => {
+    const chatId = 'chat:t06';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Emit result event
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+
+    // Advance fake timers by 3000ms (the TYPING_DONE_DELAY_MS)
+    jest.advanceTimersByTime(3000);
+
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(false);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-07: new output within 3s cancels typing done
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-07: new output within 3s cancels typing done', async () => {
+    const chatId = 'chat:t07';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Emit result event (starts 3s timer)
+    session.emit('output', JSON.stringify({ type: 'result', result: 'partial' }));
+
+    // Advance 1s, then emit new assistant output (cancels the pending timer)
+    jest.advanceTimersByTime(1000);
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'continuing...' }] },
+      stop_reason: null,
+    }));
+
+    // Advance to 4s total (3s after the first result, 3s after the new output hasn't elapsed yet)
+    jest.advanceTimersByTime(3000);
+
+    // Typing file should still exist — the new output cancelled the first timer
+    // and no new result event was emitted, so no new 3s timer was started
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(true);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-08: multiple result events only trigger one deletion
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-08: multiple result events only trigger one deletion', async () => {
+    const chatId = 'chat:t08';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Spy on writeTypingDone to count calls
+    const writeTypingDoneSpy = jest.spyOn(
+      runner as unknown as { writeTypingDone: (id: string) => void },
+      'writeTypingDone',
+    );
+
+    // Emit 3 result events rapidly
+    session.emit('output', JSON.stringify({ type: 'result', result: 'r1' }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'r2' }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'r3' }));
+
+    // Advance 3s after the last result
+    jest.advanceTimersByTime(3000);
+
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(false);
+
+    // writeTypingDone should have been called exactly once (only the last timer fires)
+    expect(writeTypingDoneSpy).toHaveBeenCalledTimes(1);
+    expect(writeTypingDoneSpy).toHaveBeenCalledWith(chatId);
+
+    writeTypingDoneSpy.mockRestore();
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-09: session exit clears pending timer and calls writeTypingDone
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-09: session exit clears pending timer and calls writeTypingDone immediately', async () => {
+    const chatId = 'chat:t09';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Emit result event (starts 3s timer)
+    session.emit('output', JSON.stringify({ type: 'result', result: 'working' }));
+
+    // Before 3s elapses, emit exit on session (simulates session termination)
+    jest.advanceTimersByTime(500);
+    session.emit('exit');
+
+    // Typing file should be deleted immediately on exit (no need to wait 3s)
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(false);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TYPING-10: reply tool call does not affect typing file
+  // --------------------------------------------------------------------------
+  it('U-AR-TYPING-10: reply tool call does not affect typing file', async () => {
+    const chatId = 'chat:t10';
+    const session = await setupSessionWithTypingFile(chatId);
+
+    // Emit assistant message with mcp__telegram__reply tool_use
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'mcp__telegram__reply', id: 'tool-1' },
+        ],
+      },
+      stop_reason: null,
+    }));
+
+    // Typing file should still exist — reply tool does not trigger typing done
+    const typingFile = path.join(getTypingDir(), chatId);
+    expect(fs.existsSync(typingFile)).toBe(true);
+  }, 15000);
+});
