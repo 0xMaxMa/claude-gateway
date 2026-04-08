@@ -633,6 +633,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 const SEND_ONLY = process.env.TELEGRAM_SEND_ONLY === 'true'
 const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 
+// Available AI models for /models command
+const AVAILABLE_MODELS = [
+  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku' },
+]
+
+// Base URL for command API calls to the AgentRunner callback server.
+// Derived from CLAUDE_CHANNEL_CALLBACK (e.g. http://127.0.0.1:PORT/channel -> http://127.0.0.1:PORT)
+const CALLBACK_URL_BASE = (() => {
+  const raw = process.env.CLAUDE_CHANNEL_CALLBACK ?? ''
+  try {
+    const u = new URL(raw)
+    return `${u.protocol}//${u.host}`
+  } catch {
+    return ''
+  }
+})()
+
 // ─── Message helpers (shared across all polling modes) ───────────────────────
 
 // Filenames and titles are uploader-controlled. They land inside the <channel>
@@ -829,7 +848,10 @@ bot.command('help', async ctx => {
     `Messages you send here route to a paired Claude Code session. ` +
     `Text and photos are forwarded; replies and reactions come back.\n\n` +
     `/start — pairing instructions\n` +
-    `/status — check your pairing state`
+    `/status — check your pairing state\n` +
+    `/model — show current AI model\n` +
+    `/models — switch AI model\n` +
+    `/restart — graceful restart session`
   )
 })
 
@@ -858,11 +880,168 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
+// /model — show current AI model (receiver mode only, needs AgentRunner callback)
+bot.command('model', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  if (!CALLBACK_URL_BASE) return
+
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
+    })
+    const data = (await res.json()) as { model?: string }
+    await ctx.reply(`Current model: ${data.model ?? 'unknown'}`)
+  } catch (err) {
+    await ctx.reply('Failed to get model info.')
+  }
+})
+
+// /models — show model selection keyboard (receiver mode only)
+bot.command('models', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  if (!CALLBACK_URL_BASE) return
+
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
+    })
+    const data = (await res.json()) as { model?: string }
+    const currentModel = data.model ?? ''
+
+    const keyboard = new InlineKeyboard()
+    for (const m of AVAILABLE_MODELS) {
+      const prefix = m.id === currentModel ? '\u2705 ' : ''
+      keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
+    }
+
+    await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
+      reply_markup: keyboard,
+    })
+  } catch (err) {
+    await ctx.reply('Failed to get model info.')
+  }
+})
+
+// /restart — show restart confirmation keyboard (receiver mode only)
+bot.command('restart', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+
+  const keyboard = new InlineKeyboard()
+    .text('\u2705 Confirm Restart', 'restart:confirm')
+    .text('\u274c Cancel', 'restart:cancel')
+
+  await ctx.reply(
+    '\u26a0\ufe0f Restart session?\nThis will graceful-restart the current Claude session.',
+    { reply_markup: keyboard },
+  )
+})
+
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+
+  // Handle model selection callback: model:<model_id>
+  const modelMatch = /^model:(.+)$/.exec(data)
+  if (modelMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const newModel = modelMatch[1]
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: 'set_model',
+          chat_id: String(ctx.callbackQuery.message?.chat.id),
+          payload: { model: newModel },
+        }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      if (result.success) {
+        if (result.restarted === false) {
+          // No active session — model changed, no restart needed
+          await ctx.answerCallbackQuery({ text: `Model changed to ${newModel}` }).catch(() => {})
+          await ctx.editMessageText(`\u2705 Model changed to ${newModel}`).catch(() => {})
+        } else {
+          await ctx.answerCallbackQuery({ text: `Switching to ${newModel}...` }).catch(() => {})
+          await ctx.editMessageText(`\u23f3 Switching to ${newModel}...`).catch(() => {})
+        }
+      } else {
+        await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle restart confirmation callback: restart:confirm | restart:cancel
+  const restartMatch = /^restart:(confirm|cancel)$/.exec(data)
+  if (restartMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (restartMatch[1] === 'cancel') {
+      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+      await ctx.editMessageText('Restart cancelled.').catch(() => {})
+      return
+    }
+    // confirm
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: 'restart',
+          chat_id: String(ctx.callbackQuery.message?.chat.id),
+        }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
+      if (result.success) {
+        if (result.restarted === false) {
+          // No active session — nothing to restart
+          await ctx.answerCallbackQuery({ text: 'No active session' }).catch(() => {})
+          await ctx.editMessageText('\u2705 Session restarted').catch(() => {})
+        } else {
+          await ctx.answerCallbackQuery({ text: 'Restarting...' }).catch(() => {})
+          await ctx.editMessageText('\u23f3 Restarting session...').catch(() => {})
+        }
+      } else {
+        await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
+        await ctx.editMessageText(`Restart failed: ${result.error ?? 'unknown error'}`).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle permission callbacks: perm:allow|deny|more:<id>
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
   if (!m) {
     await ctx.answerCallbackQuery().catch(() => {})
@@ -1054,6 +1233,17 @@ if (RECEIVER_MODE) {
           onStart: info => {
             botUsername = info.username
             process.stderr.write(`telegram channel (receiver): polling as @${info.username}\n`)
+            void bot.api.setMyCommands(
+              [
+                { command: 'start', description: 'Welcome and setup guide' },
+                { command: 'help', description: 'What this bot can do' },
+                { command: 'status', description: 'Check your pairing status' },
+                { command: 'model', description: 'Show current AI model' },
+                { command: 'models', description: 'Switch AI model' },
+                { command: 'restart', description: 'Graceful restart session' },
+              ],
+              { scope: { type: 'all_private_chats' } },
+            ).catch(() => {})
           },
         })
         return
@@ -1109,6 +1299,9 @@ if (RECEIVER_MODE) {
                   { command: 'start', description: 'Welcome and setup guide' },
                   { command: 'help', description: 'What this bot can do' },
                   { command: 'status', description: 'Check your pairing status' },
+                  { command: 'model', description: 'Show current AI model' },
+                  { command: 'models', description: 'Switch AI model' },
+                  { command: 'restart', description: 'Graceful restart session' },
                 ],
                 { scope: { type: 'all_private_chats' } },
               ).catch(() => {})

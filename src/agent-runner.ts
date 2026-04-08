@@ -12,6 +12,12 @@ import { TelegramReceiver } from './telegram-receiver';
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 
+const AVAILABLE_MODELS = [
+  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku' },
+] as const;
+
 export class AgentRunner extends EventEmitter {
   private readonly agentConfig: AgentConfig;
   private readonly gatewayConfig: GatewayConfig;
@@ -31,6 +37,9 @@ export class AgentRunner extends EventEmitter {
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
 
+  // Path to gateway config.json for persisting model changes
+  private readonly configPath: string;
+
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
     super();
     this.agentConfig = agentConfig;
@@ -40,6 +49,8 @@ export class AgentRunner extends EventEmitter {
     // Resolve agentsBaseDir: workspace is at <agentsBaseDir>/<agentId>/workspace
     const agentsBaseDir = path.resolve(agentConfig.workspace, '..', '..');
     this.sessionStore = new SessionStore(agentsBaseDir);
+    // config.json lives 3 levels above workspace: <base>/<agentId>/workspace -> <base>/config.json
+    this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
 
     this.idleTimeoutMs =
       (agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
@@ -66,11 +77,19 @@ export class AgentRunner extends EventEmitter {
         res.end();
         return;
       }
+
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       let raw = '';
       req.on('data', (chunk) => {
         raw += chunk;
       });
       req.on('end', () => {
+        if (url.pathname === '/command') {
+          this.handleCommandRequest(raw, res);
+          return;
+        }
+
+        // Default: /channel — existing channel message handler
         res.writeHead(200);
         res.end('ok');
         try {
@@ -120,6 +139,129 @@ export class AgentRunner extends EventEmitter {
 
     this.callbackServer.listen(this.callbackPort, '127.0.0.1');
     this.logger.info('Channel callback server listening', { port: this.callbackPort });
+  }
+
+  /**
+   * Handle POST /command requests from the receiver process.
+   * Supports: get_model, set_model, restart.
+   */
+  private handleCommandRequest(raw: string, res: http.ServerResponse): void {
+    const respond = (data: Record<string, unknown>, status = 200): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+
+    let body: { command?: string; chat_id?: string; payload?: Record<string, unknown> };
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      respond({ success: false, error: 'Invalid JSON' }, 400);
+      return;
+    }
+
+    const command = body.command;
+
+    if (command === 'get_model') {
+      respond({ model: this.agentConfig.claude.model });
+      return;
+    }
+
+    if (command === 'set_model') {
+      const newModel = typeof body.payload?.model === 'string' ? body.payload.model : '';
+      const valid = AVAILABLE_MODELS.find(m => m.id === newModel);
+      if (!valid) {
+        respond({ success: false, error: 'Unknown model' });
+        return;
+      }
+
+      // Update in-memory config
+      this.agentConfig.claude.model = newModel;
+
+      // Persist to config.json (atomic write)
+      try {
+        this.persistModelToConfig(newModel);
+      } catch (err) {
+        this.logger.error('Failed to persist model to config', { error: (err as Error).message });
+      }
+
+      // Graceful restart all sessions with notify payload
+      const chatId = body.chat_id ?? '';
+      let restarted = false;
+      for (const [sessionId, session] of this.sessions) {
+        restarted = true;
+        const notifyPayload = JSON.stringify({
+          notify: {
+            chat_id: chatId,
+            text: `Model changed to ${newModel} — back online!`,
+          },
+        });
+        const signalPath = path.join(
+          this.agentConfig.workspace,
+          '.telegram-state',
+          `restart-${sessionId}`,
+        );
+        try {
+          fs.mkdirSync(path.dirname(signalPath), { recursive: true });
+          fs.writeFileSync(signalPath, notifyPayload);
+        } catch (err) {
+          this.logger.error('Failed to write restart signal', {
+            sessionId,
+            error: (err as Error).message,
+          });
+        }
+      }
+
+      respond({ success: true, model: newModel, restarted });
+      return;
+    }
+
+    if (command === 'restart') {
+      const chatId = body.chat_id ?? '';
+      const session = this.sessions.get(chatId);
+      if (!session) {
+        // No active session — nothing to restart, but not an error
+        respond({ success: true, restarted: false });
+        return;
+      }
+
+      // Write restart signal with notify payload
+      const signalPayload = JSON.stringify({
+        notify: { chat_id: chatId, text: 'Session restarted — back online!' },
+      });
+      const signalPath = path.join(
+        this.agentConfig.workspace,
+        '.telegram-state',
+        `restart-${chatId}`,
+      );
+      try {
+        fs.mkdirSync(path.dirname(signalPath), { recursive: true });
+        fs.writeFileSync(signalPath, signalPayload);
+      } catch (err) {
+        this.logger.error('Failed to write restart signal', { error: (err as Error).message });
+        respond({ success: false, error: 'Failed to write restart signal' });
+        return;
+      }
+
+      respond({ success: true, restarted: true });
+      return;
+    }
+
+    respond({ success: false, error: 'Unknown command' }, 400);
+  }
+
+  /**
+   * Persist the current model to config.json using atomic write (tmp + rename).
+   */
+  private persistModelToConfig(newModel: string): void {
+    const raw = fs.readFileSync(this.configPath, 'utf-8');
+    const config = JSON.parse(raw);
+    const agent = config.agents?.find((a: { id: string }) => a.id === this.agentConfig.id);
+    if (agent) {
+      agent.claude.model = newModel;
+      const tmp = this.configPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
+      fs.renameSync(tmp, this.configPath);
+    }
   }
 
   private static buildChannelXml(params: {

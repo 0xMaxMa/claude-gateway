@@ -84,14 +84,27 @@ export class SessionProcess extends EventEmitter {
     if (this.restartWatcher) return;
     this.restartWatcher = chokidar.watch(this.restartSignalPath, { ignoreInitial: true });
     this.restartWatcher.on('add', () => {
+      // Read signal file content before deleting — may contain a notify payload
+      let notifyPayload: { chat_id: string; text: string } | null = null;
+      try {
+        const content = fs.readFileSync(this.restartSignalPath, 'utf-8').trim();
+        if (content) {
+          const parsed = JSON.parse(content);
+          notifyPayload = parsed.notify ?? null;
+        }
+      } catch { /* empty or unparseable — no notify */ }
       try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
       this.restartRequested = true;
-      this.logger.info('Graceful self-restart requested by agent', { sessionId: this.sessionId });
+      this.logger.info('Graceful restart requested', { sessionId: this.sessionId, hasNotify: !!notifyPayload });
       // Inject a marker into session history so the next spawned session
       // knows the restart is complete and does not repeat it.
+      // If notify payload is present, include instruction for the agent to send a message after restart.
+      const marker = notifyPayload
+        ? `[System: Graceful restart completed successfully. Do not restart again. IMPORTANT: Send a Telegram reply to chat_id "${notifyPayload.chat_id}" with the message: "${notifyPayload.text}"]`
+        : '[System: Graceful restart completed successfully. Do not restart again.]';
       this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, {
         role: 'assistant',
-        content: '[System: Graceful restart completed successfully. Do not restart again.]',
+        content: marker,
         ts: Date.now(),
       }).catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
       if (this.process) {
