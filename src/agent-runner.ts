@@ -124,10 +124,21 @@ export class AgentRunner extends EventEmitter {
     meta?: Record<string, string>;
   }): string {
     const meta = params.meta ?? {};
+    const optionalAttrs = [
+      'image_path',
+      'attachment_file_id',
+      'attachment_kind',
+      'attachment_size',
+      'attachment_mime',
+      'attachment_name',
+    ]
+      .filter(k => meta[k])
+      .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
+      .join('');
     return (
       `<channel source="telegram" chat_id="${meta['chat_id'] ?? ''}" ` +
       `message_id="${meta['message_id'] ?? ''}" user="${meta['user'] ?? ''}" ` +
-      `ts="${meta['ts'] ?? new Date().toISOString()}">${params.content ?? ''}</channel>`
+      `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${params.content ?? ''}</channel>`
     );
   }
 
