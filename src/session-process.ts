@@ -87,6 +87,13 @@ export class SessionProcess extends EventEmitter {
       try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
       this.restartRequested = true;
       this.logger.info('Graceful self-restart requested by agent', { sessionId: this.sessionId });
+      // Inject a marker into session history so the next spawned session
+      // knows the restart is complete and does not repeat it.
+      this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, {
+        role: 'assistant',
+        content: '[System: Graceful restart completed successfully. Do not restart again.]',
+        ts: Date.now(),
+      }).catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
       if (this.process) {
         this.process.kill('SIGTERM');
       }
