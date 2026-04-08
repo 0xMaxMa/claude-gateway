@@ -256,23 +256,25 @@ curl -N -X POST \
 **Response (SSE):**
 
 ```
-data: {"type":"text_delta","content":"Let me"}
-data: {"type":"text_delta","content":" explain..."}
-data: {"type":"tool_use","tool":"Read","detail":"src/index.ts"}
-data: {"type":"result","content":"Here's the explanation...","session_id":"abc-123","duration_ms":4200}
+data: {"type":"text_delta","text":"Let me"}
+data: {"type":"text_delta","text":" explain..."}
+data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
+data: {"type":"text_delta","text":"Here's the explanation..."}
+data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
+data: [DONE]
 ```
 
 **Stream event types:**
 
-| Type | Description |
-|------|-------------|
-| `text_delta` | Incremental text output |
-| `tool_use` | Tool being invoked (tool name + detail) |
-| `thinking` | Agent reasoning (if available) |
-| `result` | Final result with session_id and duration |
-| `error` | Error event |
+| Type | Fields | Description |
+|------|--------|-------------|
+| `text_delta` | `text` | Incremental text chunk |
+| `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
+| `thinking` | `text` | Agent reasoning (if available) |
+| `result` | `text`, `request_id`, `session_id`, `duration_ms` | Final aggregated result |
+| `error` | `message` | Error event |
 
-Set `stream: false` (default) for the synchronous JSON response mode.
+The stream ends with `data: [DONE]`. Set `stream: false` (default) for the synchronous JSON response mode.
 
 ---
 
