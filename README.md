@@ -115,6 +115,7 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 
 ```json
 {
+  "configVersion": "1.0.0",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -236,45 +237,6 @@ While an agent is working, the gateway sends real-time status updates to Telegra
 - **Auto-cleanup** — status message is deleted when the agent finishes
 
 Status updates are sent every 5-10 seconds (first update at 5s, then every 10s).
-
----
-
-## Streaming API (SSE)
-
-The HTTP API supports Server-Sent Events for real-time streaming responses.
-
-**Request:**
-
-```bash
-curl -N -X POST \
-  -H "X-Api-Key: my-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Explain this code", "stream": true}' \
-  http://localhost:3000/api/v1/agents/alfred/messages
-```
-
-**Response (SSE):**
-
-```
-data: {"type":"text_delta","text":"Let me"}
-data: {"type":"text_delta","text":" explain..."}
-data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
-data: {"type":"text_delta","text":"Here's the explanation..."}
-data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
-data: [DONE]
-```
-
-**Stream event types:**
-
-| Type | Fields | Description |
-|------|--------|-------------|
-| `text_delta` | `text` | Incremental text chunk |
-| `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
-| `thinking` | `text` | Agent reasoning (if available) |
-| `result` | `text`, `request_id`, `session_id`, `duration_ms` | Final aggregated result |
-| `error` | `message` | Error event |
-
-The stream ends with `data: [DONE]`. Set `stream: false` (default) for the synchronous JSON response mode.
 
 ---
 
@@ -405,6 +367,45 @@ See [Quickstart: Using the Agent API](#quickstart-using-the-agent-api) for full 
 | 409 | Session is busy processing another request |
 | 504 | Agent did not respond within 60s |
 | 500 | Internal error |
+
+---
+
+## Streaming API (SSE)
+
+The HTTP API supports Server-Sent Events for real-time streaming responses.
+
+**Request:**
+
+```bash
+curl -N -X POST \
+  -H "X-Api-Key: my-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Explain this code", "stream": true}' \
+  http://localhost:3000/api/v1/agents/alfred/messages
+```
+
+**Response (SSE):**
+
+```
+data: {"type":"text_delta","text":"Let me"}
+data: {"type":"text_delta","text":" explain..."}
+data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
+data: {"type":"text_delta","text":"Here's the explanation..."}
+data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
+data: [DONE]
+```
+
+**Stream event types:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `text_delta` | `text` | Incremental text chunk |
+| `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
+| `thinking` | `text` | Agent reasoning (if available) |
+| `result` | `text`, `request_id`, `session_id`, `duration_ms` | Final aggregated result |
+| `error` | `message` | Error event |
+
+The stream ends with `data: [DONE]`. Set `stream: false` (default) for the synchronous JSON response mode.
 
 ---
 
