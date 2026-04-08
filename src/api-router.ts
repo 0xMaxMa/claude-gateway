@@ -38,8 +38,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { message?: unknown; session_id?: unknown };
-    const { message, session_id } = body;
+    const body = req.body as { message?: unknown; session_id?: unknown; stream?: unknown };
+    const { message, session_id, stream } = body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: 'message is required and must be a non-empty string' });
@@ -58,25 +58,89 @@ export function createApiRouter(
     const sessionId = (session_id as string | undefined) ?? randomUUID();
     const startTime = Date.now();
 
-    try {
-      const response = await runner.sendApiMessage(sessionId, message.trim(), {
-        timeoutMs: DEFAULT_TIMEOUT_MS,
-      });
-      res.json({
-        request_id: requestId,
-        agent_id: agentId,
-        response,
-        session_id: sessionId,
-        duration_ms: Date.now() - startTime,
-      });
-    } catch (err: unknown) {
-      const code = (err as { code?: string }).code;
-      if (code === 'TIMEOUT') {
-        res.status(504).json({ error: 'Agent response timeout' });
-      } else if (code === 'CONFLICT') {
-        res.status(409).json({ error: 'Session already has a pending request' });
-      } else {
-        res.status(500).json({ error: 'Internal error' });
+    if (stream) {
+      // SSE streaming mode
+      let cleanup: (() => void) | undefined;
+      try {
+        const sseCallbacks = {
+          onChunk: (event: import('./types').StreamEvent) => {
+            try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
+          },
+          onDone: (fullText: string) => {
+            try {
+              res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, request_id: requestId, session_id: sessionId, duration_ms: Date.now() - startTime })}\n\n`);
+              res.write('data: [DONE]\n\n');
+              res.end();
+            } catch { /* client gone */ }
+          },
+          onError: (err: Error) => {
+            try {
+              res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+              res.end();
+            } catch { /* client gone */ }
+          },
+        };
+
+        // Preflight conflict check — return 409 JSON before SSE headers are sent
+        if (runner.hasActiveApiSession(sessionId)) {
+          res.status(409).json({ error: 'Session already has a pending request' });
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        res.flushHeaders();
+
+        cleanup = await runner.sendApiMessageStream(
+          sessionId,
+          message.trim(),
+          sseCallbacks,
+          { timeoutMs: DEFAULT_TIMEOUT_MS },
+        );
+
+        // Client disconnect -> cleanup
+        res.on('close', cleanup);
+      } catch (err: unknown) {
+        const code = (err as { code?: string }).code;
+        if (!res.headersSent) {
+          if (code === 'CONFLICT') {
+            res.status(409).json({ error: 'Session already has a pending request' });
+          } else {
+            res.status(500).json({ error: 'Internal error' });
+          }
+        } else {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'error', message: 'Internal error' })}\n\n`);
+            res.end();
+          } catch { /* client gone */ }
+        }
+      }
+    } else {
+      // Synchronous mode (existing behavior)
+      try {
+        const response = await runner.sendApiMessage(sessionId, message.trim(), {
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+        });
+        res.json({
+          request_id: requestId,
+          agent_id: agentId,
+          response,
+          session_id: sessionId,
+          duration_ms: Date.now() - startTime,
+        });
+      } catch (err: unknown) {
+        const code = (err as { code?: string }).code;
+        if (code === 'TIMEOUT') {
+          res.status(504).json({ error: 'Agent response timeout' });
+        } else if (code === 'CONFLICT') {
+          res.status(409).json({ error: 'Session already has a pending request' });
+        } else {
+          res.status(500).json({ error: 'Internal error' });
+        }
       }
     }
   });

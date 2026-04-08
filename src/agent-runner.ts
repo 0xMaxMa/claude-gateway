@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as net from 'net';
 import * as path from 'path';
-import { AgentConfig, GatewayConfig, Logger } from './types';
+import { AgentConfig, GatewayConfig, Logger, StreamEvent } from './types';
 import { createLogger } from './logger';
 import { SessionProcess } from './session-process';
 import { SessionStore } from './session-store';
@@ -444,6 +444,149 @@ export class AgentRunner extends EventEmitter {
       // after the first output line arrives, otherwise it fires before the
       // subprocess has had time to respond (especially on first spawn).
     });
+  }
+
+  /**
+   * Send a message to an API session and stream back events via callbacks.
+   *
+   * Returns a cleanup function that removes all listeners and frees the session slot.
+   * The caller MUST invoke cleanup on client disconnect or when done.
+   */
+  async sendApiMessageStream(
+    sessionId: string,
+    message: string,
+    callbacks: {
+      onChunk: (event: StreamEvent) => void;
+      onDone: (fullText: string) => void;
+      onError: (err: Error) => void;
+    },
+    opts: { timeoutMs: number },
+  ): Promise<() => void> {
+    if (this.pendingApiSessions.has(sessionId)) {
+      const err = Object.assign(
+        new Error(`Session ${sessionId} already has a pending request`),
+        { code: 'CONFLICT' },
+      );
+      throw err;
+    }
+
+    const session = await this.getOrSpawnSession(sessionId, 'api');
+
+    // Persist user message
+    await this.sessionStore
+      .appendMessage(this.agentConfig.id, sessionId, {
+        role: 'user',
+        content: message,
+        ts: Date.now(),
+      })
+      .catch(() => {});
+
+    this.pendingApiSessions.add(sessionId);
+    session.touch();
+
+    const buffer: string[] = [];
+    let settled = false;
+
+    const done = (result: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // Persist assistant reply
+      if (result.trim()) {
+        this.sessionStore
+          .appendMessage(this.agentConfig.id, sessionId, {
+            role: 'assistant',
+            content: result.trim(),
+            ts: Date.now(),
+          })
+          .catch(() => {});
+      }
+      callbacks.onDone(result.trim());
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callbacks.onError(err);
+    };
+
+    const cleanup = () => {
+      clearTimeout(globalTimer);
+      session.off('output', onOutput);
+      this.pendingApiSessions.delete(sessionId);
+    };
+
+    const onOutput = (line: string) => {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+
+        // Text delta
+        const text =
+          (obj['text'] as string | undefined) ??
+          ((obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined) ??
+          '';
+        if (text) {
+          buffer.push(text);
+          callbacks.onChunk({ type: 'text_delta', text });
+        }
+
+        // Tool use
+        if (obj['type'] === 'tool_use') {
+          callbacks.onChunk({
+            type: 'tool_use',
+            name: (obj['name'] as string) ?? '',
+            id: (obj['id'] as string) ?? '',
+          });
+        }
+
+        // Thinking
+        if (obj['type'] === 'thinking') {
+          callbacks.onChunk({
+            type: 'thinking',
+            text: (obj['text'] as string) ?? '',
+          });
+        }
+
+        // Result = end of turn
+        if (obj['type'] === 'result') {
+          const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
+          done(resultText);
+        }
+      } catch {
+        /* non-JSON stdout line */
+      }
+    };
+
+    const globalTimer = setTimeout(() => {
+      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+    }, opts.timeoutMs);
+
+    session.on('output', onOutput);
+
+    const channelXml =
+      `<channel source="api" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
+      `${message}\n\n` +
+      `[SYSTEM: This is an API request. Reply with plain text only. ` +
+      `Do NOT call any tools. Your text output will be returned directly to the caller.]\n` +
+      `</channel>`;
+
+    session.sendMessage(channelXml);
+
+    // Return cleanup function for client disconnect
+    return () => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+      }
+    };
+  }
+
+  /**
+   * Check if a session has a pending API request (for preflight conflict check).
+   */
+  hasActiveApiSession(sessionId: string): boolean {
+    return this.pendingApiSessions.has(sessionId);
   }
 
   /**
