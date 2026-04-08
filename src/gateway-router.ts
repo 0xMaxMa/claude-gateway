@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import { Server } from 'http';
 import { AgentRunner } from './agent-runner';
-import { AgentConfig, AgentStats, GatewayConfig, HeartbeatResult } from './types';
+import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from './types';
 import { CronScheduler } from './cron-scheduler';
 import { generateDashboardHtml } from './web-ui';
 import { createApiRouter } from './api-router';
@@ -191,6 +191,17 @@ export class GatewayRouter {
    */
   listAgents(): AgentConfig[] {
     return [...this.configs.values()];
+  }
+
+  /**
+   * Hot-reload API keys by mutating the existing array in-place.
+   * The auth middleware captures apiKeys by reference, so mutations
+   * are picked up automatically without remounting the router.
+   */
+  updateApiKeys(newKeys: ApiKey[]): void {
+    if (!this.gatewayConfig?.gateway?.api?.keys) return;
+    const keys = this.gatewayConfig.gateway.api.keys;
+    keys.splice(0, keys.length, ...newKeys);
   }
 
   /**

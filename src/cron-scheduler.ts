@@ -59,6 +59,19 @@ export class CronScheduler extends EventEmitter {
     this.history = history ?? new HeartbeatHistory();
   }
 
+  get id(): string {
+    return this.agentId;
+  }
+
+  /** Hot-reload: update the rate limit without restarting the scheduler */
+  updateRateLimit(minutes: number): void {
+    if (!this.agentConfig.heartbeat) {
+      this.agentConfig.heartbeat = {};
+    }
+    this.agentConfig.heartbeat.rateLimitMinutes = minutes;
+    this.logger.info('Heartbeat rate limit updated', { rateLimitMinutes: minutes });
+  }
+
   /**
    * Parse the heartbeat.md content, cancel existing cron tasks,
    * and schedule new ones.

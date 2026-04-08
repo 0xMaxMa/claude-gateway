@@ -17,6 +17,7 @@ import { CronScheduler } from './cron-scheduler';
 import { GatewayRouter } from './gateway-router';
 import { ContextIsolationGuard } from './context-isolation';
 import { createLogger } from './logger';
+import { ConfigWatcher, ConfigChange } from './config-watcher';
 import { AgentConfig, GatewayConfig } from './types';
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
@@ -298,6 +299,45 @@ async function main(): Promise<void> {
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
 
+  // ── Config hot-reload watcher ──────────────────────────────────────────────
+  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+  const configWatcher = new ConfigWatcher(CONFIG_PATH, config, globalLogger);
+
+  configWatcher.on('changes', (changes: ConfigChange[], newConfig: GatewayConfig) => {
+    for (const change of changes) {
+      if (!change.hotReloadable) continue;
+
+      const agentConfig = agentConfigs.get(change.agentId);
+      if (!agentConfig) continue;
+
+      switch (change.field) {
+        case 'claude.model':
+          agentConfig.claude.model = change.newValue as string;
+          break;
+        case 'claude.extraFlags':
+          agentConfig.claude.extraFlags = change.newValue as string[];
+          break;
+        case 'claude.dangerouslySkipPermissions':
+          agentConfig.claude.dangerouslySkipPermissions = change.newValue as boolean;
+          break;
+        case 'session.idleTimeoutMinutes':
+          if (!agentConfig.session) agentConfig.session = {};
+          agentConfig.session.idleTimeoutMinutes = change.newValue as number;
+          break;
+        case 'session.maxConcurrent':
+          if (!agentConfig.session) agentConfig.session = {};
+          agentConfig.session.maxConcurrent = change.newValue as number;
+          break;
+        case 'heartbeat.rateLimitMinutes':
+          if (!agentConfig.heartbeat) agentConfig.heartbeat = {};
+          agentConfig.heartbeat.rateLimitMinutes = change.newValue as number;
+          break;
+      }
+    }
+  });
+
+  configWatcher.start();
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     console.log(`[gateway] Received ${signal}, shutting down...`);
@@ -305,6 +345,8 @@ async function main(): Promise<void> {
     for (const scheduler of schedulers) {
       scheduler.stop();
     }
+
+    configWatcher.stop();
 
     await router.stop();
 
