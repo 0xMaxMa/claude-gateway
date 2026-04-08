@@ -24,6 +24,10 @@ export interface AgentConfig {
   };
   /** Session pool settings */
   session?: SessionConfig;
+  /** Emoji reaction mode for Telegram reactions */
+  emojiReactionMode?: 'minimal' | 'extensive' | 'none';
+  /** Agent's signature emoji (used in greetings/sign-offs) */
+  signatureEmoji?: string;
 }
 
 export interface AgentStats {

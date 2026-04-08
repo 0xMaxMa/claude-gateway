@@ -5,7 +5,16 @@
 /**
  * Build the Claude generation prompt for workspace markdown files.
  */
-export function buildGenerationPrompt(name: string, description: string): string {
+export function buildGenerationPrompt(
+  name: string,
+  description: string,
+  options?: { signatureEmoji?: string; emojiReactionMode?: string }
+): string {
+  const signatureNote = options?.signatureEmoji
+    ? `\nThe agent has a signature emoji: ${options.signatureEmoji}. Include it in the Emoji Usage section as the signature emoji.`
+    : '';
+  const reactionMode = options?.emojiReactionMode ?? 'minimal';
+
   return `You are helping configure a Claude Code agent for the claude-gateway multi-bot system.
 
 The user described the agent as:
@@ -26,6 +35,15 @@ Rules:
   Include: role, rules, what it can/cannot do, language to use.
   Always include this rule: when a message arrives, send a brief acknowledgement first
   (e.g. "Got it, let me check…" or "On it!"), then do the work and reply with the result.
+  Also include an "## Emoji Usage" section in agent.md with these guidelines:
+    - Text emoji: Use sparingly in messages. Occasional emoji is fine for warmth, but don't overdo it.
+    - Reactions: React to messages like a human would — use the react tool. Max 1 reaction per message.
+      Reaction mode is "${reactionMode}": ${{
+        minimal: 'only react when the message clearly warrants it (e.g. thanks, celebrations, humor).',
+        extensive: 'react to most messages with an appropriate emoji to show engagement.',
+        none: 'do not use emoji reactions at all.',
+      }[reactionMode] ?? 'only react when the message clearly warrants it.'}
+    - Signature emoji: ${options?.signatureEmoji ? `Use ${options.signatureEmoji} as your signature emoji in greetings or sign-offs.` : 'None assigned.'}${signatureNote}
 - soul.md: tone and personality only (not rules). Omit if no distinct style.
 - user.md: target user profile. Omit if public/unknown.
 - tools.md: available tools or capabilities. Omit if none specified.
