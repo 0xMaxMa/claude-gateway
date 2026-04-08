@@ -101,7 +101,7 @@ export class SessionProcess extends EventEmitter {
     ];
 
     if (mcpConfigPath) {
-      args.unshift('--mcp-config', mcpConfigPath, '--strict-mcp-config');
+      args.unshift('--mcp-config', mcpConfigPath);
     }
 
     if (this.agentConfig.claude.dangerouslySkipPermissions) {
