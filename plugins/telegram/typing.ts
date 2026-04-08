@@ -62,6 +62,7 @@ export interface WorkingState {
   startedAt: number
   currentReaction: string | null
   lastDetail: string | null
+  recentDetails: string[]
 }
 
 export interface BotApi {
@@ -163,6 +164,7 @@ export function createWorkingStateManager(
       startedAt,
       currentReaction: null,
       lastDetail: null,
+      recentDetails: [],
     }
     states.set(chatId, state)
 
@@ -182,9 +184,12 @@ export function createWorkingStateManager(
           : mins > 0
             ? secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
             : `${secs}s`
-        const statusLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
+        const currentLine = s.lastDetail ?? STATUS_MESSAGES[tick % STATUS_MESSAGES.length]!
         tick++
-        const text = `${statusLine}\n(elapsed: ${elapsedStr})`
+        // Build multi-line status: recent history (dimmed) + current line + elapsed
+        const historyLines = s.recentDetails.slice(-4).map(d => `  ${d}`);
+        const lines = [...historyLines, currentLine, `(elapsed: ${elapsedStr})`]
+        const text = lines.join('\n')
         if (s.statusMessageId === null) {
           try {
             const sent = await botApi.sendMessage(chatId, text)
@@ -231,6 +236,11 @@ export function createWorkingStateManager(
           }
           // Update detail and immediately send status when it changes
           if (s && detail && detail !== s.lastDetail) {
+            if (s.lastDetail) {
+              s.recentDetails.push(s.lastDetail)
+              // Keep only last 4 history entries
+              if (s.recentDetails.length > 4) s.recentDetails.shift()
+            }
             s.lastDetail = detail
             void sendStatusUpdate()
           }
