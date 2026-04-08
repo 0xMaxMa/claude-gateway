@@ -562,6 +562,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
+        // Signal typing loop that reply was sent → stop typing indicator
+        typingManager.signalReplyDone(chat_id)
+
         const result =
           sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`

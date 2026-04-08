@@ -224,11 +224,20 @@ export class SessionProcess extends EventEmitter {
 
     const CODING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
 
-    const TOOL_EMOJI: Record<string, string> = {
-      Read: '📖', Edit: '✏️', Write: '📝', NotebookEdit: '📝',
-      Grep: '🔍', Glob: '📂',
-      Bash: '⚡', WebFetch: '🌐', WebSearch: '🔎',
-      Agent: '🤖', Task: '🤖',
+    const TOOL_LABELS: Record<string, { emoji: string; verb: string }> = {
+      Read:         { emoji: '📖', verb: 'Reading' },
+      Edit:         { emoji: '✏️', verb: 'Editing' },
+      Write:        { emoji: '📝', verb: 'Writing' },
+      MultiEdit:    { emoji: '✏️', verb: 'Editing' },
+      NotebookEdit: { emoji: '📝', verb: 'Editing notebook' },
+      Grep:         { emoji: '🔍', verb: 'Searching for' },
+      Glob:         { emoji: '📂', verb: 'Finding files' },
+      Bash:         { emoji: '⚡', verb: 'Running' },
+      WebFetch:     { emoji: '🌐', verb: 'Fetching' },
+      WebSearch:    { emoji: '🔎', verb: 'Searching' },
+      Agent:        { emoji: '🤖', verb: 'Running agent' },
+      Task:         { emoji: '🤖', verb: 'Running task' },
+      TodoWrite:    { emoji: '📋', verb: 'Updating tasks' },
     };
 
     function shortenPath(p: string): string {
@@ -242,48 +251,60 @@ export class SessionProcess extends EventEmitter {
     }
 
     function extractToolDetail(name: string, input: Record<string, unknown>): string {
-      const emoji = TOOL_EMOJI[name] ?? '🔧';
-      const parts: string[] = [];
+      const label = TOOL_LABELS[name] ?? { emoji: '🔧', verb: name };
+      const { emoji, verb } = label;
 
-      // Primary description (e.g. Bash.description, Agent.description)
-      if (input.description && typeof input.description === 'string') {
-        parts.push(input.description);
-      }
-      // File path context
-      if (input.file_path && typeof input.file_path === 'string') {
-        parts.push(shortenPath(input.file_path));
-      }
-      // Search pattern
-      if (input.pattern && typeof input.pattern === 'string') {
-        parts.push(input.pattern);
-      }
-      // URL
-      if (input.url && typeof input.url === 'string') {
-        parts.push(input.url);
-      }
-      // Search query
-      if (input.query && typeof input.query === 'string') {
-        parts.push(input.query);
-      }
-      // Bash command (when no description)
-      if (!parts.length && input.command && typeof input.command === 'string') {
-        parts.push(input.command);
-      }
-      // Agent/task prompt (when no description)
-      if (!parts.length && input.prompt && typeof input.prompt === 'string') {
-        parts.push(input.prompt);
-      }
-      // TodoWrite: summarize todo content
-      if (!parts.length && input.todos && Array.isArray(input.todos)) {
-        const active = (input.todos as { content?: string; status?: string }[])
-          .find(t => t.status === 'in_progress');
-        if (active?.content) {
-          parts.push(active.content);
+      // Build context parts based on tool type
+      switch (name) {
+        case 'Read':
+        case 'Edit':
+        case 'Write':
+        case 'MultiEdit':
+        case 'NotebookEdit': {
+          const file = typeof input.file_path === 'string' ? shortenPath(input.file_path) : '';
+          const desc = typeof input.description === 'string' ? ` — ${input.description}` : '';
+          return truncateDetail(`${emoji} ${verb}: ${file}${desc}`);
+        }
+        case 'Grep': {
+          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
+          const path = typeof input.path === 'string' ? ` in ${shortenPath(input.path)}` : '';
+          return truncateDetail(`${emoji} ${verb}: ${pattern}${path}`);
+        }
+        case 'Glob': {
+          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
+          return truncateDetail(`${emoji} ${verb}: ${pattern}`);
+        }
+        case 'Bash': {
+          const desc = typeof input.description === 'string' ? input.description : '';
+          const cmd = typeof input.command === 'string' ? input.command : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || cmd}`);
+        }
+        case 'WebFetch': {
+          const url = typeof input.url === 'string' ? input.url : '';
+          return truncateDetail(`${emoji} ${verb}: ${url}`);
+        }
+        case 'WebSearch': {
+          const query = typeof input.query === 'string' ? input.query : '';
+          return truncateDetail(`${emoji} ${verb}: "${query}"`);
+        }
+        case 'Agent':
+        case 'Task': {
+          const desc = typeof input.description === 'string' ? input.description : '';
+          const prompt = typeof input.prompt === 'string' ? input.prompt : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || prompt}`);
+        }
+        case 'TodoWrite': {
+          const todos = Array.isArray(input.todos) ? input.todos as { content?: string; status?: string }[] : [];
+          const active = todos.find(t => t.status === 'in_progress');
+          const detail = active?.content ?? `${todos.length} items`;
+          return truncateDetail(`${emoji} ${verb}: ${detail}`);
+        }
+        default: {
+          // Generic fallback: try description, then name
+          const desc = typeof input.description === 'string' ? input.description : '';
+          return truncateDetail(`${emoji} ${verb}: ${desc || '...'}`);
         }
       }
-
-      const detail = parts.length ? parts.join(' — ') : name;
-      return truncateDetail(`${emoji} ${detail}`);
     }
 
     let assistantBuffer = '';
@@ -325,8 +346,8 @@ export class SessionProcess extends EventEmitter {
               writeStatus('tool', truncateDetail(`🤖 ${taskDesc}`));
             } else {
               const toolName = typeof obj.last_tool_name === 'string' ? obj.last_tool_name : '';
-              const emoji = TOOL_EMOJI[toolName] ?? '🔧';
-              writeStatus('tool', truncateDetail(`${emoji} ${taskDesc}`));
+              const toolLabel = TOOL_LABELS[toolName] ?? { emoji: '🔧', verb: toolName };
+              writeStatus('tool', truncateDetail(`${toolLabel.emoji} ${taskDesc}`));
             }
           }
           // rate_limit_event
