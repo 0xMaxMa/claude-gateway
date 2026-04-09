@@ -112,6 +112,9 @@ export interface Logger {
 
 // ─── Cron Manager Types ───────────────────────────────────────────────────────
 
+export type CronScheduleKind = 'cron' | 'at';
+export type CronJobType = 'command' | 'agent';
+
 export interface CronJobState {
   lastRunAt: number | null;
   lastStatus: 'ok' | 'error' | null;
@@ -120,39 +123,58 @@ export interface CronJobState {
   runCount: number;
 }
 
-export interface CronJobNotify {
-  telegram?: string; // chat_id
-  webhook?: string;  // URL
-}
-
 export interface CronJob {
   id: string;
   agentId: string;
   name: string;
-  schedule: string; // 5-field cron expression
-  command: string;  // shell command to execute
+  // Schedule fields
+  scheduleKind?: CronScheduleKind;  // default: 'cron'
+  schedule?: string;                // cron expression (kind=cron)
+  scheduleAt?: string;              // ISO-8601 timestamp (kind=at)
+  // Payload fields
+  type?: CronJobType;               // default: 'command'
+  command?: string;                 // shell command (type=command)
+  prompt?: string;                  // agent prompt (type=agent)
+  telegram?: string;                // chat_id to deliver agent response (type=agent, required)
+  timeoutMs?: number;               // execution timeout ms (default 120000)
+  // Lifecycle
+  deleteAfterRun?: boolean;         // auto-delete after first successful run
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
-  notify?: CronJobNotify;
   state: CronJobState;
 }
 
 export interface CronJobCreate {
   agentId: string;
   name: string;
-  schedule: string;
-  command: string;
+  // Schedule
+  scheduleKind?: CronScheduleKind;
+  schedule?: string;
+  scheduleAt?: string;
+  // Payload
+  type?: CronJobType;
+  command?: string;
+  prompt?: string;
+  telegram?: string;
+  timeoutMs?: number;
+  // Lifecycle
+  deleteAfterRun?: boolean;
   enabled?: boolean;
-  notify?: CronJobNotify;
 }
 
 export interface CronJobUpdate {
   name?: string;
+  scheduleKind?: CronScheduleKind;
   schedule?: string;
+  scheduleAt?: string;
+  type?: CronJobType;
   command?: string;
+  prompt?: string;
+  telegram?: string;
+  timeoutMs?: number;
+  deleteAfterRun?: boolean;
   enabled?: boolean;
-  notify?: CronJobNotify;
 }
 
 export interface CronRunLog {

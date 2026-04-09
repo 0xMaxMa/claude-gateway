@@ -244,168 +244,24 @@ Status updates are sent every 5-10 seconds (first update at 5s, then every 10s).
 
 When `gateway.api.keys` is configured, the gateway exposes a REST API for external clients.
 
-### Quickstart: Using the Agent API
+Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 
-**Step 1 — Add an API key to `config.json`**
-
-```json
-{
-  "gateway": {
-    "api": {
-      "keys": [
-        {
-          "key": "my-secret-key-123",
-          "description": "My app",
-          "agents": ["alfred"]
-        },
-        {
-          "key": "admin-key-456",
-          "description": "Admin — full access",
-          "agents": "*"
-        }
-      ]
-    }
-  }
-}
-```
-
-`agents` can be an array of agent IDs or `"*"` for full access. Keys support `${ENV_VAR}` interpolation.
-
-**Step 2 — Restart the gateway**
-
-```bash
-npm start
-```
-
-Config is loaded at startup — a restart is required after changing API keys.
-
-**Step 3 — List available agents**
-
-```bash
-curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/agents | jq
-```
-
-```json
-{
-  "agents": [
-    { "id": "alfred", "description": "Personal assistant" }
-  ]
-}
-```
-
-**Step 4 — Send a message (new session)**
-
-Omit `session_id` to start a fresh conversation. The response includes a `session_id` — save it for follow-up messages.
-
-```bash
-curl -X POST \
-  -H "X-Api-Key: my-secret-key-123" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello! What can you help me with?"}' \
-  http://localhost:3000/api/v1/agents/alfred/messages | jq
-```
-
-```json
-{
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "agent_id": "alfred",
-  "response": "Hello! I'm Alfred, your personal assistant. I can help you with...",
-  "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
-  "duration_ms": 2341
-}
-```
-
-**Step 5 — Continue the conversation (same session)**
-
-Pass the `session_id` from the previous response to resume the same context. Claude remembers the full conversation history.
-
-```bash
-curl -X POST \
-  -H "X-Api-Key: my-secret-key-123" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What did I just ask you?", "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8"}' \
-  http://localhost:3000/api/v1/agents/alfred/messages | jq
-```
-
-```json
-{
-  "request_id": "7f3c2a1b-...",
-  "agent_id": "alfred",
-  "response": "You asked: \"Hello! What can you help me with?\"",
-  "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
-  "duration_ms": 1876
-}
-```
-
-> **Tips:**
-> - Auth header: `X-Api-Key: <key>` or `Authorization: Bearer <key>` — both work
-> - `session_id` is optional — omit for a stateless one-shot call
-> - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
-> - Error 409 = session is currently processing a request — wait and retry
-> - Add `"stream": true` to the request body for SSE streaming (see [Streaming API](#streaming-api-sse))
-
----
-
-### Endpoints
-
-See [Quickstart: Using the Agent API](#quickstart-using-the-agent-api) for full examples with request/response JSON.
+**Endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/agents/:agentId/messages` | Send a message — sync JSON or SSE stream |
 | `GET` | `/api/v1/agents` | List agents accessible by the provided key |
+| `POST` | `/api/v1/agents/:agentId/messages` | Send a message — sync JSON or SSE stream |
+| `GET` | `/api/v1/crons` | List cron jobs accessible by key |
+| `GET` | `/api/v1/crons/status` | Scheduler status |
+| `POST` | `/api/v1/crons` | Create a scheduled job |
+| `GET` | `/api/v1/crons/:id` | Get a single job |
+| `PUT` | `/api/v1/crons/:id` | Update a job |
+| `DELETE` | `/api/v1/crons/:id` | Delete a job |
+| `POST` | `/api/v1/crons/:id/run` | Trigger a job manually |
+| `GET` | `/api/v1/crons/:id/runs` | Get run history |
 
-**Error responses (POST):**
-
-| Status | When |
-|--------|------|
-| 400 | Empty message or exceeds 10,000 characters |
-| 401 | Missing API key |
-| 403 | Invalid key or key has no access to that agent |
-| 404 | Agent ID not found |
-| 409 | Session is busy processing another request |
-| 504 | Agent did not respond within 60s |
-| 500 | Internal error |
-
----
-
-## Streaming API (SSE)
-
-The HTTP API supports Server-Sent Events for real-time streaming responses.
-
-**Request:**
-
-```bash
-curl -N -X POST \
-  -H "X-Api-Key: my-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Explain this code", "stream": true}' \
-  http://localhost:3000/api/v1/agents/alfred/messages
-```
-
-**Response (SSE):**
-
-```
-data: {"type":"text_delta","text":"Let me"}
-data: {"type":"text_delta","text":" explain..."}
-data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
-data: {"type":"text_delta","text":"Here's the explanation..."}
-data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
-data: [DONE]
-```
-
-**Stream event types:**
-
-| Type | Fields | Description |
-|------|--------|-------------|
-| `text_delta` | `text` | Incremental text chunk |
-| `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
-| `thinking` | `text` | Agent reasoning (if available) |
-| `result` | `text`, `request_id`, `session_id`, `duration_ms` | Final aggregated result |
-| `error` | `message` | Error event |
-
-The stream ends with `data: [DONE]`. Set `stream: false` (default) for the synchronous JSON response mode.
+See **[API.md](./API.md)** for full reference with request/response schemas and curl examples.
 
 ---
 
@@ -428,6 +284,8 @@ claude-gateway/
 │   ├── api-auth.ts                     ← API key auth middleware (timing-safe)
 │   ├── config-loader.ts                ← load + validate config.json
 │   ├── config-migrator.ts              ← auto-migration for config schema changes
+│   ├── cron-manager.ts                 ← persistent cron job manager (REST + agentTurn)
+│   ├── cron-router.ts                  ← Cron API router (auth + agent-scoped access)
 │   ├── cron-scheduler.ts               ← heartbeat task scheduler
 │   ├── heartbeat-parser.ts             ← parse heartbeat.md YAML
 │   ├── heartbeat-history.ts            ← track scheduled task execution
@@ -571,6 +429,7 @@ The gateway runs an HTTP server on port 3000 (set `PORT` env var to change):
 | `GET /ui` | Live HTML dashboard (auto-refreshes every 5s) |
 | `POST /api/v1/agents/:id/messages` | Send a message to an agent (requires API key) |
 | `GET /api/v1/agents` | List accessible agents (requires API key) |
+| `/api/v1/crons/*` | Cron job management — see [API.md](./API.md) |
 
 ---
 
