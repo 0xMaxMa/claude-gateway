@@ -27,12 +27,12 @@ const API_KEY_WRONG = 'sk-test-wrong-key';
 function createTempWorkspace(prefix = 'api-e2e-ws-'): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const files: Record<string, string> = {
-    'agent.md': '# Agent\nYou are a test assistant.',
-    'soul.md': '# Soul\nBe helpful.',
-    'tools.md': '# Tools\nNo tools.',
-    'user.md': '# User\nTester.',
-    'heartbeat.md': '# Heartbeat\n',
-    'memory.md': '# Memory\n',
+    'AGENTS.md': '# Agent\nYou are a test assistant.',
+    'SOUL.md': '# Soul\nBe helpful.',
+    'TOOLS.md': '# Tools\nNo tools.',
+    'USER.md': '# User\nTester.',
+    'HEARTBEAT.md': '# Heartbeat\n',
+    'MEMORY.md': '# Memory\n',
   };
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
@@ -428,12 +428,12 @@ describe('Agent HTTP API integration (planning-05)', () => {
     fs.mkdirSync(ws, { recursive: true });
     // Write workspace files into the structured path
     const files: Record<string, string> = {
-      'agent.md': '# Agent\nYou are a test assistant.',
-      'soul.md': '# Soul\nBe helpful.',
-      'tools.md': '# Tools\nNo tools.',
-      'user.md': '# User\nTester.',
-      'heartbeat.md': '# Heartbeat\n',
-      'memory.md': '# Memory\n',
+      'AGENTS.md': '# Agent\nYou are a test assistant.',
+      'SOUL.md': '# Soul\nBe helpful.',
+      'TOOLS.md': '# Tools\nNo tools.',
+      'USER.md': '# User\nTester.',
+      'HEARTBEAT.md': '# Heartbeat\n',
+      'MEMORY.md': '# Memory\n',
     };
     for (const [name, content] of Object.entries(files)) {
       fs.writeFileSync(path.join(ws, name), content, 'utf-8');

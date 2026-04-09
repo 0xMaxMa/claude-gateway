@@ -320,7 +320,7 @@ describe('T-CA-03: parseGeneratedFiles correctly splits multi-section output', (
   it('parses three sections from realistic claude output', () => {
     const claudeOutput = `Here are the workspace files for your agent:
 
-=== agent.md ===
+=== AGENTS.md ===
 # Agent: Butler
 You are Butler, a formal English assistant.
 
@@ -328,41 +328,41 @@ Rules:
 - Speak formally at all times
 - Never use contractions
 
-=== soul.md ===
+=== SOUL.md ===
 Formal, precise, and unfailingly polite.
 Think Jeeves from P.G. Wodehouse.
 
-=== user.md ===
+=== USER.md ===
 A busy professional who values efficiency.`;
 
     const files = parseGeneratedFiles(claudeOutput);
 
     expect(files.size).toBe(3);
-    expect(files.get('agent.md')).toContain('# Agent: Butler');
-    expect(files.get('soul.md')).toContain('Jeeves');
-    expect(files.get('user.md')).toContain('professional');
+    expect(files.get('AGENTS.md')).toContain('# Agent: Butler');
+    expect(files.get('SOUL.md')).toContain('Jeeves');
+    expect(files.get('USER.md')).toContain('professional');
   });
 
-  it('returns only agent.md when other sections are absent', () => {
-    const claudeOutput = `=== agent.md ===
+  it('returns only AGENTS.md when other sections are absent', () => {
+    const claudeOutput = `=== AGENTS.md ===
 # Agent: Simple
 You are Simple, a minimal assistant.`;
 
     const files = parseGeneratedFiles(claudeOutput);
     expect(files.size).toBe(1);
-    expect(files.has('agent.md')).toBe(true);
+    expect(files.has('AGENTS.md')).toBe(true);
   });
 
   it('content of first section does not bleed into second section', () => {
-    const claudeOutput = `=== agent.md ===
+    const claudeOutput = `=== AGENTS.md ===
 Agent content only.
 
-=== soul.md ===
+=== SOUL.md ===
 Soul content only.`;
 
     const files = parseGeneratedFiles(claudeOutput);
-    expect(files.get('agent.md')).not.toContain('Soul content only.');
-    expect(files.get('soul.md')).not.toContain('Agent content only.');
+    expect(files.get('AGENTS.md')).not.toContain('Soul content only.');
+    expect(files.get('SOUL.md')).not.toContain('Agent content only.');
   });
 });
 
@@ -581,9 +581,9 @@ describe('T-CA-08: Workspace creation — accepted files written to correct path
   it('writes all accepted files to workspace directory', () => {
     const wsDir = path.join(tmpDir, 'agents', 'testbot', 'workspace');
     const accepted = new Map<string, string>([
-      ['agent.md', '# Agent: Testbot\nYou are Testbot.'],
-      ['soul.md', 'Friendly and helpful.'],
-      ['user.md', 'A developer.'],
+      ['AGENTS.md', '# Agent: Testbot\nYou are Testbot.'],
+      ['SOUL.md', 'Friendly and helpful.'],
+      ['USER.md', 'A developer.'],
     ]);
 
     createWorkspace(wsDir, accepted);
@@ -600,12 +600,12 @@ describe('T-CA-08: Workspace creation — accepted files written to correct path
     const wsDir = path.join(tmpDir, 'deep', 'nested', 'workspace');
     expect(fs.existsSync(wsDir)).toBe(false);
 
-    createWorkspace(wsDir, new Map([['agent.md', '# Agent\nTest.']]));
+    createWorkspace(wsDir, new Map([['AGENTS.md', '# Agent\nTest.']]));
 
     expect(fs.existsSync(wsDir)).toBe(true);
   });
 
-  it('agent.md content is preserved exactly', () => {
+  it('AGENTS.md content is preserved exactly', () => {
     const wsDir = path.join(tmpDir, 'ws');
     const agentMdContent = `# Agent: Precise
 You are Precise.
@@ -614,9 +614,9 @@ Rules:
 - Be exact
 - Use formal language`;
 
-    createWorkspace(wsDir, new Map([['agent.md', agentMdContent]]));
+    createWorkspace(wsDir, new Map([['AGENTS.md', agentMdContent]]));
 
-    const written = fs.readFileSync(path.join(wsDir, 'agent.md'), 'utf8');
+    const written = fs.readFileSync(path.join(wsDir, 'AGENTS.md'), 'utf8');
     expect(written).toBe(agentMdContent);
   });
 });
@@ -737,25 +737,25 @@ describe('Full config round-trip', () => {
     const agentId = 'roundtrip';
     const wsDir = path.join(tmpDir, 'agents', agentId, 'workspace');
 
-    const claudeOutput = `=== agent.md ===
+    const claudeOutput = `=== AGENTS.md ===
 # Agent: Roundtrip
 You are Roundtrip, a test agent.
 
 Rules:
 - Be helpful
 
-=== soul.md ===
+=== SOUL.md ===
 Methodical and precise.`;
 
     const files = parseGeneratedFiles(claudeOutput);
-    expect(files.has('agent.md')).toBe(true);
+    expect(files.has('AGENTS.md')).toBe(true);
 
     createWorkspace(wsDir, files);
-    appendAgentToConfig(agentId, wsDir, files.get('agent.md')!, configPath);
+    appendAgentToConfig(agentId, wsDir, files.get('AGENTS.md')!, configPath);
 
     // Verify workspace files
-    expect(fs.existsSync(path.join(wsDir, 'agent.md'))).toBe(true);
-    expect(fs.existsSync(path.join(wsDir, 'soul.md'))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, 'AGENTS.md'))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, 'SOUL.md'))).toBe(true);
 
     // Verify config
     const config = loadOrCreateRawConfig(configPath);

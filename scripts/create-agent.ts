@@ -255,7 +255,7 @@ function fallbackFiles(agentId: string): Map<string, string> {
   const name = agentId.charAt(0).toUpperCase() + agentId.slice(1);
   const files = new Map<string, string>();
   files.set(
-    'agent.md',
+    'AGENTS.md',
     `# Agent: ${name}\n\nYou are ${name}, a helpful assistant.\n\n<!-- TODO: Describe your agent's role, rules, and capabilities. -->`
   );
   return files;
@@ -313,18 +313,18 @@ async function generateFiles(
   }
 
   const parsed = parseGeneratedFiles(raw);
-  if (!parsed.has('agent.md')) {
-    // Fallback: if Claude output looks like markdown content without markers, use as agent.md
+  if (!parsed.has('AGENTS.md')) {
+    // Fallback: if Claude output looks like markdown content without markers, use as AGENTS.md
     const headingIdx = raw.indexOf('# ');
     if (headingIdx >= 0) {
       const content = raw.slice(headingIdx).replace(/\n```\s*$/, '').trim();
       if (content.length > 50) {
-        console.log('  Note: Claude output had no section markers — treating as agent.md');
-        parsed.set('agent.md', content);
+        console.log('  Note: Claude output had no section markers — treating as AGENTS.md');
+        parsed.set('AGENTS.md', content);
         return { files: parsed, suggestedEmoji };
       }
     }
-    console.log('  Warning: agent.md not found in Claude output. Using minimal fallback templates.');
+    console.log('  Warning: AGENTS.md not found in Claude output. Using minimal fallback templates.');
     return { files: fallbackFiles(agentId) };
   }
 
@@ -335,7 +335,7 @@ async function generateFiles(
 // Step 2 — Preview and accept generated files
 // ---------------------------------------------------------------------------
 
-const OPTIONAL_FILES = new Set(['soul.md', 'user.md', 'tools.md', 'heartbeat.md', 'bootstrap.md']);
+const OPTIONAL_FILES = new Set(['IDENTITY.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md', 'BOOTSTRAP.md']);
 const SEPARATOR_WIDTH = 42;
 
 export function printFilePreview(filename: string, content: string): void {
@@ -799,8 +799,8 @@ function printSummary(agentId: string, botUsername: string): void {
   console.log('To start the full gateway (all agents):');
   console.log(`  GATEWAY_CONFIG=${cfgPath} npm start\n`);
   console.log('To edit your agent\'s personality later, modify:');
-  console.log(`  ${wsDir}/agent.md`);
-  console.log(`  ${wsDir}/soul.md`);
+  console.log(`  ${wsDir}/AGENTS.md`);
+  console.log(`  ${wsDir}/SOUL.md`);
   console.log('\nTo add new users to this agent later:');
   console.log(`  1. Change dmPolicy to pairing (if currently allowlist):`);
   console.log(`       edit ${wsDir}/.telegram-state/access.json → set "dmPolicy": "pairing"`);
@@ -882,9 +882,9 @@ async function main(): Promise<void> {
   const rl3 = createRl();
   const acceptedFiles = await previewAndAccept(rl3, generatedFiles);
 
-  if (!acceptedFiles.has('agent.md')) {
+  if (!acceptedFiles.has('AGENTS.md')) {
     const fallback = fallbackFiles(agentId);
-    acceptedFiles.set('agent.md', fallback.get('agent.md')!);
+    acceptedFiles.set('AGENTS.md', fallback.get('AGENTS.md')!);
   }
   state.lastCompletedStep = 2;
   saveWizardState(state);
@@ -892,7 +892,7 @@ async function main(): Promise<void> {
   // ── Step 3 ──────────────────────────────────────────────────────────────
   console.log('\nStep 3/6 · Create Workspace\n');
   const wsDir = await createWorkspace(agentId, acceptedFiles);
-  await appendToConfig(agentId, wsDir, acceptedFiles.get('agent.md')!, {
+  await appendToConfig(agentId, wsDir, acceptedFiles.get('AGENTS.md')!, {
     signatureEmoji,
   });
   state.wsDir = wsDir;
@@ -946,15 +946,15 @@ async function resumeWizard(state: WizardState): Promise<void> {
     const description = await promptDescription(rl);
     const { files: generatedFiles } = await generateFiles(agentId, description);
     const acceptedFiles = await previewAndAccept(rl, generatedFiles);
-    if (!acceptedFiles.has('agent.md')) {
-      acceptedFiles.set('agent.md', fallbackFiles(agentId).get('agent.md')!);
+    if (!acceptedFiles.has('AGENTS.md')) {
+      acceptedFiles.set('AGENTS.md', fallbackFiles(agentId).get('AGENTS.md')!);
     }
     state.lastCompletedStep = 2;
     saveWizardState(state);
 
     console.log('\nStep 3/6 · Create Workspace\n');
     const wsDir = await createWorkspace(agentId, acceptedFiles);
-    await appendToConfig(agentId, wsDir, acceptedFiles.get('agent.md')!);
+    await appendToConfig(agentId, wsDir, acceptedFiles.get('AGENTS.md')!);
     state.wsDir = wsDir;
     state.lastCompletedStep = 3;
     saveWizardState(state);

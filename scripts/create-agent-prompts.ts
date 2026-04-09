@@ -23,27 +23,28 @@ ${description}
 
 Generate workspace markdown files for this agent. Output each file as:
 
-=== agent.md ===
+=== AGENTS.md ===
 <content here>
 
-=== soul.md ===
+=== SOUL.md ===
 <content here>
 
 Rules:
-- agent.md is REQUIRED. Start with "# Agent: ${name}" on line 1.
+- AGENTS.md is REQUIRED. Start with "# Agent: ${name}" on line 1.
   Include: role, rules, what it can/cannot do, language to use.
   Always include these rules under ## Rules:
   "Report completion (mandatory): After finishing any task, ALWAYS send a reply summarising what
    was done before the session ends. Never silently complete work without reporting the result back
    to the user."
-  Also include an "## Emoji Usage" section in agent.md with these guidelines:
+  Also include an "## Emoji Usage" section in AGENTS.md with these guidelines:
     - React to messages naturally — use the react tool. Max 1 reaction per message.
     - Signature emoji: ${options?.signatureEmoji ? `Use ${options.signatureEmoji} as your signature emoji in greetings or sign-offs.` : 'None assigned.'}${signatureNote}
-- soul.md: tone and personality only (not rules). Omit if no distinct style.
-- user.md: target user profile. Omit if public/unknown.
-- tools.md: available tools or capabilities. Omit if none specified.
-- heartbeat.md: only if proactive/scheduled tasks were described. Use YAML tasks format.
-- bootstrap.md: only if a special first-run greeting is appropriate.
+- IDENTITY.md (optional): agent name, emoji, avatar, creature, vibe. Omit if not needed.
+- SOUL.md: tone and personality only (not rules). Omit if no distinct style.
+- USER.md: target user profile. Omit if public/unknown.
+- TOOLS.md: available tools or capabilities. Omit if none specified.
+- HEARTBEAT.md: only if proactive/scheduled tasks were described. Use YAML tasks format.
+- BOOTSTRAP.md: only if a special first-run greeting is appropriate.
 - Keep each file under 500 words.
 - Omit files that are not relevant.
 - IMPORTANT: On the very FIRST line of your output (before any === markers), output a single emoji that best represents this agent's personality or role. Just the emoji alone on line 1, nothing else.`;

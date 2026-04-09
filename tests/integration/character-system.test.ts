@@ -21,13 +21,13 @@ const MOCK_CLAUDE_BIN = path.resolve(__dirname, '../helpers/mock-claude.js');
 function createTempWorkspace(prefix = 'cs-test-ws-'): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const files: Record<string, string> = {
-    'agent.md': '# Agent\nYou are a test assistant.',
-    'soul.md': '# Soul\nBe helpful.',
-    'tools.md': '# Tools\nNo tools.',
-    'user.md': '# User\nTester.',
-    'heartbeat.md': '# Heartbeat\n',
-    'memory.md': '# Memory\n',
-    'bootstrap.md': '# Bootstrap\nFirst run.',
+    'AGENTS.md': '# Agent\nYou are a test assistant.',
+    'SOUL.md': '# Soul\nBe helpful.',
+    'TOOLS.md': '# Tools\nNo tools.',
+    'USER.md': '# User\nTester.',
+    'HEARTBEAT.md': '# Heartbeat\n',
+    'MEMORY.md': '# Memory\n',
+    'BOOTSTRAP.md': '# Bootstrap\nFirst run.',
   };
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
@@ -88,21 +88,21 @@ describe('Character System Integration', () => {
     delete process.env.CLAUDE_BIN;
   });
 
-  // ── I-CS-01: bootstrap.md → isFirstRun; after markBootstrapComplete → .done ─
-  it('I-CS-01: bootstrap.md present → isFirstRun=true; after markBootstrapComplete → renamed to .done', async () => {
+  // ── I-CS-01: BOOTSTRAP.md → isFirstRun; after markBootstrapComplete → .done ─
+  it('I-CS-01: BOOTSTRAP.md present → isFirstRun=true; after markBootstrapComplete → renamed to .done', async () => {
     const workspace = createTempWorkspace('cs01-');
     try {
-      // Load workspace — bootstrap.md exists → isFirstRun=true
+      // Load workspace — BOOTSTRAP.md exists → isFirstRun=true
       const loaded = await loadWorkspace(workspace);
       expect(loaded.files.isFirstRun).toBe(true);
-      expect(fs.existsSync(path.join(workspace, 'bootstrap.md'))).toBe(true);
+      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md'))).toBe(true);
 
       // Call markBootstrapComplete
       await markBootstrapComplete(workspace);
 
-      // bootstrap.md should be gone, bootstrap.md.done should exist
-      expect(fs.existsSync(path.join(workspace, 'bootstrap.md'))).toBe(false);
-      expect(fs.existsSync(path.join(workspace, 'bootstrap.md.done'))).toBe(true);
+      // BOOTSTRAP.md should be gone, BOOTSTRAP.md.done should exist
+      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md'))).toBe(false);
+      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md.done'))).toBe(true);
 
       // Reload → isFirstRun=false
       const reloaded = await loadWorkspace(workspace);
@@ -112,8 +112,8 @@ describe('Character System Integration', () => {
     }
   });
 
-  // ── I-CS-02: hot-reload: modify soul.md → onChange fires within 500ms ────
-  it('I-CS-02: hot-reload: modify soul.md → onChange callback fires (within 500ms)', async () => {
+  // ── I-CS-02: hot-reload: modify SOUL.md → onChange fires within 500ms ────
+  it('I-CS-02: hot-reload: modify SOUL.md → onChange callback fires (within 500ms)', async () => {
     const workspace = createTempWorkspace('cs02-');
     try {
       let callbackCount = 0;
@@ -122,9 +122,9 @@ describe('Character System Integration', () => {
       });
 
       try {
-        // Modify soul.md after a short delay
+        // Modify SOUL.md after a short delay
         await new Promise((r) => setTimeout(r, 50));
-        fs.writeFileSync(path.join(workspace, 'soul.md'), '# Soul\nUpdated personality.', 'utf-8');
+        fs.writeFileSync(path.join(workspace, 'SOUL.md'), '# Soul\nUpdated personality.', 'utf-8');
 
         // Wait for callback (within 500ms total — debounce is 300ms)
         await waitFor(() => callbackCount > 0, 3000);
@@ -151,7 +151,7 @@ describe('Character System Integration', () => {
 
       // Wait a bit then modify file
       await new Promise((r) => setTimeout(r, 50));
-      fs.writeFileSync(path.join(workspace, 'soul.md'), '# Soul\nAfter close.', 'utf-8');
+      fs.writeFileSync(path.join(workspace, 'SOUL.md'), '# Soul\nAfter close.', 'utf-8');
 
       // Wait to ensure no callback fired
       await new Promise((r) => setTimeout(r, 700));
@@ -161,14 +161,14 @@ describe('Character System Integration', () => {
     }
   });
 
-  // ── I-CS-04: MemoryManager.appendFact → memory.md updated on disk ─────────
-  it('I-CS-04: MemoryManager.appendFact → memory.md updated on disk', async () => {
+  // ── I-CS-04: MemoryManager.appendFact → MEMORY.md updated on disk ─────────
+  it('I-CS-04: MemoryManager.appendFact → MEMORY.md updated on disk', async () => {
     const workspace = createTempWorkspace('cs04-');
     try {
       const manager = new MemoryManager(workspace);
       await manager.appendFact('User Facts', 'Loves TypeScript');
 
-      const content = fs.readFileSync(path.join(workspace, 'memory.md'), 'utf-8');
+      const content = fs.readFileSync(path.join(workspace, 'MEMORY.md'), 'utf-8');
       expect(content).toContain('## User Facts');
       expect(content).toContain('- Loves TypeScript');
     } finally {
@@ -290,7 +290,7 @@ describe('Character System Integration', () => {
     const workspace = createTempWorkspace('cs08-');
     try {
       const manager = new MemoryManager(workspace);
-      const memPath = path.join(workspace, 'memory.md');
+      const memPath = path.join(workspace, 'MEMORY.md');
 
       // Write a long file
       const longContent =
@@ -317,7 +317,7 @@ describe('Character System Integration', () => {
     const workspace = createTempWorkspace('cs09-');
     try {
       const manager = new MemoryManager(workspace);
-      const memPath = path.join(workspace, 'memory.md');
+      const memPath = path.join(workspace, 'MEMORY.md');
       fs.writeFileSync(
         memPath,
         '# Memory\n\n## Facts\n- likes coffee\n- dark mode user\n- works in Bangkok\n- dark chocolate fan\n',
@@ -358,7 +358,7 @@ describe('Character System Integration', () => {
 
       // Trigger a workspace change (simulate hot reload by writing soul.md)
       fs.writeFileSync(
-        path.join(workspace, 'soul.md'),
+        path.join(workspace, 'SOUL.md'),
         '# Soul\nUpdated during test.',
         'utf-8',
       );

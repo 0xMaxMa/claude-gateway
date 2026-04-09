@@ -14,44 +14,44 @@ describe('create-agent-prompts', () => {
   // ---------------------------------------------------------------------------
   describe('parseGeneratedFiles', () => {
     it('parses a single section correctly', () => {
-      const output = `=== agent.md ===
+      const output = `=== AGENTS.md ===
 # Agent: Test
 You are Test, a helpful assistant.`;
       const files = parseGeneratedFiles(output);
       expect(files.size).toBe(1);
-      expect(files.has('agent.md')).toBe(true);
-      expect(files.get('agent.md')).toContain('# Agent: Test');
+      expect(files.has('AGENTS.md')).toBe(true);
+      expect(files.get('AGENTS.md')).toContain('# Agent: Test');
     });
 
     it('parses multiple sections correctly', () => {
-      const output = `=== agent.md ===
+      const output = `=== AGENTS.md ===
 # Agent: Alfred
 You are Alfred.
 
-=== soul.md ===
+=== SOUL.md ===
 Formal, polite tone.
 
-=== user.md ===
+=== USER.md ===
 Private user profile.`;
       const files = parseGeneratedFiles(output);
       expect(files.size).toBe(3);
-      expect(files.has('agent.md')).toBe(true);
-      expect(files.has('soul.md')).toBe(true);
-      expect(files.has('user.md')).toBe(true);
-      expect(files.get('agent.md')).toContain('# Agent: Alfred');
-      expect(files.get('soul.md')).toContain('Formal, polite tone.');
-      expect(files.get('user.md')).toContain('Private user profile.');
+      expect(files.has('AGENTS.md')).toBe(true);
+      expect(files.has('SOUL.md')).toBe(true);
+      expect(files.has('USER.md')).toBe(true);
+      expect(files.get('AGENTS.md')).toContain('# Agent: Alfred');
+      expect(files.get('SOUL.md')).toContain('Formal, polite tone.');
+      expect(files.get('USER.md')).toContain('Private user profile.');
     });
 
     it('trims whitespace from section content (trailing)', () => {
-      const output = `=== agent.md ===
+      const output = `=== AGENTS.md ===
 # Agent: Trim
 Content with trailing spaces.
 
-=== soul.md ===
+=== SOUL.md ===
 Soul content.`;
       const files = parseGeneratedFiles(output);
-      const agentMd = files.get('agent.md')!;
+      const agentMd = files.get('AGENTS.md')!;
       expect(agentMd).not.toMatch(/\s+$/);
     });
 
@@ -59,41 +59,41 @@ Soul content.`;
       const output = `Some preamble text that should be ignored.
 Here is another line of preamble.
 
-=== agent.md ===
+=== AGENTS.md ===
 # Agent: Clean
 This is the agent content.`;
       const files = parseGeneratedFiles(output);
       expect(files.size).toBe(1);
-      const content = files.get('agent.md')!;
+      const content = files.get('AGENTS.md')!;
       expect(content).not.toContain('preamble');
       expect(content).toContain('# Agent: Clean');
     });
 
     it('handles five sections correctly', () => {
-      const output = `=== agent.md ===
+      const output = `=== AGENTS.md ===
 # Agent: Full
 Role description.
 
-=== soul.md ===
+=== SOUL.md ===
 Personality.
 
-=== user.md ===
+=== USER.md ===
 User profile.
 
-=== tools.md ===
+=== TOOLS.md ===
 Available tools.
 
-=== heartbeat.md ===
+=== HEARTBEAT.md ===
 tasks:
   - name: daily
     cron: "0 8 * * *"`;
       const files = parseGeneratedFiles(output);
       expect(files.size).toBe(5);
-      expect(files.has('agent.md')).toBe(true);
-      expect(files.has('soul.md')).toBe(true);
-      expect(files.has('user.md')).toBe(true);
-      expect(files.has('tools.md')).toBe(true);
-      expect(files.has('heartbeat.md')).toBe(true);
+      expect(files.has('AGENTS.md')).toBe(true);
+      expect(files.has('SOUL.md')).toBe(true);
+      expect(files.has('USER.md')).toBe(true);
+      expect(files.has('TOOLS.md')).toBe(true);
+      expect(files.has('HEARTBEAT.md')).toBe(true);
     });
 
     it('returns empty map when output has no sections', () => {
@@ -107,27 +107,40 @@ tasks:
       expect(files.size).toBe(0);
     });
 
-    it('includes soul.md section with correct content when agent.md has no body', () => {
-      // When agent.md has no content between headers, the parser may include
-      // partial text; what matters is soul.md content is correct.
-      const output = `=== soul.md ===
+    it('includes SOUL.md section with correct content when AGENTS.md has no body', () => {
+      // When AGENTS.md has no content between headers, the parser may include
+      // partial text; what matters is SOUL.md content is correct.
+      const output = `=== SOUL.md ===
 Soul content here.`;
       const files = parseGeneratedFiles(output);
-      expect(files.has('soul.md')).toBe(true);
-      expect(files.get('soul.md')).toContain('Soul content here.');
+      expect(files.has('SOUL.md')).toBe(true);
+      expect(files.get('SOUL.md')).toContain('Soul content here.');
     });
 
     it('preserves section content without stripping leading lines', () => {
-      const output = `=== agent.md ===
+      const output = `=== AGENTS.md ===
 # Agent: Preserve
 Line 1.
 Line 2.
 Line 3.`;
       const files = parseGeneratedFiles(output);
-      const content = files.get('agent.md')!;
+      const content = files.get('AGENTS.md')!;
       expect(content).toContain('Line 1.');
       expect(content).toContain('Line 2.');
       expect(content).toContain('Line 3.');
+    });
+
+    it('handles optional IDENTITY.md section', () => {
+      const output = `=== AGENTS.md ===
+# Agent: Test
+You are Test.
+
+=== IDENTITY.md ===
+Name: TestBot
+Emoji: 🤖`;
+      const files = parseGeneratedFiles(output);
+      expect(files.has('IDENTITY.md')).toBe(true);
+      expect(files.get('IDENTITY.md')).toContain('Name: TestBot');
     });
   });
 
@@ -146,15 +159,20 @@ Line 3.`;
       expect(prompt).toContain(description);
     });
 
-    it('includes the agent name in the agent.md rule', () => {
+    it('includes the agent name in the AGENTS.md rule', () => {
       const prompt = buildGenerationPrompt('Jeeves', 'A helpful butler.');
       expect(prompt).toContain('# Agent: Jeeves');
     });
 
-    it('mentions required files', () => {
+    it('mentions required files in uppercase format', () => {
       const prompt = buildGenerationPrompt('Bot', 'A bot.');
-      expect(prompt).toContain('agent.md');
-      expect(prompt).toContain('soul.md');
+      expect(prompt).toContain('AGENTS.md');
+      expect(prompt).toContain('SOUL.md');
+    });
+
+    it('mentions optional IDENTITY.md', () => {
+      const prompt = buildGenerationPrompt('Bot', 'A bot.');
+      expect(prompt).toContain('IDENTITY.md');
     });
 
     it('returns a non-empty string', () => {

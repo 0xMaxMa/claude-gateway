@@ -22,13 +22,13 @@ const MOCK_CLAUDE_BIN = path.resolve(__dirname, '../helpers/mock-claude.js');
 function createTempWorkspace(prefix = 'gw-test-ws-'): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const files: Record<string, string> = {
-    'agent.md': '# Agent\nYou are a test assistant.',
-    'soul.md': '# Soul\nBe helpful.',
-    'tools.md': '# Tools\nNo tools.',
-    'user.md': '# User\nTester.',
-    'heartbeat.md': '# Heartbeat\n',
-    'memory.md': '# Memory\n',
-    'bootstrap.md': '# Bootstrap\nFirst run.',
+    'AGENTS.md': '# Agent\nYou are a test assistant.',
+    'SOUL.md': '# Soul\nBe helpful.',
+    'TOOLS.md': '# Tools\nNo tools.',
+    'USER.md': '# User\nTester.',
+    'HEARTBEAT.md': '# Heartbeat\n',
+    'MEMORY.md': '# Memory\n',
+    'BOOTSTRAP.md': '# Bootstrap\nFirst run.',
   };
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
@@ -212,8 +212,8 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
     const content1 = fs.readFileSync(claudeMdPath, 'utf-8');
     expect(content1).toContain('You are a test assistant.');
 
-    // Modify soul.md
-    fs.writeFileSync(path.join(workspace, 'soul.md'), '# Soul\nUpdated soul content.', 'utf-8');
+    // Modify SOUL.md
+    fs.writeFileSync(path.join(workspace, 'SOUL.md'), '# Soul\nUpdated soul content.', 'utf-8');
 
     // Reload and rewrite
     const loaded2 = await loadWorkspace(workspace);

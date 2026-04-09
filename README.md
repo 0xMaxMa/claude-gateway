@@ -12,7 +12,7 @@ HTTP Client ──► POST /api/v1/agents/:id/messages ──► SessionProcess(
 
                         ↑
                   GatewayRouter (/health, /status, /ui, /api)
-                  CronScheduler (heartbeat.md)
+                  CronScheduler (HEARTBEAT.md)
                   TypingManager (live status + typing indicators)
 ```
 
@@ -97,13 +97,14 @@ Each agent has a workspace directory with markdown files that define its behavio
 
 | File | Required | Purpose |
 |------|----------|---------|
-| `agent.md` | **Yes** | Core identity, rules, capabilities |
-| `soul.md` | No | Tone, personality, speaking style |
-| `user.md` | No | User profile and preferences |
-| `tools.md` | No | Available tools and how to use them |
-| `memory.md` | No | Long-term memory (auto-appended by the agent) |
-| `heartbeat.md` | No | Scheduled/proactive tasks |
-| `bootstrap.md` | No | One-time first-run setup (auto-deleted after) |
+| `AGENTS.md` | **Yes** | Core identity, rules, capabilities |
+| `IDENTITY.md` | No | Agent name, emoji, avatar, personality identity |
+| `SOUL.md` | No | Tone, personality, speaking style |
+| `USER.md` | No | User profile and preferences |
+| `TOOLS.md` | No | Available tools and how to use them |
+| `MEMORY.md` | No | Long-term memory (auto-appended by the agent) |
+| `HEARTBEAT.md` | No | Scheduled/proactive tasks |
+| `BOOTSTRAP.md` | No | One-time first-run setup (auto-deleted after) |
 
 On startup (and on any file change), all files are assembled into `CLAUDE.md` which the Claude subprocess reads as its system prompt. Do not edit `CLAUDE.md` directly.
 
@@ -330,11 +331,11 @@ claude-gateway/
         │   └── <chat_id>.jsonl         ← conversation history (SessionStore)
         └── workspace/
             ├── CLAUDE.md               ← auto-generated, do not edit
-            ├── agent.md
-            ├── soul.md
-            ├── user.md
-            ├── memory.md
-            ├── heartbeat.md
+            ├── AGENTS.md
+            ├── SOUL.md
+            ├── USER.md
+            ├── MEMORY.md
+            ├── HEARTBEAT.md
             └── .telegram-state/
                 ├── access.json         ← allowlist and pairing state
                 └── .mcp-config.json    ← auto-generated MCP config for Telegram plugin
@@ -344,7 +345,7 @@ claude-gateway/
 
 ## Heartbeat / Scheduled Tasks
 
-Define proactive tasks in `heartbeat.md`:
+Define proactive tasks in `HEARTBEAT.md`:
 
 ```yaml
 tasks:
@@ -457,7 +458,7 @@ npm run typecheck
 ## Troubleshooting
 
 **Agent fails to start**
-- Check workspace path exists and contains `agent.md`
+- Check workspace path exists and contains `AGENTS.md`
 - Check `dangerouslySkipPermissions: true` is set in config
 - Check logs in `~/.claude-gateway/logs/<id>.log`
 
@@ -475,7 +476,7 @@ npm run typecheck
 - Trigger a reload by saving any `.md` file in the workspace
 
 **Heartbeat not firing**
-- Verify `heartbeat.md` YAML is valid
+- Verify `HEARTBEAT.md` YAML is valid
 - Check cron expression (5 fields: `min hour day month weekday`)
 - Check rate limit — default 30 min between proactive messages
 

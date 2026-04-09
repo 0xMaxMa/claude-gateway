@@ -430,18 +430,18 @@ describe('T-CA-08: Workspace file creation', () => {
     fs.mkdirSync(wsDir, { recursive: true });
 
     const files = new Map<string, string>([
-      ['agent.md', '# Agent: Test\nYou are Test.'],
-      ['soul.md', 'Be helpful and kind.'],
+      ['AGENTS.md', '# Agent: Test\nYou are Test.'],
+      ['SOUL.md', 'Be helpful and kind.'],
     ]);
 
     for (const [filename, content] of files) {
       fs.writeFileSync(path.join(wsDir, filename), content, 'utf8');
     }
 
-    expect(fs.existsSync(path.join(wsDir, 'agent.md'))).toBe(true);
-    expect(fs.existsSync(path.join(wsDir, 'soul.md'))).toBe(true);
-    expect(fs.readFileSync(path.join(wsDir, 'agent.md'), 'utf8')).toBe('# Agent: Test\nYou are Test.');
-    expect(fs.readFileSync(path.join(wsDir, 'soul.md'), 'utf8')).toBe('Be helpful and kind.');
+    expect(fs.existsSync(path.join(wsDir, 'AGENTS.md'))).toBe(true);
+    expect(fs.existsSync(path.join(wsDir, 'SOUL.md'))).toBe(true);
+    expect(fs.readFileSync(path.join(wsDir, 'AGENTS.md'), 'utf8')).toBe('# Agent: Test\nYou are Test.');
+    expect(fs.readFileSync(path.join(wsDir, 'SOUL.md'), 'utf8')).toBe('Be helpful and kind.');
   });
 
   it('creates workspace directory recursively', () => {
@@ -457,10 +457,10 @@ describe('T-CA-08: Workspace file creation', () => {
     fs.mkdirSync(wsDir, { recursive: true });
 
     const accepted = new Map<string, string>([
-      ['agent.md', 'agent content'],
-      ['soul.md', 'soul content'],
-      ['user.md', 'user content'],
-      ['tools.md', 'tools content'],
+      ['AGENTS.md', 'agent content'],
+      ['SOUL.md', 'soul content'],
+      ['USER.md', 'user content'],
+      ['TOOLS.md', 'tools content'],
     ]);
 
     for (const [filename, content] of accepted) {
@@ -469,10 +469,10 @@ describe('T-CA-08: Workspace file creation', () => {
 
     const written = fs.readdirSync(wsDir);
     expect(written).toHaveLength(4);
-    expect(written).toContain('agent.md');
-    expect(written).toContain('soul.md');
-    expect(written).toContain('user.md');
-    expect(written).toContain('tools.md');
+    expect(written).toContain('AGENTS.md');
+    expect(written).toContain('SOUL.md');
+    expect(written).toContain('USER.md');
+    expect(written).toContain('TOOLS.md');
   });
 });
 

@@ -11,7 +11,7 @@ function expandTilde(p: string): string {
 }
 import { loadConfig } from './config-loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config-migrator';
-import { loadWorkspace, watchWorkspace, markBootstrapComplete } from './workspace-loader';
+import { loadWorkspace, watchWorkspace, markBootstrapComplete, migrateWorkspaceFiles } from './workspace-loader';
 import { AgentRunner } from './agent-runner';
 import { CronScheduler } from './cron-scheduler';
 import { CronManager } from './cron-manager';
@@ -89,10 +89,10 @@ function validateWorkspaceFast(workspacePath: string): { ok: true } | { ok: fals
   if (!fs.existsSync(workspacePath)) {
     return { ok: false, reason: 'workspace directory not found' };
   }
-  // Check required agent.md
-  const agentMd = path.join(workspacePath, 'agent.md');
+  // Check required AGENTS.md
+  const agentMd = path.join(workspacePath, 'AGENTS.md');
   if (!fs.existsSync(agentMd)) {
-    return { ok: false, reason: 'workspace missing agent.md' };
+    return { ok: false, reason: 'workspace missing AGENTS.md' };
   }
   return { ok: true };
 }
@@ -192,6 +192,15 @@ async function main(): Promise<void> {
 
     const logger = createLogger(agentConfig.id, expandTilde(config.gateway.logDir));
     logger.info('Initialising agent', { id: agentConfig.id });
+
+    // ── Migrate legacy lowercase workspace files (agent.md → AGENTS.md, etc.) ──
+    if (fs.existsSync(agentConfig.workspace)) {
+      try {
+        migrateWorkspaceFiles(agentConfig.workspace);
+      } catch (err) {
+        logger.warn('Workspace migration failed', { error: (err as Error).message });
+      }
+    }
 
     // ── Per-agent workspace validation (fail fast per-agent, not whole gateway) ──
     const validation = validateWorkspaceFast(agentConfig.workspace);

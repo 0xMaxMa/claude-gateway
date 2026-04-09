@@ -48,21 +48,21 @@ function makeTempWorkspace(
 ): string {
   const dir = makeTempDir(prefix);
   const files: Record<string, string> = {
-    'agent.md': '# Agent\nYou are a test assistant.',
-    'soul.md': '# Soul\nBe helpful.',
-    'tools.md': '# Tools\nNo tools.',
-    'user.md': '# User\nTester.',
-    'heartbeat.md': '# Heartbeat\n',
-    'memory.md': '# Memory\n',
+    'AGENTS.md': '# Agent\nYou are a test assistant.',
+    'SOUL.md': '# Soul\nBe helpful.',
+    'TOOLS.md': '# Tools\nNo tools.',
+    'USER.md': '# User\nTester.',
+    'HEARTBEAT.md': '# Heartbeat\n',
+    'MEMORY.md': '# Memory\n',
   };
 
   if (opts.withBootstrap !== false) {
-    files['bootstrap.md'] = '# Bootstrap\nFirst run instructions.';
+    files['BOOTSTRAP.md'] = '# Bootstrap\nFirst run instructions.';
   }
 
   if (opts.oversizeFile) {
-    // Make agent.md oversized (> 20_000 chars)
-    files['agent.md'] = 'A'.repeat(25_000);
+    // Make AGENTS.md oversized (> 20_000 chars)
+    files['AGENTS.md'] = 'A'.repeat(25_000);
   }
 
   for (const [name, content] of Object.entries(files)) {
@@ -271,7 +271,7 @@ describe('Phase 1: Workspace Loader', () => {
 
   // P1-05
   it('P1-05: oversized file truncated with [TRUNCATED] marker', async () => {
-    const workspace = makeTempWorkspace('p105-', { oversizeFile: 'agent.md' });
+    const workspace = makeTempWorkspace('p105-', { oversizeFile: 'AGENTS.md' });
     const result = await loadWorkspace(workspace);
 
     expect(result.truncated).toBe(true);
@@ -1587,8 +1587,8 @@ describe('Phase 4: Bootstrap lifecycle', () => {
     await markBootstrapComplete(ws);
 
     // bootstrap.md should be gone; bootstrap.md.done should exist
-    expect(fs.existsSync(path.join(ws, 'bootstrap.md'))).toBe(false);
-    expect(fs.existsSync(path.join(ws, 'bootstrap.md.done'))).toBe(true);
+    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md'))).toBe(false);
+    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md.done'))).toBe(true);
 
     // Subsequent load reports isFirstRun=false
     const after = await loadWorkspace(ws);
@@ -1602,7 +1602,7 @@ describe('Phase 4: Bootstrap lifecycle', () => {
 
     await expect(deleteBootstrap(ws)).resolves.not.toThrow();
     // File is gone after first call
-    expect(fs.existsSync(path.join(ws, 'bootstrap.md'))).toBe(false);
+    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md'))).toBe(false);
     // Second call must also not throw
     await expect(deleteBootstrap(ws)).resolves.not.toThrow();
   });
@@ -1616,7 +1616,7 @@ describe('Phase 4: MemoryManager', () => {
     const ws = makeTempWorkspace('p404-', { withBootstrap: false });
     // Pre-populate memory.md with a section
     fs.writeFileSync(
-      path.join(ws, 'memory.md'),
+      path.join(ws, 'MEMORY.md'),
       '# Memory\n\n## People\n- Alice is a friend.\n',
       'utf-8',
     );
@@ -1624,7 +1624,7 @@ describe('Phase 4: MemoryManager', () => {
     const mm = new MemoryManager(ws);
     await mm.appendFact('People', 'Bob is a colleague.');
 
-    const content = fs.readFileSync(path.join(ws, 'memory.md'), 'utf-8');
+    const content = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf-8');
     expect(content).toContain('## People');
     expect(content).toContain('- Bob is a colleague.');
 
@@ -1639,12 +1639,12 @@ describe('Phase 4: MemoryManager', () => {
   // P4-05
   it('P4-05: appendFact to new section → section created at end of file', async () => {
     const ws = makeTempWorkspace('p405-', { withBootstrap: false });
-    fs.writeFileSync(path.join(ws, 'memory.md'), '# Memory\n', 'utf-8');
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# Memory\n', 'utf-8');
 
     const mm = new MemoryManager(ws);
     await mm.appendFact('NewSection', 'A brand new fact.');
 
-    const content = fs.readFileSync(path.join(ws, 'memory.md'), 'utf-8');
+    const content = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf-8');
     expect(content).toContain('## NewSection');
     expect(content).toContain('- A brand new fact.');
 
@@ -1658,7 +1658,7 @@ describe('Phase 4: MemoryManager', () => {
   it('P4-06: searchMemory → returns only lines containing query', async () => {
     const ws = makeTempWorkspace('p406-', { withBootstrap: false });
     fs.writeFileSync(
-      path.join(ws, 'memory.md'),
+      path.join(ws, 'MEMORY.md'),
       '# Memory\n\n## People\n- Alice loves cats.\n- Bob likes dogs.\n- Carol has a parrot.\n',
       'utf-8',
     );
@@ -1684,15 +1684,15 @@ describe('Phase 4: MemoryManager', () => {
     for (let i = 0; i < 50; i++) {
       lines.push(`- Fact number ${i} with some padding text to ensure the file is large enough.`);
     }
-    fs.writeFileSync(path.join(ws, 'memory.md'), lines.join('\n'), 'utf-8');
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), lines.join('\n'), 'utf-8');
 
-    const before = fs.readFileSync(path.join(ws, 'memory.md'), 'utf-8');
+    const before = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf-8');
     const limit = Math.floor(before.length / 2);
 
     const mm = new MemoryManager(ws);
     const { removed } = await mm.trimToSize(limit);
 
-    const after = fs.readFileSync(path.join(ws, 'memory.md'), 'utf-8');
+    const after = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf-8');
     expect(after.length).toBeLessThanOrEqual(limit);
     expect(removed).toBeGreaterThan(0);
   });
@@ -1700,7 +1700,7 @@ describe('Phase 4: MemoryManager', () => {
   // P4-08
   it('P4-08: thread-safety: 5 concurrent appendFact → all 5 facts present', async () => {
     const ws = makeTempWorkspace('p408-', { withBootstrap: false });
-    fs.writeFileSync(path.join(ws, 'memory.md'), '# Memory\n', 'utf-8');
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# Memory\n', 'utf-8');
 
     const mm = new MemoryManager(ws);
 
@@ -1713,7 +1713,7 @@ describe('Phase 4: MemoryManager', () => {
       mm.appendFact('Concurrent', 'Fact five'),
     ]);
 
-    const content = fs.readFileSync(path.join(ws, 'memory.md'), 'utf-8');
+    const content = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf-8');
     expect(content).toContain('- Fact one');
     expect(content).toContain('- Fact two');
     expect(content).toContain('- Fact three');

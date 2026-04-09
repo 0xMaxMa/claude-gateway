@@ -59,6 +59,7 @@ export interface GatewayConfig {
 
 export interface WorkspaceFiles {
   agentMd: string;
+  identityMd: string;
   soulMd: string;
   toolsMd: string;
   userMd: string;

@@ -200,7 +200,7 @@ async function confirmAndSave(
         const edited = fs.readFileSync(tmpFile, 'utf8');
         fs.unlinkSync(tmpFile);
         currentContent = edited;
-        printFilePreview('agent.md', currentContent);
+        printFilePreview('AGENTS.md', currentContent);
         console.log(`  (edited with ${usedEditor})`);
       }
     } else {
@@ -225,10 +225,10 @@ async function main(): Promise<void> {
   process.stdin.resume();
   const rl = createRl();
 
-  // Check agent.md exists
-  const agentMdPath = path.join(wsDir, 'agent.md');
+  // Check AGENTS.md exists
+  const agentMdPath = path.join(wsDir, 'AGENTS.md');
   if (!fs.existsSync(agentMdPath)) {
-    console.error(`  Error: agent.md not found at ${agentMdPath}`);
+    console.error(`  Error: AGENTS.md not found at ${agentMdPath}`);
     rl.close();
     process.exit(1);
   }
@@ -243,8 +243,8 @@ async function main(): Promise<void> {
   }
 
   // Step 3 — Preview
-  printFilePreview('agent.md', newContent);
-  console.log('\n  Warning: this will overwrite the existing agent.md');
+  printFilePreview('AGENTS.md', newContent);
+  console.log('\n  Warning: this will overwrite the existing AGENTS.md');
 
   // Step 4 — Confirm
   const finalContent = await confirmAndSave(rl, agentMdPath, newContent);
@@ -256,7 +256,7 @@ async function main(): Promise<void> {
 
   // Step 5 — Save agent.md
   fs.writeFileSync(agentMdPath, finalContent + '\n', 'utf8');
-  console.log('  ✓ agent.md saved');
+  console.log('  ✓ AGENTS.md saved');
 
   // Step 6 — Signature emoji
   const currentEmoji = agent.signatureEmoji;

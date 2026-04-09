@@ -5,7 +5,7 @@
       "gateway.api.keys"
     ]
   },
-  "configVersion": "1.0.0",
+  "configVersion": "1.0.1",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",

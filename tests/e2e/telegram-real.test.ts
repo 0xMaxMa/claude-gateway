@@ -79,8 +79,8 @@ function getBotInfo(botToken: string): Promise<BotInfo> {
 
 function createAgentWorkspace(agentName: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `e2e-${agentName}-`));
-  fs.writeFileSync(path.join(dir, 'agent.md'), `# Agent: ${agentName}\nYou are a test assistant named ${agentName}. Keep replies very short (1 sentence). This is an automated test.`);
-  fs.writeFileSync(path.join(dir, 'soul.md'), '# Soul\nBe brief and direct. Always mention your name in the response.');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), `# Agent: ${agentName}\nYou are a test assistant named ${agentName}. Keep replies very short (1 sentence). This is an automated test.`);
+  fs.writeFileSync(path.join(dir, 'SOUL.md'), '# Soul\nBe brief and direct. Always mention your name in the response.');
   return dir;
 }
 

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import PQueue from 'p-queue';
 
-const MEMORY_FILE = 'memory.md';
+const MEMORY_FILE = 'MEMORY.md';
 const DEFAULT_HEADER = '# Memory\n';
 
 export class MemoryManager {

@@ -26,7 +26,7 @@ describe('MemoryManager', () => {
 
   // ─── appendFact: existing section ─────────────────────────────────────────
   it('appendFact to existing section → fact appended under correct section', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     fs.writeFileSync(memPath, '# Memory\n\n## User Facts\n- fact 1\n\n## Decisions\n- decision 1\n');
 
     await manager.appendFact('User Facts', 'Prefers dark mode');
@@ -45,7 +45,7 @@ describe('MemoryManager', () => {
 
   // ─── appendFact: new section ───────────────────────────────────────────────
   it('appendFact to new section → section created + fact added', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     fs.writeFileSync(memPath, '# Memory\n\n## User Facts\n- fact 1\n');
 
     await manager.appendFact('Preferences', 'No filler words');
@@ -66,7 +66,7 @@ describe('MemoryManager', () => {
 
   // ─── readMemory ───────────────────────────────────────────────────────────
   it('readMemory → returns full content', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     const expected = '# Memory\n\n## Test\n- item\n';
     fs.writeFileSync(memPath, expected);
 
@@ -81,7 +81,7 @@ describe('MemoryManager', () => {
 
   // ─── searchMemory ─────────────────────────────────────────────────────────
   it('searchMemory → returns matching lines only', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     fs.writeFileSync(memPath, '# Memory\n\n## User Facts\n- dark mode\n- prefers coffee\n- dark theme\n');
 
     const results = await manager.searchMemory('dark');
@@ -90,7 +90,7 @@ describe('MemoryManager', () => {
   });
 
   it('searchMemory → returns empty array when no matches', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     fs.writeFileSync(memPath, '# Memory\n\n## Facts\n- hello world\n');
 
     const results = await manager.searchMemory('nonexistent-query-xyz');
@@ -99,7 +99,7 @@ describe('MemoryManager', () => {
 
   // ─── getStats ─────────────────────────────────────────────────────────────
   it('getStats → correct sizeBytes, lineCount, sectionCount', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     const content = '# Memory\n\n## User Facts\n- fact 1\n\n## Decisions\n- decision 1\n';
     fs.writeFileSync(memPath, content);
 
@@ -111,7 +111,7 @@ describe('MemoryManager', () => {
 
   // ─── trimToSize ───────────────────────────────────────────────────────────
   it('trimToSize → removes oldest lines, file under limit', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     // Build a content > 100 chars
     const content =
       '# Memory\n\n## Facts\n- old fact 1\n- old fact 2\n- old fact 3\n- recent fact\n';
@@ -128,7 +128,7 @@ describe('MemoryManager', () => {
   });
 
   it('trimToSize → does nothing if already under limit', async () => {
-    const memPath = path.join(tmpDir, 'memory.md');
+    const memPath = path.join(tmpDir, 'MEMORY.md');
     const content = '# Memory\n- short\n';
     fs.writeFileSync(memPath, content);
 
