@@ -3,8 +3,10 @@ import { Server } from 'http';
 import { AgentRunner } from './agent-runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from './types';
 import { CronScheduler } from './cron-scheduler';
+import { CronManager } from './cron-manager';
 import { generateDashboardHtml } from './web-ui';
 import { createApiRouter } from './api-router';
+import { createCronRouter } from './cron-router';
 
 export class GatewayRouter {
   private readonly agents: Map<string, AgentRunner>;
@@ -31,15 +33,20 @@ export class GatewayRouter {
   /** Optional gateway config (used to mount API router) */
   private readonly gatewayConfig?: GatewayConfig;
 
+  /** Optional persistent cron manager */
+  private readonly cronManager?: CronManager;
+
   constructor(
     agents: Map<string, AgentRunner>,
     configs: Map<string, AgentConfig>,
     schedulers?: Map<string, CronScheduler>,
     gatewayConfig?: GatewayConfig,
+    cronManager?: CronManager,
   ) {
     this.agents = agents;
     this.configs = configs;
     this.gatewayConfig = gatewayConfig;
+    this.cronManager = cronManager;
     this.app = express();
 
     // Initialise counters for all known agents
@@ -77,6 +84,12 @@ export class GatewayRouter {
         this.gatewayConfig.gateway.api.keys,
       );
       this.app.use('/api', apiRouter);
+    }
+
+    // Mount cron manager routes (no auth required for now — add API key auth later)
+    if (this.cronManager) {
+      const cronRouter = createCronRouter(this.cronManager);
+      this.app.use('/api', cronRouter);
     }
 
     // Health check

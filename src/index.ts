@@ -14,6 +14,7 @@ import { detectMigration, applyMigration, loadCleanTemplate } from './config-mig
 import { loadWorkspace, watchWorkspace, markBootstrapComplete } from './workspace-loader';
 import { AgentRunner } from './agent-runner';
 import { CronScheduler } from './cron-scheduler';
+import { CronManager } from './cron-manager';
 import { GatewayRouter } from './gateway-router';
 import { ContextIsolationGuard } from './context-isolation';
 import { createLogger } from './logger';
@@ -294,8 +295,18 @@ async function main(): Promise<void> {
   // Print startup summary table
   printStartupTable(startupResults);
 
+  // Start persistent cron manager
+  const cronManager = new CronManager(
+    {
+      storePath: path.join(path.dirname(CONFIG_PATH), 'crons.json'),
+      runsDir: path.join(path.dirname(CONFIG_PATH), 'cron-runs'),
+    },
+    createLogger('cron-manager', expandTilde(config.gateway.logDir)),
+  );
+  await cronManager.start();
+
   // Start gateway router
-  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config);
+  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager);
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
 
@@ -346,6 +357,7 @@ async function main(): Promise<void> {
       scheduler.stop();
     }
 
+    cronManager.stop();
     configWatcher.stop();
 
     await router.stop();

@@ -109,3 +109,62 @@ export interface Logger {
   error(message: string, data?: Record<string, unknown>): void;
   debug(message: string, data?: Record<string, unknown>): void;
 }
+
+// ─── Cron Manager Types ───────────────────────────────────────────────────────
+
+export interface CronJobState {
+  lastRunAt: number | null;
+  lastStatus: 'ok' | 'error' | null;
+  lastError: string | null;
+  consecutiveErrors: number;
+  runCount: number;
+}
+
+export interface CronJobNotify {
+  telegram?: string; // chat_id
+  webhook?: string;  // URL
+}
+
+export interface CronJob {
+  id: string;
+  agentId: string;
+  name: string;
+  schedule: string; // 5-field cron expression
+  command: string;  // shell command to execute
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  notify?: CronJobNotify;
+  state: CronJobState;
+}
+
+export interface CronJobCreate {
+  agentId: string;
+  name: string;
+  schedule: string;
+  command: string;
+  enabled?: boolean;
+  notify?: CronJobNotify;
+}
+
+export interface CronJobUpdate {
+  name?: string;
+  schedule?: string;
+  command?: string;
+  enabled?: boolean;
+  notify?: CronJobNotify;
+}
+
+export interface CronRunLog {
+  jobId: string;
+  startedAt: number;
+  durationMs: number;
+  status: 'ok' | 'error';
+  output: string;
+  error: string | null;
+}
+
+export interface CronManagerConfig {
+  storePath?: string;
+  runsDir?: string;
+}
