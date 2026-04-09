@@ -1,12 +1,19 @@
 import { Router, Request, Response } from 'express';
 import { CronManager } from './cron-manager';
-import { CronJobCreate, CronJobUpdate } from './types';
+import { ApiKey, CronJobCreate, CronJobUpdate } from './types';
+import { createApiAuthMiddleware, canAccessAgent } from './api-auth';
+
+type AuthedRequest = Request & { apiKey: ApiKey };
 
 /**
  * Creates Express routes for managing persistent cron jobs.
  *
+ * All routes require a valid API key (Authorization: Bearer or X-Api-Key header).
+ * Write operations (create/update/delete/run) additionally verify that the key
+ * has access to the job's agentId via canAccessAgent().
+ *
  * Routes:
- *   GET    /v1/crons           — List all jobs (optional ?agent= filter)
+ *   GET    /v1/crons           — List jobs accessible by this key
  *   GET    /v1/crons/status    — Overall scheduler status
  *   POST   /v1/crons           — Create a new job
  *   GET    /v1/crons/:id       — Get a single job
@@ -15,13 +22,39 @@ import { CronJobCreate, CronJobUpdate } from './types';
  *   POST   /v1/crons/:id/run   — Trigger a job manually
  *   GET    /v1/crons/:id/runs  — Get run history
  */
-export function createCronRouter(manager: CronManager): Router {
+export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[]): Router {
   const router = Router();
 
-  // List jobs
+  // Apply auth middleware if apiKeys are provided
+  if (apiKeys?.length) {
+    router.use(createApiAuthMiddleware(apiKeys));
+  }
+
+  // Helper: check agent access for jobs retrieved by id
+  function checkJobAccess(req: Request, res: Response, agentId: string): boolean {
+    if (!apiKeys?.length) return true; // no auth configured — allow all
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return false;
+    }
+    return true;
+  }
+
+  // List jobs — filtered to agents this key can access
   router.get('/v1/crons', (_req: Request, res: Response) => {
     const agentId = _req.query.agent as string | undefined;
-    const jobs = manager.list(agentId);
+    let jobs = manager.list(agentId);
+
+    // Filter by key's agent scope
+    if (apiKeys?.length) {
+      const apiKey = (_req as AuthedRequest).apiKey;
+      if (apiKey.agents !== '*') {
+        const allowed = apiKey.agents as string[];
+        jobs = jobs.filter((j) => allowed.includes(j.agentId));
+      }
+    }
+
     res.json({ jobs });
   });
 
@@ -34,10 +67,37 @@ export function createCronRouter(manager: CronManager): Router {
   router.post('/v1/crons', async (req: Request, res: Response) => {
     const body = req.body as Partial<CronJobCreate>;
 
-    if (!body.agentId || !body.name || !body.schedule || !body.command) {
-      res.status(400).json({
-        error: 'Required fields: agentId, name, schedule, command',
-      });
+    if (!body.agentId || !body.name) {
+      res.status(400).json({ error: 'Required fields: agentId, name' });
+      return;
+    }
+
+    if (!checkJobAccess(req, res, body.agentId)) return;
+
+    const scheduleKind = body.scheduleKind ?? 'cron';
+    const payloadKind = body.payloadKind ?? 'command';
+
+    // Schedule validation
+    if (scheduleKind === 'cron' && !body.schedule) {
+      res.status(400).json({ error: 'schedule is required for scheduleKind=cron' });
+      return;
+    }
+    if (scheduleKind === 'at' && !body.scheduleAt) {
+      res.status(400).json({ error: 'scheduleAt is required for scheduleKind=at' });
+      return;
+    }
+    if (scheduleKind === 'every' && (body.everyMs === undefined || body.everyMs === null)) {
+      res.status(400).json({ error: 'everyMs is required for scheduleKind=every' });
+      return;
+    }
+
+    // Payload validation
+    if (payloadKind === 'command' && !body.command) {
+      res.status(400).json({ error: 'command is required for payloadKind=command' });
+      return;
+    }
+    if (payloadKind === 'agentTurn' && !body.agentTurnMessage) {
+      res.status(400).json({ error: 'agentTurnMessage is required for payloadKind=agentTurn' });
       return;
     }
 
@@ -56,14 +116,21 @@ export function createCronRouter(manager: CronManager): Router {
       res.status(404).json({ error: 'Job not found' });
       return;
     }
+    if (!checkJobAccess(req, res, job.agentId)) return;
     res.json({ job });
   });
 
   // Update job
   router.put('/v1/crons/:id', async (req: Request, res: Response) => {
+    const job = manager.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    if (!checkJobAccess(req, res, job.agentId)) return;
     try {
-      const job = await manager.update(req.params.id, req.body as CronJobUpdate);
-      res.json({ job });
+      const updated = await manager.update(req.params.id, req.body as CronJobUpdate);
+      res.json({ job: updated });
     } catch (err) {
       const message = (err as Error).message;
       if (message.includes('not found')) {
@@ -76,36 +143,46 @@ export function createCronRouter(manager: CronManager): Router {
 
   // Delete job
   router.delete('/v1/crons/:id', async (req: Request, res: Response) => {
+    const job = manager.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    if (!checkJobAccess(req, res, job.agentId)) return;
     try {
       await manager.remove(req.params.id);
       res.json({ ok: true });
     } catch (err) {
       const message = (err as Error).message;
-      if (message.includes('not found')) {
-        res.status(404).json({ error: message });
-      } else {
-        res.status(500).json({ error: message });
-      }
+      res.status(500).json({ error: message });
     }
   });
 
   // Manual trigger
   router.post('/v1/crons/:id/run', async (req: Request, res: Response) => {
+    const job = manager.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    if (!checkJobAccess(req, res, job.agentId)) return;
     try {
       const log = await manager.run(req.params.id);
       res.json({ run: log });
     } catch (err) {
       const message = (err as Error).message;
-      if (message.includes('not found')) {
-        res.status(404).json({ error: message });
-      } else {
-        res.status(500).json({ error: message });
-      }
+      res.status(500).json({ error: message });
     }
   });
 
   // Run history
   router.get('/v1/crons/:id/runs', async (req: Request, res: Response) => {
+    const job = manager.get(req.params.id);
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    if (!checkJobAccess(req, res, job.agentId)) return;
     const limit = parseInt(req.query.limit as string) || 20;
     try {
       const runs = await manager.getRuns(req.params.id, limit);

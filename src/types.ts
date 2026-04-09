@@ -112,47 +112,96 @@ export interface Logger {
 
 // ─── Cron Manager Types ───────────────────────────────────────────────────────
 
+export type CronScheduleKind = 'cron' | 'at' | 'every';
+export type CronPayloadKind = 'command' | 'agentTurn';
+
 export interface CronJobState {
   lastRunAt: number | null;
   lastStatus: 'ok' | 'error' | null;
   lastError: string | null;
   consecutiveErrors: number;
   runCount: number;
+  lastAlertAt?: number | null;
 }
 
 export interface CronJobNotify {
   telegram?: string; // chat_id
   webhook?: string;  // URL
+  onSuccess?: boolean; // default true
+  onError?: boolean;   // default true
+}
+
+export interface CronJobFailureAlert {
+  after: number;       // trigger after N consecutive errors
+  telegram?: string;   // chat_id
+  webhook?: string;    // URL
+  cooldownMs?: number; // default 3600000 (1h)
 }
 
 export interface CronJob {
   id: string;
   agentId: string;
   name: string;
-  schedule: string; // 5-field cron expression
-  command: string;  // shell command to execute
+  // Schedule fields
+  scheduleKind?: CronScheduleKind;  // default: 'cron'
+  schedule?: string;                // cron expression (kind=cron)
+  scheduleAt?: string;              // ISO-8601 timestamp (kind=at)
+  everyMs?: number;                 // interval in ms (kind=every)
+  anchorMs?: number;                // optional anchor timestamp (kind=every)
+  // Payload fields
+  payloadKind?: CronPayloadKind;    // default: 'command'
+  command?: string;                 // shell command (payloadKind=command)
+  agentTurnMessage?: string;        // prompt for agent (payloadKind=agentTurn)
+  agentTurnSessionId?: string;      // session id (auto-generated if omitted)
+  agentTurnTimeoutMs?: number;      // default 120000
+  // Lifecycle
+  deleteAfterRun?: boolean;         // auto-delete after first successful run
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
   notify?: CronJobNotify;
+  failureAlert?: CronJobFailureAlert;
   state: CronJobState;
 }
 
 export interface CronJobCreate {
   agentId: string;
   name: string;
-  schedule: string;
-  command: string;
+  // Schedule
+  scheduleKind?: CronScheduleKind;
+  schedule?: string;
+  scheduleAt?: string;
+  everyMs?: number;
+  anchorMs?: number;
+  // Payload
+  payloadKind?: CronPayloadKind;
+  command?: string;
+  agentTurnMessage?: string;
+  agentTurnSessionId?: string;
+  agentTurnTimeoutMs?: number;
+  // Lifecycle
+  deleteAfterRun?: boolean;
   enabled?: boolean;
   notify?: CronJobNotify;
+  failureAlert?: CronJobFailureAlert;
 }
 
 export interface CronJobUpdate {
   name?: string;
+  scheduleKind?: CronScheduleKind;
   schedule?: string;
+  scheduleAt?: string;
+  everyMs?: number;
+  anchorMs?: number;
+  payloadKind?: CronPayloadKind;
   command?: string;
+  agentTurnMessage?: string;
+  agentTurnSessionId?: string;
+  agentTurnTimeoutMs?: number;
+  deleteAfterRun?: boolean;
   enabled?: boolean;
   notify?: CronJobNotify;
+  failureAlert?: CronJobFailureAlert;
 }
 
 export interface CronRunLog {

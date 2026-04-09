@@ -301,6 +301,8 @@ async function main(): Promise<void> {
       storePath: path.join(path.dirname(CONFIG_PATH), 'crons.json'),
       runsDir: path.join(path.dirname(CONFIG_PATH), 'cron-runs'),
     },
+    agentRunners,
+    agentConfigs,
     createLogger('cron-manager', expandTilde(config.gateway.logDir)),
   );
   await cronManager.start();

@@ -351,6 +351,8 @@ curl -X POST \
 
 See [Quickstart: Using the Agent API](#quickstart-using-the-agent-api) for full examples with request/response JSON.
 
+#### Agent API
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/agents/:agentId/messages` | Send a message — sync JSON or SSE stream |
@@ -367,6 +369,72 @@ See [Quickstart: Using the Agent API](#quickstart-using-the-agent-api) for full 
 | 409 | Session is busy processing another request |
 | 504 | Agent did not respond within 60s |
 | 500 | Internal error |
+
+#### Cron API
+
+Manage persistent scheduled jobs via REST. All routes require the same API key auth as the Agent API. Write operations (`POST`, `PUT`, `DELETE`) additionally verify the key has access to the job's `agentId`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/crons` | List jobs (filtered to key's accessible agents) |
+| `GET` | `/api/v1/crons/status` | Scheduler status (total, enabled, running) |
+| `POST` | `/api/v1/crons` | Create a new job |
+| `GET` | `/api/v1/crons/:id` | Get a single job |
+| `PUT` | `/api/v1/crons/:id` | Update a job |
+| `DELETE` | `/api/v1/crons/:id` | Delete a job |
+| `POST` | `/api/v1/crons/:id/run` | Trigger a job manually |
+| `GET` | `/api/v1/crons/:id/runs` | Get run history (last 20 by default) |
+
+**Create job — request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `agentId` | Yes | Agent to associate this job with |
+| `name` | Yes | Human-readable job name |
+| `scheduleKind` | No | `"cron"` (default), `"at"`, or `"every"` |
+| `schedule` | If `scheduleKind=cron` | 5-field cron expression e.g. `"0 9 * * *"` |
+| `scheduleAt` | If `scheduleKind=at` | ISO 8601 timestamp for one-shot run |
+| `everyMs` | If `scheduleKind=every` | Interval in milliseconds |
+| `payloadKind` | No | `"command"` (default) or `"agentTurn"` |
+| `command` | If `payloadKind=command` | Shell command to run |
+| `agentTurnMessage` | If `payloadKind=agentTurn` | Prompt sent to the agent as a new turn |
+| `notify` | No | `{ "telegram": { "chatId": "..." } }` — deliver result to Telegram |
+| `failureAlert` | No | `{ "telegram": { "chatId": "...", "consecutiveErrors": 3 } }` |
+| `deleteAfterRun` | No | `true` to auto-delete after first run (one-shot jobs) |
+| `enabled` | No | `true` (default) / `false` to create disabled |
+
+**Examples:**
+
+```bash
+# Create a daily cron that sends a prompt to an agent
+curl -X POST -H "X-Api-Key: my-key" -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "alfred",
+    "name": "morning-brief",
+    "scheduleKind": "cron",
+    "schedule": "0 9 * * *",
+    "payloadKind": "agentTurn",
+    "agentTurnMessage": "Give me a morning summary."
+  }' http://localhost:3000/api/v1/crons
+
+# Schedule a one-shot command
+curl -X POST -H "X-Api-Key: my-key" -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "alfred",
+    "name": "deploy",
+    "scheduleKind": "at",
+    "scheduleAt": "2026-04-10T10:00:00Z",
+    "payloadKind": "command",
+    "command": "make deploy",
+    "deleteAfterRun": true
+  }' http://localhost:3000/api/v1/crons
+
+# Trigger a job immediately
+curl -X POST -H "X-Api-Key: my-key" \
+  http://localhost:3000/api/v1/crons/<id>/run
+```
+
+Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restarts.
 
 ---
 
@@ -428,6 +496,8 @@ claude-gateway/
 │   ├── api-auth.ts                     ← API key auth middleware (timing-safe)
 │   ├── config-loader.ts                ← load + validate config.json
 │   ├── config-migrator.ts              ← auto-migration for config schema changes
+│   ├── cron-manager.ts                 ← persistent cron job manager (REST + agentTurn)
+│   ├── cron-router.ts                  ← Cron API router (auth + agent-scoped access)
 │   ├── cron-scheduler.ts               ← heartbeat task scheduler
 │   ├── heartbeat-parser.ts             ← parse heartbeat.md YAML
 │   ├── heartbeat-history.ts            ← track scheduled task execution
@@ -571,6 +641,8 @@ The gateway runs an HTTP server on port 3000 (set `PORT` env var to change):
 | `GET /ui` | Live HTML dashboard (auto-refreshes every 5s) |
 | `POST /api/v1/agents/:id/messages` | Send a message to an agent (requires API key) |
 | `GET /api/v1/agents` | List accessible agents (requires API key) |
+| `GET /api/v1/crons` | List cron jobs accessible by key (requires API key) |
+| `POST /api/v1/crons` | Create a scheduled job (requires API key + agent access) |
 
 ---
 
