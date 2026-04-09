@@ -86,9 +86,13 @@ export class GatewayRouter {
       this.app.use('/api', apiRouter);
     }
 
-    // Mount cron manager routes (no auth required for now — add API key auth later)
+    // Mount cron manager routes with same API key auth as agent router
     if (this.cronManager) {
-      const cronRouter = createCronRouter(this.cronManager);
+      const cronRouter = createCronRouter(
+        this.cronManager,
+        this.gatewayConfig?.gateway?.api?.keys,
+        new Set(this.configs.keys()),
+      );
       this.app.use('/api', cronRouter);
     }
 
