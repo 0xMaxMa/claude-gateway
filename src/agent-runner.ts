@@ -376,9 +376,10 @@ export class AgentRunner extends EventEmitter {
             }
           }
           if (obj['type'] === 'result') {
-            // Auto-forward result text if agent didn't call reply tool
+            // Always forward result text — it contains the agent's completion summary.
+            // If the agent also called reply tool, this summary still reaches the user.
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
-            if (!replyCalled && resultText.trim()) {
+            if (resultText.trim()) {
               const text = resultText.trim();
               if (hasMarkdown(text)) {
                 this.writeAutoForward(sessionId, toMarkdownV2(text), 'markdownv2');

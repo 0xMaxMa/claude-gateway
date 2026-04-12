@@ -945,4 +945,5 @@ describe('AgentRunner — typing persistence', () => {
     const typingFile = path.join(getTypingDir(), chatId);
     expect(fs.existsSync(typingFile)).toBe(true);
   }, 15000);
+
 });

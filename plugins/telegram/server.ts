@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager } from './typing'
+import { hasMarkdown, toMarkdownV2 } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -506,8 +507,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
-        const format = (args.format as string | undefined) ?? 'text'
-        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const explicitFormat = args.format as string | undefined
+        // Auto-detect markdown when caller didn't specify format explicitly
+        const useMarkdownV2 = explicitFormat === 'markdownv2' || (!explicitFormat && hasMarkdown(text))
+        const sendText = useMarkdownV2 && !explicitFormat ? toMarkdownV2(text) : text
+        const parseMode = useMarkdownV2 ? 'MarkdownV2' as const : undefined
 
         assertAllowedChat(chat_id)
 
@@ -523,7 +527,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(text, limit, mode)
+        const chunks = chunk(sendText, limit, mode)
         const sentIds: number[] = []
 
         try {

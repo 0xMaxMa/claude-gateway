@@ -194,6 +194,127 @@ export function gateLogic(
   return { action: 'drop' }
 }
 
+/**
+ * Detects whether text contains markdown formatting that warrants MarkdownV2.
+ */
+export function hasMarkdown(text: string): boolean {
+  return (
+    /\*\*[^*\n]+\*\*/m.test(text) ||
+    /`[^`\n]+`/m.test(text) ||
+    /^```/m.test(text) ||
+    /^#{1,6}\s/m.test(text) ||
+    /^\|.+\|/m.test(text) ||
+    /\[.+?\]\(https?:\/\/.+?\)/m.test(text)
+  )
+}
+
+function escapePlain(text: string): string {
+  return text.replace(/([_*[\]()~`>#+=|{}.!\-\\])/g, '\\$1')
+}
+
+function convertTablesToCodeBlocks(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let tableLines: string[] = []
+  const flushTable = (): void => {
+    if (tableLines.length > 0) {
+      out.push('```', ...tableLines, '```')
+      tableLines = []
+    }
+  }
+  for (const line of lines) {
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      tableLines.push(line)
+    } else {
+      flushTable()
+      out.push(line)
+    }
+  }
+  flushTable()
+  return out.join('\n')
+}
+
+/**
+ * Converts standard Markdown to Telegram MarkdownV2 format.
+ */
+export function toMarkdownV2(text: string): string {
+  text = convertTablesToCodeBlocks(text)
+  const out: string[] = []
+  let i = 0
+  const len = text.length
+  while (i < len) {
+    if (text.startsWith('```', i)) {
+      const closeIdx = text.indexOf('\n```', i + 3)
+      if (closeIdx !== -1) {
+        const inner = text.slice(i + 3, closeIdx)
+        const nlIdx = inner.indexOf('\n')
+        const lang = nlIdx > 0 ? inner.slice(0, nlIdx) : ''
+        const code = nlIdx > 0 ? inner.slice(nlIdx + 1) : inner.replace(/^\n/, '')
+        const esc = code.replace(/\\/g, '\\\\').replace(/`/g, '\\`')
+        out.push('```' + lang + '\n' + esc + '\n```')
+        i = closeIdx + 4
+        continue
+      }
+    }
+    if (text[i] === '`' && text[i + 1] !== '`') {
+      const closeIdx = text.indexOf('`', i + 1)
+      if (closeIdx !== -1) {
+        const code = text.slice(i + 1, closeIdx)
+        out.push('`' + code.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`')
+        i = closeIdx + 1
+        continue
+      }
+    }
+    if (text.startsWith('**', i) && text[i + 2] !== '*' && text[i + 2] !== ' ') {
+      const closeIdx = text.indexOf('**', i + 2)
+      if (closeIdx !== -1 && !text.slice(i + 2, closeIdx).includes('\n')) {
+        out.push('*' + escapePlain(text.slice(i + 2, closeIdx)) + '*')
+        i = closeIdx + 2
+        continue
+      }
+    }
+    if (text[i] === '[') {
+      const closeBracket = text.indexOf(']', i + 1)
+      if (closeBracket !== -1 && text[closeBracket + 1] === '(') {
+        const closeParen = text.indexOf(')', closeBracket + 2)
+        if (closeParen !== -1) {
+          const linkText = text.slice(i + 1, closeBracket)
+          const url = text.slice(closeBracket + 2, closeParen)
+          out.push('[' + escapePlain(linkText) + '](' + url.replace(/\\/g, '\\\\').replace(/\)/g, '\\)') + ')')
+          i = closeParen + 1
+          continue
+        }
+      }
+    }
+    if ((i === 0 || text[i - 1] === '\n') && text[i] === '#') {
+      let level = 0
+      while (i + level < len && text[i + level] === '#') level++
+      if (level <= 6 && text[i + level] === ' ') {
+        const lineEnd = text.indexOf('\n', i + level + 1)
+        const end = lineEnd === -1 ? len : lineEnd
+        out.push('*' + escapePlain(text.slice(i + level + 1, end)) + '*')
+        i = end
+        continue
+      }
+    }
+    let j = i + 1
+    while (j < len) {
+      const c = text[j]
+      if (
+        text.startsWith('```', j) ||
+        (c === '`' && text[j + 1] !== '`') ||
+        text.startsWith('**', j) ||
+        c === '[' ||
+        (c === '#' && (j === 0 || text[j - 1] === '\n'))
+      ) break
+      j++
+    }
+    out.push(escapePlain(text.slice(i, j)))
+    i = j
+  }
+  return out.join('')
+}
+
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {
   const entities = input.messageEntities ?? input.captionEntities ?? []
   const text = input.messageText ?? ''
