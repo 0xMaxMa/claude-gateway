@@ -11,6 +11,7 @@ export function hasMarkdown(text: string): boolean {
   return (
     /\*\*[^*\n]+\*\*/m.test(text) ||          // **bold**
     /\*[^\s*\n][^*\n]*\*/m.test(text) ||       // *italic*
+    /_[^\s_\n][^_\n]*_/m.test(text) ||        // _italic_
     /`[^`\n]+`/m.test(text) ||                 // `inline code`
     /^```/m.test(text) ||                      // ```code block
     /^#{1,6}\s/m.test(text) ||                 // # header

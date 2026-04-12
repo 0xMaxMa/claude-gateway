@@ -1,8 +1,7 @@
 /**
- * Unit tests for hasMarkdown() and toMarkdownV2() from plugins/telegram/pure.ts
+ * Unit tests for hasMarkdown() and toMarkdownV2() from src/markdown.ts
  */
 import { hasMarkdown, toMarkdownV2 } from '../../../src/markdown'
-import { hasMarkdown as hasMarkdownPure, toMarkdownV2 as toMarkdownV2Pure } from '../../../plugins/telegram/pure'
 
 describe('hasMarkdown()', () => {
   test('detects **bold**', () => {
@@ -224,33 +223,3 @@ describe('toMarkdownV2()', () => {
   })
 })
 
-describe('plugins/telegram/pure hasMarkdown() and toMarkdownV2()', () => {
-  test('hasMarkdown detects **bold**', () => {
-    expect(hasMarkdownPure('**bold**')).toBe(true)
-  })
-
-  test('hasMarkdown detects inline code', () => {
-    expect(hasMarkdownPure('`code`')).toBe(true)
-  })
-
-  test('hasMarkdown plain text returns false', () => {
-    expect(hasMarkdownPure('just text')).toBe(false)
-  })
-
-  test('toMarkdownV2 converts **bold**', () => {
-    expect(toMarkdownV2Pure('**hello**')).toBe('*hello*')
-  })
-
-  test('toMarkdownV2 escapes plain text special chars', () => {
-    expect(toMarkdownV2Pure('hello. world!')).toBe('hello\\. world\\!')
-  })
-
-  test('toMarkdownV2 preserves inline code', () => {
-    expect(toMarkdownV2Pure('Use `npm install`')).toBe('Use `npm install`')
-  })
-
-  test('pure and src produce identical output for complex input', () => {
-    const input = '**Title**\n\n```ts\nconst x = 1\n```\n\nSome `code` here.'
-    expect(toMarkdownV2Pure(input)).toBe(toMarkdownV2(input))
-  })
-})
