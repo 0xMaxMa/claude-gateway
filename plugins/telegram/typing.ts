@@ -138,32 +138,38 @@ export function createWorkingStateManager(
         }
       } catch {}
     }
-    // Auto-forward result text only if agent didn't already reply via tool.
-    // The .replied marker is written by the Telegram MCP reply handler.
+    // Auto-forward result text to Telegram if the agent did not already reply with the same text.
     const forwardPath = forwardFilePath(chatId)
     const repliedPath = repliedFilePath(chatId)
-    const alreadyReplied = fsApi.existsSync(repliedPath)
     if (fsApi.existsSync(forwardPath)) {
-      if (!alreadyReplied) {
+      try {
+        const raw = fsApi.readFileSync(forwardPath, 'utf8').trim()
+        let forwardText: string
+        let parseMode: 'HTML' | undefined
         try {
-          const raw = fsApi.readFileSync(forwardPath, 'utf8').trim()
-          let forwardText: string
-          let parseMode: 'MarkdownV2' | undefined
+          const parsed = JSON.parse(raw) as { text: string; format: string }
+          forwardText = parsed.text
+          parseMode = parsed.format === 'html' ? 'HTML' : undefined
+        } catch {
+          // Fallback: treat as plain text (old format compatibility)
+          forwardText = raw
+          parseMode = undefined
+        }
+        // Skip if the reply tool already sent the exact same text (content-based dedup)
+        let isDuplicate = false
+        if (fsApi.existsSync(repliedPath)) {
           try {
-            const parsed = JSON.parse(raw) as { text: string; format: string }
-            forwardText = parsed.text
-            parseMode = parsed.format === 'markdownv2' ? 'MarkdownV2' : undefined
+            const repliedText = fsApi.readFileSync(repliedPath, 'utf8').trim()
+            isDuplicate = repliedText === forwardText.trim()
           } catch {
-            // Fallback: treat as plain text (old format compatibility)
-            forwardText = raw
-            parseMode = undefined
+            isDuplicate = true  // Unreadable → assume duplicate to avoid double-send
           }
-          if (forwardText) {
-            const msgOpts = parseMode ? { parse_mode: parseMode } : {}
-            await botApi.sendMessage(chatId, forwardText, msgOpts).catch(() => {})
-          }
-        } catch {}
-      }
+        }
+        if (!isDuplicate && forwardText) {
+          const msgOpts = parseMode ? { parse_mode: parseMode } : {}
+          await botApi.sendMessage(chatId, forwardText, msgOpts).catch(() => {})
+        }
+      } catch {}
       fsApi.rmSync(forwardPath, { force: true })
     }
     fsApi.rmSync(repliedPath, { force: true })
