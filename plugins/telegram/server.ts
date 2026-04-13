@@ -637,6 +637,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 const SEND_ONLY = process.env.TELEGRAM_SEND_ONLY === 'true'
 const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 
+const BOT_COMMANDS = [
+  { command: 'session', description: 'Show current session info' },
+  { command: 'sessions', description: 'Manage conversation sessions' },
+  { command: 'new', description: 'Create a new session' },
+  { command: 'rename', description: 'Rename current session' },
+  { command: 'clear', description: 'Clear current session history' },
+  { command: 'compact', description: 'Summarize and compress session history' },
+  { command: 'restart', description: 'Graceful restart session' },
+  { command: 'model', description: 'Show current AI model' },
+  { command: 'models', description: 'Switch AI model' },
+  { command: 'start', description: 'Welcome and setup guide' },
+  { command: 'status', description: 'Check your pairing status' },
+  { command: 'help', description: 'What this bot can do' },
+]
+
 // Available AI models for /models command
 const AVAILABLE_MODELS = [
   { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus' },
@@ -851,11 +866,21 @@ bot.command('help', async ctx => {
   await ctx.reply(
     `Messages you send here route to a paired Claude Code session. ` +
     `Text and photos are forwarded; replies and reactions come back.\n\n` +
-    `/start — pairing instructions\n` +
-    `/status — check your pairing state\n` +
+    `*Session management*\n` +
+    `/session — show current session info\n` +    
+    `/sessions — list and switch between sessions\n` +
+    `/new <name> — create a new session\n` +
+    `/rename <name> — rename current session\n` +
+    `/clear — clear current session history\n` +
+    `/compact — summarise and compress session history\n` +
+    `/restart — graceful restart session\n\n` +
+    `*Agent*\n` +
     `/model — show current AI model\n` +
-    `/models — switch AI model\n` +
-    `/restart — graceful restart session`
+    `/models — switch AI model\n\n` +
+    `*Account*\n` +
+    `/start — pairing instructions\n` +
+    `/status — check your pairing state`,
+    { parse_mode: 'Markdown' }
   )
 })
 
@@ -934,6 +959,22 @@ bot.command('models', async ctx => {
   }
 })
 
+// /compact — show compact confirmation keyboard (receiver mode only)
+bot.command('compact', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+
+  const keyboard = new InlineKeyboard()
+    .text('\u2705 Yes, compact', 'compact:confirm')
+    .text('\u274c Cancel', 'compact:cancel')
+
+  await ctx.reply(
+    '🧠 Compact session?\nThis will summarise old messages and keep only recent history.',
+    { reply_markup: keyboard },
+  )
+})
+
 // /restart — show restart confirmation keyboard (receiver mode only)
 bot.command('restart', async ctx => {
   if (ctx.chat?.type !== 'private') return
@@ -948,6 +989,94 @@ bot.command('restart', async ctx => {
     '\u26a0\ufe0f Restart session?\nThis will graceful-restart the current Claude session.',
     { reply_markup: keyboard },
   )
+})
+
+// /session — show current session info (direct command, no typing manager)
+bot.command('session', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  if (!CALLBACK_URL_BASE) return
+
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'session_info', chat_id: String(ctx.chat.id) }),
+    })
+    const data = await res.json() as { success: boolean; text?: string }
+    await ctx.reply(data.text ?? '⚠️ Could not get session info.')
+  } catch {
+    await ctx.reply('⚠️ Could not connect to gateway.')
+  }
+})
+
+// /sessions — list sessions with inline keyboard for switching/deleting
+bot.command('sessions', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  if (!CALLBACK_URL_BASE) return
+
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'list_sessions', chat_id: String(ctx.chat.id) }),
+    })
+    const data = (await res.json()) as {
+      sessions?: Array<{ id: string; name: string; messageCount: number; lastActive: number }>
+      activeSessionId?: string
+    }
+    const sessions = data.sessions ?? []
+    const activeId = data.activeSessionId ?? ''
+
+    const keyboard = new InlineKeyboard()
+    for (const s of sessions) {
+      const isActive = s.id === activeId
+      const label = isActive ? `\ud83d\udfe2 ${s.name}` : s.name
+      if (sessions.length > 1) {
+        keyboard.text(label, `session_switch:${s.id}`).text('\ud83d\uddd1', `session_delete:${s.id}`).row()
+      } else {
+        keyboard.text(label, `session_switch:${s.id}`).row()
+      }
+    }
+    keyboard.text('\u2795 New Session', 'session_new').row()
+    keyboard.text('Dismiss', 'session_back')
+
+    const lines = [`\ud83d\uddc2 Sessions (${sessions.length})`, '']
+    for (const s of sessions) {
+      const isActive = s.id === activeId
+      const ago = Math.round((Date.now() - s.lastActive) / 60000)
+      const ageStr = ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`
+      lines.push(`${isActive ? '\ud83d\udfe2' : '\u26aa'} ${s.name} \u00b7 ${s.messageCount} msgs \u00b7 ${ageStr}`)
+    }
+    lines.push('')
+    lines.push('Tap a session to switch, \ud83d\uddd1 to delete')
+
+    await ctx.reply(lines.join('\n'), { reply_markup: keyboard })
+  } catch {
+    await ctx.reply('Failed to get sessions.')
+  }
+})
+
+// /clear — show Yes/No confirmation before clearing session history
+bot.command('clear', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+
+  await ctx.reply(
+    '🗑️ Clear session?\n\nThis will delete all message history. This cannot be undone.',
+    {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Yes, clear it', callback_data: 'session_clear_confirm' },
+          { text: '❌ Cancel', callback_data: 'session_clear_cancel' },
+        ]],
+      },
+    },
+  ).catch(() => {})
 })
 
 // Inline-button handler for permission requests. Callback data is
@@ -1038,6 +1167,214 @@ bot.on('callback_query:data', async ctx => {
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
         await ctx.editMessageText(`Restart failed: ${result.error ?? 'unknown error'}`).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle compact confirmation: compact:confirm | compact:cancel
+  const compactMatch = /^compact:(confirm|cancel)$/.exec(data)
+  if (compactMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (compactMatch[1] === 'cancel') {
+      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+      await ctx.editMessageText('Compact cancelled.').catch(() => {})
+      return
+    }
+    // confirm
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const chatId = String(ctx.callbackQuery.message?.chat.id)
+    try {
+      await ctx.answerCallbackQuery({ text: 'Compacting...' }).catch(() => {})
+      await ctx.deleteMessage().catch(() => {})
+      await ctx.reply('🧠 Session compacting, please wait...\nThis may take a moment.').catch(() => {})
+      if (RECEIVER_MODE) {
+        typingManager.start(chatId)
+      }
+      await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'compact_confirm', chat_id: chatId }),
+      })
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle session switch: session_switch:<sessionId>
+  const switchMatch = /^session_switch:(.+)$/.exec(data)
+  if (switchMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const sessionId = switchMatch[1]
+    const chatId = String(ctx.callbackQuery.message?.chat.id)
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'switch_session', chat_id: chatId, payload: { session_id: sessionId } }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string; sessionName?: string }
+      if (result.success) {
+        await ctx.answerCallbackQuery({ text: 'Switched!' }).catch(() => {})
+        const name = result.sessionName ?? sessionId
+        await ctx.editMessageText(`\u2705 Session switched to "${name}".`).catch(() => {})
+      } else {
+        await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle session delete prompt: session_delete:<sessionId>
+  const deleteMatch = /^session_delete:(.+)$/.exec(data)
+  if (deleteMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const sessionId = deleteMatch[1]
+    const keyboard = new InlineKeyboard()
+      .text('\u2705 Yes, delete', `session_delete_confirm:${sessionId}`)
+      .text('\u274c Cancel', 'session_delete_cancel')
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.editMessageText('\u26a0\ufe0f Delete this session? This cannot be undone.', {
+      reply_markup: keyboard,
+    }).catch(() => {})
+    return
+  }
+
+  // Handle session delete confirmation: session_delete_confirm:<sessionId>
+  const deleteConfirmMatch = /^session_delete_confirm:(.+)$/.exec(data)
+  if (deleteConfirmMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const sessionId = deleteConfirmMatch[1]
+    const chatId = String(ctx.callbackQuery.message?.chat.id)
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'delete_session', chat_id: chatId, payload: { session_id: sessionId } }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string; sessionName?: string }
+      if (result.success) {
+        await ctx.answerCallbackQuery({ text: 'Deleted' }).catch(() => {})
+        const switchedTo = result.sessionName ? `\n\n↩️ Switched to "${result.sessionName}"` : ''
+        await ctx.editMessageText(`\ud83d\uddd1 Session deleted.${switchedTo}`).catch(() => {})
+      } else {
+        await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
+        await ctx.editMessageText(`Delete failed: ${result.error ?? 'unknown error'}`).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  // Handle session delete cancel
+  if (data === 'session_delete_cancel') {
+    await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+    await ctx.editMessageText('Delete cancelled.').catch(() => {})
+    return
+  }
+
+  // Handle /clear confirmation: session_clear_confirm | session_clear_cancel
+  if (data === 'session_clear_confirm') {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const chatId = String(ctx.callbackQuery.message?.chat.id)
+    try {
+      await ctx.answerCallbackQuery({ text: 'Clearing...' }).catch(() => {})
+      await ctx.editMessageText('\u23f3 Clearing session...').catch(() => {})
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'session_clear_confirm', chat_id: chatId }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string }
+      if (result.success) {
+        await ctx.reply('\uD83D\uDCA1 Session has been cleared').catch(() => {})
+      } else {
+        await ctx.reply(`\u274C Clear failed: ${result.error ?? 'Unknown error'}`).catch(() => {})
+      }
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  if (data === 'session_clear_cancel') {
+    await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+    await ctx.editMessageText('Clear cancelled.').catch(() => {})
+    return
+  }
+
+  // Handle back button: dismiss the sessions menu
+  if (data === 'session_back') {
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.deleteMessage().catch(() => {})
+    return
+  }
+
+  // Handle new session via keyboard button: session_new
+  if (data === 'session_new') {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    const chatId = String(ctx.callbackQuery.message?.chat.id)
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'new_session', chat_id: chatId }),
+      })
+      const result = (await res.json()) as { success?: boolean; error?: string }
+      if (result.success) {
+        await ctx.answerCallbackQuery({ text: 'New session created!' }).catch(() => {})
+        await ctx.editMessageText('\u2705 New session started.').catch(() => {})
+      } else {
+        await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
     } catch {
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
@@ -1237,17 +1574,7 @@ if (RECEIVER_MODE) {
           onStart: info => {
             botUsername = info.username
             process.stderr.write(`telegram channel (receiver): polling as @${info.username}\n`)
-            void bot.api.setMyCommands(
-              [
-                { command: 'start', description: 'Welcome and setup guide' },
-                { command: 'help', description: 'What this bot can do' },
-                { command: 'status', description: 'Check your pairing status' },
-                { command: 'model', description: 'Show current AI model' },
-                { command: 'models', description: 'Switch AI model' },
-                { command: 'restart', description: 'Graceful restart session' },
-              ],
-              { scope: { type: 'all_private_chats' } },
-            ).catch(() => {})
+            void bot.api.setMyCommands(BOT_COMMANDS, { scope: { type: 'all_private_chats' } }).catch(() => {})
           },
         })
         return
@@ -1298,17 +1625,7 @@ if (RECEIVER_MODE) {
             onStart: info => {
               botUsername = info.username
               process.stderr.write(`telegram channel: polling as @${info.username}\n`)
-              void bot.api.setMyCommands(
-                [
-                  { command: 'start', description: 'Welcome and setup guide' },
-                  { command: 'help', description: 'What this bot can do' },
-                  { command: 'status', description: 'Check your pairing status' },
-                  { command: 'model', description: 'Show current AI model' },
-                  { command: 'models', description: 'Switch AI model' },
-                  { command: 'restart', description: 'Graceful restart session' },
-                ],
-                { scope: { type: 'all_private_chats' } },
-              ).catch(() => {})
+              void bot.api.setMyCommands(BOT_COMMANDS, { scope: { type: 'all_private_chats' } }).catch(() => {})
             },
           })
           return // bot.stop() was called — clean exit from the loop
