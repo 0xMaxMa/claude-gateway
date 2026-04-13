@@ -46,10 +46,18 @@ export interface ApiKey {
   agents: string[] | '*'; // agent IDs this key can access, or '*' for all
 }
 
+export interface ModelConfig {
+  id: string;
+  label: string;
+  alias: string;
+  contextWindow: number;
+}
+
 export interface GatewayConfig {
   gateway: {
     logDir: string;
     timezone: string;
+    models?: ModelConfig[];
     api?: {
       keys: ApiKey[];
     };
@@ -95,6 +103,24 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   ts: number;
+}
+
+export interface SessionMeta {
+  id: string;          // UUID
+  name: string;        // user-set or auto-generated ("Session N")
+  createdAt: number;
+  lastActive: number;
+  messageCount: number;
+  totalTokensUsed: number;
+  lastInputTokens?: number;
+  loadedAtSpawn?: number;   // messages loaded into context at last spawn (≤ MAX_HISTORY_MESSAGES)
+  archivedCount?: number;   // messages not loaded into context (older than loaded window)
+  messageCountAtSpawn?: number; // total messageCount at spawn time, used to derive in-context count
+}
+
+export interface SessionIndex {
+  activeSessionId: string;
+  sessions: SessionMeta[];
 }
 
 export type StreamEvent =
