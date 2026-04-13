@@ -245,7 +245,7 @@ async function main(): Promise<void> {
     let runner: AgentRunner;
     try {
       runner = new AgentRunner(agentConfig, config, logger);
-      await runner.start(workspace.files.bootstrapMd ?? undefined);
+      await runner.start();
     } catch (err) {
       const reason = (err as Error).message;
       logger.error('Failed to start agent runner', { error: reason });

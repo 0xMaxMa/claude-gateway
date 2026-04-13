@@ -947,3 +947,155 @@ describe('AgentRunner — typing persistence', () => {
   }, 15000);
 
 });
+
+// ── Session command routing tests ─────────────────────────────────────────────
+
+describe('AgentRunner — session command routing', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-session-cmd-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  function getTypingDir(): string {
+    return path.join(agentConfig.workspace, '.telegram-state', 'typing');
+  }
+
+  async function postChannelMessage(port: number, chatId: string, content: string): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        meta: {
+          chat_id: chatId,
+          message_id: '1',
+          user: 'testuser',
+          ts: new Date().toISOString(),
+        },
+      }),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // U11: /sessions command → not forwarded to SessionProcess, triggers session list
+  // -------------------------------------------------------------------------
+  it('U11: /sessions command is NOT forwarded to SessionProcess but triggers session list handling', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    // Send a /sessions command
+    await postChannelMessage(port, 'chat:session-cmd', '/sessions');
+    await new Promise(r => setTimeout(r, 200));
+
+    // The session process should NOT have been spawned (command handled before getOrSpawnSession)
+    const sessions = getSessions(runner);
+    expect(sessions.has('chat:session-cmd')).toBe(false);
+
+    // A .forward file should have been written (session list response)
+    const forwardFile = path.join(getTypingDir(), 'chat:session-cmd.forward');
+    expect(fs.existsSync(forwardFile)).toBe(true);
+    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(typeof content.text).toBe('string');
+    expect(content.text).toContain('Session');
+  }, 15000);
+
+  // -------------------------------------------------------------------------
+  // U12: /new my session → creates session, sends confirmation via auto-forward
+  // -------------------------------------------------------------------------
+  it('U12: /new <name> creates a new session and sends confirmation via auto-forward', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    // Send a /new command with a session name
+    await postChannelMessage(port, 'chat:new-cmd', '/new my session');
+    await new Promise(r => setTimeout(r, 300));
+
+    // A .forward file should contain confirmation
+    const forwardFile = path.join(getTypingDir(), 'chat:new-cmd.forward');
+    expect(fs.existsSync(forwardFile)).toBe(true);
+    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(content.text).toContain('my session');
+    expect(content.text).toContain('New session created');
+
+    // The process should NOT be in the session map (new sessions are lazily spawned)
+    const sessions = getSessions(runner);
+    expect(sessions.has('chat:new-cmd')).toBe(false);
+  }, 15000);
+
+  it('U12b: /new without name creates "Session N" and sends confirmation', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    await postChannelMessage(port, 'chat:new-noname', '/new');
+    await new Promise(r => setTimeout(r, 300));
+
+    const forwardFile = path.join(getTypingDir(), 'chat:new-noname.forward');
+    expect(fs.existsSync(forwardFile)).toBe(true);
+    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    // Auto-name should follow "Session N" pattern
+    expect(content.text).toMatch(/Session \d/);
+  }, 15000);
+
+  // -------------------------------------------------------------------------
+  // U13: regular message (non-command) → forwarded to Claude normally
+  // -------------------------------------------------------------------------
+  it('U13: regular (non-command) message is forwarded to Claude via SessionProcess', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    // Send a plain message
+    await postChannelMessage(port, 'chat:regular', 'Hello, Claude!');
+    await new Promise(r => setTimeout(r, 200));
+
+    // A SessionProcess should have been spawned for this chat
+    const sessions = getSessions(runner);
+    expect(sessions.has('chat:regular')).toBe(true);
+
+    // The process's stdin should have received the message
+    // Skip TelegramReceiver (0 writes) — find session process with stdin writes
+    const proc = allProcesses.find(p => !p.killed && p.stdin!.write.mock.calls.length > 0);
+    expect(proc).toBeDefined();
+    const writeCallArgs = proc!.stdin!.write.mock.calls.map((c: unknown[]) => c[0] as string);
+    const hasMessage = writeCallArgs.some(s => s.includes('Hello, Claude!'));
+    expect(hasMessage).toBe(true);
+  }, 15000);
+
+  it('U13b: /sessions does not spawn a SessionProcess (only session list command)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    const spawnMock = require('child_process').spawn as jest.Mock;
+    const spawnCountBefore = spawnMock.mock.calls.length;
+
+    await postChannelMessage(port, 'chat:no-spawn', '/sessions');
+    await new Promise(r => setTimeout(r, 200));
+
+    const spawnCountAfter = spawnMock.mock.calls.length;
+    // spawn should NOT have been called for a session command
+    expect(spawnCountAfter).toBe(spawnCountBefore);
+  }, 15000);
+});

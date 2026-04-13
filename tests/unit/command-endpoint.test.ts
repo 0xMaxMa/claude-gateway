@@ -330,6 +330,8 @@ describe('SessionProcess restart watcher notify payload', () => {
   let sessionStore: jest.Mocked<{
     loadSession: jest.Mock;
     appendMessage: jest.Mock;
+    loadTelegramSession: jest.Mock;
+    appendTelegramMessage: jest.Mock;
   }>;
 
   beforeEach(() => {
@@ -343,6 +345,8 @@ describe('SessionProcess restart watcher notify payload', () => {
     sessionStore = {
       loadSession: jest.fn().mockResolvedValue([]),
       appendMessage: jest.fn().mockResolvedValue(undefined),
+      loadTelegramSession: jest.fn().mockResolvedValue([]),
+      appendTelegramMessage: jest.fn().mockResolvedValue(undefined),
     };
 
     allProcesses.length = 0;
@@ -382,16 +386,17 @@ describe('SessionProcess restart watcher notify payload', () => {
     // Wait for chokidar to detect the file and trigger the handler
     await new Promise(r => setTimeout(r, 1000));
 
-    // Check that appendMessage was called with a marker containing notify instruction
-    const calls = sessionStore.appendMessage.mock.calls;
+    // Check that appendTelegramMessage was called with a marker containing notify instruction
+    // appendTelegramMessage(agentId, chatId, sessionId, message) — message is arg[3]
+    const calls = sessionStore.appendTelegramMessage.mock.calls;
     const restartMarkerCall = calls.find(
-      (c: unknown[]) => typeof c[2] === 'object' && c[2] !== null &&
-        typeof (c[2] as { content?: string }).content === 'string' &&
-        (c[2] as { content: string }).content.includes('Graceful restart completed'),
+      (c: unknown[]) => typeof c[3] === 'object' && c[3] !== null &&
+        typeof (c[3] as { content?: string }).content === 'string' &&
+        (c[3] as { content: string }).content.includes('Graceful restart completed'),
     );
     expect(restartMarkerCall).toBeDefined();
 
-    const markerContent = (restartMarkerCall![2] as { content: string }).content;
+    const markerContent = (restartMarkerCall![3] as { content: string }).content;
     expect(markerContent).toContain('IMPORTANT: Send a Telegram reply to chat_id "chat123"');
     expect(markerContent).toContain('Model changed to claude-sonnet-4-6');
 
@@ -425,16 +430,17 @@ describe('SessionProcess restart watcher notify payload', () => {
     // Wait for chokidar to detect the file and trigger the handler
     await new Promise(r => setTimeout(r, 1000));
 
-    // Check that appendMessage was called with default marker (no notify)
-    const calls = sessionStore.appendMessage.mock.calls;
+    // Check that appendTelegramMessage was called with default marker (no notify)
+    // appendTelegramMessage(agentId, chatId, sessionId, message) — message is arg[3]
+    const calls = sessionStore.appendTelegramMessage.mock.calls;
     const restartMarkerCall = calls.find(
-      (c: unknown[]) => typeof c[2] === 'object' && c[2] !== null &&
-        typeof (c[2] as { content?: string }).content === 'string' &&
-        (c[2] as { content: string }).content.includes('Graceful restart completed'),
+      (c: unknown[]) => typeof c[3] === 'object' && c[3] !== null &&
+        typeof (c[3] as { content?: string }).content === 'string' &&
+        (c[3] as { content: string }).content.includes('Graceful restart completed'),
     );
     expect(restartMarkerCall).toBeDefined();
 
-    const markerContent = (restartMarkerCall![2] as { content: string }).content;
+    const markerContent = (restartMarkerCall![3] as { content: string }).content;
     expect(markerContent).toBe('[System: Graceful restart completed successfully. Do not restart again.]');
     expect(markerContent).not.toContain('IMPORTANT');
 

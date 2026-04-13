@@ -3,21 +3,22 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as net from 'net';
 import * as path from 'path';
-import { AgentConfig, GatewayConfig, Logger, StreamEvent } from './types';
+import { AgentConfig, GatewayConfig, Logger, ModelConfig, StreamEvent } from './types';
 import { createLogger } from './logger';
 import { SessionProcess } from './session-process';
 import { SessionStore } from './session-store';
+import { SessionCompactor } from './session-compactor';
 import { TelegramReceiver } from './telegram-receiver';
 import { hasMarkdown, toTelegramHtml } from './markdown';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 
-const AVAILABLE_MODELS = [
-  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku' },
-] as const;
+const DEFAULT_MODELS: ModelConfig[] = [
+  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus', contextWindow: 1000000 },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet', contextWindow: 1000000 },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku', contextWindow: 200000 },
+];
 
 export class AgentRunner extends EventEmitter {
   private readonly agentConfig: AgentConfig;
@@ -102,23 +103,35 @@ export class AgentRunner extends EventEmitter {
           const chatId = meta['chat_id'] ?? '';
           const content = params.content ?? '';
 
-          // Append user message to session store
-          this.sessionStore
-            .appendMessage(this.agentConfig.id, chatId, {
-              role: 'user',
-              content,
-              ts: Date.now(),
-            })
-            .catch(() => {});
+          // Check if this is a session management command
+          const trimmedContent = content.trim();
+          if (this.isSessionCommand(trimmedContent)) {
+            this.handleSessionCommand(chatId, trimmedContent)
+              .then(() => this.writeTypingDone(chatId))
+              .catch((err) => {
+                this.logger.error('Session command failed', { error: (err as Error).message });
+                this.writeTypingDone(chatId);
+              });
+            return;
+          }
 
-          // Route to session, inject as channel XML
-          this.getOrSpawnSession(chatId, 'telegram')
-            .then((session) => {
+          // Get active session ID and route message to it
+          this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId)
+            .then(async (sessionId) => {
+              // Append user message to the active telegram session
+              await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
+                role: 'user',
+                content,
+                ts: Date.now(),
+              });
+              // Route to session process (map key = chatId, actual sessionId passed separately)
+              const session = await this.getOrSpawnSession(chatId, 'telegram', sessionId);
               const channelXml = AgentRunner.buildChannelXml(params);
               session.sendMessage(channelXml);
               session.touch();
               this.logger.debug('Injected channel turn into session', {
                 chatId,
+                sessionId,
                 user: meta['user'],
               });
             })
@@ -146,7 +159,7 @@ export class AgentRunner extends EventEmitter {
    * Handle POST /command requests from the receiver process.
    * Supports: get_model, set_model, restart.
    */
-  private handleCommandRequest(raw: string, res: http.ServerResponse): void {
+  private async handleCommandRequest(raw: string, res: http.ServerResponse): Promise<void> {
     const respond = (data: Record<string, unknown>, status = 200): void => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
@@ -169,7 +182,8 @@ export class AgentRunner extends EventEmitter {
 
     if (command === 'set_model') {
       const newModel = typeof body.payload?.model === 'string' ? body.payload.model : '';
-      const valid = AVAILABLE_MODELS.find(m => m.id === newModel);
+      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+      const valid = availableModels.find(m => m.id === newModel);
       if (!valid) {
         respond({ success: false, error: 'Unknown model' });
         return;
@@ -247,6 +261,118 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
+    if (command === 'session_clear_confirm') {
+      const chatId = body.chat_id ?? '';
+      try {
+        await this.handleCommandClear(this.agentConfig.id, chatId);
+        respond({ success: true });
+      } catch (err) {
+        respond({ success: false, error: String(err) });
+      }
+      return;
+    }
+
+    if (command === 'list_sessions') {
+      const chatId = body.chat_id ?? '';
+      try {
+        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+        return respond({ sessions: index.sessions, activeSessionId: index.activeSessionId });
+      } catch {
+        return respond({ success: false, error: 'Failed to list sessions' });
+      }
+    }
+
+    if (command === 'session_info') {
+      const chatId = body.chat_id ?? '';
+      try {
+        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+        const meta = index.sessions.find(s => s.id === index.activeSessionId);
+        if (!meta) {
+          return respond({ success: true, text: 'No active session found.' });
+        }
+        const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+        const modelConfig = availableModels.find(m => m.id === this.agentConfig.claude.model);
+        const contextWindow = modelConfig?.contextWindow ?? 200000;
+        const contextTokens = meta.lastInputTokens ?? 0;
+        const usedPct = Math.round((contextTokens / contextWindow) * 100);
+        let msgs: string;
+        if (meta.messageCount <= 0) {
+          msgs = 'No messages yet';
+        } else if ((meta.archivedCount ?? 0) > 0 && meta.loadedAtSpawn != null && meta.messageCountAtSpawn != null) {
+          const newMessagesSinceSpawn = meta.messageCount - meta.messageCountAtSpawn;
+          const inContext = meta.loadedAtSpawn + Math.max(0, newMessagesSinceSpawn);
+          msgs = `${meta.messageCount} (${inContext} in context / ${meta.archivedCount} archived)`;
+        } else {
+          msgs = `${meta.messageCount}`;
+        }
+        const lines = [
+          `📌 Current Session: ${meta.name}`,
+          '',
+          `📥 Messages: ${msgs}`,
+          `👉 Context: ${usedPct}%`,
+        ];
+        if (usedPct >= 80) {
+          lines.push('', '💡 Near limit — consider /compact');
+        }
+        lines.push('', 'Commands: /sessions /new /rename /clear /compact');
+        return respond({ success: true, text: lines.join('\n') });
+      } catch {
+        return respond({ success: false, text: 'Failed to get session info.' });
+      }
+    }
+
+    if (command === 'switch_session') {
+      const chatId = body.chat_id ?? '';
+      const sessionId = typeof body.payload?.session_id === 'string' ? body.payload.session_id : '';
+      if (!sessionId) {
+        respond({ success: false, error: 'Missing session_id' });
+        return;
+      }
+      this.switchSession(chatId, sessionId)
+        .then(async () => {
+          const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+          const session = index.sessions.find(s => s.id === sessionId);
+          respond({ success: true, sessionName: session?.name ?? sessionId });
+        })
+        .catch(err => respond({ success: false, error: String(err) }));
+      return;
+    }
+
+    if (command === 'delete_session') {
+      const chatId = body.chat_id ?? '';
+      const sessionId = typeof body.payload?.session_id === 'string' ? body.payload.session_id : '';
+      if (!sessionId) {
+        respond({ success: false, error: 'Missing session_id' });
+        return;
+      }
+      this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId)
+        .then(async () => {
+          const newIndex = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+          await this.restartProcess(chatId);
+          const activeMeta = newIndex.sessions.find(s => s.id === newIndex.activeSessionId);
+          respond({ success: true, sessionName: activeMeta?.name ?? newIndex.activeSessionId });
+        })
+        .catch(err => respond({ success: false, error: String(err) }));
+      return;
+    }
+
+    if (command === 'new_session') {
+      const chatId = body.chat_id ?? '';
+      const name = typeof body.payload?.name === 'string' ? body.payload.name : undefined;
+      this.handleCommandNew(this.agentConfig.id, chatId, name)
+        .then(() => respond({ success: true }))
+        .catch(err => respond({ success: false, error: String(err) }));
+      return;
+    }
+
+    if (command === 'compact_confirm') {
+      const chatId = body.chat_id ?? '';
+      this.handleCommandCompact(this.agentConfig.id, chatId)
+        .then(() => this.writeTypingDone(chatId))
+        .catch(() => this.writeTypingDone(chatId));
+      return respond({ success: true });
+    }
+
     respond({ success: false, error: 'Unknown command' }, 400);
   }
 
@@ -306,10 +432,11 @@ export class AgentRunner extends EventEmitter {
   }
 
   private async getOrSpawnSession(
-    sessionId: string,
+    mapKey: string,              // Map lookup key (chatId for telegram, sessionId for API)
     source: 'telegram' | 'api',
+    sessionId?: string,          // actual session UUID (only for telegram; equals mapKey for API)
   ): Promise<SessionProcess> {
-    const existing = this.sessions.get(sessionId);
+    const existing = this.sessions.get(mapKey);
     if (existing) return existing;
 
     // Evict oldest idle session if at capacity
@@ -327,12 +454,16 @@ export class AgentRunner extends EventEmitter {
       }
     }
 
+    const actualSessionId = sessionId ?? mapKey;
+    const chatId = source === 'telegram' ? mapKey : undefined;
+
     const proc = new SessionProcess(
-      sessionId,
+      actualSessionId,
       source,
       this.agentConfig,
       this.gatewayConfig,
       this.sessionStore,
+      chatId,
     );
     await proc.start();
 
@@ -343,8 +474,8 @@ export class AgentRunner extends EventEmitter {
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source === 'telegram') {
       proc.once('failed', () => {
-        this.writeTypingError(sessionId, 'PROCESS_FAILED');
-        this.sessions.delete(sessionId);
+        this.writeTypingError(mapKey, 'PROCESS_FAILED');
+        this.sessions.delete(mapKey);
       });
       // Stop typing loop when Claude's turn truly ends.
       // Typing done is delayed 3s after result event — if new output arrives within
@@ -382,20 +513,48 @@ export class AgentRunner extends EventEmitter {
             if (resultText.trim()) {
               const text = resultText.trim();
               if (hasMarkdown(text)) {
-                this.writeAutoForward(sessionId, toTelegramHtml(text), 'html');
+                this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
               } else {
-                this.writeAutoForward(sessionId, text);
+                this.writeAutoForward(mapKey, text);
               }
             }
             replyCalled = false; // reset for next turn
             // Delay typing done — agent may continue with more work
             typingDoneTimer = setTimeout(() => {
-              this.writeTypingDone(sessionId);
+              this.writeTypingDone(mapKey);
               typingDoneTimer = null;
             }, TYPING_DONE_DELAY_MS);
           }
         } catch { /* non-JSON */ }
       });
+
+      // Track token usage and persist to session meta
+      // Use actualSessionId (captured at spawn time) — NOT getActiveSessionId() —
+      // so tokens are attributed to the session that owns this process.
+      proc.on('tokenUsage', async ({ inputTokens, totalTokens }: { inputTokens: number; totalTokens: number }) => {
+        try {
+          const index = await this.sessionStore.listSessions(this.agentConfig.id, mapKey);
+          const meta = index.sessions.find(s => s.id === actualSessionId);
+          const current = meta?.totalTokensUsed ?? 0;
+          await this.sessionStore.updateSessionMeta(this.agentConfig.id, mapKey, actualSessionId, {
+            totalTokensUsed: current + totalTokens,
+            lastInputTokens: inputTokens,
+          });
+        } catch {
+          // Non-fatal — token tracking is best-effort
+        }
+      });
+
+      // Persist spawn context (loaded vs archived message counts).
+      // Read from property instead of event — the event fired during start() before
+      // listeners were registered, causing a race condition.
+      if (proc.spawnContext) {
+        this.sessionStore.updateSessionMeta(this.agentConfig.id, mapKey, actualSessionId, {
+          loadedAtSpawn: proc.spawnContext.loadedAtSpawn,
+          archivedCount: proc.spawnContext.archivedCount,
+          messageCountAtSpawn: proc.spawnContext.messageCountAtSpawn,
+        }).catch(() => { /* Non-fatal */ });
+      }
 
       // Clean up pending typing-done timer when session stops
       proc.once('exit', () => {
@@ -403,17 +562,244 @@ export class AgentRunner extends EventEmitter {
           clearTimeout(typingDoneTimer);
           typingDoneTimer = null;
         }
-        this.writeTypingDone(sessionId);
+        this.writeTypingDone(mapKey);
       });
     }
 
-    this.sessions.set(sessionId, proc);
+    this.sessions.set(mapKey, proc);
     this.logger.info('Spawned session', {
-      sessionId,
+      mapKey,
+      actualSessionId,
       source,
       total: this.sessions.size,
     });
     return proc;
+  }
+
+  /**
+   * Returns true if the message content is a session management command.
+   */
+  private isSessionCommand(content: string): boolean {
+    return /^\/sessions?\b|^\/new(\s|$)|^\/clear\b|^\/compact\b|^\/rename(\s|$)/.test(content);
+  }
+
+  /**
+   * Dispatch a session management command to the appropriate handler.
+   */
+  private async handleSessionCommand(chatId: string, content: string): Promise<void> {
+    const agentId = this.agentConfig.id;
+
+    if (content.startsWith('/sessions')) {
+      await this.handleCommandSessions(agentId, chatId);
+    } else if (content.startsWith('/session') && !content.startsWith('/sessions')) {
+      await this.handleCommandSessionInfo(agentId, chatId);
+    } else if (content.startsWith('/new')) {
+      const name = content.replace('/new', '').trim() || undefined;
+      await this.handleCommandNew(agentId, chatId, name);
+    } else if (content.startsWith('/clear')) {
+      await this.handleCommandClear(agentId, chatId);
+    } else if (content.startsWith('/compact')) {
+      await this.handleCommandCompact(agentId, chatId);
+    } else if (content.startsWith('/rename')) {
+      const name = content.replace('/rename', '').trim();
+      await this.handleCommandRename(agentId, chatId, name);
+    }
+  }
+
+  /**
+   * /sessions — list all sessions for this chat.
+   */
+  private async handleCommandSessions(agentId: string, chatId: string): Promise<void> {
+    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const lines: string[] = [`Sessions (${agentId})`, ''];
+
+    for (const s of index.sessions) {
+      const isActive = s.id === index.activeSessionId;
+      const indicator = isActive ? '🟢 ' : '   ';
+      const age = this.formatAge(s.lastActive);
+      lines.push(`${indicator}${isActive ? `**${s.name}**` : s.name}`);
+      lines.push(`  ${s.messageCount} messages · last active ${age}`);
+      lines.push('');
+    }
+
+    lines.push('Use /new [name] to create a new session');
+    this.writeAutoForward(chatId, lines.join('\n'));
+  }
+
+  /**
+   * /session — show info about the current active session.
+   */
+  private async handleCommandSessionInfo(agentId: string, chatId: string): Promise<void> {
+    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const meta = index.sessions.find(s => s.id === index.activeSessionId);
+    if (!meta) {
+      this.writeAutoForward(chatId, 'No active session found.');
+      return;
+    }
+
+    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    const modelConfig = availableModels.find(m => m.id === this.agentConfig.claude.model);
+    const contextWindow = modelConfig?.contextWindow ?? 200000;
+    const contextTokens = meta.lastInputTokens ?? 0;
+    const usedPct = Math.round((contextTokens / contextWindow) * 100);
+
+    let msgs: string;
+    if (meta.messageCount <= 0) {
+      msgs = 'No messages yet';
+    } else if ((meta.archivedCount ?? 0) > 0 && meta.loadedAtSpawn != null && meta.messageCountAtSpawn != null) {
+      const newMessagesSinceSpawn = meta.messageCount - meta.messageCountAtSpawn;
+      const inContext = meta.loadedAtSpawn + Math.max(0, newMessagesSinceSpawn);
+      msgs = `${meta.messageCount} (${inContext} in context / ${meta.archivedCount} archived)`;
+    } else {
+      msgs = `${meta.messageCount}`;
+    }
+
+    const contextLine = `${usedPct}%`;
+
+    const lines = [
+      `📌 Current Session: ${meta.name}`,
+      '',
+      `📥 Messages: ${msgs}`,
+      `👉 Context: ${contextLine}`,
+    ];
+
+    if (usedPct >= 80) {
+      lines.push('', '💡 Near limit — consider /compact');
+    }
+
+    lines.push('', 'Commands: /sessions /new /rename /clear /compact');
+
+    const info = lines.join('\n');
+
+    this.writeAutoForward(chatId, info);
+  }
+
+  /**
+   * /new [name] — create a new session and switch to it.
+   */
+  private async handleCommandNew(agentId: string, chatId: string, name?: string): Promise<void> {
+    const newMeta = await this.sessionStore.createTelegramSession(agentId, chatId, name);
+    await this.switchSession(chatId, newMeta.id);
+    this.writeAutoForward(chatId, `✅ New session created: "${newMeta.name}"\nNow chatting in a fresh context. Use /sessions to switch back.`);
+  }
+
+  /**
+   * /rename <name> — rename the current session.
+   */
+  private async handleCommandRename(agentId: string, chatId: string, name: string): Promise<void> {
+    if (!name) {
+      this.writeAutoForward(chatId, '⚠️ Usage: /rename <new name>\nExample: /rename Design review');
+      return;
+    }
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
+    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, { name });
+    this.writeAutoForward(chatId, `✅ Session renamed to "${name}"`);
+  }
+
+  /**
+   * /clear — clear history of the current session and restart the process.
+   */
+  private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
+
+    // Clear messages and reset all metadata in-place (preserves session ID and name)
+    await this.sessionStore.clearTelegramSessionHistory(agentId, chatId, sessionId);
+    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
+      totalTokensUsed: 0,
+      lastInputTokens: 0,
+      archivedCount: 0,
+      loadedAtSpawn: undefined,
+      messageCountAtSpawn: undefined,
+    });
+
+    // Kill old process so next message spawns fresh
+    this.restartProcess(chatId).catch(() => {});
+  }
+
+  /**
+   * /compact — summarise old history and keep only recent messages.
+   */
+  private async handleCommandCompact(agentId: string, chatId: string): Promise<void> {
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
+    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const meta = index.sessions.find(s => s.id === sessionId);
+    const name = meta?.name ?? 'Session';
+
+    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    const modelConfig = availableModels.find(m => m.id === this.agentConfig.claude.model);
+    const contextWindow = modelConfig?.contextWindow ?? 200000;
+
+    this.writeAutoForward(chatId, `⏳ Compacting session "${name}"...`);
+
+    try {
+      const compactor = new SessionCompactor(this.sessionStore);
+      const result = await compactor.compact(agentId, chatId, sessionId, this.agentConfig.claude.model, contextWindow);
+      // Reset context tracking — after compaction all messages fit in context
+      await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
+        loadedAtSpawn: undefined,
+        archivedCount: undefined,
+        messageCountAtSpawn: undefined,
+      });
+      await this.restartProcess(chatId);
+
+      const summary = [
+        `✅ Session compacted`,
+        '',
+        `Before: ${result.beforeMessages} messages (~${result.beforeTokens.toLocaleString()} tokens)  →  ${result.contextPctBefore}% of context`,
+        `After:  ${result.afterMessages} messages (~${result.afterTokens.toLocaleString()} tokens)   →  ${result.contextPctAfter}% of context`,
+        `Reduced by: ${result.reductionPct}%`,
+        '',
+        'Summary preserved. Full history before compaction is archived.',
+      ].join('\n');
+      this.writeAutoForward(chatId, summary);
+    } catch (err) {
+      if ((err as Error).name === 'NotEnoughMessagesError') {
+        this.writeAutoForward(chatId, `⚠️ ${(err as Error).message}`);
+      } else {
+        this.logger.error('Compact failed', { error: (err as Error).message });
+        this.writeAutoForward(chatId, `❌ Compact failed: ${(err as Error).message}\n\nYour session history is unchanged.`);
+      }
+    }
+  }
+
+  /**
+   * Switch the active session for a chat: stop the existing process and update the store.
+   * The new process will be lazily spawned on the next incoming message.
+   */
+  private async switchSession(chatId: string, newSessionId: string): Promise<void> {
+    const existing = this.sessions.get(chatId);
+    if (existing) {
+      await existing.stop();
+      this.sessions.delete(chatId);
+    }
+    await this.sessionStore.setActiveSession(this.agentConfig.id, chatId, newSessionId);
+  }
+
+  /**
+   * Restart the process for a given chatId (stop + remove from map).
+   * The process will be lazily re-spawned on the next incoming message.
+   */
+  private async restartProcess(chatId: string): Promise<void> {
+    const existing = this.sessions.get(chatId);
+    if (existing) {
+      await existing.stop();
+      this.sessions.delete(chatId);
+    }
+    // Process will be re-spawned on next incoming message
+  }
+
+  /**
+   * Format a timestamp as a human-readable age string (e.g. "5m ago", "2h ago").
+   */
+  private formatAge(ts: number): string {
+    const diffMs = Date.now() - ts;
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
   }
 
   /**
@@ -472,8 +858,7 @@ export class AgentRunner extends EventEmitter {
     }, 5 * 60 * 1000);
   }
 
-  async start(bootstrapPrompt?: string): Promise<void> {
-    void bootstrapPrompt; // reserved for future use
+  async start(): Promise<void> {
     this.stopping = false;
     await this.startCallbackServer();
     this.receiver = new TelegramReceiver(

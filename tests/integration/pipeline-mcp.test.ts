@@ -205,17 +205,6 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
 
     mock = startMockTelegramServer(port)
 
-    // Pre-pair USER_ID so messages are delivered (not dropped by gate)
-    const access = {
-      dmPolicy: 'allowlist',
-      allowFrom: [USER_ID],
-      groups: {},
-      pending: {},
-    }
-    const stateDir = path.join(tmpDir, '.telegram-state')
-    fs.mkdirSync(stateDir, { recursive: true })
-    fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2))
-
     collectedOutput = []
 
     // Use mock-claude-mcp as the Claude binary.
@@ -224,15 +213,31 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
     process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE_MCP_BIN}`
     process.env.TELEGRAM_API_ROOT = `http://127.0.0.1:${port}`
 
-    const agentCfg = makeAgentConfig(tmpDir, BOT_TOKEN, `http://127.0.0.1:${port}`)
+    // Pre-pair USER_ID so messages are delivered (not dropped by gate)
+    const access = {
+      dmPolicy: 'allowlist',
+      allowFrom: [USER_ID],
+      groups: {},
+      pending: {},
+    }
+
+    // workspace must be <base>/<agentId>/workspace so agentsBaseDir resolves correctly
+    const workspace = path.join(tmpDir, 'pipeline-test-agent', 'workspace')
+    fs.mkdirSync(workspace, { recursive: true })
+    const agentCfg = makeAgentConfig(workspace, BOT_TOKEN, `http://127.0.0.1:${port}`)
     const gatewayCfg = makeGatewayConfig(logDir)
+
+    // Pre-pair USER_ID in workspace state dir
+    const workspaceStateDir = path.join(workspace, '.telegram-state')
+    fs.mkdirSync(workspaceStateDir, { recursive: true })
+    fs.writeFileSync(path.join(workspaceStateDir, 'access.json'), JSON.stringify(access, null, 2))
 
     runner = new AgentRunner(agentCfg, gatewayCfg)
     runner.on('output', (line: string) => {
       collectedOutput.push(line)
     })
 
-    await runner.start('Pipeline test: channels mode active')
+    await runner.start()
 
     // Wait for mock-claude-mcp to complete MCP handshake with plugin
     const deadline = Date.now() + 20000
@@ -347,9 +352,17 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
   // ── MCP config validation ─────────────────────────────────────────────────
 
   test('MCP config written by agent-runner has correct structure', () => {
-    // MCP config is per-session: written at .sessions/<chatId>/mcp-config.json
-    const mcpConfigPath = path.join(tmpDir, '.sessions', USER_ID, 'mcp-config.json')
-    expect(fs.existsSync(mcpConfigPath)).toBe(true)
+    // MCP config is per-session: written at workspace/.sessions/<sessionUUID>/mcp-config.json
+    const workspace = path.join(tmpDir, 'pipeline-test-agent', 'workspace')
+    const sessionsDir = path.join(workspace, '.sessions')
+    expect(fs.existsSync(sessionsDir)).toBe(true)
+    // Scan for mcp-config.json in any session directory
+    const sessionDirs = fs.readdirSync(sessionsDir)
+    const sessionWithConfig = sessionDirs.find(d =>
+      fs.existsSync(path.join(sessionsDir, d, 'mcp-config.json'))
+    )
+    expect(sessionWithConfig).toBeDefined()
+    const mcpConfigPath = path.join(sessionsDir, sessionWithConfig!, 'mcp-config.json')
 
     const config = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'))
     expect(config.mcpServers).toBeDefined()
@@ -397,15 +410,6 @@ describe('Pipeline MCP — Step 3b: Claude calls reply tool → sendMessage', ()
 
     mock2 = startMockTelegramServer(port2)
 
-    const stateDir2 = path.join(tmpDir2, '.telegram-state')
-    fs.mkdirSync(stateDir2, { recursive: true })
-    fs.writeFileSync(path.join(stateDir2, 'access.json'), JSON.stringify({
-      dmPolicy: 'allowlist',
-      allowFrom: [USER_ID],
-      groups: {},
-      pending: {},
-    }, null, 2))
-
     collectedOutput2 = []
 
     // Set MOCK_CLAUDE_REPLY=1 BEFORE spawning — the child process inherits env at spawn time
@@ -413,14 +417,27 @@ describe('Pipeline MCP — Step 3b: Claude calls reply tool → sendMessage', ()
     process.env.TELEGRAM_API_ROOT = `http://127.0.0.1:${port2}`
     process.env.MOCK_CLAUDE_REPLY = '1'
 
-    const agentCfg = makeAgentConfig(tmpDir2, BOT_TOKEN + '_2', `http://127.0.0.1:${port2}`)
+    // workspace must be <base>/<agentId>/workspace so agentsBaseDir resolves correctly
+    const workspace2 = path.join(tmpDir2, 'pipeline-test-agent-2', 'workspace')
+    fs.mkdirSync(workspace2, { recursive: true })
+    const agentCfg = makeAgentConfig(workspace2, BOT_TOKEN + '_2', `http://127.0.0.1:${port2}`)
     agentCfg.id = 'pipeline-test-agent-2'
+
+    // Pre-pair USER_ID in workspace state dir
+    const stateDir2 = path.join(workspace2, '.telegram-state')
+    fs.mkdirSync(stateDir2, { recursive: true })
+    fs.writeFileSync(path.join(stateDir2, 'access.json'), JSON.stringify({
+      dmPolicy: 'allowlist',
+      allowFrom: [USER_ID],
+      groups: {},
+      pending: {},
+    }, null, 2))
     const gatewayCfg = makeGatewayConfig(logDir2)
 
     runner2 = new AgentRunner(agentCfg, gatewayCfg)
     runner2.on('output', (line: string) => { collectedOutput2.push(line) })
 
-    await runner2.start('Pipeline test: channels mode active')
+    await runner2.start()
 
     // Wait for ready + bot polling
     const deadline = Date.now() + 20000

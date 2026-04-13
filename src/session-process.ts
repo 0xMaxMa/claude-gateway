@@ -16,8 +16,10 @@ const CHANNELS_ACTIVATION_PROMPT =
 
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
+  readonly chatId: string;
   readonly source: 'telegram' | 'api';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
+  spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
   private stopping = false;
   private restartCount = 0;
@@ -36,10 +38,12 @@ export class SessionProcess extends EventEmitter {
     agentConfig: AgentConfig,
     gatewayConfig: GatewayConfig,
     sessionStore: SessionStore,
+    chatId?: string,  // for telegram: actual chatId; for api: same as sessionId
   ) {
     super();
     this.sessionId = sessionId;
     this.source = source;
+    this.chatId = chatId ?? sessionId;
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
     this.sessionStore = sessionStore;
@@ -102,30 +106,40 @@ export class SessionProcess extends EventEmitter {
       const marker = notifyPayload
         ? `[System: Graceful restart completed successfully. Do not restart again. IMPORTANT: Send a Telegram reply to chat_id "${notifyPayload.chat_id}" with the message: "${notifyPayload.text}"]`
         : '[System: Graceful restart completed successfully. Do not restart again.]';
-      this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, {
-        role: 'assistant',
-        content: marker,
-        ts: Date.now(),
-      }).catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
+      const restartMsg = { role: 'assistant' as const, content: marker, ts: Date.now() };
+      const appendRestartMarker = this.source === 'telegram'
+        ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, restartMsg)
+        : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, restartMsg);
+      appendRestartMarker.catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
       if (this.process) {
         this.process.kill('SIGTERM');
       }
     });
   }
 
-  private async buildInitialPrompt(): Promise<string> {
-    const history = await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
+  private async buildInitialPrompt(): Promise<{ prompt: string; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
+    const history = this.source === 'telegram'
+      ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId)
+      : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
     const recent = history.slice(-MAX_HISTORY_MESSAGES);
+    const loadedAtSpawn = recent.length;
+    const archivedCount = history.length - recent.length;
+    const messageCountAtSpawn = history.length;
 
     if (recent.length === 0) {
-      return CHANNELS_ACTIVATION_PROMPT;
+      return { prompt: CHANNELS_ACTIVATION_PROMPT, loadedAtSpawn, archivedCount, messageCountAtSpawn };
     }
 
     const historyText = recent
       .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
       .join('\n');
 
-    return `[Conversation history with this user:\n${historyText}]\n\n${CHANNELS_ACTIVATION_PROMPT}`;
+    return {
+      prompt: `[Conversation history with this user:\n${historyText}]\n\n${CHANNELS_ACTIVATION_PROMPT}`,
+      loadedAtSpawn,
+      archivedCount,
+      messageCountAtSpawn,
+    };
   }
 
   /**
@@ -238,7 +252,8 @@ export class SessionProcess extends EventEmitter {
   }
 
   private async spawnProcess(): Promise<void> {
-    const initialPrompt = await this.buildInitialPrompt();
+    const { prompt: initialPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
+    this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
     const mcpConfigPath = this.writeMcpConfig();
     const freshModel = this.readFreshModel();
     const args = this.buildArgs(mcpConfigPath, freshModel);
@@ -277,10 +292,10 @@ export class SessionProcess extends EventEmitter {
     // Capture stdout — emit output events + persist assistant replies
     const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
     const heartbeatPath = this.source === 'telegram'
-      ? path.join(typingDir, `${this.sessionId}.heartbeat`)
+      ? path.join(typingDir, `${this.chatId}.heartbeat`)
       : null;
     const statusPath = this.source === 'telegram'
-      ? path.join(typingDir, `${this.sessionId}.status`)
+      ? path.join(typingDir, `${this.chatId}.status`)
       : null;
 
     const writeStatus = (status: string, detail?: string): void => {
@@ -390,6 +405,9 @@ export class SessionProcess extends EventEmitter {
     // Track partial message text to avoid double-counting when --include-partial-messages is active.
     // Each partial `type: 'assistant'` event contains the FULL text so far, not a delta.
     let lastPartialText = '';
+    // Track context from message_start events (first sub-call of each turn) for accurate context % display.
+    // result.usage is cumulative across all sub-calls; message_start.usage reflects a single API call's context.
+    let lastMessageStartContext = 0;
 
     proc.stdout?.on('data', (data: Buffer) => {
       // Update heartbeat so the receiver's stalled detector knows Claude is active
@@ -460,20 +478,34 @@ export class SessionProcess extends EventEmitter {
           }
           // text delta (standalone, not from assistant messages)
           if (obj.type === 'text') assistantBuffer += obj.text ?? '';
+          // Capture context size from message_start (first sub-call of each turn)
+          if (obj.type === 'stream_event' && obj.event?.type === 'message_start') {
+            const msUsage = obj.event.message?.usage as { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
+            if (msUsage) {
+              lastMessageStartContext = (msUsage.input_tokens ?? 0) + (msUsage.cache_read_input_tokens ?? 0) + (msUsage.cache_creation_input_tokens ?? 0);
+            }
+          }
           // result = end of turn
           if (obj.type === 'result') {
             lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
             if (assistantBuffer.trim()) {
-              this.sessionStore
-                .appendMessage(this.agentConfig.id, this.sessionId, {
-                  role: 'assistant',
-                  content: assistantBuffer.trim(),
-                  ts: Date.now(),
-                })
-                .catch(() => {});
+              const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
+              const appendAssistant = this.source === 'telegram'
+                ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg)
+                : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, assistantMsg);
+              appendAssistant.catch(() => {});
               assistantBuffer = '';
             }
+            // Emit tokenUsage using message_start context (accurate per-call context window usage)
+            // rather than result.usage which is cumulative across all sub-calls in the turn.
+            const usage = obj.usage as { output_tokens?: number } | undefined;
+            const outputTokens = usage?.output_tokens ?? 0;
+            const totalTokens = lastMessageStartContext + outputTokens;
+            if (lastMessageStartContext > 0) {
+              this.emit('tokenUsage', { inputTokens: lastMessageStartContext, outputTokens, totalTokens });
+            }
+            lastMessageStartContext = 0;
           }
         } catch {
           /* not JSON */
