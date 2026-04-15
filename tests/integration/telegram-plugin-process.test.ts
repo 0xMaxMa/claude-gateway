@@ -21,7 +21,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as net from 'net'
 
-const PLUGIN_PATH = path.resolve(__dirname, '../../plugins/telegram/server.ts')
+const RECEIVER_PATH = path.resolve(__dirname, '../../mcp/gateway/tools/telegram/receiver-server.ts')
 const BOT_TOKEN = 'test_token_e2e'
 const USER_ID = '111222333'
 
@@ -241,7 +241,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const port = await getFreePort()
     mock = startMockTelegramServer(port)
 
-    proc = spawn('bun', [PLUGIN_PATH], {
+    proc = spawn('bun', [RECEIVER_PATH], {
       env: {
         ...process.env,
         TELEGRAM_BOT_TOKEN: BOT_TOKEN,

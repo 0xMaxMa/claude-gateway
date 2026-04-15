@@ -136,7 +136,7 @@ describe('Multi-Agent (Option A)', () => {
 
     expect(configPath).not.toBeNull();
     const mcpConfig = JSON.parse(fs.readFileSync(configPath!, 'utf-8'));
-    const env = mcpConfig.mcpServers.telegram.env;
+    const env = mcpConfig.mcpServers.gateway.env;
 
     expect(env.TELEGRAM_STATE_DIR).toBeDefined();
     expect(env.TELEGRAM_STATE_DIR).toBe(path.join(ws, '.telegram-state'));
@@ -162,8 +162,8 @@ describe('Multi-Agent (Option A)', () => {
     const configPath1 = (proc1 as unknown as { writeMcpConfig: () => string | null }).writeMcpConfig();
     const configPath2 = (proc2 as unknown as { writeMcpConfig: () => string | null }).writeMcpConfig();
 
-    const env1 = JSON.parse(fs.readFileSync(configPath1!, 'utf-8')).mcpServers.telegram.env;
-    const env2 = JSON.parse(fs.readFileSync(configPath2!, 'utf-8')).mcpServers.telegram.env;
+    const env1 = JSON.parse(fs.readFileSync(configPath1!, 'utf-8')).mcpServers.gateway.env;
+    const env2 = JSON.parse(fs.readFileSync(configPath2!, 'utf-8')).mcpServers.gateway.env;
 
     expect(env1.TELEGRAM_STATE_DIR).not.toBe(env2.TELEGRAM_STATE_DIR);
     expect(env1.TELEGRAM_STATE_DIR).toBe(path.join(ws1, '.telegram-state'));

@@ -366,13 +366,13 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
 
     const config = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'))
     expect(config.mcpServers).toBeDefined()
-    expect(config.mcpServers.telegram).toBeDefined()
+    expect(config.mcpServers.gateway).toBeDefined()
 
-    const tg = config.mcpServers.telegram
-    expect(tg.command).toBe('bun')
-    expect(tg.args[0]).toMatch(/plugins\/telegram\/server\.ts$/)
-    expect(tg.env.TELEGRAM_BOT_TOKEN).toBe(BOT_TOKEN)
-    expect(tg.env.TELEGRAM_STATE_DIR).toMatch(/\.telegram-state$/)
+    const gw = config.mcpServers.gateway
+    expect(gw.command).toBe('bun')
+    expect(gw.args[0]).toMatch(/mcp\/gateway\/server\.ts$/)
+    expect(gw.env.TELEGRAM_BOT_TOKEN).toBe(BOT_TOKEN)
+    expect(gw.env.TELEGRAM_STATE_DIR).toMatch(/\.telegram-state$/)
   })
 
   // ── agent-runner args validation ──────────────────────────────────────────
@@ -472,9 +472,20 @@ describe('Pipeline MCP — Step 3b: Claude calls reply tool → sendMessage', ()
     })
 
     // mock-claude-mcp receives the notification and immediately calls reply tool
-    // plugin then calls sendMessage on the Telegram API
-    const sendCall = await mock2.waitForCall('sendMessage', t0, 12000)
-    expect(String(sendCall.body['chat_id'])).toBe(USER_ID)
-    expect(sendCall.body['text']).toMatch(/echo: step3b reply test/)
+    // plugin then calls sendMessage on the Telegram API.
+    // Note: TelegramReceiver's typing manager may send a "Thinking..." status message
+    // before the actual reply arrives, so we search for the echo reply specifically.
+    const deadline = Date.now() + 12000
+    let sendCall: MockCall | undefined
+    while (Date.now() < deadline) {
+      sendCall = mock2.calls.find(
+        c => c.method === 'sendMessage' && c.ts >= t0 && String(c.body['text'] ?? '').includes('echo:')
+      )
+      if (sendCall) break
+      await sleep(100)
+    }
+    expect(sendCall).toBeDefined()
+    expect(String(sendCall!.body['chat_id'])).toBe(USER_ID)
+    expect(sendCall!.body['text']).toMatch(/echo: step3b reply test/)
   }, 20000)
 })

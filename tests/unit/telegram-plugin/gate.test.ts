@@ -1,7 +1,7 @@
 /**
- * Unit tests for gate() logic using gateLogic() from plugins/telegram/pure.ts
+ * Unit tests for gate() logic using gateLogic() from mcp/gateway/tools/telegram/pure.ts
  */
-import { gateLogic, defaultAccess, pruneExpired, Access, GateInput } from '../../../plugins/telegram/pure'
+import { gateLogic, defaultAccess, pruneExpired, Access, GateInput } from '../../../mcp/gateway/tools/telegram/pure'
 
 function makeGateHelpers(initial?: Partial<Access>) {
   let access: Access = { ...defaultAccess(), ...initial }

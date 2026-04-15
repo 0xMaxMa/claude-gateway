@@ -28,7 +28,6 @@ Thumbs.db
 # Test coverage
 coverage/
 
-.claude-plugin/
 .claude
 
 # Planning

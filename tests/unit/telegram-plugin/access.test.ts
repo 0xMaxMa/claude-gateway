@@ -4,7 +4,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { readAccessFile, saveAccess, pruneExpired, defaultAccess, Access } from '../../../plugins/telegram/pure'
+import { readAccessFile, saveAccess, pruneExpired, defaultAccess, Access } from '../../../mcp/gateway/tools/telegram/pure'
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tg-access-test-'))

@@ -147,7 +147,7 @@ function handleChannel(ch) {
     const client = clients[0]?.client
     if (client) {
       client.request('tools/call', {
-        name: 'reply',
+        name: 'telegram_reply',
         arguments: { chat_id: chatId, text },
       }).then(result => {
         process.stdout.write(`[mock-claude-mcp] tool-result: ${JSON.stringify(result)}\n`)

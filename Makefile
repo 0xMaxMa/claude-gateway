@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start create-agent update-agent pair plugin-install
+.PHONY: help start create-agent update-agent pair mcp-install
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -24,8 +24,6 @@ update-agent: ## Update an existing agent's agent.md with Claude
 pair: ## Approve a Telegram pairing (e.g. make pair agent=alfred code=abc123)
 	./node_modules/.bin/ts-node scripts/pair.ts --agent=$(agent) --code=$(code)
 
-plugin-install: ## Install the Telegram plugin and enable channels mode
-	cd plugins/telegram && bun install
+mcp-install: ## Install MCP gateway dependencies
+	cd mcp/gateway && bun install
 	node scripts/setup-claude-settings.js
-	claude plugin marketplace add ./plugins/marketplace.json
-	claude plugin install telegram@claude-gateway

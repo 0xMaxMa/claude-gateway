@@ -2,8 +2,8 @@
  * E2E test with REAL Claude binary + REAL Telegram plugin (mock Telegram API)
  *
  * Tests the actual MCP pipeline as it runs in production:
- *   real claude --mcp-config --channels plugin:telegram
- *     └─ spawns: bun plugins/telegram/server.ts
+ *   real claude --mcp-config --channels server:telegram
+ *     └─ spawns: bun mcp/gateway/tools/telegram/receiver-server.ts
  *           └─ Grammy polls mock Telegram API
  *                └─ message queued → plugin sends notifications/claude/channel
  *                      └─ Claude receives, calls reply tool
@@ -24,7 +24,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as net from 'net'
 
-const PLUGIN_PATH = path.resolve(__dirname, '../../plugins/telegram/server.ts')
+const RECEIVER_PATH = path.resolve(__dirname, '../../mcp/gateway/tools/telegram/receiver-server.ts')
 const BOT_TOKEN = 'real_e2e_test_token'
 const USER_ID = '555444333'
 const TEST_TIMEOUT_MS = 90_000
@@ -229,7 +229,7 @@ beforeAll(async () => {
     mcpServers: {
       telegram: {
         command: 'bun',
-        args: [PLUGIN_PATH],
+        args: [RECEIVER_PATH],
         env: {
           TELEGRAM_BOT_TOKEN: BOT_TOKEN,
           TELEGRAM_STATE_DIR: path.join(tmpDir, '.telegram-state'),
@@ -259,7 +259,7 @@ beforeAll(async () => {
     '--output-format', 'stream-json',
     '--print',
     '--verbose',
-    '--channels', 'plugin:telegram',
+    '--channels', 'server:telegram',
   ], {
     cwd: tmpDir,
     env: { ...process.env },

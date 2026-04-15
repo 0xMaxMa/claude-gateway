@@ -173,34 +173,38 @@ export class SessionProcess extends EventEmitter {
   }
 
   private writeMcpConfig(): string | null {
-    if (this.source === 'api') return null; // API sessions don't need Telegram plugin
+    if (this.source === 'api') return null; // API sessions don't need gateway MCP
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
     const sessionDir = path.join(this.agentConfig.workspace, '.sessions', this.sessionId);
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
-    const pluginPath = path.resolve(__dirname, '..', 'plugins', 'telegram', 'server.ts');
+    const mcpServerPath = path.resolve(__dirname, '..', 'mcp', 'gateway', 'server.ts');
 
     // Merge stdio servers from Claude Code user + project configs (project overrides user).
-    // Skip "telegram" from both — gateway always generates its own telegram config below.
+    // Skip "telegram" and "gateway" from both — gateway always generates its own config below.
     const userServers = this.readUserScopedMcp();
     const projectServers = this.readProjectScopedMcp();
     const extraServers: Record<string, unknown> = {};
     for (const [name, server] of Object.entries({ ...userServers, ...projectServers })) {
-      if (name !== 'telegram') extraServers[name] = server;
+      if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
     }
 
     const mcpConfig = {
       mcpServers: {
         ...extraServers,
-        // Telegram always wins — must stay last to override any accidental collision
-        telegram: {
+        // Gateway always wins — must stay last to override any accidental collision
+        gateway: {
           command: 'bun',
-          args: [pluginPath],
+          args: [mcpServerPath],
           env: {
             TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
             TELEGRAM_STATE_DIR: stateDir,
             TELEGRAM_SEND_ONLY: 'true', // ALWAYS — session subprocesses never poll
+            GATEWAY_AGENT_ID: this.agentConfig.id,
+            GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
+            GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
+            GATEWAY_ORIGIN_CHANNEL: 'telegram',
           },
         },
       },
@@ -213,6 +217,14 @@ export class SessionProcess extends EventEmitter {
     this.logger.debug('MCP config written', { sessionId: this.sessionId, servers: serverNames });
 
     return configPath;
+  }
+
+  /** Find the first API key that has access to this agent (agents: '*' or includes agentId). */
+  private findApiKeyForAgent(agentId: string): string {
+    const keys = this.gatewayConfig.gateway.api?.keys;
+    if (!keys?.length) return '';
+    const match = keys.find(k => k.agents === '*' || (Array.isArray(k.agents) && k.agents.includes(agentId)));
+    return match?.key ?? '';
   }
 
   private buildArgs(mcpConfigPath: string | null, model: string): string[] {

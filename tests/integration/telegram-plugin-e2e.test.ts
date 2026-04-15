@@ -1,7 +1,7 @@
 /**
  * Integration tests for the Telegram plugin (telegram-plugin-e2e).
  *
- * These tests exercise the pure functions from plugins/telegram/pure.ts
+ * These tests exercise the pure functions from mcp/gateway/tools/telegram/pure.ts
  * and simulate the plugin's behavior without starting a real Grammy bot
  * or connecting to the real Telegram API.
  *
@@ -20,7 +20,7 @@ import {
   saveAccess,
   chunk,
   Access,
-} from '../../plugins/telegram/pure'
+} from '../../mcp/gateway/tools/telegram/pure'
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tg-e2e-test-'))

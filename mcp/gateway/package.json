@@ -1,5 +1,5 @@
 {
-  "name": "claude-gateway-telegram",
+  "name": "claude-gateway-plugin",
   "version": "1.0.0",
   "type": "module",
   "bin": "./server.ts",
@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "grammy": "^1.21.0"
+    "grammy": "^1.21.0",
+    "zod": "^3.22.0"
   }
 }

@@ -200,7 +200,7 @@ describe('SessionProcess', () => {
 
     expect(fs.existsSync(configPath)).toBe(true);
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    expect(config.mcpServers.telegram.env.TELEGRAM_SEND_ONLY).toBe('true');
+    expect(config.mcpServers.gateway.env.TELEGRAM_SEND_ONLY).toBe('true');
   });
 
   // --------------------------------------------------------------------------
@@ -332,7 +332,7 @@ describe('SessionProcess', () => {
 
       expect(config.mcpServers.github).toBeDefined();
       expect(config.mcpServers.github.command).toBe('npx');
-      expect(config.mcpServers.telegram).toBeDefined(); // gateway telegram still present
+      expect(config.mcpServers.gateway).toBeDefined(); // gateway plugin still present
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
@@ -406,8 +406,8 @@ describe('SessionProcess', () => {
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-      expect(config.mcpServers.telegram.command).toBe('bun'); // gateway version
-      expect(config.mcpServers.telegram.command).not.toBe('bad-command');
+      expect(config.mcpServers.gateway.command).toBe('bun'); // gateway version
+      expect(config.mcpServers.gateway.command).not.toBe('bad-command');
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
@@ -428,7 +428,7 @@ describe('SessionProcess', () => {
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-      expect(Object.keys(config.mcpServers)).toEqual(['telegram']);
+      expect(Object.keys(config.mcpServers)).toEqual(['gateway']);
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }

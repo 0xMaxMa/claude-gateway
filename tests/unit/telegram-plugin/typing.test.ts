@@ -1,5 +1,5 @@
 /**
- * Unit tests for plugins/telegram/typing.ts — WorkingState manager.
+ * Unit tests for mcp/gateway/tools/telegram/typing.ts — WorkingState manager.
  * All bot API calls and filesystem operations are injected mocks.
  */
 
@@ -15,7 +15,7 @@ import {
   STALLED_CHECK_INTERVAL_MS,
   type BotApi,
   type FsApi,
-} from '../../../plugins/telegram/typing'
+} from '../../../mcp/gateway/tools/telegram/typing'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

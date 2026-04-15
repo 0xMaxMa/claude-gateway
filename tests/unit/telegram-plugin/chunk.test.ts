@@ -1,7 +1,7 @@
 /**
- * Unit tests for chunk() pure function from plugins/telegram/pure.ts
+ * Unit tests for chunk() pure function from mcp/gateway/tools/telegram/pure.ts
  */
-import { chunk, MAX_CHUNK_LIMIT } from '../../../plugins/telegram/pure'
+import { chunk, MAX_CHUNK_LIMIT } from '../../../mcp/gateway/tools/telegram/pure'
 
 describe('chunk()', () => {
   test('text <= limit → returns single element array', () => {

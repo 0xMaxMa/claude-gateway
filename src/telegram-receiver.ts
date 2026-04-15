@@ -27,10 +27,10 @@ export class TelegramReceiver {
   }
 
   private spawnProcess(): void {
-    const pluginPath = path.resolve(__dirname, '..', 'plugins', 'telegram', 'server.ts');
+    const receiverPath = path.resolve(__dirname, '..', 'mcp', 'gateway', 'tools', 'telegram', 'receiver-server.ts');
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
 
-    this.process = spawn('bun', [pluginPath], {
+    this.process = spawn('bun', [receiverPath], {
       env: {
         ...process.env,
         TELEGRAM_RECEIVER_MODE: 'true',
