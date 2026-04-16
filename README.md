@@ -18,26 +18,28 @@ HTTP Client    ──►  POST /api/v1/.../messages ─────────�
                            │  TypingManager   (live status indicators)        │
                            └─────────────────────────────────────────────────┘
 
-                    ┌──────────────────────────────┐
-                    │    MCP Server (per session)   │
-                    │    mcp/gateway/server.ts      │
-                    │                               │
-                    │  telegram_reply               │
-                    │  telegram_react               │
-                    │  telegram_edit_message         │
-                    │  telegram_download_attachment  │
-                    │  cron_list / cron_create / ... │
-                    └──────────────────────────────┘
+                    ┌───────────────────────────────────┐
+                    │    MCP Server (per session)        │
+                    │    mcp/server.ts                   │
+                    │                                    │
+                    │  telegram_reply                    │
+                    │  telegram_react                    │
+                    │  telegram_edit_message              │
+                    │  telegram_download_attachment       │
+                    │  cron_list / cron_create / ...      │
+                    │  skill_create / skill_delete / ...  │
+                    └───────────────────────────────────┘
 ```
 
-Each agent runs a **dedicated TelegramReceiver** (single poller per bot token) and a **session pool** of isolated Claude subprocesses — one per chat or API session. Each session gets its own **MCP server** (`mcp/gateway/server.ts`) exposing channel-specific tools (Telegram reply, react, cron management). Sessions persist history via `SessionStore`, so Claude remembers the conversation even after idle restart.
+Each agent runs a **dedicated TelegramReceiver** (single poller per bot token) and a **session pool** of isolated Claude subprocesses — one per chat or API session. Each session gets its own **MCP server** (`mcp/server.ts`) exposing channel-specific tools (Telegram reply, react, cron management, skill management). Sessions persist history via `SessionStore`, so Claude remembers the conversation even after idle restart.
 
 ---
 
 ## Features
 
 - **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
-- **Multi-channel MCP** — modular tool system per channel (Telegram, Cron, extensible to Discord/WhatsApp)
+- **Multi-channel MCP** — modular tool system per channel (Telegram, Cron, Skills, extensible to Discord/WhatsApp)
+- **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - **Agent identity** — define personality, tone, and rules via workspace markdown files
 - **Live status messages** — real-time status updates showing tool usage, thinking, and progress
 - **Typing indicators** — continuous typing animation while the agent is working
@@ -56,7 +58,7 @@ Each agent runs a **dedicated TelegramReceiver** (single poller per bot token) a
 
 - Node.js 18+
 - [Claude Code CLI](https://claude.ai/code) v2.1.0+ installed and authenticated — `channels mode` is required (`claude --version`)
-- [Bun](https://bun.sh) — runs the MCP server subprocess (`mcp/gateway/server.ts`)
+- [Bun](https://bun.sh) — runs the MCP server subprocess (`mcp/server.ts`)
 - A Telegram bot token per agent (from [@BotFather](https://t.me/BotFather))
 
 ---
@@ -77,10 +79,10 @@ npm run build
 The gateway MCP server uses Bun with its own `package.json`. Install once:
 
 ```bash
-make mcp-install    # runs: cd mcp/gateway && bun install
+make mcp-install    # runs: cd mcp && bun install
 ```
 
-This installs `grammy` (Telegram Bot API) and `@modelcontextprotocol/sdk` into `mcp/gateway/node_modules/`.
+This installs `grammy` (Telegram Bot API) and `@modelcontextprotocol/sdk` into `mcp/node_modules/`.
 
 ### 3. Create an agent
 
@@ -122,6 +124,7 @@ Each agent has a workspace directory with markdown files that define its behavio
 | `MEMORY.md` | No | Long-term memory (auto-appended by the agent) |
 | `HEARTBEAT.md` | No | Scheduled/proactive tasks |
 | `BOOTSTRAP.md` | No | One-time first-run setup (auto-deleted after) |
+| `skills/` | No | Directory of SKILL.md files — agent-specific skills |
 
 On startup (and on any file change), all files are assembled into `CLAUDE.md` which the Claude subprocess reads as its system prompt. Do not edit `CLAUDE.md` directly.
 
@@ -219,7 +222,7 @@ Each agent maintains a **session pool** — a separate Claude subprocess per cha
 TelegramReceiver  (1 per agent, spawned by gateway)
   - single long-poll connection per bot token
   - handles access control (allowlist / pairing)
-  - runs as: bun mcp/gateway/tools/telegram/receiver-server.ts (RECEIVER_MODE)
+  - runs as: bun mcp/tools/telegram/receiver-server.ts (RECEIVER_MODE)
   - POSTs incoming messages to AgentRunner callback
 
 AgentRunner  (session pool manager)
@@ -230,16 +233,17 @@ AgentRunner  (session pool manager)
 
 ### MCP Tool System
 
-The MCP server (`mcp/gateway/server.ts`) uses a **modular multi-channel architecture**. Each channel is a separate module implementing `ChannelModule` or `ToolModule` interfaces:
+The MCP server (`mcp/server.ts`) uses a **modular multi-channel architecture**. Each channel is a separate module implementing `ChannelModule` or `ToolModule` interfaces:
 
 | Module | Interface | Tools | Purpose |
 |--------|-----------|-------|---------|
 | `telegram` | `ChannelModule` | `telegram_reply`, `telegram_react`, `telegram_edit_message`, `telegram_download_attachment` | Send messages, reactions, edit messages in Telegram |
 | `cron` | `ToolModule` | `cron_list`, `cron_create`, `cron_delete`, `cron_run`, `cron_get_runs` | Manage scheduled jobs via gateway REST API |
+| `skills` | `ToolModule` | `skill_create`, `skill_delete`, `skill_install` | Create, delete, and install agent skills at runtime |
 
 Tools are **prefixed by channel name** to avoid collisions. Each module controls its own visibility and lifecycle.
 
-**Adding a new channel** (e.g. Discord) means implementing `ChannelModule` interface in `mcp/gateway/tools/discord/module.ts` and registering it in `server.ts`.
+**Adding a new channel** (e.g. Discord) means implementing `ChannelModule` interface in `mcp/tools/discord/module.ts` and registering it in `server.ts`.
 
 ### Process Modes
 
@@ -260,9 +264,9 @@ While an agent is working, the gateway sends real-time status updates to Telegra
 
 ```
 ☑️ : 🧠 Analyzing the codebase structure...
-☑️ : 📖 Reading: src/agent-runner.ts
+☑️ : 📖 Reading: src/agent/runner.ts
 ☑️ : 🔍 Searching for: "sendMessage" in src/
-🕐 : ✏️ Editing: src/typing.ts
+🕐 : ✏️ Editing: mcp/tools/telegram/typing.ts
 (elapsed: 2m 30s)
 ```
 
@@ -313,35 +317,57 @@ claude-gateway/
 ├── src/                                ← Gateway core (TypeScript, compiled to dist/)
 │   ├── index.ts                        ← entrypoint — loads config, starts agents
 │   ├── types.ts                        ← shared TypeScript types
-│   │
-│   │── agent-runner.ts                 ← session pool manager (spawn/evict sessions)
-│   ├── session-process.ts              ← single Claude subprocess per session
-│   ├── session-store.ts                ← persist/load conversation history (.jsonl)
-│   ├── session-compactor.ts            ← summarise + compact old history
-│   ├── telegram-receiver.ts            ← spawns TelegramReceiver subprocess per agent
-│   │
-│   ├── gateway-router.ts               ← HTTP server (/health, /status, /ui, /api)
-│   ├── api-router.ts                   ← REST API router (sync + SSE streaming)
-│   ├── api-auth.ts                     ← API key auth middleware (timing-safe)
-│   │
-│   ├── config-loader.ts                ← load + validate config.json
-│   ├── config-migrator.ts              ← auto-migration for config schema changes
-│   ├── config-watcher.ts               ← hot-reload config on file change
-│   │
-│   ├── cron-manager.ts                 ← persistent cron job manager (REST + agentTurn)
-│   ├── cron-router.ts                  ← Cron API router (auth + agent-scoped access)
-│   ├── cron-scheduler.ts               ← heartbeat task scheduler
-│   ├── heartbeat-parser.ts             ← parse HEARTBEAT.md YAML
-│   ├── heartbeat-history.ts            ← track scheduled task execution
-│   │
-│   ├── workspace-loader.ts             ← assembles CLAUDE.md from workspace files
-│   ├── memory-manager.ts               ← long-term memory persistence
-│   ├── context-isolation.ts            ← context guard for session isolation
-│   ├── security.ts                     ← input validation and sanitization
-│   ├── markdown.ts                     ← markdown/HTML utilities
-│   ├── webhook-manager.ts              ← webhook event dispatch
 │   ├── logger.ts                       ← structured logging with per-agent files
-│   └── web-ui.ts                       ← live HTML dashboard
+│   ├── security.ts                     ← input validation and sanitization
+│   │
+│   ├── agent/                          ← Agent management
+│   │   ├── runner.ts                   ← session pool manager (spawn/evict sessions)
+│   │   ├── workspace-loader.ts         ← assembles CLAUDE.md from workspace files + skills
+│   │   └── context-isolation.ts        ← context guard for session isolation
+│   │
+│   ├── session/                        ← Session lifecycle
+│   │   ├── process.ts                  ← single Claude subprocess per session
+│   │   ├── store.ts                    ← persist/load conversation history (.jsonl)
+│   │   └── compactor.ts               ← summarise + compact old history
+│   │
+│   ├── telegram/                       ← Telegram integration
+│   │   ├── receiver.ts                 ← spawns TelegramReceiver subprocess per agent
+│   │   └── markdown.ts                 ← markdown/HTML utilities
+│   │
+│   ├── api/                            ← HTTP API
+│   │   ├── gateway-router.ts           ← HTTP server (/health, /status, /ui, /api)
+│   │   ├── router.ts                   ← REST API router (sync + SSE streaming)
+│   │   ├── auth.ts                     ← API key auth middleware (timing-safe)
+│   │   └── cron-router.ts             ← Cron API router (auth + agent-scoped access)
+│   │
+│   ├── config/                         ← Configuration
+│   │   ├── loader.ts                   ← load + validate config.json
+│   │   ├── migrator.ts                 ← auto-migration for config schema changes
+│   │   └── watcher.ts                  ← hot-reload config on file change
+│   │
+│   ├── cron/                           ← Cron scheduling
+│   │   ├── manager.ts                  ← persistent cron job manager (REST + agentTurn)
+│   │   └── scheduler.ts               ← heartbeat task scheduler
+│   │
+│   ├── heartbeat/                      ← Proactive tasks
+│   │   ├── parser.ts                   ← parse HEARTBEAT.md YAML
+│   │   └── history.ts                  ← track scheduled task execution
+│   │
+│   ├── skills/                         ← Agent skills system
+│   │   ├── index.ts                    ← re-exports (parser, loader, invoker, watcher)
+│   │   ├── parser.ts                   ← parse SKILL.md frontmatter + body
+│   │   ├── loader.ts                   ← load skills from directories, build registry
+│   │   ├── invoker.ts                  ← detect /skill-name in messages, inject context
+│   │   └── watcher.ts                  ← hot-reload skills on file changes (chokidar)
+│   │
+│   ├── memory/                         ← Long-term memory
+│   │   └── manager.ts                  ← memory persistence
+│   │
+│   ├── webhook/                        ← Webhooks
+│   │   └── manager.ts                  ← webhook event dispatch
+│   │
+│   └── ui/                             ← Dashboard
+│       └── web-ui.ts                   ← live HTML dashboard
 │
 ├── scripts/
 │   ├── create-agent.ts                 ← interactive agent creation wizard
@@ -351,29 +377,32 @@ claude-gateway/
 │   ├── pair.ts                         ← approve Telegram pairing
 │   └── setup-claude-settings.js        ← enables channelsEnabled in Claude Code
 │
-└── mcp/
-    └── gateway/                        ← MCP server (runs in Bun, separate node_modules)
-        ├── package.json                ← dependencies: grammy, @modelcontextprotocol/sdk
-        ├── server.ts                   ← MCP entry point — registers all tool modules
-        ├── types.ts                    ← ChannelModule / ToolModule interfaces
-        ├── channel-manager.ts          ← module lifecycle (init, start, stop, restart)
-        ├── router.ts                   ← route resolution + channel context rendering
+└── mcp/                                ← MCP server (runs in Bun, separate node_modules)
+    ├── package.json                    ← dependencies: grammy, @modelcontextprotocol/sdk
+    ├── server.ts                       ← MCP entry point — registers all tool modules
+    ├── types.ts                        ← ChannelModule / ToolModule interfaces
+    ├── channel-manager.ts              ← module lifecycle (init, start, stop, restart)
+    ├── router.ts                       ← route resolution + channel context rendering
+    │
+    └── tools/
+        ├── telegram/                   ← Telegram channel module
+        │   ├── module.ts              ← ChannelModule: telegram_reply, react, edit, download
+        │   ├── receiver-server.ts     ← standalone receiver (polling mode, no MCP)
+        │   ├── pure.ts               ← markdown → Telegram HTML conversion
+        │   ├── typing.ts             ← typing indicator state
+        │   └── skills/
+        │       ├── access/SKILL.md        ← /telegram:access skill
+        │       └── configure/SKILL.md     ← /telegram:configure skill
         │
-        └── tools/
-            ├── telegram/               ← Telegram channel module
-            │   ├── module.ts           ← ChannelModule: telegram_reply, react, edit, download
-            │   ├── receiver-server.ts  ← standalone receiver (polling mode, no MCP)
-            │   ├── pure.ts             ← markdown → Telegram HTML conversion
-            │   ├── typing.ts           ← typing indicator state
-            │   └── skills/
-            │       ├── access/SKILL.md     ← /telegram:access skill
-            │       └── configure/SKILL.md  ← /telegram:configure skill
-            │
-            └── cron/                   ← Cron tool module
-                ├── module.ts           ← ToolModule: cron_list, create, delete, run, get_runs
-                ├── client.ts           ← HTTP client for gateway cron REST API
-                └── skills/
-                    └── cron/SKILL.md   ← /cron skill
+        ├── cron/                       ← Cron tool module
+        │   ├── module.ts              ← ToolModule: cron_list, create, delete, run, get_runs
+        │   ├── client.ts             ← HTTP client for gateway cron REST API
+        │   └── skills/
+        │       └── cron/SKILL.md          ← /cron skill
+        │
+        └── skills/                     ← Skills tool module
+            ├── module.ts              ← ToolModule: skill_create, skill_delete, skill_install
+            └── handlers.ts            ← skill CRUD + URL install handlers
 ```
 
 ### Runtime data (`~/.claude-gateway/`)
@@ -398,9 +427,12 @@ claude-gateway/
             ├── TOOLS.md               ← available tools and usage
             ├── MEMORY.md               ← long-term memory (auto-appended)
             ├── HEARTBEAT.md            ← scheduled/proactive tasks
+            ├── skills/                 ← agent-specific skills (hot-reloaded)
+            │   └── <skill-name>/
+            │       └── SKILL.md        ← skill definition with frontmatter
             ├── .sessions/              ← per-session MCP config
             │   └── <session_id>/
-            │       └── .mcp-config.json ← auto-generated MCP config for this session
+            │       └── mcp-config.json ← auto-generated MCP config for this session
             └── .telegram-state/
                 └── access.json         ← allowlist and pairing state
 ```
@@ -426,6 +458,45 @@ tasks:
 - `interval` — shorthand: `30m`, `1h`, `6h`, `1d`, `1w`
 - If the agent replies with `HEARTBEAT_OK` (case-insensitive), no message is sent to Telegram
 - `rateLimitMinutes` in config suppresses tasks if a proactive message was already sent recently (default: 30 min)
+
+---
+
+## Agent Skills
+
+Skills are reusable capabilities defined as `SKILL.md` files with YAML frontmatter. They are injected into the agent's system prompt and can be invoked via `/skill-name` commands.
+
+### Skill locations
+
+| Location | Scope | Description |
+|----------|-------|-------------|
+| `workspace/skills/<name>/SKILL.md` | Per-agent | Agent-specific skills |
+| `mcp/tools/<channel>/skills/<name>/SKILL.md` | All agents | Built-in channel skills (e.g. `/telegram:access`) |
+
+### SKILL.md format
+
+```yaml
+---
+name: my-skill
+description: What this skill does
+user_invocable: true          # false = system-only, not shown to user
+argument_description: "[args]" # optional, shown in /skill-name [args]
+---
+
+Skill instructions go here. Claude follows these instructions
+when the user invokes /my-skill.
+```
+
+### Runtime skill management
+
+Agents can manage skills at runtime via MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `skill_create` | Create a new skill in the workspace |
+| `skill_delete` | Delete an existing skill |
+| `skill_install` | Install a skill from a GitHub URL or raw URL |
+
+Skills are **hot-reloaded** — changes to skill files are detected automatically and the skill registry is updated without restarting the session.
 
 ---
 
@@ -565,8 +636,8 @@ npm run typecheck
 - Verify the key's `agents` list includes the target agent ID, or set `"agents": "*"`
 
 **MCP tools not working (telegram_reply, cron_list, etc.)**
-- Ensure `mcp/gateway/node_modules/` exists — run `make mcp-install` if not
-- Check that `.mcp-config.json` is generated in the session directory
+- Ensure `mcp/node_modules/` exists — run `make mcp-install` if not
+- Check that `mcp-config.json` is generated in the session directory
 - Verify Bun is installed (`bun --version`)
 
 **Status messages not appearing in Telegram**
