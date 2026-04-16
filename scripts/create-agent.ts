@@ -279,6 +279,60 @@ function extractLeadingEmoji(text: string): { emoji: string | undefined; rest: s
   return { emoji: undefined, rest: text };
 }
 
+/**
+ * Fetch plain-text content from a URL.
+ * For Wikipedia URLs, uses the REST summary API to get clean prose.
+ * For other URLs, strips HTML tags from the response body.
+ */
+async function fetchUrlContent(url: string): Promise<string> {
+  // Wikipedia: use REST summary API for clean plain-text extract
+  const wikiMatch = url.match(/^https?:\/\/(\w+)\.wikipedia\.org\/wiki\/(.+)$/);
+  if (wikiMatch) {
+    const lang = wikiMatch[1];
+    const title = wikiMatch[2];
+    const apiUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
+    const body = await httpsGet(apiUrl);
+    const json = JSON.parse(body) as { extract?: string; title?: string };
+    if (json.extract) {
+      return `${json.title ?? title}:\n${json.extract}`;
+    }
+  }
+  // Generic URL: fetch and strip HTML tags, truncate to 2000 chars
+  const body = await httpsGet(url);
+  return body
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2000);
+}
+
+/**
+ * Expand any URLs found in the description by pre-fetching their content
+ * and appending it inline. This prevents claude --print from needing to
+ * use WebFetch tools, which can timeout or fail in non-interactive mode.
+ */
+export async function expandDescriptionUrls(description: string): Promise<string> {
+  const urlRegex = /https?:\/\/[^\s]+/g;
+  const urls = description.match(urlRegex);
+  if (!urls || urls.length === 0) return description;
+
+  const parts: string[] = [];
+  for (const url of urls) {
+    try {
+      const content = await fetchUrlContent(url);
+      if (content.trim()) {
+        parts.push(`\n\n--- Content fetched from ${url} ---\n${content}\n---`);
+      }
+    } catch {
+      // Ignore fetch failures — Claude will work with the URL text only
+    }
+  }
+
+  return description + parts.join('');
+}
+
 async function generateFiles(
   agentId: string,
   description: string,
@@ -287,7 +341,8 @@ async function generateFiles(
   const agentName = agentId.charAt(0).toUpperCase() + agentId.slice(1);
   console.log('\nGenerating workspace files with Claude...');
 
-  const genPrompt = buildGenerationPrompt(agentName, description, options);
+  const expandedDescription = await expandDescriptionUrls(description);
+  const genPrompt = buildGenerationPrompt(agentName, expandedDescription, options);
   const result = spawnSync('claude', ['--print'], {
     input: genPrompt,
     encoding: 'utf8',
@@ -335,7 +390,10 @@ async function generateFiles(
 // Step 2 — Preview and accept generated files
 // ---------------------------------------------------------------------------
 
-const OPTIONAL_FILES = new Set(['IDENTITY.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md', 'BOOTSTRAP.md']);
+const OPTIONAL_FILES = new Set(['IDENTITY.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md']);
+
+/** Standard files that should always exist in a workspace (created as stubs if not generated). */
+const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'TOOLS.md', 'USER.md'];
 const SEPARATOR_WIDTH = 42;
 
 export function printFilePreview(filename: string, content: string): void {
@@ -431,6 +489,17 @@ export async function createWorkspace(agentId: string, files: Map<string, string
     const filePath = path.join(wsDir, filename);
     fs.writeFileSync(filePath, content, 'utf8');
     console.log(`  ✓ ${filename}`);
+  }
+
+  // Create blank stubs for any standard files not generated
+  for (const stub of STANDARD_STUB_FILES) {
+    if (!files.has(stub)) {
+      const stubPath = path.join(wsDir, stub);
+      if (!fs.existsSync(stubPath)) {
+        fs.writeFileSync(stubPath, '', 'utf8');
+        console.log(`  ✓ ${stub} (stub)`);
+      }
+    }
   }
 
   return wsDir;

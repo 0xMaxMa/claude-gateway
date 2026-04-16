@@ -13,6 +13,7 @@ module.exports = {
         strict: true,
         skipLibCheck: true,
         resolveJsonModule: true,
+        rootDir: '.',
       }
     }]
   },
