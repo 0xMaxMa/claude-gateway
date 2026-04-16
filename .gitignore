@@ -27,7 +27,6 @@ Thumbs.db
 
 # Test coverage
 coverage/
-
 .claude
 
 # Planning
@@ -40,3 +39,4 @@ task-*.md
 research*.md
 restart.sh
 stop.sh
+.skills

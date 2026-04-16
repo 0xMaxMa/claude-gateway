@@ -285,6 +285,129 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-09a: >50 msgs with summary at [0] → summary + last 49 loaded (total 50)
+  // --------------------------------------------------------------------------
+  it('U-SP-09a: summary at history[0] is rescued when history exceeds 50 messages', async () => {
+    const summaryContent = '[Conversation Summary]\n**Summary:**\n\nPrior work on the project.';
+    // Insert summary as message[0]
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'system',
+      content: summaryContent,
+      ts: 1000,
+    });
+    // Insert 60 normal messages (indices 1–60)
+    for (let i = 1; i <= 60; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Message ${i}`,
+        ts: 1000 + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    // Summary and last message must be present
+    expect(text).toContain('[Conversation Summary]');
+    expect(text).toContain('Message 60');
+    // Message 12 is outside the 49-tail window (last 49 = messages 12–60)
+    expect(text).not.toContain('Message 11');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-09b: >50 msgs without summary → last 50 loaded normally
+  // --------------------------------------------------------------------------
+  it('U-SP-09b: last 50 messages loaded when no summary exists and history > 50', async () => {
+    for (let i = 0; i < 60; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Msg ${i}`,
+        ts: Date.now() + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    expect(text).toContain('Msg 59');
+    expect(text).not.toContain('Msg 0');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-09c: <=50 msgs with summary → all messages loaded (summary included)
+  // --------------------------------------------------------------------------
+  it('U-SP-09c: all messages loaded when history <=50 even with a summary present', async () => {
+    const summaryContent = '[Conversation Summary]\n**Summary:**\n\nEarly work.';
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'system',
+      content: summaryContent,
+      ts: 1000,
+    });
+    for (let i = 1; i <= 10; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Short ${i}`,
+        ts: 1000 + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    expect(text).toContain('[Conversation Summary]');
+    expect(text).toContain('Short 1');
+    expect(text).toContain('Short 10');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-09d: summary at index 1 (not 0) → treated as normal, last 50 loaded
+  // --------------------------------------------------------------------------
+  it('U-SP-09d: summary not at history[0] is not rescued', async () => {
+    // First message is a normal user message
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'user',
+      content: 'First normal message',
+      ts: 1000,
+    });
+    // Summary at index 1
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'system',
+      content: '[Conversation Summary]\nShould not be rescued.',
+      ts: 1001,
+    });
+    for (let i = 2; i <= 60; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Bulk ${i}`,
+        ts: 1000 + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    // Last 50 messages = indices 11–60, so 'First normal message' (idx 0) is out
+    expect(text).not.toContain('First normal message');
+    expect(text).toContain('Bulk 60');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-10: --strict-mcp-config must NOT be in subprocess args
   // --------------------------------------------------------------------------
   it('U-SP-10: subprocess is spawned without --strict-mcp-config', async () => {
@@ -788,5 +911,102 @@ describe('SessionProcess', () => {
     const written = JSON.parse(fs.readFileSync(sp_path, 'utf-8'));
     expect(written.status).toBe('tool');
     expect(written.detail).toContain('List files');
+  });
+});
+
+// ── isProcessing + deferred restart ──────────────────────────────────────────
+
+describe('SessionProcess — isProcessing and deferred restart', () => {
+  let tmpDir: string;
+  let sessionStore: SessionStore;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-proc-'));
+    agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace') });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
+    lastProcess = null;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // IP1: defaults to not processing
+  it('IP1: isProcessing defaults to false', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    expect(sp.isProcessing).toBe(false);
+    await sp.stop();
+  });
+
+  // IP2: setProcessing(true) flips the flag
+  it('IP2: setProcessing(true) → isProcessing true', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    expect(sp.isProcessing).toBe(true);
+    await sp.stop();
+  });
+
+  // IP3: setProcessing(false) resets the flag
+  it('IP3: setProcessing(false) → isProcessing false', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+    expect(sp.isProcessing).toBe(false);
+    await sp.stop();
+  });
+
+  // IP4: emits processingChange event on transition
+  it('IP4: emits processingChange event when state changes', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const changes: boolean[] = [];
+    sp.on('processingChange', (v: boolean) => changes.push(v));
+    sp.setProcessing(true);
+    sp.setProcessing(true);  // same value — no event
+    sp.setProcessing(false);
+    expect(changes).toEqual([true, false]);
+    await sp.stop();
+  });
+
+  // IP5: stop() works while processing
+  it('IP5: stop() succeeds while isProcessing is true', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    await expect(sp.stop()).resolves.toBeUndefined();
+  });
+
+  // IP6: markPendingRestart while not processing → emits deferredRestartReady immediately
+  it('IP6: markPendingRestart while idle emits deferredRestartReady immediately', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    let fired = false;
+    sp.once('deferredRestartReady', () => { fired = true; });
+    sp.markPendingRestart();
+    expect(fired).toBe(true);
+    await sp.stop();
+  });
+
+  // IP7: markPendingRestart while processing → deferred until setProcessing(false)
+  it('IP7: markPendingRestart while processing defers until turn ends', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    let fired = false;
+    sp.once('deferredRestartReady', () => { fired = true; });
+    sp.markPendingRestart();
+    expect(fired).toBe(false);  // not yet
+    sp.setProcessing(false);
+    expect(fired).toBe(true);  // fires when turn ends
+    await sp.stop();
   });
 });

@@ -271,7 +271,7 @@ While an agent is working, the gateway sends real-time status updates to Telegra
 ```
 
 - **Tool tracking** — each tool call is displayed with a descriptive label (e.g. `📖 Reading: config.ts`, `⚡ Running: npm test`)
-- **History** — previous steps shown with ✅, current step with 🕐
+- **History** — previous steps shown with ☑️, current step with 🕐
 - **Thinking** — agent's reasoning shown with 🧠
 - **Elapsed time** — total time since the agent started working
 - **Auto-cleanup** — status message is deleted when the agent finishes
@@ -413,6 +413,9 @@ claude-gateway/
 ├── logs/
 │   ├── alfred.log
 │   └── warrior.log
+├── shared-skills/                      ← shared skills (synced to ~/.claude/skills/ on boot and on change)
+│   └── <skill-name>/
+│       └── SKILL.md                    ← skill definition (same format as agent skills)
 └── agents/
     └── alfred/
         ├── .env                        ← bot token (auto-created by wizard)
@@ -470,6 +473,7 @@ Skills are reusable capabilities defined as `SKILL.md` files with YAML frontmatt
 | Location | Scope | Description |
 |----------|-------|-------------|
 | `workspace/skills/<name>/SKILL.md` | Per-agent | Agent-specific skills |
+| `~/.claude-gateway/shared-skills/<name>/SKILL.md` | All agents | Shared skills — synced to `~/.claude/skills/` at boot and on change |
 | `mcp/tools/<channel>/skills/<name>/SKILL.md` | All agents | Built-in channel skills (e.g. `/telegram:access`) |
 
 ### SKILL.md format
@@ -497,6 +501,16 @@ Agents can manage skills at runtime via MCP tools:
 | `skill_install` | Install a skill from a GitHub URL or raw URL |
 
 Skills are **hot-reloaded** — changes to skill files are detected automatically and the skill registry is updated without restarting the session.
+
+### Shared skills sync
+
+Skills placed in `~/.claude-gateway/shared-skills/` are automatically synced to `~/.claude/skills/` — the user-level directory that Claude Code scans for every session:
+
+- **At boot** — gateway copies all shared skills before spawning any agent
+- **On change** — any add, edit, or delete under `shared-skills/` triggers a re-sync
+- **Cleanup** — each synced skill is tagged with a `.shared` marker file; if a skill is removed from `shared-skills/`, the marker is used to delete the stale copy from `~/.claude/skills/` automatically (user-installed skills without the marker are never touched)
+
+This means adding a skill to `shared-skills/` makes it available to **all agents** without per-agent setup or a gateway restart.
 
 ---
 

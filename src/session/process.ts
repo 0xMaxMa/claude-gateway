@@ -24,6 +24,8 @@ export class SessionProcess extends EventEmitter {
   private stopping = false;
   private restartCount = 0;
   private restartRequested = false;
+  private _processing = false;
+  private _pendingRestart = false;
   private restartWatcher: chokidar.FSWatcher | null = null;
   private readonly sessionStore: SessionStore;
   private readonly agentConfig: AgentConfig;
@@ -121,7 +123,21 @@ export class SessionProcess extends EventEmitter {
     const history = this.source === 'telegram'
       ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
-    const recent = history.slice(-MAX_HISTORY_MESSAGES);
+
+    // If history exceeds the limit and history[0] is a compaction summary, rescue it
+    // so the model retains context from before the truncation window.
+    const SUMMARY_MARKER = '[Conversation Summary]';
+    const firstMsg = history[0];
+    const hasSummary =
+      history.length > MAX_HISTORY_MESSAGES &&
+      firstMsg?.role === 'system' &&
+      typeof firstMsg.content === 'string' &&
+      firstMsg.content.trimStart().startsWith(SUMMARY_MARKER);
+
+    const recent = hasSummary
+      ? [firstMsg, ...history.slice(-(MAX_HISTORY_MESSAGES - 1))]
+      : history.slice(-MAX_HISTORY_MESSAGES);
+
     const loadedAtSpawn = recent.length;
     const archivedCount = history.length - recent.length;
     const messageCountAtSpawn = history.length;
@@ -589,6 +605,26 @@ export class SessionProcess extends EventEmitter {
       try { fs.writeFileSync(statusPath, 'queued') } catch {}
     }
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(text) + '\n');
+  }
+
+  get isProcessing(): boolean { return this._processing; }
+
+  setProcessing(active: boolean): void {
+    if (this._processing !== active) {
+      this._processing = active;
+      this.emit('processingChange', active);
+      if (!active && this._pendingRestart) {
+        this.emit('deferredRestartReady');
+      }
+    }
+  }
+
+  markPendingRestart(): void {
+    if (!this._processing) {
+      this.emit('deferredRestartReady');
+    } else {
+      this._pendingRestart = true;
+    }
   }
 
   touch(): void {

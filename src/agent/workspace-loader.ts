@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import chokidar from 'chokidar';
 import { WorkspaceFiles, LoadedWorkspace, WatchHandle } from '../types';
+import { createWatcher } from '../watch/factory';
 import { loadSkills, renderSkillsSection } from '../skills';
 
 export class MissingRequiredFileError extends Error {
@@ -174,47 +174,25 @@ const WATCH_DEBOUNCE_MS = 300;
  * Returns a WatchHandle with a close() method.
  */
 export function watchWorkspace(workspaceDir: string, onChange: () => void): WatchHandle {
-  const watcher = chokidar.watch(path.join(workspaceDir, '*.md'), {
-    persistent: true,
-    ignoreInitial: true,
-    ignored: path.join(workspaceDir, 'CLAUDE.md'),
-  });
-
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  const debouncedOnChange = () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(onChange, WATCH_DEBOUNCE_MS);
-  };
-
-  watcher.on('change', debouncedOnChange);
-  watcher.on('add', (filePath: string) => {
-    const filename = path.basename(filePath);
-    const upperName = LOWERCASE_TO_UPPERCASE[filename];
-    if (upperName) {
-      // Auto-rename lowercase file to uppercase canonical name
-      const upperPath = path.join(workspaceDir, upperName);
-      try {
-        fs.renameSync(filePath, upperPath);
-        console.log(`[workspace] Auto-renamed: ${filename} → ${upperName}`);
-      } catch {
-        // Ignore rename errors (file may have already been renamed)
+  return createWatcher({
+    paths: [path.join(workspaceDir, '*.md')],
+    debounceMs: WATCH_DEBOUNCE_MS,
+    chokidarOpts: { ignored: path.join(workspaceDir, 'CLAUDE.md') },
+    onAddSync: (filePath: string) => {
+      const filename = path.basename(filePath);
+      const upperName = LOWERCASE_TO_UPPERCASE[filename];
+      if (upperName) {
+        const upperPath = path.join(workspaceDir, upperName);
+        try {
+          fs.renameSync(filePath, upperPath);
+          console.log(`[workspace] Auto-renamed: ${filename} → ${upperName}`);
+        } catch {
+          // Ignore rename errors (file may have already been renamed)
+        }
       }
-    }
-    debouncedOnChange();
-  });
-  watcher.on('unlink', debouncedOnChange);
-
-  return {
-    close(): void {
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
-        debounceTimer = null;
-      }
-      watcher.close().catch(() => {
-        // Ignore errors during close
-      });
     },
-  };
+    onChange,
+  });
 }
 
 /**

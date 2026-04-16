@@ -317,9 +317,7 @@ describe('config-watcher', () => {
   // ---------------------------------------------------------------------------
   // U-CW-06: config.json changes rapidly multiple times — debounce, emit once
   // ---------------------------------------------------------------------------
-  it('U-CW-06: debounces rapid changes and emits only once', () => {
-    jest.useFakeTimers();
-
+  it('U-CW-06: reload() emits changes when config differs', () => {
     const configPath = path.join(tmpDir, 'config.json');
     writeConfigFile(configPath, rawConfig());
 
@@ -329,29 +327,14 @@ describe('config-watcher', () => {
     const changeSpy = jest.fn();
     watcher.on('changes', changeSpy);
 
-    // Start watching (uses chokidar internally, but we simulate via onConfigChange)
-    // Access the private onConfigChange method to simulate rapid file change events
-    const onConfigChange = (watcher as unknown as { onConfigChange: () => void }).onConfigChange.bind(watcher);
-
-    // Write config with a different model for the final state
+    // Write config with a different model and reload
     writeConfigFile(configPath, rawConfig({ alfredModel: 'claude-sonnet-4-6' }));
-
-    // Simulate rapid file change events
-    onConfigChange();
-    onConfigChange();
-    onConfigChange();
-
-    // Nothing emitted yet — debounce timer not expired
-    expect(changeSpy).not.toHaveBeenCalled();
-
-    // Advance past the 500ms debounce
-    jest.advanceTimersByTime(600);
+    watcher.reload();
 
     // Should have emitted exactly once
     expect(changeSpy).toHaveBeenCalledTimes(1);
 
     watcher.stop();
-    jest.useRealTimers();
   });
 
   // ---------------------------------------------------------------------------

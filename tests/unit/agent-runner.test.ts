@@ -261,6 +261,175 @@ describe('AgentRunner (session pool)', () => {
   }, 15000);
 });
 
+// ── restartOrDefer (skills hot-reload support) ────────────────────────────────
+
+describe('AgentRunner — restartOrDefer', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-restart-defer-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) {
+      await runner.stop();
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // --------------------------------------------------------------------------
+  // RS1: stops a non-processing session immediately
+  // --------------------------------------------------------------------------
+  it('RS1: stops a non-processing session subprocess immediately', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:idle')!;
+    expect(sess).toBeDefined();
+    // Simulate turn completed: mark as not processing so it stops immediately.
+    sess.setProcessing(false);
+
+    await runner.restartOrDefer();
+
+    expect(getSessions(runner).has('chat:idle')).toBe(false);
+    expect(getSessions(runner).size).toBe(0);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS2: defers a processing session (does not stop immediately)
+  // --------------------------------------------------------------------------
+  it('RS2: defers restart for a processing session', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:busy', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:busy')!;
+    // Mark session as processing.
+    sess.setProcessing(true);
+    const stopSpy = jest.spyOn(sess, 'stop');
+
+    await runner.restartOrDefer();
+
+    // Session still in pool; stop not called yet.
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:busy')).toBe(true);
+    expect(getSessions(runner).size).toBe(1);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS3: mixed — idle stopped immediately, processing deferred
+  // --------------------------------------------------------------------------
+  it('RS3: stops idle sessions immediately; defers processing sessions', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:a', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:b', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sessA = getSessions(runner).get('chat:a')!;
+    const sessB = getSessions(runner).get('chat:b')!;
+    // sessA: reset processing (turn completed) → stops immediately
+    // sessB: remains processing (turn still running) → deferred
+    sessA.setProcessing(false);
+    // sessB.isProcessing is already true from sendChannelPost
+    const stopSpyB = jest.spyOn(sessB, 'stop');
+
+    await runner.restartOrDefer();
+
+    expect(getSessions(runner).has('chat:a')).toBe(false);
+    expect(getSessions(runner).has('chat:b')).toBe(true);
+    expect(stopSpyB).not.toHaveBeenCalled();
+    expect(getSessions(runner).size).toBe(1);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS4: empty pool — no-op, does not throw
+  // --------------------------------------------------------------------------
+  it('RS4: empty session pool is a no-op', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(getSessions(runner).size).toBe(0);
+    await expect(runner.restartOrDefer()).resolves.toBeUndefined();
+    expect(getSessions(runner).size).toBe(0);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS5: receiver and callback server remain up
+  // --------------------------------------------------------------------------
+  it('RS5: receiver and callback server keep running after restart', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:keepalive', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:keepalive')!;
+    // Simulate turn completed so session is stopped immediately.
+    sess.setProcessing(false);
+
+    expect(runner.isRunning()).toBe(true);
+    const portBefore = getCallbackPort(runner);
+
+    await runner.restartOrDefer();
+
+    // Receiver still running; callback server still bound to the same port.
+    expect(runner.isRunning()).toBe(true);
+    expect(getCallbackPort(runner)).toBe(portBefore);
+
+    // And a new message re-spawns the stopped session lazily.
+    await sendChannelPost(port, 'chat:keepalive', 'again');
+    await new Promise(r => setTimeout(r, 100));
+    expect(getSessions(runner).has('chat:keepalive')).toBe(true);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS6: deferred session stops when setProcessing(false) is called
+  // --------------------------------------------------------------------------
+  it('RS6: deferred session stops itself after turn completes', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:defer', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:defer')!;
+    // isProcessing is already true from sendChannelPost
+
+    await runner.restartOrDefer();
+    // Still in pool — processing
+    expect(getSessions(runner).has('chat:defer')).toBe(true);
+
+    // Simulate turn completing
+    sess.setProcessing(false);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Session should now be stopped and removed via deferredRestartReady listener
+    expect(getSessions(runner).has('chat:defer')).toBe(false);
+  }, 15000);
+});
+
 // ── Typing error notification tests ───────────────────────────────────────────
 
 describe('AgentRunner — typing error notification', () => {

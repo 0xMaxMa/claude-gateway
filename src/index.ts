@@ -13,6 +13,8 @@ import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, markBootstrapComplete, migrateWorkspaceFiles } from './agent/workspace-loader';
 import { watchSkills } from './skills';
+import { syncSharedSkills } from './skills/sync';
+import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
@@ -187,6 +189,23 @@ async function main(): Promise<void> {
   const schedulers: CronScheduler[] = [];
   const startupResults: StartupResult[] = [];
 
+  const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
+  const personalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
+  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+
+  // Initial sync: copy shared skills to ~/.claude/skills/ so the Skill tool sees them
+  syncSharedSkills(sharedSkillsDir, personalSkillsDir, globalLogger);
+
+  // Watch shared-skills for changes and re-sync to ~/.claude/skills/ on any update
+  createWatcher({
+    paths: [`${sharedSkillsDir}/**/SKILL.md`],
+    debounceMs: 250,
+    chokidarOpts: { depth: 2 },
+    onChange: () => {
+      syncSharedSkills(sharedSkillsDir, personalSkillsDir, globalLogger);
+    },
+  });
+
   for (const agentConfig of config.agents) {
     // Expand ~ in workspace path so all downstream code uses absolute paths
     agentConfig.workspace = expandTilde(agentConfig.workspace);
@@ -214,7 +233,6 @@ async function main(): Promise<void> {
 
     // Load workspace
     const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
-    const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
     let workspace;
     try {
       workspace = await loadWorkspace(agentConfig.workspace, {
@@ -304,11 +322,11 @@ async function main(): Promise<void> {
           updated.systemPrompt,
           'utf8',
         );
-        logger.info('Updated CLAUDE.md, restarting runner');
+        logger.info('Updated CLAUDE.md, restarting sessions');
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
         }
-        await runner.restart();
+        await runner.restartOrDefer();
         scheduler.load(updated.files.heartbeatMd);
       } catch (err) {
         logger.error('Failed to reload workspace', { error: (err as Error).message });
@@ -336,6 +354,9 @@ async function main(): Promise<void> {
             updated.systemPrompt,
             'utf8',
           );
+          // Stop idle subprocesses now; busy sessions are deferred until
+          // their current turn completes, then restarted automatically.
+          await runner.restartOrDefer();
           logger.info('Skills registry updated', {
             count: updated.skillRegistry?.skills.size ?? 0,
           });
@@ -369,7 +390,6 @@ async function main(): Promise<void> {
   console.log(`[gateway] Listening on port ${PORT}`);
 
   // ── Config hot-reload watcher ──────────────────────────────────────────────
-  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   const configWatcher = new ConfigWatcher(CONFIG_PATH, config, globalLogger);
 
   configWatcher.on('changes', (changes: ConfigChange[], newConfig: GatewayConfig) => {

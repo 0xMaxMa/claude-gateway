@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
-import chokidar from 'chokidar';
 import { loadConfig } from './loader';
 import { AgentConfig, GatewayConfig, Logger } from '../types';
+import { createWatcher, WatchHandle } from '../watch/factory';
 
 // Fields that can be hot-reloaded without restarting the gateway
 const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
@@ -22,9 +22,8 @@ export interface ConfigChange {
 }
 
 export class ConfigWatcher extends EventEmitter {
-  private watcher: chokidar.FSWatcher | null = null;
+  private watchHandle: WatchHandle | null = null;
   private currentConfig: GatewayConfig;
-  private debounceTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly configPath: string,
@@ -36,27 +35,22 @@ export class ConfigWatcher extends EventEmitter {
   }
 
   start(): void {
-    this.watcher = chokidar.watch(this.configPath, {
-      ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 300 },
+    this.watchHandle = createWatcher({
+      paths: [this.configPath],
+      debounceMs: 500,
+      chokidarOpts: { awaitWriteFinish: { stabilityThreshold: 300 } },
+      onChange: () => this.reload(),
     });
-    this.watcher.on('change', () => this.onConfigChange());
   }
 
   stop(): void {
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.watcher?.close();
-    this.watcher = null;
+    void this.watchHandle?.close();
+    this.watchHandle = null;
   }
 
   /** Get current config snapshot */
   getConfig(): GatewayConfig {
     return this.currentConfig;
-  }
-
-  private onConfigChange(): void {
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.reload(), 500);
   }
 
   reload(): void {
