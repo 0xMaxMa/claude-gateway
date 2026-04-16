@@ -271,7 +271,7 @@ While an agent is working, the gateway sends real-time status updates to Telegra
 ```
 
 - **Tool tracking** — each tool call is displayed with a descriptive label (e.g. `📖 Reading: config.ts`, `⚡ Running: npm test`)
-- **History** — previous steps shown with ✅, current step with 🕐
+- **History** — previous steps shown with ☑️, current step with 🕐
 - **Thinking** — agent's reasoning shown with 🧠
 - **Elapsed time** — total time since the agent started working
 - **Auto-cleanup** — status message is deleted when the agent finishes

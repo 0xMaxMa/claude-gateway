@@ -261,6 +261,151 @@ describe('AgentRunner (session pool)', () => {
   }, 15000);
 });
 
+// ── restartIdleSessions (skills hot-reload support) ───────────────────────────
+
+describe('AgentRunner — restartIdleSessions', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-restart-idle-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) {
+      await runner.stop();
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // Force a session's idle state by rewriting its lastActivityAt.
+  function setLastActivity(proc: SessionProcess, msAgo: number): void {
+    (proc as unknown as { lastActivityAt: number }).lastActivityAt = Date.now() - msAgo;
+  }
+
+  // --------------------------------------------------------------------------
+  // RS1: stops an idle session subprocess
+  // --------------------------------------------------------------------------
+  it('RS1: stops an idle session subprocess', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:idle')!;
+    expect(sess).toBeDefined();
+
+    // Mark as idle for well over the 1s threshold.
+    setLastActivity(sess, 5_000);
+
+    await runner.restartIdleSessions();
+
+    expect(getSessions(runner).has('chat:idle')).toBe(false);
+    expect(getSessions(runner).size).toBe(0);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS2: leaves a busy session alone
+  // --------------------------------------------------------------------------
+  it('RS2: leaves a busy session alone', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:busy', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:busy')!;
+    // Freshly active: lastActivityAt is "now" — well below the 1s idle threshold.
+    setLastActivity(sess, 0);
+    const stopSpy = jest.spyOn(sess, 'stop');
+
+    await runner.restartIdleSessions();
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:busy')).toBe(true);
+    expect(getSessions(runner).size).toBe(1);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS3: mixed idle/busy — only idle is stopped
+  // --------------------------------------------------------------------------
+  it('RS3: stops only idle sessions in a mixed pool', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:a', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:b', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sessA = getSessions(runner).get('chat:a')!;
+    const sessB = getSessions(runner).get('chat:b')!;
+    setLastActivity(sessA, 10_000); // idle
+    setLastActivity(sessB, 0);       // busy
+    const stopSpyB = jest.spyOn(sessB, 'stop');
+
+    await runner.restartIdleSessions();
+
+    expect(getSessions(runner).has('chat:a')).toBe(false);
+    expect(getSessions(runner).has('chat:b')).toBe(true);
+    expect(stopSpyB).not.toHaveBeenCalled();
+    expect(getSessions(runner).size).toBe(1);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS4: empty pool — no-op, does not throw
+  // --------------------------------------------------------------------------
+  it('RS4: empty session pool is a no-op', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(getSessions(runner).size).toBe(0);
+    await expect(runner.restartIdleSessions()).resolves.toBeUndefined();
+    expect(getSessions(runner).size).toBe(0);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS5: receiver and callback server remain up
+  // --------------------------------------------------------------------------
+  it('RS5: receiver and callback server keep running after restart', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:keepalive', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:keepalive')!;
+    setLastActivity(sess, 5_000);
+
+    expect(runner.isRunning()).toBe(true);
+    const portBefore = getCallbackPort(runner);
+
+    await runner.restartIdleSessions();
+
+    // Receiver still running; callback server still bound to the same port.
+    expect(runner.isRunning()).toBe(true);
+    expect(getCallbackPort(runner)).toBe(portBefore);
+
+    // And a new message re-spawns the stopped session lazily.
+    await sendChannelPost(port, 'chat:keepalive', 'again');
+    await new Promise(r => setTimeout(r, 100));
+    expect(getSessions(runner).has('chat:keepalive')).toBe(true);
+  }, 15000);
+});
+
 // ── Typing error notification tests ───────────────────────────────────────────
 
 describe('AgentRunner — typing error notification', () => {

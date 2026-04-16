@@ -812,6 +812,38 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Stop all idle session subprocesses so they re-spawn with the latest
+   * system prompt on the next incoming message.
+   *
+   * - "Idle" = no activity for {@link IDLE_THRESHOLD_MS}ms (enough to exclude an in-flight turn).
+   * - Busy sessions are left alone; they will be picked up by the idle cleaner
+   *   (every 5m) or naturally on the next spawn after timeout.
+   * - Does NOT stop the receiver; incoming messages keep flowing.
+   *
+   * Used by the skills hot-reload path so that SKILL.md changes take effect
+   * without kicking users out of in-flight turns.
+   */
+  async restartIdleSessions(): Promise<void> {
+    const IDLE_THRESHOLD_MS = 1000;
+    const toStop: string[] = [];
+    for (const [id, proc] of this.sessions) {
+      if (proc.isIdle(IDLE_THRESHOLD_MS)) {
+        toStop.push(id);
+      }
+    }
+    for (const id of toStop) {
+      const proc = this.sessions.get(id);
+      if (!proc) continue;
+      await proc.stop();
+      this.sessions.delete(id);
+    }
+    this.logger.info('Restarted idle sessions for skill reload', {
+      stopped: toStop.length,
+      skipped: this.sessions.size,
+    });
+  }
+
+  /**
    * Format a timestamp as a human-readable age string (e.g. "5m ago", "2h ago").
    */
   private formatAge(ts: number): string {

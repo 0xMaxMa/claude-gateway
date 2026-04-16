@@ -336,6 +336,11 @@ async function main(): Promise<void> {
             updated.systemPrompt,
             'utf8',
           );
+          // Stop idle subprocesses so the next incoming message picks up the
+          // refreshed system prompt. Busy sessions are left running and will
+          // pick up the change after their current turn completes and they
+          // idle out via the idle cleaner.
+          await runner.restartIdleSessions();
           logger.info('Skills registry updated', {
             count: updated.skillRegistry?.skills.size ?? 0,
           });
