@@ -279,60 +279,6 @@ function extractLeadingEmoji(text: string): { emoji: string | undefined; rest: s
   return { emoji: undefined, rest: text };
 }
 
-/**
- * Fetch plain-text content from a URL.
- * For Wikipedia URLs, uses the REST summary API to get clean prose.
- * For other URLs, strips HTML tags from the response body.
- */
-async function fetchUrlContent(url: string): Promise<string> {
-  // Wikipedia: use REST summary API for clean plain-text extract
-  const wikiMatch = url.match(/^https?:\/\/(\w+)\.wikipedia\.org\/wiki\/(.+)$/);
-  if (wikiMatch) {
-    const lang = wikiMatch[1];
-    const title = wikiMatch[2];
-    const apiUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
-    const body = await httpsGet(apiUrl);
-    const json = JSON.parse(body) as { extract?: string; title?: string };
-    if (json.extract) {
-      return `${json.title ?? title}:\n${json.extract}`;
-    }
-  }
-  // Generic URL: fetch and strip HTML tags, truncate to 2000 chars
-  const body = await httpsGet(url);
-  return body
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 2000);
-}
-
-/**
- * Expand any URLs found in the description by pre-fetching their content
- * and appending it inline. This prevents claude --print from needing to
- * use WebFetch tools, which can timeout or fail in non-interactive mode.
- */
-export async function expandDescriptionUrls(description: string): Promise<string> {
-  const urlRegex = /https?:\/\/[^\s]+/g;
-  const urls = description.match(urlRegex);
-  if (!urls || urls.length === 0) return description;
-
-  const parts: string[] = [];
-  for (const url of urls) {
-    try {
-      const content = await fetchUrlContent(url);
-      if (content.trim()) {
-        parts.push(`\n\n--- Content fetched from ${url} ---\n${content}\n---`);
-      }
-    } catch {
-      // Ignore fetch failures — Claude will work with the URL text only
-    }
-  }
-
-  return description + parts.join('');
-}
-
 async function generateFiles(
   agentId: string,
   description: string,
@@ -341,12 +287,11 @@ async function generateFiles(
   const agentName = agentId.charAt(0).toUpperCase() + agentId.slice(1);
   console.log('\nGenerating workspace files with Claude...');
 
-  const expandedDescription = await expandDescriptionUrls(description);
-  const genPrompt = buildGenerationPrompt(agentName, expandedDescription, options);
-  const result = spawnSync('claude', ['--print'], {
+  const genPrompt = buildGenerationPrompt(agentName, description, options);
+  const result = spawnSync('claude', ['--print', '--dangerously-skip-permissions'], {
     input: genPrompt,
     encoding: 'utf8',
-    timeout: 60000,
+    timeout: 120000,
   });
 
   if (result.error || result.status !== 0 || !result.stdout?.trim()) {

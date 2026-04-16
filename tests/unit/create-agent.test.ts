@@ -528,81 +528,10 @@ describe('expandHome helper', () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-CA-09: expandDescriptionUrls — URL pre-fetching logic (pure unit tests)
+// T-CA-09: createWorkspace stub files
 // ---------------------------------------------------------------------------
 
-describe('T-CA-09: expandDescriptionUrls — URL detection and Wikipedia API routing', () => {
-  /**
-   * Mirror the Wikipedia URL matching logic from expandDescriptionUrls.
-   * Returns the REST summary API URL for Wikipedia links, null for other URLs.
-   */
-  function resolveWikipediaApiUrl(url: string): string | null {
-    const wikiMatch = url.match(/^https?:\/\/(\w+)\.wikipedia\.org\/wiki\/(.+)$/);
-    if (!wikiMatch) return null;
-    const lang = wikiMatch[1];
-    const title = wikiMatch[2];
-    return `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
-  }
-
-  /** Mirror URL regex from expandDescriptionUrls */
-  function extractUrls(text: string): string[] {
-    return text.match(/https?:\/\/[^\s]+/) ?? [];
-  }
-
-  it('detects no URLs in plain text', () => {
-    expect(extractUrls('A helpful assistant for personal tasks.')).toHaveLength(0);
-  });
-
-  it('detects a single URL', () => {
-    const urls = extractUrls('See https://example.com for info.');
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toBe('https://example.com');
-  });
-
-  it('routes Wikipedia URL to REST summary API', () => {
-    const url = 'https://en.wikipedia.org/wiki/Akari_Tsumugi';
-    const apiUrl = resolveWikipediaApiUrl(url);
-    expect(apiUrl).toBe('https://en.wikipedia.org/api/rest_v1/page/summary/Akari_Tsumugi');
-  });
-
-  it('routes non-English Wikipedia URL with correct language code', () => {
-    const url = 'https://vi.wikipedia.org/wiki/Akari_Tsumugi';
-    const apiUrl = resolveWikipediaApiUrl(url);
-    expect(apiUrl).toBe('https://vi.wikipedia.org/api/rest_v1/page/summary/Akari_Tsumugi');
-  });
-
-  it('returns null for non-Wikipedia URLs', () => {
-    expect(resolveWikipediaApiUrl('https://example.com/page')).toBeNull();
-    expect(resolveWikipediaApiUrl('https://github.com/user/repo')).toBeNull();
-  });
-
-  it('URL-encodes spaces in Wikipedia article titles', () => {
-    const url = 'https://en.wikipedia.org/wiki/Sailor_Moon';
-    const apiUrl = resolveWikipediaApiUrl(url);
-    expect(apiUrl).toContain('Sailor_Moon');
-  });
-
-  it('strips HTML script and style tags from generic URL content', () => {
-    const html = '<html><script>alert(1)</script><style>.x{}</style><body><h1>Title</h1><p>Content</p></body></html>';
-    const stripped = html
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    expect(stripped).toContain('Title');
-    expect(stripped).toContain('Content');
-    expect(stripped).not.toContain('<script>');
-    expect(stripped).not.toContain('<style>');
-    expect(stripped).not.toContain('alert(1)');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// T-CA-10: createWorkspace stub files
-// ---------------------------------------------------------------------------
-
-describe('T-CA-10: createWorkspace creates blank stubs for standard files', () => {
+describe('T-CA-09: createWorkspace creates blank stubs for standard files', () => {
   let tmpDir: string;
 
   beforeEach(() => {
