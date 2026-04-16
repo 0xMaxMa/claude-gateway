@@ -24,8 +24,7 @@ const LOWERCASE_TO_UPPERCASE: Record<string, string> = {
   'tools.md': 'TOOLS.md',
   'memory.md': 'MEMORY.md',
   'heartbeat.md': 'HEARTBEAT.md',
-  'bootstrap.md': 'BOOTSTRAP.md',
-  'bootstrap.md.done': 'BOOTSTRAP.md.done',
+
 };
 
 function readFileOrDefault(filePath: string, defaultValue: string): string {
@@ -97,10 +96,6 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   const rawHeartbeat = readFileOrDefault(path.join(workspaceDir, 'HEARTBEAT.md'), '');
   const rawMemory = readFileOrDefault(path.join(workspaceDir, 'MEMORY.md'), '');
 
-  const bootstrapPath = path.join(workspaceDir, 'BOOTSTRAP.md');
-  const bootstrapExists = fs.existsSync(bootstrapPath);
-  const rawBootstrap = bootstrapExists ? fs.readFileSync(bootstrapPath, 'utf-8') : null;
-
   let anyTruncated = false;
 
   const truncateResult = (raw: string) => {
@@ -116,7 +111,6 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   const userMd = truncateResult(rawUser);
   const heartbeatMd = truncateResult(rawHeartbeat);
   const memoryMd = truncateResult(rawMemory);
-  const bootstrapMd = rawBootstrap !== null ? truncateResult(rawBootstrap) : null;
 
   // Load agent skills
   const skillRegistry = loadSkills({
@@ -127,7 +121,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   });
   const skillsSection = renderSkillsSection(skillRegistry);
 
-  // Assemble system prompt (bootstrap not included in prompt sections)
+  // Assemble system prompt
   let systemPrompt =
     `--- AGENT IDENTITY ---\n${agentMd}\n\n` +
     `--- IDENTITY ---\n${identityMd}\n\n` +
@@ -152,8 +146,6 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     userMd,
     heartbeatMd,
     memoryMd,
-    bootstrapMd,
-    isFirstRun: bootstrapExists,
   };
 
   return {
@@ -195,29 +187,3 @@ export function watchWorkspace(workspaceDir: string, onChange: () => void): Watc
   });
 }
 
-/**
- * Delete BOOTSTRAP.md from the workspace directory.
- * Idempotent: no error if file is already gone.
- */
-export async function deleteBootstrap(workspaceDir: string): Promise<void> {
-  const bootstrapPath = path.join(workspaceDir, 'BOOTSTRAP.md');
-  try {
-    fs.unlinkSync(bootstrapPath);
-  } catch {
-    // File may already be gone; ignore
-  }
-}
-
-/**
- * Mark bootstrap as complete by renaming BOOTSTRAP.md → BOOTSTRAP.md.done.
- * Idempotent: no error if file is already gone or already renamed.
- */
-export async function markBootstrapComplete(workspaceDir: string): Promise<void> {
-  const bootstrapPath = path.join(workspaceDir, 'BOOTSTRAP.md');
-  const donePath = path.join(workspaceDir, 'BOOTSTRAP.md.done');
-  try {
-    fs.renameSync(bootstrapPath, donePath);
-  } catch {
-    // File may already be gone or renamed; ignore
-  }
-}

@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import supertest from 'supertest';
-import { loadWorkspace, watchWorkspace, markBootstrapComplete, deleteBootstrap } from '../../src/agent/workspace-loader';
+import { loadWorkspace, watchWorkspace } from '../../src/agent/workspace-loader';
 import { MemoryManager } from '../../src/memory/manager';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
@@ -27,7 +27,6 @@ function createTempWorkspace(prefix = 'cs-test-ws-'): string {
     'USER.md': '# User\nTester.',
     'HEARTBEAT.md': '# Heartbeat\n',
     'MEMORY.md': '# Memory\n',
-    'BOOTSTRAP.md': '# Bootstrap\nFirst run.',
   };
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
@@ -86,30 +85,6 @@ describe('Character System Integration', () => {
 
   afterAll(() => {
     delete process.env.CLAUDE_BIN;
-  });
-
-  // ── I-CS-01: BOOTSTRAP.md → isFirstRun; after markBootstrapComplete → .done ─
-  it('I-CS-01: BOOTSTRAP.md present → isFirstRun=true; after markBootstrapComplete → renamed to .done', async () => {
-    const workspace = createTempWorkspace('cs01-');
-    try {
-      // Load workspace — BOOTSTRAP.md exists → isFirstRun=true
-      const loaded = await loadWorkspace(workspace);
-      expect(loaded.files.isFirstRun).toBe(true);
-      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md'))).toBe(true);
-
-      // Call markBootstrapComplete
-      await markBootstrapComplete(workspace);
-
-      // BOOTSTRAP.md should be gone, BOOTSTRAP.md.done should exist
-      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md'))).toBe(false);
-      expect(fs.existsSync(path.join(workspace, 'BOOTSTRAP.md.done'))).toBe(true);
-
-      // Reload → isFirstRun=false
-      const reloaded = await loadWorkspace(workspace);
-      expect(reloaded.files.isFirstRun).toBe(false);
-    } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    }
   });
 
   // ── I-CS-02: hot-reload: modify SOUL.md → onChange fires within 500ms ────
@@ -379,24 +354,4 @@ describe('Character System Integration', () => {
     }
   });
 
-  // ── Idempotent deleteBootstrap / markBootstrapComplete ────────────────────
-  it('Idempotent: deleteBootstrap calling twice does not throw', async () => {
-    const workspace = createTempWorkspace('cs-idem-del-');
-    try {
-      await deleteBootstrap(workspace);
-      await expect(deleteBootstrap(workspace)).resolves.toBeUndefined();
-    } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    }
-  });
-
-  it('Idempotent: markBootstrapComplete calling twice does not throw', async () => {
-    const workspace = createTempWorkspace('cs-idem-mark-');
-    try {
-      await markBootstrapComplete(workspace);
-      await expect(markBootstrapComplete(workspace)).resolves.toBeUndefined();
-    } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    }
-  });
 });

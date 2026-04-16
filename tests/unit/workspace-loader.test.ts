@@ -3,8 +3,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import {
   loadWorkspace,
-  deleteBootstrap,
-  markBootstrapComplete,
   migrateWorkspaceFiles,
   watchWorkspace,
   MissingRequiredFileError,
@@ -25,16 +23,6 @@ describe('workspace-loader', () => {
     expect(result.files.userMd).toContain('User Profile');
     expect(result.files.heartbeatMd).toContain('morning-brief');
     expect(result.files.memoryMd).toContain('Memory');
-    expect(result.files.bootstrapMd).toContain('Bootstrap');
-  });
-
-  // -------------------------------------------------------------------------
-  // U-WL-02: Missing optional file (BOOTSTRAP.md)
-  // -------------------------------------------------------------------------
-  it('U-WL-02: missing optional BOOTSTRAP.md does not throw', async () => {
-    const result = await loadWorkspace(path.join(FIXTURES, 'valid-no-bootstrap'));
-    expect(result.files.bootstrapMd).toBeNull();
-    expect(result.systemPrompt).toBeTruthy();
   });
 
   // -------------------------------------------------------------------------
@@ -146,24 +134,6 @@ describe('workspace-loader', () => {
   });
 
   // -------------------------------------------------------------------------
-  // U-WL-09: isFirstRun = true when BOOTSTRAP.md exists
-  // -------------------------------------------------------------------------
-  it('U-WL-09: sets isFirstRun=true when BOOTSTRAP.md exists', async () => {
-    const result = await loadWorkspace(path.join(FIXTURES, 'valid-full'));
-    expect(result.files.isFirstRun).toBe(true);
-    expect(result.files.bootstrapMd).not.toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // U-WL-10: isFirstRun = false when BOOTSTRAP.md absent
-  // -------------------------------------------------------------------------
-  it('U-WL-10: sets isFirstRun=false when BOOTSTRAP.md is absent', async () => {
-    const result = await loadWorkspace(path.join(FIXTURES, 'valid-no-bootstrap'));
-    expect(result.files.isFirstRun).toBe(false);
-    expect(result.files.bootstrapMd).toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
   // IDENTITY.md tests
   // -------------------------------------------------------------------------
   it('IDENTITY.md present → included in prompt under --- IDENTITY ---', async () => {
@@ -189,50 +159,6 @@ describe('workspace-loader', () => {
       const result = await loadWorkspace(tmpDir);
       expect(result.systemPrompt).toContain('--- IDENTITY ---');
       expect(result.files.identityMd).toBe('');
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // deleteBootstrap helper
-  // -------------------------------------------------------------------------
-  it('deleteBootstrap removes BOOTSTRAP.md from disk', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-test-'));
-    try {
-      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
-      fs.writeFileSync(path.join(tmpDir, 'BOOTSTRAP.md'), '# Bootstrap');
-
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md'))).toBe(true);
-      await deleteBootstrap(tmpDir);
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md'))).toBe(false);
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true });
-    }
-  });
-
-  it('deleteBootstrap is idempotent when BOOTSTRAP.md does not exist', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-test-'));
-    try {
-      // Should not throw even if file is absent
-      await expect(deleteBootstrap(tmpDir)).resolves.toBeUndefined();
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // markBootstrapComplete
-  // -------------------------------------------------------------------------
-  it('markBootstrapComplete renames BOOTSTRAP.md → BOOTSTRAP.md.done', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-test-'));
-    try {
-      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
-      fs.writeFileSync(path.join(tmpDir, 'BOOTSTRAP.md'), '# Bootstrap');
-
-      await markBootstrapComplete(tmpDir);
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md'))).toBe(false);
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md.done'))).toBe(true);
     } finally {
       fs.rmSync(tmpDir, { recursive: true });
     }
@@ -272,10 +198,10 @@ describe('workspace-loader', () => {
     }
   });
 
-  it('migrateWorkspaceFiles: all 8 lowercase files → all renamed to uppercase', () => {
+  it('migrateWorkspaceFiles: all 6 lowercase files → all renamed to uppercase', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-migrate-'));
     try {
-      const files = ['agent.md', 'soul.md', 'user.md', 'tools.md', 'memory.md', 'heartbeat.md', 'bootstrap.md', 'bootstrap.md.done'];
+      const files = ['agent.md', 'soul.md', 'user.md', 'tools.md', 'memory.md', 'heartbeat.md'];
       for (const f of files) {
         fs.writeFileSync(path.join(tmpDir, f), `content of ${f}`);
       }
@@ -288,8 +214,6 @@ describe('workspace-loader', () => {
       expect(fs.existsSync(path.join(tmpDir, 'TOOLS.md'))).toBe(true);
       expect(fs.existsSync(path.join(tmpDir, 'MEMORY.md'))).toBe(true);
       expect(fs.existsSync(path.join(tmpDir, 'HEARTBEAT.md'))).toBe(true);
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md'))).toBe(true);
-      expect(fs.existsSync(path.join(tmpDir, 'BOOTSTRAP.md.done'))).toBe(true);
 
       // No lowercase files remain
       for (const f of files) {

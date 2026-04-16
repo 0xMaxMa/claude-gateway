@@ -288,10 +288,10 @@ async function generateFiles(
   console.log('\nGenerating workspace files with Claude...');
 
   const genPrompt = buildGenerationPrompt(agentName, description, options);
-  const result = spawnSync('claude', ['--print'], {
+  const result = spawnSync('claude', ['--print', '--dangerously-skip-permissions'], {
     input: genPrompt,
     encoding: 'utf8',
-    timeout: 60000,
+    timeout: 120000,
   });
 
   if (result.error || result.status !== 0 || !result.stdout?.trim()) {
@@ -335,7 +335,10 @@ async function generateFiles(
 // Step 2 — Preview and accept generated files
 // ---------------------------------------------------------------------------
 
-const OPTIONAL_FILES = new Set(['IDENTITY.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md', 'BOOTSTRAP.md']);
+const OPTIONAL_FILES = new Set(['IDENTITY.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'HEARTBEAT.md']);
+
+/** Standard files that should always exist in a workspace (created as stubs if not generated). */
+const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'TOOLS.md', 'USER.md'];
 const SEPARATOR_WIDTH = 42;
 
 export function printFilePreview(filename: string, content: string): void {
@@ -431,6 +434,17 @@ export async function createWorkspace(agentId: string, files: Map<string, string
     const filePath = path.join(wsDir, filename);
     fs.writeFileSync(filePath, content, 'utf8');
     console.log(`  ✓ ${filename}`);
+  }
+
+  // Create blank stubs for any standard files not generated
+  for (const stub of STANDARD_STUB_FILES) {
+    if (!files.has(stub)) {
+      const stubPath = path.join(wsDir, stub);
+      if (!fs.existsSync(stubPath)) {
+        fs.writeFileSync(stubPath, '', 'utf8');
+        console.log(`  ✓ ${stub} (stub)`);
+      }
+    }
   }
 
   return wsDir;

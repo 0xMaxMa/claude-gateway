@@ -123,7 +123,6 @@ Each agent has a workspace directory with markdown files that define its behavio
 | `TOOLS.md` | No | Available tools and how to use them |
 | `MEMORY.md` | No | Long-term memory (auto-appended by the agent) |
 | `HEARTBEAT.md` | No | Scheduled/proactive tasks |
-| `BOOTSTRAP.md` | No | One-time first-run setup (auto-deleted after) |
 | `skills/` | No | Directory of SKILL.md files — agent-specific skills |
 
 On startup (and on any file change), all files are assembled into `CLAUDE.md` which the Claude subprocess reads as its system prompt. Do not edit `CLAUDE.md` directly.

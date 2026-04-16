@@ -11,7 +11,7 @@ function expandTilde(p: string): string {
 }
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
-import { loadWorkspace, watchWorkspace, markBootstrapComplete, migrateWorkspaceFiles } from './agent/workspace-loader';
+import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';
 import { watchSkills } from './skills';
 import { syncSharedSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -250,7 +250,6 @@ async function main(): Promise<void> {
 
     logger.info('Workspace loaded', {
       truncated: workspace.truncated,
-      isFirstRun: workspace.files.isFirstRun,
     });
 
     // Write assembled system prompt to CLAUDE.md so Claude Code subprocess picks it up
@@ -288,17 +287,6 @@ async function main(): Promise<void> {
     // Log startup status
     console.log(JSON.stringify({ id: agentConfig.id, status: 'started' }));
     logger.info('Agent started');
-
-    // If this is a first run, mark bootstrap complete after the first agent output
-    if (workspace.files.isFirstRun) {
-      const onFirstOutput = () => {
-        runner.removeListener('output', onFirstOutput);
-        markBootstrapComplete(agentConfig.workspace).catch((err) => {
-          logger.warn('Failed to mark bootstrap complete', { error: (err as Error).message });
-        });
-      };
-      runner.on('output', onFirstOutput);
-    }
 
     // Create scheduler
     const scheduler = new CronScheduler(agentConfig.id, runner, logger, agentConfig);

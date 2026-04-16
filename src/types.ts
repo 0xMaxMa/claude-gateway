@@ -73,8 +73,7 @@ export interface WorkspaceFiles {
   userMd: string;
   heartbeatMd: string;
   memoryMd: string;
-  bootstrapMd: string | null; // null if not present
-  isFirstRun: boolean;
+
 }
 
 export interface HeartbeatTask {

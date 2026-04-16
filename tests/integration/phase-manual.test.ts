@@ -13,7 +13,7 @@ import express from 'express';
 import supertest from 'supertest';
 
 import { loadConfig, MissingEnvVarError, DuplicateAgentIdError, ConfigValidationError } from '../../src/config/loader';
-import { loadWorkspace, markBootstrapComplete, deleteBootstrap, watchWorkspace } from '../../src/agent/workspace-loader';
+import { loadWorkspace, watchWorkspace } from '../../src/agent/workspace-loader';
 import { MemoryManager } from '../../src/memory/manager';
 import { parseHeartbeat, InvalidCronError } from '../../src/heartbeat/parser';
 import { SessionStore } from '../../src/session/store';
@@ -39,12 +39,11 @@ function makeTempDir(prefix: string): string {
 }
 
 /**
- * Create a workspace directory populated with all 7 standard .md files.
- * Optionally include bootstrap.md.
+ * Create a workspace directory populated with all standard .md files.
  */
 function makeTempWorkspace(
   prefix: string,
-  opts: { withBootstrap?: boolean; oversizeFile?: string } = {},
+  opts: { oversizeFile?: string } = {},
 ): string {
   const dir = makeTempDir(prefix);
   const files: Record<string, string> = {
@@ -55,10 +54,6 @@ function makeTempWorkspace(
     'HEARTBEAT.md': '# Heartbeat\n',
     'MEMORY.md': '# Memory\n',
   };
-
-  if (opts.withBootstrap !== false) {
-    files['BOOTSTRAP.md'] = '# Bootstrap\nFirst run instructions.';
-  }
 
   if (opts.oversizeFile) {
     // Make AGENTS.md oversized (> 20_000 chars)
@@ -280,21 +275,6 @@ describe('Phase 1: Workspace Loader', () => {
     expect(result.files.agentMd.length).toBeLessThan(25_000);
   });
 
-  // P1-06
-  it('P1-06: bootstrap.md present → isFirstRun=true; absent → isFirstRun=false', async () => {
-    const wsWithBootstrap = makeTempWorkspace('p106a-', { withBootstrap: true });
-    const wsWithoutBootstrap = makeTempWorkspace('p106b-', {
-      withBootstrap: false,
-    });
-
-    const withResult = await loadWorkspace(wsWithBootstrap);
-    expect(withResult.files.isFirstRun).toBe(true);
-    expect(withResult.files.bootstrapMd).not.toBeNull();
-
-    const withoutResult = await loadWorkspace(wsWithoutBootstrap);
-    expect(withoutResult.files.isFirstRun).toBe(false);
-    expect(withoutResult.files.bootstrapMd).toBeNull();
-  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,7 +445,7 @@ describe('Phase 1: Security', () => {
 describe('Phase 1: Gateway Router', () => {
   // P1-16 (Option A: webhook route removed — Claude handles Telegram via --channels)
   it('P1-16: POST /webhook returns 404 (webhook route removed in Option A)', async () => {
-    const ws = makeTempWorkspace('p116-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p116-', {});
     const agentCfg = makeAgentConfig('p116-agent', 'token-p116', ws);
     const mockRunner = { sendMessage: jest.fn(), isRunning: () => true };
 
@@ -484,7 +464,7 @@ describe('Phase 1: Gateway Router', () => {
 
   // P1-17 (all webhook routes return 404 in Option A)
   it('P1-17: POST any bot token to /webhook → 404 (webhook route removed)', async () => {
-    const ws = makeTempWorkspace('p117-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p117-', {});
     const agentCfg = makeAgentConfig('p117-agent', 'token-p117', ws);
     const mockRunner = { sendMessage: jest.fn(), isRunning: () => true };
 
@@ -506,7 +486,7 @@ describe('Phase 1: Gateway Router', () => {
 
   // P1-18 (dedup via webhook removed with Option A)
   it('P1-18: POST /webhook returns 404 (dedup via webhook no longer applicable)', async () => {
-    const ws = makeTempWorkspace('p118-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p118-', {});
     const agentCfg = makeAgentConfig('p118-agent', 'token-p118', ws);
     const mockRunner = { sendMessage: jest.fn(), isRunning: () => true };
 
@@ -524,7 +504,7 @@ describe('Phase 1: Gateway Router', () => {
 
   // P1-19 (allowlist security now enforced by Claude plugin, not gateway webhook)
   it('P1-19: POST /webhook returns 404 (security enforced by Claude plugin in Option A)', async () => {
-    const ws = makeTempWorkspace('p119-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p119-', {});
     const agentCfg = makeAgentConfig('p119-agent', 'token-p119', ws, {
       telegram: { botToken: 'token-p119', allowedUsers: [1001, 1002], dmPolicy: 'allowlist' },
     });
@@ -556,7 +536,7 @@ describe('Phase 1: Agent Runner', () => {
 
   // P1-20
   it('P1-20: spawns mock subprocess with correct CLAUDE_BIN args and env vars', async () => {
-    const ws = makeTempWorkspace('p120-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p120-', {});
     const logDir = makeTempDir('p120-log-');
     const agentCfg = makeAgentConfig('p120-agent', 'token-p120', ws);
     const gatewayCfg = makeGatewayConfig(logDir);
@@ -591,8 +571,8 @@ describe('Phase 1: Agent Runner', () => {
 describe('Phase 2: ContextIsolationGuard', () => {
   // P2-01
   it('P2-01: duplicate bot token → TokenConflictError', () => {
-    const ws1 = makeTempWorkspace('p201a-', { withBootstrap: false });
-    const ws2 = makeTempWorkspace('p201b-', { withBootstrap: false });
+    const ws1 = makeTempWorkspace('p201a-', {});
+    const ws2 = makeTempWorkspace('p201b-', {});
     const cfg1 = makeAgentConfig('p201-agent1', 'shared-token', ws1);
     const cfg2 = makeAgentConfig('p201-agent2', 'shared-token', ws2);
 
@@ -603,7 +583,7 @@ describe('Phase 2: ContextIsolationGuard', () => {
 
   // P2-02
   it('P2-02: duplicate workspace path → WorkspaceConflictError', () => {
-    const sharedWs = makeTempWorkspace('p202-shared-', { withBootstrap: false });
+    const sharedWs = makeTempWorkspace('p202-shared-', {});
     const cfg1 = makeAgentConfig('p202-agent1', 'token-p202a', sharedWs);
     const cfg2 = makeAgentConfig('p202-agent2', 'token-p202b', sharedWs);
 
@@ -614,8 +594,8 @@ describe('Phase 2: ContextIsolationGuard', () => {
 
   // P2-03
   it('P2-03: all unique → no error thrown', () => {
-    const ws1 = makeTempWorkspace('p203a-', { withBootstrap: false });
-    const ws2 = makeTempWorkspace('p203b-', { withBootstrap: false });
+    const ws1 = makeTempWorkspace('p203a-', {});
+    const ws2 = makeTempWorkspace('p203b-', {});
     const cfg1 = makeAgentConfig('p203-agent1', 'token-p203a', ws1);
     const cfg2 = makeAgentConfig('p203-agent2', 'token-p203b', ws2);
 
@@ -628,8 +608,8 @@ describe('Phase 2: ContextIsolationGuard', () => {
 
 describe('Phase 2: GatewayRouter lookup and stats API', () => {
   function buildTwoAgentRouter() {
-    const ws1 = makeTempWorkspace('p2router-a-', { withBootstrap: false });
-    const ws2 = makeTempWorkspace('p2router-b-', { withBootstrap: false });
+    const ws1 = makeTempWorkspace('p2router-a-', {});
+    const ws2 = makeTempWorkspace('p2router-b-', {});
     const cfg1 = makeAgentConfig('p2-agent-alpha', 'token-p2-alpha', ws1);
     const cfg2 = makeAgentConfig('p2-agent-beta', 'token-p2-beta', ws2);
     const mockAlpha = { sendMessage: jest.fn(), isRunning: () => true };
@@ -677,8 +657,8 @@ describe('Phase 2: GatewayRouter lookup and stats API', () => {
 
   // P2-06 (Option A: messagesSent tracked from subprocess output events)
   it('P2-06: GatewayRouter.getAgentStats(): messagesSent increments from subprocess output', () => {
-    const ws1 = makeTempWorkspace('p206-a-', { withBootstrap: false });
-    const ws2 = makeTempWorkspace('p206-b-', { withBootstrap: false });
+    const ws1 = makeTempWorkspace('p206-a-', {});
+    const ws2 = makeTempWorkspace('p206-b-', {});
     const cfg1 = makeAgentConfig('p206-alpha', 'token-p206-alpha', ws1);
     const cfg2 = makeAgentConfig('p206-beta', 'token-p206-beta', ws2);
 
@@ -729,8 +709,8 @@ describe('Phase 2: Two-agent token routing (Option A)', () => {
   let mockBeta: { sendMessage: jest.Mock; isRunning: () => boolean };
 
   beforeEach(() => {
-    const ws1 = makeTempWorkspace('p2routing-a-', { withBootstrap: false });
-    const ws2 = makeTempWorkspace('p2routing-b-', { withBootstrap: false });
+    const ws1 = makeTempWorkspace('p2routing-a-', {});
+    const ws2 = makeTempWorkspace('p2routing-b-', {});
     const cfg1 = makeAgentConfig('p207-alpha', 'token-p207-alpha', ws1);
     const cfg2 = makeAgentConfig('p207-beta', 'token-p207-beta', ws2);
     mockAlpha = { sendMessage: jest.fn(), isRunning: () => true };
@@ -776,7 +756,7 @@ describe('Phase 2: Debouncing (Option A — debounce removed)', () => {
   // P2-09: Debouncing via webhook removed in Option A.
   // Claude subprocess handles Telegram messages directly via --channels.
   it('P2-09: POST /webhook returns 404 (debounce via webhook removed in Option A)', async () => {
-    const ws = makeTempWorkspace('p209-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p209-', {});
     const agentCfg = makeAgentConfig('p209-agent', 'token-p209', ws);
     const mockRunner = { sendMessage: jest.fn(), isRunning: () => true };
 
@@ -853,7 +833,7 @@ describe('Phase 2: Startup resilience', () => {
   // P2-11
   it('P2-11: agent with missing agent.md fails gracefully, valid agent still starts', async () => {
     const badWorkspace = path.join(os.tmpdir(), `p211-nonexistent-${Date.now()}`);
-    const goodWorkspace = makeTempWorkspace('p211-good-', { withBootstrap: false });
+    const goodWorkspace = makeTempWorkspace('p211-good-', {});
     const logDir = makeTempDir('p211-log-');
     const cfgBad = makeAgentConfig('p211-bad', 'token-p211-bad', badWorkspace);
     const cfgGood = makeAgentConfig('p211-good', 'token-p211-good', goodWorkspace);
@@ -1566,54 +1546,10 @@ describe('Phase 3: Full heartbeat flow', () => {
 // Phase 4 Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('Phase 4: Bootstrap lifecycle', () => {
-  // P4-01
-  it('P4-01: bootstrap.md present → isFirstRun=true', async () => {
-    const ws = makeTempWorkspace('p401-', { withBootstrap: true });
-    const result = await loadWorkspace(ws);
-    expect(result.files.isFirstRun).toBe(true);
-    expect(result.files.bootstrapMd).not.toBeNull();
-  });
-
-  // P4-02
-  it('P4-02: markBootstrapComplete() → file renamed to .done, subsequent loadWorkspace isFirstRun=false', async () => {
-    const ws = makeTempWorkspace('p402-', { withBootstrap: true });
-
-    // Confirm it starts as first run
-    const before = await loadWorkspace(ws);
-    expect(before.files.isFirstRun).toBe(true);
-
-    // Mark complete
-    await markBootstrapComplete(ws);
-
-    // bootstrap.md should be gone; bootstrap.md.done should exist
-    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md'))).toBe(false);
-    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md.done'))).toBe(true);
-
-    // Subsequent load reports isFirstRun=false
-    const after = await loadWorkspace(ws);
-    expect(after.files.isFirstRun).toBe(false);
-    expect(after.files.bootstrapMd).toBeNull();
-  });
-
-  // P4-03
-  it('P4-03: deleteBootstrap() idempotent — calling twice does not throw', async () => {
-    const ws = makeTempWorkspace('p403-', { withBootstrap: true });
-
-    await expect(deleteBootstrap(ws)).resolves.not.toThrow();
-    // File is gone after first call
-    expect(fs.existsSync(path.join(ws, 'BOOTSTRAP.md'))).toBe(false);
-    // Second call must also not throw
-    await expect(deleteBootstrap(ws)).resolves.not.toThrow();
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe('Phase 4: MemoryManager', () => {
   // P4-04
   it('P4-04: appendFact to existing section → fact appears under that section', async () => {
-    const ws = makeTempWorkspace('p404-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p404-', {});
     // Pre-populate memory.md with a section
     fs.writeFileSync(
       path.join(ws, 'MEMORY.md'),
@@ -1638,7 +1574,7 @@ describe('Phase 4: MemoryManager', () => {
 
   // P4-05
   it('P4-05: appendFact to new section → section created at end of file', async () => {
-    const ws = makeTempWorkspace('p405-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p405-', {});
     fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# Memory\n', 'utf-8');
 
     const mm = new MemoryManager(ws);
@@ -1656,7 +1592,7 @@ describe('Phase 4: MemoryManager', () => {
 
   // P4-06
   it('P4-06: searchMemory → returns only lines containing query', async () => {
-    const ws = makeTempWorkspace('p406-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p406-', {});
     fs.writeFileSync(
       path.join(ws, 'MEMORY.md'),
       '# Memory\n\n## People\n- Alice loves cats.\n- Bob likes dogs.\n- Carol has a parrot.\n',
@@ -1677,7 +1613,7 @@ describe('Phase 4: MemoryManager', () => {
 
   // P4-07
   it('P4-07: trimToSize → file under limit after trim', async () => {
-    const ws = makeTempWorkspace('p407-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p407-', {});
 
     // Create a memory.md with enough content to exceed a small limit
     const lines = ['# Memory', ''];
@@ -1699,7 +1635,7 @@ describe('Phase 4: MemoryManager', () => {
 
   // P4-08
   it('P4-08: thread-safety: 5 concurrent appendFact → all 5 facts present', async () => {
-    const ws = makeTempWorkspace('p408-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p408-', {});
     fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# Memory\n', 'utf-8');
 
     const mm = new MemoryManager(ws);
@@ -1727,7 +1663,7 @@ describe('Phase 4: MemoryManager', () => {
 describe('Phase 4: watchWorkspace', () => {
   // P4-09
   it('P4-09: hot-reload → onChange fires after file change (within 600ms)', async () => {
-    const ws = makeTempWorkspace('p409-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p409-', {});
 
     let changeCount = 0;
     const handle = watchWorkspace(ws, () => {
@@ -1752,7 +1688,7 @@ describe('Phase 4: watchWorkspace', () => {
 
   // P4-10
   it('P4-10: watchWorkspace.close() → file change does NOT fire onChange', async () => {
-    const ws = makeTempWorkspace('p410-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p410-', {});
 
     let changeCount = 0;
     const handle = watchWorkspace(ws, () => {
@@ -1782,7 +1718,7 @@ describe('Phase 4: Web UI and status endpoint', () => {
   // P4-11
   it('P4-11: GET /ui returns 200 HTML containing "agent"', async () => {
     const runner = makeMockRunner();
-    const agentCfg = makeAgentConfig('p411-agent', 'tok-p411', makeTempWorkspace('p411-', { withBootstrap: false }));
+    const agentCfg = makeAgentConfig('p411-agent', 'tok-p411', makeTempWorkspace('p411-', {}));
     const agents = new Map<string, AgentRunner>([['p411-agent', runner as unknown as AgentRunner]]);
     const configs = new Map<string, AgentConfig>([['p411-agent', agentCfg]]);
     const router = new GatewayRouter(agents, configs);
@@ -1796,7 +1732,7 @@ describe('Phase 4: Web UI and status endpoint', () => {
 
   // P4-12 (Option A: lastActivityAt now set from subprocess output events, not webhook)
   it('P4-12: GET /status lastActivityAt=null before output, non-null after subprocess output', async () => {
-    const ws = makeTempWorkspace('p412-', { withBootstrap: false });
+    const ws = makeTempWorkspace('p412-', {});
     const agentCfg = makeAgentConfig('p412-agent', 'tok-p412', ws);
 
     // Use EventEmitter-based mock so runner.on() works and we can emit 'output'

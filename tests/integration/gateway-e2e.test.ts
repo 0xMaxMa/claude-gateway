@@ -28,7 +28,6 @@ function createTempWorkspace(prefix = 'gw-test-ws-'): string {
     'USER.md': '# User\nTester.',
     'HEARTBEAT.md': '# Heartbeat\n',
     'MEMORY.md': '# Memory\n',
-    'BOOTSTRAP.md': '# Bootstrap\nFirst run.',
   };
   for (const [name, content] of Object.entries(files)) {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
