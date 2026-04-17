@@ -214,6 +214,9 @@ export function detectMigration(
   delete templateWithoutAgents.agents;
   deepMerge(configClone, templateWithoutAgents, '', added, ignorePaths);
 
+  // Migrate models array by ID
+  migrateModels(configClone, template, added);
+
   // Merge agent arrays
   if (Array.isArray(configClone.agents) && Array.isArray(template.agents)) {
     mergeAgentArrays(
@@ -256,6 +259,9 @@ export function applyMigration(
   const templateWithoutAgents = { ...template };
   delete templateWithoutAgents.agents;
   deepMerge(config, templateWithoutAgents, '', added, ignorePaths);
+
+  // Migrate models array by ID
+  migrateModels(config, template, added);
 
   // Merge agent arrays
   if (Array.isArray(config.agents) && Array.isArray(template.agents)) {
@@ -320,5 +326,48 @@ export function migrateConfig(
   );
 }
 
+/**
+ * Merge models from template into user config by ID.
+ * Adds new models, updates alias/label/contextWindow of existing ones.
+ * Preserves user models not in template.
+ */
+function migrateModels(
+  config: Record<string, unknown>,
+  template: Record<string, unknown>,
+  added: string[],
+): void {
+  const gw = config.gateway as Record<string, unknown> | undefined;
+  const tgw = template.gateway as Record<string, unknown> | undefined;
+  if (!gw || !tgw) return;
+
+  const templateModels = tgw.models as Array<Record<string, unknown>> | undefined;
+  if (!templateModels || templateModels.length === 0) return;
+
+  const userModels = (gw.models ?? []) as Array<Record<string, unknown>>;
+  const userMap = new Map(userModels.map((m) => [m.id as string, m]));
+  const merged: Array<Record<string, unknown>> = [];
+
+  for (const tm of templateModels) {
+    const existing = userMap.get(tm.id as string);
+    if (existing) {
+      existing.alias = tm.alias;
+      existing.label = tm.label;
+      existing.contextWindow = tm.contextWindow;
+      merged.push(existing);
+    } else {
+      merged.push(structuredClone(tm));
+      added.push(`gateway.models[${tm.id}]`);
+    }
+  }
+
+  for (const um of userModels) {
+    if (!templateModels.some((tm) => tm.id === um.id)) {
+      merged.push(um);
+    }
+  }
+
+  gw.models = merged;
+}
+
 // Exported for testing
-export { compareSemver, deepMerge };
+export { compareSemver, deepMerge, migrateModels };

@@ -16,7 +16,8 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 
 const DEFAULT_MODELS: ModelConfig[] = [
-  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus', contextWindow: 1000000 },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7', alias: 'opus', contextWindow: 1000000 },
+  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus46', contextWindow: 1000000 },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet', contextWindow: 1000000 },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku', contextWindow: 200000 },
 ];
