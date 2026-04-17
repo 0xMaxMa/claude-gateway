@@ -217,6 +217,12 @@ export class SessionProcess extends EventEmitter {
             TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
             TELEGRAM_STATE_DIR: stateDir,
             TELEGRAM_SEND_ONLY: 'true', // ALWAYS — session subprocesses never poll
+            DISCORD_BOT_TOKEN: this.agentConfig.discord?.botToken ?? '',
+            DISCORD_STATE_DIR: path.join(this.agentConfig.workspace, '.discord-state'),
+            DISCORD_GUILD_ALLOWLIST: (this.agentConfig.discord?.guildAllowlist ?? []).join(','),
+            DISCORD_CHANNEL_ALLOWLIST: (this.agentConfig.discord?.channelAllowlist ?? []).join(','),
+            DISCORD_DM_POLICY: this.agentConfig.discord?.dmPolicy ?? 'disabled',
+            DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
             GATEWAY_AGENT_ID: this.agentConfig.id,
             GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),

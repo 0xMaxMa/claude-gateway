@@ -13,6 +13,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { TelegramModule } from './tools/telegram/module';
+import { DiscordModule } from './tools/discord/module';
 import { CronModule } from './tools/cron/module';
 import { SkillsModule } from './tools/skills/module';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
@@ -27,6 +28,7 @@ function isChannelModule(mod: AnyModule): mod is ChannelModule {
 
 const modules: AnyModule[] = [
   new TelegramModule(),
+  new DiscordModule(),
   new CronModule(),
   new SkillsModule(),
 ];

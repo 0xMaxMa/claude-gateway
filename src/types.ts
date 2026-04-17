@@ -13,6 +13,14 @@ export interface AgentConfig {
     allowedUsers: number[];
     dmPolicy: 'allowlist' | 'open';
   };
+  discord?: {
+    botToken: string;
+    guildAllowlist?: string[];
+    channelAllowlist?: string[];
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    dmAllowlist?: string[];
+    autoThread?: boolean;
+  };
   claude: {
     model: string;
     dangerouslySkipPermissions: boolean;
