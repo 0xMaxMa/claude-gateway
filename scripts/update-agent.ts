@@ -221,6 +221,19 @@ async function main(): Promise<void> {
   // Step 1 — Select agent (before creating readline — interactiveSelect uses raw stdin)
   const { agentId, wsDir, agent, config } = await selectAgent();
 
+  // Step 1b — Choose action
+  process.stdin.resume();
+  const actionIdx = await interactiveSelect(
+    ['Update agent.md', 'Manage channels'],
+    'What would you like to do? (↑/↓ to move, Enter to select):'
+  );
+
+  if (actionIdx === 1) {
+    const { runMenu } = await import('./update-agent-channel');
+    await runMenu(agentId);
+    return;
+  }
+
   // interactiveSelect pauses stdin in cleanup — resume it so readline can read
   process.stdin.resume();
   const rl = createRl();
