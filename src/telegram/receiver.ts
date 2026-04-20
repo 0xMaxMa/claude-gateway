@@ -34,7 +34,7 @@ export class TelegramReceiver {
       env: {
         ...process.env,
         TELEGRAM_RECEIVER_MODE: 'true',
-        TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
+        TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         TELEGRAM_STATE_DIR: stateDir,
         CLAUDE_CHANNEL_CALLBACK: `http://127.0.0.1:${this.callbackPort}/channel`,
       },

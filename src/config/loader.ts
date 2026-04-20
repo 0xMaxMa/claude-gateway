@@ -63,15 +63,25 @@ function validateAgent(agent: Record<string, unknown>, index: number): string | 
   if (!agent.id || typeof agent.id !== 'string') {
     return `Agent at index ${index} is missing required field "id"`;
   }
-  if (!agent.telegram || typeof agent.telegram !== 'object') {
-    return `Agent "${agent.id}" is missing "telegram" config`;
+  const hasTelegram = agent.telegram && typeof agent.telegram === 'object';
+  const hasDiscord = agent.discord && typeof agent.discord === 'object';
+  if (!hasTelegram && !hasDiscord) {
+    return `Agent "${agent.id}" must have at least one channel configured ("telegram" or "discord")`;
   }
-  const telegram = agent.telegram as Record<string, unknown>;
-  if (!telegram.botToken || typeof telegram.botToken !== 'string') {
-    return `Agent "${agent.id}" is missing "telegram.botToken"`;
+  if (hasTelegram) {
+    const telegram = agent.telegram as Record<string, unknown>;
+    if (!telegram.botToken || typeof telegram.botToken !== 'string') {
+      return `Agent "${agent.id}" is missing "telegram.botToken"`;
+    }
+    if (telegram.dmPolicy !== 'allowlist' && telegram.dmPolicy !== 'open') {
+      return `Agent "${agent.id}" has invalid dmPolicy "${telegram.dmPolicy}". Must be "allowlist" or "open".`;
+    }
   }
-  if (telegram.dmPolicy !== 'allowlist' && telegram.dmPolicy !== 'open') {
-    return `Agent "${agent.id}" has invalid dmPolicy "${telegram.dmPolicy}". Must be "allowlist" or "open".`;
+  if (hasDiscord) {
+    const discord = agent.discord as Record<string, unknown>;
+    if (!discord.botToken || typeof discord.botToken !== 'string') {
+      return `Agent "${agent.id}" is missing "discord.botToken"`;
+    }
   }
 
   if (agent.session !== undefined && typeof agent.session === 'object') {

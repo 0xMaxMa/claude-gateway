@@ -1,19 +1,23 @@
 #!/usr/bin/env ts-node
 /**
- * npm run pair -- --agent=<agentId> --code=<code>
+ * npm run pair -- --agent=<agentId> --code=<code> [--channel=telegram|discord]
  *
  * Multi-agent pairing helper for Claude Gateway.
- * Approves a pending Telegram pairing without needing an interactive Claude session.
+ * Approves a pending pairing without needing an interactive Claude session.
  *
- * Steps:
- *  1. Reads gateway config to find the agent's workspace path
- *  2. Opens {workspace}/.telegram-state/access.json
- *  3. Verifies the code exists in pending and is not expired
- *  4. Adds senderId to allowFrom
- *  5. Writes {workspace}/.telegram-state/approved/<senderId> (content = chatId)
- *  6. Saves access.json
+ * For Telegram (default):
+ *  1. Reads {workspace}/.telegram-state/access.json
+ *  2. Verifies the code exists and is not expired
+ *  3. Adds senderId to allowFrom
+ *  4. Writes {workspace}/.telegram-state/approved/<senderId> (content = chatId)
  *
- * The plugin polls approved/ every 5 seconds and sends "Paired! Say hi to Claude."
+ * For Discord (--channel=discord):
+ *  1. Reads {workspace}/.discord-state/access.json
+ *  2. Verifies the code exists and is not expired
+ *  3. Adds senderId to allowFrom
+ *  4. Writes {workspace}/.discord-state/approved/<senderId> (content = channelId)
+ *
+ * The module polls approved/ every 5 seconds and sends "Paired! Say hi to Claude."
  * when it detects the file.
  */
 import * as fs from 'fs'
@@ -34,9 +38,15 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 const args = parseArgs(process.argv)
 const agentId = args['agent'] as string | undefined
 const code = (args['code'] as string | undefined)?.toLowerCase()
+const channel = (args['channel'] as string | undefined) ?? 'telegram'
 
 if (!agentId || !code) {
-  console.error('Usage: npm run pair -- --agent=<agentId> --code=<code>')
+  console.error('Usage: npm run pair -- --agent=<agentId> --code=<code> [--channel=telegram|discord]')
+  process.exit(1)
+}
+
+if (channel !== 'telegram' && channel !== 'discord') {
+  console.error(`Unknown channel "${channel}". Must be "telegram" or "discord".`)
   process.exit(1)
 }
 
@@ -66,62 +76,126 @@ const workspace = agent.workspace.startsWith('~/')
   ? path.join(os.homedir(), agent.workspace.slice(2))
   : agent.workspace
 
-const stateDir = path.join(workspace, '.telegram-state')
-const accessFile = path.join(stateDir, 'access.json')
-const approvedDir = path.join(stateDir, 'approved')
-
-// Read access.json
-let access: {
-  dmPolicy: string
-  allowFrom: string[]
-  groups: Record<string, unknown>
-  pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies?: number }>
-}
-try {
-  access = JSON.parse(fs.readFileSync(accessFile, 'utf8'))
-} catch (err) {
-  console.error(`Cannot read access.json at ${accessFile}: ${(err as Error).message}`)
-  process.exit(1)
+if (channel === 'discord') {
+  pairDiscord(workspace)
+} else {
+  pairTelegram(workspace)
 }
 
-if (!access.pending) {
-  console.error(`No pending entries in access.json`)
-  process.exit(1)
-}
+function pairTelegram(workspace: string): void {
+  const stateDir = path.join(workspace, '.telegram-state')
+  const accessFile = path.join(stateDir, 'access.json')
+  const approvedDir = path.join(stateDir, 'approved')
 
-const entry = access.pending[code]
-if (!entry) {
-  console.error(`Code "${code}" not found in pending`)
-  const pendingCodes = Object.keys(access.pending)
-  if (pendingCodes.length > 0) {
-    console.error(`Available pending codes: ${pendingCodes.join(', ')}`)
-  } else {
-    console.error(`No pending entries found`)
+  let access: {
+    dmPolicy: string
+    allowFrom: string[]
+    groups: Record<string, unknown>
+    pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies?: number }>
   }
-  process.exit(1)
+  try {
+    access = JSON.parse(fs.readFileSync(accessFile, 'utf8'))
+  } catch (err) {
+    console.error(`Cannot read access.json at ${accessFile}: ${(err as Error).message}`)
+    process.exit(1)
+  }
+
+  if (!access.pending) {
+    console.error(`No pending entries in access.json`)
+    process.exit(1)
+  }
+
+  const entry = access.pending[code!]
+  if (!entry) {
+    console.error(`Code "${code}" not found in pending`)
+    const pendingCodes = Object.keys(access.pending)
+    if (pendingCodes.length > 0) {
+      console.error(`Available pending codes: ${pendingCodes.join(', ')}`)
+    } else {
+      console.error(`No pending entries found`)
+    }
+    process.exit(1)
+  }
+
+  if (entry.expiresAt < Date.now()) {
+    console.error(`Code "${code}" has expired (expired ${new Date(entry.expiresAt).toISOString()})`)
+    process.exit(1)
+  }
+
+  const { senderId, chatId } = entry
+  delete access.pending[code!]
+  if (!access.allowFrom.includes(senderId)) {
+    access.allowFrom.push(senderId)
+  }
+
+  const tmp = accessFile + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
+  fs.renameSync(tmp, accessFile)
+
+  fs.mkdirSync(approvedDir, { recursive: true })
+  fs.writeFileSync(path.join(approvedDir, senderId), chatId)
+
+  console.log(`Paired: senderId=${senderId} for agent "${agentId}"`)
+  console.log(`  State dir: ${stateDir}`)
+  console.log(`  Plugin will send confirmation message within 5s.`)
 }
 
-if (entry.expiresAt < Date.now()) {
-  console.error(`Code "${code}" has expired (expired ${new Date(entry.expiresAt).toISOString()})`)
-  process.exit(1)
+function pairDiscord(workspace: string): void {
+  const stateDir = path.join(workspace, '.discord-state')
+  const accessFile = path.join(stateDir, 'access.json')
+  const approvedDir = path.join(stateDir, 'approved')
+
+  let access: {
+    dmPolicy: string
+    allowFrom: string[]
+    guildAllowlist: string[]
+    channelAllowlist: string[]
+    roleAllowlist: string[]
+    pending: Record<string, { senderId: string; channelId: string; createdAt: number; expiresAt: number; replies: number }>
+  }
+  try {
+    access = JSON.parse(fs.readFileSync(accessFile, 'utf8'))
+  } catch (err) {
+    console.error(`Cannot read access.json at ${accessFile}: ${(err as Error).message}`)
+    process.exit(1)
+  }
+
+  if (!access.pending) {
+    console.error(`No pending entries in access.json`)
+    process.exit(1)
+  }
+
+  const entry = access.pending[code!]
+  if (!entry) {
+    console.error(`Code "${code}" not found in pending`)
+    const pendingCodes = Object.keys(access.pending)
+    if (pendingCodes.length > 0) {
+      console.error(`Available pending codes: ${pendingCodes.join(', ')}`)
+    } else {
+      console.error(`No pending entries found`)
+    }
+    process.exit(1)
+  }
+
+  if (entry.expiresAt < Date.now()) {
+    console.error(`Code "${code}" has expired (expired ${new Date(entry.expiresAt).toISOString()})`)
+    process.exit(1)
+  }
+
+  const { senderId, channelId } = entry
+  delete access.pending[code!]
+  if (!access.allowFrom.includes(senderId)) {
+    access.allowFrom.push(senderId)
+  }
+
+  const tmp = accessFile + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
+  fs.renameSync(tmp, accessFile)
+
+  fs.mkdirSync(approvedDir, { recursive: true })
+  fs.writeFileSync(path.join(approvedDir, senderId), channelId)
+
+  console.log(`Paired: senderId=${senderId} for agent "${agentId}" (discord)`)
+  console.log(`  State dir: ${stateDir}`)
+  console.log(`  Module will send confirmation message within 5s.`)
 }
-
-// Approve pairing
-const { senderId, chatId } = entry
-delete access.pending[code]
-if (!access.allowFrom.includes(senderId)) {
-  access.allowFrom.push(senderId)
-}
-
-// Write access.json atomically
-const tmp = accessFile + '.tmp'
-fs.writeFileSync(tmp, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
-fs.renameSync(tmp, accessFile)
-
-// Write approved file (plugin polls this directory every 5s)
-fs.mkdirSync(approvedDir, { recursive: true })
-fs.writeFileSync(path.join(approvedDir, senderId), chatId)
-
-console.log(`Paired: senderId=${senderId} for agent "${agentId}"`)
-console.log(`  State dir: ${stateDir}`)
-console.log(`  Plugin will send confirmation message within 5s.`)

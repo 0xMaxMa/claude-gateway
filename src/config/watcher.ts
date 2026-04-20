@@ -118,9 +118,9 @@ export class ConfigWatcher extends EventEmitter {
         { field: 'session.maxConcurrent', oldVal: oldAgent.session?.maxConcurrent, newVal: newAgent.session?.maxConcurrent },
         { field: 'heartbeat.rateLimitMinutes', oldVal: oldAgent.heartbeat?.rateLimitMinutes, newVal: newAgent.heartbeat?.rateLimitMinutes },
         { field: 'workspace', oldVal: oldAgent.workspace, newVal: newAgent.workspace },
-        { field: 'telegram.botToken', oldVal: oldAgent.telegram.botToken, newVal: newAgent.telegram.botToken },
-        { field: 'telegram.allowedUsers', oldVal: oldAgent.telegram.allowedUsers, newVal: newAgent.telegram.allowedUsers },
-        { field: 'telegram.dmPolicy', oldVal: oldAgent.telegram.dmPolicy, newVal: newAgent.telegram.dmPolicy },
+        { field: 'telegram.botToken', oldVal: oldAgent.telegram?.botToken, newVal: newAgent.telegram?.botToken },
+        { field: 'telegram.allowedUsers', oldVal: oldAgent.telegram?.allowedUsers, newVal: newAgent.telegram?.allowedUsers },
+        { field: 'telegram.dmPolicy', oldVal: oldAgent.telegram?.dmPolicy, newVal: newAgent.telegram?.dmPolicy },
         { field: 'description', oldVal: oldAgent.description, newVal: newAgent.description },
       ];
 

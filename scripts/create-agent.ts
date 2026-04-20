@@ -50,7 +50,7 @@ function agentDir(agentId: string): string {
   return path.join(gatewayDir(), 'agents', agentId);
 }
 
-function workspaceDir(agentId: string): string {
+export function workspaceDir(agentId: string): string {
   return path.join(agentDir(agentId), 'workspace');
 }
 
@@ -63,6 +63,7 @@ interface WizardState {
   agentName: string;
   lastCompletedStep: number; // 1-6
   wsDir?: string;
+  channel?: 'telegram' | 'discord';
   token?: string;
   botUsername?: string;
   chatId?: string;
@@ -128,10 +129,13 @@ interface RawAgentEntry {
   description: string;
   workspace: string;
   env: string;
-  telegram: {
+  telegram?: {
     botToken: string;
     allowedUsers: number[];
     dmPolicy: string;
+  };
+  discord?: {
+    botToken: string;
   };
   claude: {
     model: string;
@@ -140,6 +144,14 @@ interface RawAgentEntry {
   };
   signatureEmoji?: string;
 }
+
+export const SUPPORTED_CHANNELS = [
+  { id: 'telegram' as const, label: 'Telegram', available: true },
+  { id: 'discord' as const, label: 'Discord', available: true },
+  { id: 'slack' as const, label: 'Slack', available: false, note: 'coming soon' },
+] as const;
+
+export type SupportedChannelId = 'telegram' | 'discord' | 'slack';
 
 function loadOrCreateRawConfig(): RawConfig {
   const cp = configPath();
@@ -176,6 +188,10 @@ function saveConfig(config: RawConfig): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readAgentsMd(wsDir: string): string {
+  try { return fs.readFileSync(path.join(wsDir, 'AGENTS.md'), 'utf8'); } catch { return ''; }
 }
 
 export function firstNonEmptyLine(text: string): string {
@@ -454,7 +470,7 @@ export async function appendToConfig(
   agentId: string,
   wsDir: string,
   agentMdContent: string,
-  options?: { signatureEmoji?: string }
+  options?: { signatureEmoji?: string; channel?: 'telegram' | 'discord'; token?: string }
 ): Promise<void> {
   console.log('Updating config.json...');
 
@@ -462,24 +478,33 @@ export async function appendToConfig(
   config.agents = config.agents.filter((a) => a.id !== agentId);
 
   const envVarName = agentId.toUpperCase().replace(/-/g, '_') + '_BOT_TOKEN';
+  const discordEnvVarName = agentId.toUpperCase().replace(/-/g, '_') + '_DISCORD_BOT_TOKEN';
   const descriptionText = firstNonEmptyLine(agentMdContent);
+  const channel = options?.channel ?? 'telegram';
 
   const newAgent: RawAgentEntry = {
     id: agentId,
     description: descriptionText,
     workspace: wsDir.replace(os.homedir(), '~'),
     env: '',
-    telegram: {
-      botToken: `\${${envVarName}}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
-    },
     claude: {
       model: 'claude-sonnet-4-6',
       dangerouslySkipPermissions: true,
       extraFlags: [],
     },
   };
+
+  if (channel === 'telegram') {
+    newAgent.telegram = {
+      botToken: `\${${envVarName}}`,
+      allowedUsers: [],
+      dmPolicy: 'open',
+    };
+  } else if (channel === 'discord') {
+    newAgent.discord = {
+      botToken: `\${${discordEnvVarName}}`,
+    };
+  }
 
   if (options?.signatureEmoji) {
     newAgent.signatureEmoji = options.signatureEmoji;
@@ -522,7 +547,7 @@ export async function verifyBotToken(token: string): Promise<{ ok: boolean; user
   }
 }
 
-async function promptBotToken(
+export async function promptBotToken(
   rl: readline.Interface,
   agentId: string
 ): Promise<{ token: string; username: string }> {
@@ -569,6 +594,154 @@ async function promptBotToken(
   console.log('\nCould not verify bot token. Please check the token from BotFather and try again.');
   console.log(`Run "npm run create-agent" to restart.`);
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 — Channel selection
+// ---------------------------------------------------------------------------
+
+export async function stepChooseChannel(rl: readline.Interface): Promise<'telegram' | 'discord'> {
+  console.log('Which channel do you want to connect?\n');
+  for (const ch of SUPPORTED_CHANNELS) {
+    const avail = ch.available ? '(supported)' : `(${'note' in ch ? ch.note : 'unavailable'})`;
+    console.log(`  ${ch.label}  ${avail}`);
+  }
+  console.log('');
+
+  while (true) {
+    const raw = await prompt(rl, 'Enter channel name: ');
+    const choice = raw.trim().toLowerCase();
+    const found = SUPPORTED_CHANNELS.find(c => c.id === choice || c.label.toLowerCase() === choice);
+    if (!found) {
+      console.log(`  Unknown channel "${raw.trim()}". Choose from: ${SUPPORTED_CHANNELS.map(c => c.label).join(', ')}`);
+      continue;
+    }
+    if (!found.available) {
+      console.log(`  ${found.label} is not available yet. Please choose another channel.`);
+      continue;
+    }
+    return found.id as 'telegram' | 'discord';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Discord bot token
+// ---------------------------------------------------------------------------
+
+export const DISCORD_TOKEN_REGEX = /^\w{24,}\.\w{6}\.[\w-]{27,}$/;
+
+export async function verifyDiscordBotToken(token: string): Promise<{ ok: boolean; username: string }> {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'discord.com',
+      path: '/api/v10/users/@me',
+      method: 'GET',
+      headers: { Authorization: `Bot ${token}` },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data) as { username?: string };
+          resolve({ ok: res.statusCode === 200, username: json.username ?? '' });
+        } catch {
+          resolve({ ok: false, username: '' });
+        }
+      });
+    });
+    req.on('error', () => resolve({ ok: false, username: '' }));
+    req.end();
+  });
+}
+
+async function promptDiscordBotToken(
+  rl: readline.Interface,
+  agentId: string
+): Promise<{ token: string; username: string }> {
+  let attempts = 0;
+  const MAX_ATTEMPTS = 3;
+
+  while (attempts < MAX_ATTEMPTS) {
+    const raw = await prompt(rl, 'Discord bot token: ');
+    const token = raw.trim();
+
+    if (!DISCORD_TOKEN_REGEX.test(token)) {
+      console.log('  Invalid token format. Expected: MTAxMTk...AAAA.xxxxx.yyyyyyy');
+      attempts++;
+      if (attempts < MAX_ATTEMPTS) console.log(`  ${MAX_ATTEMPTS - attempts} attempt(s) remaining.`);
+      continue;
+    }
+
+    process.stdout.write('  Verifying token...');
+    const { ok, username } = await verifyDiscordBotToken(token);
+    if (ok) {
+      process.stdout.write('\r                      \r');
+      console.log(`  ✓ Bot @${username} verified`);
+
+      const discordEnvVarName = agentId.toUpperCase().replace(/-/g, '_') + '_DISCORD_BOT_TOKEN';
+      process.env[discordEnvVarName] = token;
+      const agentEnvDir = agentDir(agentId);
+      fs.mkdirSync(agentEnvDir, { recursive: true });
+      const envFile = path.join(agentEnvDir, '.env');
+      let existing = '';
+      try { existing = fs.readFileSync(envFile, 'utf8'); } catch {}
+      if (!existing.includes(`${discordEnvVarName}=`)) {
+        fs.appendFileSync(envFile, `${discordEnvVarName}=${token}\n`, { mode: 0o600 });
+      }
+
+      return { token, username };
+    } else {
+      process.stdout.write('\r                      \r');
+      attempts++;
+      if (attempts >= MAX_ATTEMPTS) {
+        console.log('\n  Max attempts reached.');
+        break;
+      }
+      console.log(`  Invalid token (API call failed). ${MAX_ATTEMPTS - attempts} attempt(s) remaining.`);
+    }
+  }
+
+  console.log('\nCould not verify Discord bot token. Please check the token and try again.');
+  process.exit(1);
+}
+
+async function startAndPairDiscord(
+  agentId: string,
+  token: string,
+  wsDir: string,
+  botUsername: string,
+  _rl: readline.Interface,
+): Promise<string> {
+  const discordStateDir = path.join(wsDir, '.discord-state');
+  fs.mkdirSync(discordStateDir, { recursive: true });
+
+  // Write access.json with pairing policy ready
+  const accessFile = path.join(discordStateDir, 'access.json');
+  const access = {
+    dmPolicy: 'pairing',
+    allowFrom: [] as string[],
+    guildAllowlist: [] as string[],
+    channelAllowlist: [] as string[],
+    roleAllowlist: [] as string[],
+    pending: {} as Record<string, unknown>,
+  };
+  fs.writeFileSync(accessFile, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 });
+
+  // Write token to stateDir/.env
+  const stateEnvFile = path.join(discordStateDir, '.env');
+  fs.writeFileSync(stateEnvFile, `DISCORD_BOT_TOKEN=${token}\n`, { mode: 0o600 });
+
+  console.log(`  ✓ Discord state dir created: ${discordStateDir.replace(os.homedir(), '~')}`);
+  console.log(`  ✓ access.json written (dmPolicy: pairing)\n`);
+  console.log('To pair your Discord account:');
+  console.log(`  1. Start the gateway: npm start`);
+  console.log(`  2. Open Discord and send ANY message to @${botUsername}`);
+  console.log(`  3. The bot will reply with a 6-char code`);
+  console.log(`  4. Run: make pair agent=${agentId} code=<code> channel=discord`);
+
+  // Return empty string — chatId not available until pairing completes at runtime
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +922,7 @@ async function startAndPair(
 // Step 6 — Welcome message + summary
 // ---------------------------------------------------------------------------
 
-function httpsPost(url: string, body: string): Promise<string> {
+function httpsPost(url: string, body: string, extraHeaders?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const options = {
@@ -759,6 +932,7 @@ function httpsPost(url: string, body: string): Promise<string> {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
+        ...extraHeaders,
       },
     };
     const req = https.request(options, (res) => {
@@ -799,9 +973,12 @@ async function sendWelcome(token: string, chatId: string, agentName: string, wsD
   }
 }
 
-function printSummary(agentId: string, botUsername: string): void {
+function printSummary(agentId: string, botUsername: string, channel: 'telegram' | 'discord' = 'telegram'): void {
   const wsDir = workspaceDir(agentId).replace(os.homedir(), '~');
   const cfgPath = configPath().replace(os.homedir(), '~');
+  const channelLabel = channel === 'telegram' ? 'Telegram' : 'Discord';
+  const stateSubDir = channel === 'telegram' ? '.telegram-state' : '.discord-state';
+  const channelFlag = channel === 'telegram' ? '' : ' channel=discord';
 
   console.log('\nStep 6/6 · Done!\n');
   console.log('═══════════════════════════════════════');
@@ -809,7 +986,7 @@ function printSummary(agentId: string, botUsername: string): void {
   console.log('═══════════════════════════════════════\n');
   console.log(`Workspace:  ${wsDir}/`);
   console.log(`Config:     ${cfgPath}`);
-  console.log('\nYour agent just introduced itself in Telegram.\n');
+  console.log(`\nYour agent just introduced itself in ${channelLabel}.\n`);
   console.log('To start the full gateway (all agents):');
   console.log(`  GATEWAY_CONFIG=${cfgPath} npm start\n`);
   console.log('To edit your agent\'s personality later, modify:');
@@ -817,9 +994,9 @@ function printSummary(agentId: string, botUsername: string): void {
   console.log(`  ${wsDir}/SOUL.md`);
   console.log('\nTo add new users to this agent later:');
   console.log(`  1. Change dmPolicy to pairing (if currently allowlist):`);
-  console.log(`       edit ${wsDir}/.telegram-state/access.json → set "dmPolicy": "pairing"`);
+  console.log(`       edit ${wsDir}/${stateSubDir}/access.json → set "dmPolicy": "pairing"`);
   console.log(`  2. Ask the user to DM @${botUsername} — they'll get a pairing code`);
-  console.log(`  3. Run: npm run pair -- --agent=${agentId} --code=<code>`);
+  console.log(`  3. Run: make pair agent=${agentId} code=<code>${channelFlag}`);
   console.log('═══════════════════════════════════════');
 }
 
@@ -906,44 +1083,84 @@ async function main(): Promise<void> {
   // ── Step 3 ──────────────────────────────────────────────────────────────
   console.log('\nStep 3/6 · Create Workspace\n');
   const wsDir = await createWorkspace(agentId, acceptedFiles);
-  await appendToConfig(agentId, wsDir, acceptedFiles.get('AGENTS.md')!, {
-    signatureEmoji,
-  });
   state.wsDir = wsDir;
   state.lastCompletedStep = 3;
   saveWizardState(state);
 
   // ── Step 4 ──────────────────────────────────────────────────────────────
-  console.log('\nStep 4/6 · Create a Telegram Bot\n');
-  console.log('Follow these steps in Telegram:\n');
-  console.log('  1. Open Telegram and search for @BotFather');
-  console.log('  2. Send:  /newbot');
-  console.log(`  3. Enter a display name (e.g. "${agentName} Assistant")`);
-  console.log(`  4. Enter a unique username ending in "bot" (e.g. "${agentId}_my_bot")`);
-  console.log('  5. BotFather will reply with a token like:');
-  console.log('       123456789:AAHfiqksKZ8WmHPDKxxxxxxxxxxxxxxxx');
-  console.log('     Copy the entire token.\n');
-
-  const { token, username: botUsername } = await promptBotToken(rl3, agentId);
-  state.token = token;
-  state.botUsername = botUsername;
+  console.log('\nStep 4/6 · Choose Channel\n');
+  rl3.close();
+  process.stdin.resume();
+  const rl4 = createRl();
+  const channel = await stepChooseChannel(rl4);
+  state.channel = channel;
   state.lastCompletedStep = 4;
   saveWizardState(state);
 
   // ── Step 5 ──────────────────────────────────────────────────────────────
-  rl3.close();
+  let token: string;
+  let botUsername: string;
+  let chatId: string;
 
-  console.log('\nStep 5/6 · Pair Your Telegram Account\n');
-  console.log('The wizard will detect your message and approve pairing automatically.\n');
-  const chatId = await startAndPair(agentId, token, wsDir, botUsername);
+  if (channel === 'telegram') {
+    console.log('\nStep 5/6 · Create a Telegram Bot\n');
+    console.log('Follow these steps in Telegram:\n');
+    console.log('  1. Open Telegram and search for @BotFather');
+    console.log('  2. Send:  /newbot');
+    console.log(`  3. Enter a display name (e.g. "${agentName} Assistant")`);
+    console.log(`  4. Enter a unique username ending in "bot" (e.g. "${agentId}_my_bot")`);
+    console.log('  5. BotFather will reply with a token like:');
+    console.log('       123456789:AAHfiqksKZ8WmHPDKxxxxxxxxxxxxxxxx');
+    console.log('     Copy the entire token.\n');
+
+    const tg = await promptBotToken(rl4, agentId);
+    token = tg.token;
+    botUsername = tg.username;
+    state.token = token;
+    state.botUsername = botUsername;
+    state.lastCompletedStep = 5;
+    saveWizardState(state);
+
+    rl4.close();
+    console.log('\nPairing your Telegram account...\n');
+    console.log('The wizard will detect your message and approve pairing automatically.\n');
+    chatId = await startAndPair(agentId, token, wsDir, botUsername);
+  } else {
+    console.log('\nStep 5/6 · Set Up Discord Bot\n');
+    console.log('Follow these steps:\n');
+    console.log('  1. Go to https://discord.com/developers/applications');
+    console.log('  2. Create a new application → Bot settings');
+    console.log('  3. Enable MESSAGE CONTENT INTENT (Privileged Gateway Intents)');
+    console.log('  4. Copy the bot token.\n');
+
+    const dc = await promptDiscordBotToken(rl4, agentId);
+    token = dc.token;
+    botUsername = dc.username;
+    state.token = token;
+    state.botUsername = botUsername;
+    state.lastCompletedStep = 5;
+    saveWizardState(state);
+
+    console.log('\nPairing your Discord account...\n');
+    chatId = await startAndPairDiscord(agentId, token, wsDir, botUsername, rl4);
+    rl4.close();
+  }
+
+  await appendToConfig(agentId, wsDir, acceptedFiles.get('AGENTS.md')!, {
+    signatureEmoji,
+    channel,
+    token,
+  });
   state.chatId = chatId;
   state.lastCompletedStep = 5;
   saveWizardState(state);
 
   // ── Step 6 ──────────────────────────────────────────────────────────────
-  console.log('\nGenerating welcome message...');
-  await sendWelcome(token, chatId, agentName, wsDir);
-  printSummary(agentId, botUsername);
+  if (channel === 'telegram') {
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, chatId, agentName, wsDir);
+  }
+  printSummary(agentId, botUsername, channel);
 
   clearWizardState(); // Clean up on success
 }
@@ -955,7 +1172,6 @@ async function resumeWizard(state: WizardState): Promise<void> {
   const rl = createRl();
 
   if (lastCompletedStep < 2) {
-    // Need to redo step 2 — files not yet created
     console.log('Step 2/6 · Describe Your Agent\n');
     const description = await promptDescription(rl);
     const { files: generatedFiles } = await generateFiles(agentId, description);
@@ -968,7 +1184,6 @@ async function resumeWizard(state: WizardState): Promise<void> {
 
     console.log('\nStep 3/6 · Create Workspace\n');
     const wsDir = await createWorkspace(agentId, acceptedFiles);
-    await appendToConfig(agentId, wsDir, acceptedFiles.get('AGENTS.md')!);
     state.wsDir = wsDir;
     state.lastCompletedStep = 3;
     saveWizardState(state);
@@ -977,40 +1192,69 @@ async function resumeWizard(state: WizardState): Promise<void> {
   const wsDir = state.wsDir!;
 
   if (lastCompletedStep < 4) {
-    console.log('Step 4/6 · Create a Telegram Bot\n');
-    console.log('Follow these steps in Telegram:\n');
-    console.log('  1. Open Telegram and search for @BotFather');
-    console.log('  2. Send:  /newbot');
-    console.log(`  3. Enter a display name (e.g. "${agentName} Assistant")`);
-    console.log(`  4. Enter a unique username ending in "bot" (e.g. "${agentId}_my_bot")`);
-    console.log('  5. Copy the token BotFather provides.\n');
-
-    const { token, username: botUsername } = await promptBotToken(rl, agentId);
-    state.token = token;
-    state.botUsername = botUsername;
+    console.log('\nStep 4/6 · Choose Channel\n');
+    rl.close();
+    process.stdin.resume();
+    const rlCh = createRl();
+    const channel = await stepChooseChannel(rlCh);
+    rlCh.close();
+    state.channel = channel;
     state.lastCompletedStep = 4;
     saveWizardState(state);
   }
 
-  const token = state.token!;
-  const botUsername = state.botUsername!;
-
-  rl.close();
+  const channel = state.channel ?? 'telegram';
+  process.stdin.resume();
+  const rl5 = createRl();
 
   if (lastCompletedStep < 5) {
-    console.log('Step 5/6 · Pair Your Telegram Account\n');
-    console.log('The wizard will detect your message and approve pairing automatically.\n');
-    const chatId = await startAndPair(agentId, token, wsDir, botUsername);
-    state.chatId = chatId;
+    if (channel === 'telegram') {
+      console.log('\nStep 5/6 · Create a Telegram Bot\n');
+      console.log('  1. Open Telegram and search for @BotFather');
+      console.log('  2. Send:  /newbot');
+      console.log(`  3. Enter a display name (e.g. "${agentName} Assistant")`);
+      console.log(`  4. Enter a unique username ending in "bot" (e.g. "${agentId}_my_bot")`);
+      console.log('  5. Copy the token BotFather provides.\n');
+      const { token, username: botUsername } = await promptBotToken(rl5, agentId);
+      state.token = token;
+      state.botUsername = botUsername;
+      rl5.close();
+      console.log('\nPairing your Telegram account...\n');
+      const chatId = await startAndPair(agentId, token, wsDir, botUsername);
+      state.chatId = chatId;
+      const agentsMd1 = readAgentsMd(wsDir);
+      await appendToConfig(agentId, wsDir, agentsMd1, { channel: 'telegram', token });
+    } else {
+      console.log('\nStep 5/6 · Set Up Discord Bot\n');
+      console.log('  1. Go to https://discord.com/developers/applications');
+      console.log('  2. Create a new application → Bot settings');
+      console.log('  3. Enable MESSAGE CONTENT INTENT');
+      console.log('  4. Copy the bot token.\n');
+      const { token, username: botUsername } = await promptDiscordBotToken(rl5, agentId);
+      state.token = token;
+      state.botUsername = botUsername;
+      console.log('\nPairing your Discord account...\n');
+      const chatId = await startAndPairDiscord(agentId, token, wsDir, botUsername, rl5);
+      state.chatId = chatId;
+      rl5.close();
+      const agentsMd2 = readAgentsMd(wsDir);
+      await appendToConfig(agentId, wsDir, agentsMd2, { channel: 'discord', token });
+    }
     state.lastCompletedStep = 5;
     saveWizardState(state);
+  } else {
+    rl5.close();
   }
 
+  const token = state.token!;
+  const botUsername = state.botUsername!;
   const chatId = state.chatId!;
 
-  console.log('\nGenerating welcome message...');
-  await sendWelcome(token, chatId, agentName, wsDir);
-  printSummary(agentId, botUsername);
+  if (channel === 'telegram') {
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, chatId, agentName, wsDir);
+  }
+  printSummary(agentId, botUsername, channel);
   clearWizardState();
 }
 

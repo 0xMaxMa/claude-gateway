@@ -14,6 +14,8 @@ export function isAllowed(userId: number, agentConfig: AgentConfig, chatId?: str
     return true;
   }
 
+  if (!agentConfig.telegram) return false;
+
   if (agentConfig.telegram.dmPolicy === 'open') {
     return true;
   }

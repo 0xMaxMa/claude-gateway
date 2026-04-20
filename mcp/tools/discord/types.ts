@@ -2,6 +2,28 @@
  * Discord-specific types. No discord.js imports — pure TypeScript.
  */
 
+export interface DiscordPending {
+  senderId: string;
+  channelId: string;
+  createdAt: number;
+  expiresAt: number;
+  replies: number;
+}
+
+export interface DiscordAccess {
+  dmPolicy: 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  guildAllowlist: string[];
+  channelAllowlist: string[];
+  roleAllowlist: string[];
+  pending: Record<string, DiscordPending>;
+}
+
+export type DiscordGateResult =
+  | { action: 'deliver' }
+  | { action: 'drop' }
+  | { action: 'pair'; code: string; isResend: boolean };
+
 export type DiscordConfig = {
   botToken: string;
   guildAllowlist?: string[];

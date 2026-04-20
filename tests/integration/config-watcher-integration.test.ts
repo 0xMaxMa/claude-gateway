@@ -151,7 +151,7 @@ describe('config-watcher integration', () => {
     // Check that the watcher detected the botToken change
     const updatedConfig = watcher.getConfig();
     const alfredAgent = updatedConfig.agents.find((a) => a.id === 'alfred')!;
-    expect(alfredAgent.telegram.botToken).toBe(NEW_TOKEN);
+    expect(alfredAgent.telegram!.botToken).toBe(NEW_TOKEN);
 
     // Check that the change was flagged as not hot-reloadable
     const warnCall = logger.calls.warn.find(

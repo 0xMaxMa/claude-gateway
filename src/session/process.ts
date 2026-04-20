@@ -214,7 +214,7 @@ export class SessionProcess extends EventEmitter {
           command: 'bun',
           args: [mcpServerPath],
           env: {
-            TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
+            TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
             TELEGRAM_STATE_DIR: stateDir,
             TELEGRAM_SEND_ONLY: 'true', // ALWAYS — session subprocesses never poll
             DISCORD_BOT_TOKEN: this.agentConfig.discord?.botToken ?? '',
@@ -308,7 +308,7 @@ export class SessionProcess extends EventEmitter {
       env: {
         ...process.env,
         CLAUDE_WORKSPACE: this.agentConfig.workspace,
-        TELEGRAM_BOT_TOKEN: this.agentConfig.telegram.botToken,
+        TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
       },
       cwd: this.agentConfig.workspace,

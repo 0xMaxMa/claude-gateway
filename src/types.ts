@@ -8,7 +8,7 @@ export interface AgentConfig {
   description: string;
   workspace: string;
   env: string;
-  telegram: {
+  telegram?: {
     botToken: string;
     allowedUsers: number[];
     dmPolicy: 'allowlist' | 'open';

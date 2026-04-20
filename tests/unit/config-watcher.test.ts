@@ -392,7 +392,7 @@ describe('config-watcher', () => {
 
     // Current config unchanged
     const currentConfig = watcher.getConfig();
-    expect(currentConfig.agents[0].telegram.botToken).toBe('alfred-test-token');
+    expect(currentConfig.agents[0].telegram!.botToken).toBe('alfred-test-token');
 
     watcher.stop();
   });

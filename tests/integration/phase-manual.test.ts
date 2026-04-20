@@ -205,8 +205,8 @@ describe('Phase 1: Config Loader', () => {
       expect(config.agents).toHaveLength(2);
       expect(config.agents[0].id).toBe('alfred');
       expect(config.agents[1].id).toBe('baerbel');
-      expect(config.agents[0].telegram.botToken).toBe('token-alfred-test');
-      expect(config.agents[1].telegram.botToken).toBe('token-baerbel-test');
+      expect(config.agents[0].telegram!.botToken).toBe('token-alfred-test');
+      expect(config.agents[1].telegram!.botToken).toBe('token-baerbel-test');
       expect(config.gateway).toBeDefined();
     } finally {
       delete process.env.ALFRED_BOT_TOKEN;
@@ -429,7 +429,7 @@ describe('Phase 1: Security', () => {
   it('P1-15: open policy, any userId → isAllowed=true', () => {
     const openConfig: AgentConfig = {
       ...baseAgentConfig,
-      telegram: { ...baseAgentConfig.telegram, dmPolicy: 'open' },
+      telegram: { ...baseAgentConfig.telegram!, dmPolicy: 'open' },
     };
     expect(isAllowed(9999, openConfig, '99999')).toBe(true);
     expect(isAllowed(0, openConfig, '99999')).toBe(true);
@@ -1495,7 +1495,7 @@ describe('Phase 3: Full heartbeat flow', () => {
       scheduler.on('heartbeat:result', async (result: HeartbeatResult) => {
         if (!result.suppressed) {
           const base = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
-          const url = `${base}/bot${agentCfg.telegram.botToken}/sendMessage`;
+          const url = `${base}/bot${agentCfg.telegram!.botToken}/sendMessage`;
           // Fire-and-forget; use http module
           const body = JSON.stringify({ chat_id: 0, text: result.response });
           const urlObj = new URL(url);

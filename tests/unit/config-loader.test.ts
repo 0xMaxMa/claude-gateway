@@ -36,8 +36,8 @@ describe('config-loader', () => {
     expect(config.agents[0].id).toBe('alfred');
     expect(config.agents[1].id).toBe('baerbel');
     // Env vars should be interpolated
-    expect(config.agents[0].telegram.botToken).toBe('alfred-test-token');
-    expect(config.agents[1].telegram.botToken).toBe('baerbel-test-token');
+    expect(config.agents[0].telegram!.botToken).toBe('alfred-test-token');
+    expect(config.agents[1].telegram!.botToken).toBe('baerbel-test-token');
   });
 
   // -------------------------------------------------------------------------
@@ -120,7 +120,7 @@ describe('config-loader', () => {
     }));
 
     const config = loadConfig(configPath);
-    expect(config.agents[0].telegram.botToken).toBe('my-real-token');
+    expect(config.agents[0].telegram!.botToken).toBe('my-real-token');
   });
 
   // -------------------------------------------------------------------------
@@ -173,8 +173,8 @@ describe('config-loader', () => {
     }));
 
     const config = loadConfig(configPath);
-    expect(config.agents[0].telegram.dmPolicy).toBe('allowlist');
-    expect(config.agents[1].telegram.dmPolicy).toBe('open');
+    expect(config.agents[0].telegram!.dmPolicy).toBe('allowlist');
+    expect(config.agents[1].telegram!.dmPolicy).toBe('open');
   });
 
   // -------------------------------------------------------------------------
@@ -216,7 +216,7 @@ describe('config-loader', () => {
     }));
 
     const config = loadConfig(configPath);
-    expect(config.agents[0].telegram.allowedUsers).toEqual([]);
+    expect(config.agents[0].telegram!.allowedUsers).toEqual([]);
   });
 
   // -------------------------------------------------------------------------

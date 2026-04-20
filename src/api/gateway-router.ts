@@ -196,7 +196,7 @@ export class GatewayRouter {
    */
   getAgentByToken(token: string): AgentConfig | undefined {
     for (const [, config] of this.configs) {
-      if (config.telegram.botToken === token) {
+      if (config.telegram?.botToken === token) {
         return config;
       }
     }

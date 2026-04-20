@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
+import { randomBytes } from 'crypto';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -18,9 +19,10 @@ import type {
   ChannelId,
 } from '../../types';
 import { sendMessage } from './outbound';
-import { buildAccessConfig } from './access';
+import { loadAccess, saveAccess, gate } from './access';
 import { maybeCreateThread } from './threading';
 import { createMessageHandler } from './inbound';
+import type { DiscordMessageContext } from './types';
 
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 
@@ -173,40 +175,108 @@ export class DiscordModule implements ChannelModule {
       await this.initBot();
     }
 
-    const accessConfig = buildAccessConfig();
     const autoThread = process.env.DISCORD_AUTO_THREAD === 'true';
     const autoArchive = parseInt(process.env.DISCORD_AUTO_THREAD_ARCHIVE ?? '60', 10);
     const useEmbeds = process.env.DISCORD_USE_EMBEDS === 'true';
     const agentId = process.env.GATEWAY_AGENT_ID ?? 'discord';
 
-    const config = {
+    const stateDir = this.stateDir;
+    const loadAccessFn = () => loadAccess(stateDir);
+    const saveAccessFn = (a: ReturnType<typeof loadAccess>) => saveAccess(stateDir, a);
+
+    // Permissive config — gate() already handled access, inbound.ts skips re-check
+    const permissiveConfig = {
       botToken: this.getToken()!,
-      dmPolicy: accessConfig.dmPolicy,
-      dmAllowlist: accessConfig.dmAllowlist,
-      guildAllowlist: accessConfig.guildAllowlist,
-      channelAllowlist: accessConfig.channelAllowlist,
+      dmPolicy: 'open' as const,
+      dmAllowlist: [] as string[],
+      guildAllowlist: [] as string[],
+      channelAllowlist: [] as string[],
       autoThread,
       autoThreadArchiveMinutes: autoArchive as 60 | 1440 | 4320 | 10080,
       maxMessageLength: 2000,
       useEmbeds,
     };
 
-    const msgHandler = createMessageHandler(agentId, handler, config, accessConfig);
+    const permissiveAccessConfig = {
+      dmPolicy: 'open' as const,
+      dmAllowlist: [] as string[],
+      guildAllowlist: [] as string[],
+      channelAllowlist: [] as string[],
+      roleAllowlist: [] as string[],
+    };
+
+    const msgHandler = createMessageHandler(agentId, handler, permissiveConfig, permissiveAccessConfig);
 
     this.client.on('messageCreate', async (msg: any) => {
+      if (msg.author?.bot) return;
+      if (msg.system) return;
+
       this.lastMessageAt = Date.now();
+
+      const isDM = !msg.guild;
+      const isThread = msg.channel?.isThread?.() ?? false;
+
+      const context: DiscordMessageContext = {
+        guildId: msg.guildId ?? null,
+        channelId: msg.channelId,
+        threadId: isThread ? msg.channelId : null,
+        userId: msg.author.id,
+        username: msg.author.username,
+        messageId: msg.id,
+        isDM,
+        isThread,
+      };
+
+      const access = loadAccessFn();
+      const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));
+
+      if (result.action === 'drop') return;
+
+      if (result.action === 'pair') {
+        try {
+          await msg.channel.send(
+            `Pairing required — run in Claude Code:\n\n/discord:access pair ${result.code}`,
+          );
+        } catch {}
+        return;
+      }
+
+      // action === 'deliver'
       await msgHandler(msg);
       if (autoThread) {
         await maybeCreateThread(msg, autoThread, autoArchive).catch(() => {});
       }
     });
 
+    const approvedDir = path.join(this.stateDir, 'approved');
+    const approvedInterval = setInterval(() => { void this.checkApprovals(approvedDir); }, 5000);
+    approvedInterval.unref();
+
     signal.addEventListener('abort', () => {
       this.running = false;
+      clearInterval(approvedInterval);
       this.client?.destroy?.();
     });
 
     await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve()));
+  }
+
+  private async checkApprovals(approvedDir: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(approvedDir); } catch { return; }
+
+    for (const userId of files) {
+      const file = path.join(approvedDir, userId);
+      let channelId: string;
+      try { channelId = fs.readFileSync(file, 'utf8').trim(); } catch { continue; }
+
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        await channel.send('Paired! Say hi to Claude.');
+      } catch {}
+
+      try { fs.unlinkSync(file); } catch {}
+    }
   }
 
   getSnapshot(): ChannelAccountSnapshot {

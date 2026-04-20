@@ -50,7 +50,7 @@ export class ContextIsolationGuard {
       workspaces.set(ws, agent.id);
 
       // Token check
-      const token = agent.telegram.botToken;
+      const token = agent.telegram?.botToken ?? '';
       if (tokens.has(token)) {
         throw new TokenConflictError([tokens.get(token)!, agent.id], token);
       }
