@@ -436,11 +436,11 @@ async function main(): Promise<void> {
 
   process.stdin.resume();
   const actionIdx = await interactiveSelect(
-    ['Update agent.md', 'Manage channels'],
+    ['Manage channels', 'Regenerate agent.md'],
     'What would you like to do? (↑/↓ to move, Enter to select):'
   );
 
-  if (actionIdx === 1) {
+  if (actionIdx === 0) {
     await runMenu(agentId);
     return;
   }

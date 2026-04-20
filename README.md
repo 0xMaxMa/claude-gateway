@@ -12,7 +12,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 ## Features
 
 - **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
-- **Multi-channel MCP** — modular tool system per channel (Telegram, Cron, Skills, extensible to Discord/WhatsApp)
+- **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, Cron, Skills, extensible to Slack/WhatsApp)
 - **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - **Agent identity** — define personality, tone, and rules via workspace markdown files
 - **Live status messages** — real-time status updates showing tool usage, thinking, and progress
@@ -33,7 +33,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - Node.js 18+
 - [Claude Code CLI](https://claude.ai/code) v2.1.0+ installed and authenticated — `channels mode` is required (`claude --version`)
 - [Bun](https://bun.sh) — runs the MCP server subprocess (`mcp/server.ts`)
-- A Telegram bot token per agent (from [@BotFather](https://t.me/BotFather))
+- A bot token per agent — Telegram (from [@BotFather](https://t.me/BotFather)) or Discord (from [Discord Developer Portal](https://discord.com/developers/applications))
 
 ---
 
@@ -70,9 +70,10 @@ Steps:
 1. Choose an agent name
 2. Describe the agent — Claude generates workspace files
 3. Review and accept generated files
-4. Create a Telegram bot via @BotFather and paste the token
-5. Send any message to the bot to complete pairing
-6. Agent sends a welcome message
+4. Choose a channel: **Telegram** or **Discord**
+5. Paste the bot token — wizard verifies it automatically
+6. Send any message to the bot to complete pairing
+7. Agent sends a welcome message
 
 ### 4. Start the gateway
 
@@ -241,12 +242,13 @@ The MCP server (`mcp/server.ts`) uses a **modular multi-channel architecture**. 
 | Module | Interface | Tools | Purpose |
 |--------|-----------|-------|---------|
 | `telegram` | `ChannelModule` | `telegram_reply`, `telegram_react`, `telegram_edit_message`, `telegram_download_attachment` | Send messages, reactions, edit messages in Telegram |
+| `discord` | `ChannelModule` | `discord_reply`, `discord_react`, `discord_edit_message` | Send messages, reactions, edit messages in Discord |
 | `cron` | `ToolModule` | `cron_list`, `cron_create`, `cron_delete`, `cron_run`, `cron_get_runs` | Manage scheduled jobs via gateway REST API |
 | `skills` | `ToolModule` | `skill_create`, `skill_delete`, `skill_install` | Create, delete, and install agent skills at runtime |
 
 Tools are **prefixed by channel name** to avoid collisions. Each module controls its own visibility and lifecycle.
 
-**Adding a new channel** (e.g. Discord) means implementing `ChannelModule` interface in `mcp/tools/discord/module.ts` and registering it in `server.ts`.
+**Adding a new channel** (e.g. Slack) means implementing `ChannelModule` interface in `mcp/tools/slack/module.ts` and registering it in `server.ts`.
 
 ### Process Modes
 
@@ -314,7 +316,7 @@ See **[API.md](./API.md)** for full reference with request/response schemas and 
 
 ```
 claude-gateway/
-├── Makefile                            ← make start / create-agent / pair / mcp-install
+├── Makefile                            ← make start / create-agent / update-agent / pair / mcp-install
 ├── config.template.json                ← config template (source of truth for migration)
 │
 ├── src/                                ← Gateway core (TypeScript, compiled to dist/)
@@ -373,11 +375,11 @@ claude-gateway/
 │       └── web-ui.ts                   ← live HTML dashboard
 │
 ├── scripts/
-│   ├── create-agent.ts                 ← interactive agent creation wizard
+│   ├── create-agent.ts                 ← interactive agent creation wizard (with channel selection)
 │   ├── create-agent-prompts.ts         ← agent workspace generation prompts
-│   ├── update-agent.ts                 ← agent config updater
+│   ├── update-agent.ts                 ← update agent.md or manage channels (add/remove)
 │   ├── interactive-select.ts           ← interactive selection UI helper
-│   ├── pair.ts                         ← approve Telegram pairing
+│   ├── pair.ts                         ← approve channel pairing (Telegram / Discord)
 │   └── setup-claude-settings.js        ← enables channelsEnabled in Claude Code
 │
 └── mcp/                                ← MCP server (runs in Bun, separate node_modules)
@@ -438,8 +440,10 @@ claude-gateway/
             ├── .sessions/              ← per-session MCP config
             │   └── <session_id>/
             │       └── mcp-config.json ← auto-generated MCP config for this session
-            └── .telegram-state/
-                └── access.json         ← allowlist and pairing state
+            ├── .telegram-state/
+            │   └── access.json         ← Telegram allowlist and pairing state
+            └── .discord-state/
+                └── access.json         ← Discord allowlist and pairing state
 ```
 
 ---
@@ -544,12 +548,10 @@ When the config schema changes (new fields added in `config.template.json`), the
    npm run pair -- --agent=alfred --policy=allowlist
    ```
 
-Or use the Makefile shortcut:
+To manage channels (add/remove Telegram or Discord) on an existing agent:
 ```bash
-make add-user AGENT=alfred
+make update-agent   # choose "Manage channels"
 ```
-
-This switches `dmPolicy` to `pairing`, prints pairing instructions, and reminds you to switch back to `allowlist` when done.
 
 ---
 
