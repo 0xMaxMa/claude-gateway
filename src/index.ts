@@ -101,6 +101,24 @@ function validateWorkspaceFast(workspacePath: string): { ok: true } | { ok: fals
 }
 
 /**
+ * Load .env from a single agent's env file into process.env.
+ * Values already in process.env win (existing env vars take priority).
+ */
+function loadAgentEnvFile(envFile: string): void {
+  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    if (key && process.env[key] === undefined) {
+      process.env[key] = val;
+    }
+  }
+}
+
+/**
  * Load .env files from the gateway agents directory into process.env.
  * Each agent may have a .env at ~/.claude-gateway/agents/<id>/.env
  * containing bot tokens and other secrets. Values already in process.env win.
@@ -110,18 +128,173 @@ function loadAgentEnvFiles(gatewayAgentsDir: string): void {
   for (const agentId of fs.readdirSync(gatewayAgentsDir)) {
     const envFile = path.join(gatewayAgentsDir, agentId, '.env');
     if (!fs.existsSync(envFile)) continue;
-    for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eq = trimmed.indexOf('=');
-      if (eq < 1) continue;
-      const key = trimmed.slice(0, eq).trim();
-      const val = trimmed.slice(eq + 1).trim();
-      if (key && process.env[key] === undefined) {
-        process.env[key] = val;
-      }
+    loadAgentEnvFile(envFile);
+  }
+}
+
+// ─── Context shared between startAgent calls ──────────────────────────────────
+interface StartupContext {
+  agentRunners: Map<string, AgentRunner>;
+  agentConfigs: Map<string, AgentConfig>;
+  schedulers: CronScheduler[];
+  startupResults: StartupResult[];
+  mcpToolsDir: string;
+  sharedSkillsDir: string;
+  logDir: string;
+  cronManager: CronManager;
+}
+
+async function startAgent(
+  agentConfig: AgentConfig,
+  gatewayConfig: GatewayConfig,
+  ctx: StartupContext,
+): Promise<void> {
+  const { agentRunners, agentConfigs, schedulers, startupResults, mcpToolsDir, sharedSkillsDir, logDir } = ctx;
+
+  const logger = createLogger(agentConfig.id, logDir);
+  logger.info('Initialising agent', { id: agentConfig.id });
+
+  // ── Migrate legacy lowercase workspace files (agent.md → AGENTS.md, etc.) ──
+  if (fs.existsSync(agentConfig.workspace)) {
+    try {
+      migrateWorkspaceFiles(agentConfig.workspace);
+    } catch (err) {
+      logger.warn('Workspace migration failed', { error: (err as Error).message });
     }
   }
+
+  // ── Per-agent workspace validation (fail fast per-agent, not whole gateway) ──
+  const validation = validateWorkspaceFast(agentConfig.workspace);
+  if (!validation.ok) {
+    logger.error('Workspace validation failed', { reason: validation.reason });
+    console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason: validation.reason }));
+    startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason: validation.reason });
+    return;
+  }
+
+  // Load workspace
+  let workspace;
+  try {
+    workspace = await loadWorkspace(agentConfig.workspace, {
+      mcpToolsDir,
+      sharedSkillsDir,
+      logger,
+    });
+  } catch (err) {
+    const reason = (err as Error).message;
+    logger.error('Failed to load workspace', { error: reason });
+    console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
+    startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
+    return;
+  }
+
+  logger.info('Workspace loaded', {
+    truncated: workspace.truncated,
+  });
+
+  // Write assembled system prompt to CLAUDE.md so Claude Code subprocess picks it up
+  const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
+  try {
+    await fs.promises.writeFile(claudeMdPath, workspace.systemPrompt, 'utf8');
+    logger.info('Wrote CLAUDE.md', { path: claudeMdPath, chars: workspace.systemPrompt.length });
+  } catch (err) {
+    const reason = (err as Error).message;
+    logger.error('Failed to write CLAUDE.md', { error: reason });
+    console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
+    startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
+    return;
+  }
+
+  // Create runner
+  let runner: AgentRunner;
+  try {
+    runner = new AgentRunner(agentConfig, gatewayConfig, logger);
+    if (workspace.skillRegistry) {
+      runner.setSkillRegistry(workspace.skillRegistry);
+    }
+    await runner.start();
+  } catch (err) {
+    const reason = (err as Error).message;
+    logger.error('Failed to start agent runner', { error: reason });
+    console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
+    startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
+    return;
+  }
+
+  agentRunners.set(agentConfig.id, runner);
+  agentConfigs.set(agentConfig.id, agentConfig);
+
+  // Log startup status
+  console.log(JSON.stringify({ id: agentConfig.id, status: 'started' }));
+  logger.info('Agent started');
+
+  // Create scheduler
+  const scheduler = new CronScheduler(agentConfig.id, runner, logger, agentConfig);
+  if (workspace.files.heartbeatMd) {
+    scheduler.load(workspace.files.heartbeatMd);
+  }
+  schedulers.push(scheduler);
+
+  // Watch workspace for changes
+  watchWorkspace(agentConfig.workspace, async () => {
+    logger.info('Workspace changed, reloading');
+    try {
+      const updated = await loadWorkspace(agentConfig.workspace, {
+        mcpToolsDir,
+        sharedSkillsDir,
+        logger,
+      });
+      // Rewrite CLAUDE.md with updated system prompt and restart subprocess
+      await fs.promises.writeFile(
+        path.join(agentConfig.workspace, 'CLAUDE.md'),
+        updated.systemPrompt,
+        'utf8',
+      );
+      logger.info('Updated CLAUDE.md, restarting sessions');
+      if (updated.skillRegistry) {
+        runner.setSkillRegistry(updated.skillRegistry);
+      }
+      await runner.restartOrDefer();
+      scheduler.load(updated.files.heartbeatMd);
+    } catch (err) {
+      logger.error('Failed to reload workspace', { error: (err as Error).message });
+    }
+  });
+
+  // Watch skill directories for hot-reload (SKILL.md add/modify/delete)
+  const workspaceSkillsDir = path.join(agentConfig.workspace, 'skills');
+  watchSkills({
+    dirs: [workspaceSkillsDir, mcpToolsDir, sharedSkillsDir],
+    onChange: async () => {
+      logger.info('Skills changed, reloading registry');
+      try {
+        const updated = await loadWorkspace(agentConfig.workspace, {
+          mcpToolsDir,
+          sharedSkillsDir,
+          logger,
+        });
+        if (updated.skillRegistry) {
+          runner.setSkillRegistry(updated.skillRegistry);
+        }
+        // Rewrite CLAUDE.md with updated skills section
+        await fs.promises.writeFile(
+          path.join(agentConfig.workspace, 'CLAUDE.md'),
+          updated.systemPrompt,
+          'utf8',
+        );
+        // Stop idle subprocesses now; busy sessions are deferred until
+        // their current turn completes, then restarted automatically.
+        await runner.restartOrDefer();
+        logger.info('Skills registry updated', {
+          count: updated.skillRegistry?.skills.size ?? 0,
+        });
+      } catch (err) {
+        logger.error('Failed to reload skills', { error: (err as Error).message });
+      }
+    },
+  });
+
+  startupResults.push({ id: agentConfig.id, status: 'started', workspace: agentConfig.workspace });
 }
 
 async function main(): Promise<void> {
@@ -206,161 +379,10 @@ async function main(): Promise<void> {
     },
   });
 
-  for (const agentConfig of config.agents) {
-    // Expand ~ in workspace path so all downstream code uses absolute paths
-    agentConfig.workspace = expandTilde(agentConfig.workspace);
+  const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
+  const logDir = expandTilde(config.gateway.logDir);
 
-    const logger = createLogger(agentConfig.id, expandTilde(config.gateway.logDir));
-    logger.info('Initialising agent', { id: agentConfig.id });
-
-    // ── Migrate legacy lowercase workspace files (agent.md → AGENTS.md, etc.) ──
-    if (fs.existsSync(agentConfig.workspace)) {
-      try {
-        migrateWorkspaceFiles(agentConfig.workspace);
-      } catch (err) {
-        logger.warn('Workspace migration failed', { error: (err as Error).message });
-      }
-    }
-
-    // ── Per-agent workspace validation (fail fast per-agent, not whole gateway) ──
-    const validation = validateWorkspaceFast(agentConfig.workspace);
-    if (!validation.ok) {
-      logger.error('Workspace validation failed', { reason: validation.reason });
-      console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason: validation.reason }));
-      startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason: validation.reason });
-      continue; // skip this agent, continue with others
-    }
-
-    // Load workspace
-    const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
-    let workspace;
-    try {
-      workspace = await loadWorkspace(agentConfig.workspace, {
-        mcpToolsDir,
-        sharedSkillsDir,
-        logger,
-      });
-    } catch (err) {
-      const reason = (err as Error).message;
-      logger.error('Failed to load workspace', { error: reason });
-      console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
-      startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
-      continue;
-    }
-
-    logger.info('Workspace loaded', {
-      truncated: workspace.truncated,
-    });
-
-    // Write assembled system prompt to CLAUDE.md so Claude Code subprocess picks it up
-    const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
-    try {
-      await fs.promises.writeFile(claudeMdPath, workspace.systemPrompt, 'utf8');
-      logger.info('Wrote CLAUDE.md', { path: claudeMdPath, chars: workspace.systemPrompt.length });
-    } catch (err) {
-      const reason = (err as Error).message;
-      logger.error('Failed to write CLAUDE.md', { error: reason });
-      console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
-      startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
-      continue;
-    }
-
-    // Create runner
-    let runner: AgentRunner;
-    try {
-      runner = new AgentRunner(agentConfig, config, logger);
-      if (workspace.skillRegistry) {
-        runner.setSkillRegistry(workspace.skillRegistry);
-      }
-      await runner.start();
-    } catch (err) {
-      const reason = (err as Error).message;
-      logger.error('Failed to start agent runner', { error: reason });
-      console.log(JSON.stringify({ id: agentConfig.id, status: 'failed', reason }));
-      startupResults.push({ id: agentConfig.id, status: 'failed', workspace: agentConfig.workspace, reason });
-      continue;
-    }
-
-    agentRunners.set(agentConfig.id, runner);
-    agentConfigs.set(agentConfig.id, agentConfig);
-
-    // Log startup status
-    console.log(JSON.stringify({ id: agentConfig.id, status: 'started' }));
-    logger.info('Agent started');
-
-    // Create scheduler
-    const scheduler = new CronScheduler(agentConfig.id, runner, logger, agentConfig);
-    if (workspace.files.heartbeatMd) {
-      scheduler.load(workspace.files.heartbeatMd);
-    }
-    schedulers.push(scheduler);
-
-    // Watch workspace for changes
-    watchWorkspace(agentConfig.workspace, async () => {
-      logger.info('Workspace changed, reloading');
-      try {
-        const updated = await loadWorkspace(agentConfig.workspace, {
-          mcpToolsDir,
-          sharedSkillsDir,
-          logger,
-        });
-        // Rewrite CLAUDE.md with updated system prompt and restart subprocess
-        await fs.promises.writeFile(
-          path.join(agentConfig.workspace, 'CLAUDE.md'),
-          updated.systemPrompt,
-          'utf8',
-        );
-        logger.info('Updated CLAUDE.md, restarting sessions');
-        if (updated.skillRegistry) {
-          runner.setSkillRegistry(updated.skillRegistry);
-        }
-        await runner.restartOrDefer();
-        scheduler.load(updated.files.heartbeatMd);
-      } catch (err) {
-        logger.error('Failed to reload workspace', { error: (err as Error).message });
-      }
-    });
-
-    // Watch skill directories for hot-reload (SKILL.md add/modify/delete)
-    const workspaceSkillsDir = path.join(agentConfig.workspace, 'skills');
-    watchSkills({
-      dirs: [workspaceSkillsDir, mcpToolsDir, sharedSkillsDir],
-      onChange: async () => {
-        logger.info('Skills changed, reloading registry');
-        try {
-          const updated = await loadWorkspace(agentConfig.workspace, {
-            mcpToolsDir,
-            sharedSkillsDir,
-            logger,
-          });
-          if (updated.skillRegistry) {
-            runner.setSkillRegistry(updated.skillRegistry);
-          }
-          // Rewrite CLAUDE.md with updated skills section
-          await fs.promises.writeFile(
-            path.join(agentConfig.workspace, 'CLAUDE.md'),
-            updated.systemPrompt,
-            'utf8',
-          );
-          // Stop idle subprocesses now; busy sessions are deferred until
-          // their current turn completes, then restarted automatically.
-          await runner.restartOrDefer();
-          logger.info('Skills registry updated', {
-            count: updated.skillRegistry?.skills.size ?? 0,
-          });
-        } catch (err) {
-          logger.error('Failed to reload skills', { error: (err as Error).message });
-        }
-      },
-    });
-
-    startupResults.push({ id: agentConfig.id, status: 'started', workspace: agentConfig.workspace });
-  }
-
-  // Print startup summary table
-  printStartupTable(startupResults);
-
-  // Start persistent cron manager
+  // Start persistent cron manager (needed before startAgent so hot-added agents can reference it)
   const cronManager = new CronManager(
     {
       storePath: path.join(path.dirname(CONFIG_PATH), 'crons.json'),
@@ -371,6 +393,26 @@ async function main(): Promise<void> {
     createLogger('cron-manager', expandTilde(config.gateway.logDir)),
   );
   await cronManager.start();
+
+  const ctx: StartupContext = {
+    agentRunners,
+    agentConfigs,
+    schedulers,
+    startupResults,
+    mcpToolsDir,
+    sharedSkillsDir,
+    logDir,
+    cronManager,
+  };
+
+  for (const agentConfig of config.agents) {
+    // Expand ~ in workspace path so all downstream code uses absolute paths
+    agentConfig.workspace = expandTilde(agentConfig.workspace);
+    await startAgent(agentConfig, config, ctx);
+  }
+
+  // Print startup summary table
+  printStartupTable(startupResults);
 
   // Start gateway router
   const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager);
@@ -411,6 +453,20 @@ async function main(): Promise<void> {
           break;
       }
     }
+  });
+
+  configWatcher.on('agent.added', async (newAgentConfig: AgentConfig) => {
+    globalLogger.info('New agent detected in config, starting dynamically', { id: newAgentConfig.id });
+
+    // Load .env for new agent so token interpolation works before startAgent
+    const agentEnvFile = path.join(gatewayAgentsDir, newAgentConfig.id, '.env');
+    if (fs.existsSync(agentEnvFile)) {
+      loadAgentEnvFile(agentEnvFile);
+    }
+
+    newAgentConfig.workspace = expandTilde(newAgentConfig.workspace);
+    await startAgent(newAgentConfig, configWatcher.getConfig(), ctx);
+    globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
   });
 
   configWatcher.start();

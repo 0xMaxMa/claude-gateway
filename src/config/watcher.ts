@@ -21,7 +21,19 @@ export interface ConfigChange {
   hotReloadable: boolean;
 }
 
+interface DiffResult {
+  fieldChanges: ConfigChange[];
+  addedAgents: AgentConfig[];
+}
+
 export class ConfigWatcher extends EventEmitter {
+  on(event: 'changes', listener: (changes: ConfigChange[], newCfg: GatewayConfig, oldCfg: GatewayConfig) => void): this;
+  on(event: 'agent.added', listener: (agent: AgentConfig) => void): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string, listener: (...args: any[]) => void): this {
+    return super.on(event, listener);
+  }
+
   private watchHandle: WatchHandle | null = null;
   private currentConfig: GatewayConfig;
 
@@ -64,34 +76,46 @@ export class ConfigWatcher extends EventEmitter {
       return;
     }
 
-    const changes = this.diffConfig(this.currentConfig, newConfig);
-    if (changes.length === 0) {
+    const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
+
+    if (fieldChanges.length === 0 && addedAgents.length === 0) {
       this.logger.info('Config file changed but no effective differences detected');
       return;
     }
 
+    // Always update currentConfig when there are any changes (including new agents)
     const oldConfig = this.currentConfig;
     this.currentConfig = structuredClone(newConfig);
 
-    const hotChanges = changes.filter(c => c.hotReloadable);
-    const coldChanges = changes.filter(c => !c.hotReloadable);
+    // Emit field changes for existing agents
+    if (fieldChanges.length > 0) {
+      const hotChanges = fieldChanges.filter(c => c.hotReloadable);
+      const coldChanges = fieldChanges.filter(c => !c.hotReloadable);
 
-    if (hotChanges.length > 0) {
-      this.logger.info('Config hot-reloaded', {
-        fields: hotChanges.map(c => `${c.agentId}.${c.field}`),
-      });
-    }
-    if (coldChanges.length > 0) {
-      this.logger.warn('Config changes require restart to take effect', {
-        fields: coldChanges.map(c => `${c.agentId}.${c.field}`),
-      });
+      if (hotChanges.length > 0) {
+        this.logger.info('Config hot-reloaded', {
+          fields: hotChanges.map(c => `${c.agentId}.${c.field}`),
+        });
+      }
+      if (coldChanges.length > 0) {
+        this.logger.warn('Config changes require restart to take effect', {
+          fields: coldChanges.map(c => `${c.agentId}.${c.field}`),
+        });
+      }
+
+      this.emit('changes', fieldChanges, newConfig, oldConfig);
     }
 
-    this.emit('changes', changes, newConfig, oldConfig);
+    // Emit agent.added for each new agent
+    for (const agent of addedAgents) {
+      this.logger.info('New agent detected in config', { id: agent.id });
+      this.emit('agent.added', agent);
+    }
   }
 
-  private diffConfig(oldCfg: GatewayConfig, newCfg: GatewayConfig): ConfigChange[] {
-    const changes: ConfigChange[] = [];
+  private diffConfig(oldCfg: GatewayConfig, newCfg: GatewayConfig): DiffResult {
+    const fieldChanges: ConfigChange[] = [];
+    const addedAgents: AgentConfig[] = [];
 
     // Build agent maps by id for comparison
     const oldAgents = new Map<string, AgentConfig>();
@@ -104,10 +128,13 @@ export class ConfigWatcher extends EventEmitter {
       newAgents.set(agent.id, agent);
     }
 
-    // Compare agents that exist in both configs
+    // Compare agents that exist in both configs; collect new agents separately
     for (const [id, newAgent] of newAgents) {
       const oldAgent = oldAgents.get(id);
-      if (!oldAgent) continue; // new agent added — not hot-reloadable
+      if (!oldAgent) {
+        addedAgents.push(newAgent);
+        continue;
+      }
 
       // Check each field path
       const fieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
@@ -126,7 +153,7 @@ export class ConfigWatcher extends EventEmitter {
 
       for (const { field, oldVal, newVal } of fieldPairs) {
         if (!deepEqual(oldVal, newVal)) {
-          changes.push({
+          fieldChanges.push({
             agentId: id,
             field,
             oldValue: oldVal,
@@ -137,7 +164,7 @@ export class ConfigWatcher extends EventEmitter {
       }
     }
 
-    return changes;
+    return { fieldChanges, addedAgents };
   }
 }
 
