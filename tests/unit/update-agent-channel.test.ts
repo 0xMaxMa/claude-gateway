@@ -10,7 +10,7 @@ import {
   removeChannel,
   findAgent,
   loadConfig,
-} from '../../scripts/update-agent-channel';
+} from '../../scripts/update-agent';
 
 describe('detectConnectedChannels()', () => {
   let tmpDir: string;

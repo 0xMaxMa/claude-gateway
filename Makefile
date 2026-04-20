@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start create-agent update-agent update-agent-channel pair mcp-install
+.PHONY: help start create-agent update-agent pair mcp-install
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -24,8 +24,6 @@ update-agent: ## Update agent.md or manage channels for an existing agent
 pair: ## Approve a channel pairing (e.g. make pair agent=alfred code=abc123 channel=telegram)
 	./node_modules/.bin/ts-node scripts/pair.ts --agent=$(agent) --code=$(code) --channel=$(or $(channel),telegram)
 
-update-agent-channel: ## [deprecated] Use make update-agent → Manage channels instead
-	./node_modules/.bin/ts-node scripts/update-agent-channel.ts --agent=$(agent)
 
 mcp-install: ## Install MCP gateway dependencies
 	cd mcp && bun install
