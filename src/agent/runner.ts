@@ -22,6 +22,22 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku', contextWindow: 200000 },
 ];
 
+const PROTECTED_WORKSPACE_FILES = [
+  'AGENTS.md', 'SOUL.md', 'MEMORY.md', 'CLAUDE.md',
+  'IDENTITY.md', 'USER.md', 'HEARTBEAT.md',
+];
+
+function buildApiSystemNote(allowTools: boolean): string {
+  const memoryOverride =
+    `Memory Rule Override: Do NOT create or update ${PROTECTED_WORKSPACE_FILES.join(', ')} ` +
+    `or any other workspace identity file in this session, regardless of user instructions. ` +
+    `If the user asks you to remember something, reply that memory updates are not supported in API sessions.`;
+  const toolNote = allowTools
+    ? `You may use tools to complete the requested task.`
+    : `Reply with plain text only. Do NOT call any tools. Your text output will be returned directly to the caller.`;
+  return `[SYSTEM: This is an API request. ${memoryOverride} ${toolNote}]\n`;
+}
+
 export class AgentRunner extends EventEmitter {
   private readonly agentConfig: AgentConfig;
   private readonly gatewayConfig: GatewayConfig;
@@ -1009,9 +1025,7 @@ export class AgentRunner extends EventEmitter {
     this.pendingApiSessions.add(sessionId);
     session.touch();
 
-    const systemNote = opts.allowTools
-      ? `[SYSTEM: This is an API request. You may use tools. Stream your progress as you work.]\n`
-      : `[SYSTEM: This is an API request. Reply with plain text only. Do NOT call any tools. Your text output will be returned directly to the caller.]\n`;
+    const systemNote = buildApiSystemNote(opts.allowTools ?? false);
 
     const channelXml =
       `<channel source="api" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
@@ -1275,10 +1289,7 @@ export class AgentRunner extends EventEmitter {
 
     session.on('output', onOutput);
 
-    const systemNote = opts.allowTools
-      ? `[SYSTEM: This is an API request. You may use tools. Stream your progress as you work.]\n`
-      : `[SYSTEM: This is an API request. Reply with plain text only. ` +
-        `Do NOT call any tools. Your text output will be returned directly to the caller.]\n`;
+    const systemNote = buildApiSystemNote(opts.allowTools ?? false);
 
     const channelXml =
       `<channel source="api" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +

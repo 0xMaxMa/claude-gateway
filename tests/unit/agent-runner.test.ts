@@ -940,6 +940,92 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect(capturedMessage).toContain('Do NOT call any tools');
   }, 15000);
 
+  // T-WP-1: allowTools=true — system note contains MEMORY_RULE override
+  it('T-WP-1: allowTools=true system note contains memory-rule override', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    runner.sendApiMessageStream(
+      'stream-wp-1',
+      'do something',
+      { onChunk: () => {}, onDone: () => {}, onError: () => {} },
+      { timeoutMs: 5000, allowTools: true },
+    );
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const proc = allProcesses[allProcesses.length - 1];
+    const calls = (proc.stdin!.write as jest.Mock).mock.calls;
+    const capturedMessage = calls.map((c: unknown[]) => String(c[0])).join('');
+
+    expect(capturedMessage).toContain('memory updates are not supported in API sessions');
+  }, 15000);
+
+  // T-WP-2: allowTools=true — system note lists protected workspace files
+  it('T-WP-2: allowTools=true system note lists protected workspace files', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    runner.sendApiMessageStream(
+      'stream-wp-2',
+      'do something',
+      { onChunk: () => {}, onDone: () => {}, onError: () => {} },
+      { timeoutMs: 5000, allowTools: true },
+    );
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const proc = allProcesses[allProcesses.length - 1];
+    const calls = (proc.stdin!.write as jest.Mock).mock.calls;
+    const capturedMessage = calls.map((c: unknown[]) => String(c[0])).join('');
+
+    expect(capturedMessage).toContain('AGENTS.md');
+    expect(capturedMessage).toContain('SOUL.md');
+    expect(capturedMessage).toContain('MEMORY.md');
+  }, 15000);
+
+  // T-WP-3: allowTools=false — system note also contains MEMORY_RULE override
+  it('T-WP-3: allowTools=false system note also contains memory-rule override', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    runner.sendApiMessageStream(
+      'stream-wp-3',
+      'hello',
+      { onChunk: () => {}, onDone: () => {}, onError: () => {} },
+      { timeoutMs: 5000, allowTools: false },
+    );
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const proc = allProcesses[allProcesses.length - 1];
+    const calls = (proc.stdin!.write as jest.Mock).mock.calls;
+    const capturedMessage = calls.map((c: unknown[]) => String(c[0])).join('');
+
+    expect(capturedMessage).toContain('memory updates are not supported in API sessions');
+  }, 15000);
+
+  // T-WP-4: allowTools=false — system note instructs no tool use
+  it('T-WP-4: allowTools=false system note instructs no tool use', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    runner.sendApiMessageStream(
+      'stream-wp-4',
+      'hello',
+      { onChunk: () => {}, onDone: () => {}, onError: () => {} },
+      { timeoutMs: 5000, allowTools: false },
+    );
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const proc = allProcesses[allProcesses.length - 1];
+    const calls = (proc.stdin!.write as jest.Mock).mock.calls;
+    const capturedMessage = calls.map((c: unknown[]) => String(c[0])).join('');
+
+    expect(capturedMessage).toContain('Do NOT call any tools');
+  }, 15000);
+
   // --------------------------------------------------------------------------
   // T-AR-STREAM-16: No duplicate text in buffer from partial messages
   // --------------------------------------------------------------------------

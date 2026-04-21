@@ -194,6 +194,9 @@ curl -N -X POST \
 
 > Keys without `allow_tools: true` are always conversational — tools are never invoked regardless of what the request contains.
 
+**Workspace identity files are always protected in API sessions.**
+Regardless of `allow_tools`, the agent will not create or update workspace identity files (`AGENTS.md`, `SOUL.md`, `MEMORY.md`, `CLAUDE.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`) during an API session. If asked to remember something, the agent will decline. Memory updates require a Telegram or Cron session where the agent has full workspace access.
+
 **Event types:**
 
 | Type | Fields | Description |
