@@ -732,7 +732,7 @@ async function promptDiscordBotToken(
   process.exit(1);
 }
 
-async function startAndPairDiscord(
+export async function startAndPairDiscord(
   agentId: string,
   token: string,
   wsDir: string,
@@ -850,7 +850,7 @@ export async function pollForFirstMessage(
   throw new Error('Pairing timeout — no message received within 3 minutes');
 }
 
-async function startAndPair(
+export async function startAndPair(
   agentId: string,
   token: string,
   wsDir: string,

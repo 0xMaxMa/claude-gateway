@@ -20,6 +20,8 @@ import {
   appendToConfig,
   verifyDiscordBotToken,
   DISCORD_TOKEN_REGEX,
+  startAndPair,
+  startAndPairDiscord,
 } from './create-agent';
 import { interactiveSelect } from './interactive-select';
 
@@ -289,12 +291,11 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     console.log('  1. Open Telegram and search for @BotFather');
     console.log('  2. Send: /newbot, follow prompts, copy the token.\n');
     const { token, username } = await promptBotToken(rl2, agent.id);
-    await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'telegram', token });
-    console.log(`  ✓ Telegram configured for agent "${agent.id}"`);
-    console.log(`\n  → Now open Telegram and send any message to @${username} to get your pairing code`);
-    console.log(`  → Then run: make pair agent=${agent.id} code=<code>`);
-    await new Promise<void>((resolve) => rl2.question('\n  Press Enter when done... ', () => resolve()));
     rl2.close();
+    await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'telegram', token });
+    console.log(`\nPairing your Telegram account...\n`);
+    console.log('The wizard will detect your message and approve pairing automatically.\n');
+    await startAndPair(agent.id, token, wsDir, username);
   } else {
     console.log('Setting up Discord:\n');
     console.log('  1. Go to https://discord.com/developers/applications');
@@ -319,8 +320,8 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
       }
       console.log(`  Verification failed. ${3 - attempt} attempt(s) remaining.`);
     }
-    rl2.close();
     if (!token) {
+      rl2.close();
       console.error('Could not verify Discord token. Aborting.');
       process.exit(1);
     }
@@ -338,10 +339,9 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     }
 
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'discord', token });
-    console.log(`  ✓ Discord configured for agent "${agent.id}"`);
-    console.log(`\n  → Now send any message to @${username} in Discord to get your pairing code`);
-    console.log(`  → Then run: make pair agent=${agent.id} code=<code> channel=discord`);
-    await new Promise<void>((resolve) => rl2.question('\n  Press Enter when done... ', () => resolve()));
+    console.log(`\nPairing your Discord account...\n`);
+    await startAndPairDiscord(agent.id, token, wsDir, username, rl2);
+    rl2.close();
   }
 }
 
