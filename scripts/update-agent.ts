@@ -422,6 +422,8 @@ export async function runMenu(agentId: string): Promise<void> {
       const freshConfig = loadConfig();
       const freshAgent = findAgent(freshConfig, agentId)!;
       removeChannel(freshConfig, freshAgent, ch);
+      // Replace all keys: Object.assign won't copy deleted properties, so clear first
+      for (const key of Object.keys(agent)) delete (agent as Record<string, unknown>)[key];
       Object.assign(agent, freshAgent);
     }
   }
