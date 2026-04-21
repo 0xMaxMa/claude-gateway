@@ -475,13 +475,33 @@ export async function appendToConfig(
   console.log('Updating config.json...');
 
   const config = loadOrCreateRawConfig();
-  config.agents = config.agents.filter((a) => a.id !== agentId);
-
   const envVarName = agentId.toUpperCase().replace(/-/g, '_') + '_BOT_TOKEN';
   const discordEnvVarName = agentId.toUpperCase().replace(/-/g, '_') + '_DISCORD_BOT_TOKEN';
   const descriptionText = firstNonEmptyLine(agentMdContent);
   const channel = options?.channel ?? 'telegram';
 
+  const existingIdx = config.agents.findIndex((a) => a.id === agentId);
+
+  if (existingIdx >= 0) {
+    // Agent exists — merge the new channel in, preserve all other fields
+    const existing = config.agents[existingIdx];
+    existing.description = descriptionText;
+    if (channel === 'telegram') {
+      existing.telegram = {
+        botToken: `\${${envVarName}}`,
+        allowedUsers: existing.telegram?.allowedUsers ?? [],
+        dmPolicy: existing.telegram?.dmPolicy ?? 'open',
+      };
+    } else if (channel === 'discord') {
+      existing.discord = { botToken: `\${${discordEnvVarName}}` };
+    }
+    if (options?.signatureEmoji) existing.signatureEmoji = options.signatureEmoji;
+    saveConfig(config);
+    console.log(`  ✓ Agent "${agentId}" updated`);
+    return;
+  }
+
+  // New agent — create fresh entry
   const newAgent: RawAgentEntry = {
     id: agentId,
     description: descriptionText,
@@ -501,14 +521,10 @@ export async function appendToConfig(
       dmPolicy: 'open',
     };
   } else if (channel === 'discord') {
-    newAgent.discord = {
-      botToken: `\${${discordEnvVarName}}`,
-    };
+    newAgent.discord = { botToken: `\${${discordEnvVarName}}` };
   }
 
-  if (options?.signatureEmoji) {
-    newAgent.signatureEmoji = options.signatureEmoji;
-  }
+  if (options?.signatureEmoji) newAgent.signatureEmoji = options.signatureEmoji;
 
   config.agents.push(newAgent);
   saveConfig(config);
