@@ -65,7 +65,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 
 `agents` can be an array of agent IDs or `"*"` for full access. Keys support `${ENV_VAR}` interpolation.
 
-`allow_tools` grants the key permission to send requests with `allow_tools: true` in the body. Without this, any request that sets `allow_tools: true` is rejected with `403`.
+`allow_tools` grants the key permission to invoke tools (Read, Bash, Grep, etc.). Tool access is governed entirely by this config — no extra field is needed in the request body. Keys without `allow_tools: true` are always conversational regardless of what the request contains.
 
 **2. Restart the gateway**
 
@@ -176,9 +176,9 @@ data: {"type":"result","text":"Here's the full explanation...","request_id":"550
 data: [DONE]
 ```
 
-### Streaming with tool use
+### Requests with tool use
 
-When the API key has `allow_tools: true` in `config.json`, the agent can call tools (Read, Bash, Grep, etc.) and stream results back. No extra field is needed in the request body — tool access is governed entirely by the key config.
+When the API key has `allow_tools: true` in `config.json`, the agent can call tools (Read, Bash, Grep, etc.). No extra field is needed in the request body — tool access is governed entirely by the key config. This applies to both sync and streaming modes.
 
 ```bash
 curl -N -X POST \
