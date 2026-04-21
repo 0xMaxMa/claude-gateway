@@ -9,7 +9,7 @@
       "telegram.dmPolicy"
     ]
   },
-  "configVersion": "1.0.5",
+  "configVersion": "1.0.4",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
