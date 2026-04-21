@@ -24,6 +24,14 @@ import { loadWorkspace } from '../src/agent/workspace-loader';
 import { buildGenerationPrompt, parseGeneratedFiles } from './create-agent-prompts';
 import { interactiveSelect } from './interactive-select';
 import { loadCleanTemplate, stripIgnoredPaths } from '../src/config/migrator';
+import {
+  pollForFirstTelegramDM,
+  pollForFirstDiscordDM,
+  sendTelegramMessage,
+  sendDiscordMessage,
+  writeTelegramAccess,
+  writeDiscordAccess,
+} from '../lib/pairing';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -131,8 +139,6 @@ interface RawAgentEntry {
   env: string;
   telegram?: {
     botToken: string;
-    allowedUsers: number[];
-    dmPolicy: string;
   };
   discord?: {
     botToken: string;
@@ -489,8 +495,6 @@ export async function appendToConfig(
     if (channel === 'telegram') {
       existing.telegram = {
         botToken: `\${${envVarName}}`,
-        allowedUsers: existing.telegram?.allowedUsers ?? [],
-        dmPolicy: existing.telegram?.dmPolicy ?? 'open',
       };
     } else if (channel === 'discord') {
       existing.discord = { botToken: `\${${discordEnvVarName}}` };
@@ -517,8 +521,6 @@ export async function appendToConfig(
   if (channel === 'telegram') {
     newAgent.telegram = {
       botToken: `\${${envVarName}}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
     };
   } else if (channel === 'discord') {
     newAgent.discord = { botToken: `\${${discordEnvVarName}}` };
@@ -764,15 +766,11 @@ export async function startAndPairDiscord(
 
   const pairingCode = randomBytes(3).toString('hex');
 
-  try {
-    await httpsPost(
-      `https://discord.com/api/v10/channels/${channelId}/messages`,
-      JSON.stringify({ content: `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.` }),
-      { Authorization: `Bot ${token}` },
-    );
-  } catch {
-    // Not fatal
-  }
+  await sendDiscordMessage(
+    token,
+    channelId,
+    `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
+  );
 
   console.log(`\nThe bot just sent a pairing code to your Discord.`);
 
@@ -792,26 +790,9 @@ export async function startAndPairDiscord(
   }
 
   // Write access.json with user in allowlist
-  const accessFile = path.join(discordStateDir, 'access.json');
-  const access = {
-    dmPolicy: 'allowlist',
-    allowFrom: [senderId],
-    guildAllowlist: [] as string[],
-    channelAllowlist: [] as string[],
-    roleAllowlist: [] as string[],
-    pending: {} as Record<string, unknown>,
-  };
-  fs.writeFileSync(accessFile, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 });
+  writeDiscordAccess(discordStateDir, senderId);
 
-  try {
-    await httpsPost(
-      `https://discord.com/api/v10/channels/${channelId}/messages`,
-      JSON.stringify({ content: 'Paired! Say hi to Claude.' }),
-      { Authorization: `Bot ${token}` },
-    );
-  } catch {
-    // Not fatal
-  }
+  await sendDiscordMessage(token, channelId, "You're connected! Send me a message to get started.");
 
   console.log(`  ✓ Pairing approved — @${botUsername} is connected to your Discord account`);
   return channelId;
@@ -821,162 +802,12 @@ export async function startAndPairDiscord(
 // Step 5 — Start agent + auto-approve pairing
 // ---------------------------------------------------------------------------
 
+// AccessJson kept for type reference by other parts of this file
 interface AccessJson {
   dmPolicy: string;
   allowFrom: string[];
   groups: Record<string, unknown>;
   pending: Record<string, unknown>;
-}
-
-// ---------------------------------------------------------------------------
-// Direct Telegram polling — used during pairing (no subprocess needed)
-// ---------------------------------------------------------------------------
-
-interface TgMessage {
-  message_id: number;
-  from: { id: number; username?: string };
-  chat: { id: number; type: string };
-  text?: string;
-}
-
-interface TgUpdate {
-  update_id: number;
-  message?: TgMessage;
-}
-
-/**
- * Poll Telegram getUpdates until the first private DM arrives.
- * Returns { senderId, chatId } from the first message.
- * Uses long-polling (timeout=30s per request) to avoid busy-waiting.
- */
-export async function pollForFirstMessage(
-  token: string,
-  timeoutMs = 10 * 60 * 1000,
-): Promise<{ senderId: string; chatId: string }> {
-  const deadline = Date.now() + timeoutMs;
-  let offset = 0;
-  let dotCount = 0;
-  process.stdout.write('Waiting for send any message.');
-
-  while (Date.now() < deadline) {
-    const remaining = Math.max(0, deadline - Date.now());
-    const pollSecs = Math.min(30, Math.ceil(remaining / 1000));
-    if (pollSecs === 0) break;
-
-    try {
-      const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=${pollSecs}&allowed_updates=%5B%22message%22%5D`;
-      const body = await httpsGet(url);
-      const data = JSON.parse(body) as { ok: boolean; result: TgUpdate[] };
-
-      if (data.ok && data.result.length > 0) {
-        for (const update of data.result) {
-          offset = update.update_id + 1;
-          if (update.message?.chat.type === 'private') {
-            process.stdout.write('\n');
-            return {
-              senderId: String(update.message.from.id),
-              chatId: String(update.message.chat.id),
-            };
-          }
-        }
-        // Non-private updates — advance offset and continue
-        continue;
-      }
-    } catch {
-      // Network blip — back off briefly and retry
-      await sleep(2000);
-    }
-
-    dotCount++;
-    const dots = '.'.repeat((dotCount % 6) + 1);
-    process.stdout.write(`\rWaiting for pairing${dots}      \r`);
-    process.stdout.write(`Waiting for pairing${dots}`);
-  }
-
-  process.stdout.write('\n');
-  throw new Error('Pairing timeout — no message received within 10 minutes');
-}
-
-/**
- * Connect to Discord Gateway and wait for the first DM.
- * Uses Node 22's built-in WebSocket — no external packages needed.
- */
-export async function pollForFirstDiscordDM(
-  token: string,
-  timeoutMs = 10 * 60 * 1000,
-): Promise<{ senderId: string; channelId: string }> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const WS = (globalThis as any).WebSocket as typeof WebSocket;
-  return new Promise((resolve, reject) => {
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-    let resolved = false;
-    let dotCount = 0;
-
-    process.stdout.write('Waiting for Discord DM.');
-
-    const ws = new WS('wss://gateway.discord.gg/?v=10&encoding=json');
-
-    const deadline = setTimeout(() => {
-      ws.close();
-      process.stdout.write('\n');
-      reject(new Error('Pairing timeout — no Discord DM received within 10 minutes'));
-    }, timeoutMs);
-
-    ws.onmessage = (event: MessageEvent) => {
-      const payload = JSON.parse(event.data as string) as {
-        op: number;
-        d: Record<string, unknown>;
-        t?: string;
-      };
-      const { op, d, t } = payload;
-
-      if (op === 10) {
-        const interval = (d.heartbeat_interval as number) ?? 41250;
-        heartbeatTimer = setInterval(() => {
-          ws.send(JSON.stringify({ op: 1, d: null }));
-        }, interval);
-        ws.send(JSON.stringify({
-          op: 2,
-          d: {
-            token,
-            intents: 4096 + 32768, // DIRECT_MESSAGES + MESSAGE_CONTENT
-            properties: { os: 'linux', browser: 'claude-gateway', device: 'claude-gateway' },
-          },
-        }));
-      } else if (op === 0 && t === 'MESSAGE_CREATE') {
-        const msg = d as Record<string, unknown>;
-        if (!msg['guild_id'] && !(msg['author'] as Record<string, unknown>)?.['bot']) {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(deadline);
-            if (heartbeatTimer) clearInterval(heartbeatTimer);
-            ws.close();
-            process.stdout.write('\n');
-            resolve({
-              senderId: String((msg['author'] as Record<string, unknown>)['id']),
-              channelId: String(msg['channel_id']),
-            });
-          }
-        }
-      }
-    };
-
-    ws.onerror = () => {
-      clearTimeout(deadline);
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      process.stdout.write('\n');
-      reject(new Error('Discord WebSocket error during pairing'));
-    };
-
-    // dot animation on heartbeat ticks
-    const dotTimer = setInterval(() => {
-      if (resolved) { clearInterval(dotTimer); return; }
-      dotCount++;
-      const dots = '.'.repeat((dotCount % 6) + 1);
-      process.stdout.write(`\rWaiting for Discord DM${dots}      \r`);
-      process.stdout.write(`Waiting for Discord DM${dots}`);
-    }, 5000);
-  });
 }
 
 export async function startAndPair(
@@ -1000,10 +831,12 @@ export async function startAndPair(
 
   let senderId: string;
   let chatId: string;
+  let nextOffset: number;
   try {
-    const result = await pollForFirstMessage(token);
+    const result = await pollForFirstTelegramDM(token);
     senderId = result.senderId;
     chatId = result.chatId;
+    nextOffset = result.nextOffset;
   } catch (err) {
     console.error(`\n  ${(err as Error).message}`);
     console.error('  To pair manually, run the gateway and send a message to the bot.');
@@ -1016,18 +849,11 @@ export async function startAndPair(
   const pairingCode = randomBytes(3).toString('hex');
 
   // Send pairing code to the user in Telegram
-  try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(
-      url,
-      JSON.stringify({
-        chat_id: chatId,
-        text: `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
-      }),
-    );
-  } catch {
-    // Not fatal — continue regardless
-  }
+  await sendTelegramMessage(
+    token,
+    chatId,
+    `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
+  );
 
   console.log(`\nThe bot just sent a pairing code to your Telegram.`);
 
@@ -1052,24 +878,13 @@ export async function startAndPair(
   }
 
   // Write access.json with user in allowlist
-  const accessFile = path.join(telegramStateDir, 'access.json');
-  const access: AccessJson = {
-    dmPolicy: 'allowlist',
-    allowFrom: [senderId],
-    groups: {},
-    pending: {},
-  };
-  fs.writeFileSync(accessFile, JSON.stringify(access, null, 2), 'utf8');
+  writeTelegramAccess(telegramStateDir, senderId);
 
   // Send "Paired!" confirmation to Telegram
-  try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(url, JSON.stringify({ chat_id: chatId, text: 'Paired! Say hi to Claude.' }));
-  } catch {
-    // Not fatal
-  }
+  await sendTelegramMessage(token, chatId, "You're connected! Send me a message to get started.");
 
   console.log(`  ✓ Pairing approved — @${botUsername} is connected to your Telegram account`);
+  void nextOffset; // consumed by lib but not needed further in terminal flow
   return chatId;
 }
 
@@ -1101,7 +916,13 @@ function httpsPost(url: string, body: string, extraHeaders?: Record<string, stri
   });
 }
 
-async function sendWelcome(token: string, chatId: string, agentName: string, wsDir: string): Promise<void> {
+export async function sendWelcome(
+  token: string,
+  chatId: string,
+  agentName: string,
+  wsDir: string,
+  channel: 'telegram' | 'discord' = 'telegram',
+): Promise<void> {
   const claudeMdPath = path.join(wsDir, 'CLAUDE.md');
   const userMessage = `Write a short, warm welcome message (2-3 sentences) to your new user, speaking fully in character. Do not use markdown formatting. End with a note telling the user that the gateway needs to be restarted once to activate this agent, and that you will be ready after that.`;
 
@@ -1121,8 +942,13 @@ async function sendWelcome(token: string, chatId: string, agentName: string, wsD
       : result.stdout.trim();
 
   try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(url, JSON.stringify({ chat_id: chatId, text: welcomeText }));
+    if (channel === 'discord') {
+      const url = `https://discord.com/api/v10/channels/${chatId}/messages`;
+      await httpsPost(url, JSON.stringify({ content: welcomeText }), { Authorization: `Bot ${token}` });
+    } else {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      await httpsPost(url, JSON.stringify({ chat_id: chatId, text: welcomeText }));
+    }
   } catch (err) {
     console.log(`  Warning: Could not send welcome message: ${(err as Error).message}`);
   }
@@ -1311,10 +1137,8 @@ async function main(): Promise<void> {
   saveWizardState(state);
 
   // ── Step 6 ──────────────────────────────────────────────────────────────
-  if (channel === 'telegram') {
-    console.log('\nGenerating welcome message...');
-    await sendWelcome(token, chatId, agentName, wsDir);
-  }
+  console.log('\nGenerating welcome message...');
+  await sendWelcome(token, chatId, agentName, wsDir, channel);
   printSummary(agentId, botUsername, channel);
 
   clearWizardState(); // Clean up on success
@@ -1405,10 +1229,8 @@ async function resumeWizard(state: WizardState): Promise<void> {
   const botUsername = state.botUsername!;
   const chatId = state.chatId!;
 
-  if (channel === 'telegram') {
-    console.log('\nGenerating welcome message...');
-    await sendWelcome(token, chatId, agentName, wsDir);
-  }
+  console.log('\nGenerating welcome message...');
+  await sendWelcome(token, chatId, agentName, wsDir, channel);
   printSummary(agentId, botUsername, channel);
   clearWizardState();
 }

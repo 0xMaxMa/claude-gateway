@@ -18,6 +18,30 @@ import {
 } from '../../mcp/tools/agent/handlers';
 
 // ---------------------------------------------------------------------------
+// Mock lib/pairing (pairTelegramUser, pairDiscordUser write access.json in tests)
+// ---------------------------------------------------------------------------
+
+import * as pairingLib from '../../lib/pairing';
+
+jest.mock('../../lib/pairing', () => ({
+  pairTelegramUser: jest.fn(),
+  pairDiscordUser: jest.fn(),
+  writeTelegramAccess: jest.fn(),
+  writeDiscordAccess: jest.fn(),
+  // primitives not used directly by handlers — included for completeness
+  pollForFirstTelegramDM: jest.fn(),
+  pollForTelegramCode: jest.fn(),
+  sendTelegramMessage: jest.fn(),
+  pollForFirstDiscordDM: jest.fn(),
+  sendDiscordMessage: jest.fn(),
+}));
+
+const mockPairTelegram = pairingLib.pairTelegramUser as jest.MockedFunction<typeof pairingLib.pairTelegramUser>;
+const mockPairDiscord = pairingLib.pairDiscordUser as jest.MockedFunction<typeof pairingLib.pairDiscordUser>;
+const mockWriteTelegramAccess = pairingLib.writeTelegramAccess as jest.MockedFunction<typeof pairingLib.writeTelegramAccess>;
+const mockWriteDiscordAccess = pairingLib.writeDiscordAccess as jest.MockedFunction<typeof pairingLib.writeDiscordAccess>;
+
+// ---------------------------------------------------------------------------
 // Mock global fetch (used by verifyTelegramToken / verifyDiscordToken)
 // ---------------------------------------------------------------------------
 
@@ -82,6 +106,31 @@ beforeEach(() => {
   writeConfig();
   process.env.GATEWAY_CONFIG = configFile;
   mockFetch.mockReset();
+  mockPairTelegram.mockReset();
+  mockPairDiscord.mockReset();
+  mockWriteTelegramAccess.mockReset();
+  mockWriteDiscordAccess.mockReset();
+  // Default: pairing succeeds and writes access.json via the mock
+  mockPairTelegram.mockImplementation((_token, stateDir) => {
+    const fs2 = require('fs') as typeof import('fs');
+    const path2 = require('path') as typeof import('path');
+    fs2.writeFileSync(
+      path2.join(stateDir, 'access.json'),
+      JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['111'], groups: {}, pending: {} }, null, 2),
+      { mode: 0o600 },
+    );
+    return Promise.resolve({ chatId: '111' });
+  });
+  mockPairDiscord.mockImplementation((_token, stateDir) => {
+    const fs2 = require('fs') as typeof import('fs');
+    const path2 = require('path') as typeof import('path');
+    fs2.writeFileSync(
+      path2.join(stateDir, 'access.json'),
+      JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['dc-user'], guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {} }, null, 2),
+      { mode: 0o600 },
+    );
+    return Promise.resolve({ channelId: 'dc-channel' });
+  });
 });
 
 afterEach(() => {
@@ -180,12 +229,12 @@ describe('createAgent — Telegram happy path', () => {
     const envContent = fs.readFileSync(envFile, 'utf8');
     expect(envContent).toContain(`MYAGENT_BOT_TOKEN=${VALID_TG_TOKEN}`);
 
-    // access.json
+    // access.json written by pairTelegramUser (mocked)
     const stateDir = path.join(wsDir, '.telegram-state');
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
-    // access.json always starts in pairing mode so the owner can pair immediately
-    expect(access.dmPolicy).toBe('pairing');
-    expect(access.allowFrom).toEqual([]);
+    expect(access.dmPolicy).toBe('allowlist');
+    expect(access.allowFrom).toEqual(['111']);
+    expect(mockPairTelegram).toHaveBeenCalledWith(VALID_TG_TOKEN, stateDir);
   });
 });
 
@@ -204,14 +253,15 @@ describe('createAgent — Discord happy path', () => {
     const stateDir = path.join(wsDir, '.discord-state');
 
     expect(fs.existsSync(stateDir)).toBe(true);
-    expect(fs.existsSync(path.join(stateDir, 'access.json'))).toBe(true);
+    // .env written before pairing
     expect(fs.existsSync(path.join(stateDir, '.env'))).toBe(true);
-
     const stateEnv = fs.readFileSync(path.join(stateDir, '.env'), 'utf8');
     expect(stateEnv).toContain(`DISCORD_BOT_TOKEN=${VALID_DC_TOKEN}`);
-
+    // access.json written by pairDiscordUser (mocked)
+    expect(fs.existsSync(path.join(stateDir, 'access.json'))).toBe(true);
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
-    expect(access.guildAllowlist).toEqual([]);
+    expect(access.allowFrom).toEqual(['dc-user']);
+    expect(mockPairDiscord).toHaveBeenCalledWith(VALID_DC_TOKEN, stateDir);
   });
 });
 
@@ -238,6 +288,28 @@ describe('createAgent — optional fields', () => {
     const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     const agent = cfg.agents.find((a: { id: string }) => a.id === 'richagent');
     expect(agent.signatureEmoji).toBe('🎭');
+  });
+});
+
+describe('createAgent — pairing failure fallback', () => {
+  it('AMH-03b: returns partial success message when pairing times out', async () => {
+    mockTelegramOk('mybot');
+    mockPairTelegram.mockRejectedValueOnce(new Error('Pairing timed out'));
+
+    const result = await createAgent({
+      id: 'failagent',
+      description: 'Agent that fails pairing',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+    });
+
+    expect(result).toContain('pairing failed');
+    expect(result).toContain('Pairing timed out');
+    // config.json still written
+    const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    expect(cfg.agents.find((a: { id: string }) => a.id === 'failagent')).toBeDefined();
+    // fallback writeTelegramAccess called
+    expect(mockWriteTelegramAccess).toHaveBeenCalled();
   });
 });
 

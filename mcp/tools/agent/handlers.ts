@@ -1,6 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import {
+  pairTelegramUser,
+  pairDiscordUser,
+  writeTelegramAccess,
+  writeDiscordAccess,
+} from '../../../lib/pairing';
 
 // ---------------------------------------------------------------------------
 // Regex constants (exported for tests)
@@ -226,38 +232,12 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   const agentEnvFile = path.join(agentRootDir(agentId), '.env');
   fs.writeFileSync(agentEnvFile, `${envVar}=${bot_token}\n`, { mode: 0o600 });
 
-  // 10. Create channel state dir + access.json
+  // 10. Create channel state dir (access.json written after pairing completes)
   const stateDir = path.join(wsDir, `.${channel}-state`);
   fs.mkdirSync(stateDir, { recursive: true });
 
-  if (channel === 'telegram') {
-    // Start in pairing mode so the owner can pair immediately; runtime dmPolicy is pairing.
-    const access = {
-      dmPolicy: 'pairing',
-      allowFrom: [] as string[],
-      groups: {} as Record<string, unknown>,
-      pending: {} as Record<string, unknown>,
-    };
-    fs.writeFileSync(
-      path.join(stateDir, 'access.json'),
-      JSON.stringify(access, null, 2),
-      { mode: 0o600 }
-    );
-  } else {
-    const access = {
-      dmPolicy,
-      allowFrom: [] as string[],
-      guildAllowlist: [] as string[],
-      channelAllowlist: [] as string[],
-      roleAllowlist: [] as string[],
-      pending: {} as Record<string, unknown>,
-    };
-    fs.writeFileSync(
-      path.join(stateDir, 'access.json'),
-      JSON.stringify(access, null, 2),
-      { mode: 0o600 }
-    );
-    // Discord state dir also needs .env with the token
+  if (channel === 'discord') {
+    // Discord state dir also needs .env with the token before pairing
     fs.writeFileSync(
       path.join(stateDir, '.env'),
       `DISCORD_BOT_TOKEN=${bot_token}\n`,
@@ -265,7 +245,7 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
     );
   }
 
-  // 11. Update config.json
+  // 11. Update config.json (before pairing so the gateway can hot-add the agent)
   const descriptionText = firstNonEmptyLine(agentsMdContent);
   const newAgent: RawAgentEntry = {
     id: agentId,
@@ -298,24 +278,34 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   config.agents.push(newAgent);
   saveRawConfig(config);
 
-  // 12. Return success with pairing instructions
-  const pairingNote =
-    channel === 'telegram'
-      ? [
-          `Bot is in pairing mode — DM @${botUsername} on Telegram to get a pairing code.`,
-          `Then run: make pair agent=${agentId} code=<code>`,
-          `After pairing, access.json will switch to dm_policy: ${dmPolicy} automatically.`,
-        ].join('\n')
-      : `To pair users: run the gateway, DM @${botUsername} from Discord, then: make pair agent=${agentId} code=<code> channel=discord`;
+  // 12. Run interactive pairing flow (blocks until user DMs the bot and confirms code)
+  try {
+    if (channel === 'telegram') {
+      await pairTelegramUser(bot_token, stateDir);
+    } else {
+      await pairDiscordUser(bot_token, stateDir);
+    }
+  } catch (err) {
+    // Pairing failed — write a permissive stub so the agent still starts
+    if (channel === 'telegram') {
+      writeTelegramAccess(stateDir, '');
+    } else {
+      writeDiscordAccess(stateDir, '');
+    }
+    return [
+      `Agent "${agentId}" created but pairing failed: ${(err as Error).message}`,
+      `Bot: @${botUsername} | Workspace: ${wsDir.replace(os.homedir(), '~')}`,
+      `Pair manually: DM @${botUsername} then use the gateway access tools.`,
+    ].join('\n');
+  }
 
   return [
-    `Agent "${agentId}" created successfully!`,
+    `Agent "${agentId}" created and paired successfully!`,
     `Bot: @${botUsername}`,
     `Workspace: ${wsDir.replace(os.homedir(), '~')}`,
     `Channel: ${channel} (dm_policy: ${dmPolicy})`,
     '',
     'The gateway will detect the new agent and start it automatically (hot-add).',
-    pairingNote,
   ].join('\n');
 }
 
@@ -414,28 +404,8 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
     const stateDir = path.join(wsDir, `.${channel}-state`);
     fs.mkdirSync(stateDir, { recursive: true });
 
-    if (channel === 'telegram') {
-      // Start in pairing mode so the owner can pair immediately.
-      const access = { dmPolicy: 'pairing', allowFrom: [] as string[], groups: {}, pending: {} };
-      fs.writeFileSync(
-        path.join(stateDir, 'access.json'),
-        JSON.stringify(access, null, 2),
-        { mode: 0o600 }
-      );
-    } else {
-      const access = {
-        dmPolicy,
-        allowFrom: [] as string[],
-        guildAllowlist: [],
-        channelAllowlist: [],
-        roleAllowlist: [],
-        pending: {},
-      };
-      fs.writeFileSync(
-        path.join(stateDir, 'access.json'),
-        JSON.stringify(access, null, 2),
-        { mode: 0o600 }
-      );
+    if (channel === 'discord') {
+      // Discord state dir needs .env before pairing
       fs.writeFileSync(
         path.join(stateDir, '.env'),
         `DISCORD_BOT_TOKEN=${bot_token}\n`,
@@ -443,7 +413,7 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
       );
     }
 
-    // Update config.json
+    // Update config.json before pairing (so gateway can hot-add)
     if (channel === 'telegram') {
       config.agents[agentIdx].telegram = {
         botToken: `\${${envVar}}`,
@@ -457,19 +427,26 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
     }
     saveRawConfig(config);
 
-    const pairingNote =
-      channel === 'telegram'
-        ? [
-            `Bot is in pairing mode — DM @${botUsername} on Telegram to get a pairing code.`,
-            `Then run: make pair agent=${agentId} code=<code>`,
-            `After pairing, access.json will switch to dm_policy: ${dmPolicy}.`,
-          ].join('\n')
-        : `To pair: DM @${botUsername} → make pair agent=${agentId} code=<code> channel=discord`;
+    // Run pairing flow
+    try {
+      if (channel === 'telegram') {
+        await pairTelegramUser(bot_token, stateDir);
+      } else {
+        await pairDiscordUser(bot_token, stateDir);
+      }
+    } catch (err) {
+      if (channel === 'telegram') {
+        writeTelegramAccess(stateDir, '');
+      } else {
+        writeDiscordAccess(stateDir, '');
+      }
+      return [
+        `Channel "${channel}" added to agent "${agentId}" but pairing failed: ${(err as Error).message}`,
+        `Bot: @${botUsername} — pair manually via the gateway access tools.`,
+      ].join('\n');
+    }
 
-    return [
-      `Channel "${channel}" added to agent "${agentId}". Bot: @${botUsername}`,
-      pairingNote,
-    ].join('\n');
+    return `Channel "${channel}" added to agent "${agentId}" and paired. Bot: @${botUsername}`;
   }
 
   // ── Action: remove_channel ───────────────────────────────────────────────
