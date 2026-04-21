@@ -150,7 +150,10 @@ export interface CreateAgentArgs {
   description: string;
   channel: 'telegram' | 'discord';
   bot_token: string;
+  /** @deprecated use telegram_user_id or discord_user_id */
   user_id?: string;
+  telegram_user_id?: string;
+  discord_user_id?: string;
   dm_policy?: 'open' | 'allowlist' | 'pairing';
   model?: string;
   signature_emoji?: string;
@@ -259,7 +262,10 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
     );
   }
 
-  const userId = args.user_id?.trim() ?? '';
+  const userId = (channel === 'telegram'
+    ? (args.telegram_user_id ?? args.user_id)
+    : (args.discord_user_id ?? args.user_id)
+  )?.trim() ?? '';
   if (channel === 'telegram') {
     if (userId) {
       writeTelegramAccess(stateDir, userId);
@@ -338,7 +344,10 @@ export interface UpdateAgentArgs {
   action: 'add_channel' | 'remove_channel' | 'update_workspace_file';
   channel?: 'telegram' | 'discord';
   bot_token?: string;
+  /** @deprecated use telegram_user_id or discord_user_id */
   user_id?: string;
+  telegram_user_id?: string;
+  discord_user_id?: string;
   dm_policy?: 'open' | 'allowlist' | 'pairing';
   filename?: string;
   content?: string;
@@ -433,7 +442,10 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
       );
     }
 
-    const addUserId = args.user_id?.trim() ?? '';
+    const addUserId = (channel === 'telegram'
+      ? (args.telegram_user_id ?? args.user_id)
+      : (args.discord_user_id ?? args.user_id)
+    )?.trim() ?? '';
     if (channel === 'telegram') {
       if (addUserId) {
         writeTelegramAccess(stateDir, addUserId);

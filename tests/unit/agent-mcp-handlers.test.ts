@@ -218,7 +218,7 @@ describe('createAgent — Telegram happy path', () => {
     expect(result).toContain('No user_id provided');
   });
 
-  it('AMH-01b: creates access.json with allowFrom when user_id is provided', async () => {
+  it('AMH-01b: creates access.json with allowFrom when telegram_user_id is provided', async () => {
     mockTelegramOk('mybot');
 
     await createAgent({
@@ -226,7 +226,7 @@ describe('createAgent — Telegram happy path', () => {
       description: 'A test agent',
       channel: 'telegram',
       bot_token: VALID_TG_TOKEN,
-      user_id: '997170033',
+      telegram_user_id: '997170033',
     });
 
     const wsDir = path.join(tmpDir, 'agents', 'myagent2', 'workspace');
@@ -234,6 +234,24 @@ describe('createAgent — Telegram happy path', () => {
     expect(mockWriteTelegramAccess).toHaveBeenCalledWith(stateDir, '997170033');
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
     expect(access.allowFrom).toEqual(['997170033']);
+  });
+
+  it('AMH-01c: does NOT use telegram_user_id for discord channel (isolation test)', async () => {
+    mockDiscordOk('discordbot');
+
+    await createAgent({
+      id: 'dcagent-iso',
+      description: 'Isolation test',
+      channel: 'discord',
+      bot_token: VALID_DC_TOKEN,
+      telegram_user_id: '997170033',
+    });
+
+    const wsDir = path.join(tmpDir, 'agents', 'dcagent-iso', 'workspace');
+    const stateDir = path.join(wsDir, '.discord-state');
+    expect(mockWriteDiscordAccess).not.toHaveBeenCalled();
+    const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
+    expect(access.allowFrom).toEqual([]);
   });
 });
 
@@ -261,7 +279,7 @@ describe('createAgent — Discord happy path', () => {
     expect(access.allowFrom).toEqual([]);
   });
 
-  it('AMH-02b: creates access.json with allowFrom when user_id is provided', async () => {
+  it('AMH-02b: creates access.json with allowFrom when discord_user_id is provided', async () => {
     mockDiscordOk('discordbot');
 
     await createAgent({
@@ -269,7 +287,7 @@ describe('createAgent — Discord happy path', () => {
       description: 'A discord agent',
       channel: 'discord',
       bot_token: VALID_DC_TOKEN,
-      user_id: '123456789012345678',
+      discord_user_id: '123456789012345678',
     });
 
     const wsDir = path.join(tmpDir, 'agents', 'dcagent2', 'workspace');

@@ -39,10 +39,15 @@ export class AgentModule implements ToolModule {
               description:
                 'Bot token. Telegram: 123456789:AAHfiq... Discord: MTAxMTk....AAAA.xxx.',
             },
-            user_id: {
+            telegram_user_id: {
               type: 'string',
               description:
-                'Channel user ID to grant access immediately (allowlist). Telegram: numeric chat_id. Discord: numeric user ID. If omitted, allowFrom is empty and must be set manually.',
+                'Telegram numeric chat_id to grant access immediately. Use when channel=telegram. Find it via @userinfobot.',
+            },
+            discord_user_id: {
+              type: 'string',
+              description:
+                'Discord numeric user ID to grant access immediately. Use when channel=discord. Enable Developer Mode → right-click username → Copy User ID.',
             },
             dm_policy: {
               type: 'string',
@@ -100,10 +105,15 @@ export class AgentModule implements ToolModule {
               type: 'string',
               description: 'Bot token (required for add_channel).',
             },
-            user_id: {
+            telegram_user_id: {
               type: 'string',
               description:
-                'Channel user ID to grant access immediately (add_channel only). If omitted, allowFrom is empty.',
+                'Telegram numeric chat_id (add_channel only, when channel=telegram). Find via @userinfobot.',
+            },
+            discord_user_id: {
+              type: 'string',
+              description:
+                'Discord numeric user ID (add_channel only, when channel=discord). Enable Developer Mode → right-click username → Copy User ID.',
             },
             dm_policy: {
               type: 'string',
