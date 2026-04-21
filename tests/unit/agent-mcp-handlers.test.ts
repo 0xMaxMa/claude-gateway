@@ -270,9 +270,8 @@ describe('createAgent — Discord happy path', () => {
     const stateDir = path.join(wsDir, '.discord-state');
 
     expect(fs.existsSync(stateDir)).toBe(true);
-    expect(fs.existsSync(path.join(stateDir, '.env'))).toBe(true);
-    const stateEnv = fs.readFileSync(path.join(stateDir, '.env'), 'utf8');
-    expect(stateEnv).toContain(`DISCORD_BOT_TOKEN=${VALID_DC_TOKEN}`);
+    // token lives in agent root .env, not inside the state dir
+    expect(fs.existsSync(path.join(stateDir, '.env'))).toBe(false);
     // access.json written with empty allowFrom (no user_id)
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
     expect(access.dmPolicy).toBe('allowlist');
@@ -466,7 +465,8 @@ describe('updateAgent — add_channel', () => {
 
     const stateDir = path.join(tmpDir, 'agents', 'myagent', 'workspace', '.discord-state');
     expect(fs.existsSync(stateDir)).toBe(true);
-    expect(fs.existsSync(path.join(stateDir, '.env'))).toBe(true);
+    // token lives in agent root .env, not inside the state dir
+    expect(fs.existsSync(path.join(stateDir, '.env'))).toBe(false);
   });
 });
 

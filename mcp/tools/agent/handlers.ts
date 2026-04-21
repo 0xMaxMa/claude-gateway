@@ -10,6 +10,10 @@ import { writeTelegramAccess, writeDiscordAccess } from '../../../lib/pairing';
 export const NAME_REGEX = /^[a-zA-Z][a-zA-Z0-9_-]{1,31}$/;
 export const TELEGRAM_TOKEN_REGEX = /^\d{8,12}:[A-Za-z0-9_-]{35,}$/;
 export const DISCORD_TOKEN_REGEX = /^\w{24,}\.\w{6}\.[\w-]{27,}$/;
+// Telegram user IDs: 6–15 decimal digits
+export const TELEGRAM_USER_ID_REGEX = /^\d{6,15}$/;
+// Discord Snowflakes: 17–19 decimal digits
+export const DISCORD_USER_ID_REGEX = /^\d{17,19}$/;
 
 const FILENAME_SAFE_REGEX = /^[A-Z][A-Z0-9_-]*\.md$/i;
 const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'USER.md'];
@@ -123,22 +127,8 @@ function envVarName(agentId: string, channel: 'telegram' | 'discord'): string {
 }
 
 function howToFindUserId(channel: 'telegram' | 'discord'): string {
-  if (channel === 'telegram') {
-    return [
-      'No user_id provided — allowFrom is empty (nobody can DM the bot yet).',
-      'To grant access, find your Telegram user ID:',
-      '  • Send /start to @userinfobot, or',
-      '  • Forward any message to @getidsbot',
-      'Then use the telegram:access tool to add your ID.',
-    ].join('\n');
-  }
-  return [
-    'No user_id provided — allowFrom is empty (nobody can DM the bot yet).',
-    'To grant access, find your Discord user ID:',
-    '  • Settings → Advanced → enable Developer Mode',
-    '  • Right-click your username → Copy User ID',
-    'Then use the discord:discord-access tool to add your ID.',
-  ].join('\n');
+  const tool = channel === 'telegram' ? 'telegram:access' : 'discord:discord-access';
+  return `No user_id provided — allowFrom is empty. Use the ${tool} tool to add users later.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,18 +244,27 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   const stateDir = path.join(wsDir, `.${channel}-state`);
   fs.mkdirSync(stateDir, { recursive: true });
 
-  if (channel === 'discord') {
-    fs.writeFileSync(
-      path.join(stateDir, '.env'),
-      `DISCORD_BOT_TOKEN=${bot_token}\n`,
-      { mode: 0o600 }
-    );
-  }
-
-  const userId = (channel === 'telegram'
+  const rawUserId = (channel === 'telegram'
     ? (args.telegram_user_id ?? args.user_id)
     : (args.discord_user_id ?? args.user_id)
   )?.trim() ?? '';
+
+  // Validate ID format to prevent cross-channel mix-ups
+  if (rawUserId) {
+    if (channel === 'telegram' && !TELEGRAM_USER_ID_REGEX.test(rawUserId)) {
+      throw new Error(
+        `Invalid telegram_user_id "${rawUserId}": must be 6–15 digits. ` +
+        `Discord Snowflake IDs (17–19 digits) are NOT valid Telegram IDs.`
+      );
+    }
+    if (channel === 'discord' && !DISCORD_USER_ID_REGEX.test(rawUserId)) {
+      throw new Error(
+        `Invalid discord_user_id "${rawUserId}": must be 17–19 digits (Discord Snowflake). ` +
+        `Telegram user IDs (6–15 digits) are NOT valid Discord IDs.`
+      );
+    }
+  }
+  const userId = rawUserId;
   if (channel === 'telegram') {
     if (userId) {
       writeTelegramAccess(stateDir, userId);
@@ -435,18 +434,28 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
     const stateDir = path.join(wsDir, `.${channel}-state`);
     fs.mkdirSync(stateDir, { recursive: true });
 
-    if (channel === 'discord') {
-      fs.writeFileSync(
-        path.join(stateDir, '.env'),
-        `DISCORD_BOT_TOKEN=${bot_token}\n`,
-        { mode: 0o600 }
-      );
-    }
-
-    const addUserId = (channel === 'telegram'
+    const rawAddUserId = (channel === 'telegram'
       ? (args.telegram_user_id ?? args.user_id)
       : (args.discord_user_id ?? args.user_id)
     )?.trim() ?? '';
+
+    // Validate ID format to prevent cross-channel mix-ups
+    if (rawAddUserId) {
+      if (channel === 'telegram' && !TELEGRAM_USER_ID_REGEX.test(rawAddUserId)) {
+        throw new Error(
+          `Invalid telegram_user_id "${rawAddUserId}": must be 6–15 digits. ` +
+          `Discord Snowflake IDs (17–19 digits) are NOT valid Telegram IDs.`
+        );
+      }
+      if (channel === 'discord' && !DISCORD_USER_ID_REGEX.test(rawAddUserId)) {
+        throw new Error(
+          `Invalid discord_user_id "${rawAddUserId}": must be 17–19 digits (Discord Snowflake). ` +
+          `Telegram user IDs (6–15 digits) are NOT valid Discord IDs.`
+        );
+      }
+    }
+    const addUserId = rawAddUserId;
+
     if (channel === 'telegram') {
       if (addUserId) {
         writeTelegramAccess(stateDir, addUserId);

@@ -242,6 +242,18 @@ export class DiscordModule implements ChannelModule {
       }
 
       // action === 'deliver'
+      // Start typing indicator before handing off to runner
+      const channelId = context.channelId;
+      const typingFileDir = path.join(this.stateDir, 'typing');
+      try {
+        fs.mkdirSync(typingFileDir, { recursive: true });
+        fs.writeFileSync(path.join(typingFileDir, channelId), '');
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${this.getToken()!}`, 'Content-Length': '0' },
+        });
+      } catch {}
+
       await msgHandler(msg);
       if (autoThread) {
         await maybeCreateThread(msg, autoThread, autoArchive).catch(() => {});
@@ -256,10 +268,15 @@ export class DiscordModule implements ChannelModule {
     const forwardInterval = setInterval(() => { void this.processForwardFiles(typingDir); }, 1000);
     forwardInterval.unref();
 
+    // Send typing indicator every 8s for all active channels (Discord typing lasts ~10s)
+    const typingInterval = setInterval(() => { void this.processTypingSignals(typingDir, this.getToken()!); }, 8000);
+    typingInterval.unref();
+
     signal.addEventListener('abort', () => {
       this.running = false;
       clearInterval(approvedInterval);
       clearInterval(forwardInterval);
+      clearInterval(typingInterval);
       this.client?.destroy?.();
     });
 
@@ -297,6 +314,30 @@ export class DiscordModule implements ChannelModule {
         }
         await sendMessage(channel, text, {});
       } catch { /* non-fatal */ }
+    }
+  }
+
+  private async processTypingSignals(typingDir: string, token: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(typingDir); } catch { return; }
+
+    for (const file of files) {
+      // Only act on plain files (no extension) — these are active typing channels
+      if (file.includes('.')) continue;
+      const channelId = file;
+      const errorFile = path.join(typingDir, `${channelId}.error`);
+      if (fs.existsSync(errorFile)) {
+        // Error signalled by runner — clean up both files and stop typing
+        try { fs.rmSync(path.join(typingDir, channelId), { force: true }); } catch {}
+        try { fs.rmSync(errorFile, { force: true }); } catch {}
+        continue;
+      }
+      try {
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${this.getToken()!}`, 'Content-Length': '0' },
+        });
+      } catch {}
     }
   }
 

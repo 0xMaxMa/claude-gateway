@@ -16,7 +16,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - **Agent identity** — define personality, tone, and rules via workspace markdown files
 - **Live status messages** — real-time status updates showing tool usage, thinking, and progress
-- **Typing indicators** — continuous typing animation while the agent is working
+- **Typing indicators** — continuous typing animation while the agent is working (Telegram and Discord)
 - **Streaming API** — SSE (Server-Sent Events) endpoint for real-time response streaming
 - **Auto-forward** — agent text output automatically forwarded to Telegram even without explicit reply tool calls
 - **Heartbeat / scheduled tasks** — cron-based proactive messages and recurring tasks via HEARTBEAT.md + REST API
@@ -139,9 +139,7 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
         "maxConcurrent": 20
       },
       "telegram": {
-        "botToken": "${ALFRED_BOT_TOKEN}",
-        "allowedUsers": [123456789],
-        "dmPolicy": "allowlist"
+        "botToken": "${ALFRED_BOT_TOKEN}"
       },
       "claude": {
         "model": "claude-sonnet-4-6",
@@ -165,9 +163,16 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 
 ### `dmPolicy`
 
+Access policy is configured per-channel in the agent's workspace state file, not in `config.json`:
+
+| File | Path |
+|------|------|
+| Telegram | `~/.claude-gateway/agents/<id>/workspace/.telegram-state/access.json` |
+| Discord | `~/.claude-gateway/agents/<id>/workspace/.discord-state/access.json` |
+
 | Value | Behaviour |
 |-------|-----------|
-| `allowlist` | Only user IDs in `allowedUsers` can DM the agent |
+| `allowlist` | Only user IDs in `allowFrom` can DM the agent (**default**) |
 | `open` | Anyone can DM the agent |
 | `pairing` | New users DM the bot to receive a pairing code; approve with `npm run pair` |
 
@@ -323,7 +328,6 @@ claude-gateway/
 │   ├── index.ts                        ← entrypoint — loads config, starts agents
 │   ├── types.ts                        ← shared TypeScript types
 │   ├── logger.ts                       ← structured logging with per-agent files
-│   ├── security.ts                     ← input validation and sanitization
 │   │
 │   ├── agent/                          ← Agent management
 │   │   ├── runner.ts                   ← session pool manager (spawn/evict sessions)
@@ -533,7 +537,7 @@ When the config schema changes (new fields added in `config.template.json`), the
 
 ## Pairing New Users
 
-1. Set `dmPolicy` to `pairing` in `access.json` (or in config):
+1. Set `dmPolicy` to `pairing` in `access.json`:
    ```json
    { "dmPolicy": "pairing" }
    ```
@@ -633,7 +637,7 @@ npm run typecheck
 - Check logs in `~/.claude-gateway/logs/<id>.log`
 
 **Agent not responding to messages**
-- Verify `dmPolicy` — if `allowlist`, check the user's ID is in `access.json`
+- Verify `dmPolicy` in `access.json` — if `allowlist`, check the user's ID is in `allowFrom`
 - Ensure no other process is polling the same bot token (causes 409 Conflict)
 - Only `TelegramReceiver` polls Telegram — MCP session subprocesses run in `SEND_ONLY` mode (no polling)
 

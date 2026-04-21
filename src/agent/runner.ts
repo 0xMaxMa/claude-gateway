@@ -920,7 +920,6 @@ export class AgentRunner extends EventEmitter {
   }
 
   private writeTypingError(chatId: string, code: string): void {
-    if (this.channelSourceMap.get(chatId) === 'discord') return;
     const typingDir = this.getTypingDir(chatId);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
@@ -931,7 +930,6 @@ export class AgentRunner extends EventEmitter {
   }
 
   private writeTypingDone(chatId: string): void {
-    if (this.channelSourceMap.get(chatId) === 'discord') return;
     const typingDir = this.getTypingDir(chatId);
     try {
       fs.rmSync(path.join(typingDir, chatId), { force: true });

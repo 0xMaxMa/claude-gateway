@@ -42,12 +42,12 @@ export class AgentModule implements ToolModule {
             telegram_user_id: {
               type: 'string',
               description:
-                'Telegram numeric chat_id to grant access immediately. Use when channel=telegram. Find it via @userinfobot.',
+                'Telegram numeric chat_id (6–15 digits, e.g. "997170033"). ONLY pass here when channel=telegram. IMPORTANT: If you are responding to a Telegram message, use the sender chat_id from the inbound message context directly — do NOT ask the user for it. NEVER put a Discord Snowflake (17–19 digits) here.',
             },
             discord_user_id: {
               type: 'string',
               description:
-                'Discord numeric user ID to grant access immediately. Use when channel=discord. Enable Developer Mode → right-click username → Copy User ID.',
+                'Discord Snowflake user ID (17–19 digits, e.g. "932651528878194749"). ONLY pass here when channel=discord. IMPORTANT: If you are responding to a Discord message, use the sender user ID from the inbound message context directly — do NOT ask the user for it. NEVER put a Telegram chat_id (6–15 digits) here.',
             },
             dm_policy: {
               type: 'string',
@@ -108,12 +108,12 @@ export class AgentModule implements ToolModule {
             telegram_user_id: {
               type: 'string',
               description:
-                'Telegram numeric chat_id (add_channel only, when channel=telegram). Find via @userinfobot.',
+                'Telegram numeric chat_id (6–15 digits). add_channel only, when channel=telegram. IMPORTANT: If responding to a Telegram message, use the sender chat_id directly — do NOT ask the user for it. NEVER put a Discord Snowflake (17–19 digits) here.',
             },
             discord_user_id: {
               type: 'string',
               description:
-                'Discord numeric user ID (add_channel only, when channel=discord). Enable Developer Mode → right-click username → Copy User ID.',
+                'Discord Snowflake user ID (17–19 digits). add_channel only, when channel=discord. IMPORTANT: If responding to a Discord message, use the sender user ID directly — do NOT ask the user for it. NEVER put a Telegram chat_id (6–15 digits) here.',
             },
             dm_policy: {
               type: 'string',
