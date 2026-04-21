@@ -288,11 +288,13 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     console.log('Setting up Telegram:\n');
     console.log('  1. Open Telegram and search for @BotFather');
     console.log('  2. Send: /newbot, follow prompts, copy the token.\n');
-    const { token } = await promptBotToken(rl2, agent.id);
-    rl2.close();
+    const { token, username } = await promptBotToken(rl2, agent.id);
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'telegram', token });
     console.log(`  ✓ Telegram configured for agent "${agent.id}"`);
-    console.log(`  Run: make pair agent=${agent.id} code=<code>`);
+    console.log(`\n  → Now open Telegram and send any message to @${username} to get your pairing code`);
+    console.log(`  → Then run: make pair agent=${agent.id} code=<code>`);
+    await new Promise<void>((resolve) => rl2.question('\n  Press Enter when done... ', () => resolve()));
+    rl2.close();
   } else {
     console.log('Setting up Discord:\n');
     console.log('  1. Go to https://discord.com/developers/applications');

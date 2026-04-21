@@ -588,12 +588,22 @@ export async function promptBotToken(
       process.stdout.write('\r                      \r');
       console.log(`  ✓ Bot @${username} verified`);
 
-      // Store token in .env for the agent dir
+      // Store token in .env for the agent dir (append-if-missing to preserve other tokens)
       const envVarName = agentId.toUpperCase().replace(/-/g, '_') + '_BOT_TOKEN';
       process.env[envVarName] = token;
       const agentEnvDir = agentDir(agentId);
       fs.mkdirSync(agentEnvDir, { recursive: true });
-      fs.writeFileSync(path.join(agentEnvDir, '.env'), `${envVarName}=${token}\n`, 'utf8');
+      const envFile = path.join(agentEnvDir, '.env');
+      let existingEnv = '';
+      try { existingEnv = fs.readFileSync(envFile, 'utf8'); } catch {}
+      if (!existingEnv.includes(`${envVarName}=`)) {
+        fs.appendFileSync(envFile, `${envVarName}=${token}\n`, { mode: 0o600 });
+      } else {
+        const updated = existingEnv.split('\n')
+          .map((l) => (l.startsWith(`${envVarName}=`) ? `${envVarName}=${token}` : l))
+          .join('\n');
+        fs.writeFileSync(envFile, updated, { mode: 0o600 });
+      }
 
       return { token, username };
     } else {
