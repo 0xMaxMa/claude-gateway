@@ -737,7 +737,7 @@ export async function startAndPairDiscord(
   token: string,
   wsDir: string,
   botUsername: string,
-  _rl: readline.Interface,
+  _rl: readline.Interface, // caller-owned — do NOT close inside this function
 ): Promise<string> {
   const discordStateDir = path.join(wsDir, '.discord-state');
   fs.mkdirSync(discordStateDir, { recursive: true });
@@ -776,17 +776,15 @@ export async function startAndPairDiscord(
 
   console.log(`\nThe bot just sent a pairing code to your Discord.`);
 
-  const rlConfirm = createRl();
   let confirmed = false;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const entered = await prompt(rlConfirm, `Enter the pairing code from Discord: `);
+    const entered = await prompt(_rl, `Enter the pairing code from Discord: `);
     if (entered.trim().toLowerCase() === pairingCode) {
       confirmed = true;
       break;
     }
     if (attempt < 3) console.log(`  Incorrect code. ${3 - attempt} attempt(s) remaining.`);
   }
-  rlConfirm.close();
 
   if (!confirmed) {
     console.error('\n  Pairing code mismatch after 3 attempts. Aborting.');
@@ -853,7 +851,7 @@ interface TgUpdate {
  */
 export async function pollForFirstMessage(
   token: string,
-  timeoutMs = 3 * 60 * 1000,
+  timeoutMs = 10 * 60 * 1000,
 ): Promise<{ senderId: string; chatId: string }> {
   const deadline = Date.now() + timeoutMs;
   let offset = 0;
@@ -896,7 +894,7 @@ export async function pollForFirstMessage(
   }
 
   process.stdout.write('\n');
-  throw new Error('Pairing timeout — no message received within 3 minutes');
+  throw new Error('Pairing timeout — no message received within 10 minutes');
 }
 
 /**
@@ -905,7 +903,7 @@ export async function pollForFirstMessage(
  */
 export async function pollForFirstDiscordDM(
   token: string,
-  timeoutMs = 3 * 60 * 1000,
+  timeoutMs = 10 * 60 * 1000,
 ): Promise<{ senderId: string; channelId: string }> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const WS = (globalThis as any).WebSocket as typeof WebSocket;
@@ -921,7 +919,7 @@ export async function pollForFirstDiscordDM(
     const deadline = setTimeout(() => {
       ws.close();
       process.stdout.write('\n');
-      reject(new Error('Pairing timeout — no Discord DM received within 3 minutes'));
+      reject(new Error('Pairing timeout — no Discord DM received within 10 minutes'));
     }, timeoutMs);
 
     ws.onmessage = (event: MessageEvent) => {
