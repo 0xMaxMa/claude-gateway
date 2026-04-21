@@ -140,7 +140,7 @@ export interface CreateAgentArgs {
 
 export async function createAgent(args: CreateAgentArgs): Promise<string> {
   const { id, description, channel, bot_token } = args;
-  const dmPolicy = args.dm_policy ?? 'open';
+  const dmPolicy = args.dm_policy ?? 'allowlist';
   const model = args.model ?? 'claude-sonnet-4-6';
 
   // 1. Validate id
@@ -231,8 +231,9 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   fs.mkdirSync(stateDir, { recursive: true });
 
   if (channel === 'telegram') {
+    // Start in pairing mode so the owner can pair immediately; runtime dmPolicy is pairing.
     const access = {
-      dmPolicy,
+      dmPolicy: 'pairing',
       allowFrom: [] as string[],
       groups: {} as Record<string, unknown>,
       pending: {} as Record<string, unknown>,
@@ -300,7 +301,11 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   // 12. Return success with pairing instructions
   const pairingNote =
     channel === 'telegram'
-      ? `To pair a user: set dmPolicy to "pairing" in workspace/.telegram-state/access.json, then run: make pair agent=${agentId} code=<code>`
+      ? [
+          `Bot is in pairing mode — DM @${botUsername} on Telegram to get a pairing code.`,
+          `Then run: make pair agent=${agentId} code=<code>`,
+          `After pairing, access.json will switch to dm_policy: ${dmPolicy} automatically.`,
+        ].join('\n')
       : `To pair users: run the gateway, DM @${botUsername} from Discord, then: make pair agent=${agentId} code=<code> channel=discord`;
 
   return [
@@ -356,7 +361,7 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
   if (action === 'add_channel') {
     const channel = args.channel;
     const bot_token = args.bot_token;
-    const dmPolicy = args.dm_policy ?? 'open';
+    const dmPolicy = args.dm_policy ?? 'allowlist';
 
     if (!channel || (channel !== 'telegram' && channel !== 'discord')) {
       throw new Error('add_channel requires channel: "telegram" or "discord"');
@@ -410,7 +415,8 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
     fs.mkdirSync(stateDir, { recursive: true });
 
     if (channel === 'telegram') {
-      const access = { dmPolicy, allowFrom: [] as string[], groups: {}, pending: {} };
+      // Start in pairing mode so the owner can pair immediately.
+      const access = { dmPolicy: 'pairing', allowFrom: [] as string[], groups: {}, pending: {} };
       fs.writeFileSync(
         path.join(stateDir, 'access.json'),
         JSON.stringify(access, null, 2),
@@ -453,7 +459,11 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
 
     const pairingNote =
       channel === 'telegram'
-        ? `To pair: make pair agent=${agentId} code=<code>`
+        ? [
+            `Bot is in pairing mode — DM @${botUsername} on Telegram to get a pairing code.`,
+            `Then run: make pair agent=${agentId} code=<code>`,
+            `After pairing, access.json will switch to dm_policy: ${dmPolicy}.`,
+          ].join('\n')
         : `To pair: DM @${botUsername} → make pair agent=${agentId} code=<code> channel=discord`;
 
     return [

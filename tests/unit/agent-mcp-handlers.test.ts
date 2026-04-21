@@ -157,7 +157,6 @@ describe('createAgent — Telegram happy path', () => {
       description: 'A test agent',
       channel: 'telegram',
       bot_token: VALID_TG_TOKEN,
-      dm_policy: 'open',
     });
 
     expect(result).toContain('myagent');
@@ -167,8 +166,8 @@ describe('createAgent — Telegram happy path', () => {
     const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     const agent = cfg.agents.find((a: { id: string }) => a.id === 'myagent');
     expect(agent).toBeDefined();
-    expect(agent.telegram.dmPolicy).toBe('open');
     expect(agent.telegram.botToken).toContain('MYAGENT_BOT_TOKEN');
+    expect(agent.telegram.dmPolicy).toBe('allowlist');
 
     // Workspace files exist
     const wsDir = path.join(tmpDir, 'agents', 'myagent', 'workspace');
@@ -184,7 +183,8 @@ describe('createAgent — Telegram happy path', () => {
     // access.json
     const stateDir = path.join(wsDir, '.telegram-state');
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
-    expect(access.dmPolicy).toBe('open');
+    // access.json always starts in pairing mode so the owner can pair immediately
+    expect(access.dmPolicy).toBe('pairing');
     expect(access.allowFrom).toEqual([]);
   });
 });
@@ -333,7 +333,7 @@ describe('updateAgent — add_channel', () => {
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
     };
     if (hasTelegram) {
-      agent.telegram = { botToken: '${EXISTING_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' };
+      agent.telegram = { botToken: '${EXISTING_BOT_TOKEN}' };
     }
     if (hasDiscord) {
       agent.discord = { botToken: '${EXISTING_DC_TOKEN}' };
@@ -409,7 +409,7 @@ describe('updateAgent — remove_channel', () => {
       description: 'test',
       workspace: wsDir,
       env: '',
-      telegram: { botToken: '${MYAGENT_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: '${MYAGENT_BOT_TOKEN}' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
     }]);
 
