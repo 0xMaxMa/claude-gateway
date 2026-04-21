@@ -14,7 +14,7 @@ interface StreamCallbacks {
 }
 
 class MockAgentRunner extends EventEmitter {
-  sendApiMessageImpl: (sessionId: string, message: string) => Promise<string>;
+  sendApiMessageImpl: (sessionId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>;
   sendApiMessageStreamImpl?: (
     sessionId: string,
     message: string,
@@ -23,7 +23,7 @@ class MockAgentRunner extends EventEmitter {
   ) => Promise<() => void>;
   private _activeApiSessions = new Set<string>();
 
-  constructor(impl: (sessionId: string, message: string) => Promise<string>) {
+  constructor(impl: (sessionId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>) {
     super();
     this.sendApiMessageImpl = impl;
   }
@@ -31,9 +31,9 @@ class MockAgentRunner extends EventEmitter {
   async sendApiMessage(
     sessionId: string,
     message: string,
-    _opts: { timeoutMs: number },
+    opts: { timeoutMs: number; allowTools?: boolean },
   ): Promise<string> {
-    return this.sendApiMessageImpl(sessionId, message);
+    return this.sendApiMessageImpl(sessionId, message, { allowTools: opts.allowTools });
   }
 
   async sendApiMessageStream(
@@ -556,6 +556,50 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     await collectSSE(app, { message: 'hi', stream: true, timeout_ms: 999999 });
 
     expect(capturedOpts!.timeoutMs).toBe(60000); // DEFAULT_TIMEOUT_MS
+  });
+
+  // I-API-14: key with allow_tools=true passes allowTools=true to sync runner
+  it('I-API-14: key with allow_tools=true passes allowTools=true to sync sendApiMessage', async () => {
+    let capturedAllowTools: boolean | undefined;
+    const runner = new MockAgentRunner(async (_sid, _msg, opts) => {
+      capturedAllowTools = opts?.allowTools;
+      return 'ok';
+    });
+    const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
+    const configs = new Map([[AGENT_ID, agentConfig]]);
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApiRouter(runners, configs, apiKeys));
+
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/messages`)
+      .set('Authorization', 'Bearer sk-test-tools')
+      .send({ message: 'run job' });
+
+    expect(res.status).toBe(200);
+    expect(capturedAllowTools).toBe(true);
+  });
+
+  // I-API-15: key without allow_tools passes allowTools=false to sync runner
+  it('I-API-15: key without allow_tools passes allowTools=false to sync sendApiMessage', async () => {
+    let capturedAllowTools: boolean | undefined;
+    const runner = new MockAgentRunner(async (_sid, _msg, opts) => {
+      capturedAllowTools = opts?.allowTools;
+      return 'ok';
+    });
+    const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
+    const configs = new Map([[AGENT_ID, agentConfig]]);
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApiRouter(runners, configs, apiKeys));
+
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/messages`)
+      .set('Authorization', 'Bearer sk-test-app')
+      .send({ message: 'hello' });
+
+    expect(res.status).toBe(200);
+    expect(capturedAllowTools).toBe(false);
   });
 
   // T-API-STREAM-TCP: TCP_NODELAY is set on SSE connections (regression test)

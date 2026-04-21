@@ -134,6 +134,7 @@ export function createApiRouter(
       try {
         const response = await runner.sendApiMessage(sessionId, message.trim(), {
           timeoutMs,
+          allowTools: !!apiKey.allow_tools,
         });
         res.json({
           request_id: requestId,
