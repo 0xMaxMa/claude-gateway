@@ -9,6 +9,7 @@ import { SessionProcess } from '../session/process';
 import { SessionStore } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
+import { DiscordReceiver } from '../discord/receiver';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 
@@ -49,6 +50,7 @@ export class AgentRunner extends EventEmitter {
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
   private receiver: TelegramReceiver | null = null;
+  private discordReceiver: DiscordReceiver | null = null;
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -143,17 +145,19 @@ export class AgentRunner extends EventEmitter {
             return;
           }
 
+          const channelSource = (meta['source'] === 'discord' ? 'discord' : 'telegram') as 'telegram' | 'discord';
+
           // Get active session ID and route message to it
           this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId)
             .then(async (sessionId) => {
-              // Append user message to the active telegram session
+              // Append user message to the active session
               await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
                 role: 'user',
                 content,
                 ts: Date.now(),
               });
               // Route to session process (map key = chatId, actual sessionId passed separately)
-              const session = await this.getOrSpawnSession(chatId, 'telegram', sessionId);
+              const session = await this.getOrSpawnSession(chatId, channelSource, sessionId);
               let channelXml = AgentRunner.buildChannelXml(params);
 
               // Detect skill commands and inject skill content
@@ -465,17 +469,18 @@ export class AgentRunner extends EventEmitter {
         `</replied>`;
     }
 
+    const source = meta['source'] ?? 'telegram';
     return (
-      `<channel source="telegram" chat_id="${meta['chat_id'] ?? ''}" ` +
+      `<channel source="${source}" chat_id="${meta['chat_id'] ?? ''}" ` +
       `message_id="${meta['message_id'] ?? ''}" user="${meta['user'] ?? ''}" ` +
       `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${repliedBlock}${params.content ?? ''}</channel>`
     );
   }
 
   private async getOrSpawnSession(
-    mapKey: string,              // Map lookup key (chatId for telegram, sessionId for API)
-    source: 'telegram' | 'api',
-    sessionId?: string,          // actual session UUID (only for telegram; equals mapKey for API)
+    mapKey: string,              // Map lookup key (chatId for telegram/discord, sessionId for API)
+    source: 'telegram' | 'discord' | 'api',
+    sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
   ): Promise<SessionProcess> {
     const existing = this.sessions.get(mapKey);
     if (existing) return existing;
@@ -496,7 +501,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     const actualSessionId = sessionId ?? mapKey;
-    const chatId = source === 'telegram' ? mapKey : undefined;
+    const chatId = source !== 'api' ? mapKey : undefined;
 
     const proc = new SessionProcess(
       actualSessionId,
@@ -513,7 +518,7 @@ export class AgentRunner extends EventEmitter {
     proc.on('output', (line: string) => this.emit('output', line));
 
     // Notify typing indicator when session permanently fails (max restarts exceeded)
-    if (source === 'telegram') {
+    if (source !== 'api') {
       proc.once('failed', () => {
         this.writeTypingError(mapKey, 'PROCESS_FAILED');
         this.sessions.delete(mapKey);
@@ -521,10 +526,11 @@ export class AgentRunner extends EventEmitter {
       // Stop typing loop when Claude's turn truly ends.
       // Typing done is delayed 3s after result event — if new output arrives within
       // the delay, the timer is cancelled so typing persists during multi-step work.
-      // Auto-forward result text to Telegram if agent didn't call reply tool.
+      // Auto-forward result text to channel if agent didn't call reply tool.
       let replyCalled = false;
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
+      const replyToolName = source === 'discord' ? 'mcp__gateway__discord_reply' : 'mcp__telegram__reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -536,12 +542,12 @@ export class AgentRunner extends EventEmitter {
             typingDoneTimer = null;
           }
 
-          // Track mcp__telegram__reply tool calls
+          // Track reply tool calls
           if (obj['type'] === 'assistant') {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string }> } | undefined;
             if (Array.isArray(msg?.content)) {
               for (const block of msg!.content) {
-                if (block.type === 'tool_use' && block.name === 'mcp__telegram__reply') {
+                if (block.type === 'tool_use' && block.name === replyToolName) {
                   replyCalled = true;
                 }
               }
@@ -957,14 +963,35 @@ export class AgentRunner extends EventEmitter {
   async start(): Promise<void> {
     this.stopping = false;
     await this.startCallbackServer();
-    this.receiver = new TelegramReceiver(
+    if (this.agentConfig.telegram?.botToken) {
+      this.receiver = new TelegramReceiver(
+        this.agentConfig,
+        this.callbackPort,
+        this.gatewayConfig.gateway.logDir,
+      );
+      this.receiver.start();
+    }
+    if (this.agentConfig.discord?.botToken) {
+      this.discordReceiver = new DiscordReceiver(
+        this.agentConfig,
+        this.callbackPort,
+        this.gatewayConfig.gateway.logDir,
+      );
+      this.discordReceiver.start();
+    }
+    this.startIdleCleaner();
+    this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
+  }
+
+  startDiscordReceiver(): void {
+    if (this.discordReceiver?.isRunning()) return;
+    this.discordReceiver = new DiscordReceiver(
       this.agentConfig,
       this.callbackPort,
       this.gatewayConfig.gateway.logDir,
     );
-    this.receiver.start();
-    this.startIdleCleaner();
-    this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
+    this.discordReceiver.start();
+    this.logger.info('DiscordReceiver hot-started', { agentId: this.agentConfig.id });
   }
 
   async stop(): Promise<void> {
@@ -976,6 +1003,7 @@ export class AgentRunner extends EventEmitter {
     this.callbackServer?.close();
     this.callbackServer = null;
     this.receiver?.stop();
+    this.discordReceiver?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.stop()));
     this.sessions.clear();
   }

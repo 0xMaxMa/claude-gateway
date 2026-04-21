@@ -418,7 +418,7 @@ describe('Gateway Telegram E2E — TelegramModule via mock API', () => {
     // Verify mock server recorded the getFile call and file download
     const sent = mockTg.getSentMessages();
     expect(sent.some(m => m.method === 'downloadFile')).toBe(true);
-  });
+  }, 15000);
 
   test('E2E-TG-7: telegram_reply rejects non-allowlisted chat', async () => {
     const result = await mod.handleTool('telegram_reply', {

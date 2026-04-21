@@ -337,7 +337,9 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
 
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'discord', token });
     console.log(`  ✓ Discord configured for agent "${agent.id}"`);
-    console.log(`  Run: make pair agent=${agent.id} code=<code> channel=discord`);
+    console.log(`\n  → Now send any message to @${username} in Discord to get your pairing code`);
+    console.log(`  → Then run: make pair agent=${agent.id} code=<code> channel=discord`);
+    await new Promise<void>((resolve) => rl2.question('\n  Press Enter when done... ', () => resolve()));
   }
 }
 

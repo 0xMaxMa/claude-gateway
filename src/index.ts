@@ -469,6 +469,27 @@ async function main(): Promise<void> {
     globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
   });
 
+  configWatcher.on('channel.added', async (agentId: string, channel: string) => {
+    const runner = ctx.agentRunners.get(agentId);
+    if (!runner) return;
+
+    // Load fresh .env so new token is available before starting receiver
+    const agentEnvFile = path.join(gatewayAgentsDir, agentId, '.env');
+    if (fs.existsSync(agentEnvFile)) {
+      loadAgentEnvFile(agentEnvFile);
+    }
+
+    // Reload the agent config so runner has the new token
+    const freshConfig = configWatcher.getConfig();
+    const freshAgent = freshConfig.agents.find(a => a.id === agentId);
+    if (!freshAgent) return;
+
+    if (channel === 'discord') {
+      (runner as import('./agent/runner').AgentRunner).startDiscordReceiver();
+      globalLogger.info('Discord channel hot-added to existing agent', { agentId });
+    }
+  });
+
   configWatcher.start();
 
   // Graceful shutdown

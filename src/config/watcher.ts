@@ -29,6 +29,7 @@ interface DiffResult {
 export class ConfigWatcher extends EventEmitter {
   on(event: 'changes', listener: (changes: ConfigChange[], newCfg: GatewayConfig, oldCfg: GatewayConfig) => void): this;
   on(event: 'agent.added', listener: (agent: AgentConfig) => void): this;
+  on(event: 'channel.added', listener: (agentId: string, channel: string) => void): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): this {
     return super.on(event, listener);
@@ -104,6 +105,20 @@ export class ConfigWatcher extends EventEmitter {
       }
 
       this.emit('changes', fieldChanges, newConfig, oldConfig);
+
+      // Emit channel.added when a new channel token is added to an existing agent
+      for (const change of fieldChanges) {
+        if (!change.oldValue && change.newValue) {
+          if (change.field === 'discord.botToken') {
+            this.logger.info('Discord channel added to agent', { agentId: change.agentId });
+            this.emit('channel.added', change.agentId, 'discord');
+          }
+          if (change.field === 'telegram.botToken') {
+            this.logger.info('Telegram channel added to agent', { agentId: change.agentId });
+            this.emit('channel.added', change.agentId, 'telegram');
+          }
+        }
+      }
     }
 
     // Emit agent.added for each new agent
@@ -148,6 +163,7 @@ export class ConfigWatcher extends EventEmitter {
         { field: 'telegram.botToken', oldVal: oldAgent.telegram?.botToken, newVal: newAgent.telegram?.botToken },
         { field: 'telegram.allowedUsers', oldVal: oldAgent.telegram?.allowedUsers, newVal: newAgent.telegram?.allowedUsers },
         { field: 'telegram.dmPolicy', oldVal: oldAgent.telegram?.dmPolicy, newVal: newAgent.telegram?.dmPolicy },
+        { field: 'discord.botToken', oldVal: oldAgent.discord?.botToken, newVal: newAgent.discord?.botToken },
         { field: 'description', oldVal: oldAgent.description, newVal: newAgent.description },
       ];
 
