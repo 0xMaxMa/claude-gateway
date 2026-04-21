@@ -242,6 +242,18 @@ export class DiscordModule implements ChannelModule {
       }
 
       // action === 'deliver'
+      // Start typing indicator before handing off to runner
+      const channelId = context.channelId;
+      const typingFileDir = path.join(this.stateDir, 'typing');
+      try {
+        fs.mkdirSync(typingFileDir, { recursive: true });
+        fs.writeFileSync(path.join(typingFileDir, channelId), '');
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${this.getToken()!}`, 'Content-Length': '0' },
+        });
+      } catch {}
+
       await msgHandler(msg);
       if (autoThread) {
         await maybeCreateThread(msg, autoThread, autoArchive).catch(() => {});
@@ -252,13 +264,81 @@ export class DiscordModule implements ChannelModule {
     const approvedInterval = setInterval(() => { void this.checkApprovals(approvedDir); }, 5000);
     approvedInterval.unref();
 
+    const typingDir = path.join(this.stateDir, 'typing');
+    const forwardInterval = setInterval(() => { void this.processForwardFiles(typingDir); }, 1000);
+    forwardInterval.unref();
+
+    // Send typing indicator every 8s for all active channels (Discord typing lasts ~10s)
+    const typingInterval = setInterval(() => { void this.processTypingSignals(typingDir, this.getToken()!); }, 8000);
+    typingInterval.unref();
+
     signal.addEventListener('abort', () => {
       this.running = false;
       clearInterval(approvedInterval);
+      clearInterval(forwardInterval);
+      clearInterval(typingInterval);
       this.client?.destroy?.();
     });
 
     await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve()));
+  }
+
+  private async processForwardFiles(typingDir: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(typingDir); } catch { return; }
+
+    for (const file of files) {
+      if (!file.endsWith('.forward')) continue;
+      const filePath = path.join(typingDir, file);
+      const channelId = file.slice(0, -'.forward'.length);
+      let text: string;
+      let parseMode: undefined | 'html';
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8').trim();
+        try {
+          const parsed = JSON.parse(raw) as { text: string; format: string };
+          text = parsed.text;
+          parseMode = parsed.format === 'html' ? 'html' : undefined;
+        } catch {
+          text = raw;
+        }
+        fs.rmSync(filePath, { force: true });
+      } catch { continue; }
+
+      if (!text) continue;
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        if (parseMode === 'html') {
+          // Discord doesn't support HTML — strip tags and send plain text
+          text = text.replace(/<[^>]*>/g, '');
+        }
+        await sendMessage(channel, text, {});
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  private async processTypingSignals(typingDir: string, token: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(typingDir); } catch { return; }
+
+    for (const file of files) {
+      // Only act on plain files (no extension) — these are active typing channels
+      if (file.includes('.')) continue;
+      const channelId = file;
+      const errorFile = path.join(typingDir, `${channelId}.error`);
+      if (fs.existsSync(errorFile)) {
+        // Error signalled by runner — clean up both files and stop typing
+        try { fs.rmSync(path.join(typingDir, channelId), { force: true }); } catch {}
+        try { fs.rmSync(errorFile, { force: true }); } catch {}
+        continue;
+      }
+      try {
+        await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${this.getToken()!}`, 'Content-Length': '0' },
+        });
+      } catch {}
+    }
   }
 
   private async checkApprovals(approvedDir: string): Promise<void> {
@@ -272,7 +352,7 @@ export class DiscordModule implements ChannelModule {
 
       try {
         const channel = await this.client.channels.fetch(channelId);
-        await channel.send('Paired! Say hi to Claude.');
+        await channel.send("You're connected! Send me a message to get started.");
       } catch {}
 
       try { fs.unlinkSync(file); } catch {}

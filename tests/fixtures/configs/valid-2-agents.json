@@ -10,9 +10,7 @@
       "workspace": "/tmp/alfred/workspace",
       "env": "/tmp/alfred/.env",
       "telegram": {
-        "botToken": "${ALFRED_BOT_TOKEN}",
-        "allowedUsers": [991177022],
-        "dmPolicy": "allowlist"
+        "botToken": "${ALFRED_BOT_TOKEN}"
       },
       "claude": {
         "model": "claude-opus-4-6",
@@ -26,9 +24,7 @@
       "workspace": "/tmp/baerbel/workspace",
       "env": "/tmp/baerbel/.env",
       "telegram": {
-        "botToken": "${BAERBEL_BOT_TOKEN}",
-        "allowedUsers": [],
-        "dmPolicy": "open"
+        "botToken": "${BAERBEL_BOT_TOKEN}"
       },
       "claude": {
         "model": "claude-sonnet-4-6",

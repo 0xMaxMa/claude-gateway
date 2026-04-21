@@ -43,7 +43,7 @@ function makeAgentConfig(
     description: `Test agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken },
     claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
   };
 }

@@ -3,9 +3,13 @@
     "ignorePaths": [
       "gateway.api",
       "gateway.api.keys"
+    ],
+    "removePaths": [
+      "telegram.allowedUsers",
+      "telegram.dmPolicy"
     ]
   },
-  "configVersion": "1.0.3",
+  "configVersion": "1.0.4",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -37,9 +41,7 @@
       "workspace": "~/.claude-gateway/agents/alfred/workspace",
       "env": "~/.claude-gateway/agents/alfred/.env",
       "telegram": {
-        "botToken": "${ALFRED_BOT_TOKEN}",
-        "allowedUsers": [991177022],
-        "dmPolicy": "allowlist"
+        "botToken": "${ALFRED_BOT_TOKEN}"
       },
       "claude": {
         "model": "claude-opus-4-6",
@@ -61,9 +63,7 @@
       "workspace": "~/.claude-gateway/agents/baerbel/workspace",
       "env": "~/.claude-gateway/agents/baerbel/.env",
       "telegram": {
-        "botToken": "${BAERBEL_BOT_TOKEN}",
-        "allowedUsers": [],
-        "dmPolicy": "open"
+        "botToken": "${BAERBEL_BOT_TOKEN}"
       },
       "claude": {
         "model": "claude-sonnet-4-6",

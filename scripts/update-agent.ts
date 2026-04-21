@@ -20,6 +20,9 @@ import {
   appendToConfig,
   verifyDiscordBotToken,
   DISCORD_TOKEN_REGEX,
+  startAndPair,
+  startAndPairDiscord,
+  sendWelcome,
 } from './create-agent';
 import { interactiveSelect } from './interactive-select';
 
@@ -31,7 +34,7 @@ export interface AgentEntry {
   id: string;
   workspace: string;
   signatureEmoji?: string;
-  telegram?: { botToken: string; allowedUsers?: number[]; dmPolicy?: string };
+  telegram?: { botToken: string };
   discord?: { botToken: string };
   [key: string]: unknown;
 }
@@ -288,11 +291,15 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     console.log('Setting up Telegram:\n');
     console.log('  1. Open Telegram and search for @BotFather');
     console.log('  2. Send: /newbot, follow prompts, copy the token.\n');
-    const { token } = await promptBotToken(rl2, agent.id);
+    const { token, username } = await promptBotToken(rl2, agent.id);
     rl2.close();
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'telegram', token });
-    console.log(`  ✓ Telegram configured for agent "${agent.id}"`);
-    console.log(`  Run: make pair agent=${agent.id} code=<code>`);
+    console.log(`\nPairing your Telegram account...\n`);
+    console.log('The wizard will detect your message and approve pairing automatically.\n');
+    const chatId = await startAndPair(agent.id, token, wsDir, username);
+    const agentName = agent.id.charAt(0).toUpperCase() + agent.id.slice(1);
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, chatId, agentName, wsDir, 'telegram');
   } else {
     console.log('Setting up Discord:\n');
     console.log('  1. Go to https://discord.com/developers/applications');
@@ -317,8 +324,8 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
       }
       console.log(`  Verification failed. ${3 - attempt} attempt(s) remaining.`);
     }
-    rl2.close();
     if (!token) {
+      rl2.close();
       console.error('Could not verify Discord token. Aborting.');
       process.exit(1);
     }
@@ -336,8 +343,12 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     }
 
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'discord', token });
-    console.log(`  ✓ Discord configured for agent "${agent.id}"`);
-    console.log(`  Run: make pair agent=${agent.id} code=<code> channel=discord`);
+    console.log(`\nPairing your Discord account...\n`);
+    const channelId = await startAndPairDiscord(agent.id, token, wsDir, username, rl2);
+    rl2.close();
+    const agentName = agent.id.charAt(0).toUpperCase() + agent.id.slice(1);
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, channelId, agentName, wsDir, 'discord');
   }
 }
 
@@ -418,6 +429,8 @@ export async function runMenu(agentId: string): Promise<void> {
       const freshConfig = loadConfig();
       const freshAgent = findAgent(freshConfig, agentId)!;
       removeChannel(freshConfig, freshAgent, ch);
+      // Replace all keys: Object.assign won't copy deleted properties, so clear first
+      for (const key of Object.keys(agent)) delete (agent as Record<string, unknown>)[key];
       Object.assign(agent, freshAgent);
     }
   }

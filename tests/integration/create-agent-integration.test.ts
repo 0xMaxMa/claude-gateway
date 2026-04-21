@@ -43,7 +43,7 @@ interface RawAgentEntry {
   description: string;
   workspace: string;
   env: string;
-  telegram: { botToken: string; allowedUsers: number[]; dmPolicy: string };
+  telegram: { botToken: string };
   claude: { model: string; dangerouslySkipPermissions: boolean; extraFlags: string[] };
 }
 
@@ -87,8 +87,6 @@ function appendAgentToConfig(
     env: '',
     telegram: {
       botToken: `\${${envVarName}}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
     },
     claude: {
       model: 'claude-sonnet-4-6',
@@ -276,7 +274,7 @@ describe('T-CA-02: Duplicate name detection', () => {
           description: 'Existing agent',
           workspace: '~/existing/workspace',
           env: '',
-          telegram: { botToken: '${EXISTING_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '${EXISTING_BOT_TOKEN}' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],
@@ -299,7 +297,7 @@ describe('T-CA-02: Duplicate name detection', () => {
           description: 'Alfred agent',
           workspace: '~/alfred/workspace',
           env: '',
-          telegram: { botToken: '${ALFRED_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '${ALFRED_BOT_TOKEN}' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],
@@ -380,7 +378,7 @@ describe('T-CA-04: Config append — new agent added to existing config.json', (
           description: 'Agent A',
           workspace: '~/agents/agent-a/workspace',
           env: '',
-          telegram: { botToken: '${AGENT_A_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '${AGENT_A_BOT_TOKEN}' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],
@@ -477,7 +475,6 @@ describe('T-CA-05: Config create — creates config.json from scratch', () => {
     const agent = config.agents[0];
     expect(agent.id).toBe('mybot');
     expect(agent.telegram.botToken).toBe('${MYBOT_BOT_TOKEN}');
-    expect(agent.telegram.dmPolicy).toBe('open');
     expect(agent.claude.model).toBe('claude-sonnet-4-6');
     expect(agent.claude.dangerouslySkipPermissions).toBe(false);
     expect(Array.isArray(agent.claude.extraFlags)).toBe(true);

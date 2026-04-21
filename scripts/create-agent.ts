@@ -24,6 +24,14 @@ import { loadWorkspace } from '../src/agent/workspace-loader';
 import { buildGenerationPrompt, parseGeneratedFiles } from './create-agent-prompts';
 import { interactiveSelect } from './interactive-select';
 import { loadCleanTemplate, stripIgnoredPaths } from '../src/config/migrator';
+import {
+  pollForFirstTelegramDM,
+  pollForFirstDiscordDM,
+  sendTelegramMessage,
+  sendDiscordMessage,
+  writeTelegramAccess,
+  writeDiscordAccess,
+} from '../lib/pairing';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -131,8 +139,6 @@ interface RawAgentEntry {
   env: string;
   telegram?: {
     botToken: string;
-    allowedUsers: number[];
-    dmPolicy: string;
   };
   discord?: {
     botToken: string;
@@ -475,13 +481,31 @@ export async function appendToConfig(
   console.log('Updating config.json...');
 
   const config = loadOrCreateRawConfig();
-  config.agents = config.agents.filter((a) => a.id !== agentId);
-
   const envVarName = agentId.toUpperCase().replace(/-/g, '_') + '_BOT_TOKEN';
   const discordEnvVarName = agentId.toUpperCase().replace(/-/g, '_') + '_DISCORD_BOT_TOKEN';
   const descriptionText = firstNonEmptyLine(agentMdContent);
   const channel = options?.channel ?? 'telegram';
 
+  const existingIdx = config.agents.findIndex((a) => a.id === agentId);
+
+  if (existingIdx >= 0) {
+    // Agent exists — merge the new channel in, preserve all other fields
+    const existing = config.agents[existingIdx];
+    existing.description = descriptionText;
+    if (channel === 'telegram') {
+      existing.telegram = {
+        botToken: `\${${envVarName}}`,
+      };
+    } else if (channel === 'discord') {
+      existing.discord = { botToken: `\${${discordEnvVarName}}` };
+    }
+    if (options?.signatureEmoji) existing.signatureEmoji = options.signatureEmoji;
+    saveConfig(config);
+    console.log(`  ✓ Agent "${agentId}" updated`);
+    return;
+  }
+
+  // New agent — create fresh entry
   const newAgent: RawAgentEntry = {
     id: agentId,
     description: descriptionText,
@@ -497,18 +521,12 @@ export async function appendToConfig(
   if (channel === 'telegram') {
     newAgent.telegram = {
       botToken: `\${${envVarName}}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
     };
   } else if (channel === 'discord') {
-    newAgent.discord = {
-      botToken: `\${${discordEnvVarName}}`,
-    };
+    newAgent.discord = { botToken: `\${${discordEnvVarName}}` };
   }
 
-  if (options?.signatureEmoji) {
-    newAgent.signatureEmoji = options.signatureEmoji;
-  }
+  if (options?.signatureEmoji) newAgent.signatureEmoji = options.signatureEmoji;
 
   config.agents.push(newAgent);
   saveConfig(config);
@@ -572,12 +590,22 @@ export async function promptBotToken(
       process.stdout.write('\r                      \r');
       console.log(`  ✓ Bot @${username} verified`);
 
-      // Store token in .env for the agent dir
+      // Store token in .env for the agent dir (append-if-missing to preserve other tokens)
       const envVarName = agentId.toUpperCase().replace(/-/g, '_') + '_BOT_TOKEN';
       process.env[envVarName] = token;
       const agentEnvDir = agentDir(agentId);
       fs.mkdirSync(agentEnvDir, { recursive: true });
-      fs.writeFileSync(path.join(agentEnvDir, '.env'), `${envVarName}=${token}\n`, 'utf8');
+      const envFile = path.join(agentEnvDir, '.env');
+      let existingEnv = '';
+      try { existingEnv = fs.readFileSync(envFile, 'utf8'); } catch {}
+      if (!existingEnv.includes(`${envVarName}=`)) {
+        fs.appendFileSync(envFile, `${envVarName}=${token}\n`, { mode: 0o600 });
+      } else {
+        const updated = existingEnv.split('\n')
+          .map((l) => (l.startsWith(`${envVarName}=`) ? `${envVarName}=${token}` : l))
+          .join('\n');
+        fs.writeFileSync(envFile, updated, { mode: 0o600 });
+      }
 
       return { token, username };
     } else {
@@ -706,48 +734,75 @@ async function promptDiscordBotToken(
   process.exit(1);
 }
 
-async function startAndPairDiscord(
+export async function startAndPairDiscord(
   agentId: string,
   token: string,
   wsDir: string,
   botUsername: string,
-  _rl: readline.Interface,
+  _rl: readline.Interface, // caller-owned — do NOT close inside this function
 ): Promise<string> {
   const discordStateDir = path.join(wsDir, '.discord-state');
   fs.mkdirSync(discordStateDir, { recursive: true });
-
-  // Write access.json with pairing policy ready
-  const accessFile = path.join(discordStateDir, 'access.json');
-  const access = {
-    dmPolicy: 'pairing',
-    allowFrom: [] as string[],
-    guildAllowlist: [] as string[],
-    channelAllowlist: [] as string[],
-    roleAllowlist: [] as string[],
-    pending: {} as Record<string, unknown>,
-  };
-  fs.writeFileSync(accessFile, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 });
 
   // Write token to stateDir/.env
   const stateEnvFile = path.join(discordStateDir, '.env');
   fs.writeFileSync(stateEnvFile, `DISCORD_BOT_TOKEN=${token}\n`, { mode: 0o600 });
 
-  console.log(`  ✓ Discord state dir created: ${discordStateDir.replace(os.homedir(), '~')}`);
-  console.log(`  ✓ access.json written (dmPolicy: pairing)\n`);
-  console.log('To pair your Discord account:');
-  console.log(`  1. Start the gateway: npm start`);
-  console.log(`  2. Open Discord and send ANY message to @${botUsername}`);
-  console.log(`  3. The bot will reply with a 6-char code`);
-  console.log(`  4. Run: make pair agent=${agentId} code=<code> channel=discord`);
+  console.log(`Now open Discord and send ANY message to @${botUsername}\n`);
 
-  // Return empty string — chatId not available until pairing completes at runtime
-  return '';
+  let senderId: string;
+  let channelId: string;
+  try {
+    const result = await pollForFirstDiscordDM(token);
+    senderId = result.senderId;
+    channelId = result.channelId;
+  } catch (err) {
+    console.error(`\n  ${(err as Error).message}`);
+    console.error('  To pair manually, start the gateway and DM the bot.');
+    process.exit(1);
+  }
+
+  console.log(`  ✓ Pairing request received from user ${senderId}`);
+
+  const pairingCode = randomBytes(3).toString('hex');
+
+  await sendDiscordMessage(
+    token,
+    channelId,
+    `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
+  );
+
+  console.log(`\nThe bot just sent a pairing code to your Discord.`);
+
+  let confirmed = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const entered = await prompt(_rl, `Enter the pairing code from Discord: `);
+    if (entered.trim().toLowerCase() === pairingCode) {
+      confirmed = true;
+      break;
+    }
+    if (attempt < 3) console.log(`  Incorrect code. ${3 - attempt} attempt(s) remaining.`);
+  }
+
+  if (!confirmed) {
+    console.error('\n  Pairing code mismatch after 3 attempts. Aborting.');
+    process.exit(1);
+  }
+
+  // Write access.json with user in allowlist
+  writeDiscordAccess(discordStateDir, senderId);
+
+  await sendDiscordMessage(token, channelId, "You're connected! Send me a message to get started.");
+
+  console.log(`  ✓ Pairing approved — @${botUsername} is connected to your Discord account`);
+  return channelId;
 }
 
 // ---------------------------------------------------------------------------
 // Step 5 — Start agent + auto-approve pairing
 // ---------------------------------------------------------------------------
 
+// AccessJson kept for type reference by other parts of this file
 interface AccessJson {
   dmPolicy: string;
   allowFrom: string[];
@@ -755,76 +810,7 @@ interface AccessJson {
   pending: Record<string, unknown>;
 }
 
-// ---------------------------------------------------------------------------
-// Direct Telegram polling — used during pairing (no subprocess needed)
-// ---------------------------------------------------------------------------
-
-interface TgMessage {
-  message_id: number;
-  from: { id: number; username?: string };
-  chat: { id: number; type: string };
-  text?: string;
-}
-
-interface TgUpdate {
-  update_id: number;
-  message?: TgMessage;
-}
-
-/**
- * Poll Telegram getUpdates until the first private DM arrives.
- * Returns { senderId, chatId } from the first message.
- * Uses long-polling (timeout=30s per request) to avoid busy-waiting.
- */
-export async function pollForFirstMessage(
-  token: string,
-  timeoutMs = 3 * 60 * 1000,
-): Promise<{ senderId: string; chatId: string }> {
-  const deadline = Date.now() + timeoutMs;
-  let offset = 0;
-  let dotCount = 0;
-  process.stdout.write('Waiting for send any message.');
-
-  while (Date.now() < deadline) {
-    const remaining = Math.max(0, deadline - Date.now());
-    const pollSecs = Math.min(30, Math.ceil(remaining / 1000));
-    if (pollSecs === 0) break;
-
-    try {
-      const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=${pollSecs}&allowed_updates=%5B%22message%22%5D`;
-      const body = await httpsGet(url);
-      const data = JSON.parse(body) as { ok: boolean; result: TgUpdate[] };
-
-      if (data.ok && data.result.length > 0) {
-        for (const update of data.result) {
-          offset = update.update_id + 1;
-          if (update.message?.chat.type === 'private') {
-            process.stdout.write('\n');
-            return {
-              senderId: String(update.message.from.id),
-              chatId: String(update.message.chat.id),
-            };
-          }
-        }
-        // Non-private updates — advance offset and continue
-        continue;
-      }
-    } catch {
-      // Network blip — back off briefly and retry
-      await sleep(2000);
-    }
-
-    dotCount++;
-    const dots = '.'.repeat((dotCount % 6) + 1);
-    process.stdout.write(`\rWaiting for pairing${dots}      \r`);
-    process.stdout.write(`Waiting for pairing${dots}`);
-  }
-
-  process.stdout.write('\n');
-  throw new Error('Pairing timeout — no message received within 3 minutes');
-}
-
-async function startAndPair(
+export async function startAndPair(
   agentId: string,
   token: string,
   wsDir: string,
@@ -845,10 +831,12 @@ async function startAndPair(
 
   let senderId: string;
   let chatId: string;
+  let nextOffset: number;
   try {
-    const result = await pollForFirstMessage(token);
+    const result = await pollForFirstTelegramDM(token);
     senderId = result.senderId;
     chatId = result.chatId;
+    nextOffset = result.nextOffset;
   } catch (err) {
     console.error(`\n  ${(err as Error).message}`);
     console.error('  To pair manually, run the gateway and send a message to the bot.');
@@ -861,18 +849,11 @@ async function startAndPair(
   const pairingCode = randomBytes(3).toString('hex');
 
   // Send pairing code to the user in Telegram
-  try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(
-      url,
-      JSON.stringify({
-        chat_id: chatId,
-        text: `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
-      }),
-    );
-  } catch {
-    // Not fatal — continue regardless
-  }
+  await sendTelegramMessage(
+    token,
+    chatId,
+    `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.`,
+  );
 
   console.log(`\nThe bot just sent a pairing code to your Telegram.`);
 
@@ -897,24 +878,13 @@ async function startAndPair(
   }
 
   // Write access.json with user in allowlist
-  const accessFile = path.join(telegramStateDir, 'access.json');
-  const access: AccessJson = {
-    dmPolicy: 'allowlist',
-    allowFrom: [senderId],
-    groups: {},
-    pending: {},
-  };
-  fs.writeFileSync(accessFile, JSON.stringify(access, null, 2), 'utf8');
+  writeTelegramAccess(telegramStateDir, senderId);
 
   // Send "Paired!" confirmation to Telegram
-  try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(url, JSON.stringify({ chat_id: chatId, text: 'Paired! Say hi to Claude.' }));
-  } catch {
-    // Not fatal
-  }
+  await sendTelegramMessage(token, chatId, "You're connected! Send me a message to get started.");
 
   console.log(`  ✓ Pairing approved — @${botUsername} is connected to your Telegram account`);
+  void nextOffset; // consumed by lib but not needed further in terminal flow
   return chatId;
 }
 
@@ -946,7 +916,13 @@ function httpsPost(url: string, body: string, extraHeaders?: Record<string, stri
   });
 }
 
-async function sendWelcome(token: string, chatId: string, agentName: string, wsDir: string): Promise<void> {
+export async function sendWelcome(
+  token: string,
+  chatId: string,
+  agentName: string,
+  wsDir: string,
+  channel: 'telegram' | 'discord' = 'telegram',
+): Promise<void> {
   const claudeMdPath = path.join(wsDir, 'CLAUDE.md');
   const userMessage = `Write a short, warm welcome message (2-3 sentences) to your new user, speaking fully in character. Do not use markdown formatting. End with a note telling the user that the gateway needs to be restarted once to activate this agent, and that you will be ready after that.`;
 
@@ -966,8 +942,13 @@ async function sendWelcome(token: string, chatId: string, agentName: string, wsD
       : result.stdout.trim();
 
   try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await httpsPost(url, JSON.stringify({ chat_id: chatId, text: welcomeText }));
+    if (channel === 'discord') {
+      const url = `https://discord.com/api/v10/channels/${chatId}/messages`;
+      await httpsPost(url, JSON.stringify({ content: welcomeText }), { Authorization: `Bot ${token}` });
+    } else {
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      await httpsPost(url, JSON.stringify({ chat_id: chatId, text: welcomeText }));
+    }
   } catch (err) {
     console.log(`  Warning: Could not send welcome message: ${(err as Error).message}`);
   }
@@ -1156,10 +1137,8 @@ async function main(): Promise<void> {
   saveWizardState(state);
 
   // ── Step 6 ──────────────────────────────────────────────────────────────
-  if (channel === 'telegram') {
-    console.log('\nGenerating welcome message...');
-    await sendWelcome(token, chatId, agentName, wsDir);
-  }
+  console.log('\nGenerating welcome message...');
+  await sendWelcome(token, chatId, agentName, wsDir, channel);
   printSummary(agentId, botUsername, channel);
 
   clearWizardState(); // Clean up on success
@@ -1250,10 +1229,8 @@ async function resumeWizard(state: WizardState): Promise<void> {
   const botUsername = state.botUsername!;
   const chatId = state.chatId!;
 
-  if (channel === 'telegram') {
-    console.log('\nGenerating welcome message...');
-    await sendWelcome(token, chatId, agentName, wsDir);
-  }
+  console.log('\nGenerating welcome message...');
+  await sendWelcome(token, chatId, agentName, wsDir, channel);
   printSummary(agentId, botUsername, channel);
   clearWizardState();
 }

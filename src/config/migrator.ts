@@ -4,6 +4,7 @@ import * as path from 'path';
 export interface MigrationResult {
   migrated: boolean;
   addedFields: string[];
+  removedFields: string[];
 }
 
 export interface DetectMigrationResult {
@@ -11,6 +12,7 @@ export interface DetectMigrationResult {
   fromVersion: string;
   toVersion: string;
   addedFields: string[];
+  removedFields: string[];
   config: Record<string, unknown>;
   template: Record<string, unknown>;
 }
@@ -18,6 +20,7 @@ export interface DetectMigrationResult {
 export interface CleanTemplateResult {
   template: Record<string, unknown>;
   ignorePaths: Set<string>;
+  removePaths: string[];
 }
 
 /**
@@ -80,6 +83,39 @@ function mergeAgentArrays(
 }
 
 /**
+ * Remove dot-path keys from each agent entry. Returns paths actually removed.
+ * Paths are relative to each agent object (e.g. "telegram.allowedUsers").
+ */
+function pruneAgentPaths(
+  agents: Array<Record<string, unknown>>,
+  removePaths: string[],
+): string[] {
+  const removed: string[] = [];
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
+    for (const dotPath of removePaths) {
+      const parts = dotPath.split('.');
+      let obj: Record<string, unknown> = agent;
+      let valid = true;
+      for (let j = 0; j < parts.length - 1; j++) {
+        if (typeof obj[parts[j]] !== 'object' || obj[parts[j]] === null) {
+          valid = false;
+          break;
+        }
+        obj = obj[parts[j]] as Record<string, unknown>;
+      }
+      const leaf = parts[parts.length - 1];
+      if (valid && leaf in obj) {
+        delete obj[leaf];
+        const fullPath = `agents[${i}].${dotPath}`;
+        if (!removed.includes(fullPath)) removed.push(fullPath);
+      }
+    }
+  }
+  return removed;
+}
+
+/**
  * Compare two semver strings. Returns:
  *  -1 if a < b, 0 if equal, 1 if a > b
  */
@@ -107,8 +143,9 @@ export function loadCleanTemplate(templatePath: string): CleanTemplateResult {
   const templateRaw = fs.readFileSync(templatePath, 'utf-8');
   const template = JSON.parse(templateRaw) as Record<string, unknown>;
 
-  // Extract ignorePaths from _migration metadata
+  // Extract ignorePaths and removePaths from _migration metadata
   let ignorePaths = new Set<string>();
+  let removePaths: string[] = [];
   if (
     template._migration &&
     typeof template._migration === 'object' &&
@@ -122,12 +159,17 @@ export function loadCleanTemplate(templatePath: string): CleanTemplateResult {
         ),
       );
     }
+    if (Array.isArray(migration.removePaths)) {
+      removePaths = (migration.removePaths as unknown[]).filter(
+        (p): p is string => typeof p === 'string',
+      );
+    }
   }
 
   // Strip _migration from the template
   delete template._migration;
 
-  return { template, ignorePaths };
+  return { template, ignorePaths, removePaths };
 }
 
 /**
@@ -172,6 +214,7 @@ export function detectMigration(
     fromVersion,
     toVersion: templateVersion,
     addedFields: [],
+    removedFields: [],
     config,
     template,
   });
@@ -182,7 +225,7 @@ export function detectMigration(
   }
 
   // Template must exist — load and strip _migration
-  const { template, ignorePaths } = loadCleanTemplate(templatePath);
+  const { template, ignorePaths, removePaths } = loadCleanTemplate(templatePath);
 
   // Read and parse config
   let configRaw: string;
@@ -205,7 +248,7 @@ export function detectMigration(
     return noMigration(config, template, configVersion);
   }
 
-  // Dry-run merge on a clone to detect what would be added
+  // Dry-run merge on a clone to detect what would be added/removed
   const configClone = structuredClone(config);
   const added: string[] = [];
 
@@ -227,6 +270,14 @@ export function detectMigration(
     );
   }
 
+  // Prune removed paths from agent entries
+  const removed: string[] = [];
+  if (removePaths.length > 0 && Array.isArray(configClone.agents)) {
+    removed.push(
+      ...pruneAgentPaths(configClone.agents as Array<Record<string, unknown>>, removePaths),
+    );
+  }
+
   // configVersion will always be updated
   if (!added.includes('configVersion')) {
     added.push('configVersion');
@@ -237,6 +288,7 @@ export function detectMigration(
     fromVersion: configVersion,
     toVersion: templateVersion,
     addedFields: added,
+    removedFields: removed,
     config,
     template,
   };
@@ -252,6 +304,7 @@ export function applyMigration(
   template: Record<string, unknown>,
   templateVersion: string,
   ignorePaths?: Set<string>,
+  removePaths?: string[],
 ): MigrationResult {
   const added: string[] = [];
 
@@ -273,6 +326,14 @@ export function applyMigration(
     );
   }
 
+  // Prune removed paths from agent entries
+  const removed: string[] = [];
+  if (removePaths && removePaths.length > 0 && Array.isArray(config.agents)) {
+    removed.push(
+      ...pruneAgentPaths(config.agents as Array<Record<string, unknown>>, removePaths),
+    );
+  }
+
   // Update configVersion
   config.configVersion = templateVersion;
   if (!added.includes('configVersion')) {
@@ -288,7 +349,7 @@ export function applyMigration(
   fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmpPath, configPath);
 
-  return { migrated: true, addedFields: added };
+  return { migrated: true, addedFields: added, removedFields: removed };
 }
 
 /**
@@ -305,16 +366,18 @@ export function migrateConfig(
   const detection = detectMigration(configPath, templatePath, templateVersion);
 
   if (!detection.needed) {
-    return { migrated: false, addedFields: [] };
+    return { migrated: false, addedFields: [], removedFields: [] };
   }
 
-  // Load ignorePaths again for the actual merge
+  // Load ignorePaths and removePaths again for the actual merge
   let ignorePaths: Set<string> | undefined;
+  let removePaths: string[] | undefined;
   try {
     const clean = loadCleanTemplate(templatePath);
     ignorePaths = clean.ignorePaths;
+    removePaths = clean.removePaths;
   } catch {
-    // If template can't be loaded again, proceed without ignorePaths
+    // If template can't be loaded again, proceed without ignorePaths/removePaths
   }
 
   return applyMigration(
@@ -323,6 +386,7 @@ export function migrateConfig(
     detection.template,
     templateVersion,
     ignorePaths,
+    removePaths,
   );
 }
 
@@ -370,4 +434,4 @@ function migrateModels(
 }
 
 // Exported for testing
-export { compareSemver, deepMerge, migrateModels };
+export { compareSemver, deepMerge, migrateModels, pruneAgentPaths };

@@ -16,7 +16,7 @@ function makeAgent(id: string, botToken: string, workspace: string): AgentConfig
     description: `Agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken },
     claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
   };
 }

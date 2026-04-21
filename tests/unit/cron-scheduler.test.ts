@@ -30,7 +30,7 @@ function makeAgentConfig(rateLimitMinutes?: number): AgentConfig {
     description: 'test',
     workspace: '/tmp/ws',
     env: '',
-    telegram: { botToken: 'token', allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken: 'token' },
     claude: { model: 'test', dangerouslySkipPermissions: false, extraFlags: [] },
     ...(rateLimitMinutes !== undefined ? { heartbeat: { rateLimitMinutes } } : {}),
   };

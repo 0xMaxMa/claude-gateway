@@ -73,9 +73,6 @@ function validateAgent(agent: Record<string, unknown>, index: number): string | 
     if (!telegram.botToken || typeof telegram.botToken !== 'string') {
       return `Agent "${agent.id}" is missing "telegram.botToken"`;
     }
-    if (telegram.dmPolicy !== 'allowlist' && telegram.dmPolicy !== 'open') {
-      return `Agent "${agent.id}" has invalid dmPolicy "${telegram.dmPolicy}". Must be "allowlist" or "open".`;
-    }
   }
   if (hasDiscord) {
     const discord = agent.discord as Record<string, unknown>;

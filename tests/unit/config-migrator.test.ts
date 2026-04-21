@@ -9,6 +9,7 @@ import {
   applyMigration,
   loadCleanTemplate,
   stripIgnoredPaths,
+  pruneAgentPaths,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -349,7 +350,7 @@ describe('config-migrator', () => {
         agents: [
           {
             id: 'example',
-            telegram: { botToken: '${TOKEN}', dmPolicy: 'allowlist' },
+            telegram: { botToken: '${TOKEN}' },
             signatureEmoji: '',
           },
         ],
@@ -363,7 +364,6 @@ describe('config-migrator', () => {
       expect(updated.agents[0].id).toBe('agent-a');
       expect(updated.agents[0].signatureEmoji).toBe('');
       expect(updated.agents[0].telegram.botToken).toBe('tok-a');
-      expect(updated.agents[0].telegram.dmPolicy).toBe('allowlist');
     });
   });
 
@@ -439,7 +439,7 @@ describe('config-migrator', () => {
         agents: [
           {
             id: 'example',
-            telegram: { botToken: '${TOKEN}', dmPolicy: 'allowlist' },
+            telegram: { botToken: '${TOKEN}' },
             signatureEmoji: '',
           },
         ],
@@ -451,7 +451,6 @@ describe('config-migrator', () => {
       expect(updated.agents[0].id).toBe('agent-a');
       expect(updated.agents[0].signatureEmoji).toBe('');
       expect(updated.agents[0].telegram.botToken).toBe('tok-a');
-      expect(updated.agents[0].telegram.dmPolicy).toBe('allowlist');
 
       expect(updated.agents[1].id).toBe('agent-b');
       expect(updated.agents[1].signatureEmoji).toBe('');
@@ -482,6 +481,48 @@ describe('config-migrator', () => {
       expect(() => migrateConfig(configPath, templatePath, '1.0.0')).toThrow(
         /Config file is not valid JSON/,
       );
+    });
+
+    it('strips telegram.allowedUsers and telegram.dmPolicy via removePaths in _migration', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.3',
+        agents: [
+          { id: 'alfred', telegram: { botToken: 'tok-a', allowedUsers: [1, 2], dmPolicy: 'allowlist' } },
+          { id: 'baerbel', telegram: { botToken: 'tok-b', allowedUsers: [], dmPolicy: 'open' } },
+        ],
+      });
+      const templatePath = writeJson('template.json', {
+        _migration: {
+          removePaths: ['telegram.allowedUsers', 'telegram.dmPolicy'],
+        },
+        configVersion: '1.0.4',
+        agents: [
+          { id: 'example', telegram: { botToken: '${TOKEN}' } },
+        ],
+      });
+
+      const result = migrateConfig(configPath, templatePath, '1.0.4');
+
+      expect(result.migrated).toBe(true);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      // allowedUsers and dmPolicy should be gone from both agents
+      expect(updated.agents[0].telegram.allowedUsers).toBeUndefined();
+      expect(updated.agents[0].telegram.dmPolicy).toBeUndefined();
+      expect(updated.agents[0].telegram.botToken).toBe('tok-a');
+
+      expect(updated.agents[1].telegram.allowedUsers).toBeUndefined();
+      expect(updated.agents[1].telegram.dmPolicy).toBeUndefined();
+      expect(updated.agents[1].telegram.botToken).toBe('tok-b');
+
+      // removedFields should list the pruned paths
+      expect(result.removedFields).toContain('agents[0].telegram.allowedUsers');
+      expect(result.removedFields).toContain('agents[0].telegram.dmPolicy');
+      expect(result.removedFields).toContain('agents[1].telegram.allowedUsers');
+      expect(result.removedFields).toContain('agents[1].telegram.dmPolicy');
+
+      // version bumped to 1.0.4
+      expect(updated.configVersion).toBe('1.0.4');
     });
 
     it('preserves extra custom fields not in template', () => {
@@ -524,6 +565,30 @@ describe('config-migrator', () => {
       const templatePath = writeJson('template.json', { configVersion: '1.0.0', gateway: {} });
       const result = migrateConfig(configPath, templatePath, '1.0.0');
       expect(result.migrated).toBe(false);
+    });
+
+    it('is a no-op when removePaths fields do not exist in agents', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.3',
+        agents: [
+          { id: 'alfred', telegram: { botToken: 'tok-a' } },
+        ],
+      });
+      const templatePath = writeJson('template.json', {
+        _migration: {
+          removePaths: ['telegram.allowedUsers', 'telegram.dmPolicy'],
+        },
+        configVersion: '1.0.4',
+        agents: [{ id: 'example', telegram: { botToken: '${TOKEN}' } }],
+      });
+
+      const result = migrateConfig(configPath, templatePath, '1.0.4');
+
+      expect(result.migrated).toBe(true);
+      // Fields never existed — nothing to remove
+      expect(result.removedFields).toEqual([]);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.agents[0].telegram.botToken).toBe('tok-a');
     });
 
     it('does not merge fields in ignorePaths from _migration', () => {
@@ -570,6 +635,61 @@ describe('config-migrator', () => {
       // _migration should NOT appear in the migrated config
       expect(updated._migration).toBeUndefined();
       expect(result.addedFields).not.toContain('_migration');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // pruneAgentPaths (unit)
+  // ---------------------------------------------------------------------------
+  describe('pruneAgentPaths', () => {
+    it('removes telegram.allowedUsers and telegram.dmPolicy from agents', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'alfred', telegram: { botToken: 'tok-a', allowedUsers: [1, 2], dmPolicy: 'allowlist' } },
+        { id: 'baerbel', telegram: { botToken: 'tok-b', allowedUsers: [], dmPolicy: 'open' } },
+      ];
+
+      const removed = pruneAgentPaths(agents, ['telegram.allowedUsers', 'telegram.dmPolicy']);
+
+      expect((agents[0].telegram as Record<string, unknown>).allowedUsers).toBeUndefined();
+      expect((agents[0].telegram as Record<string, unknown>).dmPolicy).toBeUndefined();
+      expect((agents[0].telegram as Record<string, unknown>).botToken).toBe('tok-a');
+
+      expect((agents[1].telegram as Record<string, unknown>).allowedUsers).toBeUndefined();
+      expect((agents[1].telegram as Record<string, unknown>).dmPolicy).toBeUndefined();
+      expect((agents[1].telegram as Record<string, unknown>).botToken).toBe('tok-b');
+
+      expect(removed).toContain('agents[0].telegram.allowedUsers');
+      expect(removed).toContain('agents[0].telegram.dmPolicy');
+      expect(removed).toContain('agents[1].telegram.allowedUsers');
+      expect(removed).toContain('agents[1].telegram.dmPolicy');
+    });
+
+    it('is a no-op when the fields do not exist', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'alfred', telegram: { botToken: 'tok-a' } },
+      ];
+
+      const removed = pruneAgentPaths(agents, ['telegram.allowedUsers', 'telegram.dmPolicy']);
+
+      expect(removed).toEqual([]);
+      expect((agents[0].telegram as Record<string, unknown>).botToken).toBe('tok-a');
+    });
+
+    it('returns empty array for empty agents list', () => {
+      const removed = pruneAgentPaths([], ['telegram.allowedUsers']);
+      expect(removed).toEqual([]);
+    });
+
+    it('handles empty removePaths without error', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'alfred', telegram: { botToken: 'tok-a', allowedUsers: [1] } },
+      ];
+
+      const removed = pruneAgentPaths(agents, []);
+
+      expect(removed).toEqual([]);
+      // field untouched
+      expect((agents[0].telegram as Record<string, unknown>).allowedUsers).toEqual([1]);
     });
   });
 });

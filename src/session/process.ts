@@ -17,7 +17,7 @@ const CHANNELS_ACTIVATION_PROMPT =
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
   readonly chatId: string;
-  readonly source: 'telegram' | 'api';
+  readonly source: 'telegram' | 'discord' | 'api';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
@@ -36,11 +36,11 @@ export class SessionProcess extends EventEmitter {
 
   constructor(
     sessionId: string,
-    source: 'telegram' | 'api',
+    source: 'telegram' | 'discord' | 'api',
     agentConfig: AgentConfig,
     gatewayConfig: GatewayConfig,
     sessionStore: SessionStore,
-    chatId?: string,  // for telegram: actual chatId; for api: same as sessionId
+    chatId?: string,  // for telegram/discord: actual chatId; for api: same as sessionId
   ) {
     super();
     this.sessionId = sessionId;
@@ -55,7 +55,8 @@ export class SessionProcess extends EventEmitter {
     );
     // config.json lives 3 levels above workspace: <base>/<agentId>/workspace → <base>/config.json
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
-    this.restartSignalPath = path.join(agentConfig.workspace, '.telegram-state', `restart-${sessionId}`);
+    const stateSubDir = source === 'discord' ? '.discord-state' : '.telegram-state';
+    this.restartSignalPath = path.join(agentConfig.workspace, stateSubDir, `restart-${sessionId}`);
   }
 
   /**
@@ -109,7 +110,7 @@ export class SessionProcess extends EventEmitter {
         ? `[System: Graceful restart completed successfully. Do not restart again. IMPORTANT: Send a Telegram reply to chat_id "${notifyPayload.chat_id}" with the message: "${notifyPayload.text}"]`
         : '[System: Graceful restart completed successfully. Do not restart again.]';
       const restartMsg = { role: 'assistant' as const, content: marker, ts: Date.now() };
-      const appendRestartMarker = this.source === 'telegram'
+      const appendRestartMarker = this.source !== 'api'
         ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, restartMsg)
         : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, restartMsg);
       appendRestartMarker.catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
@@ -120,7 +121,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private async buildInitialPrompt(): Promise<{ prompt: string; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
-    const history = this.source === 'telegram'
+    const history = this.source !== 'api'
       ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
 
@@ -226,7 +227,7 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_AGENT_ID: this.agentConfig.id,
             GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
-            GATEWAY_ORIGIN_CHANNEL: 'telegram',
+            GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
           },
@@ -321,16 +322,19 @@ export class SessionProcess extends EventEmitter {
     // API sessions receive the first message directly via sendApiMessage(),
     // so no activation prompt is needed and sending one would race with
     // the first API turn, causing sendApiMessage to resolve with the wrong result.
-    if (this.source === 'telegram') {
+    if (this.source !== 'api') {
       proc.stdin?.write(SessionProcess.toStreamJsonTurn(initialPrompt) + '\n');
     }
 
     // Capture stdout — emit output events + persist assistant replies
-    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
-    const heartbeatPath = this.source === 'telegram'
+    const stateDir = this.source === 'discord'
+      ? path.join(this.agentConfig.workspace, '.discord-state')
+      : path.join(this.agentConfig.workspace, '.telegram-state');
+    const typingDir = path.join(stateDir, 'typing');
+    const heartbeatPath = this.source !== 'api'
       ? path.join(typingDir, `${this.chatId}.heartbeat`)
       : null;
-    const statusPath = this.source === 'telegram'
+    const statusPath = this.source !== 'api'
       ? path.join(typingDir, `${this.chatId}.status`)
       : null;
 
@@ -527,7 +531,7 @@ export class SessionProcess extends EventEmitter {
             writeStatus(obj.is_error ? 'error' : 'done');
             if (assistantBuffer.trim()) {
               const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
-              const appendAssistant = this.source === 'telegram'
+              const appendAssistant = this.source !== 'api'
                 ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg)
                 : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, assistantMsg);
               appendAssistant.catch(() => {});
@@ -601,10 +605,11 @@ export class SessionProcess extends EventEmitter {
       return;
     }
     // Signal queued state so the typing loop can update the reaction immediately
-    if (this.source === 'telegram') {
+    if (this.source !== 'api') {
+      const stateSubDir = this.source === 'discord' ? '.discord-state' : '.telegram-state';
       const statusPath = path.join(
         this.agentConfig.workspace,
-        '.telegram-state',
+        stateSubDir,
         'typing',
         `${this.sessionId}.status`,
       );

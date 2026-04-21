@@ -161,8 +161,6 @@ function makeAgentConfig(workspace: string, botToken: string, telegramApiRoot: s
     env: '',
     telegram: {
       botToken,
-      allowedUsers: [Number(USER_ID)],
-      dmPolicy: 'allowlist',
     },
     claude: {
       model: 'claude-test',

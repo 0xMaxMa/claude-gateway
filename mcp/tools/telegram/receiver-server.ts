@@ -321,7 +321,7 @@ function checkApprovals(): void {
 
   for (const senderId of files) {
     const file = join(APPROVED_DIR, senderId)
-    void bot.api.sendMessage(senderId, "Paired! Say hi to Claude.").then(
+    void bot.api.sendMessage(senderId, "You're connected! Send me a message to get started.").then(
       () => rmSync(file, { force: true }),
       err => {
         process.stderr.write(`telegram channel: failed to send approval confirm: ${err}\n`)

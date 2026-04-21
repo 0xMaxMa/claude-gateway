@@ -42,15 +42,13 @@ function makeAgentConfig(
   id: string,
   botToken: string,
   workspace: string,
-  dmPolicy: 'open' | 'allowlist' = 'open',
-  allowedUsers: number[] = [],
 ): AgentConfig {
   return {
     id,
     description: `Test agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers, dmPolicy },
+    telegram: { botToken },
     claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
   };
 }

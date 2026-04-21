@@ -11,6 +11,7 @@ import {
   findAgent,
   loadConfig,
 } from '../../scripts/update-agent';
+import { appendToConfig } from '../../scripts/create-agent';
 
 describe('detectConnectedChannels()', () => {
   let tmpDir: string;
@@ -37,7 +38,7 @@ describe('detectConnectedChannels()', () => {
   });
 
   it('UAC2: returns ["telegram"] when telegram config exists', () => {
-    const agent = makeAgent({ telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' } });
+    const agent = makeAgent({ telegram: { botToken: '123:abc' } });
     expect(detectConnectedChannels(agent)).toEqual(['telegram']);
   });
 
@@ -48,7 +49,7 @@ describe('detectConnectedChannels()', () => {
 
   it('UAC4: returns both when both channels configured', () => {
     const agent = makeAgent({
-      telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: '123:abc' },
       discord: { botToken: 'abc.def.ghi' },
     });
     const result = detectConnectedChannels(agent);
@@ -93,7 +94,7 @@ describe('removeChannel()', () => {
         {
           id: agentId,
           workspace,
-          telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '123:abc' },
           discord: { botToken: 'abc.def.ghi' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
         },
@@ -176,5 +177,122 @@ describe('findAgent()', () => {
   it('UAC12: returns undefined for unknown agent', () => {
     const config = { agents: [{ id: 'alfred', workspace: '~/alfred' }] };
     expect(findAgent(config as any, 'nonexistent')).toBeUndefined();
+  });
+});
+
+describe('appendToConfig() — channel merge', () => {
+  let tmpDir: string;
+  let configFile: string;
+  let wsDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-append-'));
+    configFile = path.join(tmpDir, 'config.json');
+    wsDir = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(wsDir, { recursive: true });
+    process.env['GATEWAY_CONFIG'] = configFile;
+  });
+
+  afterEach(() => {
+    delete process.env['GATEWAY_CONFIG'];
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writeInitialConfig(agentEntry: object): void {
+    fs.writeFileSync(configFile, JSON.stringify({
+      gateway: { logDir: '~/logs', timezone: 'UTC' },
+      agents: [agentEntry],
+    }, null, 2));
+  }
+
+  it('UAC13: adding discord to agent with telegram preserves telegram config', async () => {
+    writeInitialConfig({
+      id: 'shadow',
+      workspace: wsDir,
+      description: 'test',
+      env: '',
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    });
+
+    await appendToConfig('shadow', wsDir, '# Shadow\nA test agent', { channel: 'discord' });
+
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const agent = saved.agents.find((a: any) => a.id === 'shadow');
+    expect(agent).toBeDefined();
+    expect(agent.telegram).toBeDefined();
+    expect(agent.telegram.botToken).toBe('${SHADOW_BOT_TOKEN}');
+    expect(agent.discord).toBeDefined();
+    expect(agent.discord.botToken).toBe('${SHADOW_DISCORD_BOT_TOKEN}');
+  });
+
+  it('UAC14: adding telegram to agent with discord preserves discord config', async () => {
+    writeInitialConfig({
+      id: 'shadow',
+      workspace: wsDir,
+      description: 'test',
+      env: '',
+      discord: { botToken: '${SHADOW_DISCORD_BOT_TOKEN}' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    });
+
+    await appendToConfig('shadow', wsDir, '# Shadow\nA test agent', { channel: 'telegram' });
+
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const agent = saved.agents.find((a: any) => a.id === 'shadow');
+    expect(agent.telegram).toBeDefined();
+    expect(agent.telegram.botToken).toBe('${SHADOW_BOT_TOKEN}');
+    expect(agent.discord).toBeDefined();
+    expect(agent.discord.botToken).toBe('${SHADOW_DISCORD_BOT_TOKEN}');
+  });
+
+  it('UAC15: adding discord to agent with telegram preserves telegram botToken', async () => {
+    writeInitialConfig({
+      id: 'shadow',
+      workspace: wsDir,
+      description: 'test',
+      env: '',
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    });
+
+    await appendToConfig('shadow', wsDir, '# Shadow\nA test agent', { channel: 'discord' });
+
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const agent = saved.agents.find((a: any) => a.id === 'shadow');
+    expect(agent.telegram.botToken).toBe('${SHADOW_BOT_TOKEN}');
+    expect(agent.discord).toBeDefined();
+  });
+
+  it('UAC16: config has only one entry after merge (no duplicates)', async () => {
+    writeInitialConfig({
+      id: 'shadow',
+      workspace: wsDir,
+      description: 'test',
+      env: '',
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    });
+
+    await appendToConfig('shadow', wsDir, '# Shadow\nA test agent', { channel: 'discord' });
+
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const matches = saved.agents.filter((a: any) => a.id === 'shadow');
+    expect(matches).toHaveLength(1);
+  });
+
+  it('UAC17: new agent (no existing entry) creates fresh entry with channel', async () => {
+    fs.writeFileSync(configFile, JSON.stringify({
+      gateway: { logDir: '~/logs', timezone: 'UTC' },
+      agents: [],
+    }, null, 2));
+
+    await appendToConfig('new-agent', wsDir, '# New\nA brand new agent', { channel: 'telegram' });
+
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const agent = saved.agents.find((a: any) => a.id === 'new-agent');
+    expect(agent).toBeDefined();
+    expect(agent.telegram).toBeDefined();
+    expect(agent.discord).toBeUndefined();
   });
 });
