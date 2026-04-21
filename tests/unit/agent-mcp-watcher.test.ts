@@ -41,8 +41,6 @@ function makeAgent(id: string, model = 'claude-sonnet-4-6'): Record<string, unkn
     env: '',
     telegram: {
       botToken: `\${${id.toUpperCase()}_BOT_TOKEN}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
     },
     claude: {
       model,

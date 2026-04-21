@@ -90,7 +90,7 @@ function makeAgentConfig(id: string, botToken: string, workspace: string): Agent
     description: `E2E test agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken },
     claude: { model: 'claude-haiku-4-5-20251001', dangerouslySkipPermissions: true, extraFlags: [] },
   };
 }

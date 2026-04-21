@@ -58,7 +58,7 @@ function makeAgentConfig(
     description: `HB test agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken },
     claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
     heartbeat: { rateLimitMinutes },
   };

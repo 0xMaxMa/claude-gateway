@@ -49,6 +49,7 @@ export class AgentRunner extends EventEmitter {
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
+  private readonly channelSourceMap = new Map<string, 'telegram' | 'discord'>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
   private readonly sessionStore: SessionStore;
@@ -623,6 +624,9 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.sessions.set(mapKey, proc);
+    if (source === 'telegram' || source === 'discord') {
+      this.channelSourceMap.set(mapKey, source);
+    }
     this.logger.info('Spawned session', {
       mapKey,
       actualSessionId,
@@ -909,8 +913,15 @@ export class AgentRunner extends EventEmitter {
    * typing loop can pick it up and notify the user via Telegram.
    * Non-fatal: if the write fails the typing loop will stop via stalled timer.
    */
+    private getTypingDir(chatId: string): string {
+    const channel = this.channelSourceMap.get(chatId) ?? 'telegram';
+    const stateDir = channel === 'discord' ? '.discord-state' : '.telegram-state';
+    return path.join(this.agentConfig.workspace, stateDir, 'typing');
+  }
+
   private writeTypingError(chatId: string, code: string): void {
-    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
+    if (this.channelSourceMap.get(chatId) === 'discord') return;
+    const typingDir = this.getTypingDir(chatId);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
       fs.writeFileSync(path.join(typingDir, `${chatId}.error`), code);
@@ -919,12 +930,9 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
-  /**
-   * Delete the typing signal file so the receiver's typing loop stops on next tick.
-   * Called when Claude's turn is truly complete (result event), not on individual reply calls.
-   */
   private writeTypingDone(chatId: string): void {
-    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
+    if (this.channelSourceMap.get(chatId) === 'discord') return;
+    const typingDir = this.getTypingDir(chatId);
     try {
       fs.rmSync(path.join(typingDir, chatId), { force: true });
     } catch {
@@ -932,14 +940,8 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
-  /**
-   * Write result text to a forward file so the typing plugin sends it to Telegram.
-   * Used when the agent produces text output but didn't call mcp__telegram__reply.
-   * The file is written as JSON { text, format } so the receiver can apply the
-   * correct parse_mode when sending the Telegram message.
-   */
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {
-    const typingDir = path.join(this.agentConfig.workspace, '.telegram-state', 'typing');
+    const typingDir = this.getTypingDir(chatId);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
       fs.writeFileSync(path.join(typingDir, `${chatId}.forward`), JSON.stringify({ text, format }));

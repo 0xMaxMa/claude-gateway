@@ -61,7 +61,7 @@ describe('config-loader', () => {
         description: 'no id here',
         workspace: '/tmp',
         env: '/tmp/.env',
-        telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'open' },
+        telegram: { botToken: 'tok' },
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       }],
     }));
@@ -82,7 +82,7 @@ describe('config-loader', () => {
         description: 'missing bot token',
         workspace: '/tmp',
         env: '/tmp/.env',
-        telegram: { allowedUsers: [], dmPolicy: 'open' },
+        telegram: {},
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       }],
     }));
@@ -114,7 +114,7 @@ describe('config-loader', () => {
         description: 'env test',
         workspace: '/tmp',
         env: '/tmp/.env',
-        telegram: { botToken: '${TEST_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+        telegram: { botToken: '${TEST_TOKEN}' },
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       }],
     }));
@@ -136,7 +136,7 @@ describe('config-loader', () => {
         description: 'env test',
         workspace: '/tmp',
         env: '/tmp/.env',
-        telegram: { botToken: '${NONEXISTENT_VAR}', allowedUsers: [], dmPolicy: 'open' },
+        telegram: { botToken: '${NONEXISTENT_VAR}' },
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       }],
     }));
@@ -146,77 +146,28 @@ describe('config-loader', () => {
   });
 
   // -------------------------------------------------------------------------
-  // U-CL-08: dmPolicy valid values
+  // U-CL-08: config without dmPolicy/allowedUsers loads fine
   // -------------------------------------------------------------------------
-  it('U-CL-08: accepts valid dmPolicy values (allowlist and open)', () => {
-    const configPath = path.join(tmpDir, 'valid-policy.json');
+  it('U-CL-08: loads config that has no dmPolicy or allowedUsers in telegram', () => {
+    const configPath = path.join(tmpDir, 'minimal-telegram.json');
     fs.writeFileSync(configPath, JSON.stringify({
       gateway: { logDir: '/tmp', timezone: 'UTC' },
       agents: [
         {
-          id: 'agent-allowlist',
+          id: 'agent-a',
           description: '',
           workspace: '/tmp',
           env: '/tmp/.env',
-          telegram: { botToken: 'tok-a', allowedUsers: [], dmPolicy: 'allowlist' },
-          claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
-        },
-        {
-          id: 'agent-open',
-          description: '',
-          workspace: '/tmp',
-          env: '/tmp/.env',
-          telegram: { botToken: 'tok-b', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: 'tok-a' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],
     }));
 
     const config = loadConfig(configPath);
-    expect(config.agents[0].telegram!.dmPolicy).toBe('allowlist');
-    expect(config.agents[1].telegram!.dmPolicy).toBe('open');
-  });
-
-  // -------------------------------------------------------------------------
-  // U-CL-09: dmPolicy invalid value
-  // -------------------------------------------------------------------------
-  it('U-CL-09: skips agent with invalid dmPolicy, throws if no agents remain', () => {
-    const configPath = path.join(tmpDir, 'invalid-policy.json');
-    fs.writeFileSync(configPath, JSON.stringify({
-      gateway: { logDir: '/tmp', timezone: 'UTC' },
-      agents: [{
-        id: 'test',
-        description: '',
-        workspace: '/tmp',
-        env: '/tmp/.env',
-        telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'everyone' },
-        claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
-      }],
-    }));
-
-    expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
-    expect(() => loadConfig(configPath)).toThrow(/no valid agents/i);
-  });
-
-  // -------------------------------------------------------------------------
-  // U-CL-10: allowedUsers empty array
-  // -------------------------------------------------------------------------
-  it('U-CL-10: accepts empty allowedUsers array', () => {
-    const configPath = path.join(tmpDir, 'empty-allowed.json');
-    fs.writeFileSync(configPath, JSON.stringify({
-      gateway: { logDir: '/tmp', timezone: 'UTC' },
-      agents: [{
-        id: 'test',
-        description: '',
-        workspace: '/tmp',
-        env: '/tmp/.env',
-        telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'open' },
-        claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
-      }],
-    }));
-
-    const config = loadConfig(configPath);
-    expect(config.agents[0].telegram!.allowedUsers).toEqual([]);
+    expect(config.agents[0].telegram!.botToken).toBe('tok-a');
+    expect((config.agents[0].telegram as Record<string, unknown>).dmPolicy).toBeUndefined();
+    expect((config.agents[0].telegram as Record<string, unknown>).allowedUsers).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
@@ -230,7 +181,7 @@ describe('config-loader', () => {
         description: '',
         workspace: '/tmp',
         env: '/tmp/.env',
-        telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'open' },
+        telegram: { botToken: 'tok' },
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       }],
     }));

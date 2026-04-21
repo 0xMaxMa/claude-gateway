@@ -22,6 +22,7 @@ import {
   DISCORD_TOKEN_REGEX,
   startAndPair,
   startAndPairDiscord,
+  sendWelcome,
 } from './create-agent';
 import { interactiveSelect } from './interactive-select';
 
@@ -33,7 +34,7 @@ export interface AgentEntry {
   id: string;
   workspace: string;
   signatureEmoji?: string;
-  telegram?: { botToken: string; allowedUsers?: number[]; dmPolicy?: string };
+  telegram?: { botToken: string };
   discord?: { botToken: string };
   [key: string]: unknown;
 }
@@ -295,7 +296,10 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'telegram', token });
     console.log(`\nPairing your Telegram account...\n`);
     console.log('The wizard will detect your message and approve pairing automatically.\n');
-    await startAndPair(agent.id, token, wsDir, username);
+    const chatId = await startAndPair(agent.id, token, wsDir, username);
+    const agentName = agent.id.charAt(0).toUpperCase() + agent.id.slice(1);
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, chatId, agentName, wsDir, 'telegram');
   } else {
     console.log('Setting up Discord:\n');
     console.log('  1. Go to https://discord.com/developers/applications');
@@ -340,8 +344,11 @@ async function setupChannel(agent: AgentEntry, channel: ChannelId, config: Gatew
 
     await appendToConfig(agent.id, wsDir, readAgentsMd(wsDir), { channel: 'discord', token });
     console.log(`\nPairing your Discord account...\n`);
-    await startAndPairDiscord(agent.id, token, wsDir, username, rl2);
+    const channelId = await startAndPairDiscord(agent.id, token, wsDir, username, rl2);
     rl2.close();
+    const agentName = agent.id.charAt(0).toUpperCase() + agent.id.slice(1);
+    console.log('\nGenerating welcome message...');
+    await sendWelcome(token, channelId, agentName, wsDir, 'discord');
   }
 }
 

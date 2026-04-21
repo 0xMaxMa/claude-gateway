@@ -62,8 +62,6 @@ function makeAgentConfig(workspace: string, overrides: Partial<AgentConfig> = {}
     env: '',
     telegram: {
       botToken: 'test-token',
-      allowedUsers: [],
-      dmPolicy: 'allowlist',
     },
     claude: {
       model: 'claude-opus-4-6',

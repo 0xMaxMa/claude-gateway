@@ -21,8 +21,6 @@ function makeConfig(overrides?: {
     env: '/tmp/alfred/.env',
     telegram: {
       botToken: 'alfred-test-token',
-      allowedUsers: [991177022],
-      dmPolicy: 'allowlist',
     },
     claude: {
       model: 'claude-opus-4-6',
@@ -38,8 +36,6 @@ function makeConfig(overrides?: {
     env: '/tmp/baerbel/.env',
     telegram: {
       botToken: 'baerbel-test-token',
-      allowedUsers: [],
-      dmPolicy: 'open',
     },
     claude: {
       model: 'claude-sonnet-4-6',
@@ -125,8 +121,6 @@ describe('config-watcher', () => {
           env: '/tmp/alfred/.env',
           telegram: {
             botToken: overrides?.alfredBotToken ?? '${ALFRED_BOT_TOKEN}',
-            allowedUsers: [991177022],
-            dmPolicy: 'allowlist',
           },
           claude: {
             model: overrides?.alfredModel ?? 'claude-opus-4-6',
@@ -141,8 +135,6 @@ describe('config-watcher', () => {
           env: '/tmp/baerbel/.env',
           telegram: {
             botToken: '${BAERBEL_BOT_TOKEN}',
-            allowedUsers: [],
-            dmPolicy: 'open',
           },
           claude: {
             model: overrides?.baerbelModel ?? 'claude-sonnet-4-6',
@@ -360,8 +352,6 @@ describe('config-watcher', () => {
         env: '/tmp/alfred/.env',
         telegram: {
           botToken: '${MISSING_ENV_VAR_A}',
-          allowedUsers: [991177022],
-          dmPolicy: 'allowlist',
         },
         claude: { model: 'claude-opus-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
       },
@@ -372,8 +362,6 @@ describe('config-watcher', () => {
         env: '/tmp/baerbel/.env',
         telegram: {
           botToken: '${MISSING_ENV_VAR_B}',
-          allowedUsers: [],
-          dmPolicy: 'open',
         },
         claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       },
@@ -514,7 +502,7 @@ describe('config-watcher', () => {
       description: 'test',
       workspace: '/tmp',
       env: '/tmp/.env',
-      telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: 'tok' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       heartbeat: { rateLimitMinutes: 30 },
     };
@@ -545,7 +533,7 @@ describe('config-watcher', () => {
       description: 'test',
       workspace: '/tmp',
       env: '/tmp/.env',
-      telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: 'tok' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
       // No heartbeat config
     };

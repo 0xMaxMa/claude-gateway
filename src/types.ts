@@ -10,8 +10,6 @@ export interface AgentConfig {
   env: string;
   telegram?: {
     botToken: string;
-    allowedUsers: number[];
-    dmPolicy: 'allowlist' | 'open';
   };
   discord?: {
     botToken: string;

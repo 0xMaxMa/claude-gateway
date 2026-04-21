@@ -56,8 +56,6 @@ function makeAgentConfig(workspace: string): AgentConfig {
     env: '',
     telegram: {
       botToken: 'bot-test-token-123',
-      allowedUsers: [],
-      dmPolicy: 'allowlist',
     },
     claude: {
       model: 'claude-opus-4-6',

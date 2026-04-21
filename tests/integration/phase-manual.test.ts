@@ -17,7 +17,6 @@ import { loadWorkspace, watchWorkspace } from '../../src/agent/workspace-loader'
 import { MemoryManager } from '../../src/memory/manager';
 import { parseHeartbeat, InvalidCronError } from '../../src/heartbeat/parser';
 import { SessionStore } from '../../src/session/store';
-import { isAllowed } from '../../src/security';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentRunner } from '../../src/agent/runner';
 import { ContextIsolationGuard, TokenConflictError, WorkspaceConflictError } from '../../src/agent/context-isolation';
@@ -77,7 +76,7 @@ function makeAgentConfig(
     description: `Test agent ${id}`,
     workspace,
     env: '',
-    telegram: { botToken, allowedUsers: [], dmPolicy: 'open' },
+    telegram: { botToken },
     claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
     ...extra,
   };
@@ -397,45 +396,6 @@ describe('Phase 1: Session Store', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('Phase 1: Security', () => {
-  const baseAgentConfig: AgentConfig = {
-    id: 'security-test',
-    description: 'Security test agent',
-    workspace: '/tmp/test',
-    env: '',
-    telegram: {
-      botToken: 'test-token',
-      allowedUsers: [42, 99],
-      dmPolicy: 'allowlist',
-    },
-    claude: { model: 'claude-test', dangerouslySkipPermissions: false, extraFlags: [] },
-  };
-
-  // P1-13
-  it('P1-13: allowlist policy, allowed userId → isAllowed=true', () => {
-    expect(isAllowed(42, baseAgentConfig, '99999')).toBe(true);
-    expect(isAllowed(99, baseAgentConfig, '99999')).toBe(true);
-  });
-
-  // P1-14
-  it('P1-14: allowlist policy, unknown userId → isAllowed=false', () => {
-    expect(isAllowed(9999, baseAgentConfig, '99999')).toBe(false);
-    expect(isAllowed(0, baseAgentConfig, '99999')).toBe(false);
-  });
-
-  // P1-15
-  it('P1-15: open policy, any userId → isAllowed=true', () => {
-    const openConfig: AgentConfig = {
-      ...baseAgentConfig,
-      telegram: { ...baseAgentConfig.telegram!, dmPolicy: 'open' },
-    };
-    expect(isAllowed(9999, openConfig, '99999')).toBe(true);
-    expect(isAllowed(0, openConfig, '99999')).toBe(true);
-    expect(isAllowed(123456789, openConfig, '99999')).toBe(true);
-  });
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -503,7 +463,7 @@ describe('Phase 1: Gateway Router', () => {
   it('P1-19: POST /webhook returns 404 (security enforced by Claude plugin in Option A)', async () => {
     const ws = makeTempWorkspace('p119-', {});
     const agentCfg = makeAgentConfig('p119-agent', 'token-p119', ws, {
-      telegram: { botToken: 'token-p119', allowedUsers: [1001, 1002], dmPolicy: 'allowlist' },
+      telegram: { botToken: 'token-p119' },
     });
     const mockRunner = { sendMessage: jest.fn(), isRunning: () => true };
 

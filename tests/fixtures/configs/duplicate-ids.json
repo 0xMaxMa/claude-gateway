@@ -10,9 +10,7 @@
       "workspace": "/tmp/alfred/workspace",
       "env": "/tmp/alfred/.env",
       "telegram": {
-        "botToken": "token-a",
-        "allowedUsers": [],
-        "dmPolicy": "open"
+        "botToken": "token-a"
       },
       "claude": {
         "model": "claude-sonnet-4-6",
@@ -26,9 +24,7 @@
       "workspace": "/tmp/alfred2/workspace",
       "env": "/tmp/alfred2/.env",
       "telegram": {
-        "botToken": "token-b",
-        "allowedUsers": [],
-        "dmPolicy": "open"
+        "botToken": "token-b"
       },
       "claude": {
         "model": "claude-sonnet-4-6",

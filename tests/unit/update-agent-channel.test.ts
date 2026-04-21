@@ -38,7 +38,7 @@ describe('detectConnectedChannels()', () => {
   });
 
   it('UAC2: returns ["telegram"] when telegram config exists', () => {
-    const agent = makeAgent({ telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' } });
+    const agent = makeAgent({ telegram: { botToken: '123:abc' } });
     expect(detectConnectedChannels(agent)).toEqual(['telegram']);
   });
 
@@ -49,7 +49,7 @@ describe('detectConnectedChannels()', () => {
 
   it('UAC4: returns both when both channels configured', () => {
     const agent = makeAgent({
-      telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: '123:abc' },
       discord: { botToken: 'abc.def.ghi' },
     });
     const result = detectConnectedChannels(agent);
@@ -94,7 +94,7 @@ describe('removeChannel()', () => {
         {
           id: agentId,
           workspace,
-          telegram: { botToken: '123:abc', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '123:abc' },
           discord: { botToken: 'abc.def.ghi' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
         },
@@ -211,7 +211,7 @@ describe('appendToConfig() — channel merge', () => {
       workspace: wsDir,
       description: 'test',
       env: '',
-      telegram: { botToken: '${SHADOW_BOT_TOKEN}', allowedUsers: [123], dmPolicy: 'open' },
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
     });
 
@@ -246,13 +246,13 @@ describe('appendToConfig() — channel merge', () => {
     expect(agent.discord.botToken).toBe('${SHADOW_DISCORD_BOT_TOKEN}');
   });
 
-  it('UAC15: adding discord to agent with telegram preserves existing allowedUsers', async () => {
+  it('UAC15: adding discord to agent with telegram preserves telegram botToken', async () => {
     writeInitialConfig({
       id: 'shadow',
       workspace: wsDir,
       description: 'test',
       env: '',
-      telegram: { botToken: '${SHADOW_BOT_TOKEN}', allowedUsers: [111, 222], dmPolicy: 'allowlist' },
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
     });
 
@@ -260,8 +260,8 @@ describe('appendToConfig() — channel merge', () => {
 
     const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     const agent = saved.agents.find((a: any) => a.id === 'shadow');
-    expect(agent.telegram.allowedUsers).toEqual([111, 222]);
-    expect(agent.telegram.dmPolicy).toBe('allowlist');
+    expect(agent.telegram.botToken).toBe('${SHADOW_BOT_TOKEN}');
+    expect(agent.discord).toBeDefined();
   });
 
   it('UAC16: config has only one entry after merge (no duplicates)', async () => {
@@ -270,7 +270,7 @@ describe('appendToConfig() — channel merge', () => {
       workspace: wsDir,
       description: 'test',
       env: '',
-      telegram: { botToken: '${SHADOW_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+      telegram: { botToken: '${SHADOW_BOT_TOKEN}' },
       claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
     });
 

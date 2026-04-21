@@ -332,15 +332,19 @@ async function main(): Promise<void> {
       }
 
       if (shouldMigrate) {
-        const { ignorePaths } = loadCleanTemplate(templatePath);
+        const { ignorePaths, removePaths } = loadCleanTemplate(templatePath);
         const migration = applyMigration(
           CONFIG_PATH,
           detection.config,
           detection.template,
           templateVersion,
           ignorePaths,
+          removePaths,
         );
-        console.log(`[gateway] Config migrated to v${templateVersion}. Added: ${migration.addedFields.join(', ')}`);
+        const parts = [`migrated to v${templateVersion}`];
+        if (migration.addedFields.length) parts.push(`added: ${migration.addedFields.join(', ')}`);
+        if (migration.removedFields.length) parts.push(`removed: ${migration.removedFields.join(', ')}`);
+        console.log(`[gateway] Config ${parts.join(', ')}.`);
       } else {
         console.warn(`[gateway] Config migration skipped by user. Running with current config.`);
       }

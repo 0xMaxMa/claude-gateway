@@ -45,7 +45,7 @@ interface RawAgentEntry {
   description: string;
   workspace: string;
   env: string;
-  telegram: { botToken: string; allowedUsers: number[]; dmPolicy: string };
+  telegram: { botToken: string };
   claude: { model: string; dangerouslySkipPermissions: boolean; extraFlags: string[] };
 }
 
@@ -65,8 +65,6 @@ function buildNewAgentEntry(agentId: string, wsDir: string, agentMdContent: stri
     env: '',
     telegram: {
       botToken: `\${${envVarName}}`,
-      allowedUsers: [],
-      dmPolicy: 'open',
     },
     claude: {
       model: 'claude-sonnet-4-6',
@@ -215,7 +213,7 @@ describe('Config append/create logic', () => {
           description: 'An existing agent',
           workspace: '~/.claude-gateway/agents/existing-agent/workspace',
           env: '',
-          telegram: { botToken: '${EXISTING_AGENT_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '${EXISTING_AGENT_BOT_TOKEN}' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],
@@ -243,7 +241,7 @@ describe('Config append/create logic', () => {
           description: 'Old description',
           workspace: '~/old/workspace',
           env: '',
-          telegram: { botToken: '${MYAGENT_BOT_TOKEN}', allowedUsers: [], dmPolicy: 'open' },
+          telegram: { botToken: '${MYAGENT_BOT_TOKEN}' },
           claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
         },
       ],

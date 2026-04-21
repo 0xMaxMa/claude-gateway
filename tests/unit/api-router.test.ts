@@ -66,7 +66,7 @@ const agentConfig: AgentConfig = {
   description: 'Personal assistant',
   workspace: '/tmp/alfred',
   env: '',
-  telegram: { botToken: 'tok', allowedUsers: [], dmPolicy: 'allowlist' },
+  telegram: { botToken: 'tok' },
   claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
 };
 

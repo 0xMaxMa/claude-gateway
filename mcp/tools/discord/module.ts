@@ -252,13 +252,52 @@ export class DiscordModule implements ChannelModule {
     const approvedInterval = setInterval(() => { void this.checkApprovals(approvedDir); }, 5000);
     approvedInterval.unref();
 
+    const typingDir = path.join(this.stateDir, 'typing');
+    const forwardInterval = setInterval(() => { void this.processForwardFiles(typingDir); }, 1000);
+    forwardInterval.unref();
+
     signal.addEventListener('abort', () => {
       this.running = false;
       clearInterval(approvedInterval);
+      clearInterval(forwardInterval);
       this.client?.destroy?.();
     });
 
     await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve()));
+  }
+
+  private async processForwardFiles(typingDir: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(typingDir); } catch { return; }
+
+    for (const file of files) {
+      if (!file.endsWith('.forward')) continue;
+      const filePath = path.join(typingDir, file);
+      const channelId = file.slice(0, -'.forward'.length);
+      let text: string;
+      let parseMode: undefined | 'html';
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8').trim();
+        try {
+          const parsed = JSON.parse(raw) as { text: string; format: string };
+          text = parsed.text;
+          parseMode = parsed.format === 'html' ? 'html' : undefined;
+        } catch {
+          text = raw;
+        }
+        fs.rmSync(filePath, { force: true });
+      } catch { continue; }
+
+      if (!text) continue;
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        if (parseMode === 'html') {
+          // Discord doesn't support HTML — strip tags and send plain text
+          text = text.replace(/<[^>]*>/g, '');
+        }
+        await sendMessage(channel, text, {});
+      } catch { /* non-fatal */ }
+    }
   }
 
   private async checkApprovals(approvedDir: string): Promise<void> {
@@ -272,7 +311,7 @@ export class DiscordModule implements ChannelModule {
 
       try {
         const channel = await this.client.channels.fetch(channelId);
-        await channel.send('Paired! Say hi to Claude.');
+        await channel.send("You're connected! Send me a message to get started.");
       } catch {}
 
       try { fs.unlinkSync(file); } catch {}
