@@ -742,11 +742,62 @@ export async function startAndPairDiscord(
   const discordStateDir = path.join(wsDir, '.discord-state');
   fs.mkdirSync(discordStateDir, { recursive: true });
 
-  // Write access.json with pairing policy ready
+  // Write token to stateDir/.env
+  const stateEnvFile = path.join(discordStateDir, '.env');
+  fs.writeFileSync(stateEnvFile, `DISCORD_BOT_TOKEN=${token}\n`, { mode: 0o600 });
+
+  console.log(`Now open Discord and send ANY message to @${botUsername}\n`);
+
+  let senderId: string;
+  let channelId: string;
+  try {
+    const result = await pollForFirstDiscordDM(token);
+    senderId = result.senderId;
+    channelId = result.channelId;
+  } catch (err) {
+    console.error(`\n  ${(err as Error).message}`);
+    console.error('  To pair manually, start the gateway and DM the bot.');
+    process.exit(1);
+  }
+
+  console.log(`  ✓ Pairing request received from user ${senderId}`);
+
+  const pairingCode = randomBytes(3).toString('hex');
+
+  try {
+    await httpsPost(
+      `https://discord.com/api/v10/channels/${channelId}/messages`,
+      JSON.stringify({ content: `Pairing code: ${pairingCode}\n\nEnter this code in the setup wizard to complete pairing.` }),
+      { Authorization: `Bot ${token}` },
+    );
+  } catch {
+    // Not fatal
+  }
+
+  console.log(`\nThe bot just sent a pairing code to your Discord.`);
+
+  const rlConfirm = createRl();
+  let confirmed = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const entered = await prompt(rlConfirm, `Enter the pairing code from Discord: `);
+    if (entered.trim().toLowerCase() === pairingCode) {
+      confirmed = true;
+      break;
+    }
+    if (attempt < 3) console.log(`  Incorrect code. ${3 - attempt} attempt(s) remaining.`);
+  }
+  rlConfirm.close();
+
+  if (!confirmed) {
+    console.error('\n  Pairing code mismatch after 3 attempts. Aborting.');
+    process.exit(1);
+  }
+
+  // Write access.json with user in allowlist
   const accessFile = path.join(discordStateDir, 'access.json');
   const access = {
-    dmPolicy: 'pairing',
-    allowFrom: [] as string[],
+    dmPolicy: 'allowlist',
+    allowFrom: [senderId],
     guildAllowlist: [] as string[],
     channelAllowlist: [] as string[],
     roleAllowlist: [] as string[],
@@ -754,20 +805,18 @@ export async function startAndPairDiscord(
   };
   fs.writeFileSync(accessFile, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 });
 
-  // Write token to stateDir/.env
-  const stateEnvFile = path.join(discordStateDir, '.env');
-  fs.writeFileSync(stateEnvFile, `DISCORD_BOT_TOKEN=${token}\n`, { mode: 0o600 });
+  try {
+    await httpsPost(
+      `https://discord.com/api/v10/channels/${channelId}/messages`,
+      JSON.stringify({ content: 'Paired! Say hi to Claude.' }),
+      { Authorization: `Bot ${token}` },
+    );
+  } catch {
+    // Not fatal
+  }
 
-  console.log(`  ✓ Discord state dir created: ${discordStateDir.replace(os.homedir(), '~')}`);
-  console.log(`  ✓ access.json written (dmPolicy: pairing)\n`);
-  console.log('To pair your Discord account:');
-  console.log(`  1. Start the gateway: npm start`);
-  console.log(`  2. Open Discord and send ANY message to @${botUsername}`);
-  console.log(`  3. The bot will reply with a 6-char code`);
-  console.log(`  4. Run: make pair agent=${agentId} code=<code> channel=discord`);
-
-  // Return empty string — chatId not available until pairing completes at runtime
-  return '';
+  console.log(`  ✓ Pairing approved — @${botUsername} is connected to your Discord account`);
+  return channelId;
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +897,88 @@ export async function pollForFirstMessage(
 
   process.stdout.write('\n');
   throw new Error('Pairing timeout — no message received within 3 minutes');
+}
+
+/**
+ * Connect to Discord Gateway and wait for the first DM.
+ * Uses Node 22's built-in WebSocket — no external packages needed.
+ */
+export async function pollForFirstDiscordDM(
+  token: string,
+  timeoutMs = 3 * 60 * 1000,
+): Promise<{ senderId: string; channelId: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const WS = (globalThis as any).WebSocket as typeof WebSocket;
+  return new Promise((resolve, reject) => {
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let resolved = false;
+    let dotCount = 0;
+
+    process.stdout.write('Waiting for Discord DM.');
+
+    const ws = new WS('wss://gateway.discord.gg/?v=10&encoding=json');
+
+    const deadline = setTimeout(() => {
+      ws.close();
+      process.stdout.write('\n');
+      reject(new Error('Pairing timeout — no Discord DM received within 3 minutes'));
+    }, timeoutMs);
+
+    ws.onmessage = (event: MessageEvent) => {
+      const payload = JSON.parse(event.data as string) as {
+        op: number;
+        d: Record<string, unknown>;
+        t?: string;
+      };
+      const { op, d, t } = payload;
+
+      if (op === 10) {
+        const interval = (d.heartbeat_interval as number) ?? 41250;
+        heartbeatTimer = setInterval(() => {
+          ws.send(JSON.stringify({ op: 1, d: null }));
+        }, interval);
+        ws.send(JSON.stringify({
+          op: 2,
+          d: {
+            token,
+            intents: 4096 + 32768, // DIRECT_MESSAGES + MESSAGE_CONTENT
+            properties: { os: 'linux', browser: 'claude-gateway', device: 'claude-gateway' },
+          },
+        }));
+      } else if (op === 0 && t === 'MESSAGE_CREATE') {
+        const msg = d as Record<string, unknown>;
+        if (!msg['guild_id'] && !(msg['author'] as Record<string, unknown>)?.['bot']) {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(deadline);
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            ws.close();
+            process.stdout.write('\n');
+            resolve({
+              senderId: String((msg['author'] as Record<string, unknown>)['id']),
+              channelId: String(msg['channel_id']),
+            });
+          }
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      clearTimeout(deadline);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      process.stdout.write('\n');
+      reject(new Error('Discord WebSocket error during pairing'));
+    };
+
+    // dot animation on heartbeat ticks
+    const dotTimer = setInterval(() => {
+      if (resolved) { clearInterval(dotTimer); return; }
+      dotCount++;
+      const dots = '.'.repeat((dotCount % 6) + 1);
+      process.stdout.write(`\rWaiting for Discord DM${dots}      \r`);
+      process.stdout.write(`Waiting for Discord DM${dots}`);
+    }, 5000);
+  });
 }
 
 export async function startAndPair(
