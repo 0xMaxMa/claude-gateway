@@ -332,6 +332,7 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
     accessNote,
     '',
     'The gateway will detect the new agent and start it automatically (hot-add).',
+    'If the agent does not appear, restart the gateway: make restart (or: pm2 restart gateway)',
   ].join('\n');
 }
 
@@ -488,6 +489,8 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
       `Channel "${channel}" added to agent "${agentId}". Bot: @${botUsername}`,
       '',
       addAccessNote,
+      '',
+      'If the channel does not connect, restart the gateway: make restart (or: pm2 restart gateway)',
     ].join('\n');
   }
 
