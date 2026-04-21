@@ -101,8 +101,9 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 | `message` | Yes | Message text (max 10,000 chars) |
 | `session_id` | No | Resume an existing session; omit to start a new one |
 | `stream` | No | `true` to enable SSE streaming (default `false`) |
-| `allow_tools` | No | `true` to allow the agent to call tools (Read, Bash, etc.). **Requires `stream: true` and the API key must have `allow_tools: true` in config.** Default `false` — agent is conversational only |
-| `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000). Useful for long-running tool executions |
+| `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000). Useful when the key has `allow_tools: true` and runs long-running tools |
+
+> Tool access is configured per API key in `config.json` — see `allow_tools` below.
 
 **New session:**
 
@@ -138,9 +139,9 @@ curl -X POST \
 
 | Status | When |
 |--------|------|
-| 400 | Empty message, exceeds 10,000 characters, or `allow_tools: true` without `stream: true` |
+| 400 | Empty message or exceeds 10,000 characters |
 | 401 | Missing API key |
-| 403 | Invalid key, key has no access to that agent, or key lacks `allow_tools` permission |
+| 403 | Invalid key or key has no access to that agent |
 | 404 | Agent ID not found |
 | 409 | Session is busy processing another request |
 | 504 | Agent did not respond within timeout (default 60s) |
@@ -175,26 +176,23 @@ data: {"type":"result","text":"Here's the full explanation...","request_id":"550
 data: [DONE]
 ```
 
-### Streaming with tool use (`allow_tools`)
+### Streaming with tool use
 
-By default the agent is conversational only (no tool calls). Set `allow_tools: true` together with `stream: true` to let the agent execute tools (Read, Bash, Grep, etc.) and stream the results back.
+When the API key has `allow_tools: true` in `config.json`, the agent can call tools (Read, Bash, Grep, etc.) and stream results back. No extra field is needed in the request body — tool access is governed entirely by the key config.
 
 ```bash
 curl -N -X POST \
-  -H "X-Api-Key: my-secret-key" \
+  -H "X-Api-Key: automation-key-789" \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Run the setup script in /workspace and report the output",
     "stream": true,
-    "allow_tools": true,
     "timeout_ms": 120000
   }' \
   http://localhost:3000/api/v1/agents/alfred/messages
 ```
 
-> **Two requirements for `allow_tools`:**
-> 1. `stream: true` must also be set (sync mode + tools would block indefinitely → `400`)
-> 2. The API key must have `allow_tools: true` in `config.json` (otherwise → `403`)
+> Keys without `allow_tools: true` are always conversational — tools are never invoked regardless of what the request contains.
 
 **Event types:**
 

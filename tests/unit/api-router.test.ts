@@ -473,35 +473,14 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     expect(cleanupCalled).toBe(true);
   }, 10000);
 
-  // T-ALLOW-TOOLS-1: allow_tools without stream returns 400
-  it('T-ALLOW-TOOLS-1: allow_tools without stream returns 400', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
-      cb.onDone('ok');
-      return () => {};
-    });
-    const res = await supertest.default(app)
-      .post(POST_URL)
-      .set(AUTH)
-      .send({ message: 'run job', allow_tools: true });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/allow_tools requires stream/i);
-  });
-
-  // T-ALLOW-TOOLS-2: allow_tools=true with stream=true passes allowTools=true to runner
-  it('T-ALLOW-TOOLS-2: allow_tools=true with stream=true passes allowTools to runner', async () => {
+  // T-ALLOW-TOOLS-1: key with allow_tools=true passes allowTools=true to runner
+  it('T-ALLOW-TOOLS-1: key with allow_tools=true passes allowTools=true to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStreamImpl = async (_sid, _msg, cb, opts) => {
-      capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
-      cb.onDone('done');
-      return () => {};
-    };
-
-    // Patch the mock to capture opts
-    const origStream = runner.sendApiMessageStream.bind(runner);
     runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
-      return origStream(sid, msg, cbs, opts);
+      cbs.onDone('done');
+      return () => {};
     };
 
     const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
@@ -510,23 +489,41 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     app.use(express.json());
     app.use('/api', createApiRouter(runners, configs, apiKeys));
 
-    await collectSSE(app, { message: 'run job', stream: true, allow_tools: true }, 'Bearer sk-test-tools');
+    await collectSSE(app, { message: 'run job', stream: true }, 'Bearer sk-test-tools');
 
     expect(capturedOpts).toBeDefined();
     expect(capturedOpts!.allowTools).toBe(true);
+  });
+
+  // T-ALLOW-TOOLS-2: key without allow_tools passes allowTools=false to runner
+  it('T-ALLOW-TOOLS-2: key without allow_tools passes allowTools=false to runner', async () => {
+    let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
+    const runner = new MockAgentRunner(async () => 'ok');
+    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
+      capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
+      cbs.onDone('done');
+      return () => {};
+    };
+
+    const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
+    const configs = new Map([[AGENT_ID, agentConfig]]);
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApiRouter(runners, configs, apiKeys));
+
+    await collectSSE(app, { message: 'hi', stream: true });
+
+    expect(capturedOpts!.allowTools).toBe(false);
   });
 
   // T-ALLOW-TOOLS-3: timeout_ms forwarded to runner
   it('T-ALLOW-TOOLS-3: custom timeout_ms is forwarded to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStreamImpl = async (_sid, _msg, cb) => {
-      cb.onDone('done');
-      return () => {};
-    };
     runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
-      return runner.sendApiMessageStreamImpl!(sid, msg, cbs);
+      cbs.onDone('done');
+      return () => {};
     };
 
     const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
@@ -544,13 +541,10 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   it('T-ALLOW-TOOLS-4: timeout_ms over max is clamped to default', async () => {
     let capturedOpts: { timeoutMs: number } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStreamImpl = async (_sid, _msg, cb) => {
-      cb.onDone('done');
-      return () => {};
-    };
     runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number };
-      return runner.sendApiMessageStreamImpl!(sid, msg, cbs);
+      cbs.onDone('done');
+      return () => {};
     };
 
     const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
@@ -562,44 +556,6 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     await collectSSE(app, { message: 'hi', stream: true, timeout_ms: 999999 });
 
     expect(capturedOpts!.timeoutMs).toBe(60000); // DEFAULT_TIMEOUT_MS
-  });
-
-  // T-ALLOW-TOOLS-5: no allow_tools flag defaults to allowTools=false
-  it('T-ALLOW-TOOLS-5: omitting allow_tools defaults to allowTools=false', async () => {
-    let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
-    const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStreamImpl = async (_sid, _msg, cb) => {
-      cb.onDone('done');
-      return () => {};
-    };
-    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
-      capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
-      return runner.sendApiMessageStreamImpl!(sid, msg, cbs);
-    };
-
-    const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
-    const configs = new Map([[AGENT_ID, agentConfig]]);
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createApiRouter(runners, configs, apiKeys));
-
-    await collectSSE(app, { message: 'hi', stream: true });
-
-    expect(capturedOpts!.allowTools).toBe(false);
-  });
-
-  // T-ALLOW-TOOLS-6: key without allow_tools permission returns 403 when request uses allow_tools
-  it('T-ALLOW-TOOLS-6: key without allow_tools permission returns 403', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
-      cb.onDone('ok');
-      return () => {};
-    });
-    const res = await supertest.default(app)
-      .post(POST_URL)
-      .set({ Authorization: 'Bearer sk-test-app' }) // no allow_tools on this key
-      .send({ message: 'run job', stream: true, allow_tools: true });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/allow_tools permission/i);
   });
 
   // T-API-STREAM-TCP: TCP_NODELAY is set on SSE connections (regression test)

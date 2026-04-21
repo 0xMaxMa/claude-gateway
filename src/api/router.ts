@@ -42,10 +42,9 @@ export function createApiRouter(
       message?: unknown;
       session_id?: unknown;
       stream?: unknown;
-      allow_tools?: unknown;
       timeout_ms?: unknown;
     };
-    const { message, session_id, stream, allow_tools, timeout_ms } = body;
+    const { message, session_id, stream, timeout_ms } = body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: 'message is required and must be a non-empty string' });
@@ -57,14 +56,6 @@ export function createApiRouter(
     }
     if (session_id !== undefined && typeof session_id !== 'string') {
       res.status(400).json({ error: 'session_id must be a string if provided' });
-      return;
-    }
-    if (allow_tools && !stream) {
-      res.status(400).json({ error: 'allow_tools requires stream: true' });
-      return;
-    }
-    if (allow_tools && !apiKey.allow_tools) {
-      res.status(403).json({ error: 'API key does not have allow_tools permission' });
       return;
     }
 
@@ -118,7 +109,7 @@ export function createApiRouter(
           sessionId,
           message.trim(),
           sseCallbacks,
-          { timeoutMs, allowTools: !!allow_tools },
+          { timeoutMs, allowTools: !!apiKey.allow_tools },
         );
 
         // Client disconnect -> cleanup
