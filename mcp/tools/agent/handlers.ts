@@ -1,12 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import {
-  pairTelegramUser,
-  pairDiscordUser,
-  writeTelegramAccess,
-  writeDiscordAccess,
-} from '../../../lib/pairing';
+import { writeTelegramAccess, writeDiscordAccess } from '../../../lib/pairing';
 
 // ---------------------------------------------------------------------------
 // Regex constants (exported for tests)
@@ -63,7 +58,7 @@ interface RawAgentEntry {
   description: string;
   workspace: string;
   env: string;
-  telegram?: { botToken: string; allowedUsers: number[]; dmPolicy: string };
+  telegram?: { botToken: string };
   discord?: { botToken: string };
   claude: { model: string; dangerouslySkipPermissions: boolean; extraFlags: string[] };
   signatureEmoji?: string;
@@ -127,6 +122,25 @@ function envVarName(agentId: string, channel: 'telegram' | 'discord'): string {
   return channel === 'telegram' ? `${base}_BOT_TOKEN` : `${base}_DISCORD_BOT_TOKEN`;
 }
 
+function howToFindUserId(channel: 'telegram' | 'discord'): string {
+  if (channel === 'telegram') {
+    return [
+      'No user_id provided — allowFrom is empty (nobody can DM the bot yet).',
+      'To grant access, find your Telegram user ID:',
+      '  • Send /start to @userinfobot, or',
+      '  • Forward any message to @getidsbot',
+      'Then use the telegram:access tool to add your ID.',
+    ].join('\n');
+  }
+  return [
+    'No user_id provided — allowFrom is empty (nobody can DM the bot yet).',
+    'To grant access, find your Discord user ID:',
+    '  • Settings → Advanced → enable Developer Mode',
+    '  • Right-click your username → Copy User ID',
+    'Then use the discord:discord-access tool to add your ID.',
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // agent_create
 // ---------------------------------------------------------------------------
@@ -136,6 +150,7 @@ export interface CreateAgentArgs {
   description: string;
   channel: 'telegram' | 'discord';
   bot_token: string;
+  user_id?: string;
   dm_policy?: 'open' | 'allowlist' | 'pairing';
   model?: string;
   signature_emoji?: string;
@@ -232,12 +247,11 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   const agentEnvFile = path.join(agentRootDir(agentId), '.env');
   fs.writeFileSync(agentEnvFile, `${envVar}=${bot_token}\n`, { mode: 0o600 });
 
-  // 10. Create channel state dir (access.json written after pairing completes)
+  // 10. Create channel state dir + write access.json immediately (no pairing flow)
   const stateDir = path.join(wsDir, `.${channel}-state`);
   fs.mkdirSync(stateDir, { recursive: true });
 
   if (channel === 'discord') {
-    // Discord state dir also needs .env with the token before pairing
     fs.writeFileSync(
       path.join(stateDir, '.env'),
       `DISCORD_BOT_TOKEN=${bot_token}\n`,
@@ -245,7 +259,34 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
     );
   }
 
-  // 11. Update config.json (before pairing so the gateway can hot-add the agent)
+  const userId = args.user_id?.trim() ?? '';
+  if (channel === 'telegram') {
+    if (userId) {
+      writeTelegramAccess(stateDir, userId);
+    } else {
+      fs.writeFileSync(
+        path.join(stateDir, 'access.json'),
+        JSON.stringify({ dmPolicy: 'allowlist', allowFrom: [], groups: {}, pending: {} }, null, 2),
+        { mode: 0o600 }
+      );
+    }
+  } else {
+    if (userId) {
+      writeDiscordAccess(stateDir, userId);
+    } else {
+      fs.writeFileSync(
+        path.join(stateDir, 'access.json'),
+        JSON.stringify(
+          { dmPolicy: 'allowlist', allowFrom: [], guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {} },
+          null,
+          2
+        ) + '\n',
+        { mode: 0o600 }
+      );
+    }
+  }
+
+  // 11. Update config.json (gateway hot-adds the agent automatically)
   const descriptionText = firstNonEmptyLine(agentsMdContent);
   const newAgent: RawAgentEntry = {
     id: agentId,
@@ -260,15 +301,9 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   };
 
   if (channel === 'telegram') {
-    newAgent.telegram = {
-      botToken: `\${${envVar}}`,
-      allowedUsers: [],
-      dmPolicy,
-    };
+    newAgent.telegram = { botToken: `\${${envVar}}` };
   } else {
-    newAgent.discord = {
-      botToken: `\${${envVar}}`,
-    };
+    newAgent.discord = { botToken: `\${${envVar}}` };
   }
 
   if (args.signature_emoji) {
@@ -278,32 +313,17 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   config.agents.push(newAgent);
   saveRawConfig(config);
 
-  // 12. Run interactive pairing flow (blocks until user DMs the bot and confirms code)
-  try {
-    if (channel === 'telegram') {
-      await pairTelegramUser(bot_token, stateDir);
-    } else {
-      await pairDiscordUser(bot_token, stateDir);
-    }
-  } catch (err) {
-    // Pairing failed — write a permissive stub so the agent still starts
-    if (channel === 'telegram') {
-      writeTelegramAccess(stateDir, '');
-    } else {
-      writeDiscordAccess(stateDir, '');
-    }
-    return [
-      `Agent "${agentId}" created but pairing failed: ${(err as Error).message}`,
-      `Bot: @${botUsername} | Workspace: ${wsDir.replace(os.homedir(), '~')}`,
-      `Pair manually: DM @${botUsername} then use the gateway access tools.`,
-    ].join('\n');
-  }
+  const accessNote = userId
+    ? `Access granted to user ID: ${userId}`
+    : howToFindUserId(channel);
 
   return [
-    `Agent "${agentId}" created and paired successfully!`,
+    `Agent "${agentId}" created successfully!`,
     `Bot: @${botUsername}`,
     `Workspace: ${wsDir.replace(os.homedir(), '~')}`,
     `Channel: ${channel} (dm_policy: ${dmPolicy})`,
+    '',
+    accessNote,
     '',
     'The gateway will detect the new agent and start it automatically (hot-add).',
   ].join('\n');
@@ -318,6 +338,7 @@ export interface UpdateAgentArgs {
   action: 'add_channel' | 'remove_channel' | 'update_workspace_file';
   channel?: 'telegram' | 'discord';
   bot_token?: string;
+  user_id?: string;
   dm_policy?: 'open' | 'allowlist' | 'pairing';
   filename?: string;
   content?: string;
@@ -400,12 +421,11 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
       fs.appendFileSync(agentEnvFile, `${envVar}=${bot_token}\n`, { mode: 0o600 });
     }
 
-    // Create state dir + access.json
+    // Create state dir + write access.json immediately (no pairing flow)
     const stateDir = path.join(wsDir, `.${channel}-state`);
     fs.mkdirSync(stateDir, { recursive: true });
 
     if (channel === 'discord') {
-      // Discord state dir needs .env before pairing
       fs.writeFileSync(
         path.join(stateDir, '.env'),
         `DISCORD_BOT_TOKEN=${bot_token}\n`,
@@ -413,40 +433,50 @@ export async function updateAgent(args: UpdateAgentArgs): Promise<string> {
       );
     }
 
-    // Update config.json before pairing (so gateway can hot-add)
+    const addUserId = args.user_id?.trim() ?? '';
     if (channel === 'telegram') {
-      config.agents[agentIdx].telegram = {
-        botToken: `\${${envVar}}`,
-        allowedUsers: [],
-        dmPolicy,
-      };
+      if (addUserId) {
+        writeTelegramAccess(stateDir, addUserId);
+      } else {
+        fs.writeFileSync(
+          path.join(stateDir, 'access.json'),
+          JSON.stringify({ dmPolicy: 'allowlist', allowFrom: [], groups: {}, pending: {} }, null, 2),
+          { mode: 0o600 }
+        );
+      }
     } else {
-      config.agents[agentIdx].discord = {
-        botToken: `\${${envVar}}`,
-      };
+      if (addUserId) {
+        writeDiscordAccess(stateDir, addUserId);
+      } else {
+        fs.writeFileSync(
+          path.join(stateDir, 'access.json'),
+          JSON.stringify(
+            { dmPolicy: 'allowlist', allowFrom: [], guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {} },
+            null,
+            2
+          ) + '\n',
+          { mode: 0o600 }
+        );
+      }
+    }
+
+    // Update config.json (so gateway can hot-add)
+    if (channel === 'telegram') {
+      config.agents[agentIdx].telegram = { botToken: `\${${envVar}}` };
+    } else {
+      config.agents[agentIdx].discord = { botToken: `\${${envVar}}` };
     }
     saveRawConfig(config);
 
-    // Run pairing flow
-    try {
-      if (channel === 'telegram') {
-        await pairTelegramUser(bot_token, stateDir);
-      } else {
-        await pairDiscordUser(bot_token, stateDir);
-      }
-    } catch (err) {
-      if (channel === 'telegram') {
-        writeTelegramAccess(stateDir, '');
-      } else {
-        writeDiscordAccess(stateDir, '');
-      }
-      return [
-        `Channel "${channel}" added to agent "${agentId}" but pairing failed: ${(err as Error).message}`,
-        `Bot: @${botUsername} — pair manually via the gateway access tools.`,
-      ].join('\n');
-    }
+    const addAccessNote = addUserId
+      ? `Access granted to user ID: ${addUserId}`
+      : howToFindUserId(channel);
 
-    return `Channel "${channel}" added to agent "${agentId}" and paired. Bot: @${botUsername}`;
+    return [
+      `Channel "${channel}" added to agent "${agentId}". Bot: @${botUsername}`,
+      '',
+      addAccessNote,
+    ].join('\n');
   }
 
   // ── Action: remove_channel ───────────────────────────────────────────────

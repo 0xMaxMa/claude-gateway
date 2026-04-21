@@ -39,10 +39,15 @@ export class AgentModule implements ToolModule {
               description:
                 'Bot token. Telegram: 123456789:AAHfiq... Discord: MTAxMTk....AAAA.xxx.',
             },
+            user_id: {
+              type: 'string',
+              description:
+                'Channel user ID to grant access immediately (allowlist). Telegram: numeric chat_id. Discord: numeric user ID. If omitted, allowFrom is empty and must be set manually.',
+            },
             dm_policy: {
               type: 'string',
               enum: ['open', 'allowlist', 'pairing'],
-              description: 'DM access policy. Default: open.',
+              description: 'DM access policy. Default: allowlist.',
             },
             model: {
               type: 'string',
@@ -95,10 +100,15 @@ export class AgentModule implements ToolModule {
               type: 'string',
               description: 'Bot token (required for add_channel).',
             },
+            user_id: {
+              type: 'string',
+              description:
+                'Channel user ID to grant access immediately (add_channel only). If omitted, allowFrom is empty.',
+            },
             dm_policy: {
               type: 'string',
               enum: ['open', 'allowlist', 'pairing'],
-              description: 'DM policy for the new channel (add_channel only). Default: open.',
+              description: 'DM policy for the new channel (add_channel only). Default: allowlist.',
             },
             filename: {
               type: 'string',
