@@ -29,7 +29,7 @@ Thumbs.db
 coverage/
 .claude
 
-# Planning
+# Development
 archive/
 planning*.md
 design*.md
@@ -43,3 +43,4 @@ stop.sh
 .claude-gateway
 tasks/
 .ralph-tui/
+CLAUDE.md

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as http from 'http';
 import * as net from 'net';
 import * as path from 'path';
@@ -15,6 +16,8 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
+
+export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-opus-4-7', label: 'Opus 4.7', alias: 'opus', contextWindow: 1000000 },
@@ -46,6 +49,8 @@ export class AgentRunner extends EventEmitter {
   private stopping = false;
   private callbackServer: http.Server | null = null;
   private callbackPort = 0;
+  imageSizeSinceRestart: number = 0;
+  needsRestart: boolean = false;
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
@@ -59,6 +64,9 @@ export class AgentRunner extends EventEmitter {
 
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
+
+  // Tracks pending image path per chatId for size accumulation after turn
+  private readonly pendingImagePaths = new Map<string, string>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -157,6 +165,17 @@ export class AgentRunner extends EventEmitter {
                 content,
                 ts: Date.now(),
               });
+              // Restart session before this turn if accumulated image size exceeded threshold
+              if (this.needsRestart) {
+                const existingSession = this.sessions.get(chatId);
+                if (existingSession) {
+                  await existingSession.stop();
+                  this.sessions.delete(chatId);
+                }
+                this.needsRestart = false;
+                this.imageSizeSinceRestart = 0;
+              }
+
               // Route to session process (map key = chatId, actual sessionId passed separately)
               const session = await this.getOrSpawnSession(chatId, channelSource, sessionId);
               let channelXml = AgentRunner.buildChannelXml(params);
@@ -170,6 +189,13 @@ export class AgentRunner extends EventEmitter {
                   args: skillInvocation.args,
                   chatId,
                 });
+              }
+
+              const imagePath = meta['image_path'];
+              if (imagePath) {
+                this.pendingImagePaths.set(chatId, imagePath);
+              } else {
+                this.pendingImagePaths.delete(chatId);
               }
 
               session.setProcessing(true);
@@ -556,6 +582,21 @@ export class AgentRunner extends EventEmitter {
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
+            // Accumulate image file size for restart tracking
+            const imgPath = this.pendingImagePaths.get(mapKey);
+            if (imgPath) {
+              this.pendingImagePaths.delete(mapKey);
+              fsPromises.stat(imgPath)
+                .then((stats) => {
+                  this.imageSizeSinceRestart += stats.size;
+                  if (this.imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
+                    this.needsRestart = true;
+                  }
+                })
+                .catch((err: Error) => {
+                  this.logger.warn('Failed to stat image', { path: imgPath, error: err.message });
+                });
+            }
             // Always forward result text — it contains the agent's completion summary.
             // If the agent also called reply tool, this summary still reaches the user.
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';

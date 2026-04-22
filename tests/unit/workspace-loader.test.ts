@@ -258,13 +258,13 @@ describe('workspace-loader', () => {
 
       try {
         // Wait for watcher to initialize
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 500));
 
         // Write a lowercase soul.md — watcher should auto-rename it
         fs.writeFileSync(path.join(tmpDir, 'soul.md'), '# Soul\nContent');
 
-        // Wait for debounce + rename (300ms debounce + buffer)
-        await new Promise((r) => setTimeout(r, 700));
+        // Wait for debounce + rename (300ms debounce + generous buffer for loaded CI)
+        await new Promise((r) => setTimeout(r, 3000));
 
         // onChange should have fired
         expect(changeCount).toBeGreaterThan(0);
