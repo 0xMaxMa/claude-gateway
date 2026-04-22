@@ -1663,9 +1663,9 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
   }, 15000);
 
   // --------------------------------------------------------------------------
-  // US4-02: Single image > MAX_IMAGE_SIZE_BYTES → needsRestart = true after that turn
+  // US4-02: Single image > MAX_IMAGE_SIZE_BYTES → summary triggered then needsRestart = true
   // --------------------------------------------------------------------------
-  it('US4-02: single image larger than MAX_IMAGE_SIZE_BYTES sets needsRestart immediately', async () => {
+  it('US4-02: single image larger than MAX_IMAGE_SIZE_BYTES triggers summary then sets needsRestart', async () => {
     const testImagePath = path.join(tmpDir, 'large.jpg');
     const fileSize = MAX_IMAGE_SIZE_BYTES + 1;
     fs.writeFileSync(testImagePath, Buffer.alloc(fileSize));
@@ -1679,11 +1679,12 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
 
     const session = getSessions(runner).get('chat:us4-02');
     expect(session).toBeDefined();
+    jest.spyOn(session!, 'query').mockResolvedValue('Image 1: A large test image');
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 200));
 
     expect(runner.needsRestart).toBe(true);
-    expect(runner.imageSizeSinceRestart).toBeGreaterThan(MAX_IMAGE_SIZE_BYTES);
+    expect(runner.imageSizeSinceRestart).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1728,6 +1729,53 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     // Only size2 should be in the accumulator — old total (size1) must not carry over
     expect(runner.imageSizeSinceRestart).toBe(size2);
     expect(runner.needsRestart).toBe(false);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // US4-04: query() called with summary prompt when threshold is crossed
+  // --------------------------------------------------------------------------
+  it('US4-04: session.query() is called with summary prompt when threshold is crossed', async () => {
+    const testImagePath = path.join(tmpDir, 'us4-04.jpg');
+    fs.writeFileSync(testImagePath, Buffer.alloc(MAX_IMAGE_SIZE_BYTES + 1));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendImageChannelPost(port, 'chat:us4-04', testImagePath);
+    await new Promise(r => setTimeout(r, 150));
+
+    const session = getSessions(runner).get('chat:us4-04')!;
+    const querySpy = jest.spyOn(session, 'query').mockResolvedValue('Image 1: A test image');
+
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    expect(querySpy.mock.calls[0][0]).toContain('summarize');
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // US4-05: needsRestart = true even when query() fails
+  // --------------------------------------------------------------------------
+  it('US4-05: needsRestart is set to true even when query() rejects', async () => {
+    const testImagePath = path.join(tmpDir, 'us4-05.jpg');
+    fs.writeFileSync(testImagePath, Buffer.alloc(MAX_IMAGE_SIZE_BYTES + 1));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendImageChannelPost(port, 'chat:us4-05', testImagePath);
+    await new Promise(r => setTimeout(r, 150));
+
+    const session = getSessions(runner).get('chat:us4-05')!;
+    jest.spyOn(session, 'query').mockRejectedValue(new Error('query failed'));
+
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 200));
+
+    expect(runner.needsRestart).toBe(true);
   }, 15000);
 });
 
@@ -1822,9 +1870,9 @@ describe('AgentRunner — image size tracking (US-002)', () => {
   }, 15000);
 
   // --------------------------------------------------------------------------
-  // US2-03: crossing MAX_IMAGE_SIZE_BYTES sets needsRestart = true
+  // US2-03: crossing MAX_IMAGE_SIZE_BYTES triggers summary then sets needsRestart = true
   // --------------------------------------------------------------------------
-  it('US2-03: crossing MAX_IMAGE_SIZE_BYTES threshold sets needsRestart = true', async () => {
+  it('US2-03: crossing MAX_IMAGE_SIZE_BYTES threshold triggers summary and sets needsRestart', async () => {
     const testImagePath = path.join(tmpDir, 'threshold.jpg');
     const fileSize = 200;
     fs.writeFileSync(testImagePath, Buffer.alloc(fileSize));
@@ -1840,11 +1888,12 @@ describe('AgentRunner — image size tracking (US-002)', () => {
 
     const session = getSessions(runner).get('chat:img03');
     expect(session).toBeDefined();
+    jest.spyOn(session!, 'query').mockResolvedValue('Image 1: A test threshold image');
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 200));
 
     expect(runner.needsRestart).toBe(true);
-    expect(runner.imageSizeSinceRestart).toBeGreaterThanOrEqual(MAX_IMAGE_SIZE_BYTES);
+    expect(runner.imageSizeSinceRestart).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------

@@ -1054,3 +1054,171 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
     expect(result).toBe(false);
   });
 });
+
+// ── query() tests ─────────────────────────────────────────────────────────────
+
+describe('SessionProcess — query()', () => {
+  let tmpDir: string;
+  let sessionStore: SessionStore;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-query-'));
+    agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace') });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
+    lastProcess = null;
+    spawnMock = require('child_process').spawn as jest.Mock;
+    spawnMock.mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  function emitStdout(line: string): void {
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+  }
+
+  it('U-SP-QRY-01: query() resolves with assistant text when result fires', async () => {
+    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const queryPromise = sp.query('describe all images');
+
+    emitStdout(JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'end_turn',
+      message: { content: [{ type: 'text', text: 'Image 1: A dashboard screenshot' }] },
+    }));
+    emitStdout(JSON.stringify({ type: 'result', result: '', is_error: false }));
+
+    const result = await queryPromise;
+    expect(result).toBe('Image 1: A dashboard screenshot');
+  });
+
+  it('U-SP-QRY-02: query() sets queryMode=false after resolving', async () => {
+    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const queryPromise = sp.query('describe all images');
+    expect(sp.queryMode).toBe(true);
+
+    emitStdout(JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'end_turn',
+      message: { content: [{ type: 'text', text: 'Image 1: test' }] },
+    }));
+    emitStdout(JSON.stringify({ type: 'result', result: '', is_error: false }));
+
+    await queryPromise;
+    expect(sp.queryMode).toBe(false);
+  });
+
+  it('U-SP-QRY-03: query() does not save assistant message to session store', async () => {
+    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const appendSpy = jest.spyOn(sessionStore, 'appendTelegramMessage');
+
+    const queryPromise = sp.query('describe all images');
+    emitStdout(JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'end_turn',
+      message: { content: [{ type: 'text', text: 'Image 1: test' }] },
+    }));
+    emitStdout(JSON.stringify({ type: 'result', result: '', is_error: false }));
+
+    await queryPromise;
+    expect(appendSpy).not.toHaveBeenCalled();
+  });
+
+  it('U-SP-QRY-04: query() rejects when timeout fires', async () => {
+    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    await expect(sp.query('describe all images', 50)).rejects.toThrow('query timeout');
+    expect(sp.queryMode).toBe(false);
+  }, 5000);
+
+  it('U-SP-QRY-05: query() rejects immediately when subprocess not running', async () => {
+    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    // No start() — process is null
+
+    await expect(sp.query('describe all images')).rejects.toThrow('Cannot query');
+  });
+});
+
+// ── buildInitialPrompt system role tests ──────────────────────────────────────
+
+describe('SessionProcess — buildInitialPrompt system role', () => {
+  let tmpDir: string;
+  let sessionStore: SessionStore;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-sysrole-'));
+    agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace') });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
+    lastProcess = null;
+    spawnMock = require('child_process').spawn as jest.Mock;
+    spawnMock.mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  it('U-SP-SYS-01: system messages are formatted as "System:" in initial prompt', async () => {
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'user',
+      content: 'what is in the picture?',
+      ts: Date.now(),
+    });
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'system',
+      content: '[Image Context Summary]\nImage 1: A dashboard screenshot',
+      ts: Date.now(),
+    });
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    expect(text).toContain('System: [Image Context Summary]');
+    expect(text).not.toContain('Assistant: [Image Context Summary]');
+  });
+
+  it('U-SP-SYS-02: system messages coexist with user and assistant messages', async () => {
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'user', content: 'show me a picture', ts: Date.now(),
+    });
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'assistant', content: 'Here is the image.', ts: Date.now(),
+    });
+    await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+      role: 'system', content: '[Image Context Summary]\nImage 1: A chart', ts: Date.now(),
+    });
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    expect(text).toContain('User: show me a picture');
+    expect(text).toContain('Assistant: Here is the image.');
+    expect(text).toContain('System: [Image Context Summary]');
+  });
+});

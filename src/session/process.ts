@@ -33,6 +33,11 @@ export class SessionProcess extends EventEmitter {
   private readonly logger: ReturnType<typeof createLogger>;
   private readonly configPath: string;
   private readonly restartSignalPath: string;
+  queryMode = false;
+  private _queryResolve?: (text: string) => void;
+  private _queryReject?: (err: Error) => void;
+  private _queryBuffer = '';
+  private _queryTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     sessionId: string,
@@ -148,7 +153,10 @@ export class SessionProcess extends EventEmitter {
     }
 
     const historyText = recent
-      .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+      .map(m => {
+        if (m.role === 'system') return `System: ${m.content}`;
+        return `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`;
+      })
       .join('\n');
 
     return {
@@ -473,32 +481,36 @@ export class SessionProcess extends EventEmitter {
             const isPartial = obj.stop_reason === null || obj.stop_reason === undefined;
 
             if (isPartial) {
-              // Partial message: update assistantBuffer with only the delta
+              // Partial message: update buffer with only the delta
               // (fullText is cumulative, so delta = new portion)
               if (fullText.length > lastPartialText.length) {
-                assistantBuffer += fullText.slice(lastPartialText.length);
+                const delta = fullText.slice(lastPartialText.length);
+                if (this.queryMode) { this._queryBuffer += delta; } else { assistantBuffer += delta; }
               }
               lastPartialText = fullText;
             } else {
               // Final message: use full text, reset partial tracking
               if (fullText.length > lastPartialText.length) {
-                assistantBuffer += fullText.slice(lastPartialText.length);
+                const delta = fullText.slice(lastPartialText.length);
+                if (this.queryMode) { this._queryBuffer += delta; } else { assistantBuffer += delta; }
               }
               lastPartialText = '';
             }
 
-            // Detect tool use to write status (same as before)
-            const toolBlock = obj.message.content.find(
-              (b: { type: string }) => b.type === 'tool_use',
-            );
-            if (toolBlock) {
-              const detail = extractToolDetail(toolBlock.name ?? '', toolBlock.input ?? {});
-              writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool', detail);
-            } else if (!isPartial && obj.message.content.some((b: { type: string }) => b.type === 'text')) {
-              // Only update thinking status on final messages, not every partial
-              const textBlock = obj.message.content.find((b: { type: string; text?: string }) => b.type === 'text');
-              const textSnippet = textBlock?.text ? truncateDetail(`🧠 ${textBlock.text}`) : undefined;
-              writeStatus('thinking', textSnippet);
+            if (!this.queryMode) {
+              // Detect tool use to write status (same as before)
+              const toolBlock = obj.message.content.find(
+                (b: { type: string }) => b.type === 'tool_use',
+              );
+              if (toolBlock) {
+                const detail = extractToolDetail(toolBlock.name ?? '', toolBlock.input ?? {});
+                writeStatus(CODING_TOOLS.has(toolBlock.name ?? '') ? 'coding' : 'tool', detail);
+              } else if (!isPartial && obj.message.content.some((b: { type: string }) => b.type === 'text')) {
+                // Only update thinking status on final messages, not every partial
+                const textBlock = obj.message.content.find((b: { type: string; text?: string }) => b.type === 'text');
+                const textSnippet = textBlock?.text ? truncateDetail(`🧠 ${textBlock.text}`) : undefined;
+                writeStatus('thinking', textSnippet);
+              }
             }
           }
           // task_started / task_progress
@@ -517,7 +529,9 @@ export class SessionProcess extends EventEmitter {
             writeStatus('waiting', '⏳ Rate limited, retrying...');
           }
           // text delta (standalone, not from assistant messages)
-          if (obj.type === 'text') assistantBuffer += obj.text ?? '';
+          if (obj.type === 'text') {
+            if (this.queryMode) { this._queryBuffer += obj.text ?? ''; } else { assistantBuffer += obj.text ?? ''; }
+          }
           // Capture context size from message_start (first sub-call of each turn)
           if (obj.type === 'stream_event' && obj.event?.type === 'message_start') {
             const msUsage = obj.event.message?.usage as { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
@@ -529,23 +543,34 @@ export class SessionProcess extends EventEmitter {
           if (obj.type === 'result') {
             lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
-            if (assistantBuffer.trim()) {
-              const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
-              const appendAssistant = this.source !== 'api'
-                ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg)
-                : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, assistantMsg);
-              appendAssistant.catch(() => {});
+            if (this.queryMode) {
+              if (this._queryTimer) clearTimeout(this._queryTimer);
+              const resolve = this._queryResolve;
+              this.queryMode = false;
+              this._queryResolve = undefined;
+              this._queryReject = undefined;
+              resolve?.(this._queryBuffer.trim());
+              this._queryBuffer = '';
               assistantBuffer = '';
+            } else {
+              if (assistantBuffer.trim()) {
+                const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
+                const appendAssistant = this.source !== 'api'
+                  ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg)
+                  : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, assistantMsg);
+                appendAssistant.catch(() => {});
+                assistantBuffer = '';
+              }
+              // Emit tokenUsage using message_start context (accurate per-call context window usage)
+              // rather than result.usage which is cumulative across all sub-calls in the turn.
+              const usage = obj.usage as { output_tokens?: number } | undefined;
+              const outputTokens = usage?.output_tokens ?? 0;
+              const totalTokens = lastMessageStartContext + outputTokens;
+              if (lastMessageStartContext > 0) {
+                this.emit('tokenUsage', { inputTokens: lastMessageStartContext, outputTokens, totalTokens });
+              }
+              lastMessageStartContext = 0;
             }
-            // Emit tokenUsage using message_start context (accurate per-call context window usage)
-            // rather than result.usage which is cumulative across all sub-calls in the turn.
-            const usage = obj.usage as { output_tokens?: number } | undefined;
-            const outputTokens = usage?.output_tokens ?? 0;
-            const totalTokens = lastMessageStartContext + outputTokens;
-            if (lastMessageStartContext > 0) {
-              this.emit('tokenUsage', { inputTokens: lastMessageStartContext, outputTokens, totalTokens });
-            }
-            lastMessageStartContext = 0;
           }
         } catch {
           /* not JSON */
@@ -616,6 +641,26 @@ export class SessionProcess extends EventEmitter {
       try { fs.writeFileSync(statusPath, 'queued') } catch {}
     }
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(text) + '\n');
+  }
+
+  query(prompt: string, timeoutMs = 60_000): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (!this.process?.stdin?.writable) {
+        reject(new Error('Cannot query: subprocess not running'));
+        return;
+      }
+      this._queryResolve = resolve;
+      this._queryReject = reject;
+      this._queryBuffer = '';
+      this.queryMode = true;
+      this._queryTimer = setTimeout(() => {
+        this.queryMode = false;
+        this._queryResolve = undefined;
+        this._queryReject = undefined;
+        reject(new Error('query timeout'));
+      }, timeoutMs);
+      this.sendMessage(prompt);
+    });
   }
 
   get isProcessing(): boolean { return this._processing; }

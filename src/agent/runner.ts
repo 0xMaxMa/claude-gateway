@@ -4,7 +4,7 @@ import * as fsPromises from 'fs/promises';
 import * as http from 'http';
 import * as net from 'net';
 import * as path from 'path';
-import { AgentConfig, GatewayConfig, Logger, ModelConfig, StreamEvent } from '../types';
+import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent } from '../types';
 import { createLogger } from '../logger';
 import { SessionProcess } from '../session/process';
 import { SessionStore } from '../session/store';
@@ -590,7 +590,8 @@ export class AgentRunner extends EventEmitter {
                 .then((stats) => {
                   this.imageSizeSinceRestart += stats.size;
                   if (this.imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
-                    this.needsRestart = true;
+                    this.imageSizeSinceRestart = 0;
+                    void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
                   }
                 })
                 .catch((err: Error) => {
@@ -599,8 +600,9 @@ export class AgentRunner extends EventEmitter {
             }
             // Always forward result text — it contains the agent's completion summary.
             // If the agent also called reply tool, this summary still reaches the user.
+            // Skip forwarding when session is in query mode (internal image summary request).
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
-            if (resultText.trim()) {
+            if (resultText.trim() && !proc.queryMode) {
               const text = resultText.trim();
               if (hasMarkdown(text)) {
                 this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
@@ -977,6 +979,33 @@ export class AgentRunner extends EventEmitter {
     } catch {
       // Non-fatal
     }
+  }
+
+  private async triggerSummaryAndRestart(
+    chatId: string,
+    sessionId: string,
+    session: SessionProcess,
+  ): Promise<void> {
+    const IMAGE_CONTEXT_MARKER = '[Image Context Summary]';
+    try {
+      const prompt = [
+        'Briefly summarize each image you have seen in this conversation.',
+        'Format: "Image N: [1-2 sentence description]"',
+        'List every image separately.',
+      ].join(' ');
+      const description = await session.query(prompt);
+      if (description) {
+        const msg: Message = {
+          role: 'system',
+          content: `${IMAGE_CONTEXT_MARKER}\n${description}`,
+          ts: Date.now(),
+        };
+        await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, msg);
+      }
+    } catch (err) {
+      this.logger.warn('Image context summary failed', { error: String(err) });
+    }
+    this.needsRestart = true;
   }
 
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {
