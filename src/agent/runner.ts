@@ -65,8 +65,8 @@ export class AgentRunner extends EventEmitter {
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
 
-  // Tracks pending image path per chatId for size accumulation after turn
-  private readonly pendingImagePaths = new Map<string, string>();
+  // Tracks pending image paths per chatId (queue) for size accumulation after each turn
+  private readonly pendingImagePaths = new Map<string, string[]>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -193,9 +193,9 @@ export class AgentRunner extends EventEmitter {
 
               const imagePath = meta['image_path'];
               if (imagePath) {
-                this.pendingImagePaths.set(chatId, imagePath);
-              } else {
-                this.pendingImagePaths.delete(chatId);
+                const queue = this.pendingImagePaths.get(chatId) ?? [];
+                queue.push(imagePath);
+                this.pendingImagePaths.set(chatId, queue);
               }
 
               session.setProcessing(true);
@@ -583,9 +583,10 @@ export class AgentRunner extends EventEmitter {
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
             // Accumulate image file size for restart tracking
-            const imgPath = this.pendingImagePaths.get(mapKey);
+            const queue = this.pendingImagePaths.get(mapKey);
+            const imgPath = queue?.shift();
+            if (queue?.length === 0) this.pendingImagePaths.delete(mapKey);
             if (imgPath) {
-              this.pendingImagePaths.delete(mapKey);
               fsPromises.stat(imgPath)
                 .then((stats) => {
                   this.imageSizeSinceRestart += stats.size;

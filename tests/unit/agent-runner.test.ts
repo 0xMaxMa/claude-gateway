@@ -1975,4 +1975,43 @@ describe('AgentRunner — image size tracking (US-002)', () => {
 
     expect(runner.imageSizeSinceRestart).toBe(1000); // 300 + 700
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // US2-07: rapid-fire images on same chatId — all counted, not just last
+  // --------------------------------------------------------------------------
+  it('US2-07: multiple images sent rapidly on same chatId all accumulate via queue', async () => {
+    const img1 = path.join(tmpDir, 'rapid1.jpg');
+    const img2 = path.join(tmpDir, 'rapid2.jpg');
+    const img3 = path.join(tmpDir, 'rapid3.jpg');
+    fs.writeFileSync(img1, Buffer.alloc(100));
+    fs.writeFileSync(img2, Buffer.alloc(200));
+    fs.writeFileSync(img3, Buffer.alloc(300));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    // Send 3 images before any result fires — all should be enqueued
+    await sendImageChannelPost(port, 'chat:img07', img1);
+    await sendImageChannelPost(port, 'chat:img07', img2);
+    await sendImageChannelPost(port, 'chat:img07', img3);
+    await new Promise(r => setTimeout(r, 200));
+
+    const session = getSessions(runner).get('chat:img07')!;
+    expect(session).toBeDefined();
+
+    // Fire 3 results — each dequeues one image path
+    session.emit('output', JSON.stringify({ type: 'result', result: 'turn1' }));
+    await new Promise(r => setTimeout(r, 100));
+    expect(runner.imageSizeSinceRestart).toBe(100);
+
+    session.emit('output', JSON.stringify({ type: 'result', result: 'turn2' }));
+    await new Promise(r => setTimeout(r, 100));
+    expect(runner.imageSizeSinceRestart).toBe(300); // 100 + 200
+
+    session.emit('output', JSON.stringify({ type: 'result', result: 'turn3' }));
+    await new Promise(r => setTimeout(r, 100));
+    expect(runner.imageSizeSinceRestart).toBe(600); // 100 + 200 + 300
+  }, 15000);
 });
