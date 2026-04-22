@@ -42,7 +42,7 @@ export class AgentModule implements ToolModule {
             telegram_user_id: {
               type: 'string',
               description:
-                'Telegram numeric chat_id (6–15 digits, e.g. "997170033"). ONLY pass here when channel=telegram. IMPORTANT: If you are responding to a Telegram message, use the sender chat_id from the inbound message context directly — do NOT ask the user for it. NEVER put a Discord Snowflake (17–19 digits) here.',
+                'Telegram numeric chat_id (6–15 digits, e.g. "99000000"). ONLY pass here when channel=telegram. IMPORTANT: If you are responding to a Telegram message, use the sender chat_id from the inbound message context directly — do NOT ask the user for it. NEVER put a Discord Snowflake (17–19 digits) here.',
             },
             discord_user_id: {
               type: 'string',

@@ -91,6 +91,10 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
       res.status(400).json({ error: 'scheduleAt is required for scheduleKind=at' });
       return;
     }
+    if (scheduleKind === 'at' && body.scheduleAt && isNaN(Date.parse(body.scheduleAt))) {
+      res.status(400).json({ error: `Invalid ISO-8601 timestamp: "${body.scheduleAt}"` });
+      return;
+    }
     // Payload validation
     if (type === 'command' && !body.command) {
       res.status(400).json({ error: 'command is required for type=command' });
@@ -100,8 +104,8 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
       res.status(400).json({ error: 'prompt is required for type=agent' });
       return;
     }
-    if (type === 'agent' && !body.telegram) {
-      res.status(400).json({ error: 'telegram is required for type=agent' });
+    if (type === 'agent' && !body.telegram && !body.discord) {
+      res.status(400).json({ error: 'telegram or discord is required for type=agent' });
       return;
     }
 

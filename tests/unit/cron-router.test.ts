@@ -83,6 +83,23 @@ describe('T21-T23: Router validation for new fields', () => {
     expect(res.body.error).toContain('scheduleAt');
   });
 
+  it('T22b: POST with scheduleKind=at + malformed scheduleAt (Discord emoji corruption) → 400', async () => {
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .post('/api/v1/crons')
+      .send({
+        agentId: 'agent-1',
+        name: 'bad-at-emoji',
+        scheduleKind: 'at',
+        scheduleAt: '2026-04-22T03<:37:1387546541849575464>06.000Z',
+        command: 'echo hi',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid ISO-8601 timestamp');
+  });
+
   it('T23: POST with type=agent + missing prompt → 400', async () => {
     const { app } = makeApp();
 
@@ -102,7 +119,7 @@ describe('T21-T23: Router validation for new fields', () => {
     expect(res.body.error).toContain('prompt');
   });
 
-  it('T23b: POST with type=agent + missing telegram → 400', async () => {
+  it('T23b: POST with type=agent + missing telegram and discord → 400', async () => {
     const { app } = makeApp();
 
     const res = await request(app)
@@ -114,11 +131,69 @@ describe('T21-T23: Router validation for new fields', () => {
         schedule: '* * * * *',
         type: 'agent',
         prompt: 'hello',
-        // no telegram
+        // no telegram, no discord
       });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('telegram');
+    expect(res.body.error).toBe('telegram or discord is required for type=agent');
+  });
+
+  it('T23c: POST with type=agent + telegram only → 201', async () => {
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .post('/api/v1/crons')
+      .send({
+        agentId: 'agent-1',
+        name: 'agent-job-tg',
+        scheduleKind: 'cron',
+        schedule: '* * * * *',
+        type: 'agent',
+        prompt: 'hello',
+        telegram: '12345',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.job).toBeDefined();
+  });
+
+  it('T23d: POST with type=agent + discord only → 201', async () => {
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .post('/api/v1/crons')
+      .send({
+        agentId: 'agent-1',
+        name: 'agent-job-dc',
+        scheduleKind: 'cron',
+        schedule: '* * * * *',
+        type: 'agent',
+        prompt: 'hello',
+        discord: '987654321',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.job).toBeDefined();
+  });
+
+  it('T23e: POST with type=agent + both telegram and discord → 201', async () => {
+    const { app } = makeApp();
+
+    const res = await request(app)
+      .post('/api/v1/crons')
+      .send({
+        agentId: 'agent-1',
+        name: 'agent-job-both',
+        scheduleKind: 'cron',
+        schedule: '* * * * *',
+        type: 'agent',
+        prompt: 'hello',
+        telegram: '12345',
+        discord: '987654321',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.job).toBeDefined();
   });
 });
 

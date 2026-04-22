@@ -33,7 +33,11 @@ function makeRunner(response = 'agent ok') {
   };
 }
 
-function makeAgentConfig(agentId: string, botToken = 'bot-token-123'): AgentConfig {
+function makeAgentConfig(
+  agentId: string,
+  botToken = 'bot-token-123',
+  discordBotToken?: string,
+): AgentConfig {
   return {
     id: agentId,
     description: 'test agent',
@@ -42,6 +46,7 @@ function makeAgentConfig(agentId: string, botToken = 'bot-token-123'): AgentConf
     telegram: {
       botToken,
     },
+    ...(discordBotToken ? { discord: { botToken: discordBotToken } } : {}),
     claude: {
       model: 'claude-opus-4-6',
       dangerouslySkipPermissions: false,
@@ -54,6 +59,7 @@ function makeManager(opts: {
   agentId?: string;
   runner?: ReturnType<typeof makeRunner>;
   botToken?: string;
+  discordBotToken?: string;
   tmpDir?: string;
 } = {}) {
   const agentId = opts.agentId ?? 'test-agent';
@@ -64,7 +70,10 @@ function makeManager(opts: {
   if (opts.runner) {
     agentRunners.set(agentId, opts.runner);
   }
-  agentConfigs.set(agentId, makeAgentConfig(agentId, opts.botToken ?? 'bot-token-123'));
+  agentConfigs.set(
+    agentId,
+    makeAgentConfig(agentId, opts.botToken ?? 'bot-token-123', opts.discordBotToken),
+  );
 
   const manager = new CronManager(
     { storePath: path.join(tmpDir, 'crons.json'), runsDir: path.join(tmpDir, 'runs') },
@@ -378,6 +387,235 @@ describe('T11-T13: Telegram delivery', () => {
       expect.stringContaining('Telegram notify error'),
       expect.anything(),
     );
+
+    manager.stop();
+  });
+});
+
+// ─── T14-T19: Discord delivery ────────────────────────────────────────────────
+
+describe('T14-T19: Discord delivery', () => {
+  let fetchMock: jest.SpyInstance;
+
+  beforeEach(() => {
+    fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+    } as Response);
+  });
+
+  afterEach(() => {
+    fetchMock.mockRestore();
+  });
+
+  it('T14: fetch → 200, discord CHANNEL_123 → posts to channels API with Bot auth and output content', async () => {
+    const runner = makeRunner('hello world');
+    const { manager, agentId } = makeManager({ runner, discordBotToken: 'DISC123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'discord-ok',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      discord: 'CHANNEL_123',
+    });
+
+    await manager.run(job.id);
+
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(discordCall).toBeDefined();
+    expect(discordCall![0]).toContain('/channels/CHANNEL_123/messages');
+    const init = discordCall![1];
+    const authHeader = (init.headers as Record<string, string>).Authorization;
+    expect(authHeader.startsWith('Bot ')).toBe(true);
+    expect(JSON.parse(init.body).content).toContain('hello world');
+
+    manager.stop();
+  });
+
+  it('T15: runner throws → Discord fetch not called', async () => {
+    const runner = {
+      sendApiMessage: jest.fn().mockRejectedValue(new Error('agent failed')),
+    };
+    const { manager, agentId } = makeManager({ runner, discordBotToken: 'DISC123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'discord-runner-fail',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      discord: 'CHANNEL_123',
+    });
+
+    await manager.run(job.id);
+
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(discordCall).toBeUndefined();
+
+    manager.stop();
+  });
+
+  it('T16: fetch → 500, runner succeeds → runLog.status=ok, warn logged with Discord failure info', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => 'internal server error',
+    } as Response);
+
+    const runner = makeRunner('ok');
+    const logger = makeLogger();
+    const agentId = 'test-agent';
+    const tmpDir = makeTmpDir();
+    const agentRunners = new Map<string, any>([[agentId, runner]]);
+    const agentConfigs = new Map<string, AgentConfig>([
+      [agentId, makeAgentConfig(agentId, 'bot-token-123', 'DISC')],
+    ]);
+
+    const manager = new CronManager(
+      { storePath: path.join(tmpDir, 'crons.json'), runsDir: path.join(tmpDir, 'runs') },
+      agentRunners,
+      agentConfigs,
+      logger,
+    );
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'discord-500',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      discord: 'CHANNEL_123',
+    });
+
+    const log = await manager.run(job.id);
+    expect(log.status).toBe('ok');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Discord notify failed'),
+      expect.objectContaining({ channelId: 'CHANNEL_123' }),
+    );
+
+    manager.stop();
+  });
+
+  it('T17: output longer than 2000 chars → chunked into multiple Discord messages', async () => {
+    const longText = 'a'.repeat(4500);
+    const runner = makeRunner(longText);
+    const { manager, agentId } = makeManager({ runner, discordBotToken: 'DISC' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'discord-chunked',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      discord: 'CHANNEL_123',
+    });
+
+    await manager.run(job.id);
+
+    const discordCalls = fetchMock.mock.calls.filter((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    // output truncated to 5000 chars in runLog, then split into <=2000-char chunks
+    expect(discordCalls.length).toBeGreaterThanOrEqual(2);
+    for (const call of discordCalls) {
+      const body = JSON.parse(call[1].body);
+      expect(body.content.length).toBeLessThanOrEqual(2000);
+    }
+
+    manager.stop();
+  });
+
+  it('T18: missing Discord botToken → warn logged, no fetch call, status still ok', async () => {
+    const runner = makeRunner('ok');
+    const logger = makeLogger();
+    const agentId = 'test-agent';
+    const tmpDir = makeTmpDir();
+    const agentRunners = new Map<string, any>([[agentId, runner]]);
+    // agent config omits discord block → no botToken
+    const agentConfigs = new Map<string, AgentConfig>([[agentId, makeAgentConfig(agentId)]]);
+
+    const manager = new CronManager(
+      { storePath: path.join(tmpDir, 'crons.json'), runsDir: path.join(tmpDir, 'runs') },
+      agentRunners,
+      agentConfigs,
+      logger,
+    );
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'no-token',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      discord: 'CHANNEL_123',
+    });
+
+    const log = await manager.run(job.id);
+    expect(log.status).toBe('ok');
+
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(discordCall).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('no botToken'),
+    );
+
+    manager.stop();
+  });
+
+  it('T19: both telegram and discord → delivered independently; Discord failure does not block Telegram', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes('discord.com/api')) {
+        return Promise.reject(new Error('discord down'));
+      }
+      return Promise.resolve({ ok: true, status: 200, text: async () => '' } as Response);
+    });
+
+    const runner = makeRunner('both');
+    const { manager, agentId } = makeManager({ runner, discordBotToken: 'DISC' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'both-channels',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      telegram: '12345',
+      discord: 'CHANNEL_123',
+    });
+
+    const log = await manager.run(job.id);
+    expect(log.status).toBe('ok');
+
+    const telegramCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(telegramCall).toBeDefined();
+    expect(discordCall).toBeDefined();
 
     manager.stop();
   });

@@ -169,6 +169,7 @@ export interface CronJob {
   command?: string;                 // shell command (type=command)
   prompt?: string;                  // agent prompt (type=agent)
   telegram?: string;                // chat_id to deliver agent response (type=agent, required)
+  discord?: string;                 // discord channel/user id to deliver agent response (type=agent)
   timeoutMs?: number;               // execution timeout ms (default 120000)
   // Lifecycle
   deleteAfterRun?: boolean;         // auto-delete after first successful run
@@ -190,6 +191,7 @@ export interface CronJobCreate {
   command?: string;
   prompt?: string;
   telegram?: string;
+  discord?: string;
   timeoutMs?: number;
   // Lifecycle
   deleteAfterRun?: boolean;
@@ -205,6 +207,7 @@ export interface CronJobUpdate {
   command?: string;
   prompt?: string;
   telegram?: string;
+  discord?: string;
   timeoutMs?: number;
   deleteAfterRun?: boolean;
   enabled?: boolean;

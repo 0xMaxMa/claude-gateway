@@ -41,3 +41,5 @@ restart.sh
 stop.sh
 .skills
 .claude-gateway
+tasks/
+.ralph-tui/
