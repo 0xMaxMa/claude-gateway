@@ -57,6 +57,7 @@ export class CronModule implements ToolModule {
             command: { type: 'string', description: 'Shell command (type=command)' },
             prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
             telegram: { type: 'string', description: 'Telegram chat_id for response' },
+            discord: { type: 'string', description: 'Discord channel_id for agent response delivery' },
             timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
             scheduleKind: {
               type: 'string',

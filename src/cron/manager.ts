@@ -31,10 +31,28 @@ const DEFAULT_RUNS_DIR = path.join(
 const MAX_RUN_LOGS_PER_JOB = 100;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
+const DISCORD_API_BASE = 'https://discord.com/api/v10';
+const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 
 interface StoreFormat {
   version: 1;
   jobs: CronJob[];
+}
+
+function chunkDiscordText(text: string, limit: number): string[] {
+  if (text.length <= limit) return text.length === 0 ? [] : [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    const para = rest.lastIndexOf('\n\n', limit);
+    const nl = rest.lastIndexOf('\n', limit);
+    const sp = rest.lastIndexOf(' ', limit);
+    const cut = para > limit / 2 ? para : nl > limit / 2 ? nl : sp > 0 ? sp : limit;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
 }
 
 export class CronManager extends EventEmitter {
@@ -127,6 +145,7 @@ export class CronManager extends EventEmitter {
       command: input.command,
       prompt: input.prompt,
       telegram: input.telegram,
+      discord: input.discord,
       timeoutMs: input.timeoutMs,
       deleteAfterRun: input.deleteAfterRun,
       enabled: input.enabled ?? true,
@@ -181,6 +200,7 @@ export class CronManager extends EventEmitter {
     if (input.command !== undefined) job.command = input.command;
     if (input.prompt !== undefined) job.prompt = input.prompt;
     if (input.telegram !== undefined) job.telegram = input.telegram;
+    if (input.discord !== undefined) job.discord = input.discord;
     if (input.timeoutMs !== undefined) job.timeoutMs = input.timeoutMs;
     if (input.deleteAfterRun !== undefined) job.deleteAfterRun = input.deleteAfterRun;
     if (input.name !== undefined) job.name = input.name;
@@ -280,13 +300,15 @@ export class CronManager extends EventEmitter {
     }
   }
 
-  private validatePayload(input: { type?: string; command?: string; prompt?: string; telegram?: string }): void {
+  private validatePayload(input: { type?: string; command?: string; prompt?: string; telegram?: string; discord?: string }): void {
     const kind = input.type ?? 'command';
     if (kind === 'command') {
       if (!input.command) throw new Error('command is required for type=command');
     } else if (kind === 'agent') {
       if (!input.prompt) throw new Error('prompt is required for type=agent');
-      if (!input.telegram) throw new Error('telegram is required for type=agent');
+      if (!input.telegram && !input.discord) {
+        throw new Error('telegram or discord is required for type=agent');
+      }
     }
   }
 
@@ -302,6 +324,10 @@ export class CronManager extends EventEmitter {
 
     } else if (kind === 'at') {
       const targetMs = Date.parse(job.scheduleAt!);
+      if (isNaN(targetMs)) {
+        this.logger.error(`at-job "${job.name}" has invalid scheduleAt "${job.scheduleAt}", skipping`, { id: job.id });
+        return;
+      }
       const delayMs = targetMs - Date.now();
 
       // Fix 1: If the job already ran before a crash, skip re-fire and complete cleanup.
@@ -417,9 +443,18 @@ export class CronManager extends EventEmitter {
       this.appendRunLog(job.id, runLog),
     ]);
 
-    // Deliver agent response to Telegram
-    if (status === 'ok' && job.type === 'agent' && job.telegram) {
-      await this.sendTelegram(job.agentId, job.telegram, runLog.output);
+    // Deliver agent response to configured channels (independently; one failure must not block the other)
+    if (status === 'ok' && job.type === 'agent') {
+      const deliveries: Promise<void>[] = [];
+      if (job.telegram) {
+        deliveries.push(this.sendTelegram(job.agentId, job.telegram, runLog.output));
+      }
+      if (job.discord) {
+        deliveries.push(this.sendDiscord(job.agentId, job.discord, runLog.output));
+      }
+      if (deliveries.length > 0) {
+        await Promise.allSettled(deliveries);
+      }
     }
 
     this.emit('job:executed', job, runLog);
@@ -478,6 +513,41 @@ export class CronManager extends EventEmitter {
       }
     } catch (err) {
       this.logger.warn(`Telegram notify error: ${(err as Error).message}`, { chatId });
+    }
+  }
+
+  private async sendDiscord(agentId: string, channelId: string, text: string): Promise<void> {
+    const agentConfig = this.agentConfigs.get(agentId);
+    const botToken = agentConfig?.discord?.botToken;
+
+    if (!botToken) {
+      this.logger.warn(`Cannot send Discord notify: no botToken for agent "${agentId}"`);
+      return;
+    }
+
+    const url = `${DISCORD_API_BASE}/channels/${channelId}/messages`;
+    const chunks = chunkDiscordText(text, DISCORD_MAX_MESSAGE_LENGTH);
+
+    for (const content of chunks) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bot ${botToken}`,
+          },
+          body: JSON.stringify({ content }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          this.logger.warn(`Discord notify failed: ${resp.status} ${body}`, { channelId });
+          return;
+        }
+      } catch (err) {
+        this.logger.warn(`Discord notify error: ${(err as Error).message}`, { channelId });
+        return;
+      }
     }
   }
 

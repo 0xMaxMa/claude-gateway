@@ -231,7 +231,8 @@ Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restart
 | `type` | No | `"command"` (default) or `"agent"` |
 | `command` | If `type=command` | Shell command to run |
 | `prompt` | If `type=agent` | Prompt sent to the agent as a new turn |
-| `telegram` | If `type=agent` | Telegram chat_id to deliver the agent response (required for `type=agent`) |
+| `telegram` | If `type=agent` | Telegram chat_id to deliver the agent response |
+| `discord` | If `type=agent` | Discord channel_id to deliver the agent response |
 | `timeoutMs` | No | Execution timeout in ms (default 120000) — applies to both `command` and `agent` |
 | `deleteAfterRun` | No | `true` to auto-delete after first run (one-shot jobs) |
 | `enabled` | No | `true` (default) / `false` to create disabled |
@@ -241,9 +242,11 @@ Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restart
 | | `command` | `agent` |
 |---|---|---|
 | Runs | Shell command | Agent turn (new Claude session) |
-| Key field | `command` | `prompt` + `telegram` |
+| Key field | `command` | `prompt` + `telegram` and/or `discord` |
 | Output | stdout/stderr | Agent response text |
-| Delivery | Logged only | Sent to Telegram chat |
+| Delivery | Logged only | Sent to Telegram and/or Discord |
+
+> **Note:** For `type=agent`, at least one of `telegram` or `discord` is required. Both can be set to deliver to multiple channels simultaneously.
 
 ---
 
@@ -267,7 +270,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
       "schedule": "0 9 * * *",
       "type": "agent",
       "prompt": "Give me a morning summary.",
-      "telegram": "997170033",
+      "telegram": "99000000",
       "enabled": true,
       "createdAt": 1775737709284,
       "state": {
@@ -320,7 +323,44 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 9 * * *",
     "type": "agent",
     "prompt": "Give me a morning summary.",
-    "telegram": "997170033"
+    "telegram": "99000000"
+  }' | jq
+```
+
+#### Example: Daily agent prompt — deliver to Discord
+
+Run every day at 09:00 — agent sends a morning summary to a Discord channel.
+
+```bash
+curl -s -X POST http://localhost:3000/api/v1/crons \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "claude-founder",
+    "name": "morning-brief-discord",
+    "scheduleKind": "cron",
+    "schedule": "0 9 * * *",
+    "type": "agent",
+    "prompt": "Give me a morning summary.",
+    "discord": "1234567890123456789"
+  }' | jq
+```
+
+#### Example: Deliver to both Telegram and Discord
+
+```bash
+curl -s -X POST http://localhost:3000/api/v1/crons \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "claude-founder",
+    "name": "morning-brief-all",
+    "scheduleKind": "cron",
+    "schedule": "0 9 * * *",
+    "type": "agent",
+    "prompt": "Give me a morning summary.",
+    "telegram": "99000000",
+    "discord": "1234567890123456789"
   }' | jq
 ```
 
@@ -339,7 +379,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "scheduleAt": "2026-04-09T23:00:00.000Z",
     "type": "agent",
     "prompt": "good night",
-    "telegram": "997170033",
+    "telegram": "99000000",
     "deleteAfterRun": true
   }' | jq
 ```
@@ -392,7 +432,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 18 * * 5",
     "type": "agent",
     "prompt": "Generate a weekly progress report.",
-    "telegram": "997170033",
+    "telegram": "99000000",
     "enabled": false
   }' | jq
 ```

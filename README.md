@@ -19,7 +19,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **Typing indicators** — continuous typing animation while the agent is working (Telegram and Discord)
 - **Streaming API** — SSE (Server-Sent Events) endpoint for real-time response streaming
 - **Auto-forward** — agent text output automatically forwarded to Telegram even without explicit reply tool calls
-- **Heartbeat / scheduled tasks** — cron-based proactive messages and recurring tasks via HEARTBEAT.md + REST API
+- **Heartbeat / scheduled tasks** — cron-based proactive messages and recurring tasks via HEARTBEAT.md + REST API; agent jobs deliver output to Telegram, Discord, or both
 - **Long-term memory** — persistent memory system across sessions
 - **Config auto-migration** — automatic schema migration when config format changes
 - **Access control** — allowlist, open, or pairing-based Telegram access policies

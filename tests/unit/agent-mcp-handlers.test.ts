@@ -226,14 +226,14 @@ describe('createAgent — Telegram happy path', () => {
       description: 'A test agent',
       channel: 'telegram',
       bot_token: VALID_TG_TOKEN,
-      telegram_user_id: '997170033',
+      telegram_user_id: '99000000',
     });
 
     const wsDir = path.join(tmpDir, 'agents', 'myagent2', 'workspace');
     const stateDir = path.join(wsDir, '.telegram-state');
-    expect(mockWriteTelegramAccess).toHaveBeenCalledWith(stateDir, '997170033');
+    expect(mockWriteTelegramAccess).toHaveBeenCalledWith(stateDir, '99000000');
     const access = JSON.parse(fs.readFileSync(path.join(stateDir, 'access.json'), 'utf8'));
-    expect(access.allowFrom).toEqual(['997170033']);
+    expect(access.allowFrom).toEqual(['99000000']);
   });
 
   it('AMH-01c: does NOT use telegram_user_id for discord channel (isolation test)', async () => {
@@ -244,7 +244,7 @@ describe('createAgent — Telegram happy path', () => {
       description: 'Isolation test',
       channel: 'discord',
       bot_token: VALID_DC_TOKEN,
-      telegram_user_id: '997170033',
+      telegram_user_id: '99000000',
     });
 
     const wsDir = path.join(tmpDir, 'agents', 'dcagent-iso', 'workspace');
