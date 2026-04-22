@@ -35,9 +35,9 @@ export class SessionProcess extends EventEmitter {
   private readonly restartSignalPath: string;
   queryMode = false;
   private _queryResolve?: (text: string) => void;
-  private _queryReject?: (err: Error) => void;
   private _queryBuffer = '';
   private _queryTimer?: ReturnType<typeof setTimeout>;
+  private _querySettled = false;
 
   constructor(
     sessionId: string,
@@ -154,6 +154,7 @@ export class SessionProcess extends EventEmitter {
 
     const historyText = recent
       .map(m => {
+        // system role carries injected summaries (e.g. [Image Context Summary]) from the runner
         if (m.role === 'system') return `System: ${m.content}`;
         return `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`;
       })
@@ -545,11 +546,13 @@ export class SessionProcess extends EventEmitter {
             writeStatus(obj.is_error ? 'error' : 'done');
             if (this.queryMode) {
               if (this._queryTimer) clearTimeout(this._queryTimer);
-              const resolve = this._queryResolve;
-              this.queryMode = false;
-              this._queryResolve = undefined;
-              this._queryReject = undefined;
-              resolve?.(this._queryBuffer.trim());
+              if (!this._querySettled) {
+                this._querySettled = true;
+                const resolve = this._queryResolve;
+                this.queryMode = false;
+                this._queryResolve = undefined;
+                resolve?.(this._queryBuffer.trim());
+              }
               this._queryBuffer = '';
               assistantBuffer = '';
             } else {
@@ -649,14 +652,15 @@ export class SessionProcess extends EventEmitter {
         reject(new Error('Cannot query: subprocess not running'));
         return;
       }
+      this._querySettled = false;
       this._queryResolve = resolve;
-      this._queryReject = reject;
       this._queryBuffer = '';
       this.queryMode = true;
       this._queryTimer = setTimeout(() => {
+        if (this._querySettled) return;
+        this._querySettled = true;
         this.queryMode = false;
         this._queryResolve = undefined;
-        this._queryReject = undefined;
         reject(new Error('query timeout'));
       }, timeoutMs);
       this.sendMessage(prompt);

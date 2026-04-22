@@ -49,8 +49,12 @@ export class AgentRunner extends EventEmitter {
   private stopping = false;
   private callbackServer: http.Server | null = null;
   private callbackPort = 0;
-  imageSizeSinceRestart: number = 0;
-  needsRestart: boolean = false;
+  private _imageSizeSinceRestart: number = 0;
+  private _needsRestart: boolean = false;
+  private _statQueue: Promise<void> = Promise.resolve();
+
+  get imageSizeSinceRestart(): number { return this._imageSizeSinceRestart; }
+  get needsRestart(): boolean { return this._needsRestart; }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
@@ -166,14 +170,14 @@ export class AgentRunner extends EventEmitter {
                 ts: Date.now(),
               });
               // Restart session before this turn if accumulated image size exceeded threshold
-              if (this.needsRestart) {
+              if (this._needsRestart) {
                 const existingSession = this.sessions.get(chatId);
                 if (existingSession) {
                   await existingSession.stop();
                   this.sessions.delete(chatId);
                 }
-                this.needsRestart = false;
-                this.imageSizeSinceRestart = 0;
+                this._needsRestart = false;
+                this._imageSizeSinceRestart = 0;
               }
 
               // Route to session process (map key = chatId, actual sessionId passed separately)
@@ -587,17 +591,18 @@ export class AgentRunner extends EventEmitter {
             const imgPath = queue?.shift();
             if (queue?.length === 0) this.pendingImagePaths.delete(mapKey);
             if (imgPath) {
-              fsPromises.stat(imgPath)
-                .then((stats) => {
-                  this.imageSizeSinceRestart += stats.size;
-                  if (this.imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
-                    this.imageSizeSinceRestart = 0;
+              this._statQueue = this._statQueue.then(async () => {
+                try {
+                  const stats = await fsPromises.stat(imgPath);
+                  this._imageSizeSinceRestart += stats.size;
+                  if (this._imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
+                    this._imageSizeSinceRestart = 0;
                     void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
                   }
-                })
-                .catch((err: Error) => {
-                  this.logger.warn('Failed to stat image', { path: imgPath, error: err.message });
-                });
+                } catch (err: unknown) {
+                  this.logger.warn('Failed to stat image', { path: imgPath, error: err instanceof Error ? err.message : String(err) });
+                }
+              });
             }
             // Always forward result text — it contains the agent's completion summary.
             // If the agent also called reply tool, this summary still reaches the user.
@@ -1004,9 +1009,9 @@ export class AgentRunner extends EventEmitter {
         await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, msg);
       }
     } catch (err) {
-      this.logger.warn('Image context summary failed', { error: String(err) });
+      this.logger.warn('Image context summary failed', { error: err instanceof Error ? err.message : String(err) });
     }
-    this.needsRestart = true;
+    this._needsRestart = true;
   }
 
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {

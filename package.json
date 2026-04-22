@@ -13,9 +13,7 @@
     "test:manual": "jest --testPathPattern=phase-manual --testTimeout=15000",
     "integration:hb": "jest --testPathPattern=heartbeat-e2e --testTimeout=15000",
     "integration:cs": "jest --testPathPattern=character-system --testTimeout=15000",
-    "typecheck": "tsc --noEmit",
-    "create-agent": "ts-node scripts/create-agent.ts",
-    "pair": "ts-node scripts/pair.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "chokidar": "^3.5.0",

@@ -1486,7 +1486,7 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     const stopSpy = jest.spyOn(firstSession, 'stop');
 
     // Trigger the restart flag
-    runner.needsRestart = true;
+    (runner as any)._needsRestart = true;
 
     const spawnCountBefore = (require('child_process').spawn as jest.Mock).mock.calls.length;
 
@@ -1515,7 +1515,7 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await sendChannelPost(port, 'chat:r03', 'first turn');
     await new Promise(r => setTimeout(r, 150));
 
-    runner.needsRestart = true;
+    (runner as any)._needsRestart = true;
 
     await sendChannelPost(port, 'chat:r03', 'second turn');
     await new Promise(r => setTimeout(r, 150));
@@ -1535,8 +1535,8 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await sendChannelPost(port, 'chat:r04', 'first turn');
     await new Promise(r => setTimeout(r, 150));
 
-    runner.needsRestart = true;
-    runner.imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 100;
+    (runner as any)._needsRestart = true;
+    (runner as any)._imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 100;
 
     await sendChannelPost(port, 'chat:r04', 'second turn');
     await new Promise(r => setTimeout(r, 150));
@@ -1551,8 +1551,8 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    runner.needsRestart = true;
-    runner.imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 1;
+    (runner as any)._needsRestart = true;
+    (runner as any)._imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 1;
 
     const port = getCallbackPort(runner);
 
@@ -1580,7 +1580,7 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     const firstSession = getSessions(runner).get('chat:r06')!;
     const stopSpy = jest.spyOn(firstSession, 'stop');
 
-    runner.needsRestart = true;
+    (runner as any)._needsRestart = true;
 
     // Send a plain text turn (no image) — restart should still happen
     await sendChannelPost(port, 'chat:r06', 'plain text follow-up');
@@ -1713,7 +1713,7 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     expect(runner.imageSizeSinceRestart).toBe(size1);
 
     // Mark restart needed; next turn triggers the restart and resets accumulator to 0
-    runner.needsRestart = true;
+    (runner as any)._needsRestart = true;
     await sendChannelPost(port, 'chat:us4-03', 'text turn triggers restart');
     await new Promise(r => setTimeout(r, 150));
     expect(runner.imageSizeSinceRestart).toBe(0);
@@ -1880,7 +1880,7 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     // Pre-set accumulator so that adding fileSize bytes crosses the limit
-    runner.imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES - fileSize + 1;
+    (runner as any)._imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES - fileSize + 1;
 
     const port = getCallbackPort(runner);
     await sendImageChannelPost(port, 'chat:img03', testImagePath);
