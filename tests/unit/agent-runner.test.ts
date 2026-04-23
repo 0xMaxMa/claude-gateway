@@ -1448,7 +1448,7 @@ describe('AgentRunner — restart before turn (US-003)', () => {
   it('US3-01: needsRestart=false — existing session is reused without restart', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
-    expect(runner.restartPending).toBe(false);
+    expect(runner.restartPending('chat:r01')).toBe(false);
 
     const port = getCallbackPort(runner);
 
@@ -1486,7 +1486,7 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     const stopSpy = jest.spyOn(firstSession, 'stop');
 
     // Trigger the restart flag
-    (runner as any).needsRestart = true;
+    (runner as any).pendingRestarts.add('chat:r02');
 
     const spawnCountBefore = (require('child_process').spawn as jest.Mock).mock.calls.length;
 
@@ -1515,12 +1515,12 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await sendChannelPost(port, 'chat:r03', 'first turn');
     await new Promise(r => setTimeout(r, 150));
 
-    (runner as any).needsRestart = true;
+    (runner as any).pendingRestarts.add('chat:r03');
 
     await sendChannelPost(port, 'chat:r03', 'second turn');
     await new Promise(r => setTimeout(r, 150));
 
-    expect(runner.restartPending).toBe(false);
+    expect(runner.restartPending('chat:r03')).toBe(false);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1535,13 +1535,13 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await sendChannelPost(port, 'chat:r04', 'first turn');
     await new Promise(r => setTimeout(r, 150));
 
-    (runner as any).needsRestart = true;
-    (runner as any).imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 100;
+    (runner as any).pendingRestarts.add('chat:r04');
+    (runner as any).imageSizePerChat.set('chat:r04', MAX_IMAGE_SIZE_BYTES + 100);
 
     await sendChannelPost(port, 'chat:r04', 'second turn');
     await new Promise(r => setTimeout(r, 150));
 
-    expect(runner.imageSize).toBe(0);
+    expect(runner.imageSize('chat:r04')).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1551,8 +1551,8 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    (runner as any).needsRestart = true;
-    (runner as any).imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES + 1;
+    (runner as any).pendingRestarts.add('chat:r05');
+    (runner as any).imageSizePerChat.set('chat:r05', MAX_IMAGE_SIZE_BYTES + 1);
 
     const port = getCallbackPort(runner);
 
@@ -1561,8 +1561,8 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await new Promise(r => setTimeout(r, 150));
 
     expect(getSessions(runner).has('chat:r05')).toBe(true);
-    expect(runner.restartPending).toBe(false);
-    expect(runner.imageSize).toBe(0);
+    expect(runner.restartPending('chat:r05')).toBe(false);
+    expect(runner.imageSize('chat:r05')).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1580,14 +1580,14 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     const firstSession = getSessions(runner).get('chat:r06')!;
     const stopSpy = jest.spyOn(firstSession, 'stop');
 
-    (runner as any).needsRestart = true;
+    (runner as any).pendingRestarts.add('chat:r06');
 
     // Send a plain text turn (no image) — restart should still happen
     await sendChannelPost(port, 'chat:r06', 'plain text follow-up');
     await new Promise(r => setTimeout(r, 150));
 
     expect(stopSpy).toHaveBeenCalled();
-    expect(runner.restartPending).toBe(false);
+    expect(runner.restartPending('chat:r06')).toBe(false);
   }, 15000);
 });
 
@@ -1659,7 +1659,7 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: '', is_error: true }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(fileSize);
+    expect(runner.imageSize('chat:us4-01')).toBe(fileSize);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1683,8 +1683,8 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 200));
 
-    expect(runner.restartPending).toBe(true);
-    expect(runner.imageSize).toBe(0);
+    expect(runner.restartPending('chat:us4-02')).toBe(true);
+    expect(runner.imageSize('chat:us4-02')).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1710,13 +1710,13 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     expect(session1).toBeDefined();
     session1.emit('output', JSON.stringify({ type: 'result', result: 'done1' }));
     await new Promise(r => setTimeout(r, 100));
-    expect(runner.imageSize).toBe(size1);
+    expect(runner.imageSize('chat:us4-03')).toBe(size1);
 
     // Mark restart needed; next turn triggers the restart and resets accumulator to 0
-    (runner as any).needsRestart = true;
+    (runner as any).pendingRestarts.add('chat:us4-03');
     await sendChannelPost(port, 'chat:us4-03', 'text turn triggers restart');
     await new Promise(r => setTimeout(r, 150));
-    expect(runner.imageSize).toBe(0);
+    expect(runner.imageSize('chat:us4-03')).toBe(0);
 
     // Image turn in the new session — must accumulate from zero
     await sendImageChannelPost(port, 'chat:us4-03', img2);
@@ -1727,8 +1727,8 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     await new Promise(r => setTimeout(r, 100));
 
     // Only size2 should be in the accumulator — old total (size1) must not carry over
-    expect(runner.imageSize).toBe(size2);
-    expect(runner.restartPending).toBe(false);
+    expect(runner.imageSize('chat:us4-03')).toBe(size2);
+    expect(runner.restartPending('chat:us4-03')).toBe(false);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1775,7 +1775,7 @@ describe('AgentRunner — image size edge cases (US-004)', () => {
     session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 200));
 
-    expect(runner.restartPending).toBe(true);
+    expect(runner.restartPending('chat:us4-05')).toBe(true);
   }, 15000);
 });
 
@@ -1841,8 +1841,8 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     }
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(0);
-    expect(runner.restartPending).toBe(false);
+    expect(runner.imageSize('chat:img01')).toBe(0);
+    expect(runner.restartPending('chat:img01')).toBe(false);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1865,8 +1865,8 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(fileSize);
-    expect(runner.restartPending).toBe(false);
+    expect(runner.imageSize('chat:img02')).toBe(fileSize);
+    expect(runner.restartPending('chat:img02')).toBe(false);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1880,7 +1880,7 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     // Pre-set accumulator so that adding fileSize bytes crosses the limit
-    (runner as any).imageSizeSinceRestart = MAX_IMAGE_SIZE_BYTES - fileSize + 1;
+    (runner as any).imageSizePerChat.set('chat:img03', MAX_IMAGE_SIZE_BYTES - fileSize + 1);
 
     const port = getCallbackPort(runner);
     await sendImageChannelPost(port, 'chat:img03', testImagePath);
@@ -1892,8 +1892,8 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 200));
 
-    expect(runner.restartPending).toBe(true);
-    expect(runner.imageSize).toBe(0);
+    expect(runner.restartPending('chat:img03')).toBe(true);
+    expect(runner.imageSize('chat:img03')).toBe(0);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1914,8 +1914,8 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(0);
-    expect(runner.restartPending).toBe(false);
+    expect(runner.imageSize('chat:img04')).toBe(0);
+    expect(runner.restartPending('chat:img04')).toBe(false);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1938,13 +1938,13 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     session!.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(fileSize);
+    expect(runner.imageSize('chat:img05')).toBe(fileSize);
   }, 15000);
 
   // --------------------------------------------------------------------------
-  // US2-06: multiple image turns from different sessions accumulate total size
+  // US2-06: multiple image turns from different chatIds each accumulate size independently
   // --------------------------------------------------------------------------
-  it('US2-06: multiple image turns accumulate total size across sessions', async () => {
+  it('US2-06: image turns on different chatIds accumulate size independently', async () => {
     const img1 = path.join(tmpDir, 'img1.jpg');
     const img2 = path.join(tmpDir, 'img2.jpg');
     fs.writeFileSync(img1, Buffer.alloc(300));
@@ -1963,7 +1963,7 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     sessA.emit('output', JSON.stringify({ type: 'result', result: 'done 1' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(300);
+    expect(runner.imageSize('chat:img06a')).toBe(300);
 
     // Second image turn on a different session
     await sendImageChannelPost(port, 'chat:img06b', img2);
@@ -1973,7 +1973,7 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     sessB.emit('output', JSON.stringify({ type: 'result', result: 'done 2' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(runner.imageSize).toBe(1000); // 300 + 700
+    expect(runner.imageSize('chat:img06b')).toBe(700);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -2004,14 +2004,219 @@ describe('AgentRunner — image size tracking (US-002)', () => {
     // Fire 3 results — each dequeues one image path
     session.emit('output', JSON.stringify({ type: 'result', result: 'turn1' }));
     await new Promise(r => setTimeout(r, 100));
-    expect(runner.imageSize).toBe(100);
+    expect(runner.imageSize('chat:img07')).toBe(100);
 
     session.emit('output', JSON.stringify({ type: 'result', result: 'turn2' }));
     await new Promise(r => setTimeout(r, 100));
-    expect(runner.imageSize).toBe(300); // 100 + 200
+    expect(runner.imageSize('chat:img07')).toBe(300); // 100 + 200
 
     session.emit('output', JSON.stringify({ type: 'result', result: 'turn3' }));
     await new Promise(r => setTimeout(r, 100));
-    expect(runner.imageSize).toBe(600); // 100 + 200 + 300
+    expect(runner.imageSize('chat:img07')).toBe(600); // 100 + 200 + 300
+  }, 15000);
+});
+
+// ── Discord-aware auto-forward format (US-005) ─────────────────────────────────
+
+describe('AgentRunner — Discord-aware auto-forward format (US-005)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-discord-fmt-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  async function sendImageChannelPost(
+    port: number,
+    chatId: string,
+    imagePath: string,
+    content = '',
+  ): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        meta: {
+          chat_id: chatId,
+          message_id: '1',
+          user: 'testuser',
+          ts: new Date().toISOString(),
+          image_path: imagePath,
+        },
+      }),
+    });
+  }
+
+  // US5-01: Discord auto-forward uses plain text format (not html)
+  it('US5-01: Discord result text is forwarded as plain text, not Telegram HTML', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'ch:disc01', 'hello');
+    await new Promise(r => setTimeout(r, 150));
+
+    (runner as any).channelSourceMap?.set('ch:disc01', 'discord');
+
+    const session = getSessions(runner).get('ch:disc01');
+    expect(session).toBeDefined();
+
+    const writeForwardSpy = jest.spyOn(
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      'writeAutoForward',
+    );
+
+    session!.emit('output', JSON.stringify({ type: 'result', result: '**bold** and `code`' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(writeForwardSpy).toHaveBeenCalledWith('ch:disc01', '**bold** and `code`');
+  }, 15000);
+
+  // US5-02: Telegram result text with markdown is converted to HTML
+  it('US5-02: Telegram result text with markdown is forwarded as Telegram HTML', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'ch:tg01', 'hello');
+    await new Promise(r => setTimeout(r, 150));
+
+    (runner as any).channelSourceMap?.set('ch:tg01', 'telegram');
+
+    const session = getSessions(runner).get('ch:tg01');
+    expect(session).toBeDefined();
+
+    const writeForwardSpy = jest.spyOn(
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      'writeAutoForward',
+    );
+
+    session!.emit('output', JSON.stringify({ type: 'result', result: '**bold text**' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(writeForwardSpy).toHaveBeenCalledWith(
+      'ch:tg01',
+      expect.stringContaining('<b>'),
+      'html',
+    );
+  }, 15000);
+
+  // US5-03: Telegram plain text (no markdown) forwarded without html format
+  it('US5-03: Telegram result text without markdown is forwarded as plain text', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'ch:tg02', 'hello');
+    await new Promise(r => setTimeout(r, 150));
+
+    (runner as any).channelSourceMap?.set('ch:tg02', 'telegram');
+
+    const session = getSessions(runner).get('ch:tg02');
+    expect(session).toBeDefined();
+
+    const writeForwardSpy = jest.spyOn(
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      'writeAutoForward',
+    );
+
+    session!.emit('output', JSON.stringify({ type: 'result', result: 'plain text no markdown' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(writeForwardSpy).toHaveBeenCalledWith('ch:tg02', 'plain text no markdown');
+  }, 15000);
+
+  // US5-04: per-chat image counters are independent across chatIds
+  it('US5-04: image size counters for different chatIds are independent', async () => {
+    const img1 = path.join(tmpDir, 'chat-a.jpg');
+    const img2 = path.join(tmpDir, 'chat-b.jpg');
+    fs.writeFileSync(img1, Buffer.alloc(500));
+    fs.writeFileSync(img2, Buffer.alloc(800));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    await sendImageChannelPost(port, 'chat:iso-a', img1);
+    await new Promise(r => setTimeout(r, 150));
+    const sessA = getSessions(runner).get('chat:iso-a')!;
+    sessA.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    await sendImageChannelPost(port, 'chat:iso-b', img2);
+    await new Promise(r => setTimeout(r, 150));
+    const sessB = getSessions(runner).get('chat:iso-b')!;
+    sessB.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(runner.imageSize('chat:iso-a')).toBe(500);
+    expect(runner.imageSize('chat:iso-b')).toBe(800);
+  }, 15000);
+
+  // US5-05: restart flag for one chatId does not affect another
+  it('US5-05: restart flag set for chatId A does not trigger restart for chatId B', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:rst-a', 'first message');
+    await new Promise(r => setTimeout(r, 150));
+
+    (runner as any).pendingRestarts.add('chat:rst-a');
+
+    expect(runner.restartPending('chat:rst-a')).toBe(true);
+    expect(runner.restartPending('chat:rst-b')).toBe(false);
+  }, 15000);
+
+  // US5-06: restart clears only the triggering chatId's counter
+  it('US5-06: restart triggered for chatId A clears only A counter, B counter unchanged', async () => {
+    const imgA = path.join(tmpDir, 'reset-a.jpg');
+    const imgB = path.join(tmpDir, 'reset-b.jpg');
+    fs.writeFileSync(imgA, Buffer.alloc(300));
+    fs.writeFileSync(imgB, Buffer.alloc(400));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+
+    await sendImageChannelPost(port, 'chat:clr-a', imgA);
+    await new Promise(r => setTimeout(r, 150));
+    const sessA = getSessions(runner).get('chat:clr-a')!;
+    sessA.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    await sendImageChannelPost(port, 'chat:clr-b', imgB);
+    await new Promise(r => setTimeout(r, 150));
+    const sessB = getSessions(runner).get('chat:clr-b')!;
+    sessB.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(runner.imageSize('chat:clr-a')).toBe(300);
+    expect(runner.imageSize('chat:clr-b')).toBe(400);
+
+    // Manually trigger restart for chat A only
+    (runner as any).pendingRestarts.add('chat:clr-a');
+    (runner as any).imageSizePerChat.delete('chat:clr-a');
+
+    // After reset: A is 0, B is unchanged
+    expect(runner.imageSize('chat:clr-a')).toBe(0);
+    expect(runner.imageSize('chat:clr-b')).toBe(400);
   }, 15000);
 });

@@ -49,12 +49,12 @@ export class AgentRunner extends EventEmitter {
   private stopping = false;
   private callbackServer: http.Server | null = null;
   private callbackPort = 0;
-  private imageSizeSinceRestart: number = 0;
-  private needsRestart: boolean = false;
+  private readonly imageSizePerChat = new Map<string, number>();
+  private readonly pendingRestarts = new Set<string>();
   private statQueue: Promise<void> = Promise.resolve();
 
-  get imageSize(): number { return this.imageSizeSinceRestart; }
-  get restartPending(): boolean { return this.needsRestart; }
+  imageSize(chatId: string): number { return this.imageSizePerChat.get(chatId) ?? 0; }
+  restartPending(chatId: string): boolean { return this.pendingRestarts.has(chatId); }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
@@ -170,14 +170,14 @@ export class AgentRunner extends EventEmitter {
                 ts: Date.now(),
               });
               // Restart session before this turn if accumulated image size exceeded threshold
-              if (this.needsRestart) {
+              if (this.pendingRestarts.has(chatId)) {
                 const existingSession = this.sessions.get(chatId);
                 if (existingSession) {
                   await existingSession.stop();
                   this.sessions.delete(chatId);
                 }
-                this.needsRestart = false;
-                this.imageSizeSinceRestart = 0;
+                this.pendingRestarts.delete(chatId);
+                this.imageSizePerChat.delete(chatId);
               }
 
               // Route to session process (map key = chatId, actual sessionId passed separately)
@@ -594,9 +594,11 @@ export class AgentRunner extends EventEmitter {
               this.statQueue = this.statQueue.then(async () => {
                 try {
                   const stats = await fsPromises.stat(imgPath);
-                  this.imageSizeSinceRestart += stats.size;
-                  if (this.imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
-                    this.imageSizeSinceRestart = 0;
+                  const prev = this.imageSizePerChat.get(mapKey) ?? 0;
+                  const next = prev + stats.size;
+                  this.imageSizePerChat.set(mapKey, next);
+                  if (next >= MAX_IMAGE_SIZE_BYTES) {
+                    this.imageSizePerChat.delete(mapKey);
                     void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
                   }
                 } catch (err: unknown) {
@@ -610,7 +612,8 @@ export class AgentRunner extends EventEmitter {
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
             if (resultText.trim() && !proc.queryMode) {
               const text = resultText.trim();
-              if (hasMarkdown(text)) {
+              const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
+              if (channelSrc !== 'discord' && hasMarkdown(text)) {
                 this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
               } else {
                 this.writeAutoForward(mapKey, text);
@@ -1011,7 +1014,7 @@ export class AgentRunner extends EventEmitter {
     } catch (err) {
       this.logger.warn('Image context summary failed', { error: err instanceof Error ? err.message : String(err) });
     }
-    this.needsRestart = true;
+    this.pendingRestarts.add(chatId);
   }
 
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {
