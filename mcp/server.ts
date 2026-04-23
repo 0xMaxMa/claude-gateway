@@ -17,6 +17,7 @@ import { DiscordModule } from './tools/discord/module';
 import { CronModule } from './tools/cron/module';
 import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
+import { GatewayModule } from './tools/gateway/module';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
 
 const ORIGIN_CHANNEL = process.env.GATEWAY_ORIGIN_CHANNEL ?? '';
@@ -33,6 +34,7 @@ const modules: AnyModule[] = [
   new CronModule(),
   new SkillsModule(),
   new AgentModule(),
+  new GatewayModule(),
 ];
 
 // Build tool-to-module mapping for enabled modules
