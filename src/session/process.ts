@@ -18,6 +18,7 @@ export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
   readonly chatId: string;
   readonly source: 'telegram' | 'discord' | 'api';
+  private readonly sessionChannel: 'telegram' | 'discord';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
@@ -51,6 +52,7 @@ export class SessionProcess extends EventEmitter {
     this.sessionId = sessionId;
     this.source = source;
     this.chatId = chatId ?? sessionId;
+    this.sessionChannel = source === 'discord' ? 'discord' : 'telegram';
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
     this.sessionStore = sessionStore;
@@ -116,7 +118,7 @@ export class SessionProcess extends EventEmitter {
         : '[System: Graceful restart completed successfully. Do not restart again.]';
       const restartMsg = { role: 'assistant' as const, content: marker, ts: Date.now() };
       const appendRestartMarker = this.source !== 'api'
-        ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, restartMsg)
+        ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, restartMsg, this.sessionChannel)
         : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, restartMsg);
       appendRestartMarker.catch(err => this.logger.warn('Failed to write restart marker', { error: err.message }));
       if (this.process) {
@@ -127,7 +129,7 @@ export class SessionProcess extends EventEmitter {
 
   private async buildInitialPrompt(): Promise<{ prompt: string; loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number }> {
     const history = this.source !== 'api'
-      ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId)
+      ? await this.sessionStore.loadTelegramSession(this.agentConfig.id, this.chatId, this.sessionId, this.sessionChannel)
       : await this.sessionStore.loadSession(this.agentConfig.id, this.sessionId);
 
     // If history exceeds the limit and history[0] is a compaction summary, rescue it
@@ -559,7 +561,7 @@ export class SessionProcess extends EventEmitter {
               if (assistantBuffer.trim()) {
                 const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
                 const appendAssistant = this.source !== 'api'
-                  ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg)
+                  ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, assistantMsg, this.sessionChannel)
                   : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, assistantMsg);
                 appendAssistant.catch(() => {});
                 assistantBuffer = '';

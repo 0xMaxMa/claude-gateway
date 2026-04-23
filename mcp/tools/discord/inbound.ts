@@ -45,6 +45,7 @@ export function createMessageHandler(
       messageId: message.id,
       threadId: isThread ? message.channelId : undefined,
       attachmentFileId: message.attachments.first()?.url,
+      attachmentSize: message.attachments.first()?.size,
       ts: message.createdTimestamp,
     };
 

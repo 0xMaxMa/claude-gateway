@@ -16,6 +16,7 @@ export type InboundMessage = {
   replyToMessageId?: string;
   threadId?: string;
   attachmentFileId?: string;
+  attachmentSize?: number;
   ts: number;
 };
 
