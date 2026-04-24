@@ -49,12 +49,16 @@ export class AgentRunner extends EventEmitter {
   private stopping = false;
   private callbackServer: http.Server | null = null;
   private callbackPort = 0;
-  private imageSizeSinceRestart: number = 0;
-  private needsRestart: boolean = false;
+  private readonly imageSizePerChat = new Map<string, number>();
+  private readonly pendingRestarts = new Set<string>();
   private statQueue: Promise<void> = Promise.resolve();
 
-  get imageSize(): number { return this.imageSizeSinceRestart; }
-  get restartPending(): boolean { return this.needsRestart; }
+  imageSize(chatId: string): number { return this.imageSizePerChat.get(chatId) ?? 0; }
+  restartPending(chatId: string): boolean { return this.pendingRestarts.has(chatId); }
+
+  private channelFor(chatId: string): 'telegram' | 'discord' {
+    return this.channelSourceMap.get(chatId) ?? 'telegram';
+  }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
@@ -69,7 +73,7 @@ export class AgentRunner extends EventEmitter {
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
 
-  // Tracks pending image paths per chatId (queue) for size accumulation after each turn
+  // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
 
   // Skill registry for detecting /skill-name commands in user messages
@@ -146,6 +150,10 @@ export class AgentRunner extends EventEmitter {
           const chatId = meta['chat_id'] ?? '';
           const content = params.content ?? '';
 
+          // Set channel early so all handlers (including session commands) have it
+          const channelSource = (meta['source'] === 'discord' ? 'discord' : 'telegram') as 'telegram' | 'discord';
+          this.channelSourceMap.set(chatId, channelSource);
+
           // Check if this is a session management command
           const trimmedContent = content.trim();
           if (this.isSessionCommand(trimmedContent)) {
@@ -158,26 +166,24 @@ export class AgentRunner extends EventEmitter {
             return;
           }
 
-          const channelSource = (meta['source'] === 'discord' ? 'discord' : 'telegram') as 'telegram' | 'discord';
-
           // Get active session ID and route message to it
-          this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId)
+          this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource)
             .then(async (sessionId) => {
               // Append user message to the active session
               await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
                 role: 'user',
-                content,
+                content: content || (meta['attachment_file_id'] ? '(photo)' : ''),
                 ts: Date.now(),
-              });
+              }, channelSource);
               // Restart session before this turn if accumulated image size exceeded threshold
-              if (this.needsRestart) {
+              if (this.pendingRestarts.has(chatId)) {
                 const existingSession = this.sessions.get(chatId);
                 if (existingSession) {
                   await existingSession.stop();
                   this.sessions.delete(chatId);
                 }
-                this.needsRestart = false;
-                this.imageSizeSinceRestart = 0;
+                this.pendingRestarts.delete(chatId);
+                this.imageSizePerChat.delete(chatId);
               }
 
               // Route to session process (map key = chatId, actual sessionId passed separately)
@@ -351,7 +357,7 @@ export class AgentRunner extends EventEmitter {
     if (command === 'list_sessions') {
       const chatId = body.chat_id ?? '';
       try {
-        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
         return respond({ sessions: index.sessions, activeSessionId: index.activeSessionId });
       } catch {
         return respond({ success: false, error: 'Failed to list sessions' });
@@ -361,7 +367,7 @@ export class AgentRunner extends EventEmitter {
     if (command === 'session_info') {
       const chatId = body.chat_id ?? '';
       try {
-        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+        const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
         const meta = index.sessions.find(s => s.id === index.activeSessionId);
         if (!meta) {
           return respond({ success: true, text: 'No active session found.' });
@@ -406,7 +412,7 @@ export class AgentRunner extends EventEmitter {
       }
       this.switchSession(chatId, sessionId)
         .then(async () => {
-          const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+          const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
           const session = index.sessions.find(s => s.id === sessionId);
           respond({ success: true, sessionName: session?.name ?? sessionId });
         })
@@ -421,9 +427,9 @@ export class AgentRunner extends EventEmitter {
         respond({ success: false, error: 'Missing session_id' });
         return;
       }
-      this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId)
+      this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, this.channelFor(chatId))
         .then(async () => {
-          const newIndex = await this.sessionStore.listSessions(this.agentConfig.id, chatId);
+          const newIndex = await this.sessionStore.listSessions(this.agentConfig.id, chatId, this.channelFor(chatId));
           await this.restartProcess(chatId);
           const activeMeta = newIndex.sessions.find(s => s.id === newIndex.activeSessionId);
           respond({ success: true, sessionName: activeMeta?.name ?? newIndex.activeSessionId });
@@ -476,7 +482,6 @@ export class AgentRunner extends EventEmitter {
       'image_path',
       'attachment_file_id',
       'attachment_kind',
-      'attachment_size',
       'attachment_mime',
       'attachment_name',
     ]
@@ -586,7 +591,7 @@ export class AgentRunner extends EventEmitter {
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
-            // Accumulate image file size for restart tracking
+            // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
             const queue = this.pendingImagePaths.get(mapKey);
             const imgPath = queue?.shift();
             if (queue?.length === 0) this.pendingImagePaths.delete(mapKey);
@@ -594,9 +599,11 @@ export class AgentRunner extends EventEmitter {
               this.statQueue = this.statQueue.then(async () => {
                 try {
                   const stats = await fsPromises.stat(imgPath);
-                  this.imageSizeSinceRestart += stats.size;
-                  if (this.imageSizeSinceRestart >= MAX_IMAGE_SIZE_BYTES) {
-                    this.imageSizeSinceRestart = 0;
+                  const prev = this.imageSizePerChat.get(mapKey) ?? 0;
+                  const next = prev + stats.size;
+                  this.imageSizePerChat.set(mapKey, next);
+                  if (next >= MAX_IMAGE_SIZE_BYTES) {
+                    this.imageSizePerChat.delete(mapKey);
                     void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
                   }
                 } catch (err: unknown) {
@@ -610,7 +617,8 @@ export class AgentRunner extends EventEmitter {
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
             if (resultText.trim() && !proc.queryMode) {
               const text = resultText.trim();
-              if (hasMarkdown(text)) {
+              const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
+              if (channelSrc !== 'discord' && hasMarkdown(text)) {
                 this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
               } else {
                 this.writeAutoForward(mapKey, text);
@@ -631,13 +639,14 @@ export class AgentRunner extends EventEmitter {
       // so tokens are attributed to the session that owns this process.
       proc.on('tokenUsage', async ({ inputTokens, totalTokens }: { inputTokens: number; totalTokens: number }) => {
         try {
-          const index = await this.sessionStore.listSessions(this.agentConfig.id, mapKey);
+          const ch = this.channelFor(mapKey);
+          const index = await this.sessionStore.listSessions(this.agentConfig.id, mapKey, ch);
           const meta = index.sessions.find(s => s.id === actualSessionId);
           const current = meta?.totalTokensUsed ?? 0;
           await this.sessionStore.updateSessionMeta(this.agentConfig.id, mapKey, actualSessionId, {
             totalTokensUsed: current + totalTokens,
             lastInputTokens: inputTokens,
-          });
+          }, ch);
         } catch {
           // Non-fatal — token tracking is best-effort
         }
@@ -651,7 +660,7 @@ export class AgentRunner extends EventEmitter {
           loadedAtSpawn: proc.spawnContext.loadedAtSpawn,
           archivedCount: proc.spawnContext.archivedCount,
           messageCountAtSpawn: proc.spawnContext.messageCountAtSpawn,
-        }).catch(() => { /* Non-fatal */ });
+        }, this.channelFor(mapKey)).catch(() => {});
       }
 
       // Clean up pending typing-done timer when session stops
@@ -721,7 +730,7 @@ export class AgentRunner extends EventEmitter {
    * /sessions — list all sessions for this chat.
    */
   private async handleCommandSessions(agentId: string, chatId: string): Promise<void> {
-    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const index = await this.sessionStore.listSessions(agentId, chatId, this.channelFor(chatId));
     const lines: string[] = [`Sessions (${agentId})`, ''];
 
     for (const s of index.sessions) {
@@ -741,7 +750,7 @@ export class AgentRunner extends EventEmitter {
    * /session — show info about the current active session.
    */
   private async handleCommandSessionInfo(agentId: string, chatId: string): Promise<void> {
-    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const index = await this.sessionStore.listSessions(agentId, chatId, this.channelFor(chatId));
     const meta = index.sessions.find(s => s.id === index.activeSessionId);
     if (!meta) {
       this.writeAutoForward(chatId, 'No active session found.');
@@ -789,7 +798,7 @@ export class AgentRunner extends EventEmitter {
    * /new [name] — create a new session and switch to it.
    */
   private async handleCommandNew(agentId: string, chatId: string, name?: string): Promise<void> {
-    const newMeta = await this.sessionStore.createTelegramSession(agentId, chatId, name);
+    const newMeta = await this.sessionStore.createTelegramSession(agentId, chatId, name, this.channelFor(chatId));
     await this.switchSession(chatId, newMeta.id);
     this.writeAutoForward(chatId, `✅ New session created: "${newMeta.name}"\nNow chatting in a fresh context. Use /sessions to switch back.`);
   }
@@ -802,8 +811,8 @@ export class AgentRunner extends EventEmitter {
       this.writeAutoForward(chatId, '⚠️ Usage: /rename <new name>\nExample: /rename Design review');
       return;
     }
-    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
-    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, { name });
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, this.channelFor(chatId));
+    await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, { name }, this.channelFor(chatId));
     this.writeAutoForward(chatId, `✅ Session renamed to "${name}"`);
   }
 
@@ -821,17 +830,18 @@ export class AgentRunner extends EventEmitter {
    * /clear — clear history of the current session and restart the process.
    */
   private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
-    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
+    const ch = this.channelFor(chatId);
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
 
     // Clear messages and reset all metadata in-place (preserves session ID and name)
-    await this.sessionStore.clearTelegramSessionHistory(agentId, chatId, sessionId);
+    await this.sessionStore.clearTelegramSessionHistory(agentId, chatId, sessionId, ch);
     await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
       totalTokensUsed: 0,
       lastInputTokens: 0,
       archivedCount: 0,
       loadedAtSpawn: undefined,
       messageCountAtSpawn: undefined,
-    });
+    }, ch);
 
     // Kill old process so next message spawns fresh
     this.restartProcess(chatId).catch(() => {});
@@ -841,8 +851,9 @@ export class AgentRunner extends EventEmitter {
    * /compact — summarise old history and keep only recent messages.
    */
   private async handleCommandCompact(agentId: string, chatId: string): Promise<void> {
-    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId);
-    const index = await this.sessionStore.listSessions(agentId, chatId);
+    const ch = this.channelFor(chatId);
+    const sessionId = await this.sessionStore.getActiveSessionId(agentId, chatId, ch);
+    const index = await this.sessionStore.listSessions(agentId, chatId, ch);
     const meta = index.sessions.find(s => s.id === sessionId);
     const name = meta?.name ?? 'Session';
 
@@ -854,13 +865,12 @@ export class AgentRunner extends EventEmitter {
 
     try {
       const compactor = new SessionCompactor(this.sessionStore);
-      const result = await compactor.compact(agentId, chatId, sessionId, this.agentConfig.claude.model, contextWindow);
-      // Reset context tracking — after compaction all messages fit in context
+      const result = await compactor.compact(agentId, chatId, sessionId, this.agentConfig.claude.model, contextWindow, ch);
       await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
         loadedAtSpawn: undefined,
         archivedCount: undefined,
         messageCountAtSpawn: undefined,
-      });
+      }, ch);
       await this.restartProcess(chatId);
 
       const summary = [
@@ -893,7 +903,7 @@ export class AgentRunner extends EventEmitter {
       await existing.stop();
       this.sessions.delete(chatId);
     }
-    await this.sessionStore.setActiveSession(this.agentConfig.id, chatId, newSessionId);
+    await this.sessionStore.setActiveSession(this.agentConfig.id, chatId, newSessionId, this.channelFor(chatId));
   }
 
   /**
@@ -1006,12 +1016,12 @@ export class AgentRunner extends EventEmitter {
           content: `${IMAGE_CONTEXT_MARKER}\n${description}`,
           ts: Date.now(),
         };
-        await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, msg);
+        await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, msg, this.channelFor(chatId));
       }
     } catch (err) {
       this.logger.warn('Image context summary failed', { error: err instanceof Error ? err.message : String(err) });
     }
-    this.needsRestart = true;
+    this.pendingRestarts.add(chatId);
   }
 
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {

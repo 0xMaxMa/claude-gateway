@@ -49,9 +49,10 @@ export class SessionCompactor {
     sessionId: string,
     model: string,
     contextWindow: number,
+    channel: 'telegram' | 'discord' = 'telegram',
   ): Promise<CompactionResult> {
     // Load current history
-    const messages = await this.sessionStore.loadTelegramSession(agentId, chatId, sessionId);
+    const messages = await this.sessionStore.loadTelegramSession(agentId, chatId, sessionId, channel);
 
     if (messages.length < 5) {
       throw new NotEnoughMessagesError(messages.length);
@@ -62,9 +63,9 @@ export class SessionCompactor {
 
     // Archive original before compaction
     const agentsBaseDir = this.sessionStore.getAgentsBaseDir();
-    const telegramDir = path.join(agentsBaseDir, agentId, 'sessions', `telegram-${chatId}`);
-    fs.mkdirSync(telegramDir, { recursive: true });
-    const archivePath = path.join(telegramDir, `${sessionId}.pre-compact-${Date.now()}.json`);
+    const sessionDir = path.join(agentsBaseDir, agentId, 'sessions', `${channel}-${chatId}`);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const archivePath = path.join(sessionDir, `${sessionId}.pre-compact-${Date.now()}.json`);
     fs.writeFileSync(archivePath, JSON.stringify(messages, null, 2), 'utf-8');
 
     // Keep last N messages verbatim; summarize only the older portion (or all if < N)
@@ -81,7 +82,7 @@ export class SessionCompactor {
     ];
 
     // Save compacted history (original already archived above)
-    await this.sessionStore.saveTelegramSession(agentId, chatId, sessionId, compacted);
+    await this.sessionStore.saveTelegramSession(agentId, chatId, sessionId, compacted, channel);
 
     const afterMessages = compacted.length;
     const afterTokens = estimateTokens(compacted);

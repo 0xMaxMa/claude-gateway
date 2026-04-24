@@ -151,34 +151,34 @@ export class SessionStore {
     return deleted;
   }
 
-  // ─── Multi-session Telegram support ──────────────────────────────────────────
+  // ─── Multi-session Telegram/Discord support ──────────────────────────────────
 
   /**
-   * Resolve the directory for a telegram chat's multi-session data.
+   * Resolve the directory for a chat's multi-session data.
    */
-  private resolveTelegramDir(agentId: string, chatId: string): string {
-    return path.join(this.agentsBaseDir, agentId, 'sessions', `telegram-${chatId}`);
+  private resolveTelegramDir(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): string {
+    return path.join(this.agentsBaseDir, agentId, 'sessions', `${channel}-${chatId}`);
   }
 
   /**
-   * Resolve the path to the session index file for a telegram chat.
+   * Resolve the path to the session index file for a chat.
    */
-  private resolveTelegramIndexPath(agentId: string, chatId: string): string {
-    return path.join(this.resolveTelegramDir(agentId, chatId), 'index.json');
+  private resolveTelegramIndexPath(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): string {
+    return path.join(this.resolveTelegramDir(agentId, chatId, channel), 'index.json');
   }
 
   /**
    * Resolve the path to a specific session's message file.
    */
-  private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string): string {
-    return path.join(this.resolveTelegramDir(agentId, chatId), `${sessionId}.json`);
+  private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' = 'telegram'): string {
+    return path.join(this.resolveTelegramDir(agentId, chatId, channel), `${sessionId}.json`);
   }
 
   /**
-   * Read index.json for a telegram chat. Returns null if file doesn't exist.
+   * Read index.json for a chat. Returns null if file doesn't exist.
    */
-  async loadIndex(agentId: string, chatId: string): Promise<SessionIndex | null> {
-    const indexPath = this.resolveTelegramIndexPath(agentId, chatId);
+  async loadIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<SessionIndex | null> {
+    const indexPath = this.resolveTelegramIndexPath(agentId, chatId, channel);
     if (!fs.existsSync(indexPath)) {
       return null;
     }
@@ -193,8 +193,8 @@ export class SessionStore {
   /**
    * Write index.json atomically (tmp + rename).
    */
-  async saveIndex(agentId: string, chatId: string, index: SessionIndex): Promise<void> {
-    const indexPath = this.resolveTelegramIndexPath(agentId, chatId);
+  async saveIndex(agentId: string, chatId: string, index: SessionIndex, channel: 'telegram' | 'discord' = 'telegram'): Promise<void> {
+    const indexPath = this.resolveTelegramIndexPath(agentId, chatId, channel);
     const dir = path.dirname(indexPath);
     fs.mkdirSync(dir, { recursive: true });
     const tmp = indexPath + '.tmp';
@@ -216,9 +216,9 @@ export class SessionStore {
    * Internal (unlocked) version — call this only from WITHIN a getTelegramQueue task
    * to avoid deadlock. The public getOrCreateIndex wraps this in the queue.
    */
-  private async loadOrCreateIndexUnlocked(agentId: string, chatId: string): Promise<SessionIndex> {
+  private async loadOrCreateIndexUnlocked(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<SessionIndex> {
     // 1. Check for existing index
-    const existingIndex = await this.loadIndex(agentId, chatId);
+    const existingIndex = await this.loadIndex(agentId, chatId, channel);
     if (existingIndex !== null) {
       return existingIndex;
     }
@@ -253,11 +253,11 @@ export class SessionStore {
         sessions: [meta],
       };
 
-      const telegramDir = this.resolveTelegramDir(agentId, chatId);
-      fs.mkdirSync(telegramDir, { recursive: true });
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId);
+      const sessionDir = this.resolveTelegramDir(agentId, chatId, channel);
+      fs.mkdirSync(sessionDir, { recursive: true });
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId, channel);
       fs.writeFileSync(sessionPath, JSON.stringify(messages, null, 2) + '\n', 'utf-8');
-      await this.saveIndex(agentId, chatId, index);
+      await this.saveIndex(agentId, chatId, index, channel);
       try { fs.unlinkSync(oldPath); } catch { /* non-fatal */ }
       return index;
     }
@@ -277,27 +277,27 @@ export class SessionStore {
       activeSessionId: newId,
       sessions: [meta],
     };
-    const telegramDir = this.resolveTelegramDir(agentId, chatId);
-    fs.mkdirSync(telegramDir, { recursive: true });
-    const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId);
+    const sessionDir = this.resolveTelegramDir(agentId, chatId, channel);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId, channel);
     fs.writeFileSync(sessionPath, JSON.stringify([], null, 2) + '\n', 'utf-8');
-    await this.saveIndex(agentId, chatId, index);
+    await this.saveIndex(agentId, chatId, index, channel);
     return index;
   }
 
-  async getOrCreateIndex(agentId: string, chatId: string): Promise<SessionIndex> {
+  async getOrCreateIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<SessionIndex> {
     const queue = this.getTelegramQueue(agentId, chatId);
-    return queue.add(() => this.loadOrCreateIndexUnlocked(agentId, chatId)) as Promise<SessionIndex>;
+    return queue.add(() => this.loadOrCreateIndexUnlocked(agentId, chatId, channel)) as Promise<SessionIndex>;
   }
 
   /**
-   * Create a new session for a telegram chat, add it to the index, and return the SessionMeta.
+   * Create a new session for a chat, add it to the index, and return the SessionMeta.
    * If name is not provided, auto-generates "Session N" based on current session count.
    */
-  async createTelegramSession(agentId: string, chatId: string, name?: string): Promise<SessionMeta> {
+  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<SessionMeta> {
     const queue = this.getTelegramQueue(agentId, chatId);
     return queue.add(async () => {
-      const index = await this.loadOrCreateIndexUnlocked(agentId, chatId);
+      const index = await this.loadOrCreateIndexUnlocked(agentId, chatId, channel);
       const newId = randomUUID();
       const now = Date.now();
       const sessionName = name ?? `Session ${index.sessions.length + 1}`;
@@ -312,41 +312,32 @@ export class SessionStore {
       };
 
       // Write empty messages file
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId);
-      const telegramDir = this.resolveTelegramDir(agentId, chatId);
-      fs.mkdirSync(telegramDir, { recursive: true });
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, newId, channel);
+      const sessionDir = this.resolveTelegramDir(agentId, chatId, channel);
+      fs.mkdirSync(sessionDir, { recursive: true });
       fs.writeFileSync(sessionPath, JSON.stringify([], null, 2) + '\n', 'utf-8');
 
       // Update index
       index.sessions.push(meta);
-      await this.saveIndex(agentId, chatId, index);
+      await this.saveIndex(agentId, chatId, index, channel);
 
       return meta;
     }) as Promise<SessionMeta>;
   }
 
-  /**
-   * List all sessions for a telegram chat.
-   */
-  async listSessions(agentId: string, chatId: string): Promise<SessionIndex> {
-    return this.getOrCreateIndex(agentId, chatId);
+  async listSessions(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<SessionIndex> {
+    return this.getOrCreateIndex(agentId, chatId, channel);
   }
 
-  /**
-   * Get the active session ID for a telegram chat.
-   */
-  async getActiveSessionId(agentId: string, chatId: string): Promise<string> {
-    const index = await this.getOrCreateIndex(agentId, chatId);
+  async getActiveSessionId(agentId: string, chatId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<string> {
+    const index = await this.getOrCreateIndex(agentId, chatId, channel);
     return index.activeSessionId;
   }
 
-  /**
-   * Set the active session for a telegram chat, updating index.json.
-   */
-  async setActiveSession(agentId: string, chatId: string, sessionId: string): Promise<void> {
+  async setActiveSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const index = await this.loadIndex(agentId, chatId);
+      const index = await this.loadIndex(agentId, chatId, channel);
       if (!index) {
         throw new Error(`No session index found for chat ${chatId}`);
       }
@@ -355,17 +346,14 @@ export class SessionStore {
         throw new Error(`Session ${sessionId} not found in index for chat ${chatId}`);
       }
       index.activeSessionId = sessionId;
-      await this.saveIndex(agentId, chatId, index);
+      await this.saveIndex(agentId, chatId, index, channel);
     });
   }
 
-  /**
-   * Delete a session for a telegram chat. Cannot delete the last remaining session.
-   */
-  async deleteTelegramSession(agentId: string, chatId: string, sessionId: string): Promise<void> {
+  async deleteTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const index = await this.loadIndex(agentId, chatId);
+      const index = await this.loadIndex(agentId, chatId, channel);
       if (!index) {
         throw new Error(`No session index found for chat ${chatId}`);
       }
@@ -386,10 +374,10 @@ export class SessionStore {
         index.activeSessionId = index.sessions[0]!.id;
       }
 
-      await this.saveIndex(agentId, chatId, index);
+      await this.saveIndex(agentId, chatId, index, channel);
 
       // Delete the session messages file
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId);
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       try {
         fs.unlinkSync(sessionPath);
       } catch {
@@ -398,42 +386,36 @@ export class SessionStore {
     });
   }
 
-  /**
-   * Clear the history of a telegram session (reset messages to empty array).
-   * Session meta is preserved and messageCount is reset to 0.
-   */
-  async clearTelegramSessionHistory(agentId: string, chatId: string, sessionId: string): Promise<void> {
+  async clearTelegramSessionHistory(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId);
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
       fs.writeFileSync(sessionPath, JSON.stringify([], null, 2) + '\n', 'utf-8');
 
       // Update meta: reset messageCount
-      const index = await this.loadIndex(agentId, chatId);
+      const index = await this.loadIndex(agentId, chatId, channel);
       if (index) {
         const meta = index.sessions.find((s) => s.id === sessionId);
         if (meta) {
           meta.messageCount = 0;
           meta.lastActive = Date.now();
-          await this.saveIndex(agentId, chatId, index);
+          await this.saveIndex(agentId, chatId, index, channel);
         }
       }
     });
   }
 
-  /**
-   * Update specific meta fields for a telegram session.
-   */
   async updateSessionMeta(
     agentId: string,
     chatId: string,
     sessionId: string,
     meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn'>>,
+    channel: 'telegram' | 'discord' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const index = await this.loadIndex(agentId, chatId);
+      const index = await this.loadIndex(agentId, chatId, channel);
       if (!index) {
         throw new Error(`No session index found for chat ${chatId}`);
       }
@@ -443,15 +425,12 @@ export class SessionStore {
       }
       Object.assign(session, meta);
       session.lastActive = Date.now();
-      await this.saveIndex(agentId, chatId, index);
+      await this.saveIndex(agentId, chatId, index, channel);
     });
   }
 
-  /**
-   * Load messages for a telegram session. Returns Message[] (JSON array format).
-   */
-  async loadTelegramSession(agentId: string, chatId: string, sessionId: string): Promise<Message[]> {
-    const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId);
+  async loadTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' = 'telegram'): Promise<Message[]> {
+    const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
     if (!fs.existsSync(sessionPath)) {
       return [];
     }
@@ -459,23 +438,21 @@ export class SessionStore {
       const raw = fs.readFileSync(sessionPath, 'utf-8');
       return JSON.parse(raw) as Message[];
     } catch {
-      console.error(`[SessionStore] Corrupted telegram session file at ${sessionPath}, returning empty.`);
+      console.error(`[SessionStore] Corrupted session file at ${sessionPath}, returning empty.`);
       return [];
     }
   }
 
-  /**
-   * Save all messages for a telegram session (overwrites the JSON array file).
-   */
   async saveTelegramSession(
     agentId: string,
     chatId: string,
     sessionId: string,
     messages: Message[],
+    channel: 'telegram' | 'discord' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId);
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       const dir = path.dirname(sessionPath);
       fs.mkdirSync(dir, { recursive: true });
       const tmp = sessionPath + '.tmp';
@@ -483,22 +460,20 @@ export class SessionStore {
       fs.renameSync(tmp, sessionPath);
 
       // Update meta messageCount and lastActive
-      await this._updateMessageCountInIndex(agentId, chatId, sessionId, messages.length);
+      await this._updateMessageCountInIndex(agentId, chatId, sessionId, messages.length, channel);
     });
   }
 
-  /**
-   * Append a single message to a telegram session.
-   */
   async appendTelegramMessage(
     agentId: string,
     chatId: string,
     sessionId: string,
     message: Message,
+    channel: 'telegram' | 'discord' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
-      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId);
+      const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
       const dir = path.dirname(sessionPath);
       fs.mkdirSync(dir, { recursive: true });
 
@@ -521,7 +496,7 @@ export class SessionStore {
       fs.renameSync(tmp, sessionPath);
 
       // Update meta
-      await this._updateMessageCountInIndex(agentId, chatId, sessionId, messages.length);
+      await this._updateMessageCountInIndex(agentId, chatId, sessionId, messages.length, channel);
     });
   }
 
@@ -530,14 +505,15 @@ export class SessionStore {
     chatId: string,
     sessionId: string,
     count: number,
+    channel: 'telegram' | 'discord' = 'telegram',
   ): Promise<void> {
-    const index = await this.loadIndex(agentId, chatId);
+    const index = await this.loadIndex(agentId, chatId, channel);
     if (index) {
       const meta = index.sessions.find((s) => s.id === sessionId);
       if (meta) {
         meta.messageCount = count;
         meta.lastActive = Date.now();
-        await this.saveIndex(agentId, chatId, index);
+        await this.saveIndex(agentId, chatId, index, channel);
       }
     }
   }
