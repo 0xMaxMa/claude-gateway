@@ -25,9 +25,6 @@ async function postCallback(inbound: InboundMessage): Promise<void> {
 
   if (inbound.attachmentFileId) {
     meta['attachment_file_id'] = inbound.attachmentFileId;
-    if (inbound.attachmentSize != null) {
-      meta['attachment_size'] = String(inbound.attachmentSize);
-    }
   }
 
   try {

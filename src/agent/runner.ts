@@ -17,7 +17,7 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 
-export const MAX_IMAGE_SIZE_BYTES = 0.1 * 1024 * 1024;
+export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-opus-4-7', label: 'Opus 4.7', alias: 'opus', contextWindow: 1000000 },
@@ -73,9 +73,8 @@ export class AgentRunner extends EventEmitter {
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
 
-  // Tracks pending image info per chatId (queue) for size accumulation after each turn.
-  // Each entry is either a local file path (Telegram) or a pre-known byte size (Discord).
-  private readonly pendingImagePaths = new Map<string, Array<{ kind: 'path'; value: string } | { kind: 'size'; value: number }>>();
+  // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
+  private readonly pendingImagePaths = new Map<string, string[]>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -203,19 +202,10 @@ export class AgentRunner extends EventEmitter {
               }
 
               const imagePath = meta['image_path'];
-              const attachmentFileId = meta['attachment_file_id'];
-              const attachmentSize = meta['attachment_size'];
               if (imagePath) {
                 const queue = this.pendingImagePaths.get(chatId) ?? [];
-                queue.push({ kind: 'path', value: imagePath });
+                queue.push(imagePath);
                 this.pendingImagePaths.set(chatId, queue);
-              } else if (attachmentFileId && attachmentSize) {
-                const size = parseInt(attachmentSize, 10);
-                if (!isNaN(size) && size > 0) {
-                  const queue = this.pendingImagePaths.get(chatId) ?? [];
-                  queue.push({ kind: 'size', value: size });
-                  this.pendingImagePaths.set(chatId, queue);
-                }
               }
 
               session.setProcessing(true);
@@ -492,7 +482,6 @@ export class AgentRunner extends EventEmitter {
       'image_path',
       'attachment_file_id',
       'attachment_kind',
-      'attachment_size',
       'attachment_mime',
       'attachment_name',
     ]
@@ -602,35 +591,25 @@ export class AgentRunner extends EventEmitter {
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
-            // Accumulate image size for restart tracking (FIFO: one item per turn)
+            // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
             const queue = this.pendingImagePaths.get(mapKey);
-            const item = queue?.shift();
+            const imgPath = queue?.shift();
             if (queue?.length === 0) this.pendingImagePaths.delete(mapKey);
-            if (item) {
-              if (item.kind === 'size') {
-                const prev = this.imageSizePerChat.get(mapKey) ?? 0;
-                const next = prev + item.value;
-                this.imageSizePerChat.set(mapKey, next);
-                if (next >= MAX_IMAGE_SIZE_BYTES) {
-                  this.imageSizePerChat.delete(mapKey);
-                  void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
-                }
-              } else {
-                this.statQueue = this.statQueue.then(async () => {
-                  try {
-                    const stats = await fsPromises.stat(item.value);
-                    const prev = this.imageSizePerChat.get(mapKey) ?? 0;
-                    const next = prev + stats.size;
-                    this.imageSizePerChat.set(mapKey, next);
-                    if (next >= MAX_IMAGE_SIZE_BYTES) {
-                      this.imageSizePerChat.delete(mapKey);
-                      void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
-                    }
-                  } catch (err: unknown) {
-                    this.logger.warn('Failed to stat image', { path: item.value, error: err instanceof Error ? err.message : String(err) });
+            if (imgPath) {
+              this.statQueue = this.statQueue.then(async () => {
+                try {
+                  const stats = await fsPromises.stat(imgPath);
+                  const prev = this.imageSizePerChat.get(mapKey) ?? 0;
+                  const next = prev + stats.size;
+                  this.imageSizePerChat.set(mapKey, next);
+                  if (next >= MAX_IMAGE_SIZE_BYTES) {
+                    this.imageSizePerChat.delete(mapKey);
+                    void this.triggerSummaryAndRestart(mapKey, actualSessionId, proc);
                   }
-                });
-              }
+                } catch (err: unknown) {
+                  this.logger.warn('Failed to stat image', { path: imgPath, error: err instanceof Error ? err.message : String(err) });
+                }
+              });
             }
             // Always forward result text — it contains the agent's completion summary.
             // If the agent also called reply tool, this summary still reaches the user.
