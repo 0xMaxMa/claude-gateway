@@ -559,6 +559,75 @@ make update-agent   # choose "Manage channels"
 
 ---
 
+## Telegram Groups
+
+The bot can respond in Telegram groups and supergroups. Groups must be registered before the bot will respond.
+
+**Step 1 — Add the bot to the group as Admin**
+
+Add your bot to the group and **promote it to Admin**. Without admin rights, Telegram does not deliver group messages to the bot — it will appear online but never respond.
+
+Minimum required admin permission: **"Read Messages"** (or any admin role — even the most restricted works).
+
+**Step 2 — Get the group ID**
+
+Forward any message from the group to [@userinfobot](https://t.me/userinfobot). It will reply with the chat ID — a negative number like `-1001234567890`.
+
+Alternatively, send a message in the group and visit:
+```
+https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+```
+Look for `"chat":{"id": ...}` in the result.
+
+**Step 3 — Register the group**
+
+Edit the agent's `access.json` directly:
+
+```
+~/.claude-gateway/agents/<your-agent-id>/workspace/.telegram-state/access.json
+```
+
+Add the group under `"groups"`:
+
+```json
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": ["..."],
+  "groups": {
+    "-1001234567890": {
+      "requireMention": true,
+      "allowFrom": []
+    }
+  }
+}
+```
+
+Set `"requireMention": false` if you want the bot to respond to all messages without needing an @mention.
+To restrict to specific members only, add their Telegram user IDs to `"allowFrom"`.
+
+**Step 4 — Start chatting**
+
+@mention the bot in the group (or reply to one of its messages). Changes to `access.json` take effect immediately — no restart needed.
+
+**Managing groups**
+
+Edit `access.json` to add or remove entries from the `"groups"` object. The gateway re-reads the file on every inbound message.
+
+> **Note:** `/telegram:access` skill is available when running inside a gateway agent session (TELEGRAM_STATE_DIR is set automatically). For standalone terminal use, edit `access.json` directly as shown above.
+
+**Optional — Let the bot read all messages (disable Privacy Mode)**
+
+By default, Telegram bots in groups only receive messages that start with `/` or directly @mention the bot. If you want the bot to respond to every message without an @mention (and have set `"requireMention": false` in `access.json`), you also need to disable Privacy Mode at the bot level:
+
+1. Open [@BotFather](https://t.me/BotFather)
+2. Send `/setprivacy`
+3. Select your bot
+4. Choose **Disable**
+
+This is a bot-level setting — it applies to all groups the bot joins. If @mention-only is fine, skip this step and keep `"requireMention": true`.
+
+---
+
 ## Telegram Commands
 
 Once paired, the following bot commands are available in a private chat:

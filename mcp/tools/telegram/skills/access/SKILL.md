@@ -31,13 +31,18 @@ Arguments passed: `$ARGUMENTS`
 Compute STATE_DIR at the very start before doing anything else:
 
 ```
-If $TELEGRAM_STATE_DIR env var is set:
-  STATE_DIR = $TELEGRAM_STATE_DIR
-Else:
-  STATE_DIR = ~/.claude/channels/telegram
+1. If $TELEGRAM_STATE_DIR env var is set:
+     STATE_DIR = $TELEGRAM_STATE_DIR
+
+2. Else if {CWD}/.telegram-state/ exists:
+     STATE_DIR = {CWD}/.telegram-state
+   (This handles gateway agent sessions where CWD = workspace dir)
+
+3. Else:
+     STATE_DIR = ~/.claude/channels/telegram  (legacy fallback)
 ```
 
-To target a specific gateway agent's state, set TELEGRAM_STATE_DIR before running Claude:
+To explicitly target a specific agent's state from an external terminal:
 
 ```bash
 TELEGRAM_STATE_DIR=~/.claude-gateway/agents/my-agent/workspace/.telegram-state claude
