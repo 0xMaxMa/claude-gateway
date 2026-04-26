@@ -3,7 +3,7 @@ import type { BrowserContext, Page } from 'playwright';
 import stealth from './stealth';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { spawn, execSync } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
@@ -18,9 +18,22 @@ const TOKEN_FILE = '/tmp/vnc-tokens.cfg';
 // Module-level state — persists across BrowserModule instances in the same process
 let _websockifyTokenMode = false;
 
+function isPortInUse(port: number): boolean {
+  try {
+    const hex = port.toString(16).toUpperCase().padStart(4, '0');
+    const content = readFileSync('/proc/net/tcp', 'utf-8');
+    return content.split('\n').some((line) => {
+      const parts = line.trim().split(/\s+/);
+      return parts.length >= 2 && parts[1].endsWith(`:${hex}`);
+    });
+  } catch {
+    return false;
+  }
+}
+
 function findNextAvailableDisplay(): number {
   let n = VNC_DISPLAY_BASE;
-  while (existsSync(`/tmp/.X${n}-lock`)) n++;
+  while (existsSync(`/tmp/.X${n}-lock`) || isPortInUse(VNC_PORT_BASE + (n - VNC_DISPLAY_BASE))) n++;
   return n;
 }
 
@@ -211,11 +224,13 @@ export class BrowserModule implements ToolModule {
       headless: false,
       executablePath: '/usr/bin/google-chrome-stable',
       env: { ...process.env, DISPLAY: `:${vnc.display}` },
+      ignoreDefaultArgs: ['--enable-automation'],
       args: [
         '--no-sandbox',
-        '--disable-setuid-sandbox',
+        '--test-type',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
       ],
     });
 
@@ -339,24 +354,28 @@ export class BrowserModule implements ToolModule {
     // Check if websockify is already running in token mode (cross-process safe)
     try {
       const out = execSync('pgrep -fa websockify 2>/dev/null || true').toString();
-      if (out.includes('TokenFile')) {
-        // Already running in token mode — don't restart or clear the file
+      const tokenModeProcs = out.split('\n').filter((l) => l.includes('TokenFile') && l.trim());
+      if (tokenModeProcs.length >= 1) {
+        // Kill duplicate instances if more than one, keep the first
+        if (tokenModeProcs.length > 1) {
+          tokenModeProcs.slice(1).forEach((line) => {
+            const pid = line.trim().split(/\s+/)[0];
+            try {
+              execSync(`kill ${pid} 2>/dev/null || true`);
+            } catch {
+              // ignore
+            }
+          });
+        }
+        // Token file is intact — do not clear it
         return;
       }
+      // 0 instances → fall through to start one
     } catch {
       // ignore
     }
 
-    try {
-      execSync('sudo pkill -f "websockify" 2>/dev/null || true');
-    } catch {
-      // no existing websockify — that's fine
-    }
-    await new Promise((r) => setTimeout(r, 300));
-
-    // Preserve existing tokens from other gateway processes — do not clear the file
-    await fs.writeFile(TOKEN_FILE, '').catch(() => {});
-
+    // Start websockify without clearing the token file — existing tokens from other sessions are preserved
     spawn(
       'websockify',
       [
