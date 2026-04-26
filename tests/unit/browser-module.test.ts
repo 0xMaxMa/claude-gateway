@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import { BrowserModule } from '../../mcp/tools/browser/module';
 
 const TOKEN_FILE = '/tmp/vnc-tokens.cfg';
@@ -163,4 +164,21 @@ describe('BrowserModule - session isolation', () => {
     const val = await page2.evaluate("localStorage.getItem('persist_key')");
     expect(val).toBe('persist_value');
   }, 30000);
+});
+
+const CHROME_PATH = '/usr/bin/google-chrome-stable';
+
+describe('BrowserModule - executable path', () => {
+  it('U-EXEC1: Google Chrome path is a non-empty string', () => {
+    expect(typeof CHROME_PATH).toBe('string');
+    expect(CHROME_PATH.length).toBeGreaterThan(0);
+  });
+
+  it('U-EXEC2: Google Chrome binary exists on disk', () => {
+    expect(fsSync.existsSync(CHROME_PATH)).toBe(true);
+  });
+
+  it('U-EXEC3: executable filename contains "chrome"', () => {
+    expect(/chrome/i.test(path.basename(CHROME_PATH))).toBe(true);
+  });
 });

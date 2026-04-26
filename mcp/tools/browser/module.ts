@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import type { BrowserContext, Page } from 'playwright';
+import stealth from './stealth';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
@@ -208,10 +209,30 @@ export class BrowserModule implements ToolModule {
     const userDataDir = path.join(SESSION_BASE_DIR, sessionId);
     const ctx = await chromium.launchPersistentContext(userDataDir, {
       headless: false,
-      executablePath: '/home/dev/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome',
+      executablePath: '/usr/bin/google-chrome-stable',
       env: { ...process.env, DISPLAY: `:${vnc.display}` },
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+      ],
     });
+
+    const webdriverPatch = `Object.defineProperty(navigator, 'webdriver', { get: () => false });`;
+
+    // patch navigator.webdriver + CDP artifacts on every new page
+    ctx.on('page', async (page) => {
+      await page.addInitScript(webdriverPatch);
+      await stealth(page);
+    });
+
+    // patch existing pages (first page created with the context)
+    for (const page of ctx.pages()) {
+      await page.addInitScript(webdriverPatch);
+      await stealth(page);
+    }
+
     this.contexts.set(sessionId, ctx);
     this.lastActivity.set(sessionId, Date.now());
     return ctx;
