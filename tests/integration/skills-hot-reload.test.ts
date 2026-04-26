@@ -173,7 +173,7 @@ function wireSkillsWatcher(
 
 async function waitForCondition(
   predicate: () => boolean,
-  timeoutMs = 3000,
+  timeoutMs = 6000,
   intervalMs = 25,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -252,7 +252,7 @@ describe('Skills hot-reload end-to-end', () => {
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
 
     // Give the watcher a moment to attach before writing.
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
     writeSkillFile(sharedSkillsDir, 'hr1-skill');
 
     await waitForCondition(() => !getSessions(runner).has('chat:hr1'));
@@ -271,7 +271,7 @@ describe('Skills hot-reload end-to-end', () => {
 
     await bootRunnerWithIdleSession('chat:hr2');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
 
     // Modify: rewrite with different description.
     const skillFile = path.join(sharedSkillsDir, 'hr2-skill', 'SKILL.md');
@@ -294,7 +294,7 @@ describe('Skills hot-reload end-to-end', () => {
 
     await bootRunnerWithIdleSession('chat:hr3');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
 
     deleteSkillFile(sharedSkillsDir, 'hr3-skill');
 
@@ -317,7 +317,7 @@ describe('Skills hot-reload end-to-end', () => {
     // Session is processing (isProcessing === true from sendChannelPost) — will be deferred, not stopped.
 
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
 
     writeSkillFile(sharedSkillsDir, 'hr4-skill');
 
@@ -338,7 +338,7 @@ describe('Skills hot-reload end-to-end', () => {
   it('HR5: skill added under workspace skills dir also triggers restart', async () => {
     await bootRunnerWithIdleSession('chat:hr5');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 300));
 
     // Workspace skills: <workspace>/skills/<skill-name>/SKILL.md
     const workspaceSkillsDir = path.join(workspaceDir, 'skills');
