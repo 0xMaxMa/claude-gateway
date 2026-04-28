@@ -239,6 +239,8 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
+            GATEWAY_SESSION_ID: this.sessionId,
+            GATEWAY_CHAT_ID: this.chatId,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
           },

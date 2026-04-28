@@ -1,8 +1,12 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import { BrowserModule } from '../../mcp/tools/browser/module';
 
-const SESSION_BASE_DIR = '/tmp/browser-sessions';
+function sessionDir(agentId: string, sessionId: string): string {
+  const base = process.env.GATEWAY_AGENTS_BASE_DIR ?? path.join(os.homedir(), '.claude-gateway', 'agents');
+  return path.join(base, agentId, 'browser-sessions', sessionId);
+}
 
 function parseResult(mcpResult: { content: Array<{ type: 'text'; text: string }> }): any {
   return JSON.parse(mcpResult.content[0].text);
@@ -106,7 +110,8 @@ describe('BrowserModule tools - integration', () => {
     );
     expect(r.success).toBe(true);
     expect((mod as any)['contexts'].has(SID)).toBe(false);
-    const stat = await fs.stat(path.join(SESSION_BASE_DIR, SID));
+    // session dir (userDataDir etc.) still on disk after close_session
+    const stat = await fs.stat(sessionDir(mod.agentId, SID));
     expect(stat.isDirectory()).toBe(true);
   }, 30000);
 
@@ -117,7 +122,7 @@ describe('BrowserModule tools - integration', () => {
     );
     expect(r.success).toBe(true);
     expect((mod as any)['contexts'].has(SID)).toBe(false);
-    await expect(fs.stat(path.join(SESSION_BASE_DIR, SID))).rejects.toThrow();
+    await expect(fs.stat(sessionDir(mod.agentId, SID))).rejects.toThrow();
   }, 30000);
 
   it('I11: resume after close - localStorage persists on disk', async () => {
