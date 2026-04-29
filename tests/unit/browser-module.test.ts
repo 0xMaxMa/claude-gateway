@@ -77,28 +77,30 @@ describe('BrowserModule', () => {
       }
     });
 
-    it('browser_create_session requires session_id', () => {
+    it('browser_create_session has session_id as optional property (auto-injected)', () => {
       const mod = new BrowserModule();
       const tool = mod.getTools().find(t => t.name === 'browser_create_session')!;
       const schema = tool.inputSchema as any;
-      expect(schema.required).toContain('session_id');
+      expect(schema.properties).toHaveProperty('session_id');
+      expect(schema.required ?? []).not.toContain('session_id');
     });
 
-    it('browser_navigate requires session_id and url', () => {
+    it('browser_navigate requires url', () => {
       const mod = new BrowserModule();
       const tool = mod.getTools().find(t => t.name === 'browser_navigate')!;
       const schema = tool.inputSchema as any;
-      expect(schema.required).toContain('session_id');
       expect(schema.required).toContain('url');
+      expect(schema.required ?? []).not.toContain('session_id');
     });
 
-    it('browser_scroll requires all position and delta fields', () => {
+    it('browser_scroll requires position and delta fields', () => {
       const mod = new BrowserModule();
       const tool = mod.getTools().find(t => t.name === 'browser_scroll')!;
       const schema = tool.inputSchema as any;
-      for (const field of ['session_id', 'x', 'y', 'deltaX', 'deltaY']) {
+      for (const field of ['x', 'y', 'deltaX', 'deltaY']) {
         expect(schema.required).toContain(field);
       }
+      expect(schema.required ?? []).not.toContain('session_id');
     });
 
     it('each tool has a non-empty description', () => {
