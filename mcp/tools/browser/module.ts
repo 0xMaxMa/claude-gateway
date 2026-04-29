@@ -21,6 +21,27 @@ export class BrowserModule implements ToolModule {
   }
 }
 
+async function readFirstDataLine(res: Response): Promise<string | undefined> {
+  if (!res.body) return undefined;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      const found = lines.find(l => l.startsWith('data: '));
+      if (found) return found;
+      buf = lines[lines.length - 1];
+    }
+  } finally {
+    reader.cancel();
+  }
+  return buf.startsWith('data: ') ? buf : undefined;
+}
+
 async function callGetpodBrowser(
   toolName: string,
   args: Record<string, unknown>,
@@ -48,8 +69,7 @@ async function callGetpodBrowser(
     };
   }
 
-  const text = await res.text();
-  const dataLine = text.split('\n').find(l => l.startsWith('data: '));
+  const dataLine = await readFirstDataLine(res);
   if (!dataLine) {
     return {
       content: [{ type: 'text', text: 'empty response from getpod-browser' }],
