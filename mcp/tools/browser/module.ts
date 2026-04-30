@@ -16,7 +16,9 @@ export class BrowserModule implements ToolModule {
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     const sessionId = process.env.GATEWAY_SESSION_ID ?? process.env.GATEWAY_AGENT_ID;
+    const agentId = process.env.GATEWAY_AGENT_ID;
     if (sessionId) args = { ...args, session_id: sessionId };
+    if (agentId) args = { ...args, agent_id: agentId };
     return callGetpodBrowser(name, args);
   }
 }
