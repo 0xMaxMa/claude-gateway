@@ -241,6 +241,7 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
+            GATEWAY_SESSION_ID: this.sessionId,
           },
         },
       },
