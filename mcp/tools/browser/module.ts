@@ -15,7 +15,7 @@ export class BrowserModule implements ToolModule {
   }
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
-    const sessionId = process.env.GATEWAY_SESSION_ID ?? process.env.GATEWAY_AGENT_ID;
+    const sessionId = process.env.GATEWAY_SESSION_ID;
     const agentId = process.env.GATEWAY_AGENT_ID;
     if (sessionId) args = { ...args, session_id: sessionId };
     if (agentId) args = { ...args, agent_id: agentId };
@@ -33,10 +33,13 @@ async function readFirstDataLine(res: Response): Promise<string | undefined> {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      const found = lines.find(l => l.startsWith('data: '));
-      if (found) return found;
-      buf = lines[lines.length - 1];
+      // Scan all complete \n-terminated lines; return the first data: line found
+      let newlineIdx: number;
+      while ((newlineIdx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, newlineIdx);
+        buf = buf.slice(newlineIdx + 1);
+        if (line.startsWith('data: ')) return line;
+      }
     }
   } finally {
     reader.cancel();
@@ -108,7 +111,9 @@ async function callGetpodBrowser(
 const browserToolDefs: McpToolDefinition[] = [
   {
     name: 'browser_create_session',
-    description: 'Create or resume a browser session. Returns stream_url and status.',
+    description:
+      'Create or resume a browser session. Returns stream_url and status. ' +
+      'IMPORTANT: After creating a session, always share the stream_url with the user so they can open the browser in their client.',
     inputSchema: {
       type: 'object',
       properties: {
