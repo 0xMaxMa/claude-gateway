@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 
 let _reqId = 1;
@@ -19,7 +21,25 @@ export class BrowserModule implements ToolModule {
     const agentId = process.env.GATEWAY_AGENT_ID;
     if (sessionId) args = { ...args, session_id: sessionId };
     if (agentId) args = { ...args, agent_id: agentId };
-    return callGetpodBrowser(name, args);
+
+    const result = await callGetpodBrowser(name, args);
+
+    if (name === 'browser_screenshot' && !result.isError) {
+      // getpod-browser returns {type:"image", data: base64, mimeType:"image/jpeg"}.
+      // Decode and save to /tmp so callers can attach the file path directly.
+      const block = result.content[0] as Record<string, string> | undefined;
+      const b64 = block?.['data'] ?? '';
+      const mime = block?.['mimeType'] ?? 'image/jpeg';
+      if (b64) {
+        const ext = mime.includes('png') ? 'png' : 'jpg';
+        const sid = (args.session_id as string | undefined) ?? 'default';
+        const filePath = path.join('/tmp', `browser_shot_${sid}.${ext}`);
+        fs.writeFileSync(filePath, Buffer.from(b64, 'base64'));
+        return { content: [{ type: 'text', text: filePath }] };
+      }
+    }
+
+    return result;
   }
 }
 
@@ -83,7 +103,7 @@ async function callGetpodBrowser(
   }
 
   let rpc: {
-    result?: { content: Array<{ type: string; text: string }>; isError?: boolean };
+    result?: { content: Array<Record<string, string>>; isError?: boolean };
     error?: { message: string };
   };
   try {
@@ -143,12 +163,16 @@ const browserToolDefs: McpToolDefinition[] = [
   },
   {
     name: 'browser_navigate',
-    description: 'Navigate to a URL.',
+    description: 'Navigate to a URL. If tab_id is provided, navigates that specific tab; otherwise navigates the active tab.',
     inputSchema: {
       type: 'object',
       properties: {
         session_id: { type: 'string' },
         url: { type: 'string' },
+        tab_id: {
+          type: 'string',
+          description: 'Tab ID to navigate (optional, from browser_tabs); omit to use the active tab',
+        },
         wait: {
           type: 'string',
           description: 'Wait condition: load, domcontentloaded, networkidle',
@@ -269,10 +293,24 @@ const browserToolDefs: McpToolDefinition[] = [
   {
     name: 'browser_screenshot',
     description:
-      'Capture the current viewport as JPEG. Returns {data: base64, mimeType: image/jpeg}.',
+      'Capture the current viewport as JPEG. Returns the absolute file path of the saved image (ready to attach to Telegram).',
     inputSchema: {
       type: 'object',
       properties: { session_id: { type: 'string' } },
+    },
+  },
+  {
+    name: 'browser_navigate_tab',
+    description: 'Navigate a specific tab (by tab_id) to a URL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        tab_id: { type: 'string', description: 'Tab ID returned by browser_tabs or browser_new_tab' },
+        url: { type: 'string' },
+        wait: { type: 'string', description: 'Wait condition: load, domcontentloaded, networkidle' },
+      },
+      required: ['tab_id', 'url'],
     },
   },
 ];

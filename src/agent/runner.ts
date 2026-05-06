@@ -389,6 +389,7 @@ export class AgentRunner extends EventEmitter {
         }
         const lines = [
           `📌 Current Session: ${meta.name}`,
+          `<code>${meta.id}</code>`,
           '',
           `📥 Messages: ${msgs}`,
           `👉 Context: ${usedPct}%`,
@@ -397,7 +398,7 @@ export class AgentRunner extends EventEmitter {
           lines.push('', '💡 Near limit — consider /compact');
         }
         lines.push('', 'Commands: /sessions /new /rename /clear /compact');
-        return respond({ success: true, text: lines.join('\n') });
+        return respond({ success: true, text: lines.join('\n'), format: 'html' });
       } catch {
         return respond({ success: false, text: 'Failed to get session info.' });
       }
@@ -778,6 +779,7 @@ export class AgentRunner extends EventEmitter {
 
     const lines = [
       `📌 Current Session: ${meta.name}`,
+      `<code>${index.activeSessionId}</code>`,
       '',
       `📥 Messages: ${msgs}`,
       `👉 Context: ${contextLine}`,
@@ -791,7 +793,7 @@ export class AgentRunner extends EventEmitter {
 
     const info = lines.join('\n');
 
-    this.writeAutoForward(chatId, info);
+    this.writeAutoForward(chatId, info, 'html');
   }
 
   /**

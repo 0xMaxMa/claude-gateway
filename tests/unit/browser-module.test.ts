@@ -39,9 +39,9 @@ describe('BrowserModule', () => {
   // --- getTools ---
 
   describe('getTools', () => {
-    it('returns exactly 16 browser tools', () => {
+    it('returns exactly 17 browser tools', () => {
       const mod = new BrowserModule();
-      expect(mod.getTools()).toHaveLength(16);
+      expect(mod.getTools()).toHaveLength(17);
     });
 
     it('all tool names are browser_-prefixed', () => {

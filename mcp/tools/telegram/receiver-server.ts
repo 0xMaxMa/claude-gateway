@@ -1009,7 +1009,7 @@ bot.command('session', async ctx => {
       body: JSON.stringify({ command: 'session_info', chat_id: String(ctx.chat.id) }),
     })
     const data = await res.json() as { success: boolean; text?: string }
-    await ctx.reply(data.text ?? '⚠️ Could not get session info.')
+    await ctx.reply(data.text ?? '⚠️ Could not get session info.', { parse_mode: 'HTML' })
   } catch {
     await ctx.reply('⚠️ Could not connect to gateway.')
   }
