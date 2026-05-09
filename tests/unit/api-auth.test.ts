@@ -1,6 +1,6 @@
 import { createServer } from 'http';
 import express from 'express';
-import { createApiAuthMiddleware, canAccessAgent } from '../../src/api/auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from '../../src/api/auth';
 import { ApiKey } from '../../src/types';
 import * as supertest from 'supertest';
 
@@ -89,5 +89,45 @@ describe('canAccessAgent', () => {
   it('returns true for any agentId when agents is "*"', () => {
     expect(canAccessAgent(adminKey, 'alfred')).toBe(true);
     expect(canAccessAgent(adminKey, 'anything')).toBe(true);
+  });
+});
+
+describe('canWriteAgent', () => {
+  const readKey: ApiKey = { key: 'r', agents: ['alfred'] };
+  const writeKey: ApiKey = { key: 'w', agents: ['alfred'], write: true };
+  const adminKey: ApiKey = { key: 'a', agents: '*', admin: true };
+  const writeOtherKey: ApiKey = { key: 'wo', agents: ['baerbel'], write: true };
+
+  it('returns false for a read-only key even if in scope', () => {
+    expect(canWriteAgent(readKey, 'alfred')).toBe(false);
+  });
+
+  it('returns true for a write key scoped to the agent', () => {
+    expect(canWriteAgent(writeKey, 'alfred')).toBe(true);
+  });
+
+  it('returns false for a write key not scoped to the agent', () => {
+    expect(canWriteAgent(writeOtherKey, 'alfred')).toBe(false);
+  });
+
+  it('returns true for an admin key regardless of scope', () => {
+    expect(canWriteAgent(adminKey, 'anything')).toBe(true);
+  });
+});
+
+describe('isAdmin', () => {
+  it('returns true when admin flag is set', () => {
+    const key: ApiKey = { key: 'k', agents: '*', admin: true };
+    expect(isAdmin(key)).toBe(true);
+  });
+
+  it('returns false when admin flag is absent', () => {
+    const key: ApiKey = { key: 'k', agents: '*' };
+    expect(isAdmin(key)).toBe(false);
+  });
+
+  it('returns false when admin flag is false', () => {
+    const key: ApiKey = { key: 'k', agents: '*', admin: false };
+    expect(isAdmin(key)).toBe(false);
   });
 });

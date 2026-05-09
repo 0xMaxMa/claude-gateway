@@ -72,8 +72,9 @@ const agentConfig: AgentConfig = {
 
 const apiKeys: ApiKey[] = [
   { key: 'sk-test-app', agents: [AGENT_ID] },
-  { key: 'sk-test-admin', agents: '*' },
+  { key: 'sk-test-admin', agents: '*', admin: true },
   { key: 'sk-test-tools', agents: [AGENT_ID], allow_tools: true },
+  { key: 'sk-test-write', agents: [AGENT_ID], write: true },
 ];
 
 function buildApp(runnerImpl: (sessionId: string, msg: string) => Promise<string>) {
@@ -280,6 +281,93 @@ describe('GET /api/v1/agents', () => {
     const app = buildApp(async () => 'ok');
     const res = await supertest.default(app).get('/api/v1/agents');
     expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /api/v1/agents — access control', () => {
+  it('returns 403 for non-admin key', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .post('/api/v1/agents')
+      .set(AUTH) // sk-test-app — no admin flag
+      .send({ id: 'new-agent', description: 'test' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/admin key required/i);
+  });
+
+  it('returns 403 for write key without admin flag', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .post('/api/v1/agents')
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ id: 'new-agent', description: 'test' });
+    expect(res.status).toBe(403);
+  });
+
+  it('admin key passes auth check (returns 501 without configPath)', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .post('/api/v1/agents')
+      .set({ Authorization: 'Bearer sk-test-admin' })
+      .send({ id: 'new-agent', description: 'test' });
+    expect(res.status).toBe(501); // no configPath — auth check passed
+  });
+});
+
+describe('PATCH /api/v1/agents/:agentId — access control', () => {
+  it('returns 403 for key without write flag', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set(AUTH) // sk-test-app — no write flag
+      .send({ description: 'new desc' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/write permission required/i);
+  });
+
+  it('write key with correct scope passes auth check (returns 501 without configPath)', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ description: 'new desc' });
+    expect(res.status).toBe(501); // auth passed, no configPath
+  });
+
+  it('admin key passes auth check', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-admin' })
+      .send({ description: 'new desc' });
+    expect(res.status).toBe(501); // auth passed, no configPath
+  });
+});
+
+describe('DELETE /api/v1/agents/:agentId — access control', () => {
+  it('returns 403 for non-admin key', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .delete(`/api/v1/agents/${AGENT_ID}`)
+      .set(AUTH);
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/admin key required/i);
+  });
+
+  it('returns 403 for write key without admin flag', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .delete(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' });
+    expect(res.status).toBe(403);
+  });
+
+  it('admin key passes auth check (returns 501 without configPath)', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .delete(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-admin' });
+    expect(res.status).toBe(501); // auth passed, no configPath
   });
 });
 

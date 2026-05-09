@@ -1,8 +1,11 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { AgentConfig, ApiKey } from '../types';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent } from './auth';
+
+const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1MB
 
 const ALLOWED_FILES = new Set([
   'SOUL.md',
@@ -76,15 +79,15 @@ export function createWorkspaceRouter(
   /**
    * PUT /api/v1/agents/:agentId/files/:filename
    *
-   * Write a workspace file for an agent.
+   * Write a workspace file for an agent. Requires write access.
    * Gateway's file watcher will auto-reload CLAUDE.md after write.
    */
   router.put('/v1/agents/:agentId/files/:filename', auth, (req: Request, res: Response) => {
     const { agentId, filename } = req.params as { agentId: string; filename: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
       return;
     }
 
@@ -106,10 +109,18 @@ export function createWorkspaceRouter(
       return;
     }
 
+    if (body.content.length > MAX_FILE_SIZE) {
+      res.status(400).json({ error: 'Content exceeds 1MB limit' });
+      return;
+    }
+
     const filePath = path.join(config.workspace, filename);
+    const tmpPath = filePath + '.tmp.' + randomUUID();
     try {
-      fs.writeFileSync(filePath, body.content, 'utf-8');
+      fs.writeFileSync(tmpPath, body.content, 'utf-8');
+      fs.renameSync(tmpPath, filePath);
     } catch (writeErr) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore cleanup error */ }
       res.status(500).json({ error: `Failed to write file: ${(writeErr as Error).message}` });
       return;
     }

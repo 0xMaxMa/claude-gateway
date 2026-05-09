@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, ApiKey, ModelConfig } from '../types';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -14,22 +14,28 @@ type AuthedRequest = Request & { apiKey: ApiKey };
 
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 
-/** Read config.json, mutate agents array, write back atomically. Throws if duplicate id detected. */
+let _configWriteLock: Promise<void> = Promise.resolve();
+
+/** Read config.json, mutate agents array, write back atomically under an in-process lock. */
 function writeAgentsToConfig(
   configPath: string,
   mutate: (agents: unknown[]) => void,
   newId?: string,
-): void {
-  const raw = fs.readFileSync(configPath, 'utf-8');
-  const config = JSON.parse(raw) as { agents: unknown[]; [k: string]: unknown };
-  if (newId) {
-    const exists = (config.agents as Record<string, unknown>[]).some((a) => a.id === newId);
-    if (exists) throw Object.assign(new Error(`Agent '${newId}' already exists in config`), { code: 'DUPLICATE' });
-  }
-  mutate(config.agents);
-  const tmp = configPath + '.tmp.' + randomUUID();
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf-8');
-  fs.renameSync(tmp, configPath);
+): Promise<void> {
+  const next = _configWriteLock.catch(() => {}).then(() => {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as { agents: unknown[]; [k: string]: unknown };
+    if (newId) {
+      const exists = (config.agents as Record<string, unknown>[]).some((a) => a.id === newId);
+      if (exists) throw Object.assign(new Error(`Agent '${newId}' already exists in config`), { code: 'DUPLICATE' });
+    }
+    mutate(config.agents);
+    const tmp = configPath + '.tmp.' + randomUUID();
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf-8');
+    fs.renameSync(tmp, configPath);
+  });
+  _configWriteLock = next.catch(() => {});
+  return next;
 }
 
 export function createApiRouter(
@@ -197,25 +203,33 @@ export function createApiRouter(
   /**
    * GET /api/v1/agents
    *
-   * List all agents (no API-key scope filter — auth is handled by Go API).
+   * List agents scoped to the API key. Admin keys see all agents.
    */
-  router.get('/v1/agents', auth, (_req: Request, res: Response) => {
-    const agents = [...agentConfigs.entries()].map(([id, cfg]) => ({
-      id,
-      description: cfg.description,
-      model: cfg.claude?.model ?? null,
-      allow_tools: cfg.allow_tools ?? false,
-    }));
+  router.get('/v1/agents', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const agents = [...agentConfigs.entries()]
+      .filter(([id]) => isAdmin(apiKey) || canAccessAgent(apiKey, id))
+      .map(([id, cfg]) => ({
+        id,
+        description: cfg.description,
+        model: cfg.claude?.model ?? null,
+        allow_tools: cfg.allow_tools ?? false,
+      }));
     res.json({ agents });
   });
 
   /**
    * POST /api/v1/agents
    *
-   * Create a new agent entry in config.json.
+   * Create a new agent entry in config.json. Requires admin key.
    * Body: { id, description, model? }
    */
-  router.post('/v1/agents', auth, (req: Request, res: Response) => {
+  router.post('/v1/agents', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required to create agents' });
+      return;
+    }
     if (!configPath) {
       res.status(501).json({ error: 'Agent management not available (no configPath)' });
       return;
@@ -271,7 +285,7 @@ export function createApiRouter(
     }
 
     try {
-      writeAgentsToConfig(configPath, (agents) => agents.push(newAgent), id);
+      await writeAgentsToConfig(configPath, (agents) => agents.push(newAgent), id);
     } catch (err) {
       const code = (err as { code?: string }).code;
       if (code === 'DUPLICATE') {
@@ -288,15 +302,20 @@ export function createApiRouter(
   /**
    * PATCH /api/v1/agents/:agentId
    *
-   * Update agent description and/or model.
+   * Update agent description and/or model. Requires write access to the agent.
    * Body: { description?, model? }
    */
-  router.patch('/v1/agents/:agentId', auth, (req: Request, res: Response) => {
+  router.patch('/v1/agents/:agentId', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const { agentId } = req.params as { agentId: string };
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
+      return;
+    }
     if (!configPath) {
       res.status(501).json({ error: 'Agent management not available (no configPath)' });
       return;
     }
-    const { agentId } = req.params as { agentId: string };
     if (!agentConfigs.has(agentId)) {
       res.status(404).json({ error: `Agent '${agentId}' not found` });
       return;
@@ -318,7 +337,7 @@ export function createApiRouter(
     }
 
     try {
-      writeAgentsToConfig(configPath, (agents) => {
+      await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
         if (!agent) return;
         if (description !== undefined) agent.description = (description as string).trim();
@@ -345,9 +364,14 @@ export function createApiRouter(
   /**
    * DELETE /api/v1/agents/:agentId
    *
-   * Remove agent from config.json.
+   * Remove agent from config.json. Requires admin key.
    */
-  router.delete('/v1/agents/:agentId', auth, (req: Request, res: Response) => {
+  router.delete('/v1/agents/:agentId', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required' });
+      return;
+    }
     if (!configPath) {
       res.status(501).json({ error: 'Agent management not available (no configPath)' });
       return;
@@ -359,7 +383,7 @@ export function createApiRouter(
     }
 
     try {
-      writeAgentsToConfig(configPath, (agents) => {
+      await writeAgentsToConfig(configPath, (agents) => {
         const idx = (agents as Record<string, unknown>[]).findIndex((a) => a.id === agentId);
         if (idx !== -1) agents.splice(idx, 1);
       });

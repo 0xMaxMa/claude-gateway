@@ -57,3 +57,19 @@ export function canAccessAgent(apiKey: ApiKey, agentId: string): boolean {
   if (apiKey.agents === '*') return true;
   return (apiKey.agents as string[]).includes(agentId);
 }
+
+/**
+ * Returns true if the key has write access to the specified agent.
+ * Requires both agent-scope access AND write flag (or admin).
+ */
+export function canWriteAgent(apiKey: ApiKey, agentId: string): boolean {
+  if (apiKey.admin) return true;
+  return apiKey.write === true && canAccessAgent(apiKey, agentId);
+}
+
+/**
+ * Returns true if the key has admin privileges (cross-agent + destructive ops).
+ */
+export function isAdmin(apiKey: ApiKey): boolean {
+  return apiKey.admin === true;
+}

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { AgentConfig, ApiKey } from '../types';
-import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { loadSkills } from '../skills/loader';
 import { extractFrontmatter } from '../skills/parser';
 import type { AgentRunner } from '../agent/runner';
@@ -35,6 +35,23 @@ function getSkillDir(scope: 'workspace' | 'shared', name: string, workspaceDir: 
   return scope === 'workspace'
     ? path.join(workspaceDir, 'skills', name)
     : path.join(SHARED_SKILLS_DIR, name);
+}
+
+function isPrivateHost(urlStr: string): boolean {
+  try {
+    const { hostname } = new URL(urlStr);
+    return (
+      hostname === 'localhost' ||
+      /^127\./.test(hostname) ||
+      /^10\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^169\.254\./.test(hostname) ||
+      hostname === '::1'
+    );
+  } catch {
+    return true; // block if URL cannot be parsed
+  }
 }
 
 function toRawGitHubUrl(url: string): string {
@@ -203,8 +220,8 @@ export function createSkillsRouter(
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
       return;
     }
 
@@ -233,6 +250,11 @@ export function createSkillsRouter(
     const description = body.description.trim();
     const content = body.content.trim();
     const scope = body.scope === 'shared' ? 'shared' : 'workspace';
+
+    if (scope === 'shared' && !isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required for shared scope' });
+      return;
+    }
 
     const nameErr = validateSkillName(name);
     if (nameErr) {
@@ -281,8 +303,8 @@ export function createSkillsRouter(
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+    if (!isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required to install skills from URL' });
       return;
     }
 
@@ -302,6 +324,11 @@ export function createSkillsRouter(
     const url = body.url.trim();
     if (!url.startsWith('https://')) {
       res.status(400).json({ error: 'Only HTTPS URLs are supported' });
+      return;
+    }
+
+    if (isPrivateHost(url)) {
+      res.status(400).json({ error: 'URL targets a private/internal address' });
       return;
     }
 
@@ -384,8 +411,8 @@ export function createSkillsRouter(
     const { agentId, name } = req.params as { agentId: string; name: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
       return;
     }
 
@@ -396,6 +423,11 @@ export function createSkillsRouter(
     }
 
     const scope = req.query['scope'] === 'shared' ? 'shared' : 'workspace';
+
+    if (scope === 'shared' && !isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required for shared scope' });
+      return;
+    }
     const skillDir = getSkillDir(scope, name, config.workspace);
     const skillFile = path.join(skillDir, 'SKILL.md');
 
