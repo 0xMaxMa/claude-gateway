@@ -40,14 +40,19 @@ function getSkillDir(scope: 'workspace' | 'shared', name: string, workspaceDir: 
 function isPrivateHost(urlStr: string): boolean {
   try {
     const { hostname } = new URL(urlStr);
+    // Node.js keeps brackets for IPv6 literals — strip them for matching
+    const h = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
     return (
-      hostname === 'localhost' ||
-      /^127\./.test(hostname) ||
-      /^10\./.test(hostname) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
-      /^192\.168\./.test(hostname) ||
-      /^169\.254\./.test(hostname) ||
-      hostname === '::1'
+      h === 'localhost' ||
+      /^127\./.test(h) ||
+      /^10\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+      /^192\.168\./.test(h) ||
+      /^169\.254\./.test(h) ||
+      h === '::1' ||
+      /^fe80:/i.test(h) ||                   // IPv6 link-local fe80::/10
+      /^fc[0-9a-f]{2}:/i.test(h) ||          // IPv6 ULA fc00::/7
+      /^fd[0-9a-f]{2}:/i.test(h)             // IPv6 ULA fd00::/8
     );
   } catch {
     return true; // block if URL cannot be parsed
@@ -337,7 +342,7 @@ export function createSkillsRouter(
     const force = body.force === true;
 
     try {
-      const response = await fetch(rawUrl);
+      const response = await fetch(rawUrl, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) {
         res.status(400).json({ error: `Failed to fetch URL: ${response.status} ${response.statusText}` });
         return;

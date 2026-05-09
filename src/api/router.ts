@@ -208,7 +208,7 @@ export function createApiRouter(
   router.get('/v1/agents', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const agents = [...agentConfigs.entries()]
-      .filter(([id]) => isAdmin(apiKey) || canAccessAgent(apiKey, id))
+      .filter(([id]) => canAccessAgent(apiKey, id))
       .map(([id, cfg]) => ({
         id,
         description: cfg.description,
