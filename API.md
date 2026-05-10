@@ -61,6 +61,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
+| `GET` | `/api/v1/agents/sessions` | Admin | List all sessions across all agents (nested by agent) |
 | `GET` | `/api/v1/agents/:agentId/chats` | Key | List all chats for an agent |
 | `GET` | `/api/v1/agents/:agentId/chats/:chatId/sessions` | Key | List sessions for a specific chat |
 | `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages` | Key | Paginated message history (cursor-based) |
@@ -1015,6 +1016,57 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ## Chat History API
 
 Access per-agent conversation history stored in the history DB (SQLite). `chatId` uses the format `telegram-{rawId}` or `discord-{rawId}`.
+
+### GET /api/v1/agents/sessions
+
+List all sessions across **all agents** in a single call. Admin key required. Queries each agent's history DB in parallel and returns a nested structure grouped by agent.
+
+```bash
+curl -H "X-Api-Key: admin-key-456" \
+  http://localhost:3000/api/v1/agents/sessions | jq
+```
+
+```json
+{
+  "agents": [
+    {
+      "agentId": "alfred",
+      "description": "Personal assistant",
+      "sessions": [
+        {
+          "chatId": "telegram-997170033",
+          "sessionId": "abc-123",
+          "source": "telegram",
+          "messageCount": 42,
+          "createdAt": 1775737709000,
+          "lastActivity": 1775823600000,
+          "lastMessage": "Sure, I can help with that!"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Session fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chatId` | string | Channel chat ID (`telegram-{id}` / `discord-{id}`) — null for API sessions |
+| `sessionId` | string | Unique session identifier |
+| `source` | string | `telegram`, `discord`, or `api` |
+| `messageCount` | number | Total messages in this session |
+| `createdAt` | number | Session start timestamp (ms) |
+| `lastActivity` | number | Last message timestamp (ms) |
+| `lastMessage` | string\|null | Preview of the last message content |
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 403 | Not an admin key |
+
+---
 
 ### GET /api/v1/agents/:agentId/chats
 

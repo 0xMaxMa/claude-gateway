@@ -51,3 +51,19 @@ export interface SearchOpts {
   limit?: number;
   offset?: number;
 }
+
+export interface SessionSummary {
+  chatId: string | null;
+  sessionId: string;
+  source: HistorySource;
+  messageCount: number;
+  createdAt: number;
+  lastActivity: number;
+  lastMessage: string | null;
+}
+
+export interface AgentSessionSummary {
+  agentId: string;
+  description: string;
+  sessions: SessionSummary[];
+}

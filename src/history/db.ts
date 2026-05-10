@@ -11,6 +11,7 @@ import {
   SearchOpts,
   SearchPage,
   SearchResult,
+  SessionSummary,
 } from './types';
 
 const MAX_LIMIT = 200;
@@ -252,6 +253,42 @@ export class HistoryDB {
     } catch {
       return { results: [], total: 0, hasMore: false };
     }
+  }
+
+  listSessions(): SessionSummary[] {
+    const rows = this.db.prepare(`
+      SELECT
+        chat_id,
+        session_id,
+        source,
+        COUNT(*) AS message_count,
+        MIN(ts)   AS created_at,
+        MAX(ts)   AS last_activity,
+        (SELECT content FROM messages m2
+         WHERE m2.session_id = m.session_id
+         ORDER BY ts DESC LIMIT 1) AS last_message
+      FROM messages m
+      GROUP BY session_id
+      ORDER BY last_activity DESC
+    `).all() as Array<{
+      chat_id: string;
+      session_id: string;
+      source: string;
+      message_count: number;
+      created_at: number;
+      last_activity: number;
+      last_message: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      chatId: row.chat_id || null,
+      sessionId: row.session_id,
+      source: row.source as HistorySource,
+      messageCount: row.message_count,
+      createdAt: row.created_at,
+      lastActivity: row.last_activity,
+      lastMessage: row.last_message ?? null,
+    }));
   }
 
   clearChat(chatId: string): void {

@@ -228,6 +228,30 @@ export function createApiRouter(
   });
 
   /**
+   * GET /api/v1/agents/sessions
+   *
+   * List all sessions across all agents. Admin only.
+   * Queries each agent's history DB and returns a nested agents → sessions structure.
+   */
+  router.get('/v1/agents/sessions', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required' });
+      return;
+    }
+    const result = [...agentRunners.entries()].map(([agentId, runner]) => {
+      const cfg = agentConfigs.get(agentId);
+      const sessions = runner.getHistoryDb().listSessions();
+      return {
+        agentId,
+        description: cfg?.description ?? '',
+        sessions,
+      };
+    });
+    res.json({ agents: result });
+  });
+
+  /**
    * POST /api/v1/agents
    *
    * Create a new agent entry in config.json. Requires admin key.
