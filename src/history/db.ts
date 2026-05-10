@@ -48,8 +48,23 @@ export class HistoryDB {
     return cache.get(key)!;
   }
 
+  // Used by AgentRunner: agentDir is workspace/.., so DB lives at agentDir/history.db
+  // which equals agentsBaseDir/agentId/history.db without requiring workspace to be nested correctly.
+  static forDir(agentDir: string, agentId: string): HistoryDB {
+    const key = `dir::${agentDir}::${agentId}`;
+    if (!cache.has(key)) {
+      const dbPath = path.join(agentDir, 'history.db');
+      cache.set(key, new HistoryDB(dbPath, agentId));
+    }
+    return cache.get(key)!;
+  }
+
   static evict(agentsBaseDir: string, agentId: string): void {
     cache.delete(`${agentsBaseDir}::${agentId}`);
+  }
+
+  static evictDir(agentDir: string, agentId: string): void {
+    cache.delete(`dir::${agentDir}::${agentId}`);
   }
 
   private _initSchema(): void {

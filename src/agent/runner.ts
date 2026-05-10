@@ -90,6 +90,8 @@ export class AgentRunner extends EventEmitter {
 
   // Resolved agentsBaseDir for media and history paths
   private readonly agentsBaseDir: string;
+  // Agent's own directory (workspace/..) — used for HistoryDB path
+  private readonly agentDir: string;
 
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
     super();
@@ -100,10 +102,13 @@ export class AgentRunner extends EventEmitter {
     // Resolve agentsBaseDir: workspace is at <agentsBaseDir>/<agentId>/workspace
     const agentsBaseDir = path.resolve(agentConfig.workspace, '..', '..');
     this.agentsBaseDir = agentsBaseDir;
+    // agentDir is workspace/.. — used for HistoryDB so DB is at <agentDir>/history.db
+    // This avoids requiring workspace to be nested at exactly <base>/<agentId>/workspace.
+    this.agentDir = path.resolve(agentConfig.workspace, '..');
     this.sessionStore = new SessionStore(agentsBaseDir);
     // config.json lives 3 levels above workspace: <base>/<agentId>/workspace -> <base>/config.json
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
-    this.historyDb = HistoryDB.forAgent(agentsBaseDir, agentConfig.id);
+    this.historyDb = HistoryDB.forDir(this.agentDir, agentConfig.id);
 
     this.idleTimeoutMs =
       (agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
@@ -1554,6 +1559,10 @@ export class AgentRunner extends EventEmitter {
 
   getAgentsBaseDir(): string {
     return this.agentsBaseDir;
+  }
+
+  getAgentDir(): string {
+    return this.agentDir;
   }
 
   getHistoryDb(): HistoryDB {

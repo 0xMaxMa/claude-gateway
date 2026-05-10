@@ -408,7 +408,7 @@ export function createApiRouter(
     if (runner) {
       try { await runner.stop(); } catch { /* ignore stop errors */ }
       agentRunners.delete(agentId);
-      HistoryDB.evict(runner.getAgentsBaseDir(), agentId);
+      HistoryDB.evictDir(runner.getAgentDir(), agentId);
     }
     agentConfigs.delete(agentId);
 
