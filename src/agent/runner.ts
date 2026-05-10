@@ -13,6 +13,9 @@ import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
+import { HistoryDB } from '../history/db';
+import { MediaStore } from '../history/media-store';
+import type { HistorySource } from '../history/types';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -82,6 +85,12 @@ export class AgentRunner extends EventEmitter {
   // Path to gateway config.json for persisting model changes
   private readonly configPath: string;
 
+  // Persistent chat history database (Layer 2 — separate from session context)
+  private readonly historyDb: HistoryDB;
+
+  // Resolved agentsBaseDir for media and history paths
+  private readonly agentsBaseDir: string;
+
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
     super();
     this.agentConfig = agentConfig;
@@ -90,9 +99,11 @@ export class AgentRunner extends EventEmitter {
 
     // Resolve agentsBaseDir: workspace is at <agentsBaseDir>/<agentId>/workspace
     const agentsBaseDir = path.resolve(agentConfig.workspace, '..', '..');
+    this.agentsBaseDir = agentsBaseDir;
     this.sessionStore = new SessionStore(agentsBaseDir);
     // config.json lives 3 levels above workspace: <base>/<agentId>/workspace -> <base>/config.json
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
+    this.historyDb = HistoryDB.forAgent(agentsBaseDir, agentConfig.id);
 
     this.idleTimeoutMs =
       (agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
@@ -174,11 +185,36 @@ export class AgentRunner extends EventEmitter {
           this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource)
             .then(async (sessionId) => {
               // Append user message to the active session
+              const userContent = content || (meta['attachment_file_id'] ? '(photo)' : '');
+              const userTs = Date.now();
               await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
                 role: 'user',
-                content: content || (meta['attachment_file_id'] ? '(photo)' : ''),
-                ts: Date.now(),
+                content: userContent,
+                ts: userTs,
               }, channelSource);
+
+              // Persist to permanent history DB (separate from session context)
+              const mediaFiles: string[] = [];
+              if (meta['image_path']) {
+                try {
+                  const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['image_path']);
+                  mediaFiles.push(rel);
+                } catch {
+                  // Non-fatal — continue without media
+                }
+              }
+              this.historyDb.insertMessage({
+                chatId: `${channelSource}-${chatId}`,
+                sessionId,
+                source: channelSource as HistorySource,
+                role: 'user',
+                content: userContent,
+                senderName: meta['user'] ?? undefined,
+                senderId: meta['user_id'] ?? meta['chat_id'] ?? undefined,
+                platformMessageId: meta['message_id'] ?? undefined,
+                mediaFiles: mediaFiles.length > 0 ? mediaFiles : undefined,
+                ts: userTs,
+              });
               // Restart session before this turn if accumulated image size exceeded threshold
               if (this.pendingRestarts.has(chatId)) {
                 const existingSession = this.sessions.get(chatId);
@@ -478,6 +514,10 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
+  private static escapeXmlAttr(value: string): string {
+    return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   private static buildChannelXml(params: {
     content?: string;
     meta?: Record<string, string>;
@@ -622,8 +662,18 @@ export class AgentRunner extends EventEmitter {
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
             if (resultText.trim() && !proc.queryMode) {
               const text = resultText.trim();
-              const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
-              if (channelSrc !== 'discord' && hasMarkdown(text)) {
+              const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
+              // Persist assistant reply to permanent history DB
+              this.historyDb.insertMessage({
+                chatId: `${channelSrcForResult}-${mapKey}`,
+                sessionId: actualSessionId,
+                source: channelSrcForResult as HistorySource,
+                role: 'assistant',
+                content: text,
+                ts: Date.now(),
+              });
+              // Forward to channel
+              if (channelSrcForResult !== 'discord' && hasMarkdown(text)) {
                 this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
               } else {
                 this.writeAutoForward(mapKey, text);
@@ -834,6 +884,7 @@ export class AgentRunner extends EventEmitter {
 
   /**
    * /clear — clear history of the current session and restart the process.
+   * Also clears the permanent history DB and media files for this chat.
    */
   private async handleCommandClear(agentId: string, chatId: string): Promise<void> {
     const ch = this.channelFor(chatId);
@@ -848,6 +899,13 @@ export class AgentRunner extends EventEmitter {
       loadedAtSpawn: undefined,
       messageCountAtSpawn: undefined,
     }, ch);
+
+    // Clear permanent history DB for this chat
+    const historyChatId = `${ch}-${chatId}`;
+    this.historyDb.clearChat(historyChatId);
+
+    // Delete persisted media files for this chat
+    MediaStore.clearChatMedia(this.agentsBaseDir, agentId, historyChatId);
 
     // Kill old process so next message spawns fresh
     this.restartProcess(chatId).catch(() => {});
@@ -1134,13 +1192,22 @@ export class AgentRunner extends EventEmitter {
     const session = await this.getOrSpawnSession(sessionId, 'api');
 
     // Persist user message
+    const apiUserTs = Date.now();
     await this.sessionStore
       .appendMessage(this.agentConfig.id, sessionId, {
         role: 'user',
         content: message,
-        ts: Date.now(),
+        ts: apiUserTs,
       })
       .catch(() => {});
+    this.historyDb.insertMessage({
+      chatId: `api-${sessionId}`,
+      sessionId,
+      source: 'api',
+      role: 'user',
+      content: message,
+      ts: apiUserTs,
+    });
 
     this.pendingApiSessions.add(sessionId);
     session.touch();
@@ -1174,13 +1241,22 @@ export class AgentRunner extends EventEmitter {
         cleanup();
         // Persist assistant reply
         if (result.trim()) {
+          const apiAssistantTs = Date.now();
           this.sessionStore
             .appendMessage(this.agentConfig.id, sessionId, {
               role: 'assistant',
               content: result.trim(),
-              ts: Date.now(),
+              ts: apiAssistantTs,
             })
             .catch(() => {});
+          this.historyDb.insertMessage({
+            chatId: `api-${sessionId}`,
+            sessionId,
+            source: 'api',
+            role: 'assistant',
+            content: result.trim(),
+            ts: apiAssistantTs,
+          });
         }
         resolve(result.trim());
       };
@@ -1283,13 +1359,22 @@ export class AgentRunner extends EventEmitter {
     const session = await this.getOrSpawnSession(sessionId, 'api');
 
     // Persist user message
+    const streamUserTs = Date.now();
     await this.sessionStore
       .appendMessage(this.agentConfig.id, sessionId, {
         role: 'user',
         content: message,
-        ts: Date.now(),
+        ts: streamUserTs,
       })
       .catch(() => {});
+    this.historyDb.insertMessage({
+      chatId: `api-${sessionId}`,
+      sessionId,
+      source: 'api',
+      role: 'user',
+      content: message,
+      ts: streamUserTs,
+    });
 
     this.pendingApiSessions.add(sessionId);
     session.touch();
@@ -1305,13 +1390,22 @@ export class AgentRunner extends EventEmitter {
       cleanup();
       // Persist assistant reply
       if (result.trim()) {
+        const streamAssistantTs = Date.now();
         this.sessionStore
           .appendMessage(this.agentConfig.id, sessionId, {
             role: 'assistant',
             content: result.trim(),
-            ts: Date.now(),
+            ts: streamAssistantTs,
           })
           .catch(() => {});
+        this.historyDb.insertMessage({
+          chatId: `api-${sessionId}`,
+          sessionId,
+          source: 'api',
+          role: 'assistant',
+          content: result.trim(),
+          ts: streamAssistantTs,
+        });
       }
       callbacks.onDone(result.trim());
     };
@@ -1456,6 +1550,149 @@ export class AgentRunner extends EventEmitter {
    */
   hasActiveApiSession(sessionId: string): boolean {
     return this.pendingApiSessions.has(sessionId);
+  }
+
+  getAgentsBaseDir(): string {
+    return this.agentsBaseDir;
+  }
+
+  getHistoryDb(): HistoryDB {
+    return this.historyDb;
+  }
+
+  async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord'): Promise<import('../types').SessionIndex> {
+    return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
+  }
+
+  /**
+   * Send a message into an existing channel session (cross-channel continuation from UI).
+   * The session process receives full history context from the session JSON (Layer 1).
+   * The reply is streamed back via SSE callbacks and persisted to history DB.
+   */
+  async sendMessageToSession(
+    rawChatId: string,
+    channel: 'telegram' | 'discord',
+    sessionId: string,
+    message: string,
+    senderName: string | undefined,
+    callbacks: {
+      onChunk: (event: StreamEvent) => void;
+      onDone: (fullText: string) => void;
+      onError: (err: Error) => void;
+    },
+    opts: { timeoutMs: number },
+  ): Promise<() => void> {
+    // Ensure the session process uses the correct channel source
+    this.channelSourceMap.set(rawChatId, channel);
+
+    const session = await this.getOrSpawnSession(rawChatId, channel, sessionId);
+
+    // Persist user message (Layer 1 session JSON + Layer 2 history DB)
+    const uiUserTs = Date.now();
+    await this.sessionStore.appendTelegramMessage(this.agentConfig.id, rawChatId, sessionId, {
+      role: 'user',
+      content: message,
+      ts: uiUserTs,
+    }, channel).catch(() => {});
+
+    this.historyDb.insertMessage({
+      chatId: `${channel}-${rawChatId}`,
+      sessionId,
+      source: 'ui',
+      role: 'user',
+      content: message,
+      senderName,
+      ts: uiUserTs,
+    });
+
+    const buffer: string[] = [];
+    let settled = false;
+    let lastPartialText = '';
+
+    const done = (result: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (result.trim()) {
+        const uiAssistantTs = Date.now();
+        this.sessionStore.appendTelegramMessage(this.agentConfig.id, rawChatId, sessionId, {
+          role: 'assistant',
+          content: result.trim(),
+          ts: uiAssistantTs,
+        }, channel).catch(() => {});
+        this.historyDb.insertMessage({
+          chatId: `${channel}-${rawChatId}`,
+          sessionId,
+          source: channel as HistorySource,
+          role: 'assistant',
+          content: result.trim(),
+          ts: uiAssistantTs,
+        });
+      }
+      callbacks.onDone(result.trim());
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callbacks.onError(err);
+    };
+
+    let globalTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (globalTimer) clearTimeout(globalTimer);
+      session.off('output', onOutput);
+    };
+
+    const onOutput = (line: string) => {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        if (obj['type'] === 'assistant') {
+          const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+          if (Array.isArray(msg?.content)) {
+            let fullText = '';
+            for (const block of msg!.content) {
+              if (block.type === 'text' && block.text) fullText += block.text;
+            }
+            if (fullText.length > lastPartialText.length) {
+              const delta = fullText.slice(lastPartialText.length);
+              buffer.push(delta);
+              callbacks.onChunk({ type: 'text_delta', text: delta });
+            }
+            lastPartialText = fullText;
+          }
+        }
+        if (obj['type'] === 'text') {
+          const text = (obj['text'] as string) ?? '';
+          if (text) { buffer.push(text); callbacks.onChunk({ type: 'text_delta', text }); }
+        }
+        if (obj['type'] === 'result') {
+          session.setProcessing(false);
+          const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
+          done(resultText);
+        }
+      } catch { /* non-JSON */ }
+    };
+
+    globalTimer = setTimeout(() => {
+      session.setProcessing(false);
+      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+    }, opts.timeoutMs);
+
+    session.on('output', onOutput);
+
+    const channelXml =
+      `<channel source="ui" chat_id="${AgentRunner.escapeXmlAttr(rawChatId)}" session_id="${AgentRunner.escapeXmlAttr(sessionId)}" ` +
+      `user="${AgentRunner.escapeXmlAttr(senderName ?? 'ui')}" ts="${new Date().toISOString()}">\n${message}\n</channel>`;
+
+    session.setProcessing(true);
+    session.sendMessage(channelXml);
+
+    return () => {
+      if (!settled) { settled = true; cleanup(); }
+    };
   }
 
   /**

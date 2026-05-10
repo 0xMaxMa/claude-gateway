@@ -7,6 +7,7 @@ import * as path from 'path';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, ApiKey, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
+import { MediaStore } from '../history/media-store';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -412,5 +413,313 @@ export function createApiRouter(
     res.json({ success: true, id: agentId });
   });
 
+  // ─── Chat History API ─────────────────────────────────────────────────────────
+
+  /**
+   * GET /api/v1/agents/:agentId/chats
+   * List all chats (across all channels) for an agent from the history DB.
+   */
+  router.get('/v1/agents/:agentId/chats', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const chats = runner.getHistoryDb().listChats();
+    res.json({ chats });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/chats/:chatId/sessions
+   * List sessions for a specific chat (delegated to SessionStore).
+   * chatId format: "telegram-{rawId}" | "discord-{rawId}"
+   */
+  router.get('/v1/agents/:agentId/chats/:chatId/sessions', auth, async (req: Request, res: Response) => {
+    const { agentId, chatId } = req.params as { agentId: string; chatId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const { source, rawChatId } = parseHistoryChatId(chatId);
+    if (source !== 'telegram' && source !== 'discord') {
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord chats' });
+      return;
+    }
+    try {
+      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord');
+      res.json(index);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/chats/:chatId/messages
+   * Paginated message history (cursor-based).
+   * Query: limit, before (ts ms), after (ts ms), session_id
+   */
+  router.get('/v1/agents/:agentId/chats/:chatId/messages', auth, (req: Request, res: Response) => {
+    const { agentId, chatId } = req.params as { agentId: string; chatId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const query = req.query as Record<string, string>;
+    const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, 200) : 50;
+    const before = query['before'] ? parseInt(query['before'], 10) : undefined;
+    const after = query['after'] ? parseInt(query['after'], 10) : undefined;
+    const sessionId = query['session_id'] ?? undefined;
+
+    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId });
+    res.json(page);
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/chats/:chatId/messages/search
+   * Full-text search using SQLite FTS5.
+   * Query: q, limit, offset
+   */
+  router.get('/v1/agents/:agentId/chats/:chatId/messages/search', auth, (req: Request, res: Response) => {
+    const { agentId, chatId } = req.params as { agentId: string; chatId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const query = req.query as Record<string, string>;
+    const q = (query['q'] ?? '').trim();
+    if (!q) {
+      res.status(400).json({ error: 'q is required' });
+      return;
+    }
+    const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 20, 100) : 20;
+    const offset = query['offset'] ? parseInt(query['offset'], 10) : 0;
+
+    const page = runner.getHistoryDb().searchMessages(chatId, q, { limit, offset });
+    res.json(page);
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages
+   * Inject a message into an existing channel session (cross-channel continuation).
+   * Streams the assistant response as SSE.
+   * Body: { content: string, senderName?: string }
+   */
+  router.post('/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages', auth, async (req: Request, res: Response) => {
+    const { agentId, chatId, sessionId } = req.params as { agentId: string; chatId: string; sessionId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const { source, rawChatId } = parseHistoryChatId(chatId);
+    if (source !== 'telegram' && source !== 'discord') {
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord chats' });
+      return;
+    }
+
+    const body = req.body as { content?: unknown; senderName?: unknown };
+    const content = body.content;
+    if (!content || typeof content !== 'string' || !content.trim()) {
+      res.status(400).json({ error: 'content is required and must be a non-empty string' });
+      return;
+    }
+    if (content.length > MAX_MESSAGE_LENGTH) {
+      res.status(400).json({ error: `content too long (max ${MAX_MESSAGE_LENGTH} characters)` });
+      return;
+    }
+    const senderName = typeof body.senderName === 'string' ? body.senderName : undefined;
+
+    let cleanup: (() => void) | undefined;
+    try {
+      const sseCallbacks = {
+        onChunk: (event: import('../types').StreamEvent) => {
+          try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
+        },
+        onDone: (fullText: string) => {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, session_id: sessionId })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+          } catch { /* client gone */ }
+        },
+        onError: (err: Error) => {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+            res.end();
+          } catch { /* client gone */ }
+        },
+      };
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.flushHeaders();
+      res.socket?.setNoDelay(true);
+
+      cleanup = await runner.sendMessageToSession(
+        rawChatId,
+        source as 'telegram' | 'discord',
+        sessionId,
+        content.trim(),
+        senderName,
+        sseCallbacks,
+        { timeoutMs: DEFAULT_TIMEOUT_MS },
+      );
+      res.on('close', cleanup);
+    } catch (err: unknown) {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal error' });
+      } else {
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: 'Internal error' })}\n\n`);
+          res.end();
+        } catch { /* client gone */ }
+      }
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/media
+   * Upload a media file as raw binary body (image/* or application/pdf).
+   * Headers: Content-Type (mime type), X-Filename (optional original filename)
+   * Body: raw file bytes
+   * Returns: { mediaPath: string }  — relative path usable in message mediaFiles[]
+   */
+  router.post(
+    '/v1/agents/:agentId/media',
+    auth,
+    (req: Request, res: Response, next) => {
+      // Buffer raw body up to maxUploadBytes; express.json/urlencoded don't handle binary
+      const mimeType = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
+      if (!MediaStore.isAllowedMime(mimeType)) {
+        res.status(415).json({ error: 'Unsupported file type. Allowed: image/*, application/pdf' });
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MediaStore.maxUploadBytes) {
+          req.destroy();
+          res.status(413).json({ error: `File too large (max ${MediaStore.maxUploadBytes / 1024 / 1024}MB)` });
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        (req as Request & { rawFileBuffer?: Buffer; rawFileMime?: string }).rawFileBuffer = Buffer.concat(chunks);
+        (req as Request & { rawFileMime?: string }).rawFileMime = mimeType;
+        next();
+      });
+      req.on('error', () => {
+        if (!res.headersSent) res.status(500).json({ error: 'Upload stream error' });
+      });
+    },
+    async (req: Request, res: Response) => {
+      const { agentId } = req.params as { agentId: string };
+      const apiKey = (req as AuthedRequest).apiKey;
+      if (!canAccessAgent(apiKey, agentId)) {
+        res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+        return;
+      }
+      const runner = agentRunners.get(agentId);
+      if (!runner) {
+        res.status(404).json({ error: `Agent '${agentId}' not found` });
+        return;
+      }
+      const buf = (req as Request & { rawFileBuffer?: Buffer }).rawFileBuffer;
+      const mimeType = (req as Request & { rawFileMime?: string }).rawFileMime ?? '';
+      if (!buf || buf.length === 0) {
+        res.status(400).json({ error: 'No file body received' });
+        return;
+      }
+      const originalName = (req.headers['x-filename'] as string | undefined) ?? `upload`;
+      const safeExt = path.extname(originalName).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10);
+      const ext = safeExt || (mimeType.includes('pdf') ? '.pdf' : '.bin');
+      const tmpFile = path.join(os.tmpdir(), `gw-${Date.now()}${ext}`);
+      try {
+        await fsp.writeFile(tmpFile, buf);
+        const agentsBaseDir = runner.getAgentsBaseDir();
+        const mediaPath = MediaStore.copyToMedia(agentsBaseDir, agentId, 'ui-upload', tmpFile);
+        res.json({ mediaPath });
+      } catch (err) {
+        res.status(500).json({ error: `Upload failed: ${(err as Error).message}` });
+      } finally {
+        fsp.unlink(tmpFile).catch(() => {});
+      }
+    },
+  );
+
+  /**
+   * GET /api/v1/agents/:agentId/media/*filepath
+   * Serve a media file. Validates path stays within agent's media directory.
+   */
+  router.get('/v1/agents/:agentId/media/*', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    const wildcardParam = (req.params as Record<string, string>)['0'] ?? '';
+    const agentsBaseDir = runner.getAgentsBaseDir();
+    let absPath: string;
+    try {
+      absPath = MediaStore.resolvePath(agentsBaseDir, agentId, wildcardParam);
+    } catch {
+      res.status(400).json({ error: 'Invalid path' });
+      return;
+    }
+    if (!fs.existsSync(absPath)) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.sendFile(absPath);
+  });
+
   return router;
+}
+
+function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: string } {
+  if (fullChatId.startsWith('telegram-')) return { source: 'telegram', rawChatId: fullChatId.slice(9) };
+  if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
+  return { source: 'api', rawChatId: fullChatId };
 }

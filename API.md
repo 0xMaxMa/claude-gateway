@@ -8,25 +8,130 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 
 ## Endpoints Overview
 
+### System
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/health` | None | Health check — status + agent list |
+| `GET` | `/status` | None | Per-agent stats + heartbeat history |
+| `GET` | `/ui` | None | Web UI dashboard |
+
 ### Agent API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/agents` | List agents accessible by the provided key |
-| `POST` | `/api/v1/agents/:agentId/messages` | Send a message — sync JSON or SSE stream |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents` | Key | List agents accessible by the provided key |
+| `POST` | `/api/v1/agents` | Admin | Create a new agent |
+| `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
+| `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
+| `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream |
+| `GET` | `/api/v1/models` | Key | List supported Claude models |
+
+### Workspace File API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/files/:filename` | Key | Read a workspace file |
+| `PUT` | `/api/v1/agents/:agentId/files/:filename` | Write | Write a workspace file |
+
+### Skill API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/skills` | Key | List all skills (workspace + module + shared) |
+| `GET` | `/api/v1/agents/:agentId/skills/:name` | Key | Get a single skill's content |
+| `POST` | `/api/v1/agents/:agentId/skills` | Write | Create a new skill |
+| `POST` | `/api/v1/agents/:agentId/skills/install` | Admin | Install a skill from a GitHub/raw URL |
+| `DELETE` | `/api/v1/agents/:agentId/skills/:name` | Write | Delete a skill |
 
 ### Cron API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/crons` | List jobs (filtered to key's accessible agents) |
-| `GET` | `/api/v1/crons/status` | Scheduler status (total, enabled, running) |
-| `POST` | `/api/v1/crons` | Create a new job |
-| `GET` | `/api/v1/crons/:id` | Get a single job |
-| `PUT` | `/api/v1/crons/:id` | Update a job |
-| `DELETE` | `/api/v1/crons/:id` | Delete a job |
-| `POST` | `/api/v1/crons/:id/run` | Trigger a job manually |
-| `GET` | `/api/v1/crons/:id/runs` | Get run history (last 20 by default) |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/crons` | Key | List jobs (filtered to key's accessible agents) |
+| `GET` | `/api/v1/crons/status` | Key | Scheduler status (total, enabled, running) |
+| `POST` | `/api/v1/crons` | Key | Create a new job |
+| `GET` | `/api/v1/crons/:id` | Key | Get a single job |
+| `PUT` | `/api/v1/crons/:id` | Key | Update a job |
+| `DELETE` | `/api/v1/crons/:id` | Key | Delete a job |
+| `POST` | `/api/v1/crons/:id/run` | Key | Trigger a job manually |
+| `GET` | `/api/v1/crons/:id/runs` | Key | Get run history (last 20 by default) |
+
+### Chat History API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/chats` | Key | List all chats for an agent |
+| `GET` | `/api/v1/agents/:agentId/chats/:chatId/sessions` | Key | List sessions for a specific chat |
+| `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages` | Key | Paginated message history (cursor-based) |
+| `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages/search` | Key | Full-text search across messages (SQLite FTS5) |
+| `POST` | `/api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages` | Key | Inject a message into an existing channel session (SSE stream) |
+
+### Media API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/agents/:agentId/media` | Key | Upload a media file (image/* or PDF) — returns `mediaPath` |
+| `GET` | `/api/v1/agents/:agentId/media/*` | Key | Serve a media file by path |
+
+**Auth levels:** `Key` = any valid API key, `Write` = key with write access to the agent, `Admin` = key with `agents: "*"`.
+
+---
+
+## System Endpoints
+
+### GET /health
+
+Health check. No auth required.
+
+```bash
+curl http://localhost:3000/health
+```
+
+```json
+{ "status": "ok", "agents": ["alfred", "claude-founder"] }
+```
+
+---
+
+### GET /status
+
+Per-agent stats and heartbeat history. No auth required.
+
+```bash
+curl http://localhost:3000/status | jq
+```
+
+```json
+{
+  "agents": [
+    {
+      "id": "alfred",
+      "isRunning": true,
+      "messagesReceived": 12,
+      "messagesSent": 48,
+      "lastActivityAt": "2026-05-10T02:00:00.000Z",
+      "heartbeat": {
+        "tasks": ["morning-check"],
+        "lastResults": [
+          { "taskName": "morning-check", "suppressed": false, "rateLimited": false, "durationMs": 1200, "ts": 1746835200000 }
+        ]
+      },
+      "sessions": [
+        { "chatId": "<CHAT_ID>", "messageCount": 5, "lastActivity": "2026-05-10T01:50:00.000Z" }
+      ]
+    }
+  ],
+  "uptime": 3600,
+  "startedAt": "2026-05-10T01:00:00.000Z"
+}
+```
+
+---
+
+### GET /ui
+
+Serves the web UI dashboard. No auth required.
 
 ---
 
@@ -73,6 +178,8 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 npm start
 ```
 
+---
+
 ### GET /api/v1/agents
 
 List agents accessible by the provided API key.
@@ -85,10 +192,89 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "agents": [
-    { "id": "alfred", "description": "Personal assistant" }
+    { "id": "alfred", "description": "Personal assistant", "model": "claude-sonnet-4-6", "allow_tools": false }
   ]
 }
 ```
+
+---
+
+### POST /api/v1/agents
+
+Create a new agent entry in `config.json`. Requires admin key. Also creates the workspace directory with stub files (`AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`).
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Agent ID — pattern `[a-z][a-z0-9_-]{1,31}` |
+| `description` | Yes | Human-readable description |
+| `model` | No | Claude model ID (default: `claude-sonnet-4-6`) |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my-bot", "description": "My new bot", "model": "claude-sonnet-4-6"}' \
+  http://localhost:3000/api/v1/agents | jq
+```
+
+```json
+{ "agent": { "id": "my-bot", "description": "My new bot", "model": "claude-sonnet-4-6" } }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Invalid `id` format or missing `description` |
+| 403 | Not an admin key |
+| 409 | Agent ID already exists |
+| 501 | Gateway started without a config path |
+
+---
+
+### PATCH /api/v1/agents/:agentId
+
+Update an agent's description, model, or allow_tools flag. Requires write access to the agent. Only fields provided are updated.
+
+**Request body (all optional):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | string | New description |
+| `model` | string | New Claude model ID |
+| `allow_tools` | boolean | Override tool access for this agent |
+
+```bash
+curl -X PATCH \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-opus-4-7"}' \
+  http://localhost:3000/api/v1/agents/alfred | jq
+```
+
+```json
+{ "agent": { "id": "alfred", "description": "Personal assistant", "model": "claude-opus-4-7", "allow_tools": false } }
+```
+
+---
+
+### DELETE /api/v1/agents/:agentId
+
+Remove an agent from `config.json` and stop the running process. Requires admin key. Does **not** delete the workspace directory.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: admin-key-456" \
+  http://localhost:3000/api/v1/agents/my-bot | jq
+```
+
+```json
+{ "success": true, "id": "my-bot" }
+```
+
+---
 
 ### POST /api/v1/agents/:agentId/messages
 
@@ -211,6 +397,251 @@ The stream ends with `data: [DONE]`.
 
 ---
 
+## Models API
+
+### GET /api/v1/models
+
+List all supported Claude models from gateway config.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  http://localhost:3000/api/v1/models | jq
+```
+
+```json
+{
+  "models": [
+    { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "alias": "sonnet", "contextWindow": 200000, "multiplier": 1 },
+    { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "alias": "opus", "contextWindow": 200000, "multiplier": 3 }
+  ]
+}
+```
+
+---
+
+## Workspace File API
+
+Read and write an agent's workspace identity files via the API. The gateway's file watcher auto-reloads `CLAUDE.md` after a write.
+
+**Allowed filenames:** `SOUL.md`, `USER.md`, `MEMORY.md`, `AGENTS.md`, `HEARTBEAT.md`, `IDENTITY.md`
+
+### GET /api/v1/agents/:agentId/files/:filename
+
+Read a workspace file. Returns empty `content` if the file does not exist yet (not a 404).
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  http://localhost:3000/api/v1/agents/alfred/files/SOUL.md | jq
+```
+
+```json
+{ "filename": "SOUL.md", "content": "# Soul\n\nAlfred is warm, helpful, and precise." }
+```
+
+---
+
+### PUT /api/v1/agents/:agentId/files/:filename
+
+Write a workspace file. Requires write access to the agent. Max 1MB.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `content` | Yes | Full file content as a string |
+
+```bash
+curl -X PUT \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Soul\n\nAlfred is warm, helpful, and precise."}' \
+  http://localhost:3000/api/v1/agents/alfred/files/SOUL.md | jq
+```
+
+```json
+{ "filename": "SOUL.md", "message": "File saved. CLAUDE.md will auto-reload." }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Filename not in allowed list, invalid format, or content not a string |
+| 400 | Content exceeds 1MB |
+| 403 | Key has no write access to agent |
+| 404 | Agent not found |
+
+---
+
+## Skill API
+
+Manage per-agent and shared skills. Skills are `SKILL.md` files stored in the agent workspace or shared directory.
+
+### GET /api/v1/agents/:agentId/skills
+
+List all skills for an agent (workspace + module + shared).
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  http://localhost:3000/api/v1/agents/alfred/skills | jq
+```
+
+```json
+[
+  {
+    "key": "my-helper",
+    "name": "my-helper",
+    "description": "Does something useful",
+    "scope": "workspace",
+    "emoji": null,
+    "userInvocable": true,
+    "modulePrefix": null,
+    "source_url": null
+  }
+]
+```
+
+**Scope values:** `workspace`, `shared`, `module`
+
+---
+
+### GET /api/v1/agents/:agentId/skills/:name
+
+Get a single skill's content. Optional query param `?scope=workspace|shared` to disambiguate when the same name exists in multiple scopes.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/skills/my-helper" | jq
+```
+
+```json
+{
+  "key": "my-helper",
+  "name": "my-helper",
+  "description": "Does something useful",
+  "scope": "workspace",
+  "emoji": null,
+  "content": "---\nname: my-helper\ndescription: \"Does something useful\"\n---\n\nInstructions here.",
+  "source_url": null
+}
+```
+
+---
+
+### POST /api/v1/agents/:agentId/skills
+
+Create a new skill. Requires write access. Use `scope: "shared"` with an admin key to create a shared skill.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Skill slug — lowercase alphanumeric + hyphens, 1-64 chars |
+| `description` | Yes | One-line description |
+| `content` | Yes | Skill instructions (Markdown body, excluding frontmatter) |
+| `scope` | No | `"workspace"` (default) or `"shared"` (admin only) |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-helper",
+    "description": "Does something useful",
+    "content": "When invoked, do the following:\n1. Step one\n2. Step two"
+  }' \
+  http://localhost:3000/api/v1/agents/alfred/skills | jq
+```
+
+```json
+{
+  "key": "my-helper",
+  "name": "my-helper",
+  "description": "Does something useful",
+  "scope": "workspace",
+  "emoji": null,
+  "userInvocable": true,
+  "modulePrefix": null,
+  "content": "---\nname: my-helper\ndescription: \"Does something useful\"\n---\n\nWhen invoked...",
+  "source_url": null
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Invalid skill name, reserved name, or missing fields |
+| 403 | No write access, or `shared` scope without admin key |
+| 409 | Skill with that name already exists |
+
+---
+
+### POST /api/v1/agents/:agentId/skills/install
+
+Install a skill from a GitHub URL or raw URL pointing to a `SKILL.md` file. Requires admin key.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | Yes | HTTPS URL to `SKILL.md` (GitHub URLs auto-converted to raw) |
+| `scope` | No | `"workspace"` (default) or `"shared"` |
+| `name` | No | Override skill name (default: parsed from frontmatter) |
+| `force` | No | `true` to overwrite an existing skill |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://github.com/owner/repo/blob/main/skills/my-skill/SKILL.md",
+    "scope": "shared"
+  }' \
+  http://localhost:3000/api/v1/agents/alfred/skills/install | jq
+```
+
+```json
+{
+  "key": "my-skill",
+  "name": "my-skill",
+  "description": "Skill from GitHub",
+  "scope": "shared",
+  "emoji": null,
+  "userInvocable": true,
+  "modulePrefix": null,
+  "content": "---\nname: my-skill\n...",
+  "source_url": "https://github.com/owner/repo/blob/main/skills/my-skill/SKILL.md"
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Missing/non-HTTPS URL, private host, fetch failure, invalid SKILL.md |
+| 400 | SKILL.md exceeds 100KB |
+| 403 | Not an admin key |
+| 409 | Skill already exists and `force` not set |
+
+---
+
+### DELETE /api/v1/agents/:agentId/skills/:name
+
+Delete a skill by name. Requires write access. Use `?scope=shared` (admin only) to delete a shared skill.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/skills/my-helper" | jq
+```
+
+```json
+{ "message": "Skill \"my-helper\" deleted from workspace" }
+```
+
+---
+
 ## Cron API
 
 Manage persistent scheduled jobs. All routes require the same API key auth as the Agent API. Write operations (`POST`, `PUT`, `DELETE`) additionally verify the key has access to the job's `agentId`.
@@ -270,7 +701,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
       "schedule": "0 9 * * *",
       "type": "agent",
       "prompt": "Give me a morning summary.",
-      "telegram": "99000000",
+      "telegram": "<CHAT_ID>",
       "enabled": true,
       "createdAt": 1775737709284,
       "state": {
@@ -323,7 +754,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 9 * * *",
     "type": "agent",
     "prompt": "Give me a morning summary.",
-    "telegram": "99000000"
+    "telegram": "<CHAT_ID>"
   }' | jq
 ```
 
@@ -342,7 +773,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 9 * * *",
     "type": "agent",
     "prompt": "Give me a morning summary.",
-    "discord": "1234567890123456789"
+    "discord": "<CHANNEL_ID>"
   }' | jq
 ```
 
@@ -359,8 +790,8 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 9 * * *",
     "type": "agent",
     "prompt": "Give me a morning summary.",
-    "telegram": "99000000",
-    "discord": "1234567890123456789"
+    "telegram": "<CHAT_ID>",
+    "discord": "<CHANNEL_ID>"
   }' | jq
 ```
 
@@ -379,7 +810,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "scheduleAt": "2026-04-09T23:00:00.000Z",
     "type": "agent",
     "prompt": "good night",
-    "telegram": "99000000",
+    "telegram": "<CHAT_ID>",
     "deleteAfterRun": true
   }' | jq
 ```
@@ -432,7 +863,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
     "schedule": "0 18 * * 5",
     "type": "agent",
     "prompt": "Generate a weekly progress report.",
-    "telegram": "99000000",
+    "telegram": "<CHAT_ID>",
     "enabled": false
   }' | jq
 ```
@@ -578,3 +1009,214 @@ curl -H "X-Api-Key: my-secret-key-123" \
 | `0 18 * * 5` | Every Friday at 18:00 |
 | `*/15 * * * *` | Every 15 minutes |
 | `0 0 1 * *` | First day of month at midnight |
+
+---
+
+## Chat History API
+
+Access per-agent conversation history stored in the history DB (SQLite). `chatId` uses the format `telegram-{rawId}` or `discord-{rawId}`.
+
+### GET /api/v1/agents/:agentId/chats
+
+List all chats (across all channels) for an agent.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  http://localhost:3000/api/v1/agents/alfred/chats | jq
+```
+
+```json
+{
+  "chats": [
+    { "chatId": "telegram-<CHAT_ID>", "messageCount": 42, "lastActivity": "2026-05-10T03:00:00.000Z" }
+  ]
+}
+```
+
+---
+
+### GET /api/v1/agents/:agentId/chats/:chatId/sessions
+
+List sessions for a specific chat. Only supports `telegram` and `discord` chats.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions" | jq
+```
+
+```json
+{
+  "sessions": [
+    { "sessionId": "abc-123", "messageCount": 10, "createdAt": "2026-05-10T02:00:00.000Z", "lastActivity": "2026-05-10T03:00:00.000Z" }
+  ]
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `chatId` is not a telegram/discord chat |
+| 403 | Key has no access to agent |
+| 404 | Agent not found |
+
+---
+
+### GET /api/v1/agents/:agentId/chats/:chatId/messages
+
+Paginated message history (cursor-based). Returns messages in reverse chronological order.
+
+**Query parameters:**
+
+| Param | Description |
+|-------|-------------|
+| `limit` | Max messages to return (default 50, max 200) |
+| `before` | Return messages before this timestamp (ms) |
+| `after` | Return messages after this timestamp (ms) |
+| `session_id` | Filter to a specific session |
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages?limit=20" | jq
+```
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Hello!", "ts": 1775737709000, "sessionId": "abc-123" },
+    { "role": "assistant", "content": "Hi there!", "ts": 1775737712000, "sessionId": "abc-123" }
+  ],
+  "hasMore": false
+}
+```
+
+---
+
+### GET /api/v1/agents/:agentId/chats/:chatId/messages/search
+
+Full-text search across messages using SQLite FTS5.
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `q` | Yes | Search query string |
+| `limit` | No | Max results (default 20, max 100) |
+| `offset` | No | Pagination offset (default 0) |
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages/search?q=meeting" | jq
+```
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Schedule a meeting tomorrow", "ts": 1775737709000, "sessionId": "abc-123" }
+  ],
+  "total": 1
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `q` is missing or empty |
+
+---
+
+### POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages
+
+Inject a message into an existing Telegram or Discord session and stream the assistant's response via SSE. Useful for cross-channel continuation.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `content` | Yes | Message text (max 10,000 chars) |
+| `senderName` | No | Optional display name for the injected message |
+
+```bash
+curl -N -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Continue from where we left off", "senderName": "API"}' \
+  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions/abc-123/messages"
+```
+
+**Response** (SSE stream):
+
+```
+data: {"type":"text_delta","text":"Sure, let me continue..."}
+data: {"type":"result","text":"Sure, let me continue...","session_id":"abc-123"}
+data: [DONE]
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `chatId` is not telegram/discord, or `content` is missing/too long |
+| 403 | Key has no access to agent |
+| 404 | Agent not found |
+
+---
+
+## Media API
+
+Upload and serve media files (images and PDFs) associated with an agent. Uploaded files are stored in the agent's media directory and can be referenced in messages via `mediaFiles[]`.
+
+### POST /api/v1/agents/:agentId/media
+
+Upload a media file as a raw binary body. Supported MIME types: `image/*`, `application/pdf`.
+
+**Request headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | Yes | MIME type of the file (e.g. `image/jpeg`, `application/pdf`) |
+| `X-Filename` | No | Original filename — used to preserve extension |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: image/jpeg" \
+  -H "X-Filename: photo.jpg" \
+  --data-binary @/path/to/photo.jpg \
+  http://localhost:3000/api/v1/agents/alfred/media | jq
+```
+
+```json
+{ "mediaPath": "ui-upload/2026-05-10/gw-1746837600000.jpg" }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | No file body received |
+| 403 | Key has no access to agent |
+| 404 | Agent not found |
+| 413 | File exceeds max upload size |
+| 415 | Unsupported MIME type |
+
+---
+
+### GET /api/v1/agents/:agentId/media/*
+
+Serve a media file by path. The path must stay within the agent's media directory.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/media/ui-upload/2026-05-10/gw-1746837600000.jpg" \
+  --output photo.jpg
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Path traversal attempt or invalid path |
+| 403 | Key has no access to agent |
+| 404 | Agent or file not found |

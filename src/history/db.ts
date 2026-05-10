@@ -1,0 +1,274 @@
+import * as path from 'path';
+import * as fs from 'fs';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
+import {
+  ChatSummary,
+  HistoryMessage,
+  HistorySource,
+  MessagePage,
+  MessageRole,
+  PaginationOpts,
+  SearchOpts,
+  SearchPage,
+  SearchResult,
+} from './types';
+
+const MAX_LIMIT = 200;
+const DEFAULT_LIMIT = 50;
+const PREVIEW_LENGTH = 120;
+
+// Singleton cache: one DB per (agentsBaseDir + agentId)
+const cache = new Map<string, HistoryDB>();
+
+export class HistoryDB {
+  private readonly db: DatabaseSync;
+  private readonly insertStmt: StatementSync;
+  private readonly agentId: string;
+
+  private constructor(dbPath: string, agentId: string) {
+    this.agentId = agentId;
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec('PRAGMA journal_mode=WAL');
+    this.db.exec('PRAGMA synchronous=NORMAL');
+    this.db.exec('PRAGMA foreign_keys=ON');
+    this._initSchema();
+    this.insertStmt = this.db.prepare(
+      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+  }
+
+  static forAgent(agentsBaseDir: string, agentId: string): HistoryDB {
+    const key = `${agentsBaseDir}::${agentId}`;
+    if (!cache.has(key)) {
+      const dbPath = path.join(agentsBaseDir, agentId, 'history.db');
+      cache.set(key, new HistoryDB(dbPath, agentId));
+    }
+    return cache.get(key)!;
+  }
+
+  private _initSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id             TEXT    NOT NULL,
+        session_id          TEXT    NOT NULL,
+        source              TEXT    NOT NULL,
+        role                TEXT    NOT NULL,
+        content             TEXT    NOT NULL,
+        sender_name         TEXT,
+        sender_id           TEXT,
+        platform_message_id TEXT,
+        media_files         TEXT,
+        ts                  INTEGER NOT NULL,
+        created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_messages_chat_ts    ON messages(chat_id, ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_session    ON messages(session_id, ts ASC);
+      CREATE INDEX IF NOT EXISTS idx_messages_source     ON messages(source, ts DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        sender_name,
+        content='messages',
+        content_rowid='id'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content, sender_name)
+        VALUES (new.id, new.content, new.sender_name);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, sender_name)
+        VALUES ('delete', old.id, old.content, old.sender_name);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, sender_name)
+        VALUES ('delete', old.id, old.content, old.sender_name);
+        INSERT INTO messages_fts(rowid, content, sender_name)
+        VALUES (new.id, new.content, new.sender_name);
+      END;
+    `);
+  }
+
+  insertMessage(msg: HistoryMessage): void {
+    try {
+      this.insertStmt.run(
+        msg.chatId,
+        msg.sessionId,
+        msg.source,
+        msg.role,
+        msg.content,
+        msg.senderName ?? null,
+        msg.senderId ?? null,
+        msg.platformMessageId ?? null,
+        msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
+        msg.ts,
+      );
+    } catch (err) {
+      // Non-fatal — history is best-effort
+      console.error(`[HistoryDB:${this.agentId}] insertMessage failed:`, err);
+    }
+  }
+
+  listChats(): ChatSummary[] {
+    const stmt = this.db.prepare(`
+      SELECT
+        chat_id,
+        source,
+        MAX(CASE WHEN role = 'user' THEN sender_name END) AS display_name,
+        COUNT(*) AS message_count,
+        MAX(ts) AS last_active
+      FROM messages
+      GROUP BY chat_id
+      ORDER BY last_active DESC
+    `);
+    const rows = stmt.all() as Array<{
+      chat_id: string;
+      source: string;
+      display_name: string | null;
+      message_count: number;
+      last_active: number;
+    }>;
+
+    return rows.map((row) => {
+      const previewStmt = this.db.prepare(
+        'SELECT content FROM messages WHERE chat_id = ? ORDER BY ts DESC LIMIT 1',
+      );
+      const previewRow = previewStmt.get(row.chat_id) as { content: string } | undefined;
+      const preview = previewRow
+        ? previewRow.content.slice(0, PREVIEW_LENGTH)
+        : null;
+
+      return {
+        chatId: row.chat_id,
+        source: row.source as HistorySource,
+        displayName: row.display_name,
+        messageCount: row.message_count,
+        lastActive: row.last_active,
+        lastMessagePreview: preview,
+      };
+    });
+  }
+
+  getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
+    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const conditions: string[] = ['chat_id = ?'];
+    const params: (string | number)[] = [chatId];
+
+    if (opts.sessionId) {
+      conditions.push('session_id = ?');
+      params.push(opts.sessionId);
+    }
+    if (opts.before !== undefined) {
+      conditions.push('ts < ?');
+      params.push(opts.before);
+    }
+    if (opts.after !== undefined) {
+      conditions.push('ts > ?');
+      params.push(opts.after);
+    }
+
+    // Fetch limit+1 to determine hasMore
+    params.push(limit + 1);
+    const sql = `
+      SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
+             platform_message_id, media_files, ts
+      FROM messages
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY ts DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    const hasMore = rows.length > limit;
+    const slice = hasMore ? rows.slice(0, limit) : rows;
+
+    const messages = slice.map((r) => this._rowToMessage(r));
+    const nextCursor = hasMore && slice.length > 0
+      ? (slice[slice.length - 1]!['ts'] as number)
+      : null;
+
+    return { messages, hasMore, nextCursor };
+  }
+
+  searchMessages(chatId: string, query: string, opts: SearchOpts = {}): SearchPage {
+    const limit = Math.min(opts.limit ?? 20, 100);
+    const offset = opts.offset ?? 0;
+
+    if (!query.trim()) {
+      return { results: [], total: 0, hasMore: false };
+    }
+
+    const sanitizedQuery = query.replace(/['"*\-]/g, ' ').trim();
+    if (!sanitizedQuery) {
+      return { results: [], total: 0, hasMore: false };
+    }
+
+    try {
+      const countStmt = this.db.prepare(`
+        SELECT COUNT(*) as cnt
+        FROM messages_fts
+        JOIN messages ON messages.id = messages_fts.rowid
+        WHERE messages.chat_id = ? AND messages_fts MATCH ?
+      `);
+      const countRow = countStmt.get(chatId, sanitizedQuery) as { cnt: number };
+      const total = countRow?.cnt ?? 0;
+
+      const stmt = this.db.prepare(`
+        SELECT
+          messages.id, messages.chat_id, messages.session_id, messages.source,
+          messages.role, messages.content, messages.sender_name, messages.sender_id,
+          messages.platform_message_id, messages.media_files, messages.ts,
+          snippet(messages_fts, 0, '<b>', '</b>', '...', 32) AS snippet
+        FROM messages_fts
+        JOIN messages ON messages.id = messages_fts.rowid
+        WHERE messages.chat_id = ? AND messages_fts MATCH ?
+        ORDER BY messages.ts DESC
+        LIMIT ? OFFSET ?
+      `);
+
+      const rows = stmt.all(chatId, sanitizedQuery, limit, offset) as Array<Record<string, unknown>>;
+      const results: SearchResult[] = rows.map((r) => ({
+        ...this._rowToMessage(r),
+        snippet: (r['snippet'] as string | null) ?? '',
+      }));
+
+      return { results, total, hasMore: offset + results.length < total };
+    } catch {
+      return { results: [], total: 0, hasMore: false };
+    }
+  }
+
+  clearChat(chatId: string): void {
+    this.db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+  }
+
+  private _rowToMessage(r: Record<string, unknown>): HistoryMessage {
+    let mediaFiles: string[] | undefined;
+    if (r['media_files'] && typeof r['media_files'] === 'string') {
+      try {
+        mediaFiles = JSON.parse(r['media_files'] as string) as string[];
+      } catch {
+        mediaFiles = undefined;
+      }
+    }
+    return {
+      id: r['id'] as number,
+      chatId: r['chat_id'] as string,
+      sessionId: r['session_id'] as string,
+      source: r['source'] as HistorySource,
+      role: r['role'] as MessageRole,
+      content: r['content'] as string,
+      senderName: (r['sender_name'] as string | null) ?? undefined,
+      senderId: (r['sender_id'] as string | null) ?? undefined,
+      platformMessageId: (r['platform_message_id'] as string | null) ?? undefined,
+      mediaFiles,
+      ts: r['ts'] as number,
+    };
+  }
+}
