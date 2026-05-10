@@ -8,6 +8,7 @@ import { AgentRunner } from '../agent/runner';
 import { AgentConfig, ApiKey, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
+import { HistoryDB } from '../history/db';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -407,6 +408,7 @@ export function createApiRouter(
     if (runner) {
       try { await runner.stop(); } catch { /* ignore stop errors */ }
       agentRunners.delete(agentId);
+      HistoryDB.evict(runner.getAgentsBaseDir(), agentId);
     }
     agentConfigs.delete(agentId);
 
@@ -632,8 +634,8 @@ export function createApiRouter(
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > MediaStore.maxUploadBytes) {
+          if (!res.headersSent) res.status(413).json({ error: `File too large (max ${MediaStore.maxUploadBytes / 1024 / 1024}MB)` });
           req.destroy();
-          res.status(413).json({ error: `File too large (max ${MediaStore.maxUploadBytes / 1024 / 1024}MB)` });
           return;
         }
         chunks.push(chunk);

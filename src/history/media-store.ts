@@ -25,9 +25,8 @@ export class MediaStore {
   ): string {
     const dir = MediaStore.mediaDir(agentsBaseDir, agentId, chatId);
     fs.mkdirSync(dir, { recursive: true });
-    const ext = path.extname(srcPath) || '';
     const basename = `${Date.now()}-${path.basename(srcPath)}`;
-    const destName = basename.length > 128 ? basename.slice(-128) : basename;
+    const destName = basename.length > 128 ? basename.slice(0, 128) : basename;
     const destPath = path.join(dir, destName);
     fs.copyFileSync(srcPath, destPath);
     return path.join('media', chatId, destName);

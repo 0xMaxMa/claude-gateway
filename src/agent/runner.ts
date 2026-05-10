@@ -553,7 +553,7 @@ export class AgentRunner extends EventEmitter {
     const source = meta['source'] ?? 'telegram';
     return (
       `<channel source="${source}" chat_id="${meta['chat_id'] ?? ''}" ` +
-      `message_id="${meta['message_id'] ?? ''}" user="${meta['user'] ?? ''}" ` +
+      `message_id="${meta['message_id'] ?? ''}" user="${AgentRunner.escapeXmlAttr(meta['user'] ?? '')}" ` +
       `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${repliedBlock}${params.content ?? ''}</channel>`
     );
   }

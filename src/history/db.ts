@@ -48,6 +48,10 @@ export class HistoryDB {
     return cache.get(key)!;
   }
 
+  static evict(agentsBaseDir: string, agentId: string): void {
+    cache.delete(`${agentsBaseDir}::${agentId}`);
+  }
+
   private _initSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -86,12 +90,6 @@ export class HistoryDB {
         VALUES ('delete', old.id, old.content, old.sender_name);
       END;
 
-      CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-        INSERT INTO messages_fts(messages_fts, rowid, content, sender_name)
-        VALUES ('delete', old.id, old.content, old.sender_name);
-        INSERT INTO messages_fts(rowid, content, sender_name)
-        VALUES (new.id, new.content, new.sender_name);
-      END;
     `);
   }
 
@@ -116,43 +114,40 @@ export class HistoryDB {
   }
 
   listChats(): ChatSummary[] {
-    const stmt = this.db.prepare(`
+    const rows = this.db.prepare(`
       SELECT
-        chat_id,
-        source,
-        MAX(CASE WHEN role = 'user' THEN sender_name END) AS display_name,
+        m.chat_id,
+        m.source,
+        MAX(CASE WHEN m.role = 'user' THEN m.sender_name END) AS display_name,
         COUNT(*) AS message_count,
-        MAX(ts) AS last_active
-      FROM messages
-      GROUP BY chat_id
+        MAX(m.ts) AS last_active,
+        (
+          SELECT SUBSTR(m2.content, 1, ${PREVIEW_LENGTH})
+          FROM messages m2
+          WHERE m2.chat_id = m.chat_id
+          ORDER BY m2.ts DESC
+          LIMIT 1
+        ) AS last_preview
+      FROM messages m
+      GROUP BY m.chat_id
       ORDER BY last_active DESC
-    `);
-    const rows = stmt.all() as Array<{
+    `).all() as Array<{
       chat_id: string;
       source: string;
       display_name: string | null;
       message_count: number;
       last_active: number;
+      last_preview: string | null;
     }>;
 
-    return rows.map((row) => {
-      const previewStmt = this.db.prepare(
-        'SELECT content FROM messages WHERE chat_id = ? ORDER BY ts DESC LIMIT 1',
-      );
-      const previewRow = previewStmt.get(row.chat_id) as { content: string } | undefined;
-      const preview = previewRow
-        ? previewRow.content.slice(0, PREVIEW_LENGTH)
-        : null;
-
-      return {
-        chatId: row.chat_id,
-        source: row.source as HistorySource,
-        displayName: row.display_name,
-        messageCount: row.message_count,
-        lastActive: row.last_active,
-        lastMessagePreview: preview,
-      };
-    });
+    return rows.map((row) => ({
+      chatId: row.chat_id,
+      source: row.source as HistorySource,
+      displayName: row.display_name,
+      messageCount: row.message_count,
+      lastActive: row.last_active,
+      lastMessagePreview: row.last_preview,
+    }));
   }
 
   getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
