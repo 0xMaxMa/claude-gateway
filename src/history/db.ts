@@ -315,10 +315,7 @@ export class HistoryDB {
       }
     }
 
-    const result = this.db.prepare(`DELETE FROM messages WHERE ts < ?`).run(cutoffMs) as { changes: number };
-    console.log(
-      `[HistoryDB:${this.agentId}] pruned ${result.changes} messages older than ${new Date(cutoffMs).toISOString()}`,
-    );
+    this.db.prepare(`DELETE FROM messages WHERE ts < ?`).run(cutoffMs);
 
     return mediaPaths;
   }

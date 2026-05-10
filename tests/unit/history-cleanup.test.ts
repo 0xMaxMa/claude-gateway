@@ -319,3 +319,83 @@ describe('cleanup media file deletion', () => {
     expect(fs.existsSync(outsideFile)).toBe(true);
   });
 });
+
+// ── HistoryDB.listSessions ────────────────────────────────────────────────────
+
+describe('HistoryDB.listSessions', () => {
+  it('returns empty array when no messages exist', () => {
+    const db = makeDb();
+    expect(db.listSessions()).toEqual([]);
+  });
+
+  it('groups messages by session_id and returns correct counts', () => {
+    const db = makeDb();
+    const ts = Date.now();
+    insertMsg(db, { sessionId: 'sess-a', ts: ts - 2000, content: 'first' });
+    insertMsg(db, { sessionId: 'sess-a', ts: ts - 1000, content: 'second' });
+    insertMsg(db, { sessionId: 'sess-b', ts, content: 'only' });
+
+    const sessions = db.listSessions();
+    expect(sessions).toHaveLength(2);
+    // Ordered by lastActivity DESC — sess-b is most recent
+    expect(sessions[0]!.sessionId).toBe('sess-b');
+    expect(sessions[0]!.messageCount).toBe(1);
+    expect(sessions[1]!.sessionId).toBe('sess-a');
+    expect(sessions[1]!.messageCount).toBe(2);
+  });
+
+  it('returns lastMessage as the most recent content in the session', () => {
+    const db = makeDb();
+    const ts = Date.now();
+    insertMsg(db, { sessionId: 'sess-1', ts: ts - 1000, content: 'earlier' });
+    insertMsg(db, { sessionId: 'sess-1', ts, content: 'latest' });
+
+    const sessions = db.listSessions();
+    expect(sessions[0]!.lastMessage).toBe('latest');
+  });
+
+  it('returns correct source and chatId fields', () => {
+    const db = makeDb();
+    db.insertMessage({
+      chatId: 'telegram-99999',
+      sessionId: 'sess-x',
+      source: 'telegram',
+      role: 'user',
+      content: 'hi',
+      ts: Date.now(),
+    });
+
+    const sessions = db.listSessions();
+    expect(sessions[0]!.chatId).toBe('telegram-99999');
+    expect(sessions[0]!.source).toBe('telegram');
+    expect(sessions[0]!.sessionId).toBe('sess-x');
+  });
+
+  it('returns null chatId for API sessions without a chat_id', () => {
+    const db = makeDb();
+    db.insertMessage({
+      chatId: '',
+      sessionId: 'api-sess',
+      source: 'api',
+      role: 'user',
+      content: 'api call',
+      ts: Date.now(),
+    });
+
+    const sessions = db.listSessions();
+    expect(sessions[0]!.chatId).toBeNull();
+    expect(sessions[0]!.source).toBe('api');
+  });
+
+  it('returns createdAt as the earliest ts and lastActivity as the latest', () => {
+    const db = makeDb();
+    const early = Date.now() - 5000;
+    const late = Date.now();
+    insertMsg(db, { sessionId: 'sess-t', ts: early, content: 'a' });
+    insertMsg(db, { sessionId: 'sess-t', ts: late, content: 'b' });
+
+    const [session] = db.listSessions();
+    expect(session!.createdAt).toBe(early);
+    expect(session!.lastActivity).toBe(late);
+  });
+});

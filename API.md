@@ -1019,7 +1019,7 @@ Access per-agent conversation history stored in the history DB (SQLite). `chatId
 
 ### GET /api/v1/agents/sessions
 
-List all sessions across **all agents** in a single call. Admin key required. Queries each agent's history DB in parallel and returns a nested structure grouped by agent.
+List all sessions across **all agents** in a single call. Admin key required. Queries each agent's history DB sequentially and returns a nested structure grouped by agent.
 
 ```bash
 curl -H "X-Api-Key: admin-key-456" \

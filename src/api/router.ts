@@ -9,6 +9,7 @@ import { AgentConfig, ApiKey, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB } from '../history/db';
+import type { AgentSessionSummary } from '../history/types';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -231,7 +232,7 @@ export function createApiRouter(
    * GET /api/v1/agents/sessions
    *
    * List all sessions across all agents. Admin only.
-   * Queries each agent's history DB and returns a nested agents → sessions structure.
+   * Queries each agent's history DB sequentially and returns a nested agents → sessions structure.
    */
   router.get('/v1/agents/sessions', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
@@ -239,16 +240,15 @@ export function createApiRouter(
       res.status(403).json({ error: 'Admin key required' });
       return;
     }
-    const result = [...agentRunners.entries()].map(([agentId, runner]) => {
+    const agents: AgentSessionSummary[] = [...agentRunners.entries()].map(([agentId, runner]) => {
       const cfg = agentConfigs.get(agentId);
-      const sessions = runner.getHistoryDb().listSessions();
       return {
         agentId,
         description: cfg?.description ?? '',
-        sessions,
+        sessions: runner.getHistoryDb().listSessions(),
       };
     });
-    res.json({ agents: result });
+    res.json({ agents });
   });
 
   /**

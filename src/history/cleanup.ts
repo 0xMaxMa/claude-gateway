@@ -14,18 +14,24 @@ export interface CleanupOptions {
 }
 
 const MAX_LOG_BYTES = 1 * 1024 * 1024; // 1 MB
+const MAX_LOG_LINES_KEPT = 400;
 
 function appendLog(logPath: string, line: string): void {
   const ts = new Date().toISOString();
+  const entry = `[${ts}] ${line}\n`;
   try {
-    // Truncate log if it exceeds the size cap to prevent unbounded growth
+    // Rotate: keep last N lines when file exceeds size cap
     try {
       const stat = fs.statSync(logPath);
-      if (stat.size > MAX_LOG_BYTES) fs.writeFileSync(logPath, '');
+      if (stat.size > MAX_LOG_BYTES) {
+        const content = fs.readFileSync(logPath, 'utf8');
+        const kept = content.split('\n').filter(Boolean).slice(-MAX_LOG_LINES_KEPT).join('\n') + '\n';
+        fs.writeFileSync(logPath, kept);
+      }
     } catch {
       // file may not exist yet — that's fine
     }
-    fs.appendFileSync(logPath, `[${ts}] ${line}\n`);
+    fs.appendFileSync(logPath, entry);
   } catch {
     // log write failure is non-fatal
   }
@@ -36,19 +42,29 @@ function appendLog(logPath: string, line: string): void {
  * If the current hour already matches and no minutes have passed, fires in 24h.
  */
 export function msUntilNextHour(hour: number, timezone: string, now = new Date()): number {
-  const formatter = new Intl.DateTimeFormat('en-US', {
+  const hourFormatter = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     hour: 'numeric',
     hour12: false,
   });
-  const currentHour = parseInt(formatter.format(now), 10);
+  const currentHour = parseInt(hourFormatter.format(now), 10);
 
   let hoursUntil = hour - currentHour;
   if (hoursUntil <= 0) hoursUntil += 24;
 
-  // Align to the start of that hour (subtract minutes/seconds already elapsed)
+  // Compute ms elapsed since start of current hour in the target timezone.
+  // Using formatToParts so we handle half-hour/45-min offset timezones correctly.
+  const minSecFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const parts = minSecFormatter.formatToParts(now);
+  const minutes = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  const seconds = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+  const msIntoCurrentHour = (minutes * 60 + seconds) * 1000 + (now.getTime() % 1000);
+
   const msPerHour = 60 * 60 * 1000;
-  const msIntoCurrentHour = now.getTime() % msPerHour;
   return hoursUntil * msPerHour - msIntoCurrentHour;
 }
 
