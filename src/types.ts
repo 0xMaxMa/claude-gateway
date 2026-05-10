@@ -3,6 +3,10 @@ export interface SessionConfig {
   maxConcurrent?: number; // default 20
 }
 
+export interface HistoryConfig {
+  retentionDays?: number; // 0 = keep forever (disabled), default 60
+}
+
 export interface AgentConfig {
   id: string;
   description: string;
@@ -34,6 +38,8 @@ export interface AgentConfig {
   signatureEmoji?: string;
   /** Allow tool calls when agent is accessed via API channel. Falls back to ApiKey.allow_tools if not set. */
   allow_tools?: boolean;
+  /** Per-agent history retention override */
+  history?: HistoryConfig;
 }
 
 export interface AgentStats {
@@ -72,6 +78,11 @@ export interface GatewayConfig {
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];
+    };
+    /** Global history retention/cleanup defaults */
+    history?: HistoryConfig & {
+      cleanupHour?: number;      // 0-23, default 0
+      cleanupTimezone?: string;  // IANA timezone, default "UTC"
     };
   };
   agents: AgentConfig[];

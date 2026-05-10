@@ -258,6 +258,34 @@ export class HistoryDB {
     this.db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
   }
 
+  /**
+   * Delete all messages older than cutoffMs (Unix ms timestamp).
+   * Returns relative media_files paths from deleted rows for disk cleanup.
+   * FTS5 index stays consistent via the AFTER DELETE trigger.
+   */
+  pruneOlderThan(cutoffMs: number): string[] {
+    const rows = this.db.prepare(
+      `SELECT media_files FROM messages WHERE ts < ? AND media_files IS NOT NULL`,
+    ).all(cutoffMs) as Array<{ media_files: string }>;
+
+    const mediaPaths: string[] = [];
+    for (const row of rows) {
+      try {
+        const paths = JSON.parse(row.media_files) as string[];
+        mediaPaths.push(...paths);
+      } catch {
+        // malformed JSON — skip
+      }
+    }
+
+    const result = this.db.prepare(`DELETE FROM messages WHERE ts < ?`).run(cutoffMs) as { changes: number };
+    console.log(
+      `[HistoryDB:${this.agentId}] pruned ${result.changes} messages older than ${new Date(cutoffMs).toISOString()}`,
+    );
+
+    return mediaPaths;
+  }
+
   private _rowToMessage(r: Record<string, unknown>): HistoryMessage {
     let mediaFiles: string[] | undefined;
     if (r['media_files'] && typeof r['media_files'] === 'string') {

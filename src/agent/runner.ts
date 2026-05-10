@@ -15,6 +15,7 @@ import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
+import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource } from '../history/types';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
@@ -92,6 +93,9 @@ export class AgentRunner extends EventEmitter {
   private readonly agentsBaseDir: string;
   // Agent's own directory (workspace/..) — used for HistoryDB path
   private readonly agentDir: string;
+
+  // Cancel function for the daily history cleanup timer
+  private cancelCleanup: (() => void) | null = null;
 
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
     super();
@@ -1135,6 +1139,7 @@ export class AgentRunner extends EventEmitter {
       this.discordReceiver.start();
     }
     this.startIdleCleaner();
+    this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
   }
 
@@ -1155,12 +1160,35 @@ export class AgentRunner extends EventEmitter {
       clearInterval(this.idleCleanerTimer);
       this.idleCleanerTimer = null;
     }
+    this.cancelCleanup?.();
+    this.cancelCleanup = null;
     this.callbackServer?.close();
     this.callbackServer = null;
     this.receiver?.stop();
     this.discordReceiver?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.stop()));
     this.sessions.clear();
+  }
+
+  private _startCleanupScheduler(): void {
+    const gw = this.gatewayConfig.gateway;
+    const retentionDays = resolveRetentionDays(
+      this.agentConfig.history?.retentionDays,
+      gw.history?.retentionDays,
+    );
+    const cleanupHour = gw.history?.cleanupHour ?? 0;
+    const cleanupTimezone = gw.history?.cleanupTimezone ?? 'UTC';
+    const agentMediaRoot = MediaStore.agentMediaRoot(this.agentsBaseDir, this.agentConfig.id);
+    const logPath = path.join(this.agentDir, 'cleanup.log');
+
+    this.cancelCleanup = scheduleCleanup({
+      db: this.historyDb,
+      agentMediaRoot,
+      logPath,
+      retentionDays,
+      cleanupHour,
+      cleanupTimezone,
+    });
   }
 
   async restart(): Promise<void> {

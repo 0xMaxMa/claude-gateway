@@ -9,7 +9,7 @@
       "telegram.dmPolicy"
     ]
   },
-  "configVersion": "1.0.4",
+  "configVersion": "1.0.5",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -32,6 +32,11 @@
           "agents": "*"
         }
       ]
+    },
+    "history": {
+      "retentionDays": 60,
+      "cleanupHour": 0,
+      "cleanupTimezone": "UTC"
     }
   },
   "agents": [
@@ -55,6 +60,9 @@
       "session": {
         "idleTimeoutMinutes": 30,
         "maxConcurrent": 20
+      },
+      "history": {
+        "retentionDays": 90
       }
     },
     {
