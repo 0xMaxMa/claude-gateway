@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../src/history/db';
-import { scheduleCleanup, resolveRetentionDays, msUntilNextHour, CleanupOptions } from '../../src/history/cleanup';
+import { scheduleCleanup, resolveRetentionDays, msUntilNextHour } from '../../src/history/cleanup';
 import { HistoryMessage } from '../../src/history/types';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -160,38 +160,103 @@ describe('HistoryDB.pruneOlderThan', () => {
 describe('scheduleCleanup', () => {
   it('returns a no-op cancel function when retentionDays is 0', () => {
     const db = makeDb();
-    const mediaRoot = path.join(tmpDir, 'media');
-    const logPath = path.join(tmpDir, 'cleanup.log');
-
     const cancel = scheduleCleanup({
       db,
-      agentMediaRoot: mediaRoot,
-      logPath,
+      agentMediaRoot: path.join(tmpDir, 'media'),
+      logPath: path.join(tmpDir, 'cleanup.log'),
       retentionDays: 0,
       cleanupHour: 0,
       cleanupTimezone: 'UTC',
     });
-
-    // Calling cancel on a no-op should not throw
     expect(() => cancel()).not.toThrow();
   });
 
-  it('returns a cancel function for non-zero retentionDays', () => {
+  it('fires cleanup after the timer elapses and prunes old messages', () => {
+    jest.useFakeTimers();
+
     const db = makeDb();
-    const mediaRoot = path.join(tmpDir, 'media');
+    const agentMediaRoot = path.join(tmpDir, 'media');
+    fs.mkdirSync(agentMediaRoot, { recursive: true });
     const logPath = path.join(tmpDir, 'cleanup.log');
 
+    // Insert a message old enough to be pruned (70 days ago)
+    const oldTs = Date.now() - 70 * 24 * 60 * 60 * 1000;
+    insertMsg(db, { ts: oldTs, content: 'old-message' });
+
+    // Schedule with retentionDays=60, cleanupHour=0 (next midnight)
     const cancel = scheduleCleanup({
       db,
-      agentMediaRoot: mediaRoot,
+      agentMediaRoot,
       logPath,
       retentionDays: 60,
       cleanupHour: 0,
       cleanupTimezone: 'UTC',
     });
 
-    // Cancel should not throw
-    expect(() => cancel()).not.toThrow();
+    // Advance past 24 hours to trigger the first cleanup
+    jest.advanceTimersByTime(25 * 60 * 60 * 1000);
+
+    const page = db.getMessages('telegram-12345', {});
+    expect(page.messages).toHaveLength(0);
+
+    cancel();
+    jest.useRealTimers();
+  });
+
+  it('does not prune messages when retentionDays is 0', () => {
+    jest.useFakeTimers();
+
+    const db = makeDb();
+    insertMsg(db, { ts: Date.now() - 70 * 24 * 60 * 60 * 1000, content: 'should-stay' });
+
+    const cancel = scheduleCleanup({
+      db,
+      agentMediaRoot: path.join(tmpDir, 'media'),
+      logPath: path.join(tmpDir, 'cleanup.log'),
+      retentionDays: 0,
+      cleanupHour: 0,
+      cleanupTimezone: 'UTC',
+    });
+
+    jest.advanceTimersByTime(25 * 60 * 60 * 1000);
+
+    const page = db.getMessages('telegram-12345', {});
+    expect(page.messages).toHaveLength(1);
+
+    cancel();
+    jest.useRealTimers();
+  });
+
+  it('reschedules after first run (fires twice in 50h)', () => {
+    jest.useFakeTimers();
+
+    const db = makeDb();
+    const agentMediaRoot = path.join(tmpDir, 'media');
+    fs.mkdirSync(agentMediaRoot, { recursive: true });
+
+    // First batch: 70 days old
+    insertMsg(db, { ts: Date.now() - 70 * 24 * 60 * 60 * 1000, content: 'batch-1' });
+
+    const cancel = scheduleCleanup({
+      db,
+      agentMediaRoot,
+      logPath: path.join(tmpDir, 'cleanup.log'),
+      retentionDays: 60,
+      cleanupHour: 0,
+      cleanupTimezone: 'UTC',
+    });
+
+    // First fire
+    jest.advanceTimersByTime(25 * 60 * 60 * 1000);
+    expect(db.getMessages('telegram-12345', {}).messages).toHaveLength(0);
+
+    // Insert another old message and advance another 24h — second fire
+    insertMsg(db, { ts: Date.now() - 70 * 24 * 60 * 60 * 1000, content: 'batch-2' });
+    jest.advanceTimersByTime(24 * 60 * 60 * 1000);
+    expect(db.getMessages('telegram-12345', {}).messages).toHaveLength(0);
+
+    cancel();
+    jest.useRealTimers();
   });
 });
 

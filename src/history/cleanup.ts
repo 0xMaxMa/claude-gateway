@@ -13,9 +13,18 @@ export interface CleanupOptions {
   cleanupTimezone: string; // IANA timezone, e.g. "UTC" or "Asia/Bangkok"
 }
 
+const MAX_LOG_BYTES = 1 * 1024 * 1024; // 1 MB
+
 function appendLog(logPath: string, line: string): void {
   const ts = new Date().toISOString();
   try {
+    // Truncate log if it exceeds the size cap to prevent unbounded growth
+    try {
+      const stat = fs.statSync(logPath);
+      if (stat.size > MAX_LOG_BYTES) fs.writeFileSync(logPath, '');
+    } catch {
+      // file may not exist yet — that's fine
+    }
     fs.appendFileSync(logPath, `[${ts}] ${line}\n`);
   } catch {
     // log write failure is non-fatal
@@ -48,7 +57,14 @@ function doCleanup(opts: CleanupOptions): void {
   if (retentionDays === 0) return;
 
   const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const mediaPaths = db.pruneOlderThan(cutoffMs);
+
+  let mediaPaths: string[];
+  try {
+    mediaPaths = db.pruneOlderThan(cutoffMs);
+  } catch (err) {
+    appendLog(logPath, `ERROR pruneOlderThan failed: ${(err as Error).message}`);
+    return;
+  }
 
   let deletedFiles = 0;
   const dirsToCheck = new Set<string>();
