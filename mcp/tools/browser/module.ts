@@ -9,7 +9,7 @@ export class BrowserModule implements ToolModule {
   toolVisibility: ToolVisibility = 'all-configured';
 
   isEnabled(): boolean {
-    return process.env.GETPOD_BROWSER_DISABLED !== '1';
+    return process.env.GETPOD_BROWSER_DISABLED !== 'true';
   }
 
   getTools(): McpToolDefinition[] {
@@ -80,11 +80,16 @@ async function callGetpodBrowser(
   });
 
   const baseUrl = process.env.GETPOD_BROWSER_URL ?? 'http://127.0.0.1:10880';
+  const apiKey = process.env.GETPOD_BROWSER_API_KEY ?? '';
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
   let res: Response;
   try {
     res = await fetch(`${baseUrl}/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body,
     });
   } catch (err) {

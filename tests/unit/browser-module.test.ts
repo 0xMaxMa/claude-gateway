@@ -23,14 +23,14 @@ describe('BrowserModule', () => {
       expect(mod.isEnabled()).toBe(true);
     });
 
-    it('returns false when GETPOD_BROWSER_DISABLED=1', () => {
-      process.env.GETPOD_BROWSER_DISABLED = '1';
+    it('returns false when GETPOD_BROWSER_DISABLED=true', () => {
+      process.env.GETPOD_BROWSER_DISABLED = 'true';
       const mod = new BrowserModule();
       expect(mod.isEnabled()).toBe(false);
     });
 
-    it('returns true when GETPOD_BROWSER_DISABLED is set to a value other than "1"', () => {
-      process.env.GETPOD_BROWSER_DISABLED = '0';
+    it('returns true when GETPOD_BROWSER_DISABLED is set to a value other than "true"', () => {
+      process.env.GETPOD_BROWSER_DISABLED = '1';
       const mod = new BrowserModule();
       expect(mod.isEnabled()).toBe(true);
     });
@@ -225,6 +225,56 @@ describe('BrowserModule', () => {
 
       const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe('http://custom-host:9999/mcp');
+    });
+
+    it('sends Authorization: Bearer header when GETPOD_BROWSER_API_KEY is set', async () => {
+      process.env.GETPOD_BROWSER_API_KEY = 'test-api-key-abc123';
+      const rpc = {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { content: [{ type: 'text', text: 'ok' }] },
+      };
+      fetchMock.mockResolvedValue(new Response(`data: ${JSON.stringify(rpc)}\n\n`, { status: 200 }));
+      const mod = new BrowserModule();
+      await mod.handleTool('browser_snapshot', { session_id: 'test-session' });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Authorization']).toBe('Bearer test-api-key-abc123');
+      expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('omits Authorization header when GETPOD_BROWSER_API_KEY is not set', async () => {
+      delete process.env.GETPOD_BROWSER_API_KEY;
+      const rpc = {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { content: [{ type: 'text', text: 'ok' }] },
+      };
+      fetchMock.mockResolvedValue(new Response(`data: ${JSON.stringify(rpc)}\n\n`, { status: 200 }));
+      const mod = new BrowserModule();
+      await mod.handleTool('browser_snapshot', { session_id: 'test-session' });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Authorization']).toBeUndefined();
+      expect(headers['Content-Type']).toBe('application/json');
+    });
+
+    it('omits Authorization header when GETPOD_BROWSER_API_KEY is empty string', async () => {
+      process.env.GETPOD_BROWSER_API_KEY = '';
+      const rpc = {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { content: [{ type: 'text', text: 'ok' }] },
+      };
+      fetchMock.mockResolvedValue(new Response(`data: ${JSON.stringify(rpc)}\n\n`, { status: 200 }));
+      const mod = new BrowserModule();
+      await mod.handleTool('browser_navigate', { session_id: 'test-session', url: 'https://example.com' });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const headers = init.headers as Record<string, string>;
+      expect(headers['Authorization']).toBeUndefined();
     });
   });
 });
