@@ -3,8 +3,6 @@ import * as path from 'path';
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 const ALLOWED_MIME_PREFIXES = ['image/', 'application/pdf'];
-/** Staging files older than this are eligible for cleanup */
-const STAGING_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export class MediaStore {
   static mediaDir(agentsBaseDir: string, agentId: string, chatId: string): string {
@@ -58,40 +56,6 @@ export class MediaStore {
       return real;
     }
     return resolved;
-  }
-
-  /**
-   * Delete files in the ui-upload staging area that are older than STAGING_MAX_AGE_MS.
-   * Safe to call periodically (e.g. hourly) to prevent disk accumulation.
-   */
-  static cleanupStaging(agentsBaseDir: string): void {
-    const agentsDir = agentsBaseDir;
-    if (!fs.existsSync(agentsDir)) return;
-    const now = Date.now();
-    for (const agentId of fs.readdirSync(agentsDir)) {
-      const stagingDir = path.join(agentsDir, agentId, 'media', 'ui-upload');
-      if (!fs.existsSync(stagingDir)) continue;
-      // Walk up to 2 levels: ui-upload/ and ui-upload/{subdir}/
-      for (const entry of fs.readdirSync(stagingDir)) {
-        const entryPath = path.join(stagingDir, entry);
-        const stat = fs.statSync(entryPath);
-        if (stat.isDirectory()) {
-          for (const file of fs.readdirSync(entryPath)) {
-            const filePath = path.join(entryPath, file);
-            try {
-              const fstat = fs.statSync(filePath);
-              if (now - fstat.mtimeMs > STAGING_MAX_AGE_MS) fs.unlinkSync(filePath);
-            } catch { /* skip */ }
-          }
-          // Remove empty subdir
-          try {
-            if (fs.readdirSync(entryPath).length === 0) fs.rmdirSync(entryPath);
-          } catch { /* skip */ }
-        } else if (stat.isFile() && now - stat.mtimeMs > STAGING_MAX_AGE_MS) {
-          try { fs.unlinkSync(entryPath); } catch { /* skip */ }
-        }
-      }
-    }
   }
 
   /**

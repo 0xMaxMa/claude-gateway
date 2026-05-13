@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
@@ -47,10 +47,6 @@ setInterval(() => {
   }
 }, UPLOAD_RATE_WINDOW_MS).unref();
 
-/** Derive a stable short ID from an API key value (never log the raw key). */
-function apiKeyId(key: string): string {
-  return createHash('sha256').update(key).digest('hex').slice(0, 16);
-}
 
 export function createApiRouter(
   agentRunners: Map<string, AgentRunner>,
@@ -697,14 +693,14 @@ export function createApiRouter(
   });
 
   /**
-   * POST /api/v1/agents/:agentId/media
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/media
    * Upload a media file as raw binary body (image/* or application/pdf).
    * Headers: Content-Type (mime type), X-Filename (optional original filename)
    * Body: raw file bytes
    * Returns: { mediaPath: string }  — relative path usable in message mediaFiles[]
    */
   router.post(
-    '/v1/agents/:agentId/media',
+    '/v1/agents/:agentId/sessions/:sessionId/media',
     auth,
     (req: Request, res: Response, next) => {
       // Buffer raw body up to maxUploadBytes; express.json/urlencoded don't handle binary
@@ -734,7 +730,7 @@ export function createApiRouter(
       });
     },
     async (req: Request, res: Response) => {
-      const { agentId } = req.params as { agentId: string };
+      const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
       const apiKey = (req as AuthedRequest).apiKey;
       if (!canAccessAgent(apiKey, agentId)) {
         res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
@@ -743,6 +739,10 @@ export function createApiRouter(
       const runner = agentRunners.get(agentId);
       if (!runner) {
         res.status(404).json({ error: `Agent '${agentId}' not found` });
+        return;
+      }
+      if (!sessionId || sessionId.length > 128) {
+        res.status(400).json({ error: 'Invalid session ID' });
         return;
       }
       // Rate limit: max 20 uploads/min per API key
@@ -773,12 +773,10 @@ export function createApiRouter(
       try {
         await fsp.writeFile(tmpFile, buf);
         const agentsBaseDir = runner.getAgentsBaseDir();
-        // Store under ui-upload/{keyId}/ so each API key's uploads are isolated
-        const keySubdir = `ui-upload/${apiKeyId(apiKey.key)}`;
-        const mediaPath = MediaStore.copyToMedia(agentsBaseDir, agentId, keySubdir, tmpFile);
+        const mediaPath = MediaStore.copyToMedia(agentsBaseDir, agentId, `api-${sessionId}`, tmpFile);
         res.json({ mediaPath });
       } catch (err) {
-        res.status(500).json({ error: `Upload failed: ${(err as Error).message}` });
+        res.status(500).json({ error: 'Upload failed' });
       } finally {
         fsp.unlink(tmpFile).catch(() => {});
       }
@@ -821,14 +819,6 @@ export function createApiRouter(
     res.setHeader('X-Frame-Options', 'DENY');
     res.sendFile(absPath);
   });
-
-  // Schedule hourly cleanup of stale staging uploads (files older than 24h)
-  setInterval(() => {
-    const firstRunner = agentRunners.values().next().value as AgentRunner | undefined;
-    if (firstRunner) {
-      try { MediaStore.cleanupStaging(firstRunner.getAgentsBaseDir()); } catch { /* non-critical */ }
-    }
-  }, 60 * 60 * 1000).unref(); // unref so cleanup timer doesn't keep process alive
 
   return router;
 }

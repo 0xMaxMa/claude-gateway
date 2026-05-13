@@ -355,7 +355,7 @@ describe('Chat History API integration (planning-50)', () => {
     const fakeImage = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
 
     const res = await supertest(router.getApp())
-      .post('/api/v1/agents/alfred/media')
+      .post('/api/v1/agents/alfred/sessions/test-session/media')
       .set('X-Api-Key', API_KEY_ADMIN)
       .set('Content-Type', 'image/jpeg')
       .set('X-Filename', 'test-photo.jpg')
@@ -363,7 +363,7 @@ describe('Chat History API integration (planning-50)', () => {
 
     expect(res.status).toBe(200);
     expect(typeof res.body.mediaPath).toBe('string');
-    expect(res.body.mediaPath).toMatch(/ui-upload/);
+    expect(res.body.mediaPath).toMatch(/api-test-session/);
     expect(res.body.mediaPath).toMatch(/\.jpg$/);
 
     await router.stop();
@@ -387,7 +387,7 @@ describe('Chat History API integration (planning-50)', () => {
 
     // Upload
     const uploadRes = await supertest(router.getApp())
-      .post('/api/v1/agents/alfred/media')
+      .post('/api/v1/agents/alfred/sessions/test-session/media')
       .set('X-Api-Key', API_KEY_ADMIN)
       .set('Content-Type', 'image/png')
       .set('X-Filename', 'round-trip.png')
@@ -423,7 +423,7 @@ describe('Chat History API integration (planning-50)', () => {
     await router.start(0);
 
     const res = await supertest(router.getApp())
-      .post('/api/v1/agents/alfred/media')
+      .post('/api/v1/agents/alfred/sessions/test-session/media')
       .set('X-Api-Key', API_KEY_ADMIN)
       .set('Content-Type', 'application/javascript')
       .send(Buffer.from('alert(1)'));
