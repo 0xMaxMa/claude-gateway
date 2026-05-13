@@ -22,6 +22,7 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
+const MIME_MAP: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
 
 const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-opus-4-7', label: 'Opus 4.7', alias: 'opus', contextWindow: 1000000 },
@@ -74,8 +75,7 @@ async function buildImageBlocks(agentsBaseDir: string, agentId: string, mediaFil
       const absPath = MediaStore.resolvePath(agentsBaseDir, agentId, relPath);
       const data = await fsPromises.readFile(absPath);
       const ext = path.extname(absPath).toLowerCase().slice(1);
-      const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
-      const media_type = mimeMap[ext] ?? 'image/jpeg';
+      const media_type = MIME_MAP[ext] ?? 'image/jpeg';
       blocks.push({ type: 'image', source: { type: 'base64', media_type, data: data.toString('base64') } });
     } catch (err) {
       logger.warn('Failed to build image block', { relPath, err });
@@ -686,7 +686,7 @@ export class AgentRunner extends EventEmitter {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
               for (const block of msg!.content) {
-                if (block.type === 'tool_use' && block.name === replyToolName) {
+                if (block.type === 'tool_use' && block.name === replyToolName && !replyCalled) {
                   replyCalled = true;
                   // Persist the reply text to history so it appears in chat history API
                   const replyText = typeof block.input?.['text'] === 'string' ? block.input['text'].trim() : '';
@@ -1680,6 +1680,10 @@ export class AgentRunner extends EventEmitter {
 
   getHistoryDb(): HistoryDB {
     return this.historyDb;
+  }
+
+  getAllSessionNames(): Promise<Map<string, string>> {
+    return this.sessionStore.getAllSessionNames(this.agentConfig.id);
   }
 
   async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord'): Promise<import('../types').SessionIndex> {

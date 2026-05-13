@@ -294,20 +294,26 @@ export function createApiRouter(
    * List all sessions across all agents. Admin only.
    * Queries each agent's history DB sequentially and returns a nested agents → sessions structure.
    */
-  router.get('/v1/agents/sessions', auth, (req: Request, res: Response) => {
+  router.get('/v1/agents/sessions', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) {
       res.status(403).json({ error: 'Admin key required' });
       return;
     }
-    const agents: AgentSessionSummary[] = [...agentRunners.entries()].map(([agentId, runner]) => {
-      const cfg = agentConfigs.get(agentId);
-      return {
-        agentId,
-        description: cfg?.description ?? '',
-        sessions: runner.getHistoryDb().listSessions(),
-      };
-    });
+    const agents = await Promise.all(
+      [...agentRunners.entries()].map(async ([agentId, runner]) => {
+        const cfg = agentConfigs.get(agentId);
+        const [sessions, nameMap] = await Promise.all([
+          Promise.resolve(runner.getHistoryDb().listSessions()),
+          runner.getAllSessionNames(),
+        ]);
+        return {
+          agentId,
+          description: cfg?.description ?? '',
+          sessions: sessions.map((s) => ({ ...s, name: nameMap.get(s.sessionId) ?? null })),
+        };
+      }),
+    );
     res.json({ agents });
   });
 
@@ -746,7 +752,8 @@ export function createApiRouter(
         return;
       }
       // Rate limit: max 20 uploads/min per API key
-      if (!checkUploadRateLimit(apiKey.key)) {
+      const keyHash = createHash('sha256').update(apiKey.key).digest('hex').slice(0, 16);
+      if (!checkUploadRateLimit(keyHash)) {
         res.status(429).json({ error: 'Too many uploads. Limit: 20 per minute.' });
         return;
       }

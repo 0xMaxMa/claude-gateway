@@ -288,6 +288,7 @@ export class HistoryDB {
       createdAt: row.created_at,
       lastActivity: row.last_activity,
       lastMessage: row.last_message ?? null,
+      name: null,
     }));
   }
 
