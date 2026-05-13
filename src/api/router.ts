@@ -153,6 +153,10 @@ export function createApiRouter(
       res.status(400).json({ error: 'chat_id is required and must be a non-empty string' });
       return;
     }
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test((chat_id as string).trim())) {
+      res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+      return;
+    }
     if (session_id !== undefined && typeof session_id !== 'string') {
       res.status(400).json({ error: 'session_id must be a string if provided' });
       return;
@@ -928,6 +932,10 @@ export function createApiRouter(
       res.status(400).json({ error: 'chat_id is required' });
       return null;
     }
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(chatId.trim())) {
+      res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+      return null;
+    }
     return { runner, agentId, chatId: chatId.trim() };
   }
 
@@ -990,7 +998,7 @@ export function createApiRouter(
   router.patch('/v1/agents/:agentId/sessions/:sessionId', auth, async (req: Request, res: Response) => {
     const ctx = resolveApiSession(req, res);
     if (!ctx) return;
-    const { runner, agentId, chatId } = ctx;
+    const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     const body = req.body as { sessionName?: unknown };
     const sessionName = typeof body.sessionName === 'string' ? body.sessionName.trim() : undefined;
@@ -1009,7 +1017,7 @@ export function createApiRouter(
   router.delete('/v1/agents/:agentId/sessions/:sessionId', auth, async (req: Request, res: Response) => {
     const ctx = resolveApiSession(req, res);
     if (!ctx) return;
-    const { runner, agentId, chatId } = ctx;
+    const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
       await runner.deleteApiSession(chatId, sessionId);

@@ -1290,7 +1290,9 @@ export class AgentRunner extends EventEmitter {
 
     // Register session in api-{chatId} index.json on first use
     const internalChatIdForSession = `api-${chatId}`;
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdForSession, sessionId).catch(() => {});
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdForSession, sessionId).catch((err: unknown) => {
+      this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
+    });
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -1473,7 +1475,9 @@ export class AgentRunner extends EventEmitter {
 
     // Register session in api-{chatId} index.json on first use
     const internalChatIdStream = `api-${chatId}`;
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdStream, sessionId).catch(() => {});
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdStream, sessionId).catch((err: unknown) => {
+      this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
+    });
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length
@@ -1747,8 +1751,8 @@ export class AgentRunner extends EventEmitter {
         loadedAtSpawn: undefined,
         messageCountAtSpawn: undefined,
       }, ch);
-      this.historyDb.clearChat(internalChatId);
-      MediaStore.clearChatMedia(this.agentsBaseDir, agentId, internalChatId);
+      const mediaPaths = this.historyDb.clearSession(internalChatId, sessionId);
+      MediaStore.deleteMediaFiles(this.agentsBaseDir, agentId, mediaPaths);
       this.restartProcess(sessionId).catch(() => {});
       return { success: true };
     }
@@ -1769,7 +1773,7 @@ export class AgentRunner extends EventEmitter {
       return { success: true, keptMessages: result.afterMessages, archivedMessages: result.beforeMessages - result.afterMessages };
     }
 
-    return { error: `Unknown command: ${command}` };
+    throw new Error(`Unknown command: ${command}`);
   }
 
   async setModel(newModel: string): Promise<void> {
@@ -1791,13 +1795,16 @@ export class AgentRunner extends EventEmitter {
     let sessionName = name;
     if (!sessionName && prompt) {
       try {
-        const { execSync } = await import('child_process');
+        const { execFile } = await import('child_process');
+        const { promisify } = await import('util');
+        const execFileAsync = promisify(execFile);
         const titlePrompt = `Summarise in 3-5 words as a session title (no punctuation, no quotes): ${prompt}`;
-        const out = execSync(
-          `claude -p ${JSON.stringify(titlePrompt)} --output-format text --model claude-haiku-4-5-20251001`,
+        const { stdout } = await execFileAsync(
+          'claude',
+          ['-p', titlePrompt, '--output-format', 'text', '--model', 'claude-haiku-4-5-20251001'],
           { timeout: 15000, encoding: 'utf-8' },
         );
-        sessionName = out.trim().slice(0, 60) || undefined;
+        sessionName = stdout.trim().slice(0, 60) || undefined;
       } catch {
         sessionName = undefined;
       }

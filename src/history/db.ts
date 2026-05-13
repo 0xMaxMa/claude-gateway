@@ -296,6 +296,18 @@ export class HistoryDB {
     this.db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
   }
 
+  clearSession(chatId: string, sessionId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT media_files FROM messages WHERE chat_id = ? AND session_id = ? AND media_files IS NOT NULL`,
+    ).all(chatId, sessionId) as Array<{ media_files: string }>;
+    const mediaPaths: string[] = [];
+    for (const row of rows) {
+      try { mediaPaths.push(...(JSON.parse(row.media_files) as string[])); } catch { /* skip */ }
+    }
+    this.db.prepare('DELETE FROM messages WHERE chat_id = ? AND session_id = ?').run(chatId, sessionId);
+    return mediaPaths;
+  }
+
   /**
    * Delete all messages older than cutoffMs (Unix ms timestamp).
    * Returns relative media_files paths from deleted rows for disk cleanup.

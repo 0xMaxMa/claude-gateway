@@ -104,6 +104,15 @@ export class MediaStore {
     }
   }
 
+  static deleteMediaFiles(agentsBaseDir: string, agentId: string, relativePaths: string[]): void {
+    for (const rel of relativePaths) {
+      try {
+        const abs = MediaStore.resolvePath(agentsBaseDir, agentId, rel);
+        if (fs.existsSync(abs)) fs.unlinkSync(abs);
+      } catch { /* skip — path traversal or missing file */ }
+    }
+  }
+
   static isAllowedMime(mime: string): boolean {
     return ALLOWED_MIME_PREFIXES.some((p) => mime.startsWith(p));
   }

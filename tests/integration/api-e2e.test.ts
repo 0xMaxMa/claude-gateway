@@ -179,7 +179,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
-      .send({ message: 'Hello!' });
+      .send({ message: 'Hello!', chat_id: 'test-chat' });
 
     expect(res.status).toBe(200);
     expect(res.body.agent_id).toBe('alfred');
@@ -211,7 +211,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
 
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
-      .send({ message: 'Hello' });
+      .send({ message: 'Hello', chat_id: 'test-chat' });
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBeDefined();
@@ -238,7 +238,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_WRONG}`)
-      .send({ message: 'Hello' });
+      .send({ message: 'Hello', chat_id: 'test-chat' });
 
     expect(res.status).toBe(403);
 
@@ -269,7 +269,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/warrior/messages')
       .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
-      .send({ message: 'Hello warrior' });
+      .send({ message: 'Hello warrior', chat_id: 'test-chat' });
 
     expect(res.status).toBe(403);
 
@@ -296,7 +296,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/nonexistent/messages')
       .set('Authorization', `Bearer ${API_KEY_ADMIN}`)
-      .send({ message: 'Hello' });
+      .send({ message: 'Hello', chat_id: 'test-chat' });
 
     expect(res.status).toBe(404);
 
@@ -350,7 +350,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
-      .send({ message: 'Hi', session_id: sessionId });
+      .send({ message: 'Hi', chat_id: 'test-chat', session_id: sessionId });
 
     expect(res.status).toBe(200);
     expect(res.body.session_id).toBe(sessionId);
@@ -378,7 +378,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
-      .send({ message: 'Stateless call' });
+      .send({ message: 'Stateless call', chat_id: 'test-chat' });
 
     expect(res.status).toBe(200);
     // UUID v4 format
@@ -409,7 +409,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('X-Api-Key', API_KEY_ALFRED)
-      .send({ message: 'Auth via X-Api-Key' });
+      .send({ message: 'Auth via X-Api-Key', chat_id: 'test-chat' });
 
     expect(res.status).toBe(200);
     expect(res.body.response).toContain('X-Api-Key');
@@ -457,7 +457,7 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ADMIN}`)
-      .send({ message: 'Remember this message', session_id: sessionId });
+      .send({ message: 'Remember this message', chat_id: 'test-chat', session_id: sessionId });
 
     expect(res.status).toBe(200);
 
