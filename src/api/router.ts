@@ -310,7 +310,7 @@ export function createApiRouter(
         return {
           agentId,
           description: cfg?.description ?? '',
-          sessions: sessions.map((s) => ({ ...s, name: nameMap.get(s.sessionId) ?? null })),
+          sessions: sessions.map((s) => ({ ...s, sessionName: nameMap.get(s.sessionId) ?? null })),
         };
       }),
     );

@@ -60,7 +60,7 @@ export interface SessionSummary {
   createdAt: number;
   lastActivity: number;
   lastMessage: string | null;
-  name: string | null;
+  sessionName: string | null;
 }
 
 export interface AgentSessionSummary {
