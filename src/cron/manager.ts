@@ -487,7 +487,7 @@ export class CronManager extends EventEmitter {
     const sessionId = `cron-${job.id}`;
     const timeoutMs = job.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    return runner.sendApiMessage(sessionId, job.prompt!, { timeoutMs });
+    return runner.sendApiMessage(sessionId, 'cron', job.prompt!, { timeoutMs });
   }
 
   private async sendTelegram(agentId: string, chatId: string, text: string): Promise<void> {

@@ -93,10 +93,28 @@ export function createApiRouter(
   }
 
   /**
+   * GET /api/v1/commands
+   *
+   * Return the list of slash commands available in the chat UI. No auth required.
+   */
+  router.get('/v1/commands', (_req: Request, res: Response) => {
+    res.json({
+      commands: [
+        { name: '/session',  description: 'Show current session info (name, message count, context %)' },
+        { name: '/clear',    description: 'Clear current session history' },
+        { name: '/compact',  description: 'Summarise old history and keep only recent messages' },
+        { name: '/stop',     description: 'Interrupt the in-flight turn' },
+        { name: '/restart',  description: 'Graceful session restart' },
+        { name: '/model',    description: 'Show the current AI model' },
+      ],
+    });
+  });
+
+  /**
    * POST /api/v1/agents/:agentId/messages
    *
    * Send a message to an agent and receive its response synchronously.
-   * Body: { message: string, session_id?: string }
+   * Body: { message: string, chat_id: string, session_id?: string }
    */
   router.post('/v1/agents/:agentId/messages', auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
@@ -115,12 +133,13 @@ export function createApiRouter(
 
     const body = req.body as {
       message?: unknown;
+      chat_id?: unknown;
       session_id?: unknown;
       stream?: unknown;
       timeout_ms?: unknown;
       media_files?: unknown;
     };
-    const { message, session_id, stream, timeout_ms, media_files } = body;
+    const { message, chat_id, session_id, stream, timeout_ms, media_files } = body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: 'message is required and must be a non-empty string' });
@@ -128,6 +147,10 @@ export function createApiRouter(
     }
     if (message.length > MAX_MESSAGE_LENGTH) {
       res.status(400).json({ error: `message too long (max ${MAX_MESSAGE_LENGTH} characters)` });
+      return;
+    }
+    if (!chat_id || typeof chat_id !== 'string' || !chat_id.trim()) {
+      res.status(400).json({ error: 'chat_id is required and must be a non-empty string' });
       return;
     }
     if (session_id !== undefined && typeof session_id !== 'string') {
@@ -161,11 +184,23 @@ export function createApiRouter(
 
     const requestId = randomUUID();
     const sessionId = (session_id as string | undefined) ?? randomUUID();
+    const chatIdStr = (chat_id as string).trim();
     const startTime = Date.now();
     const timeoutMs =
       typeof timeout_ms === 'number' && timeout_ms > 0 && timeout_ms <= 600_000
         ? timeout_ms
         : DEFAULT_TIMEOUT_MS;
+
+    // Slash command dispatch — runs instead of sending to Claude
+    if (message.trim().startsWith('/')) {
+      try {
+        const result = await runner.executeApiCommand(sessionId, chatIdStr, message.trim());
+        res.json({ command: message.trim(), session_id: sessionId, result });
+      } catch (err: unknown) {
+        res.status(500).json({ error: (err as Error).message ?? 'Command failed' });
+      }
+      return;
+    }
 
     if (stream) {
       // SSE streaming mode
@@ -209,6 +244,7 @@ export function createApiRouter(
         const allowTools = agentCfg.allow_tools ?? !!apiKey.allow_tools;
         cleanup = await runner.sendApiMessageStream(
           sessionId,
+          chatIdStr,
           message.trim(),
           sseCallbacks,
           { timeoutMs, allowTools, mediaFiles: validatedMediaFiles },
@@ -236,7 +272,7 @@ export function createApiRouter(
       try {
         const agentCfgSync = agentConfigs.get(agentId)!;
         const allowToolsSync = agentCfgSync.allow_tools ?? !!apiKey.allow_tools;
-        const response = await runner.sendApiMessage(sessionId, message.trim(), {
+        const response = await runner.sendApiMessage(sessionId, chatIdStr, message.trim(), {
           timeoutMs,
           allowTools: allowToolsSync,
           mediaFiles: validatedMediaFiles,
@@ -836,6 +872,216 @@ export function createApiRouter(
       try { MediaStore.cleanupStaging(firstRunner.getAgentsBaseDir()); } catch { /* non-critical */ }
     }
   }, 60 * 60 * 1000).unref(); // unref so cleanup timer doesn't keep process alive
+
+  // ──────────────────────────────────────────────────────────────
+  // Model management
+  // ──────────────────────────────────────────────────────────────
+
+  /**
+   * PUT /api/v1/agents/:agentId/model
+   *
+   * Set the active model for an agent. Persists to config.json.
+   */
+  router.put('/v1/agents/:agentId/model', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) {
+      res.status(403).json({ error: 'Admin key required' });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const body = req.body as { model?: unknown };
+    const { model: newModel } = body;
+    if (!newModel || typeof newModel !== 'string') {
+      res.status(400).json({ error: 'model is required' });
+      return;
+    }
+    try {
+      await runner.setModel(newModel);
+      res.json({ model: newModel });
+    } catch (err: unknown) {
+      const code = (err as { code?: string }).code;
+      if (code === 'UNKNOWN_MODEL') {
+        res.status(400).json({ error: `Unknown model: ${newModel}` });
+      } else {
+        res.status(500).json({ error: 'Failed to set model' });
+      }
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // API Session management  (/v1/agents/:agentId/sessions/...)
+  // ──────────────────────────────────────────────────────────────
+
+  function resolveApiSession(req: Request, res: Response): { runner: AgentRunner; agentId: string; chatId: string } | null {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return null;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return null; }
+    const chatId = (req.query['chat_id'] ?? (req.body as Record<string, unknown>)?.['chat_id']) as string | undefined;
+    if (!chatId || typeof chatId !== 'string' || !chatId.trim()) {
+      res.status(400).json({ error: 'chat_id is required' });
+      return null;
+    }
+    return { runner, agentId, chatId: chatId.trim() };
+  }
+
+  /**
+   * GET /api/v1/agents/:agentId/sessions
+   * List API sessions for a chat_id.
+   */
+  router.get('/v1/agents/:agentId/sessions', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, agentId, chatId } = ctx;
+    try {
+      const index = await runner.listApiSessions(chatId);
+      res.json(index);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/sessions
+   * Create a new API session. Optionally auto-names from a prompt.
+   */
+  router.post('/v1/agents/:agentId/sessions', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, agentId, chatId } = ctx;
+    const body = req.body as { prompt?: unknown; name?: unknown };
+    const promptText = typeof body.prompt === 'string' ? body.prompt.trim() : undefined;
+    const explicitName = typeof body.name === 'string' ? body.name.trim() : undefined;
+    try {
+      const meta = await runner.createApiSession(chatId, promptText, explicitName);
+      res.status(201).json({ sessionId: meta.id, sessionName: meta.name, createdAt: meta.createdAt });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/sessions/:sessionId/info
+   */
+  router.get('/v1/agents/:agentId/sessions/:sessionId/info', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      const info = await runner.getApiSessionInfo(chatId, sessionId);
+      if (!info) { res.status(404).json({ error: 'Session not found' }); return; }
+      res.json(info);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * PATCH /api/v1/agents/:agentId/sessions/:sessionId
+   * Rename a session.
+   */
+  router.patch('/v1/agents/:agentId/sessions/:sessionId', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, agentId, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    const body = req.body as { sessionName?: unknown };
+    const sessionName = typeof body.sessionName === 'string' ? body.sessionName.trim() : undefined;
+    if (!sessionName) { res.status(400).json({ error: 'sessionName is required' }); return; }
+    try {
+      await runner.renameApiSession(chatId, sessionId, sessionName);
+      res.json({ sessionId, sessionName });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/sessions/:sessionId
+   */
+  router.delete('/v1/agents/:agentId/sessions/:sessionId', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, agentId, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      await runner.deleteApiSession(chatId, sessionId);
+      res.status(204).send();
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/clear
+   */
+  router.post('/v1/agents/:agentId/sessions/:sessionId/clear', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      const result = await runner.executeApiCommand(sessionId, chatId, '/clear');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/compact
+   */
+  router.post('/v1/agents/:agentId/sessions/:sessionId/compact', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      const result = await runner.executeApiCommand(sessionId, chatId, '/compact');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/stop
+   */
+  router.post('/v1/agents/:agentId/sessions/:sessionId/stop', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      const result = await runner.executeApiCommand(sessionId, chatId, '/stop');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/restart
+   */
+  router.post('/v1/agents/:agentId/sessions/:sessionId/restart', auth, async (req: Request, res: Response) => {
+    const ctx = resolveApiSession(req, res);
+    if (!ctx) return;
+    const { runner, chatId } = ctx;
+    const { sessionId } = req.params as { sessionId: string };
+    try {
+      const result = await runner.executeApiCommand(sessionId, chatId, '/restart');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 
   return router;
 }

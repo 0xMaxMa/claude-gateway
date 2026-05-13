@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { randomUUID } from 'crypto';
 import supertest from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
@@ -86,10 +87,13 @@ async function sendMessage(
   message: string,
   sessionId?: string,
 ): Promise<{ sessionId: string; response: string }> {
+  // Pre-generate a stable ID used as both chat_id and session_id so that
+  // chatId in the DB (api-{chat_id}) always equals api-{returned session_id}.
+  const sid = sessionId ?? randomUUID();
   const res = await supertest(app)
     .post(`/api/v1/agents/${agentId}/messages`)
     .set('X-Api-Key', API_KEY_ADMIN)
-    .send({ message, ...(sessionId ? { session_id: sessionId } : {}) });
+    .send({ message, chat_id: sid, session_id: sid });
   if (res.status !== 200) throw new Error(`sendMessage failed: ${res.status} ${JSON.stringify(res.body)}`);
   return { sessionId: res.body.session_id as string, response: res.body.response as string };
 }

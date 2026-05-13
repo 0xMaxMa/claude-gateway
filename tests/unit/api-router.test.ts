@@ -14,36 +14,39 @@ interface StreamCallbacks {
 }
 
 class MockAgentRunner extends EventEmitter {
-  sendApiMessageImpl: (sessionId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>;
+  sendApiMessageImpl: (sessionId: string, chatId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>;
   sendApiMessageStreamImpl?: (
     sessionId: string,
+    chatId: string,
     message: string,
     callbacks: StreamCallbacks,
     opts?: { timeoutMs: number; allowTools?: boolean },
   ) => Promise<() => void>;
   private _activeApiSessions = new Set<string>();
 
-  constructor(impl: (sessionId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>) {
+  constructor(impl: (sessionId: string, chatId: string, message: string, opts?: { allowTools?: boolean }) => Promise<string>) {
     super();
     this.sendApiMessageImpl = impl;
   }
 
   async sendApiMessage(
     sessionId: string,
+    chatId: string,
     message: string,
     opts: { timeoutMs: number; allowTools?: boolean },
   ): Promise<string> {
-    return this.sendApiMessageImpl(sessionId, message, { allowTools: opts.allowTools });
+    return this.sendApiMessageImpl(sessionId, chatId, message, { allowTools: opts.allowTools });
   }
 
   async sendApiMessageStream(
     sessionId: string,
+    chatId: string,
     message: string,
     callbacks: StreamCallbacks,
     _opts: { timeoutMs: number; allowTools?: boolean },
   ): Promise<() => void> {
     if (this.sendApiMessageStreamImpl) {
-      return this.sendApiMessageStreamImpl(sessionId, message, callbacks, _opts);
+      return this.sendApiMessageStreamImpl(sessionId, chatId, message, callbacks, _opts);
     }
     throw new Error('sendApiMessageStream not implemented in mock');
   }
@@ -77,7 +80,7 @@ const apiKeys: ApiKey[] = [
   { key: 'sk-test-write', agents: [AGENT_ID], write: true },
 ];
 
-function buildApp(runnerImpl: (sessionId: string, msg: string) => Promise<string>) {
+function buildApp(runnerImpl: (sessionId: string, chatId: string, msg: string) => Promise<string>) {
   const runner = new MockAgentRunner(runnerImpl);
   const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
   const configs = new Map([[AGENT_ID, agentConfig]]);
@@ -90,6 +93,7 @@ function buildApp(runnerImpl: (sessionId: string, msg: string) => Promise<string
 function buildStreamApp(
   streamImpl: (
     sessionId: string,
+    chatId: string,
     message: string,
     callbacks: StreamCallbacks,
     opts?: { timeoutMs: number; allowTools?: boolean },
@@ -116,7 +120,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'Hi' });
+      .send({ message: 'Hi', chat_id: 'test-chat' });
     expect(res.status).toBe(200);
     expect(res.body.response).toBe('Hello!');
     expect(res.body.agent_id).toBe(AGENT_ID);
@@ -130,7 +134,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'ping', session_id: 'my-session-001' });
+      .send({ message: 'ping', chat_id: 'test-chat', session_id: 'my-session-001' });
     expect(res.status).toBe(200);
     expect(res.body.session_id).toBe('my-session-001');
   });
@@ -140,7 +144,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'ping' });
+      .send({ message: 'ping', chat_id: 'test-chat' });
     expect(res.status).toBe(200);
     // UUID v4 pattern
     expect(res.body.session_id).toMatch(
@@ -182,7 +186,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'hi', session_id: 123 });
+      .send({ message: 'hi', chat_id: 'test-chat', session_id: 123 });
     expect(res.status).toBe(400);
   });
 
@@ -229,7 +233,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'hi' });
+      .send({ message: 'hi', chat_id: 'test-chat' });
     expect(res.status).toBe(504);
   });
 
@@ -241,7 +245,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'hi' });
+      .send({ message: 'hi', chat_id: 'test-chat' });
     expect(res.status).toBe(409);
   });
 
@@ -252,7 +256,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'hi' });
+      .send({ message: 'hi', chat_id: 'test-chat' });
     expect(res.status).toBe(500);
   });
 });
@@ -417,11 +421,11 @@ function collectSSE(
 describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   // T1: SSE headers
   it('T1: returns SSE headers when stream=true', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onDone('Hello');
       return () => {};
     });
-    const { status, headers } = await collectSSE(app, { message: 'hi', stream: true });
+    const { status, headers } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     expect(status).toBe(200);
     expect(headers['content-type']).toBe('text/event-stream');
     expect(headers['cache-control']).toBe('no-cache');
@@ -429,13 +433,13 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
 
   // T2: text_delta events
   it('T2: stream receives text_delta events', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onChunk({ type: 'text_delta', text: 'Hello' });
       cb.onChunk({ type: 'text_delta', text: ' world' });
       cb.onDone('Hello world');
       return () => {};
     });
-    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    const { data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     const lines = data.split('\n').filter(l => l.startsWith('data: '));
     const events = lines
       .map(l => l.slice(6))
@@ -449,17 +453,17 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
 
   // T3: ends with [DONE]
   it('T3: stream ends with [DONE]', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onDone('done');
       return () => {};
     });
-    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    const { data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     expect(data.trimEnd()).toMatch(/data: \[DONE\]$/);
   });
 
   // T4: no message returns 400 JSON
   it('T4: stream with no message returns 400 JSON', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onDone('ok');
       return () => {};
     });
@@ -473,7 +477,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
 
   // T5: conflict returns 409 JSON
   it('T5: stream conflict returns 409 JSON', async () => {
-    const { app, runner } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app, runner } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onDone('ok');
       return () => {};
     });
@@ -481,18 +485,18 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'hi', session_id: 'conflict-session', stream: true });
+      .send({ message: 'hi', chat_id: 'test-chat', session_id: 'conflict-session', stream: true });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/pending request/i);
   });
 
   // T6: timeout sends error event in SSE
   it('T6: stream timeout sends error event in SSE', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onError(new Error('Agent response timeout'));
       return () => {};
     });
-    const { data } = await collectSSE(app, { message: 'hi', stream: true });
+    const { data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     const lines = data.split('\n').filter(l => l.startsWith('data: '));
     const events = lines.map(l => l.slice(6)).filter(s => s !== '[DONE]');
     const errorEvent = JSON.parse(events[events.length - 1]);
@@ -506,7 +510,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: 'Hi', stream: false });
+      .send({ message: 'Hi', chat_id: 'test-chat', stream: false });
     expect(res.status).toBe(200);
     expect(res.body.response).toBe('Hello!');
   });
@@ -516,7 +520,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     let cleanupCalled = false;
     let sendChunk: ((event: StreamEvent) => void) | undefined;
 
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       sendChunk = cb.onChunk;
       // Send initial chunk so client gets data
       cb.onChunk({ type: 'text_delta', text: 'hi' });
@@ -526,7 +530,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     await new Promise<void>((resolve, reject) => {
       const server = app.listen(0, () => {
         const addr = server.address() as { port: number };
-        const reqBody = JSON.stringify({ message: 'hi', stream: true });
+        const reqBody = JSON.stringify({ message: 'hi', chat_id: 'test-chat', stream: true });
         const req = http.request(
           {
             hostname: '127.0.0.1',
@@ -541,7 +545,6 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
           },
           (res) => {
             res.once('data', () => {
-              // Destroy the socket to simulate client disconnect
               res.destroy();
             });
           },
@@ -565,7 +568,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   it('T-ALLOW-TOOLS-1: key with allow_tools=true passes allowTools=true to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
+    runner.sendApiMessageStream = async (sid, chatId, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
       cbs.onDone('done');
       return () => {};
@@ -577,7 +580,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     app.use(express.json());
     app.use('/api', createApiRouter(runners, configs, apiKeys));
 
-    await collectSSE(app, { message: 'run job', stream: true }, 'Bearer sk-test-tools');
+    await collectSSE(app, { message: 'run job', chat_id: 'test-chat', stream: true }, 'Bearer sk-test-tools');
 
     expect(capturedOpts).toBeDefined();
     expect(capturedOpts!.allowTools).toBe(true);
@@ -587,7 +590,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   it('T-ALLOW-TOOLS-2: key without allow_tools passes allowTools=false to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
+    runner.sendApiMessageStream = async (sid, chatId, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
       cbs.onDone('done');
       return () => {};
@@ -599,7 +602,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     app.use(express.json());
     app.use('/api', createApiRouter(runners, configs, apiKeys));
 
-    await collectSSE(app, { message: 'hi', stream: true });
+    await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
 
     expect(capturedOpts!.allowTools).toBe(false);
   });
@@ -608,7 +611,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   it('T-ALLOW-TOOLS-3: custom timeout_ms is forwarded to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
+    runner.sendApiMessageStream = async (sid, chatId, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number; allowTools?: boolean };
       cbs.onDone('done');
       return () => {};
@@ -620,7 +623,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     app.use(express.json());
     app.use('/api', createApiRouter(runners, configs, apiKeys));
 
-    await collectSSE(app, { message: 'hi', stream: true, timeout_ms: 120000 });
+    await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true, timeout_ms: 120000 });
 
     expect(capturedOpts!.timeoutMs).toBe(120000);
   });
@@ -629,7 +632,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   it('T-ALLOW-TOOLS-4: timeout_ms over max is clamped to default', async () => {
     let capturedOpts: { timeoutMs: number } | undefined;
     const runner = new MockAgentRunner(async () => 'ok');
-    runner.sendApiMessageStream = async (sid, msg, cbs, opts) => {
+    runner.sendApiMessageStream = async (sid, chatId, msg, cbs, opts) => {
       capturedOpts = opts as { timeoutMs: number };
       cbs.onDone('done');
       return () => {};
@@ -641,7 +644,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     app.use(express.json());
     app.use('/api', createApiRouter(runners, configs, apiKeys));
 
-    await collectSSE(app, { message: 'hi', stream: true, timeout_ms: 999999 });
+    await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true, timeout_ms: 999999 });
 
     expect(capturedOpts!.timeoutMs).toBe(60000); // DEFAULT_TIMEOUT_MS
   });
@@ -649,7 +652,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   // I-API-14: key with allow_tools=true passes allowTools=true to sync runner
   it('I-API-14: key with allow_tools=true passes allowTools=true to sync sendApiMessage', async () => {
     let capturedAllowTools: boolean | undefined;
-    const runner = new MockAgentRunner(async (_sid, _msg, opts) => {
+    const runner = new MockAgentRunner(async (_sid, _chatId, _msg, opts) => {
       capturedAllowTools = opts?.allowTools;
       return 'ok';
     });
@@ -662,7 +665,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/messages`)
       .set('Authorization', 'Bearer sk-test-tools')
-      .send({ message: 'run job' });
+      .send({ message: 'run job', chat_id: 'test-chat' });
 
     expect(res.status).toBe(200);
     expect(capturedAllowTools).toBe(true);
@@ -671,7 +674,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   // I-API-15: key without allow_tools passes allowTools=false to sync runner
   it('I-API-15: key without allow_tools passes allowTools=false to sync sendApiMessage', async () => {
     let capturedAllowTools: boolean | undefined;
-    const runner = new MockAgentRunner(async (_sid, _msg, opts) => {
+    const runner = new MockAgentRunner(async (_sid, _chatId, _msg, opts) => {
       capturedAllowTools = opts?.allowTools;
       return 'ok';
     });
@@ -684,7 +687,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/messages`)
       .set('Authorization', 'Bearer sk-test-app')
-      .send({ message: 'hello' });
+      .send({ message: 'hello', chat_id: 'test-chat' });
 
     expect(res.status).toBe(200);
     expect(capturedAllowTools).toBe(false);
@@ -692,13 +695,13 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
 
   // T-API-STREAM-TCP: TCP_NODELAY is set on SSE connections (regression test)
   it('T-API-STREAM-TCP: SSE streaming works correctly with TCP_NODELAY set', async () => {
-    const { app } = buildStreamApp(async (_sid, _msg, cb) => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onChunk({ type: 'text_delta', text: 'fast' });
       cb.onChunk({ type: 'text_delta', text: ' response' });
       cb.onDone('fast response');
       return () => {};
     });
-    const { status, headers, data } = await collectSSE(app, { message: 'hi', stream: true });
+    const { status, headers, data } = await collectSSE(app, { message: 'hi', chat_id: 'test-chat', stream: true });
     expect(status).toBe(200);
     expect(headers['content-type']).toBe('text/event-stream');
 

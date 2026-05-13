@@ -183,6 +183,7 @@ describe('T6-T10: Agent type payload', () => {
 
     expect(runner.sendApiMessage).toHaveBeenCalledWith(
       expect.stringContaining('cron-'),
+      'cron',
       'hello agent',
       expect.objectContaining({ timeoutMs: expect.any(Number) }),
     );

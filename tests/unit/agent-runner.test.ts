@@ -620,6 +620,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const donePromise = new Promise<string>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t9',
+        'test-chat',
         'hello',
         {
           onChunk: (event) => chunks.push(event),
@@ -667,6 +668,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const donePromise = new Promise<string>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t10',
+        'test-chat',
         'test',
         {
           onChunk: () => {},
@@ -694,6 +696,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const donePromise = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t11',
+        'test-chat',
         'persist test',
         {
           onChunk: () => {},
@@ -734,6 +737,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     // Start first stream (never resolves)
     runner.sendApiMessageStream(
       'stream-t12',
+        'test-chat',
       'first',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 10000 },
@@ -745,6 +749,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     await expect(
       runner.sendApiMessageStream(
         'stream-t12',
+        'test-chat',
         'second',
         { onChunk: () => {}, onDone: () => {}, onError: () => {} },
         { timeoutMs: 5000 },
@@ -760,6 +765,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const errorPromise = new Promise<Error>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t13',
+        'test-chat',
         'timeout test',
         {
           onChunk: () => {},
@@ -784,6 +790,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const cleanupReady = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t14',
+        'test-chat',
         'cleanup test',
         {
           onChunk: () => {},
@@ -812,6 +819,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     await expect(
       runner.sendApiMessageStream(
         'stream-t14',
+        'test-chat',
         'after cleanup',
         { onChunk: () => {}, onDone: () => {}, onError: () => {} },
         { timeoutMs: 5000 },
@@ -830,6 +838,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const donePromise = new Promise<string>((resolve) => {
       runner.sendApiMessageStream(
         'stream-partial-15',
+        'test-chat',
         'hello',
         {
           onChunk: (event) => chunks.push(event),
@@ -880,6 +889,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     let capturedMessage = '';
     runner.sendApiMessageStream(
       'stream-at-1',
+        'test-chat',
       'hello',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: false },
@@ -902,6 +912,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-at-2',
+        'test-chat',
       'run job',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: true },
@@ -924,6 +935,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-at-3',
+        'test-chat',
       'hello',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000 },
@@ -945,6 +957,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-wp-1',
+        'test-chat',
       'do something',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: true },
@@ -966,6 +979,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-wp-2',
+        'test-chat',
       'do something',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: true },
@@ -989,6 +1003,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-wp-3',
+        'test-chat',
       'hello',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: false },
@@ -1010,6 +1025,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
     runner.sendApiMessageStream(
       'stream-wp-4',
+        'test-chat',
       'hello',
       { onChunk: () => {}, onDone: () => {}, onError: () => {} },
       { timeoutMs: 5000, allowTools: false },
@@ -1035,6 +1051,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const donePromise = new Promise<string>((resolve) => {
       runner.sendApiMessageStream(
         'stream-partial-16',
+        'test-chat',
         'hello',
         {
           onChunk: (event) => chunks.push(event),

@@ -1274,6 +1274,7 @@ export class AgentRunner extends EventEmitter {
    */
   async sendApiMessage(
     sessionId: string,
+    chatId: string,
     message: string,
     opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[] },
   ): Promise<string> {
@@ -1286,6 +1287,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     const session = await this.getOrSpawnSession(sessionId, 'api');
+
+    // Register session in api-{chatId} index.json on first use
+    const internalChatIdForSession = `api-${chatId}`;
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdForSession, sessionId).catch(() => {});
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -1307,7 +1312,7 @@ export class AgentRunner extends EventEmitter {
       })
       .catch(() => {});
     this.historyDb.insertMessage({
-      chatId: `api-${sessionId}`,
+      chatId: `api-${chatId}`,
       sessionId,
       source: 'api',
       role: 'user',
@@ -1332,7 +1337,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     const channelXml =
-      `<channel source="api" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
+      `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
       `${message}\n\n` +
       `${systemNote}` +
       `</channel>` +
@@ -1357,7 +1362,7 @@ export class AgentRunner extends EventEmitter {
             })
             .catch(() => {});
           this.historyDb.insertMessage({
-            chatId: `api-${sessionId}`,
+            chatId: `api-${chatId}`,
             sessionId,
             source: 'api',
             role: 'assistant',
@@ -1447,6 +1452,7 @@ export class AgentRunner extends EventEmitter {
    */
   async sendApiMessageStream(
     sessionId: string,
+    chatId: string,
     message: string,
     callbacks: {
       onChunk: (event: StreamEvent) => void;
@@ -1464,6 +1470,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     const session = await this.getOrSpawnSession(sessionId, 'api');
+
+    // Register session in api-{chatId} index.json on first use
+    const internalChatIdStream = `api-${chatId}`;
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdStream, sessionId).catch(() => {});
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length
@@ -1485,7 +1495,7 @@ export class AgentRunner extends EventEmitter {
       })
       .catch(() => {});
     this.historyDb.insertMessage({
-      chatId: `api-${sessionId}`,
+      chatId: `api-${chatId}`,
       sessionId,
       source: 'api',
       role: 'user',
@@ -1517,7 +1527,7 @@ export class AgentRunner extends EventEmitter {
           })
           .catch(() => {});
         this.historyDb.insertMessage({
-          chatId: `api-${sessionId}`,
+          chatId: `api-${chatId}`,
           sessionId,
           source: 'api',
           role: 'assistant',
@@ -1645,7 +1655,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     const channelXml =
-      `<channel source="api" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
+      `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}">\n` +
       `${message}\n\n` +
       systemNote +
       `</channel>` +
@@ -1688,6 +1698,137 @@ export class AgentRunner extends EventEmitter {
 
   async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord'): Promise<import('../types').SessionIndex> {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
+  }
+
+  async executeApiCommand(sessionId: string, chatId: string, command: string): Promise<Record<string, unknown>> {
+    const agentId = this.agentConfig.id;
+    const internalChatId = `api-${chatId}`;
+
+    if (command === '/model') {
+      return { model: this.agentConfig.claude.model };
+    }
+
+    if (command === '/stop') {
+      const session = this.sessions.get(sessionId);
+      const stopped = session ? session.interrupt() : false;
+      return { stopped };
+    }
+
+    if (command === '/restart') {
+      this.restartProcess(sessionId).catch(() => {});
+      return { restarting: true };
+    }
+
+    if (command === '/session') {
+      const index = await this.sessionStore.listSessions(agentId, internalChatId, 'api').catch(() => null);
+      const meta = index?.sessions.find((s) => s.id === sessionId);
+      if (!meta) return { sessionId, sessionName: null, messageCount: 0, archivedCount: 0, contextUsedPct: 0, model: this.agentConfig.claude.model };
+      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+      const modelConfig = availableModels.find((m) => m.id === this.agentConfig.claude.model);
+      const contextWindow = modelConfig?.contextWindow ?? 200000;
+      const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
+      return {
+        sessionId,
+        sessionName: meta.name,
+        messageCount: meta.messageCount,
+        archivedCount: meta.archivedCount ?? 0,
+        contextUsedPct,
+        model: this.agentConfig.claude.model,
+      };
+    }
+
+    if (command === '/clear') {
+      const ch = 'api' as const;
+      await this.sessionStore.clearTelegramSessionHistory(agentId, internalChatId, sessionId, ch);
+      await this.sessionStore.updateSessionMeta(agentId, internalChatId, sessionId, {
+        totalTokensUsed: 0,
+        lastInputTokens: 0,
+        archivedCount: 0,
+        loadedAtSpawn: undefined,
+        messageCountAtSpawn: undefined,
+      }, ch);
+      this.historyDb.clearChat(internalChatId);
+      MediaStore.clearChatMedia(this.agentsBaseDir, agentId, internalChatId);
+      this.restartProcess(sessionId).catch(() => {});
+      return { success: true };
+    }
+
+    if (command === '/compact') {
+      const ch = 'api' as const;
+      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+      const modelConfig = availableModels.find((m) => m.id === this.agentConfig.claude.model);
+      const contextWindow = modelConfig?.contextWindow ?? 200000;
+      const compactor = new SessionCompactor(this.sessionStore);
+      const result = await compactor.compact(agentId, internalChatId, sessionId, this.agentConfig.claude.model, contextWindow, ch);
+      await this.sessionStore.updateSessionMeta(agentId, internalChatId, sessionId, {
+        loadedAtSpawn: undefined,
+        archivedCount: undefined,
+        messageCountAtSpawn: undefined,
+      }, ch);
+      await this.restartProcess(sessionId);
+      return { success: true, keptMessages: result.afterMessages, archivedMessages: result.beforeMessages - result.afterMessages };
+    }
+
+    return { error: `Unknown command: ${command}` };
+  }
+
+  async setModel(newModel: string): Promise<void> {
+    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    if (!availableModels.find((m) => m.id === newModel)) {
+      throw Object.assign(new Error(`Unknown model: ${newModel}`), { code: 'UNKNOWN_MODEL' });
+    }
+    this.agentConfig.claude.model = newModel;
+    try { this.persistModelToConfig(newModel); } catch (err) {
+      this.logger.error('Failed to persist model to config', { error: (err as Error).message });
+    }
+  }
+
+  async listApiSessions(chatId: string): Promise<import('../types').SessionIndex> {
+    return this.sessionStore.listSessions(this.agentConfig.id, `api-${chatId}`, 'api');
+  }
+
+  async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
+    let sessionName = name;
+    if (!sessionName && prompt) {
+      try {
+        const { execSync } = await import('child_process');
+        const titlePrompt = `Summarise in 3-5 words as a session title (no punctuation, no quotes): ${prompt}`;
+        const out = execSync(
+          `claude -p ${JSON.stringify(titlePrompt)} --output-format text --model claude-haiku-4-5-20251001`,
+          { timeout: 15000, encoding: 'utf-8' },
+        );
+        sessionName = out.trim().slice(0, 60) || undefined;
+      } catch {
+        sessionName = undefined;
+      }
+    }
+    return this.sessionStore.createTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionName, 'api');
+  }
+
+  async getApiSessionInfo(chatId: string, sessionId: string): Promise<Record<string, unknown> | null> {
+    const index = await this.sessionStore.listSessions(this.agentConfig.id, `api-${chatId}`, 'api').catch(() => null);
+    const meta = index?.sessions.find((s) => s.id === sessionId);
+    if (!meta) return null;
+    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    const modelConfig = availableModels.find((m) => m.id === this.agentConfig.claude.model);
+    const contextWindow = modelConfig?.contextWindow ?? 200000;
+    const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
+    return {
+      sessionId: meta.id,
+      sessionName: meta.name,
+      messageCount: meta.messageCount,
+      archivedCount: meta.archivedCount ?? 0,
+      contextUsedPct,
+      model: this.agentConfig.claude.model,
+    };
+  }
+
+  async renameApiSession(chatId: string, sessionId: string, sessionName: string): Promise<void> {
+    await this.sessionStore.updateSessionMeta(this.agentConfig.id, `api-${chatId}`, sessionId, { name: sessionName }, 'api');
+  }
+
+  async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
+    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionId, 'api');
   }
 
   /**
