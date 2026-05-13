@@ -15,6 +15,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `GET` | `/health` | None | Health check — status + agent list |
 | `GET` | `/status` | None | Per-agent stats + heartbeat history |
 | `GET` | `/ui` | None | Web UI dashboard |
+| `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
 
 ### Agent API
 
@@ -24,8 +25,26 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `POST` | `/api/v1/agents` | Admin | Create a new agent |
 | `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
-| `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream |
-| `GET` | `/api/v1/models` | Key | List supported Claude models |
+| `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
+| `GET` | `/api/v1/models` | Key | List all supported Claude models |
+| `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
+
+### Session Management API
+
+All session endpoints require `chat_id` (query param for GET/DELETE, body for POST/PATCH).
+Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{id}` and `discord-{id}`.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/sessions` | Key | List API sessions for a `chat_id` |
+| `POST` | `/api/v1/agents/:agentId/sessions` | Key | Create a new API session (auto-names from prompt) |
+| `GET` | `/api/v1/agents/:agentId/sessions/:sessionId/info` | Key | Get session info (name, message count, context %) |
+| `PATCH` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Rename a session |
+| `DELETE` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Delete a session |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/clear` | Key | Clear session history |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/compact` | Key | Summarise old history, keep only recent messages |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/stop` | Key | Interrupt the in-flight turn |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/restart` | Key | Graceful session restart |
 
 ### Workspace File API
 
@@ -133,6 +152,29 @@ curl http://localhost:3000/status | jq
 ### GET /ui
 
 Serves the web UI dashboard. No auth required.
+
+---
+
+### GET /api/v1/commands
+
+List the slash commands available in the chat UI. No auth required.
+
+```bash
+curl http://localhost:3000/api/v1/commands | jq
+```
+
+```json
+{
+  "commands": [
+    { "name": "/session",  "description": "Show current session info (name, message count, context %)" },
+    { "name": "/clear",    "description": "Clear current session history" },
+    { "name": "/compact",  "description": "Summarise old history and keep only recent messages" },
+    { "name": "/stop",     "description": "Interrupt the in-flight turn" },
+    { "name": "/restart",  "description": "Graceful session restart" },
+    { "name": "/model",    "description": "Show the current AI model" }
+  ]
+}
+```
 
 ---
 
@@ -281,16 +323,45 @@ curl -X DELETE \
 
 Send a message to an agent. Returns a JSON response or SSE stream.
 
+> **Breaking change (PR #69):** `chat_id` is now required. Messages are stored under `sessions/api-{chat_id}/` on disk.
+
 **Request body:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `message` | Yes | Message text (max 10,000 chars) |
+| `message` | Yes | Message text (max 10,000 chars), or a slash command (e.g. `/session`, `/clear`) |
+| `chat_id` | Yes | Caller identity — used to namespace sessions (e.g. `"myapp"`, `"user-123"`) |
 | `session_id` | No | Resume an existing session; omit to start a new one |
 | `stream` | No | `true` to enable SSE streaming (default `false`) |
-| `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000). Useful when the key has `allow_tools: true` and runs long-running tools |
+| `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000) |
+| `media_files` | No | Array of `mediaPath` strings returned by the Media Upload endpoint |
 
-> Tool access is configured per API key in `config.json` — see `allow_tools` below.
+#### Slash command dispatch
+
+If `message` starts with `/`, the endpoint executes the command instead of forwarding to Claude:
+
+| Command | Description |
+|---------|-------------|
+| `/session` | Return current session info (name, message count, context %) |
+| `/clear` | Clear the session history |
+| `/compact` | Summarise old history and keep only recent messages |
+| `/stop` | Interrupt the in-flight turn |
+| `/restart` | Gracefully restart the session |
+| `/model` | Return the current model for this agent |
+
+**Command response:**
+
+```json
+{
+  "command": "/session",
+  "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
+  "result": {
+    "name": "My Project Discussion",
+    "messageCount": 42,
+    "contextPercent": 18
+  }
+}
+```
 
 **New session:**
 
@@ -298,7 +369,7 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
-  -d '{"message": "Hello! What can you help me with?"}' \
+  -d '{"message": "Hello! What can you help me with?", "chat_id": "myapp"}' \
   http://localhost:3000/api/v1/agents/alfred/messages | jq
 ```
 
@@ -318,7 +389,7 @@ curl -X POST \
 curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
-  -d '{"message": "What did I just ask you?", "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8"}' \
+  -d '{"message": "What did I just ask you?", "chat_id": "myapp", "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8"}' \
   http://localhost:3000/api/v1/agents/alfred/messages | jq
 ```
 
@@ -326,7 +397,7 @@ curl -X POST \
 
 | Status | When |
 |--------|------|
-| 400 | Empty message or exceeds 10,000 characters |
+| 400 | Empty or too-long message, or missing `chat_id` |
 | 401 | Missing API key |
 | 403 | Invalid key or key has no access to that agent |
 | 404 | Agent ID not found |
@@ -348,7 +419,7 @@ Set `"stream": true` in the request body to receive a Server-Sent Events stream.
 curl -N -X POST \
   -H "X-Api-Key: my-secret-key" \
   -H "Content-Type: application/json" \
-  -d '{"message": "Explain this code", "stream": true}' \
+  -d '{"message": "Explain this code", "chat_id": "myapp", "stream": true}' \
   http://localhost:3000/api/v1/agents/alfred/messages
 ```
 
@@ -373,6 +444,7 @@ curl -N -X POST \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Run the setup script in /workspace and report the output",
+    "chat_id": "myapp",
     "stream": true,
     "timeout_ms": 120000
   }' \
@@ -416,6 +488,250 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "alias": "opus", "contextWindow": 200000, "multiplier": 3 }
   ]
 }
+```
+
+---
+
+### PUT /api/v1/agents/:agentId/model
+
+Set the active model for a specific agent. Persists to `config.json`. Requires admin key.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `model` | Yes | Claude model ID (e.g. `"claude-opus-4-7"`) |
+
+```bash
+curl -X PUT \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-opus-4-7"}' \
+  http://localhost:3000/api/v1/agents/alfred/model | jq
+```
+
+```json
+{ "model": "claude-opus-4-7" }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Missing or unknown model ID |
+| 403 | Not an admin key |
+| 404 | Agent not found |
+
+---
+
+## Session Management API
+
+Manage API sessions for a specific agent and `chat_id`. Sessions are stored at `sessions/api-{chat_id}/` — symmetric with Telegram (`telegram-{id}`) and Discord (`discord-{id}`).
+
+**`chat_id`** identifies the caller. Use any stable string (e.g. `"myapp"`, `"user-123"`, `"getpod"`). It is **required** on all session endpoints — pass it as:
+- Query string for `GET` and `DELETE` requests: `?chat_id=myapp`
+- Request body for `POST` and `PATCH` requests: `{"chat_id": "myapp", ...}`
+
+---
+
+### GET /api/v1/agents/:agentId/sessions
+
+List all API sessions for a given `chat_id`.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/sessions?chat_id=myapp" | jq
+```
+
+```json
+{
+  "sessions": [
+    {
+      "id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
+      "name": "Project Planning",
+      "createdAt": 1775737709000,
+      "lastActivity": 1775823600000
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/v1/agents/:agentId/sessions
+
+Create a new API session. Optionally auto-generates a session name by summarising a prompt.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `chat_id` | Yes | Caller identity |
+| `prompt` | No | Initial user intent — used to auto-generate a session name |
+| `name` | No | Explicit session name (overrides auto-generated name) |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp", "prompt": "I want to discuss the deployment plan for Q3"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions | jq
+```
+
+```json
+{
+  "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8",
+  "sessionName": "Q3 Deployment Plan",
+  "createdAt": 1775737709000
+}
+```
+
+---
+
+### GET /api/v1/agents/:agentId/sessions/:sessionId/info
+
+Get info for a specific session — name, message count, and context usage.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/info?chat_id=myapp" | jq
+```
+
+```json
+{
+  "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8",
+  "sessionName": "Q3 Deployment Plan",
+  "messageCount": 42,
+  "contextPercent": 18,
+  "createdAt": 1775737709000,
+  "lastActivity": 1775823600000
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 404 | Session not found |
+
+---
+
+### PATCH /api/v1/agents/:agentId/sessions/:sessionId
+
+Rename a session.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `chat_id` | Yes | Caller identity |
+| `sessionName` | Yes | New session name |
+
+```bash
+curl -X PATCH \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp", "sessionName": "Q3 Infra Discussion"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a | jq
+```
+
+```json
+{
+  "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8",
+  "sessionName": "Q3 Infra Discussion"
+}
+```
+
+---
+
+### DELETE /api/v1/agents/:agentId/sessions/:sessionId
+
+Delete a session. Returns 204 No Content on success.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a?chat_id=myapp"
+```
+
+---
+
+### POST /api/v1/agents/:agentId/sessions/:sessionId/clear
+
+Clear all history for a session.
+
+**Request body:** `{ "chat_id": "myapp" }`
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/clear | jq
+```
+
+```json
+{ "cleared": true, "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8" }
+```
+
+---
+
+### POST /api/v1/agents/:agentId/sessions/:sessionId/compact
+
+Summarise old history and keep only recent messages, reducing context usage.
+
+**Request body:** `{ "chat_id": "myapp" }`
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/compact | jq
+```
+
+```json
+{ "compacted": true, "keptMessages": 10, "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8" }
+```
+
+---
+
+### POST /api/v1/agents/:agentId/sessions/:sessionId/stop
+
+Interrupt the currently in-flight turn for this session (sends SIGINT to the subprocess).
+
+**Request body:** `{ "chat_id": "myapp" }`
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/stop | jq
+```
+
+```json
+{ "stopped": true }
+```
+
+---
+
+### POST /api/v1/agents/:agentId/sessions/:sessionId/restart
+
+Gracefully restart the session (kills the subprocess and notifies when back online).
+
+**Request body:** `{ "chat_id": "myapp" }`
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "myapp"}' \
+  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/restart | jq
+```
+
+```json
+{ "restarting": true }
 ```
 
 ---
@@ -1015,7 +1331,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 ## Chat History API
 
-Access per-agent conversation history stored in the history DB (SQLite). `chatId` uses the format `telegram-{rawId}` or `discord-{rawId}`.
+Access per-agent conversation history stored in the history DB (SQLite). `chatId` uses the format `telegram-{rawId}`, `discord-{rawId}`, or `api-{rawId}`.
 
 ### GET /api/v1/agents/sessions
 
@@ -1040,7 +1356,8 @@ curl -H "X-Api-Key: admin-key-456" \
           "messageCount": 42,
           "createdAt": 1775737709000,
           "lastActivity": 1775823600000,
-          "lastMessage": "Sure, I can help with that!"
+          "lastMessage": "Sure, I can help with that!",
+          "sessionName": "Project Planning"
         }
       ]
     }
@@ -1052,13 +1369,14 @@ curl -H "X-Api-Key: admin-key-456" \
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `chatId` | string | Channel chat ID (`telegram-{id}` / `discord-{id}`) — null for API sessions |
+| `chatId` | string | Channel chat ID (`telegram-{id}` / `discord-{id}` / `api-{id}`) |
 | `sessionId` | string | Unique session identifier |
 | `source` | string | `telegram`, `discord`, or `api` |
 | `messageCount` | number | Total messages in this session |
 | `createdAt` | number | Session start timestamp (ms) |
 | `lastActivity` | number | Last message timestamp (ms) |
 | `lastMessage` | string\|null | Preview of the last message content |
+| `sessionName` | string\|null | Human-readable session name (set via `/rename` or `POST /sessions`) |
 
 **Error responses:**
 
@@ -1089,7 +1407,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 ### GET /api/v1/agents/:agentId/chats/:chatId/sessions
 
-List sessions for a specific chat. Only supports `telegram` and `discord` chats.
+List sessions for a specific chat. Supports `telegram`, `discord`, and `api` chats.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
@@ -1108,7 +1426,6 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 | Status | When |
 |--------|------|
-| 400 | `chatId` is not a telegram/discord chat |
 | 403 | Key has no access to agent |
 | 404 | Agent not found |
 
@@ -1180,7 +1497,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 ### POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages
 
-Inject a message into an existing Telegram or Discord session and stream the assistant's response via SSE. Useful for cross-channel continuation.
+Inject a message into an existing Telegram, Discord, or API session and stream the assistant's response via SSE. Useful for cross-channel continuation.
 
 **Request body:**
 
@@ -1209,7 +1526,7 @@ data: [DONE]
 
 | Status | When |
 |--------|------|
-| 400 | `chatId` is not telegram/discord, or `content` is missing/too long |
+| 400 | `content` is missing or too long |
 | 403 | Key has no access to agent |
 | 404 | Agent not found |
 
@@ -1217,7 +1534,7 @@ data: [DONE]
 
 ## Media API
 
-Upload and serve media files (images and PDFs) associated with an agent. Uploaded files are stored in the agent's media directory and can be referenced in messages via `mediaFiles[]`.
+Upload and serve media files (images and PDFs) associated with an agent. Uploaded files are stored in the agent's media directory and can be referenced in messages via `media_files[]`.
 
 ### POST /api/v1/agents/:agentId/media
 
