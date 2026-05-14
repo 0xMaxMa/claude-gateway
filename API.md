@@ -105,7 +105,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 Health check. No auth required.
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:10850/health
 ```
 
 ```json
@@ -119,7 +119,7 @@ curl http://localhost:3000/health
 Per-agent stats and heartbeat history. No auth required.
 
 ```bash
-curl http://localhost:3000/status | jq
+curl http://localhost:10850/status | jq
 ```
 
 ```json
@@ -160,7 +160,7 @@ Serves the web UI dashboard. No auth required.
 List the slash commands available in the chat UI. No auth required.
 
 ```bash
-curl http://localhost:3000/api/v1/commands | jq
+curl http://localhost:10850/api/v1/commands | jq
 ```
 
 ```json
@@ -229,7 +229,7 @@ List agents accessible by the provided API key.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/agents | jq
+  http://localhost:10850/api/v1/agents | jq
 ```
 
 ```json
@@ -259,7 +259,7 @@ curl -X POST \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
   -d '{"id": "my-bot", "description": "My new bot", "model": "claude-sonnet-4-6"}' \
-  http://localhost:3000/api/v1/agents | jq
+  http://localhost:10850/api/v1/agents | jq
 ```
 
 ```json
@@ -294,7 +294,7 @@ curl -X PATCH \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-opus-4-7"}' \
-  http://localhost:3000/api/v1/agents/alfred | jq
+  http://localhost:10850/api/v1/agents/alfred | jq
 ```
 
 ```json
@@ -310,7 +310,7 @@ Remove an agent from `config.json` and stop the running process. Requires admin 
 ```bash
 curl -X DELETE \
   -H "X-Api-Key: admin-key-456" \
-  http://localhost:3000/api/v1/agents/my-bot | jq
+  http://localhost:10850/api/v1/agents/my-bot | jq
 ```
 
 ```json
@@ -370,7 +370,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello! What can you help me with?", "chat_id": "myapp"}' \
-  http://localhost:3000/api/v1/agents/alfred/messages | jq
+  http://localhost:10850/api/v1/agents/alfred/messages | jq
 ```
 
 ```json
@@ -390,7 +390,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"message": "What did I just ask you?", "chat_id": "myapp", "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8"}' \
-  http://localhost:3000/api/v1/agents/alfred/messages | jq
+  http://localhost:10850/api/v1/agents/alfred/messages | jq
 ```
 
 **Error responses:**
@@ -420,7 +420,7 @@ curl -N -X POST \
   -H "X-Api-Key: my-secret-key" \
   -H "Content-Type: application/json" \
   -d '{"message": "Explain this code", "chat_id": "myapp", "stream": true}' \
-  http://localhost:3000/api/v1/agents/alfred/messages
+  http://localhost:10850/api/v1/agents/alfred/messages
 ```
 
 **Response:**
@@ -448,7 +448,7 @@ curl -N -X POST \
     "stream": true,
     "timeout_ms": 120000
   }' \
-  http://localhost:3000/api/v1/agents/alfred/messages
+  http://localhost:10850/api/v1/agents/alfred/messages
 ```
 
 > Keys without `allow_tools: true` are always conversational — tools are never invoked regardless of what the request contains.
@@ -478,7 +478,7 @@ List all supported Claude models from gateway config.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/models | jq
+  http://localhost:10850/api/v1/models | jq
 ```
 
 ```json
@@ -507,7 +507,7 @@ curl -X PUT \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-opus-4-7"}' \
-  http://localhost:3000/api/v1/agents/alfred/model | jq
+  http://localhost:10850/api/v1/agents/alfred/model | jq
 ```
 
 ```json
@@ -540,7 +540,7 @@ List all API sessions for a given `chat_id`.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/sessions?chat_id=myapp" | jq
+  "http://localhost:10850/api/v1/agents/alfred/sessions?chat_id=myapp" | jq
 ```
 
 ```json
@@ -575,7 +575,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp", "prompt": "I want to discuss the deployment plan for Q3"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions | jq
 ```
 
 ```json
@@ -594,7 +594,7 @@ Get info for a specific session — name, message count, and context usage.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/info?chat_id=myapp" | jq
+  "http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a/info?chat_id=myapp" | jq
 ```
 
 ```json
@@ -632,7 +632,7 @@ curl -X PATCH \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp", "sessionName": "Q3 Infra Discussion"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a | jq
 ```
 
 ```json
@@ -651,7 +651,7 @@ Delete a session. Returns 204 No Content on success.
 ```bash
 curl -X DELETE \
   -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a?chat_id=myapp"
+  "http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a?chat_id=myapp"
 ```
 
 ---
@@ -667,7 +667,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/clear | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a/clear | jq
 ```
 
 ```json
@@ -687,7 +687,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/compact | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a/compact | jq
 ```
 
 ```json
@@ -707,7 +707,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/stop | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a/stop | jq
 ```
 
 ```json
@@ -727,7 +727,7 @@ curl -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"chat_id": "myapp"}' \
-  http://localhost:3000/api/v1/agents/alfred/sessions/da19d84a/restart | jq
+  http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a/restart | jq
 ```
 
 ```json
@@ -748,7 +748,7 @@ Read a workspace file. Returns empty `content` if the file does not exist yet (n
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/agents/alfred/files/SOUL.md | jq
+  http://localhost:10850/api/v1/agents/alfred/files/SOUL.md | jq
 ```
 
 ```json
@@ -772,7 +772,7 @@ curl -X PUT \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
   -d '{"content": "# Soul\n\nAlfred is warm, helpful, and precise."}' \
-  http://localhost:3000/api/v1/agents/alfred/files/SOUL.md | jq
+  http://localhost:10850/api/v1/agents/alfred/files/SOUL.md | jq
 ```
 
 ```json
@@ -800,7 +800,7 @@ List all skills for an agent (workspace + module + shared).
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/agents/alfred/skills | jq
+  http://localhost:10850/api/v1/agents/alfred/skills | jq
 ```
 
 ```json
@@ -828,7 +828,7 @@ Get a single skill's content. Optional query param `?scope=workspace|shared` to 
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/skills/my-helper" | jq
+  "http://localhost:10850/api/v1/agents/alfred/skills/my-helper" | jq
 ```
 
 ```json
@@ -867,7 +867,7 @@ curl -X POST \
     "description": "Does something useful",
     "content": "When invoked, do the following:\n1. Step one\n2. Step two"
   }' \
-  http://localhost:3000/api/v1/agents/alfred/skills | jq
+  http://localhost:10850/api/v1/agents/alfred/skills | jq
 ```
 
 ```json
@@ -915,7 +915,7 @@ curl -X POST \
     "url": "https://github.com/owner/repo/blob/main/skills/my-skill/SKILL.md",
     "scope": "shared"
   }' \
-  http://localhost:3000/api/v1/agents/alfred/skills/install | jq
+  http://localhost:10850/api/v1/agents/alfred/skills/install | jq
 ```
 
 ```json
@@ -950,7 +950,7 @@ Delete a skill by name. Requires write access. Use `?scope=shared` (admin only) 
 ```bash
 curl -X DELETE \
   -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/skills/my-helper" | jq
+  "http://localhost:10850/api/v1/agents/alfred/skills/my-helper" | jq
 ```
 
 ```json
@@ -1004,7 +1004,7 @@ List all jobs accessible by the API key (filtered to key's agent scope).
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/crons | jq
+  http://localhost:10850/api/v1/crons | jq
 ```
 
 ```json
@@ -1041,7 +1041,7 @@ Scheduler health summary.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/crons/status | jq
+  http://localhost:10850/api/v1/crons/status | jq
 ```
 
 ```json
@@ -1061,7 +1061,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 Run every day at 09:00 — agent sends a morning summary to Telegram.
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1080,7 +1080,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 Run every day at 09:00 — agent sends a morning summary to a Discord channel.
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1097,7 +1097,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 #### Example: Deliver to both Telegram and Discord
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1117,7 +1117,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 Runs once at the given time, then auto-deletes.
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1137,7 +1137,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 Run a shell command every minute.
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1153,7 +1153,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 #### Example: One-shot shell command at a specific time
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1170,7 +1170,7 @@ curl -s -X POST http://localhost:3000/api/v1/crons \
 #### Example: Create a disabled job (enable later)
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons \
+curl -s -X POST http://localhost:10850/api/v1/crons \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1193,7 +1193,7 @@ Get a single job by ID.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/crons/8f787a4b-eaa8-4ace-a0b3-ff3d0004f2df | jq
+  http://localhost:10850/api/v1/crons/8f787a4b-eaa8-4ace-a0b3-ff3d0004f2df | jq
 ```
 
 ---
@@ -1205,7 +1205,7 @@ Only the fields you include are updated. All fields are optional.
 #### Example: Change schedule
 
 ```bash
-curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
+curl -s -X PUT http://localhost:10850/api/v1/crons/<id> \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1216,7 +1216,7 @@ curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
 #### Example: Change prompt
 
 ```bash
-curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
+curl -s -X PUT http://localhost:10850/api/v1/crons/<id> \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1227,7 +1227,7 @@ curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
 #### Example: Disable a job
 
 ```bash
-curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
+curl -s -X PUT http://localhost:10850/api/v1/crons/<id> \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"enabled": false}' | jq
@@ -1236,7 +1236,7 @@ curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
 #### Example: Re-enable a job
 
 ```bash
-curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
+curl -s -X PUT http://localhost:10850/api/v1/crons/<id> \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}' | jq
@@ -1249,7 +1249,7 @@ curl -s -X PUT http://localhost:3000/api/v1/crons/<id> \
 Delete a job permanently.
 
 ```bash
-curl -s -X DELETE http://localhost:3000/api/v1/crons/<id> \
+curl -s -X DELETE http://localhost:10850/api/v1/crons/<id> \
   -H "X-Api-Key: my-secret-key-123" | jq
 ```
 
@@ -1264,7 +1264,7 @@ curl -s -X DELETE http://localhost:3000/api/v1/crons/<id> \
 Trigger a job immediately, regardless of its schedule.
 
 ```bash
-curl -s -X POST http://localhost:3000/api/v1/crons/<id>/run \
+curl -s -X POST http://localhost:10850/api/v1/crons/<id>/run \
   -H "X-Api-Key: my-secret-key-123" | jq
 ```
 
@@ -1280,7 +1280,7 @@ Get the run history of a job (last 20 runs by default).
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/crons/<id>/runs | jq
+  http://localhost:10850/api/v1/crons/<id>/runs | jq
 ```
 
 ```json
@@ -1339,7 +1339,7 @@ List all sessions across **all agents** in a single call. Admin key required. Qu
 
 ```bash
 curl -H "X-Api-Key: admin-key-456" \
-  http://localhost:3000/api/v1/agents/sessions | jq
+  http://localhost:10850/api/v1/agents/sessions | jq
 ```
 
 ```json
@@ -1392,7 +1392,7 @@ List all chats (across all channels) for an agent.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  http://localhost:3000/api/v1/agents/alfred/chats | jq
+  http://localhost:10850/api/v1/agents/alfred/chats | jq
 ```
 
 ```json
@@ -1411,7 +1411,7 @@ List sessions for a specific chat. Supports `telegram`, `discord`, and `api` cha
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions" | jq
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions" | jq
 ```
 
 ```json
@@ -1446,7 +1446,7 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages?limit=20" | jq
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages?limit=20" | jq
 ```
 
 ```json
@@ -1475,7 +1475,7 @@ Full-text search across messages using SQLite FTS5.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages/search?q=meeting" | jq
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages/search?q=meeting" | jq
 ```
 
 ```json
@@ -1511,7 +1511,7 @@ curl -N -X POST \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
   -d '{"content": "Continue from where we left off", "senderName": "API"}' \
-  "http://localhost:3000/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions/abc-123/messages"
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/sessions/abc-123/messages"
 ```
 
 **Response** (SSE stream):
@@ -1553,7 +1553,7 @@ curl -X POST \
   -H "Content-Type: image/jpeg" \
   -H "X-Filename: photo.jpg" \
   --data-binary @/path/to/photo.jpg \
-  http://localhost:3000/api/v1/agents/alfred/media | jq
+  http://localhost:10850/api/v1/agents/alfred/media | jq
 ```
 
 ```json
@@ -1578,7 +1578,7 @@ Serve a media file by path. The path must stay within the agent's media director
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
-  "http://localhost:3000/api/v1/agents/alfred/media/ui-upload/2026-05-10/gw-1746837600000.jpg" \
+  "http://localhost:10850/api/v1/agents/alfred/media/ui-upload/2026-05-10/gw-1746837600000.jpg" \
   --output photo.jpg
 ```
 
@@ -1604,7 +1604,7 @@ Returns the current and latest version for both packages. Result is cached for 5
 
 ```bash
 curl -H "X-Api-Key: admin-secret" \
-  http://localhost:3000/api/v1/packages | jq
+  http://localhost:10850/api/v1/packages | jq
 ```
 
 ```json
@@ -1648,7 +1648,7 @@ If the package is already on the latest version the call is a no-op (`updated: f
 ```bash
 curl -X POST \
   -H "X-Api-Key: admin-secret" \
-  http://localhost:3000/api/v1/packages/claude-gateway/update | jq
+  http://localhost:10850/api/v1/packages/claude-gateway/update | jq
 ```
 
 ```json
