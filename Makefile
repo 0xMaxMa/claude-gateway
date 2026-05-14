@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop create-agent update-agent pair mcp-install
+.PHONY: help start stop create-agent update-agent pair mcp-install release
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -38,3 +38,6 @@ pair: ## Approve a channel pairing (e.g. make pair agent=alfred code=abc123 chan
 mcp-install: ## Install MCP gateway dependencies
 	cd mcp && bun install
 	node scripts/setup-claude-settings.js
+
+release: ## Interactive release — choose patch/minor/major with version preview and confirm
+	@bash scripts/release.sh
