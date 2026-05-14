@@ -41,7 +41,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 
 ## Quick Start
 
-### Option A — Install via npm (for users)
+### Install via npm (for users)
 
 **1. Install**
 
@@ -70,7 +70,7 @@ All variables are optional. Full list: [`.env.example`](.env.example)
 
 **3. Create an agent**
 
-Add an agent entry to `~/.claude-gateway/config.json` manually, or clone the repo and run `make create-agent` for the interactive wizard (see Option B).
+Add an agent entry to `~/.claude-gateway/config.json` manually, or clone the repo and run `make create-agent` for the interactive wizard (see **For development** below).
 
 **4. Start**
 
@@ -101,7 +101,7 @@ pm2 delete gateway   # remove from PM2
 
 ---
 
-### Option B — Clone repo (for development)
+### For development
 
 ```bash
 git clone https://github.com/0xMaxMa/claude-gateway
