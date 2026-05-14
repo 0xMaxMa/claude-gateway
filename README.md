@@ -26,6 +26,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **Config auto-migration** — automatic schema migration when config format changes
 - **Access control** — allowlist, open, or pairing-based Telegram access policies
 - **HTTP API** — REST API with key-based auth for external integrations
+- **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
 - **Session persistence** — conversation history saved and restored across restarts
 
 ---

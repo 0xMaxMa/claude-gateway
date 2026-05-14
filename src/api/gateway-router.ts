@@ -9,6 +9,7 @@ import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
+import { createPackagesRouter } from './packages';
 
 export class GatewayRouter {
   private readonly agents: Map<string, AgentRunner>;
@@ -112,6 +113,12 @@ export class GatewayRouter {
         this.agents,
       );
       this.app.use('/api', skillsRouter);
+    }
+
+    // Mount package update routes (admin-only)
+    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+      const packagesRouter = createPackagesRouter(this.gatewayConfig.gateway.api.keys);
+      this.app.use('/api', packagesRouter);
     }
 
     // Mount cron manager routes with same API key auth as agent router
