@@ -52,7 +52,7 @@ const CONFIG_PATH: string = expandTilde(
   path.join(os.homedir(), '.claude-gateway', 'config.json')
 );
 
-const PORT = parseInt((process.env.PORT ?? '3000'), 10);
+const PORT = parseInt((process.env.PORT ?? '10850'), 10);
 
 // ─── Startup summary table ────────────────────────────────────────────────────
 interface StartupResult {
