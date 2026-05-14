@@ -1,15 +1,10 @@
 #!/usr/bin/env node
+
+// Must run before any other imports so env vars are set before modules read them.
+// TypeScript compiles imports to inline require() calls (CommonJS), so placement matters.
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import * as readline from 'readline';
-
-function expandTilde(p: string): string {
-  if (p === '~' || p.startsWith('~/')) {
-    return path.join(os.homedir(), p.slice(1));
-  }
-  return p;
-}
 
 // Load ~/.claude-gateway/.env so global installs pick up env vars without
 // needing shell exports or running via npm start.
@@ -26,6 +21,16 @@ function expandTilde(p: string): string {
     if (!(key in process.env)) process.env[key] = val;
   }
 })();
+
+import * as readline from 'readline';
+
+function expandTilde(p: string): string {
+  if (p === '~' || p.startsWith('~/')) {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+}
+
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';

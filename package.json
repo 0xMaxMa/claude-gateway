@@ -26,7 +26,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js",
-    "postinstall": "command -v bun >/dev/null 2>&1 && bun install --cwd mcp || echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'",
+    "postinstall": "if command -v bun >/dev/null 2>&1; then bun install --cwd mcp; else echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'; fi",
     "test": "jest",
     "test:unit": "jest --testPathPattern=unit",
     "integration": "jest --testPathPattern=integration --testTimeout=15000",
