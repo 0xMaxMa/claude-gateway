@@ -168,9 +168,8 @@ export function createWorkingStateManager(
     // Read signal file timestamp before deleting — process.ts overwrites it with a newer
     // timestamp when a queued turn is injected; if newer than this turn's startedAt it means
     // another turn is waiting and the loop must be restarted after cleanup.
-    const signalRaw = fsApi.existsSync(typingFilePath(chatId))
-      ? fsApi.readFileSync(typingFilePath(chatId), 'utf8').trim()
-      : null
+    let signalRaw: string | null = null
+    try { signalRaw = fsApi.readFileSync(typingFilePath(chatId), 'utf8').trim() } catch {}
     const signalTs = signalRaw ? parseInt(signalRaw, 10) : 0
     const hasQueuedTurn = signalTs > state.startedAt
     fsApi.rmSync(typingFilePath(chatId), { force: true })
