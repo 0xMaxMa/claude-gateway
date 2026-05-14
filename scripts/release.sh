@@ -44,7 +44,22 @@ if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
 fi
 
 npm version "$TYPE"
-git push && git push --tags
+
+if ! git push; then
+  echo ""
+  echo "Error: git push failed — reverting version bump"
+  git tag -d "v$NEXT" 2>/dev/null || true
+  git reset --hard HEAD~1
+  exit 1
+fi
+
+if ! git push --tags; then
+  echo ""
+  echo "Error: git push --tags failed"
+  echo "The version commit was already pushed. Push the tag manually:"
+  echo "  git push origin v$NEXT"
+  exit 1
+fi
 
 echo ""
 echo "Released v$NEXT — GitHub Actions will publish to npm automatically."
