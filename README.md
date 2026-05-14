@@ -78,6 +78,27 @@ Add an agent entry to `~/.claude-gateway/config.json` manually, or clone the rep
 claude-gateway
 ```
 
+**Run as a service with PM2 (optional)**
+
+To keep the gateway running after logout or system restarts, use [PM2](https://pm2.keymetrics.io):
+
+```bash
+npm install -g pm2
+pm2 start claude-gateway --name gateway
+pm2 save       # persist the process list
+pm2 startup    # register PM2 to start on boot (follow the printed command)
+```
+
+Useful commands:
+
+```bash
+pm2 status           # check gateway status
+pm2 logs gateway     # tail logs
+pm2 restart gateway  # restart
+pm2 stop gateway     # stop
+pm2 delete gateway   # remove from PM2
+```
+
 ---
 
 ### Option B — Clone repo (for development)
