@@ -336,7 +336,6 @@ setInterval(checkApprovals, 5000).unref()
 
 // Telegram caps messages at 4096 chars. Split long replies, preferring
 // paragraph boundaries when chunkMode is 'newline'.
-
 function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
   if (text.length <= limit) return [text]
   const out: string[] = []
@@ -344,8 +343,6 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
   while (rest.length > limit) {
     let cut = limit
     if (mode === 'newline') {
-      // Prefer the last double-newline (paragraph), then single newline,
-      // then space. Fall back to hard cut.
       const para = rest.lastIndexOf('\n\n', limit)
       const line = rest.lastIndexOf('\n', limit)
       const space = rest.lastIndexOf(' ', limit)

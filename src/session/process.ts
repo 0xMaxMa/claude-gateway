@@ -645,7 +645,7 @@ export class SessionProcess extends EventEmitter {
       const stateSubDir = this.source === 'discord' ? '.discord-state' : '.telegram-state';
       const typingDir = path.join(this.agentConfig.workspace, stateSubDir, 'typing');
       const typingSignalPath = path.join(typingDir, this.chatId);
-      const statusPath = path.join(typingDir, `${this.sessionId}.status`);
+      const statusPath = path.join(typingDir, `${this.chatId}.status`);
       try {
         fs.mkdirSync(typingDir, { recursive: true });
         fs.writeFileSync(typingSignalPath, String(Date.now()));

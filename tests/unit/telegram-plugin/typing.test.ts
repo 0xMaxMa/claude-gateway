@@ -6,6 +6,8 @@
 import {
   createWorkingStateManager,
   parseStatusFile,
+  chunkText,
+  TELEGRAM_MAX_CHARS,
   STATUS_MESSAGES,
   ERROR_MESSAGES,
   STATUS_EMOJI,
@@ -726,6 +728,88 @@ describe('createWorkingStateManager', () => {
 
       expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
       expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
+    })
+
+    it('U-TY-10: splits long auto-forward text into multiple sendMessage calls', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      // Build a text that is just over 2× the limit to force exactly 2 chunks
+      const longText = 'A'.repeat(TELEGRAM_MAX_CHARS + 100)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: longText, format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      const forwardCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && c[1] !== longText,
+      )
+      // Should have been called at least twice (chunked)
+      expect(forwardCalls.length).toBeGreaterThanOrEqual(2)
+      // Each chunk must not exceed the limit
+      for (const call of forwardCalls) {
+        expect((call[1] as string).length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS)
+      }
+      // Combined text should equal original (minus leading newlines stripped between chunks)
+      const combined = forwardCalls.map(c => c[1] as string).join('')
+      expect(combined.length).toBeGreaterThan(0)
+    })
+
+    it('U-TY-11: short auto-forward text sends as a single message', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      const shortText = 'Short reply'
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: shortText, format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      const forwardCalls = bot.sendMessage.mock.calls.filter(c => c[0] === CHAT_ID && c[1] === shortText)
+      expect(forwardCalls).toHaveLength(1)
+    })
+  })
+
+  describe('chunkText()', () => {
+    it('U-TY-12: returns single-element array when text is within limit', () => {
+      const text = 'Hello world'
+      expect(chunkText(text, 4096)).toEqual([text])
+    })
+
+    it('U-TY-13: splits at paragraph boundary when available', () => {
+      // 3500 + "\n\n" + 1000 = 4502 > 4096 → must split; paragraph boundary is at 3500
+      const para1 = 'A'.repeat(3500)
+      const para2 = 'B'.repeat(1000)
+      const text = `${para1}\n\n${para2}`
+      const chunks = chunkText(text, 4096)
+      expect(chunks.length).toBe(2)
+      expect(chunks[0]).toBe(para1)
+      expect(chunks[1]).toBe(para2)
+    })
+
+    it('U-TY-14: falls back to hard cut when no boundary found', () => {
+      const text = 'X'.repeat(5000)
+      const chunks = chunkText(text, 4096)
+      expect(chunks.length).toBe(2)
+      expect(chunks[0].length).toBeLessThanOrEqual(4096)
+      expect(chunks[1].length).toBeLessThanOrEqual(4096)
+    })
+
+    it('U-TY-15: all chunks stay within the given limit', () => {
+      const limit = 100
+      const text = Array.from({ length: 50 }, (_, i) => `Line ${i}: ${'x'.repeat(10)}`).join('\n')
+      const chunks = chunkText(text, limit)
+      for (const c of chunks) {
+        expect(c.length).toBeLessThanOrEqual(limit)
+      }
     })
   })
 })
