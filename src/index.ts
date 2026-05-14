@@ -10,6 +10,22 @@ function expandTilde(p: string): string {
   }
   return p;
 }
+
+// Load ~/.claude-gateway/.env so global installs pick up env vars without
+// needing shell exports or running via npm start.
+(function loadDotenv() {
+  const envFile = path.join(os.homedir(), '.claude-gateway', '.env');
+  if (!fs.existsSync(envFile)) return;
+  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+    if (!(key in process.env)) process.env[key] = val;
+  }
+})();
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';

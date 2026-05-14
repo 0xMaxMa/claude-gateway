@@ -66,9 +66,11 @@ npm run build
 
 ### 2. Configure environment (optional)
 
-Create a `.env` file in your working directory (or set env vars in your shell):
+Create `~/.claude-gateway/.env` — the gateway loads this automatically on startup:
 
 ```bash
+mkdir -p ~/.claude-gateway
+cat > ~/.claude-gateway/.env << 'EOF'
 # HTTP port (default: 10850)
 PORT=10850
 
@@ -78,6 +80,7 @@ PORT=10850
 # Browser module (optional)
 # GETPOD_BROWSER_URL=http://127.0.0.1:10880
 # GETPOD_BROWSER_DISABLED=true
+EOF
 ```
 
 All variables are optional — the gateway works out of the box with defaults. Full list: [`.env.example`](.env.example)
