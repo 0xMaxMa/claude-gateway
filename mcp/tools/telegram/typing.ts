@@ -174,6 +174,12 @@ export function createWorkingStateManager(
       await botApi.deleteMessage(chatId, state.statusMessageId).catch(() => {})
     }
     states.delete(chatId)
+
+    // If runner already wrote a new signal file for a queued turn, restart the loop.
+    // This handles the case where stop() ran for turn N while turn N+1 was already injected.
+    if (fsApi.existsSync(typingFilePath(chatId))) {
+      start(chatId)
+    }
   }
 
   async function notifyError(chatId: string, code: string): Promise<void> {

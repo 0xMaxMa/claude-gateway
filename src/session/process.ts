@@ -635,16 +635,19 @@ export class SessionProcess extends EventEmitter {
       });
       return;
     }
-    // Signal queued state so the typing loop can update the reaction immediately
+    // Signal queued state + ensure typing signal file exists for this turn.
+    // If the previous turn already called stop() and cleared the typing loop,
+    // re-creating the signal file here lets stop() restart the loop for queued turns.
     if (this.source !== 'api') {
       const stateSubDir = this.source === 'discord' ? '.discord-state' : '.telegram-state';
-      const statusPath = path.join(
-        this.agentConfig.workspace,
-        stateSubDir,
-        'typing',
-        `${this.sessionId}.status`,
-      );
-      try { fs.writeFileSync(statusPath, 'queued') } catch {}
+      const typingDir = path.join(this.agentConfig.workspace, stateSubDir, 'typing');
+      const typingSignalPath = path.join(typingDir, this.chatId);
+      const statusPath = path.join(typingDir, `${this.sessionId}.status`);
+      try {
+        fs.mkdirSync(typingDir, { recursive: true });
+        fs.writeFileSync(typingSignalPath, String(Date.now()));
+        fs.writeFileSync(statusPath, 'queued');
+      } catch {}
     }
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(text) + '\n');
   }

@@ -664,6 +664,7 @@ export class AgentRunner extends EventEmitter {
       // the delay, the timer is cancelled so typing persists during multi-step work.
       // Auto-forward result text to channel if agent didn't call reply tool.
       let replyCalled = false;
+      let replyToolUseId: string | null = null; // track id to detect failed tool calls
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
       const replyToolName = source === 'discord' ? 'mcp__gateway__discord_reply' : 'mcp__gateway__telegram_reply';
@@ -685,6 +686,7 @@ export class AgentRunner extends EventEmitter {
               for (const block of msg!.content) {
                 if (block.type === 'tool_use' && block.name === replyToolName && !replyCalled) {
                   replyCalled = true;
+                  replyToolUseId = (block as Record<string, unknown>)['id'] as string ?? null;
                   // Persist the reply text to history so it appears in chat history API
                   const replyText = typeof block.input?.['text'] === 'string' ? block.input['text'].trim() : '';
                   if (replyText) {
@@ -698,6 +700,18 @@ export class AgentRunner extends EventEmitter {
                       ts: Date.now(),
                     });
                   }
+                }
+              }
+            }
+          }
+          // If reply tool was called but returned an error, unblock auto-forward
+          if (obj['type'] === 'user' && replyToolUseId && replyCalled) {
+            const msg = obj['message'] as { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean }> } | undefined;
+            if (Array.isArray(msg?.content)) {
+              for (const block of msg!.content) {
+                if (block.type === 'tool_result' && block.tool_use_id === replyToolUseId && block.is_error) {
+                  replyCalled = false;
+                  replyToolUseId = null;
                 }
               }
             }
@@ -749,6 +763,7 @@ export class AgentRunner extends EventEmitter {
               }
             }
             replyCalled = false; // reset for next turn
+            replyToolUseId = null;
             // Delay typing done — agent may continue with more work
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
