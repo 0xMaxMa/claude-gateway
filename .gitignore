@@ -3,6 +3,10 @@ node_modules/
 
 # Build output
 dist/
+mcp/**/*.js
+mcp/**/*.js.map
+mcp/**/*.d.ts
+mcp/**/*.d.ts.map
 
 # Environment & config
 .env
