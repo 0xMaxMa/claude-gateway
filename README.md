@@ -32,7 +32,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 22+
 - [Claude Code CLI](https://claude.ai/code) v2.1.0+ installed and authenticated — `channels mode` is required (`claude --version`)
 - [Bun](https://bun.sh) — runs the MCP server subprocess (`mcp/server.ts`)
 - A bot token per agent — Telegram (from [@BotFather](https://t.me/BotFather)) or Discord (from [Discord Developer Portal](https://discord.com/developers/applications))
@@ -43,22 +43,44 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 
 ### 1. Install
 
+**Via npm (recommended)**
+
 ```bash
-git clone <repo>
+npm install -g @0xmaxma/claude-gateway
+```
+
+MCP server dependencies (`grammy`, `@modelcontextprotocol/sdk`) are installed automatically via `postinstall`. Requires [Bun](https://bun.sh) — if Bun is not available, run manually:
+
+```bash
+cd $(npm root -g)/@0xmaxma/claude-gateway && bun install --cwd mcp
+```
+
+**Via git (for development)**
+
+```bash
+git clone https://github.com/0xMaxMa/claude-gateway
 cd claude-gateway
-npm install
+npm install          # also runs bun install in mcp/
 npm run build
 ```
 
-### 2. Install MCP server dependencies
+### 2. Configure environment (optional)
 
-The gateway MCP server uses Bun with its own `package.json`. Install once:
+Create a `.env` file in your working directory (or set env vars in your shell):
 
 ```bash
-make mcp-install    # runs: cd mcp && bun install
+# HTTP port (default: 10850)
+PORT=10850
+
+# Path to gateway config (default: ~/.claude-gateway/config.json)
+# GATEWAY_CONFIG=~/.claude-gateway/config.json
+
+# Browser module (optional)
+# GETPOD_BROWSER_URL=http://127.0.0.1:10880
+# GETPOD_BROWSER_DISABLED=true
 ```
 
-This installs `grammy` (Telegram Bot API) and `@modelcontextprotocol/sdk` into `mcp/node_modules/`.
+All variables are optional — the gateway works out of the box with defaults. Full list: [`.env.example`](.env.example)
 
 ### 3. Create an agent
 
