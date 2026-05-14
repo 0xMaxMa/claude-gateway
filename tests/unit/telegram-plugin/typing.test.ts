@@ -754,9 +754,9 @@ describe('createWorkingStateManager', () => {
       for (const call of forwardCalls) {
         expect((call[1] as string).length).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS)
       }
-      // Combined text should equal original (minus leading newlines stripped between chunks)
+      // Combined chunks must account for all original content (no data loss)
       const combined = forwardCalls.map(c => c[1] as string).join('')
-      expect(combined.length).toBeGreaterThan(0)
+      expect(combined.length).toBe(longText.length)
     })
 
     it('U-TY-11: short auto-forward text sends as a single message', async () => {
@@ -810,6 +810,31 @@ describe('createWorkingStateManager', () => {
       for (const c of chunks) {
         expect(c.length).toBeLessThanOrEqual(limit)
       }
+    })
+
+    it('U-TY-16: htmlSafe=true does not cut inside an HTML tag', () => {
+      // Place <code> tag near the cut boundary so a naive cut would land inside it
+      const prefix = 'A'.repeat(4090)
+      const text = `${prefix}<code>some code</code>`
+      const chunks = chunkText(text, 4096, true)
+      // Each chunk must not contain a partial open tag
+      for (const c of chunks) {
+        const openTags = (c.match(/</g) ?? []).length
+        const closeTags = (c.match(/>/g) ?? []).length
+        expect(openTags).toBe(closeTags)
+      }
+    })
+
+    it('U-TY-17: htmlSafe=false (default) may cut inside a tag', () => {
+      // Place '<code>' so that cut=4096 lands in the middle of it:
+      // prefix 4093 chars → '<' at 4093, 'c' at 4094, 'o' at 4095, 'd' at 4096 (cut here)
+      const prefix = 'A'.repeat(4093)
+      const text = `${prefix}<code>some code</code>`
+      const chunks = chunkText(text, 4096, false)
+      // first chunk ends mid-tag: contains '<' but no matching '>'
+      const openInFirst = (chunks[0].match(/</g) ?? []).length
+      const closeInFirst = (chunks[0].match(/>/g) ?? []).length
+      expect(openInFirst).toBeGreaterThan(closeInFirst)
     })
   })
 })

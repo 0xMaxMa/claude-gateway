@@ -343,6 +343,8 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
   while (rest.length > limit) {
     let cut = limit
     if (mode === 'newline') {
+      // Prefer the last double-newline (paragraph), then single newline,
+      // then space. Fall back to hard cut.
       const para = rest.lastIndexOf('\n\n', limit)
       const line = rest.lastIndexOf('\n', limit)
       const space = rest.lastIndexOf(' ', limit)
