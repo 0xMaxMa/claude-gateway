@@ -49,11 +49,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 npm install -g @0xmaxma/claude-gateway
 ```
 
-MCP server dependencies are installed automatically. Requires [Bun](https://bun.sh) — if not available, run manually:
-
-```bash
-cd $(npm root -g)/@0xmaxma/claude-gateway && bun install --cwd mcp
-```
+Requires [Bun](https://bun.sh) — MCP server dependencies are installed automatically via `postinstall`.
 
 **2. Configure environment (optional)**
 
