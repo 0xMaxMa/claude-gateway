@@ -36,6 +36,7 @@ function getNpmListVersion(packageName: string): string | null {
     const output = execSync(`npm list -g ${packageName} --depth=0 --json`, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 10_000,
     });
     const parsed = JSON.parse(output) as { dependencies?: Record<string, { version: string }> };
     return parsed.dependencies?.[packageName]?.version ?? null;
@@ -53,9 +54,12 @@ async function getLatestVersion(packageName: string): Promise<string | null> {
 }
 
 async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
+  const pkgs = Object.values(PACKAGE_MAP);
+  // Run all synchronous npm list calls before entering async Promise.all
+  const currents = pkgs.map(getNpmListVersion);
   return Promise.all(
-    Object.values(PACKAGE_MAP).map(async (pkg) => {
-      const current = getNpmListVersion(pkg);
+    pkgs.map(async (pkg, i) => {
+      const current = currents[i];
       const latest = await getLatestVersion(pkg);
       return {
         package: pkg,
@@ -143,6 +147,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
     try {
       execSync(`npm install -g ${packageName}@latest`, {
         stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 120_000,
       });
     } catch (err) {
       const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? 'install failed';

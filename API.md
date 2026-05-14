@@ -1640,7 +1640,7 @@ curl -H "X-Api-Key: admin-secret" \
 
 Installs the latest version of the specified package. `:name` accepts `claude-gateway` or `claude-code`.
 
-- **claude-gateway**: runs `npm install @0xmaxma/claude-gateway@latest` then calls `process.exit(0)` so the process manager (systemd/pm2) restarts the service.
+- **claude-gateway**: runs `npm install -g @0xmaxma/claude-gateway@latest` then calls `process.exit(0)` so the process manager (systemd/pm2) restarts the service.
 - **claude-code**: runs `npm install -g @anthropic-ai/claude-code@latest`. No restart needed.
 
 If the package is already on the latest version the call is a no-op (`updated: false`).
