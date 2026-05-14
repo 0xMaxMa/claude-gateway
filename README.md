@@ -717,7 +717,7 @@ Once paired, the following bot commands are available in a private chat:
 
 ## Monitoring
 
-The gateway runs an HTTP server on port 3000 (set `PORT` env var to change):
+The gateway runs an HTTP server on port 10850 (set `PORT` env var to change):
 
 | Endpoint | Description |
 |----------|-------------|
