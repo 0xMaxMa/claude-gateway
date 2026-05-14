@@ -23,14 +23,6 @@ import * as os from 'os';
 })();
 
 import * as readline from 'readline';
-
-function expandTilde(p: string): string {
-  if (p === '~' || p.startsWith('~/')) {
-    return path.join(os.homedir(), p.slice(1));
-  }
-  return p;
-}
-
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';
@@ -45,6 +37,13 @@ import { ContextIsolationGuard } from './agent/context-isolation';
 import { createLogger } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
 import { AgentConfig, GatewayConfig } from './types';
+
+function expandTilde(p: string): string {
+  if (p === '~' || p.startsWith('~/')) {
+    return path.join(os.homedir(), p.slice(1));
+  }
+  return p;
+}
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
 function parseArgs(argv: string[]): Record<string, string | boolean> {

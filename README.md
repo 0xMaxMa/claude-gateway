@@ -70,7 +70,7 @@ All variables are optional. Full list: [`.env.example`](.env.example)
 
 **3. Create an agent**
 
-Add an agent entry to `~/.claude-gateway/config.json` manually, or clone the repo and run `make create-agent` for the interactive wizard (see **For development** below).
+Add an agent entry to `~/.claude-gateway/config.json` manually (see [`config.template.json`](config.template.json) for the format), or clone the repo and run `make create-agent` for the interactive wizard (see **For development** below).
 
 **4. Start**
 
@@ -84,7 +84,7 @@ To keep the gateway running after logout or system restarts, use [PM2](https://p
 
 ```bash
 npm install -g pm2
-pm2 start claude-gateway --name gateway
+pm2 start $(which claude-gateway) --name gateway
 pm2 save       # persist the process list
 pm2 startup    # register PM2 to start on boot (follow the printed command)
 ```
