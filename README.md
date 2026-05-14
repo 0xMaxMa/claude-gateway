@@ -41,21 +41,50 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 
 ## Quick Start
 
-### 1. Install
+### Option A — Install via npm (for users)
 
-**Via npm (recommended)**
+**1. Install**
 
 ```bash
 npm install -g @0xmaxma/claude-gateway
 ```
 
-MCP server dependencies (`grammy`, `@modelcontextprotocol/sdk`) are installed automatically via `postinstall`. Requires [Bun](https://bun.sh) — if Bun is not available, run manually:
+MCP server dependencies are installed automatically. Requires [Bun](https://bun.sh) — if not available, run manually:
 
 ```bash
 cd $(npm root -g)/@0xmaxma/claude-gateway && bun install --cwd mcp
 ```
 
-**Via git (for development)**
+**2. Configure environment (optional)**
+
+The gateway auto-loads `~/.claude-gateway/.env` on startup:
+
+```bash
+mkdir -p ~/.claude-gateway
+cat > ~/.claude-gateway/.env << 'EOF'
+# HTTP port (default: 10850)
+# PORT=10850
+
+# Path to gateway config (default: ~/.claude-gateway/config.json)
+# GATEWAY_CONFIG=~/.claude-gateway/config.json
+EOF
+```
+
+All variables are optional. Full list: [`.env.example`](.env.example)
+
+**3. Create an agent**
+
+Add an agent entry to `~/.claude-gateway/config.json` manually, or clone the repo and run `make create-agent` for the interactive wizard (see Option B).
+
+**4. Start**
+
+```bash
+claude-gateway
+```
+
+---
+
+### Option B — Clone repo (for development)
 
 ```bash
 git clone https://github.com/0xMaxMa/claude-gateway
@@ -64,28 +93,7 @@ npm install          # also runs bun install in mcp/
 npm run build
 ```
 
-### 2. Configure environment (optional)
-
-Create `~/.claude-gateway/.env` — the gateway loads this automatically on startup:
-
-```bash
-mkdir -p ~/.claude-gateway
-cat > ~/.claude-gateway/.env << 'EOF'
-# HTTP port (default: 10850)
-PORT=10850
-
-# Path to gateway config (default: ~/.claude-gateway/config.json)
-# GATEWAY_CONFIG=~/.claude-gateway/config.json
-
-# Browser module (optional)
-# GETPOD_BROWSER_URL=http://127.0.0.1:10880
-# GETPOD_BROWSER_DISABLED=true
-EOF
-```
-
-All variables are optional — the gateway works out of the box with defaults. Full list: [`.env.example`](.env.example)
-
-### 3. Create an agent
+### Create an agent
 
 The interactive wizard handles everything — workspace files, config, bot token, and pairing:
 
