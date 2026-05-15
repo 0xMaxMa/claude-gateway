@@ -692,4 +692,76 @@ describe('config-migrator', () => {
       expect((agents[0].telegram as Record<string, unknown>).allowedUsers).toEqual([1]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // auto-migration flow (simulates gateway startup behaviour)
+  // ---------------------------------------------------------------------------
+  describe('auto-migration flow', () => {
+    it('migrates automatically when version mismatch detected', () => {
+      const config = { configVersion: '1.0.0', gateway: { port: 3000 }, agents: [] };
+      const template = {
+        configVersion: '1.1.0',
+        _migration: { ignorePaths: [], removePaths: [] },
+        gateway: { port: 3000, newField: 'default' },
+        agents: [],
+      };
+      const configPath = writeJson('config.json', config);
+      const templatePath = writeJson('config.template.json', template);
+
+      const detection = detectMigration(configPath, templatePath, '1.1.0');
+      expect(detection.needed).toBe(true);
+
+      // simulate gateway auto-migrate (no prompt)
+      const { ignorePaths, removePaths } = loadCleanTemplate(templatePath);
+      const migration = applyMigration(
+        configPath,
+        detection.config,
+        detection.template,
+        '1.1.0',
+        ignorePaths,
+        removePaths,
+      );
+
+      expect(migration.addedFields).toContain('gateway.newField');
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(written.configVersion).toBe('1.1.0');
+      expect(written.gateway.newField).toBe('default');
+      expect(written.gateway.port).toBe(3000); // existing value preserved
+    });
+
+    it('does not migrate when versions match', () => {
+      const config = { configVersion: '1.1.0', gateway: { port: 3000 }, agents: [] };
+      const template = {
+        configVersion: '1.1.0',
+        _migration: { ignorePaths: [], removePaths: [] },
+        gateway: { port: 3000 },
+        agents: [],
+      };
+      const configPath = writeJson('config.json', config);
+      const templatePath = writeJson('config.template.json', template);
+
+      const detection = detectMigration(configPath, templatePath, '1.1.0');
+      expect(detection.needed).toBe(false);
+    });
+
+    it('creates a .bak backup before writing', () => {
+      const config = { configVersion: '1.0.0', gateway: {}, agents: [] };
+      const template = {
+        configVersion: '1.1.0',
+        _migration: { ignorePaths: [], removePaths: [] },
+        gateway: { newField: 'x' },
+        agents: [],
+      };
+      const configPath = writeJson('config.json', config);
+      const templatePath = writeJson('config.template.json', template);
+
+      const detection = detectMigration(configPath, templatePath, '1.1.0');
+      const { ignorePaths, removePaths } = loadCleanTemplate(templatePath);
+      applyMigration(configPath, detection.config, detection.template, '1.1.0', ignorePaths, removePaths);
+
+      expect(fs.existsSync(`${configPath}.bak`)).toBe(true);
+      const bak = JSON.parse(fs.readFileSync(`${configPath}.bak`, 'utf-8'));
+      expect(bak.configVersion).toBe('1.0.0'); // backup has original
+    });
+  });
 });
