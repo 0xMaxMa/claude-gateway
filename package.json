@@ -29,6 +29,7 @@
     "postinstall": "if command -v bun >/dev/null 2>&1; then bun install --cwd mcp; else echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'; fi",
     "test": "jest",
     "test:unit": "jest --testPathPattern=unit",
+    "test:e2e": "jest --testPathPattern=tests/e2e --forceExit",
     "integration": "jest --testPathPattern=integration --testTimeout=15000",
     "integration:ma": "jest --testPathPattern=multi-agent --testTimeout=15000",
     "test:manual": "jest --testPathPattern=phase-manual --testTimeout=15000",

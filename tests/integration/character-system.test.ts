@@ -19,7 +19,12 @@ import { AgentConfig, GatewayConfig } from '../../src/types';
 const MOCK_CLAUDE_BIN = path.resolve(__dirname, '../helpers/mock-claude.js');
 
 function createTempWorkspace(prefix = 'cs-test-ws-'): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  // Nest workspace one level inside agentDir so that AgentRunner's
+  // path.resolve(workspace, '..') yields a unique per-test agentDir
+  // instead of resolving to /tmp/ and sharing history.db across parallel workers.
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = path.join(agentDir, 'workspace');
+  fs.mkdirSync(dir);
   const files: Record<string, string> = {
     'AGENTS.md': '# Agent\nYou are a test assistant.',
     'SOUL.md': '# Soul\nBe helpful.',
@@ -31,6 +36,10 @@ function createTempWorkspace(prefix = 'cs-test-ws-'): string {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
   }
   return dir;
+}
+
+function cleanupWorkspace(workspace: string): void {
+  fs.rmSync(path.resolve(workspace, '..'), { recursive: true, force: true });
 }
 
 function makeAgentConfig(
@@ -107,7 +116,7 @@ describe('Character System Integration', () => {
         handle.close();
       }
     } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   }, 15000);
 
@@ -131,7 +140,7 @@ describe('Character System Integration', () => {
       await new Promise((r) => setTimeout(r, 700));
       expect(callbackCount).toBe(0);
     } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -146,7 +155,7 @@ describe('Character System Integration', () => {
       expect(content).toContain('## User Facts');
       expect(content).toContain('- Loves TypeScript');
     } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -175,7 +184,7 @@ describe('Character System Integration', () => {
     } finally {
       await router.stop();
       await runner.stop();
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -214,7 +223,7 @@ describe('Character System Integration', () => {
     } finally {
       await router.stop();
       await runner.stop();
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -255,7 +264,7 @@ describe('Character System Integration', () => {
     } finally {
       await router.stop();
       await runner.stop();
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -282,7 +291,7 @@ describe('Character System Integration', () => {
       expect(result.removed).toBeGreaterThan(0);
       expect(newContent.length).toBeLessThanOrEqual(maxChars + 5);
     } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -301,7 +310,7 @@ describe('Character System Integration', () => {
       expect(results.length).toBe(2);
       expect(results.every((l) => l.toLowerCase().includes('dark'))).toBe(true);
     } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 
@@ -349,7 +358,7 @@ describe('Character System Integration', () => {
     } finally {
       await router.stop();
       await runner.stop();
-      fs.rmSync(workspace, { recursive: true, force: true });
+      cleanupWorkspace(workspace);
     }
   });
 

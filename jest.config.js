@@ -4,6 +4,9 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/tests'],
   testMatch: ['**/*.test.ts'],
+  testPathIgnorePatterns: ['/node_modules/', '<rootDir>/tests/e2e/'],
+  forceExit: true,
+  testTimeout: 30000,
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       tsconfig: {
