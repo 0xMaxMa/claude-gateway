@@ -634,7 +634,7 @@ When the config schema changes (new fields added in `config.template.json`), the
 
 - Preserves all existing values
 - Adds missing fields with defaults from the template
-- Prompts for confirmation before writing (use `--auto-migrate` to skip)
+- Migrates automatically on startup (no confirmation needed)
 - Tracks schema version for future migrations
 
 ---
