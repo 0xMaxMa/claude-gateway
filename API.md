@@ -370,12 +370,6 @@ curl -H "X-Api-Key: my-key" \
 
 The Wizard API mirrors the interactive `make create-agent` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL (refreshed on each step transition); nothing is written to disk until the `/confirm` step.
 
-**Server configuration (environment variables):**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GATEWAY_WIZARD_SKIP_PERMISSIONS` | `false` | Set to `true` to allow the wizard's Claude subprocess to skip permission prompts. Only enable in trusted server environments. |
-
 **State machine:**
 
 ```

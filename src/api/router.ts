@@ -43,23 +43,14 @@ const AVATAR_MIME_EXT: Record<string, string> = {
 
 const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
 
-/**
- * Set GATEWAY_WIZARD_SKIP_PERMISSIONS=true in the server environment to allow the wizard
- * to spawn Claude without its permission prompts. Off by default — only enable in trusted
- * environments where the server admin is aware of the implications.
- */
-const WIZARD_SKIP_PERMISSIONS = process.env.GATEWAY_WIZARD_SKIP_PERMISSIONS === 'true';
-
 /** Max simultaneous wizard/start Claude subprocesses to prevent resource exhaustion. */
 let wizardStartsInFlight = 0;
 const WIZARD_MAX_CONCURRENT = 2;
 
 /** Call Claude --print with stdin prompt; resolves with stdout on exit 0. */
 function runClaude(prompt: string, timeoutMs = 120_000): Promise<string> {
-  const args = ['--print'];
-  if (WIZARD_SKIP_PERMISSIONS) args.push('--dangerously-skip-permissions');
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', args, {
+    const child = spawn('claude', ['--print', '--dangerously-skip-permissions'], {
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
