@@ -543,6 +543,10 @@ describe('POST /api/v1/agents/wizard/start', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // The concurrency cap (429 when wizardStartsInFlight >= WIZARD_MAX_CONCURRENT) is a
+  // 3-line counter guard. Orchestrating genuinely concurrent hanging spawns in Jest's
+  // single-threaded event loop is brittle, so this case is covered by manual smoke test.
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -892,6 +896,43 @@ describe('POST /api/v1/agents/wizard/:wizardId/channel/verify', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(false);
       expect(res.body.pending).toBe(true);
+    } finally {
+      wizardStore.delete(state.wizardId);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('advances updateOffset on non-matching messages to avoid reprocessing', async () => {
+    const { app, tmpDir } = buildCtx();
+    const state = wizardStore.create('offsetbot', 'p', { 'AGENTS.md': '#' });
+    wizardStore.update(state.wizardId, {
+      step: 'pairing',
+      channel: 'telegram',
+      botToken: '123:tok',
+      pairingCode: 'ZZZZZZ',
+      updateOffset: 5,
+    });
+
+    // Return a non-matching message with update_id=10
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        result: [{ update_id: 10, message: { from: { id: 1 }, chat: { id: 1, type: 'private' }, text: 'wrong' } }],
+      }),
+    } as Response);
+
+    try {
+      const res = await supertest.default(app)
+        .post(`/api/v1/agents/wizard/${state.wizardId}/channel/verify`)
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(false);
+
+      // Offset should have advanced to 11 (update_id + 1)
+      const updated = wizardStore.get(state.wizardId);
+      expect(updated?.updateOffset).toBe(11);
     } finally {
       wizardStore.delete(state.wizardId);
       fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -43,10 +43,23 @@ const AVATAR_MIME_EXT: Record<string, string> = {
 
 const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
 
+/**
+ * Set GATEWAY_WIZARD_SKIP_PERMISSIONS=true in the server environment to allow the wizard
+ * to spawn Claude without its permission prompts. Off by default — only enable in trusted
+ * environments where the server admin is aware of the implications.
+ */
+const WIZARD_SKIP_PERMISSIONS = process.env.GATEWAY_WIZARD_SKIP_PERMISSIONS === 'true';
+
+/** Max simultaneous wizard/start Claude subprocesses to prevent resource exhaustion. */
+let wizardStartsInFlight = 0;
+const WIZARD_MAX_CONCURRENT = 2;
+
 /** Call Claude --print with stdin prompt; resolves with stdout on exit 0. */
 function runClaude(prompt: string, timeoutMs = 120_000): Promise<string> {
+  const args = ['--print'];
+  if (WIZARD_SKIP_PERMISSIONS) args.push('--dangerously-skip-permissions');
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['--print', '--dangerously-skip-permissions'], {
+    const child = spawn('claude', args, {
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -93,6 +106,12 @@ function readRawBody(req: Request, res: Response, maxBytes: number): Promise<Buf
   });
 }
 
+/** Convert an absolute path back to a tilde-relative form when under $HOME. */
+function absToTildePath(p: string): string {
+  const home = os.homedir();
+  return p.startsWith(home + path.sep) ? path.join('~', p.slice(home.length + 1)) : p;
+}
+
 /** Verify a Telegram bot token via getMe; returns username on success. */
 async function verifyTelegramToken(token: string): Promise<string | null> {
   try {
@@ -104,12 +123,16 @@ async function verifyTelegramToken(token: string): Promise<string | null> {
   }
 }
 
-/** Non-blocking Telegram getUpdates check. Returns chatId + senderId + nextOffset, or null. */
+/**
+ * Non-blocking Telegram getUpdates check.
+ * Returns match details + nextOffset on code match, { nextOffset } on no match, null on error.
+ * Always advancing the offset ensures we never re-process seen messages across poll calls.
+ */
 async function checkTelegramCode(
   token: string,
   expectedCode: string,
   offset: number,
-): Promise<{ chatId: string; senderId: string; nextOffset: number } | null> {
+): Promise<{ found: true; chatId: string; senderId: string; nextOffset: number } | { found: false; nextOffset: number } | null> {
   try {
     interface TgUpdate {
       update_id: number;
@@ -128,11 +151,14 @@ async function checkTelegramCode(
       ) {
         const chatId = String(upd.message.chat.id);
         const senderId = upd.message.from ? String(upd.message.from.id) : chatId;
-        return { chatId, senderId, nextOffset };
+        return { found: true, chatId, senderId, nextOffset };
       }
     }
-  } catch { /* swallow */ }
-  return null;
+    return { found: false, nextOffset };
+  } catch (err) {
+    console.error('[wizard/verify] getUpdates failed:', (err as Error).message);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,14 +637,22 @@ export function createApiRouter(
       return;
     }
 
+    if (wizardStartsInFlight >= WIZARD_MAX_CONCURRENT) {
+      res.status(429).json({ error: 'Too many wizard starts in progress, please retry later' });
+      return;
+    }
+
     const agentName = id.charAt(0).toUpperCase() + id.slice(1);
     let rawOutput: string;
+    wizardStartsInFlight++;
     try {
       const genPrompt = buildGenerationPrompt(agentName, prompt.trim());
       rawOutput = await runClaude(genPrompt);
     } catch (err) {
       res.status(500).json({ error: `Claude generation failed: ${(err as Error).message}` });
       return;
+    } finally {
+      wizardStartsInFlight--;
     }
 
     let raw = rawOutput.trim();
@@ -751,13 +785,14 @@ export function createApiRouter(
       }
     }
 
-    const workspaceTilde = path.join('~', '.claude-gateway', 'agents', agentId, 'workspace');
+    const defaultModel = (models ?? DEFAULT_MODELS).find((m) => m.alias === 'sonnet')?.id
+      ?? DEFAULT_MODELS[2].id;
     const newAgent: Record<string, unknown> = {
       id: agentId,
       description: wizard.prompt.slice(0, 200).trim(),
-      workspace: workspaceTilde,
-      env: path.join('~', '.claude-gateway', 'agents', agentId, 'workspace', '.env'),
-      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+      workspace: absToTildePath(workspaceDirAbs),
+      env: absToTildePath(path.join(workspaceDirAbs, '.env')),
+      claude: { model: defaultModel, dangerouslySkipPermissions: false, extraFlags: [] },
     };
     if (wizard.signatureEmoji) newAgent.signatureEmoji = wizard.signatureEmoji;
     if (avatarFilename) newAgent.avatar = avatarFilename;
@@ -868,20 +903,26 @@ export function createApiRouter(
       return;
     }
 
-    const match = await checkTelegramCode(
+    const result = await checkTelegramCode(
       wizard.botToken!,
       wizard.pairingCode!,
       wizard.updateOffset ?? 0,
     );
 
-    if (!match) {
-      wizardStore.update(wizardId, { updateOffset: match === null ? wizard.updateOffset : 0 });
+    // Always advance offset on non-error responses to avoid re-processing seen messages
+    if (!result) {
+      // Network/API error — keep current offset; client may retry
+      res.json({ success: false, pending: true });
+      return;
+    }
+    if (!result.found) {
+      wizardStore.update(wizardId, { updateOffset: result.nextOffset });
       res.json({ success: false, pending: true });
       return;
     }
 
-    wizardStore.update(wizardId, { updateOffset: match.nextOffset });
-
+    // Code matched — commit config first, then advance offset so a retry can still succeed
+    // if the config write failed mid-way
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === wizard.agentId);
@@ -892,12 +933,14 @@ export function createApiRouter(
       return;
     }
 
+    wizardStore.update(wizardId, { updateOffset: result.nextOffset, step: 'complete' });
+
     const agentsBase = getAgentsBaseDir();
     const telegramStateDir = path.join(agentsBase, wizard.agentId, 'workspace', '.telegram-state');
     try {
       fs.mkdirSync(telegramStateDir, { recursive: true });
       const access = JSON.stringify(
-        { dmPolicy: 'allowlist', allowFrom: [match.senderId], groups: {}, pending: {} },
+        { dmPolicy: 'allowlist', allowFrom: [result.senderId], groups: {}, pending: {} },
         null, 2,
       );
       await fsp.writeFile(path.join(telegramStateDir, 'access.json'), access, { mode: 0o600 });
@@ -909,11 +952,10 @@ export function createApiRouter(
       await fetch(`${TELEGRAM_API_BASE}/bot${wizard.botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: match.chatId, text: "You're connected! Send me a message to get started." }),
+        body: JSON.stringify({ chat_id: result.chatId, text: "You're connected! Send me a message to get started." }),
       });
     } catch { /* non-fatal */ }
 
-    wizardStore.update(wizardId, { step: 'complete' });
     res.json({ success: true, agentId: wizard.agentId });
   });
 

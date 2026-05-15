@@ -368,7 +368,13 @@ curl -H "X-Api-Key: my-key" \
 
 ### Wizard API — multi-step agent creation
 
-The Wizard API mirrors the interactive `make create-agent` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL; nothing is written to disk until the `/confirm` step.
+The Wizard API mirrors the interactive `make create-agent` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL (refreshed on each step transition); nothing is written to disk until the `/confirm` step.
+
+**Server configuration (environment variables):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GATEWAY_WIZARD_SKIP_PERMISSIONS` | `false` | Set to `true` to allow the wizard's Claude subprocess to skip permission prompts. Only enable in trusted server environments. |
 
 **State machine:**
 
@@ -420,6 +426,7 @@ curl -X POST \
 | 400 | Invalid `id` format or missing `prompt` |
 | 403 | Not an admin key |
 | 409 | Agent or wizard already exists for this ID |
+| 429 | Too many wizard starts in progress (max 2 concurrent) |
 | 500 | Claude generation failed |
 
 ---

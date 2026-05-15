@@ -14,11 +14,14 @@ export function buildGenerationPrompt(
     ? `\nThe agent has a signature emoji: ${options.signatureEmoji}. Include it in the Emoji Usage section as the signature emoji.`
     : '';
 
+  // Prevent prompt injection via triple-quote delimiter escape
+  const safeDescription = description.replace(/"""/g, "'''");
+
   return `You are helping configure a Claude Code agent for the claude-gateway multi-bot system.
 
 The user described the agent as:
 """
-${description}
+${safeDescription}
 """
 
 Generate workspace markdown files for this agent. Output each file as:
@@ -88,11 +91,12 @@ export function parseGeneratedFiles(output: string): Map<string, string> {
  * Build the Claude update prompt for an existing agent.md file.
  */
 export function buildUpdatePrompt(name: string, currentContent: string): string {
+  const safeContent = currentContent.replace(/"""/g, "'''");
   return `You are updating the agent.md file for a Claude Gateway agent named "${name}".
 
 Current agent.md content:
 """
-${currentContent}
+${safeContent}
 """
 
 Update this agent.md to follow current best practices:
