@@ -947,6 +947,7 @@ export function createApiRouter(
       });
     } catch { /* non-fatal */ }
 
+    wizardStore.delete(wizardId);
     res.json({ success: true, agentId: wizard.agentId });
   });
 
@@ -1572,8 +1573,9 @@ export function createApiRouter(
     if (!agentCfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     if (!agentCfg.avatar) { res.status(404).json({ error: 'No avatar set for this agent' }); return; }
 
-    const avatarPath = path.resolve(path.join(getAgentsBaseDir(), agentId, agentCfg.avatar));
-    const agentDirResolved = path.resolve(path.join(getAgentsBaseDir(), agentId));
+    const base = getAgentsBaseDir();
+    const avatarPath = path.resolve(path.join(base, agentId, agentCfg.avatar));
+    const agentDirResolved = path.resolve(path.join(base, agentId));
     if (!avatarPath.startsWith(agentDirResolved + path.sep)) {
       res.status(400).json({ error: 'Invalid avatar path' });
       return;

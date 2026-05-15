@@ -519,7 +519,7 @@ or while waiting:
 
 **Auth:** admin key.
 
-Skip channel setup and finalise the wizard. Cleans up wizard state.
+Finalise the wizard and clean up state. Can be called after `/confirm` to skip channel setup entirely, or after `/channel` to abandon pairing (the agent will be created without a Telegram/Discord channel). Requires step `confirmed` or `pairing` (calling from `pending` returns `409`).
 
 ```json
 { "agentId": "cryptobot" }

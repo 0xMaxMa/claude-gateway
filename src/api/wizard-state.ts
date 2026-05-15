@@ -58,11 +58,11 @@ export class WizardStore {
   update(wizardId: string, patch: Partial<WizardState>): void {
     const state = this.store.get(wizardId);
     if (!state) return;
-    // Refresh TTL whenever the wizard advances to a new step
-    if (patch.step && patch.step !== state.step) {
-      patch.expiresAt = Date.now() + WIZARD_TTL_MS;
-    }
-    Object.assign(state, patch);
+    // Refresh TTL whenever the wizard advances to a new step (avoid mutating caller's object)
+    const fullPatch = (patch.step && patch.step !== state.step)
+      ? { ...patch, expiresAt: Date.now() + WIZARD_TTL_MS }
+      : patch;
+    Object.assign(state, fullPatch);
   }
 
   delete(wizardId: string): void {
