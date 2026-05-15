@@ -1915,13 +1915,21 @@ export class AgentRunner extends EventEmitter {
 
   async updateApiSession(chatId: string, sessionId: string, updates: { sessionName?: string }): Promise<{ sessionId: string; sessionName?: string }> {
     if (updates.sessionName) {
-      await this.sessionStore.updateSessionMeta(this.agentConfig.id, `api-${chatId}`, sessionId, { name: updates.sessionName }, 'api');
+      const internalChatId = `api-${chatId}`;
+      // Ensure session exists in the file index (may be missing for older sessions stored only in SQLite)
+      await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatId, sessionId);
+      await this.sessionStore.updateSessionMeta(this.agentConfig.id, internalChatId, sessionId, { name: updates.sessionName }, 'api');
     }
     return { sessionId, ...(updates.sessionName ? { sessionName: updates.sessionName } : {}) };
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
-    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionId, 'api');
+    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionId, 'api').catch((err: unknown) => {
+      // If session is not in the file index (legacy session stored only in SQLite), treat as already deleted
+      const msg = (err as Error).message ?? '';
+      if (msg.includes('not found in index') || msg.includes('No session index found')) return;
+      throw err;
+    });
   }
 
   /**
