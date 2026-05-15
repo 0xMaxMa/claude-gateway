@@ -22,7 +22,6 @@ import * as os from 'os';
   }
 })();
 
-import * as readline from 'readline';
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';
@@ -341,45 +340,20 @@ async function main(): Promise<void> {
   try {
     const detection = detectMigration(CONFIG_PATH, templatePath, templateVersion);
     if (detection.needed) {
-      let shouldMigrate = false;
-
-      if (args['auto-migrate']) {
-        shouldMigrate = true;
-      } else {
-        // Prompt user for confirmation
-        const rl = readline.createInterface({
-          input: process.stdin,
-          output: process.stdout,
-        });
-        const answer = await new Promise<string>((resolve) => {
-          rl.question(
-            `[gateway] Config migration available (v${detection.fromVersion} -> v${detection.toVersion}). Migrate config? (y/n) [y]: `,
-            (ans) => {
-              rl.close();
-              resolve(ans.trim().toLowerCase());
-            },
-          );
-        });
-        shouldMigrate = answer === '' || answer === 'y' || answer === 'yes';
-      }
-
-      if (shouldMigrate) {
-        const { ignorePaths, removePaths } = loadCleanTemplate(templatePath);
-        const migration = applyMigration(
-          CONFIG_PATH,
-          detection.config,
-          detection.template,
-          templateVersion,
-          ignorePaths,
-          removePaths,
-        );
-        const parts = [`migrated to v${templateVersion}`];
-        if (migration.addedFields.length) parts.push(`added: ${migration.addedFields.join(', ')}`);
-        if (migration.removedFields.length) parts.push(`removed: ${migration.removedFields.join(', ')}`);
-        console.log(`[gateway] Config ${parts.join(', ')}.`);
-      } else {
-        console.warn(`[gateway] Config migration skipped by user. Running with current config.`);
-      }
+      console.log(`[gateway] Config migration available (v${detection.fromVersion} -> v${detection.toVersion}). Auto-migrating...`);
+      const { ignorePaths, removePaths } = loadCleanTemplate(templatePath);
+      const migration = applyMigration(
+        CONFIG_PATH,
+        detection.config,
+        detection.template,
+        templateVersion,
+        ignorePaths,
+        removePaths,
+      );
+      const parts = [`migrated to v${templateVersion}`];
+      if (migration.addedFields.length) parts.push(`added: ${migration.addedFields.join(', ')}`);
+      if (migration.removedFields.length) parts.push(`removed: ${migration.removedFields.join(', ')}`);
+      console.log(`[gateway] Config ${parts.join(', ')}.`);
     }
   } catch (err) {
     console.warn(`[gateway] Config migration skipped: ${(err as Error).message}`);
