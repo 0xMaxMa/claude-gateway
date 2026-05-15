@@ -405,6 +405,17 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `POST` | `/api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages` | Inject a message into an existing session |
 | `POST` | `/api/v1/agents/:agentId/media` | Upload a media file (image or PDF) |
 | `GET` | `/api/v1/agents/:agentId/media/*` | Serve a media file by path |
+| `PUT` | `/api/v1/agents/:agentId/avatar` | Upload or replace agent avatar (admin/write) |
+| `DELETE` | `/api/v1/agents/:agentId/avatar` | Remove agent avatar (admin/write) |
+| `GET` | `/api/v1/agents/:agentId/avatar` | Serve agent avatar image |
+| `POST` | `/api/v1/agents/wizard/start` | Start wizard: generate agent workspace via Claude (admin) |
+| `PUT` | `/api/v1/agents/wizard/:wizardId/avatar` | Upload avatar to wizard before confirm (admin) |
+| `POST` | `/api/v1/agents/wizard/:wizardId/confirm` | Write workspace to disk and add agent to config (admin) |
+| `POST` | `/api/v1/agents/wizard/:wizardId/channel` | Verify bot token and generate pairing code (admin) |
+| `POST` | `/api/v1/agents/wizard/:wizardId/channel/verify` | Poll for pairing code confirmation (admin) |
+| `POST` | `/api/v1/agents/wizard/:wizardId/complete` | Skip channel and finalise wizard (admin) |
+
+**Wizard API** — create agents programmatically with the same flow as the interactive `make create-agent` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
 
 See **[API.md](./API.md)** for full reference with request/response schemas and curl examples.
 

@@ -1,15 +1,18 @@
 import { Router, Request, Response } from 'express';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID, createHash, randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'child_process';
 import { AgentRunner, DEFAULT_MODELS } from '../agent/runner';
 import { AgentConfig, ApiKey, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB } from '../history/db';
 import type { AgentSessionSummary } from '../history/types';
+import { wizardStore } from './wizard-state';
+import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -27,6 +30,108 @@ function detectMimeFromMagic(header: Buffer): string | null {
   if (header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46 &&
       header[8] === 0x57 && header[9] === 0x45 && header[10] === 0x42 && header[11] === 0x50) return 'image/webp';
   if (header[0] === 0x25 && header[1] === 0x50 && header[2] === 0x44 && header[3] === 0x46) return 'application/pdf';
+  return null;
+}
+
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+const AVATAR_MIME_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
+const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
+
+/** Call Claude --print with stdin prompt; resolves with stdout on exit 0. */
+function runClaude(prompt: string, timeoutMs = 120_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', ['--print', '--dangerously-skip-permissions'], {
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on('data', (c: Buffer) => out.push(c));
+    child.stderr.on('data', (c: Buffer) => err.push(c));
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Claude generation timed out')); }, timeoutMs);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(Buffer.concat(out).toString('utf-8'));
+      else reject(new Error(`Claude exited ${code}: ${Buffer.concat(err).toString('utf-8').slice(0, 200)}`));
+    });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
+}
+
+/** Extract leading single emoji from first line of text. */
+function extractLeadingEmoji(text: string): { emoji: string | undefined; rest: string } {
+  const m = text.match(/^(\p{Emoji_Presentation}|\p{Emoji}️)\s*\n/u);
+  if (m) return { emoji: m[1], rest: text.slice(m[0].length) };
+  return { emoji: undefined, rest: text };
+}
+
+/** Read raw binary body up to maxBytes; rejects with 413 if exceeded. */
+function readRawBody(req: Request, res: Response, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        if (!res.headersSent) res.status(413).json({ error: `File too large (max ${maxBytes / 1024 / 1024}MB)` });
+        req.destroy();
+        reject(new Error('too_large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+/** Verify a Telegram bot token via getMe; returns username on success. */
+async function verifyTelegramToken(token: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${TELEGRAM_API_BASE}/bot${token}/getMe`);
+    const json = await res.json() as { ok: boolean; result?: { username?: string } };
+    return (json.ok && json.result?.username) ? json.result.username : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Non-blocking Telegram getUpdates check. Returns chatId + senderId + nextOffset, or null. */
+async function checkTelegramCode(
+  token: string,
+  expectedCode: string,
+  offset: number,
+): Promise<{ chatId: string; senderId: string; nextOffset: number } | null> {
+  try {
+    interface TgUpdate {
+      update_id: number;
+      message?: { from?: { id: number }; chat: { id: number; type: string }; text?: string };
+    }
+    const url = `${TELEGRAM_API_BASE}/bot${token}/getUpdates?offset=${offset}&timeout=0&limit=100`;
+    const res = await fetch(url);
+    const data = await res.json() as { ok: boolean; result: TgUpdate[] };
+    if (!data.ok) return null;
+    let nextOffset = offset;
+    for (const upd of data.result) {
+      nextOffset = upd.update_id + 1;
+      if (
+        upd.message?.chat.type === 'private' &&
+        upd.message.text?.trim().toUpperCase() === expectedCode.toUpperCase()
+      ) {
+        const chatId = String(upd.message.chat.id);
+        const senderId = upd.message.from ? String(upd.message.from.id) : chatId;
+        return { chatId, senderId, nextOffset };
+      }
+    }
+  } catch { /* swallow */ }
   return null;
 }
 
@@ -347,6 +452,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
+        avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
       }));
     res.json({ agents });
   });
@@ -464,6 +570,372 @@ export function createApiRouter(
     }
 
     res.status(201).json({ agent: { id, description: newAgent.description, model: (newAgent.claude as Record<string, unknown>).model } });
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Wizard API — stateful multi-step agent creation
+  // ──────────────────────────────────────────────────────────────
+
+  function getAgentsBaseDir(): string {
+    return configPath
+      ? path.join(path.dirname(configPath), 'agents')
+      : path.join(os.homedir(), '.claude-gateway', 'agents');
+  }
+
+  /**
+   * POST /api/v1/agents/wizard/start
+   * Start wizard: call Claude to generate workspace files, return wizardId + preview.
+   */
+  router.post('/v1/agents/wizard/start', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+
+    const body = req.body as { id?: unknown; prompt?: unknown };
+    const { id, prompt } = body;
+
+    if (!id || typeof id !== 'string' || !AGENT_ID_RE.test(id)) {
+      res.status(400).json({ error: 'id must match pattern [a-z][a-z0-9_-]{1,31}' });
+      return;
+    }
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      res.status(400).json({ error: 'prompt is required' });
+      return;
+    }
+    if (agentConfigs.has(id)) {
+      res.status(409).json({ error: `Agent '${id}' already exists` });
+      return;
+    }
+    if (wizardStore.findByAgentId(id)) {
+      res.status(409).json({ error: `Wizard for agent '${id}' is already in progress` });
+      return;
+    }
+
+    const agentName = id.charAt(0).toUpperCase() + id.slice(1);
+    let rawOutput: string;
+    try {
+      const genPrompt = buildGenerationPrompt(agentName, prompt.trim());
+      rawOutput = await runClaude(genPrompt);
+    } catch (err) {
+      res.status(500).json({ error: `Claude generation failed: ${(err as Error).message}` });
+      return;
+    }
+
+    let raw = rawOutput.trim();
+    const fenceMatch = raw.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/);
+    if (fenceMatch) raw = (fenceMatch[1] ?? '').trim();
+
+    const { emoji: signatureEmoji, rest } = extractLeadingEmoji(raw);
+    if (signatureEmoji) raw = rest;
+
+    const parsedFiles = parseGeneratedFiles(raw);
+    if (!parsedFiles.has('AGENTS.md')) {
+      const headingIdx = raw.indexOf('# ');
+      if (headingIdx >= 0) {
+        const content = raw.slice(headingIdx).trim();
+        if (content.length > 50) parsedFiles.set('AGENTS.md', content);
+      }
+    }
+    for (const f of ['MEMORY.md', 'SOUL.md', 'USER.md'] as const) {
+      if (!parsedFiles.has(f)) parsedFiles.set(f, '');
+    }
+    if (!parsedFiles.has('AGENTS.md')) {
+      parsedFiles.set('AGENTS.md', `# Agent: ${id}\n\n${prompt.trim().slice(0, 400)}\n`);
+    }
+
+    const files = Object.fromEntries(parsedFiles);
+    const state = wizardStore.create(id, prompt.trim(), files);
+    if (signatureEmoji) wizardStore.update(state.wizardId, { signatureEmoji });
+
+    res.status(201).json({
+      wizardId: state.wizardId,
+      agentId: id,
+      files,
+      expiresAt: new Date(state.expiresAt).toISOString(),
+    });
+  });
+
+  /**
+   * PUT /api/v1/agents/wizard/:wizardId/avatar
+   * Upload avatar into wizard state (in-memory until confirm).
+   */
+  router.put('/v1/agents/wizard/:wizardId/avatar', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+
+    const { wizardId } = req.params as { wizardId: string };
+    const wizard = wizardStore.get(wizardId);
+    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
+    if (wizard.step !== 'pending') { res.status(409).json({ error: 'Avatar must be uploaded before confirm' }); return; }
+
+    let buf: Buffer;
+    try {
+      buf = await readRawBody(req, res, AVATAR_MAX_BYTES);
+    } catch {
+      return;
+    }
+    if (!buf.length) { res.status(400).json({ error: 'No file body received' }); return; }
+    if (buf.length < 12) { res.status(400).json({ error: 'File too small to detect type' }); return; }
+
+    const mime = detectMimeFromMagic(buf.subarray(0, 12));
+    if (!mime || !AVATAR_MIME_EXT[mime]) {
+      res.status(415).json({ error: 'Unsupported image type. Allowed: jpeg, png, gif, webp' });
+      return;
+    }
+    wizardStore.update(wizardId, { avatarData: buf, avatarMime: mime });
+    res.json({ preview: true });
+  });
+
+  /**
+   * POST /api/v1/agents/wizard/:wizardId/confirm
+   * Write workspace files + optional avatar to disk, add agent to config.json.
+   */
+  router.post('/v1/agents/wizard/:wizardId/confirm', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+
+    const { wizardId } = req.params as { wizardId: string };
+    const wizard = wizardStore.get(wizardId);
+    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
+    if (wizard.step !== 'pending') { res.status(409).json({ error: `Wizard already in step: ${wizard.step}` }); return; }
+
+    const body = req.body as { files?: unknown };
+    const rawFiles = typeof body.files === 'object' && body.files !== null
+      ? body.files as Record<string, unknown>
+      : wizard.files;
+
+    const sanitizedFiles: Record<string, string> = {};
+    for (const [name, content] of Object.entries(rawFiles)) {
+      if (typeof name !== 'string' || typeof content !== 'string') continue;
+      if (!/^[A-Z][A-Z0-9_.-]*\.md$/i.test(name)) continue;
+      sanitizedFiles[name] = content;
+    }
+    if (!sanitizedFiles['AGENTS.md']) {
+      res.status(400).json({ error: 'AGENTS.md is required in files' });
+      return;
+    }
+
+    const agentId = wizard.agentId;
+    if (agentConfigs.has(agentId)) {
+      res.status(409).json({ error: `Agent '${agentId}' already exists` });
+      return;
+    }
+
+    const agentsBase = getAgentsBaseDir();
+    const agentDirAbs = path.join(agentsBase, agentId);
+    const workspaceDirAbs = path.join(agentDirAbs, 'workspace');
+    const resolvedWorkspace = path.resolve(workspaceDirAbs);
+
+    try {
+      fs.mkdirSync(workspaceDirAbs, { recursive: true });
+      for (const [filename, content] of Object.entries(sanitizedFiles)) {
+        const filePath = path.resolve(path.join(workspaceDirAbs, filename));
+        if (!filePath.startsWith(resolvedWorkspace + path.sep)) continue;
+        await fsp.writeFile(filePath, content, 'utf-8');
+      }
+    } catch (err) {
+      res.status(500).json({ error: `Failed to write workspace: ${(err as Error).message}` });
+      return;
+    }
+
+    let avatarFilename: string | undefined;
+    if (wizard.avatarData && wizard.avatarMime && AVATAR_MIME_EXT[wizard.avatarMime]) {
+      const ext = AVATAR_MIME_EXT[wizard.avatarMime];
+      avatarFilename = `avatar.${ext}`;
+      try {
+        await fsp.writeFile(path.join(agentDirAbs, avatarFilename), wizard.avatarData);
+      } catch (err) {
+        console.error(`[wizard] Failed to write avatar for '${agentId}': ${(err as Error).message}`);
+        avatarFilename = undefined;
+      }
+    }
+
+    const workspaceTilde = path.join('~', '.claude-gateway', 'agents', agentId, 'workspace');
+    const newAgent: Record<string, unknown> = {
+      id: agentId,
+      description: wizard.prompt.slice(0, 200).trim(),
+      workspace: workspaceTilde,
+      env: path.join('~', '.claude-gateway', 'agents', agentId, 'workspace', '.env'),
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+    };
+    if (wizard.signatureEmoji) newAgent.signatureEmoji = wizard.signatureEmoji;
+    if (avatarFilename) newAgent.avatar = avatarFilename;
+
+    try {
+      await writeAgentsToConfig(configPath, (agents) => agents.push(newAgent), agentId);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      res.status(code === 'DUPLICATE' ? 409 : 500).json({
+        error: code === 'DUPLICATE' ? `Agent '${agentId}' already exists` : `Failed to write config: ${(err as Error).message}`,
+      });
+      return;
+    }
+
+    wizardStore.update(wizardId, { step: 'confirmed' });
+    const avatarUrl = avatarFilename ? `/api/v1/agents/${agentId}/avatar` : null;
+    res.json({
+      agentId,
+      avatarUrl,
+      next: `channel via POST /api/v1/agents/wizard/${wizardId}/channel, or skip via POST /api/v1/agents/wizard/${wizardId}/complete`,
+    });
+  });
+
+  /**
+   * POST /api/v1/agents/wizard/:wizardId/channel
+   * Verify bot token and generate pairing code.
+   */
+  router.post('/v1/agents/wizard/:wizardId/channel', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+
+    const { wizardId } = req.params as { wizardId: string };
+    const wizard = wizardStore.get(wizardId);
+    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
+    if (wizard.step !== 'confirmed') { res.status(409).json({ error: `Expected step 'confirmed', got '${wizard.step}'` }); return; }
+
+    const body = req.body as { channel?: unknown; botToken?: unknown };
+    const channel = body.channel;
+    const botToken = typeof body.botToken === 'string' ? body.botToken.trim() : '';
+
+    if (channel !== 'telegram' && channel !== 'discord') {
+      res.status(400).json({ error: "channel must be 'telegram' or 'discord'" });
+      return;
+    }
+    if (!botToken) {
+      res.status(400).json({ error: 'botToken is required' });
+      return;
+    }
+
+    let botName: string;
+    if (channel === 'telegram') {
+      const username = await verifyTelegramToken(botToken);
+      if (!username) {
+        res.status(400).json({ error: 'Invalid Telegram bot token (getMe failed)' });
+        return;
+      }
+      botName = `@${username}`;
+    } else {
+      try {
+        const r = await fetch('https://discord.com/api/v10/users/@me', {
+          headers: { Authorization: `Bot ${botToken}` },
+        });
+        const json = await r.json() as { username?: string };
+        if (!r.ok || !json.username) {
+          res.status(400).json({ error: 'Invalid Discord bot token' });
+          return;
+        }
+        botName = `@${json.username}`;
+      } catch {
+        res.status(400).json({ error: 'Failed to verify Discord bot token' });
+        return;
+      }
+    }
+
+    const pairingCode = randomBytes(3).toString('hex').toUpperCase();
+    wizardStore.update(wizardId, {
+      step: 'pairing',
+      channel: channel as 'telegram' | 'discord',
+      botToken,
+      pairingCode,
+      updateOffset: 0,
+    });
+
+    res.json({
+      channel,
+      botName,
+      pairingCode,
+      instruction: `Send this code as a DM to ${botName} to complete pairing`,
+    });
+  });
+
+  /**
+   * POST /api/v1/agents/wizard/:wizardId/channel/verify
+   * Poll for pairing code. Client polls this endpoint until { success: true }.
+   */
+  router.post('/v1/agents/wizard/:wizardId/channel/verify', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+
+    const { wizardId } = req.params as { wizardId: string };
+    const wizard = wizardStore.get(wizardId);
+    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
+    if (wizard.step !== 'pairing') { res.status(409).json({ error: `Expected step 'pairing', got '${wizard.step}'` }); return; }
+
+    if (wizard.channel !== 'telegram') {
+      res.status(501).json({ error: 'Discord pairing verification via API is not yet supported' });
+      return;
+    }
+
+    const match = await checkTelegramCode(
+      wizard.botToken!,
+      wizard.pairingCode!,
+      wizard.updateOffset ?? 0,
+    );
+
+    if (!match) {
+      wizardStore.update(wizardId, { updateOffset: match === null ? wizard.updateOffset : 0 });
+      res.json({ success: false, pending: true });
+      return;
+    }
+
+    wizardStore.update(wizardId, { updateOffset: match.nextOffset });
+
+    try {
+      await writeAgentsToConfig(configPath, (agents) => {
+        const agent = (agents as Record<string, unknown>[]).find((a) => a.id === wizard.agentId);
+        if (agent) agent.telegram = { botToken: wizard.botToken };
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update config: ${(err as Error).message}` });
+      return;
+    }
+
+    const agentsBase = getAgentsBaseDir();
+    const telegramStateDir = path.join(agentsBase, wizard.agentId, 'workspace', '.telegram-state');
+    try {
+      fs.mkdirSync(telegramStateDir, { recursive: true });
+      const access = JSON.stringify(
+        { dmPolicy: 'allowlist', allowFrom: [match.senderId], groups: {}, pending: {} },
+        null, 2,
+      );
+      await fsp.writeFile(path.join(telegramStateDir, 'access.json'), access, { mode: 0o600 });
+    } catch (err) {
+      console.error(`[wizard] access.json write failed for '${wizard.agentId}': ${(err as Error).message}`);
+    }
+
+    try {
+      await fetch(`${TELEGRAM_API_BASE}/bot${wizard.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: match.chatId, text: "You're connected! Send me a message to get started." }),
+      });
+    } catch { /* non-fatal */ }
+
+    wizardStore.update(wizardId, { step: 'complete' });
+    res.json({ success: true, agentId: wizard.agentId });
+  });
+
+  /**
+   * POST /api/v1/agents/wizard/:wizardId/complete
+   * Skip channel setup and finalize wizard.
+   */
+  router.post('/v1/agents/wizard/:wizardId/complete', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+
+    const { wizardId } = req.params as { wizardId: string };
+    const wizard = wizardStore.get(wizardId);
+    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
+    if (wizard.step === 'pending') {
+      res.status(409).json({ error: 'Must confirm workspace before completing wizard' });
+      return;
+    }
+
+    const agentId = wizard.agentId;
+    wizardStore.delete(wizardId);
+    res.json({ agentId });
   });
 
   /**
@@ -951,6 +1423,138 @@ export function createApiRouter(
         res.status(500).json({ error: 'Failed to set model' });
       }
     }
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Avatar endpoints
+  // ──────────────────────────────────────────────────────────────
+
+  /**
+   * PUT /api/v1/agents/:agentId/avatar
+   * Upload or replace the agent's avatar image. Requires write permission.
+   * Body: raw image binary (image/jpeg, image/png, image/webp, image/gif)
+   */
+  router.put('/v1/agents/:agentId/avatar', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const { agentId } = req.params as { agentId: string };
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
+      return;
+    }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    let buf: Buffer;
+    try {
+      buf = await readRawBody(req, res, AVATAR_MAX_BYTES);
+    } catch {
+      return;
+    }
+    if (!buf.length) { res.status(400).json({ error: 'No file body received' }); return; }
+    if (buf.length < 12) { res.status(400).json({ error: 'File too small to detect type' }); return; }
+
+    const mime = detectMimeFromMagic(buf.subarray(0, 12));
+    if (!mime || !AVATAR_MIME_EXT[mime]) {
+      res.status(415).json({ error: 'Unsupported image type. Allowed: jpeg, png, gif, webp' });
+      return;
+    }
+
+    const ext = AVATAR_MIME_EXT[mime];
+    const newFilename = `avatar.${ext}`;
+    const agentDirAbs = path.join(getAgentsBaseDir(), agentId);
+
+    // Remove old avatar file if extension differs
+    const currentAvatar = agentConfigs.get(agentId)?.avatar;
+    if (currentAvatar && currentAvatar !== newFilename) {
+      const oldPath = path.join(agentDirAbs, currentAvatar);
+      fsp.unlink(oldPath).catch(() => {});
+    }
+
+    try {
+      fs.mkdirSync(agentDirAbs, { recursive: true });
+      await fsp.writeFile(path.join(agentDirAbs, newFilename), buf);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to write avatar: ${(err as Error).message}` });
+      return;
+    }
+
+    try {
+      await writeAgentsToConfig(configPath, (agents) => {
+        const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+        if (agent) agent.avatar = newFilename;
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update config: ${(err as Error).message}` });
+      return;
+    }
+
+    res.json({ avatarUrl: `/api/v1/agents/${agentId}/avatar` });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/avatar
+   * Remove the agent's avatar. Requires write permission.
+   */
+  router.delete('/v1/agents/:agentId/avatar', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const { agentId } = req.params as { agentId: string };
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: 'Write permission required' });
+      return;
+    }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+    const agentCfg = agentConfigs.get(agentId);
+    if (!agentCfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    if (agentCfg.avatar) {
+      const avatarPath = path.join(getAgentsBaseDir(), agentId, agentCfg.avatar);
+      fsp.unlink(avatarPath).catch(() => {});
+    }
+
+    try {
+      await writeAgentsToConfig(configPath, (agents) => {
+        const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+        if (agent) delete (agent as Record<string, unknown>).avatar;
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update config: ${(err as Error).message}` });
+      return;
+    }
+
+    res.status(204).send();
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/avatar
+   * Serve the agent's avatar image.
+   */
+  router.get('/v1/agents/:agentId/avatar', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const { agentId } = req.params as { agentId: string };
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const agentCfg = agentConfigs.get(agentId);
+    if (!agentCfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    if (!agentCfg.avatar) { res.status(404).json({ error: 'No avatar set for this agent' }); return; }
+
+    const avatarPath = path.resolve(path.join(getAgentsBaseDir(), agentId, agentCfg.avatar));
+    const agentDirResolved = path.resolve(path.join(getAgentsBaseDir(), agentId));
+    if (!avatarPath.startsWith(agentDirResolved + path.sep)) {
+      res.status(400).json({ error: 'Invalid avatar path' });
+      return;
+    }
+    if (!fs.existsSync(avatarPath)) { res.status(404).json({ error: 'Avatar file not found' }); return; }
+
+    const ext = path.extname(avatarPath).slice(1).toLowerCase();
+    const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+    const contentType = mimeMap[ext] ?? 'application/octet-stream';
+
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(avatarPath);
   });
 
   // ──────────────────────────────────────────────────────────────

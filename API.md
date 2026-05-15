@@ -303,6 +303,229 @@ curl -X PATCH \
 
 ---
 
+### PUT /api/v1/agents/:agentId/avatar
+
+Upload or replace an agent's avatar image. Requires **write** access to the agent.
+
+**Request:** raw image binary as the request body.
+
+| Constraint | Value |
+|------------|-------|
+| Allowed types | `image/jpeg`, `image/png`, `image/webp`, `image/gif` |
+| Max size | 5 MB |
+| Type detection | Magic bytes (ignores Content-Type header) |
+
+```bash
+curl -X PUT \
+  -H "X-Api-Key: write-key" \
+  --data-binary @avatar.png \
+  http://localhost:10850/api/v1/agents/alfred/avatar | jq
+```
+
+```json
+{ "avatarUrl": "/api/v1/agents/alfred/avatar" }
+```
+
+The file is written to `~/.claude-gateway/agents/{agentId}/avatar.{ext}` and the `avatar` field in `config.json` is updated. If an old avatar exists with a different extension, it is removed.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Empty body or file too small |
+| 403 | Write permission required |
+| 413 | File exceeds 5 MB |
+| 415 | Unrecognised image format |
+
+---
+
+### DELETE /api/v1/agents/:agentId/avatar
+
+Remove an agent's avatar. Requires **write** access. Returns `204 No Content` on success.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: write-key" \
+  http://localhost:10850/api/v1/agents/alfred/avatar
+```
+
+---
+
+### GET /api/v1/agents/:agentId/avatar
+
+Serve the agent's avatar image. Requires read access to the agent.
+
+- `Cache-Control: private, max-age=3600`
+- Returns the raw image bytes with the correct `Content-Type`
+- Returns `404` if no avatar has been set or the file is missing
+
+```bash
+curl -H "X-Api-Key: my-key" \
+  http://localhost:10850/api/v1/agents/alfred/avatar -o avatar.png
+```
+
+---
+
+### Wizard API — multi-step agent creation
+
+The Wizard API mirrors the interactive `make create-agent` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL; nothing is written to disk until the `/confirm` step.
+
+**State machine:**
+
+```
+start → (optional avatar upload) → confirm → (optional channel) → (verify) → complete
+```
+
+---
+
+#### POST /api/v1/agents/wizard/start
+
+**Auth:** admin key.
+
+Calls Claude to generate workspace markdown files based on your prompt. Returns a `wizardId` for subsequent steps.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Agent ID — pattern `[a-z][a-z0-9_-]{1,31}` |
+| `prompt` | Yes | Natural-language description of the agent |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "cryptobot", "prompt": "A helpful assistant that specialises in crypto analysis, speaks Thai..."}' \
+  http://localhost:10850/api/v1/agents/wizard/start | jq
+```
+
+```json
+{
+  "wizardId": "550e8400-e29b-41d4-a716-446655440000",
+  "agentId": "cryptobot",
+  "files": {
+    "AGENTS.md": "# Agent: Cryptobot\n\n...",
+    "SOUL.md": "...",
+    "USER.md": "...",
+    "MEMORY.md": ""
+  },
+  "expiresAt": "2026-05-15T09:03:00Z"
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Invalid `id` format or missing `prompt` |
+| 403 | Not an admin key |
+| 409 | Agent or wizard already exists for this ID |
+| 500 | Claude generation failed |
+
+---
+
+#### PUT /api/v1/agents/wizard/:wizardId/avatar
+
+**Auth:** admin key. Optional step before `/confirm`.
+
+Upload an avatar for the agent being created. The image is held in memory and written to disk during `/confirm`.
+
+**Request:** raw image binary (same constraints as the regular avatar upload — 5 MB max, jpeg/png/webp/gif).
+
+```json
+{ "preview": true }
+```
+
+---
+
+#### POST /api/v1/agents/wizard/:wizardId/confirm
+
+**Auth:** admin key.
+
+Write workspace files and avatar to disk, add the agent to `config.json`, and trigger a hot-reload so the agent starts automatically.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `files` | No | Map of filename → content. If omitted, the files generated in `/start` are used. Must include `AGENTS.md`. |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"files": {"AGENTS.md": "# Agent: Cryptobot\n\n...", "SOUL.md": "..."}}' \
+  http://localhost:10850/api/v1/agents/wizard/550e8400.../confirm | jq
+```
+
+```json
+{
+  "agentId": "cryptobot",
+  "avatarUrl": "/api/v1/agents/cryptobot/avatar",
+  "next": "channel via POST /api/v1/agents/wizard/.../channel, or skip via POST .../complete"
+}
+```
+
+---
+
+#### POST /api/v1/agents/wizard/:wizardId/channel
+
+**Auth:** admin key. Optional step after `/confirm`.
+
+Verify a Telegram or Discord bot token and generate a 6-character pairing code that the user must DM to the bot.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `channel` | Yes | `"telegram"` or `"discord"` |
+| `botToken` | Yes | Bot token from BotFather / Discord Developer Portal |
+
+```json
+{
+  "channel": "telegram",
+  "botName": "@my_crypto_bot",
+  "pairingCode": "A3F9C1",
+  "instruction": "Send this code as a DM to @my_crypto_bot to complete pairing"
+}
+```
+
+---
+
+#### POST /api/v1/agents/wizard/:wizardId/channel/verify
+
+**Auth:** admin key.
+
+Poll for pairing confirmation. The client should call this endpoint repeatedly until `success: true`. Each call does a non-blocking Telegram `getUpdates` check for the pairing code.
+
+On success, the bot token is written to `config.json` and `access.json` is created so the DM sender is in the allowlist. A welcome message is sent automatically.
+
+> **Note:** Discord pairing verification via this endpoint is not yet supported (`501`).
+
+```json
+{ "success": true, "agentId": "cryptobot" }
+```
+
+or while waiting:
+
+```json
+{ "success": false, "pending": true }
+```
+
+---
+
+#### POST /api/v1/agents/wizard/:wizardId/complete
+
+**Auth:** admin key.
+
+Skip channel setup and finalise the wizard. Cleans up wizard state.
+
+```json
+{ "agentId": "cryptobot" }
+```
+
+---
+
 ### DELETE /api/v1/agents/:agentId
 
 Remove an agent from `config.json` and stop the running process. Requires admin key. Does **not** delete the workspace directory.
