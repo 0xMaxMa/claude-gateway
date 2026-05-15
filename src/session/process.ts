@@ -112,7 +112,7 @@ export class SessionProcess extends EventEmitter {
    */
   private setupRestartWatcher(): void {
     if (this.restartWatcher) return;
-    this.restartWatcher = chokidar.watch(this.restartSignalPath, { ignoreInitial: true });
+    this.restartWatcher = chokidar.watch(this.restartSignalPath, { ignoreInitial: true, persistent: false });
     this.restartWatcher.on('add', () => {
       // Read signal file content before deleting — may contain a notify payload
       let notifyPayload: { chat_id: string; text: string } | null = null;
