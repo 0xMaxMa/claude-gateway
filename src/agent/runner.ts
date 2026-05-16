@@ -172,15 +172,6 @@ export class AgentRunner extends EventEmitter {
    * Each payload is routed to the appropriate SessionProcess by chat_id.
    */
   private async startCallbackServer(): Promise<void> {
-    this.callbackPort = await new Promise<number>((resolve, reject) => {
-      const srv = net.createServer();
-      srv.listen(0, '127.0.0.1', () => {
-        const addr = srv.address() as net.AddressInfo;
-        srv.close(() => resolve(addr.port));
-      });
-      srv.on('error', reject);
-    });
-
     this.callbackServer = http.createServer((req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405);
@@ -320,7 +311,14 @@ export class AgentRunner extends EventEmitter {
       });
     });
 
-    this.callbackServer.listen(this.callbackPort, '127.0.0.1');
+    // listen(0) lets the OS assign a free port atomically — no race window between allocate and bind
+    this.callbackPort = await new Promise<number>((resolve, reject) => {
+      const server = this.callbackServer!;
+      server.listen(0, '127.0.0.1', () => {
+        resolve((server.address() as import('net').AddressInfo).port);
+      });
+      server.on('error', reject);
+    });
     this.logger.info('Channel callback server listening', { port: this.callbackPort });
   }
 
