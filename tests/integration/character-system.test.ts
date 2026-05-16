@@ -105,8 +105,8 @@ describe('Character System Integration', () => {
       });
 
       try {
-        // Modify SOUL.md after a short delay
-        await new Promise((r) => setTimeout(r, 50));
+        // Wait for chokidar to finish its initial scan before writing
+        await handle.ready;
         fs.writeFileSync(path.join(workspace, 'SOUL.md'), '# Soul\nUpdated personality.', 'utf-8');
 
         // Wait for callback (debounce is 300ms; allow extra headroom under load)

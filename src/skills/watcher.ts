@@ -19,7 +19,7 @@ export function watchSkills(opts: SkillWatcherOptions): WatchHandle {
   const validDirs = opts.dirs.filter(Boolean);
 
   if (validDirs.length === 0) {
-    return { close: () => {} };
+    return { close: () => {}, ready: Promise.resolve() };
   }
 
   // Watch for SKILL.md files in skill subdirectories (depth 2)

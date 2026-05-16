@@ -54,6 +54,7 @@ export interface AgentStats {
 
 export interface WatchHandle {
   close(): void;
+  ready: Promise<void>;
 }
 
 export interface ApiKey {

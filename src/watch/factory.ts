@@ -18,6 +18,8 @@ export interface WatcherOptions {
 
 export interface WatchHandle {
   close(): Promise<void> | void;
+  /** Resolves when chokidar has finished its initial scan and is ready to detect changes. */
+  ready: Promise<void>;
 }
 
 /**
@@ -39,7 +41,11 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
     debounceTimer = setTimeout(opts.onChange, opts.debounceMs);
   };
 
+  let resolveReady!: () => void;
+  const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+
   watcher
+    .on('ready', resolveReady)
     .on('add', (filePath: string) => {
       if (opts.onAddSync) opts.onAddSync(filePath);
       debounced();
@@ -48,6 +54,7 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
     .on('unlink', debounced);
 
   return {
+    ready,
     async close() {
       if (debounceTimer) {
         clearTimeout(debounceTimer);
