@@ -7,7 +7,7 @@ import * as path from 'path';
 import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent } from '../types';
 import { createLogger } from '../logger';
 import { SessionProcess } from '../session/process';
-import { SessionStore } from '../session/store';
+import { SessionStore, SessionNotInIndexError } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
@@ -1915,21 +1915,24 @@ export class AgentRunner extends EventEmitter {
     if (updates.sessionName) {
       const internalChatId = `api-${chatId}`;
       // Ensure session exists in the file index (may be missing for older sessions stored only in SQLite)
-      await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatId, sessionId);
+      await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatId, sessionId).catch((err: unknown) => {
+        this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
+      });
       await this.sessionStore.updateSessionMeta(this.agentConfig.id, internalChatId, sessionId, { name: updates.sessionName }, 'api');
     }
     return { sessionId, ...(updates.sessionName ? { sessionName: updates.sessionName } : {}) };
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
-    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionId, 'api').catch((err: unknown) => {
-      // If session is not in the file index (legacy session stored only in SQLite), treat as already deleted
-      const msg = (err as Error).message ?? '';
-      if (msg.includes('not found in index') || msg.includes('No session index found')) return;
+    const internalChatId = `api-${chatId}`;
+    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, internalChatId, sessionId, 'api').catch((err: unknown) => {
+      // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
+      if (err instanceof SessionNotInIndexError) return;
       throw err;
     });
-    // Also purge from SQLite so the session no longer appears in listSessions()
-    this.historyDb.clearSession(`api-${chatId}`, sessionId);
+    // Purge from SQLite so the session no longer appears in listSessions()
+    const mediaPaths = this.historyDb.clearSession(internalChatId, sessionId);
+    MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
   }
 
   /**

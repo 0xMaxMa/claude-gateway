@@ -4,6 +4,13 @@ import { randomUUID } from 'crypto';
 import PQueue from 'p-queue';
 import { Message, SessionIndex, SessionMeta } from '../types';
 
+export class SessionNotInIndexError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionNotInIndexError';
+  }
+}
+
 export class SessionStore {
   private readonly agentsBaseDir: string;
   private readonly queues = new Map<string, PQueue>();
@@ -355,7 +362,7 @@ export class SessionStore {
     await queue.add(async () => {
       const index = await this.loadIndex(agentId, chatId, channel);
       if (!index) {
-        throw new Error(`No session index found for chat ${chatId}`);
+        throw new SessionNotInIndexError(`No session index found for chat ${chatId}`);
       }
       if (index.sessions.length <= 1) {
         throw new Error(`Cannot delete the last session for chat ${chatId}`);
@@ -363,7 +370,7 @@ export class SessionStore {
 
       const sessionIdx = index.sessions.findIndex((s) => s.id === sessionId);
       if (sessionIdx === -1) {
-        throw new Error(`Session ${sessionId} not found in index for chat ${chatId}`);
+        throw new SessionNotInIndexError(`Session ${sessionId} not found in index for chat ${chatId}`);
       }
 
       // Remove from index

@@ -15,6 +15,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
+import { HistoryDB } from '../../src/history/db';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -501,6 +502,110 @@ describe('Agent HTTP API integration (planning-05)', () => {
       .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
 
     expect(res.status).toBe(404);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-DEL-01: Deleted session does not reappear in admin session list ────
+  it('I-DEL-01: Deleted API session is purged from SQLite and does not reappear', async () => {
+    const agentsBaseDir = createTempDir('del-01-agents-');
+    const ws = path.join(agentsBaseDir, 'alfred', 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    for (const [name, content] of Object.entries({
+      'AGENTS.md': '# Agent\nYou are a test assistant.',
+      'SOUL.md': '# Soul\n', 'USER.md': '# User\n',
+      'HEARTBEAT.md': '# Heartbeat\n', 'MEMORY.md': '# Memory\n',
+    })) { fs.writeFileSync(path.join(ws, name), content, 'utf-8'); }
+
+    const logDir = createTempDir('del-01-log-');
+    const cfg = makeAgentConfig('alfred', ws);
+    const gatewayCfg: GatewayConfig = {
+      gateway: { logDir, timezone: 'UTC', api: { keys: [{ key: API_KEY_ADMIN, description: 'admin', agents: '*' }] } },
+      agents: [],
+    };
+
+    const runner = new AgentRunner(cfg, gatewayCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+
+    const agents = new Map([['alfred', runner]]);
+    const configs = new Map([['alfred', cfg]]);
+    const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
+    await router.start(0);
+
+    const chatId = 'del-test-chat';
+    const sessionId = 'del-test-session-01';
+
+    // Seed a message directly into SQLite (simulates a session that sent messages)
+    const agentDir = path.join(agentsBaseDir, 'alfred');
+    const db = HistoryDB.forDir(agentDir, 'alfred');
+    db.insertMessage({ chatId: `api-${chatId}`, sessionId, source: 'api', role: 'user', content: 'hello', ts: Date.now() });
+
+    // Seed the session into the file index so DELETE can find it
+    const store = new SessionStore(agentsBaseDir);
+    await store.ensureApiSession('alfred', `api-${chatId}`, sessionId);
+
+    // DELETE the session
+    const deleteRes = await supertest(router.getApp())
+      .delete(`/api/v1/agents/alfred/sessions/${sessionId}?chat_id=${chatId}`)
+      .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
+    expect(deleteRes.status).toBe(204);
+
+    // Session must no longer appear in SQLite (the source of reappearance)
+    const sessions = db.listSessions();
+    const stillPresent = sessions.some((s) => s.sessionId === sessionId);
+    expect(stillPresent).toBe(false);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-DEL-02: Legacy session (SQLite-only) deleted without error ──────────
+  it('I-DEL-02: Legacy session with no file index entry is deleted without error', async () => {
+    const agentsBaseDir = createTempDir('del-02-agents-');
+    const ws = path.join(agentsBaseDir, 'alfred', 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    for (const [name, content] of Object.entries({
+      'AGENTS.md': '# Agent\nYou are a test assistant.',
+      'SOUL.md': '# Soul\n', 'USER.md': '# User\n',
+      'HEARTBEAT.md': '# Heartbeat\n', 'MEMORY.md': '# Memory\n',
+    })) { fs.writeFileSync(path.join(ws, name), content, 'utf-8'); }
+
+    const logDir = createTempDir('del-02-log-');
+    const cfg = makeAgentConfig('alfred', ws);
+    const gatewayCfg: GatewayConfig = {
+      gateway: { logDir, timezone: 'UTC', api: { keys: [{ key: API_KEY_ADMIN, description: 'admin', agents: '*' }] } },
+      agents: [],
+    };
+
+    const runner = new AgentRunner(cfg, gatewayCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+
+    const agents = new Map([['alfred', runner]]);
+    const configs = new Map([['alfred', cfg]]);
+    const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
+    await router.start(0);
+
+    const chatId = 'legacy-chat';
+    const legacySessionId = 'legacy-session-no-index';
+
+    // Seed a message into SQLite WITHOUT creating a file index entry (legacy session)
+    const agentDir = path.join(agentsBaseDir, 'alfred');
+    const db = HistoryDB.forDir(agentDir, 'alfred');
+    db.insertMessage({ chatId: `api-${chatId}`, sessionId: legacySessionId, source: 'api', role: 'user', content: 'legacy msg', ts: Date.now() });
+
+    // DELETE a session that has no file index entry — must return 204, not 500
+    const deleteRes = await supertest(router.getApp())
+      .delete(`/api/v1/agents/alfred/sessions/${legacySessionId}?chat_id=${chatId}`)
+      .set('Authorization', `Bearer ${API_KEY_ADMIN}`);
+    expect(deleteRes.status).toBe(204);
+
+    // Session must also be gone from SQLite
+    const sessions = db.listSessions();
+    const stillPresent = sessions.some((s) => s.sessionId === legacySessionId);
+    expect(stillPresent).toBe(false);
 
     await router.stop();
     await runner.stop();
