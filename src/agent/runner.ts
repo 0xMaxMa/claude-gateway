@@ -1930,6 +1930,8 @@ export class AgentRunner extends EventEmitter {
       if (msg.includes('not found in index') || msg.includes('No session index found')) return;
       throw err;
     });
+    // Also purge from SQLite so the session no longer appears in listSessions()
+    this.historyDb.clearSession(`api-${chatId}`, sessionId);
   }
 
   /**
