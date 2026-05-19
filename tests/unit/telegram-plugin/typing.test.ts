@@ -821,6 +821,83 @@ describe('createWorkingStateManager', () => {
       const forwardCalls = bot.sendMessage.mock.calls.filter(c => c[0] === CHAT_ID && c[1] === shortText)
       expect(forwardCalls).toHaveLength(1)
     })
+
+    it('U-TY-11b: sends delivery-failure warning when sendMessage throws during auto-forward', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      // First call (the actual forward) throws; second call (the warning) succeeds
+      bot.sendMessage
+        .mockRejectedValueOnce(new Error('network error'))
+        .mockResolvedValue({ message_id: 200 })
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'Hello from agent', format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      // Warning message must be sent to the same chatId
+      const warnCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
+      )
+      expect(warnCalls).toHaveLength(1)
+    })
+
+    it('U-TY-11c: stops sending chunks and warns after first chunk fails (multi-chunk delivery)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      // sendMessage: first forward chunk succeeds, second throws, warning succeeds
+      bot.sendMessage
+        .mockResolvedValueOnce({ message_id: 100 })   // first chunk OK
+        .mockRejectedValueOnce(new Error('rate limit')) // second chunk fails
+        .mockResolvedValue({ message_id: 200 })         // warning fallback
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+      mgr.start(CHAT_ID)
+
+      // Two chunks: each > half of limit so they won't merge
+      const chunk1 = 'A'.repeat(3000)
+      const chunk2 = 'B'.repeat(3000)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: `${chunk1}\n\n${chunk2}`, format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      // Only 2 sendMessage calls: chunk1 + warning (chunk2 was aborted)
+      const forwardCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).startsWith('A'),
+      )
+      expect(forwardCalls).toHaveLength(1)
+
+      const warnCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
+      )
+      expect(warnCalls).toHaveLength(1)
+    })
+
+    it('U-TY-11d: does NOT send delivery-failure warning when sendMessage succeeds', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'All good', format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      const warnCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
+      )
+      expect(warnCalls).toHaveLength(0)
+    })
   })
 
   describe('chunkText()', () => {

@@ -193,8 +193,20 @@ export function createWorkingStateManager(
         if (!alreadyReplied && forwardText) {
           const msgOpts = parseMode ? { parse_mode: parseMode } : {}
           const chunks = chunkText(forwardText, TELEGRAM_MAX_CHARS, parseMode === 'HTML')
+          let deliveryFailed = false
           for (const part of chunks) {
-            await botApi.sendMessage(chatId, part, msgOpts).catch(() => {})
+            try {
+              await botApi.sendMessage(chatId, part, msgOpts)
+            } catch {
+              deliveryFailed = true
+              break
+            }
+          }
+          if (deliveryFailed) {
+            await botApi.sendMessage(
+              chatId,
+              '⚠️ Claude responded but the message could not be delivered. Please try asking again.',
+            ).catch(() => {})
           }
         }
       } catch {}
