@@ -1,6 +1,6 @@
 {
   "name": "@0xmaxma/claude-gateway",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "Multi-agent gateway for Claude",
   "repository": {
     "type": "git",
