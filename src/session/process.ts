@@ -336,10 +336,22 @@ export class SessionProcess extends EventEmitter {
       source: this.source,
     });
 
-    const proc = spawn(claudeBin, allArgs, {
+    // app-agent: route through docker exec so claude runs inside the container
+    const isAppAgent = this.agentConfig.type === 'app-agent' && this.agentConfig.container;
+    const spawnBin = isAppAgent ? 'docker' : claudeBin;
+    const spawnArgs = isAppAgent
+      ? [
+          'exec', '--workdir', '/workspace', '-i',
+          this.agentConfig.container!,
+          this.agentConfig.claudeBin ?? claudeBin,
+          ...allArgs,
+        ]
+      : allArgs;
+
+    const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
-        CLAUDE_WORKSPACE: this.agentConfig.workspace,
+        CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
       },

@@ -36,6 +36,11 @@ import { ContextIsolationGuard } from './agent/context-isolation';
 import { createLogger } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
 import { AgentConfig, GatewayConfig } from './types';
+import { AppsRegistry } from './apps/registry';
+import { RegistryClient } from './apps/registry-client';
+import { AppInstaller } from './apps/installer';
+import { AgentManager } from './apps/agent-manager';
+import { SocketServer } from './apps/socket-server';
 
 function expandTilde(p: string): string {
   if (p === '~' || p.startsWith('~/')) {
@@ -424,10 +429,76 @@ async function main(): Promise<void> {
   // Print startup summary table
   printStartupTable(startupResults);
 
+  // ── App store components ─────────────────────────────────────────────────
+  const appsConfigPath = path.join(path.dirname(CONFIG_PATH), 'apps.json');
+  const appsRegistry = new AppsRegistry(appsConfigPath);
+  const registryClient = new RegistryClient();
+  const agentManager = new AgentManager(CONFIG_PATH, path.join(path.dirname(CONFIG_PATH), 'agents'));
+  const socketServer = new SocketServer();
+
+  // Callbacks that bridge installer events to the router (filled in after router is created)
+  const installerCallbacks = {
+    registerRoutes: (_appName: string, _ports: import('./apps/compose-generator').ComposePort[]) => {
+      // No-op until router is ready; router.loadProxyRoutes() handles startup restore
+    },
+    deregisterRoutes: (_appName: string) => {},
+    startSocket: (_socketPath: string, _socket: import('./apps/compose-generator').ComposeSocket, _scripts: Record<string, import('./apps/installer').ScriptConfig>) => {},
+    stopSockets: (_appName: string) => {},
+  };
+
+  const appInstaller = new AppInstaller(
+    appsRegistry,
+    registryClient,
+    installerCallbacks,
+    undefined,
+    undefined,
+    agentManager,
+  );
+
   // Start gateway router
-  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH);
+  const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
+
+  // Wire installer callbacks now that the router is available
+  installerCallbacks.registerRoutes = (appName, ports) => {
+    for (const port of ports) {
+      router.registerProxyRoute(appName, port.name, port.containerPort, port.type, port.rateLimit);
+    }
+  };
+  installerCallbacks.deregisterRoutes = (appName) => {
+    router.deregisterProxyRoutes(appName);
+  };
+  installerCallbacks.startSocket = (socketPath, socket, scripts) => {
+    const appName = path.basename(socketPath).split('-')[0] ?? 'unknown';
+    socketServer.start(socketPath, {
+      appName,
+      serviceName: socket.service,
+      appDir: path.dirname(socketPath),
+      scripts: Object.fromEntries(
+        Object.entries(scripts).map(([name, s]) => [
+          name,
+          {
+            path: s.path,
+            timeoutMs: parseInt(s.timeout, 10) * 1000,
+            args: s.args,
+          },
+        ]),
+      ),
+    });
+  };
+  installerCallbacks.stopSockets = (appName) => {
+    socketServer.stopApp(appName);
+  };
+
+  // Restore proxy routes and agent entries for apps that were running before restart
+  try {
+    await router.loadProxyRoutes(appsRegistry);
+    await agentManager.reconcileAgents(appsRegistry);
+    globalLogger.info('App store: proxy routes and agent entries restored');
+  } catch (err) {
+    globalLogger.warn('App store: startup restore failed (non-fatal)', { error: (err as Error).message });
+  }
 
   // ── Config hot-reload watcher ──────────────────────────────────────────────
   const configWatcher = new ConfigWatcher(CONFIG_PATH, config, globalLogger);
@@ -535,6 +606,7 @@ async function main(): Promise<void> {
 
     cronManager.stop();
     configWatcher.stop();
+    socketServer.stopAll();
 
     await router.stop();
 

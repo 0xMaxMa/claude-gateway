@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import * as http from 'node:http';
 import { Server } from 'http';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
@@ -10,9 +11,59 @@ import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
+import { AppsRegistry } from '../apps/registry';
+import { AppInstaller } from '../apps/installer';
+import { RegistryClient } from '../apps/registry-client';
+import { createAppsRouter } from './apps-router';
+import { ComposePort } from '../apps/compose-generator';
+
+// ─── Proxy types ──────────────────────────────────────────────────────────────
+
+interface ProxyRoute {
+  port: number;
+  type: 'api' | 'web';
+  rateLimit: number;
+}
+
+interface RateBucket {
+  tokens: number;
+  lastRefill: number;
+}
+
+/** Simple token-bucket rate limiter keyed by "appName:portName". */
+class RateLimiter {
+  private readonly buckets = new Map<string, RateBucket>();
+
+  allow(key: string, maxPerSecond: number): boolean {
+    const now = Date.now();
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = { tokens: maxPerSecond, lastRefill: now };
+    }
+    const elapsed = (now - bucket.lastRefill) / 1000;
+    bucket.tokens = Math.min(maxPerSecond, bucket.tokens + elapsed * maxPerSecond);
+    bucket.lastRefill = now;
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      this.buckets.set(key, bucket);
+      return true;
+    }
+    this.buckets.set(key, bucket);
+    return false;
+  }
+
+  delete(key: string): void {
+    this.buckets.delete(key);
+  }
+}
 
 export class GatewayRouter {
   private readonly agents: Map<string, AgentRunner>;
+
+  // ─── App proxy ──────────────────────────────────────────────────────────
+  /** "appName:portName" → ProxyRoute */
+  private readonly routeMap = new Map<string, ProxyRoute>();
+  private readonly rateLimiter = new RateLimiter();
   private readonly configs: Map<string, AgentConfig>;
   private readonly app: express.Application;
   private server: Server | null = null;
@@ -42,6 +93,11 @@ export class GatewayRouter {
   /** Path to config.json for agent CRUD operations */
   private readonly configPath?: string;
 
+  /** Optional app store components */
+  private readonly appsRegistry?: AppsRegistry;
+  private readonly appInstaller?: AppInstaller;
+  private readonly appRegistryClient?: RegistryClient;
+
   constructor(
     agents: Map<string, AgentRunner>,
     configs: Map<string, AgentConfig>,
@@ -49,12 +105,18 @@ export class GatewayRouter {
     gatewayConfig?: GatewayConfig,
     cronManager?: CronManager,
     configPath?: string,
+    appsRegistry?: AppsRegistry,
+    appInstaller?: AppInstaller,
+    appRegistryClient?: RegistryClient,
   ) {
     this.agents = agents;
     this.configs = configs;
     this.gatewayConfig = gatewayConfig;
     this.cronManager = cronManager;
     this.configPath = configPath;
+    this.appsRegistry = appsRegistry;
+    this.appInstaller = appInstaller;
+    this.appRegistryClient = appRegistryClient;
     this.app = express();
 
     // Initialise counters for all known agents
@@ -131,6 +193,66 @@ export class GatewayRouter {
       this.app.use('/api', cronRouter);
     }
 
+    // Mount apps router (admin routes for installing/managing apps)
+    if (
+      this.appsRegistry &&
+      this.appInstaller &&
+      this.appRegistryClient &&
+      this.gatewayConfig?.gateway?.api?.keys?.length
+    ) {
+      const appsRouter = createAppsRouter(
+        this.appsRegistry,
+        this.appInstaller,
+        this.appRegistryClient,
+        this.gatewayConfig.gateway.api.keys,
+      );
+      this.app.use('/api', appsRouter);
+    }
+
+    // Reverse proxy: /app/:name/:portName/* → http://127.0.0.1:<port>/*
+    // This must be registered AFTER API routes to avoid conflicts.
+    this.app.use('/app/:name/:portName', (req: Request, res: Response) => {
+      const key = `${req.params.name}:${req.params.portName}`;
+      const route = this.routeMap.get(key);
+      if (!route) {
+        res.status(404).json({ error: 'App or port not found' });
+        return;
+      }
+
+      // Rate limiting
+      if (!this.rateLimiter.allow(key, route.rateLimit)) {
+        res.status(429).json({ error: 'Rate limit exceeded' });
+        return;
+      }
+
+      // Path forwarding: api strips prefix, web preserves full path
+      const targetPath = route.type === 'api'
+        ? (req.path || '/')
+        : (req.originalUrl.replace(
+            `/app/${req.params.name}/${req.params.portName}`,
+            '',
+          ) || '/');
+
+      const options: http.RequestOptions = {
+        hostname: '127.0.0.1',
+        port: route.port,
+        path: targetPath,
+        method: req.method,
+        headers: { ...req.headers, host: `127.0.0.1:${route.port}` },
+      };
+
+      const proxy = http.request(options, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+        proxyRes.pipe(res, { end: true });
+      });
+      proxy.on('error', (err: Error) => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: `App unavailable: ${err.message}` });
+        }
+      });
+      req.pipe(proxy, { end: true });
+    });
+
     // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', agents: [...this.agents.keys()] });
@@ -201,7 +323,9 @@ export class GatewayRouter {
 
   async start(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.server = this.app.listen(port, () => {
+      // Bind to 127.0.0.1 only — docker bridge network cannot reach it,
+      // preventing containers from calling the gateway API directly.
+      this.server = this.app.listen(port, '127.0.0.1', () => {
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -212,6 +336,40 @@ export class GatewayRouter {
         }
       });
     });
+  }
+
+  // ─── Proxy route management ──────────────────────────────────────────────
+
+  /** Register a proxy route for an installed app port. Hot-takes effect immediately. */
+  registerProxyRoute(
+    appName: string,
+    portName: string,
+    port: number,
+    type: 'api' | 'web',
+    rateLimit: number,
+  ): void {
+    this.routeMap.set(`${appName}:${portName}`, { port, type, rateLimit });
+  }
+
+  /** Remove all proxy routes for an app (called on uninstall). */
+  deregisterProxyRoutes(appName: string): void {
+    for (const key of this.routeMap.keys()) {
+      if (key.startsWith(`${appName}:`)) {
+        this.routeMap.delete(key);
+        this.rateLimiter.delete(key);
+      }
+    }
+  }
+
+  /** Re-register proxy routes from apps.json on gateway startup (crash-safe). */
+  async loadProxyRoutes(registry: AppsRegistry): Promise<void> {
+    const apps = await registry.list();
+    for (const app of apps) {
+      if (app.status !== 'running') continue;
+      for (const port of app.ports) {
+        this.registerProxyRoute(app.name, port.name, port.containerPort, port.type, port.rateLimit);
+      }
+    }
   }
 
   async stop(): Promise<void> {

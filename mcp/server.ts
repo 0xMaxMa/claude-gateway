@@ -18,6 +18,7 @@ import { CronModule } from './tools/cron/module';
 import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
 import { BrowserModule } from './tools/browser/module';
+import { AppsModule } from './tools/apps/module';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
 
 const ORIGIN_CHANNEL = process.env.GATEWAY_ORIGIN_CHANNEL ?? '';
@@ -35,6 +36,7 @@ const modules: AnyModule[] = [
   new SkillsModule(),
   new AgentModule(),
   new BrowserModule(),
+  new AppsModule(),
 ];
 
 // Build tool-to-module mapping for enabled modules
