@@ -55,6 +55,7 @@ export const STALLED_CHECK_INTERVAL_MS = 15_000  // check heartbeat freshness ev
 export const TYPING_INTERVAL_MS = 4_000    // sendChatAction every 4s (Telegram expires at 5s)
 export const STATUS_INTERVAL_MS = 10_000   // status update every 10s
 export const STATUS_INITIAL_DELAY_MS = 5_000  // first status message after 5s
+export const KEEPALIVE_INTERVAL_MS = 25_000  // typing keepalive every 25s, independent of stalled detection
 
 export const ERROR_MESSAGES: Record<string, string> = {
   PROCESS_FAILED: '❌ Claude stopped unexpectedly. Please try sending a new message.',
@@ -134,6 +135,10 @@ export function createWorkingStateManager(
     return `${typingDir}/${chatId}.status`
   }
 
+  function processingFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.processing`
+  }
+
   function msgIdFilePath(chatId: string): string {
     return `${typingDir}/${chatId}.msgid`
   }
@@ -209,6 +214,7 @@ export function createWorkingStateManager(
     fsApi.rmSync(heartbeatFilePath(chatId), { force: true })
     fsApi.rmSync(statusFilePath(chatId), { force: true })
     fsApi.rmSync(msgIdFilePath(chatId), { force: true })
+    fsApi.rmSync(processingFilePath(chatId), { force: true })
     if (state.statusMessageId !== null) {
       await botApi.deleteMessage(chatId, state.statusMessageId).catch(() => {})
     }
@@ -353,7 +359,17 @@ export function createWorkingStateManager(
           chatId,
           '⚠️ Claude has not responded in 5 minutes. It may be waiting for input or stuck. Please try sending a new message.',
         ).catch(() => {})
-        await stop(chatId)
+        const s = states.get(chatId)
+        // If session is still marked as processing (e.g., waiting for sub-agent), keep typing
+        // alive so the user sees activity, but stop status/stalled checks to reduce noise.
+        if (s && fsApi.existsSync(processingFilePath(chatId))) {
+          clearInterval(s.stalledInterval)
+          clearInterval(s.statusInterval)
+          if (s.initialStatusTimer) clearTimeout(s.initialStatusTimer)
+          s.initialStatusTimer = null
+        } else {
+          await stop(chatId)
+        }
       }
     }, STALLED_CHECK_INTERVAL_MS)
   }
