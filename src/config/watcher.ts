@@ -30,6 +30,7 @@ export class ConfigWatcher extends EventEmitter {
   on(event: 'changes', listener: (changes: ConfigChange[], newCfg: GatewayConfig, oldCfg: GatewayConfig) => void): this;
   on(event: 'agent.added', listener: (agent: AgentConfig) => void): this;
   on(event: 'channel.added', listener: (agentId: string, channel: string) => void): this;
+  on(event: 'channel.removed', listener: (agentId: string, channel: string) => void): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): this {
     return super.on(event, listener);
@@ -106,16 +107,33 @@ export class ConfigWatcher extends EventEmitter {
 
       this.emit('changes', fieldChanges, newConfig, oldConfig);
 
-      // Emit channel.added when a new channel token is added to an existing agent
+      // Emit channel.added / channel.removed when tokens change on existing agents
       for (const change of fieldChanges) {
-        if (!change.oldValue && change.newValue) {
+        const added = !change.oldValue && change.newValue;
+        const removed = change.oldValue && !change.newValue;
+        // Token replaced (revoke + recreate): stop old receiver, start new one
+        const replaced = change.oldValue && change.newValue && change.oldValue !== change.newValue;
+
+        if (added || replaced) {
           if (change.field === 'discord.botToken') {
+            if (replaced) this.emit('channel.removed', change.agentId, 'discord');
             this.logger.info('Discord channel added to agent', { agentId: change.agentId });
             this.emit('channel.added', change.agentId, 'discord');
           }
           if (change.field === 'telegram.botToken') {
+            if (replaced) this.emit('channel.removed', change.agentId, 'telegram');
             this.logger.info('Telegram channel added to agent', { agentId: change.agentId });
             this.emit('channel.added', change.agentId, 'telegram');
+          }
+        }
+        if (removed) {
+          if (change.field === 'discord.botToken') {
+            this.logger.info('Discord channel removed from agent', { agentId: change.agentId });
+            this.emit('channel.removed', change.agentId, 'discord');
+          }
+          if (change.field === 'telegram.botToken') {
+            this.logger.info('Telegram channel removed from agent', { agentId: change.agentId });
+            this.emit('channel.removed', change.agentId, 'telegram');
           }
         }
       }

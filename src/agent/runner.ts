@@ -81,7 +81,7 @@ function buildApiSystemNote(allowTools: boolean, imagePaths?: string[]): string 
 }
 
 export class AgentRunner extends EventEmitter {
-  private readonly agentConfig: AgentConfig;
+  private agentConfig: AgentConfig;
   private readonly gatewayConfig: GatewayConfig;
   private readonly logger: Logger;
   private stopping = false;
@@ -1269,8 +1269,36 @@ export class AgentRunner extends EventEmitter {
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
   }
 
+  updateAgentConfig(newConfig: AgentConfig): void {
+    this.agentConfig = newConfig;
+  }
+
+  getAgentConfig(): AgentConfig {
+    return { ...this.agentConfig };
+  }
+
+  startTelegramReceiver(): void {
+    if (this.receiver?.isRunning()) return;
+    if (!this.agentConfig.telegram?.botToken) return;
+    this.receiver = new TelegramReceiver(
+      this.agentConfig,
+      this.callbackPort,
+      this.gatewayConfig.gateway.logDir,
+    );
+    this.receiver.start();
+    this.logger.info('TelegramReceiver hot-started', { agentId: this.agentConfig.id });
+  }
+
+  stopTelegramReceiver(): void {
+    if (!this.receiver) return;
+    this.receiver.stop();
+    this.receiver = null;
+    this.logger.info('TelegramReceiver stopped', { agentId: this.agentConfig.id });
+  }
+
   startDiscordReceiver(): void {
     if (this.discordReceiver?.isRunning()) return;
+    if (!this.agentConfig.discord?.botToken) return;
     this.discordReceiver = new DiscordReceiver(
       this.agentConfig,
       this.callbackPort,
@@ -1278,6 +1306,13 @@ export class AgentRunner extends EventEmitter {
     );
     this.discordReceiver.start();
     this.logger.info('DiscordReceiver hot-started', { agentId: this.agentConfig.id });
+  }
+
+  stopDiscordReceiver(): void {
+    if (!this.discordReceiver) return;
+    this.discordReceiver.stop();
+    this.discordReceiver = null;
+    this.logger.info('DiscordReceiver stopped', { agentId: this.agentConfig.id });
   }
 
   async stop(): Promise<void> {

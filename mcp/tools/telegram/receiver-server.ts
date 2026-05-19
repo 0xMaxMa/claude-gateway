@@ -35,6 +35,7 @@ import { hasMarkdown, toTelegramHtml } from './pure'
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
+const AWAITING_OWNER_FILE = join(STATE_DIR, 'awaiting-owner')
 const ENV_FILE = join(STATE_DIR, '.env')
 
 // Load .env fallback when token not injected via env block (standalone mode).
@@ -114,7 +115,7 @@ type GroupPolicy = {
 }
 
 type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled'
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
@@ -232,7 +233,40 @@ function gate(ctx: Context): GateResult {
   const senderId = String(from.id)
   const chatType = ctx.chat?.type
 
+  // Owner init-pairing sentinel: first private message auto-approves sender as owner.
   if (chatType === 'private') {
+    try {
+      const stat = statSync(AWAITING_OWNER_FILE)
+      const age = Date.now() - stat.mtimeMs
+      if (age < 10 * 60 * 1000) {
+        // Sentinel is valid — approve this sender as owner
+        if (!access.allowFrom.includes(senderId)) access.allowFrom.push(senderId)
+        saveAccess(access)
+        rmSync(AWAITING_OWNER_FILE, { force: true })
+        // Write approved file so receiver sends confirmation message
+        mkdirSync(APPROVED_DIR, { recursive: true })
+        writeFileSync(join(APPROVED_DIR, senderId), String(ctx.chat!.id))
+        return { action: 'deliver', access }
+      } else {
+        rmSync(AWAITING_OWNER_FILE, { force: true })
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // Unexpected I/O error — deny to be safe rather than silently allowing
+        return { action: 'drop' }
+      }
+      // ENOENT — no sentinel, continue normal gate logic
+    }
+  }
+
+  if (chatType === 'private') {
+    if (access.dmPolicy === 'open') {
+      if (!access.allowFrom.includes(senderId)) {
+        access.allowFrom.push(senderId)
+        saveAccess(access)
+      }
+      return { action: 'deliver', access }
+    }
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
     if (access.dmPolicy === 'allowlist') return { action: 'drop' }
 
@@ -1592,7 +1626,7 @@ if (RECEIVER_MODE) {
         }
         if (err instanceof Error && err.message === 'Aborted delay') return
         process.stderr.write(`telegram channel (receiver): polling failed: ${err}\n`)
-        return
+        process.exit(1)
       }
     }
   })()
