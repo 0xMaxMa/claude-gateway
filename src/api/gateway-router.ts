@@ -353,11 +353,11 @@ export class GatewayRouter {
 
   /** Remove all proxy routes for an app (called on uninstall). */
   deregisterProxyRoutes(appName: string): void {
-    for (const key of this.routeMap.keys()) {
-      if (key.startsWith(`${appName}:`)) {
-        this.routeMap.delete(key);
-        this.rateLimiter.delete(key);
-      }
+    // Snapshot keys first — mutating a Map while iterating its live iterator is unsafe
+    const toDelete = [...this.routeMap.keys()].filter((k) => k.startsWith(`${appName}:`));
+    for (const key of toDelete) {
+      this.routeMap.delete(key);
+      this.rateLimiter.delete(key);
     }
   }
 

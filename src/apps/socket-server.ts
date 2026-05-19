@@ -60,8 +60,12 @@ export class SocketServer {
 
     netServer.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        // Stale socket — remove and retry
-        fs.unlinkSync(socketPath);
+        // Stale socket — remove and retry once
+        try { fs.unlinkSync(socketPath); } catch { /* already gone */ }
+        netServer.once('error', (retryErr: NodeJS.ErrnoException) => {
+          this.servers.delete(socketPath);
+          throw new Error(`Socket server failed after retry: ${retryErr.message}`);
+        });
         netServer.listen(socketPath);
       }
     });
@@ -149,13 +153,29 @@ export class SocketServer {
       }
     }
 
-    // Execute script via bash (script path is pre-validated at install time)
+    // Execute script via bash — re-resolve realpath at execute time to guard against symlink swaps
     const scriptAbsPath = path.resolve(config.appDir, scriptDef.path);
+    let realScriptPath: string;
     try {
-      const result = spawnSync('bash', [scriptAbsPath, ...positional], {
+      realScriptPath = fs.realpathSync(scriptAbsPath);
+    } catch {
+      this.send(res, 403, { error: 'Script not accessible' });
+      return;
+    }
+    if (!realScriptPath.startsWith(config.appDir + path.sep) && realScriptPath !== config.appDir) {
+      this.send(res, 403, { error: 'Script path escapes app directory' });
+      return;
+    }
+    // Minimal env — never expose host secrets to scripts
+    const scriptEnv = {
+      PATH: process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      HOME: process.env['HOME'] ?? '/root',
+    };
+    try {
+      const result = spawnSync('bash', [realScriptPath, ...positional], {
         encoding: 'utf-8',
         timeout: scriptDef.timeoutMs,
-        env: { ...process.env },
+        env: scriptEnv,
       });
 
       this.send(res, 200, {
@@ -174,11 +194,16 @@ export class SocketServer {
     provided: Record<string, unknown>,
     scriptDef: ScriptDefinition,
   ): string | null {
+    const MAX_ARG_LEN = 256;
     for (const argDef of scriptDef.args ?? []) {
       const val = provided[argDef.name];
       if (val === undefined) continue; // Optional args are OK
       if (typeof val !== 'string') {
         return `Argument "${argDef.name}" must be a string`;
+      }
+      // Cap value length before regex test to prevent ReDoS from catastrophic backtracking
+      if (val.length > MAX_ARG_LEN) {
+        return `Argument "${argDef.name}" exceeds maximum length of ${MAX_ARG_LEN}`;
       }
       if (argDef.pattern) {
         let re: RegExp;

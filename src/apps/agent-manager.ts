@@ -27,10 +27,25 @@ const DEFAULT_AGENTS_DIR = path.join(os.homedir(), '.claude-gateway', 'agents');
 // ─── AgentManager ────────────────────────────────────────────────────────────
 
 export class AgentManager {
+  /** Serialises concurrent config reads/writes within this process. */
+  private configLock: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly configPath: string = DEFAULT_CONFIG_PATH,
     private readonly agentsDir: string = DEFAULT_AGENTS_DIR,
   ) {}
+
+  private async withConfigLock<T>(fn: () => T): Promise<T> {
+    let release!: () => void;
+    const prev = this.configLock;
+    this.configLock = new Promise<void>((r) => { release = r; });
+    await prev;
+    try {
+      return fn();
+    } finally {
+      release();
+    }
+  }
 
   // ─── Public API ────────────────────────────────────────────────────────────
 
@@ -70,6 +85,7 @@ export class AgentManager {
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
+      security_opt: ['no-new-privileges'],
       volumes: [
         `${claudeBin}:${claudeBin}:ro`,
         `${nodeBin}:${nodeBin}:ro`,
@@ -91,7 +107,7 @@ export class AgentManager {
    * Create the agent workspace symlink and upsert the config.json entry.
    * Idempotent — safe to call multiple times (reconcile, reinstall).
    */
-  upsertAgent(entry: AppEntry): void {
+  async upsertAgent(entry: AppEntry): Promise<void> {
     if (!entry.agentDeclaration) return;
 
     const { name: agentName, path: agentRelPath } = entry.agentDeclaration;
@@ -107,7 +123,7 @@ export class AgentManager {
 
     const claudeBin = entry.agentPaths?.claudeBin ?? 'claude';
 
-    this.upsertConfigEntry(agentName, {
+    await this.upsertConfigEntry(agentName, {
       id: agentName,
       type: 'app-agent',
       description: `Agent for app ${entry.name}`,
@@ -126,31 +142,34 @@ export class AgentManager {
   /**
    * Remove the workspace symlink and the config.json entry for an app-agent.
    */
-  deleteAgent(entry: AppEntry): void {
+  async deleteAgent(entry: AppEntry): Promise<void> {
     if (!entry.agentDeclaration) return;
     const { name: agentName } = entry.agentDeclaration;
 
     const workspaceLink = path.join(this.agentsDir, agentName, 'workspace');
     fs.rmSync(workspaceLink, { force: true });
 
-    this.removeConfigEntry(agentName);
+    await this.removeConfigEntry(agentName);
   }
 
   /**
    * Idempotent reconcile — called at gateway startup to ensure all app-agents
    * that are running have their symlink + config.json entry in place.
+   * Returns a list of errors for apps that could not be reconciled (non-fatal).
    */
-  async reconcileAgents(registry: AppsRegistry): Promise<void> {
+  async reconcileAgents(registry: AppsRegistry): Promise<Array<{ app: string; error: string }>> {
     const apps = await registry.list();
+    const errors: Array<{ app: string; error: string }> = [];
     for (const app of apps) {
       if (app.agentDeclaration && app.status === 'running') {
         try {
-          this.upsertAgent(app);
-        } catch {
-          // Non-fatal — log in caller if needed
+          await this.upsertAgent(app);
+        } catch (err) {
+          errors.push({ app: app.name, error: (err as Error).message });
         }
       }
     }
+    return errors;
   }
 
   /**
@@ -178,12 +197,14 @@ export class AgentManager {
    * Return the agentName registered for a given appName, or null if none.
    * Used by the installer conflict check.
    */
-  findAgentByName(agentName: string): string | null {
-    const config = this.readConfig();
-    const found = config.agents.find(
-      (a) => a['id'] === agentName && a['type'] === 'app-agent',
-    );
-    return found ? (found['id'] as string) : null;
+  async findAgentByName(agentName: string): Promise<string | null> {
+    return this.withConfigLock(() => {
+      const config = this.readConfig();
+      const found = config.agents.find(
+        (a) => a['id'] === agentName && a['type'] === 'app-agent',
+      );
+      return found ? (found['id'] as string) : null;
+    });
   }
 
   // ─── Config I/O ────────────────────────────────────────────────────────────
@@ -206,20 +227,24 @@ export class AgentManager {
     fs.renameSync(tmp, this.configPath);
   }
 
-  private upsertConfigEntry(agentId: string, entry: Record<string, unknown>): void {
-    const config = this.readConfig();
-    const idx = config.agents.findIndex((a) => a['id'] === agentId);
-    if (idx >= 0) {
-      config.agents[idx] = entry;
-    } else {
-      config.agents.push(entry);
-    }
-    this.writeConfig(config);
+  private async upsertConfigEntry(agentId: string, entry: Record<string, unknown>): Promise<void> {
+    return this.withConfigLock(() => {
+      const config = this.readConfig();
+      const idx = config.agents.findIndex((a) => a['id'] === agentId);
+      if (idx >= 0) {
+        config.agents[idx] = entry;
+      } else {
+        config.agents.push(entry);
+      }
+      this.writeConfig(config);
+    });
   }
 
-  private removeConfigEntry(agentId: string): void {
-    const config = this.readConfig();
-    config.agents = config.agents.filter((a) => a['id'] !== agentId);
-    this.writeConfig(config);
+  private async removeConfigEntry(agentId: string): Promise<void> {
+    return this.withConfigLock(() => {
+      const config = this.readConfig();
+      config.agents = config.agents.filter((a) => a['id'] !== agentId);
+      this.writeConfig(config);
+    });
   }
 }

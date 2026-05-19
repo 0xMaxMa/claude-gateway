@@ -40,11 +40,13 @@ const DEFAULT_APPS_PATH = path.join(os.homedir(), '.claude-gateway', 'apps.json'
 
 /**
  * Persistent store for installed apps.
- * All mutations are atomic (tmp-file + rename) and serialised through a promise lock.
+ * All mutations are atomic (tmp-file + rename) and serialised through:
+ *   1. An in-process promise chain (fast path, single-process safety)
+ *   2. An advisory file lock (cross-process safety: O_EXCL on .lock file)
  */
 export class AppsRegistry {
   private readonly filePath: string;
-  private lock: Promise<void> = Promise.resolve();
+  private inProcessLock: Promise<void> = Promise.resolve();
 
   constructor(filePath = DEFAULT_APPS_PATH) {
     this.filePath = filePath;
@@ -53,14 +55,55 @@ export class AppsRegistry {
   // ─── Mutual exclusion ──────────────────────────────────────────────────────
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    // Layer 1: in-process serialisation
     let release!: () => void;
-    const prev = this.lock;
-    this.lock = new Promise<void>((r) => { release = r; });
+    const prev = this.inProcessLock;
+    this.inProcessLock = new Promise<void>((r) => { release = r; });
     await prev;
+    try {
+      // Layer 2: cross-process advisory file lock
+      return await this.withFileLock(fn);
+    } finally {
+      release();
+    }
+  }
+
+  private async withFileLock<T>(fn: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.filePath}.lock`;
+    const deadline = Date.now() + 5000;
+
+    // Ensure directory exists before trying to create lock file
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+
+    // Acquire lock via atomic O_EXCL file creation
+    while (true) {
+      try {
+        const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+        const pidBuf = Buffer.from(String(process.pid));
+        fs.writeSync(fd, pidBuf, 0, pidBuf.length);
+        fs.closeSync(fd);
+        break; // Lock acquired
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        if (Date.now() > deadline) throw new Error('Failed to acquire registry lock after 5s');
+        // Check for stale lock (holding process may have crashed)
+        try {
+          const holderPid = parseInt(fs.readFileSync(lockPath, 'utf-8'), 10);
+          if (!isNaN(holderPid) && holderPid !== process.pid) {
+            try { process.kill(holderPid, 0); } catch {
+              fs.unlinkSync(lockPath); // Stale — remove and retry immediately
+              continue;
+            }
+          }
+        } catch { /* Can't read lock file — retry */ }
+        await new Promise<void>((r) => setTimeout(r, 20));
+      }
+    }
+
     try {
       return await fn();
     } finally {
-      release();
+      try { fs.unlinkSync(lockPath); } catch { /* Already removed */ }
     }
   }
 

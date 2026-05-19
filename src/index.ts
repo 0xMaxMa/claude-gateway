@@ -494,7 +494,12 @@ async function main(): Promise<void> {
   // Restore proxy routes and agent entries for apps that were running before restart
   try {
     await router.loadProxyRoutes(appsRegistry);
-    await agentManager.reconcileAgents(appsRegistry);
+    const reconcileErrors = await agentManager.reconcileAgents(appsRegistry);
+    if (reconcileErrors.length > 0) {
+      for (const e of reconcileErrors) {
+        globalLogger.warn(`App store: reconcile failed for "${e.app}": ${e.error}`);
+      }
+    }
     globalLogger.info('App store: proxy routes and agent entries restored');
   } catch (err) {
     globalLogger.warn('App store: startup restore failed (non-fatal)', { error: (err as Error).message });

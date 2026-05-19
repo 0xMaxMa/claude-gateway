@@ -191,8 +191,18 @@ export function generateCompose(
 
   const namedVolumes = new Set<string>();
   const composeServices: Record<string, unknown> = {};
-  const cpu = appYaml.resources?.cpu ?? DEFAULT_CPU;
-  const memStr = appYaml.resources?.memory ?? DEFAULT_MEMORY;
+
+  // Defense-in-depth: re-validate resource limits even if parseAppYaml was skipped
+  if (appYaml.resources !== undefined) {
+    validateResources(appYaml.resources);
+  }
+  const cpu = Math.min(appYaml.resources?.cpu ?? DEFAULT_CPU, MAX_CPU);
+  const rawMem = appYaml.resources?.memory ?? DEFAULT_MEMORY;
+  const memMB = parseMemoryMB(rawMem);
+  if (memMB > MAX_MEMORY_MB) {
+    throw new Error(`resources.memory ${rawMem} exceeds maximum of 2G`);
+  }
+  const memStr = rawMem;
 
   // Two-pass: collect healthcheck presence for depends_on resolution
   const hasHealthcheck = new Set<string>();

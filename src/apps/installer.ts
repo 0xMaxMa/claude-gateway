@@ -77,6 +77,8 @@ const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
+  /** Tracks app names currently being installed to prevent concurrent installs of the same name. */
+  private readonly installingNames = new Set<string>();
 
   constructor(
     private readonly registry: AppsRegistry,
@@ -106,6 +108,11 @@ export class AppInstaller {
     // Run in background — no await
     void this.runInstall(job, options).catch((err: unknown) => {
       this.failJob(job, err instanceof Error ? err.message : String(err));
+    }).finally(() => {
+      // installingNames cleaned up inside runInstall on success;
+      // on error we may not know canonical name yet — clear any remnant
+      const tentative = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
+      this.installingNames.delete(tentative);
     });
 
     return jobId;
@@ -149,7 +156,7 @@ export class AppInstaller {
 
     // Remove agent symlink + config.json entry if this was an agent app
     if (this.agentManager) {
-      this.agentManager.deleteAgent(entry);
+      await this.agentManager.deleteAgent(entry);
     }
 
     // Remove app files (but not the dir itself if it's a symlink target)
@@ -183,6 +190,13 @@ export class AppInstaller {
   private async runInstall(job: JobState, options: InstallOptions): Promise<void> {
     job.status = 'running';
     job.updatedAt = Date.now();
+
+    // Temporary sentinel — replaced with canonical app name once app.yaml is parsed
+    const tentativeName = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
+    if (this.installingNames.has(tentativeName)) {
+      throw new Error(`An install for "${tentativeName}" is already in progress`);
+    }
+    this.installingNames.add(tentativeName);
 
     const { localPath } = options;
 
@@ -227,11 +241,13 @@ export class AppInstaller {
         );
       }
 
-      // git clone + checkout
+      // Shallow fetch of specific commit — avoids downloading full repo history
       this.log(job, `Cloning ${githubUrl}`);
-      fs.mkdirSync(this.appsDir, { recursive: true });
-      this.run(['git', 'clone', '--no-checkout', githubUrl, appDir]);
-      this.run(['git', 'checkout', commit], appDir);
+      fs.mkdirSync(appDir, { recursive: true });
+      this.run(['git', 'init'], appDir);
+      this.run(['git', 'remote', 'add', 'origin', githubUrl], appDir);
+      this.run(['git', 'fetch', '--depth', '1', 'origin', commit], appDir);
+      this.run(['git', 'checkout', 'FETCH_HEAD'], appDir);
       this.log(job, `Checked out commit ${commit.slice(0, 8)}`);
     }
 
@@ -243,10 +259,15 @@ export class AppInstaller {
     if (!APP_NAME_RE.test(appYaml.name)) {
       throw new Error(`Invalid app name in app.yaml: "${appYaml.name}"`);
     }
-    // Use name from app.yaml as canonical name
+    // Switch lock to canonical app name (atomic: add canonical before removing tentative)
     appName = appYaml.name;
+    if (this.installingNames.has(appName) && appName !== tentativeName) {
+      throw new Error(`An install for "${appName}" is already in progress`);
+    }
+    this.installingNames.add(appName);
+    this.installingNames.delete(tentativeName);
 
-    // Conflict check — app name
+    // Conflict check — app name (atomic with install lock held)
     const existing = await this.registry.get(appName);
     if (existing) {
       throw new Error(`App "${appName}" is already installed`);
@@ -257,9 +278,9 @@ export class AppInstaller {
     const composePath = path.join(appDir, 'docker-compose.yml');
     const generated = generateCompose(appYaml, appName, appDir, composePath);
 
-    // Conflict check — agent name (if app declares an agent)
+    // Conflict check — agent name (if app declares an agent), inside install lock
     if (generated.agentDeclaration && this.agentManager) {
-      const conflict = this.agentManager.findAgentByName(generated.agentDeclaration.name);
+      const conflict = await this.agentManager.findAgentByName(generated.agentDeclaration.name);
       if (conflict) {
         throw new Error(
           `Agent name "${generated.agentDeclaration.name}" is already registered — agent name conflict`,
@@ -295,7 +316,11 @@ export class AppInstaller {
     }
 
     const envPath = path.join(appDir, '.env');
-    fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
+    try {
+      fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
+    } catch (err) {
+      throw new Error(`Failed to write .env: ${(err as Error).message}`);
+    }
 
     // ── Create socket files ───────────────────────────────────────────────
     const SOCK_DIR = '/run/claude-gateway/apps';
@@ -306,7 +331,11 @@ export class AppInstaller {
       const sockPath = sock.hostSocketPath;
       // Remove stale socket file if it exists
       if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
-      this.callbacks.startSocket(sockPath, sock, sock.scripts);
+      try {
+        this.callbacks.startSocket(sockPath, sock, sock.scripts);
+      } catch (err) {
+        throw new Error(`Failed to start socket for service "${sock.service}": ${(err as Error).message}`);
+      }
       this.log(job, `Socket ready: ${path.basename(sockPath)}`);
     }
 
@@ -370,7 +399,7 @@ export class AppInstaller {
 
     // ── Create agent workspace symlink + config.json entry ───────────────
     if (generated.agentDeclaration && this.agentManager) {
-      this.agentManager.upsertAgent(entry);
+      await this.agentManager.upsertAgent(entry);
       this.log(job, `Agent "${generated.agentDeclaration.name}" registered`);
     }
 
@@ -394,6 +423,7 @@ export class AppInstaller {
     job.result = result;
     job.updatedAt = Date.now();
     this.log(job, `Install complete: ${JSON.stringify(proxyUrls)}`);
+    this.installingNames.delete(appName);
   }
 
   // ─── Update pipeline ──────────────────────────────────────────────────────
@@ -431,11 +461,13 @@ export class AppInstaller {
 
     const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${Date.now()}`);
     try {
-      // ── Clone + validate new version ─────────────────────────────────────
+      // ── Shallow fetch of specific commit into tmp dir ─────────────────────
       this.log(job, `Cloning ${app.repo}`);
       fs.mkdirSync(tmpDir, { recursive: true });
-      this.run(['git', 'clone', '--no-checkout', app.repo, tmpDir]);
-      this.run(['git', 'checkout', latest.commit], tmpDir);
+      this.run(['git', 'init'], tmpDir);
+      this.run(['git', 'remote', 'add', 'origin', app.repo], tmpDir);
+      this.run(['git', 'fetch', '--depth', '1', 'origin', latest.commit], tmpDir);
+      this.run(['git', 'checkout', 'FETCH_HEAD'], tmpDir);
 
       const yamlContent = fs.readFileSync(path.join(tmpDir, 'app.yaml'), 'utf-8');
       const appYaml = parseAppYaml(yamlContent, tmpDir);
@@ -509,7 +541,9 @@ export class AppInstaller {
             rateLimit: p.rateLimit,
           })));
           await this.registry.updateStatus(appName, 'running');
-        } catch { /* ignore secondary failure */ }
+        } catch (rollbackErr) {
+          this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
+        }
         fs.rmSync(tmpDir, { recursive: true, force: true });
         throw upErr;
       }
@@ -538,7 +572,7 @@ export class AppInstaller {
 
       // ── Re-create agent symlink + config.json entry ───────────────────────
       if (generated.agentDeclaration && this.agentManager) {
-        this.agentManager.upsertAgent(finalEntry);
+        await this.agentManager.upsertAgent(finalEntry);
         this.log(job, `Agent "${generated.agentDeclaration.name}" re-registered`);
       }
 

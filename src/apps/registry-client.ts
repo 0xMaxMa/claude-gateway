@@ -59,7 +59,8 @@ export class RegistryClient {
       return data;
     } catch (err) {
       if (this.cache) {
-        // Stale cache is better than nothing
+        // Stale cache is better than nothing — log so operators know registry is unreachable
+        console.warn(`[registry-client] fetch failed, using stale cache: ${(err as Error).message}`);
         return this.cache.data;
       }
       throw err;
