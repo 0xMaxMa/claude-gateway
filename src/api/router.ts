@@ -1173,7 +1173,7 @@ export function createApiRouter(
   router.get('/v1/agents/:agentId/telegram/pending', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const access = readTelegramAccess(agentId);
     const now = Date.now();
@@ -1190,7 +1190,7 @@ export function createApiRouter(
   router.post('/v1/agents/:agentId/telegram/approve', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no write access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const { code } = req.body as { code?: string };
     if (!code) { res.status(400).json({ error: 'code required' }); return; }
@@ -1213,7 +1213,7 @@ export function createApiRouter(
   router.post('/v1/agents/:agentId/telegram/deny', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no write access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const { code } = req.body as { code?: string };
     if (!code) { res.status(400).json({ error: 'code required' }); return; }
@@ -1231,7 +1231,7 @@ export function createApiRouter(
   router.post('/v1/agents/:agentId/telegram/init-pairing', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no write access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const stateDir = getTelegramStateDir(agentId);
     fs.mkdirSync(stateDir, { recursive: true });
@@ -1246,7 +1246,7 @@ export function createApiRouter(
   router.get('/v1/agents/:agentId/telegram/pairing-status', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const sentinelPath = path.join(getTelegramStateDir(agentId), 'awaiting-owner');
     let waiting = false;
@@ -1266,7 +1266,7 @@ export function createApiRouter(
   router.patch('/v1/agents/:agentId/telegram/policy', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no write access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const { dmPolicy } = req.body as { dmPolicy?: string };
     const valid = ['open', 'pairing', 'allowlist', 'disabled'];
@@ -1284,7 +1284,7 @@ export function createApiRouter(
   router.get('/v1/agents/:agentId/telegram/allowlist', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: `API key has no access to agent '${agentId}'` }); return; }
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const access = readTelegramAccess(agentId);
     res.json({ allowFrom: access.allowFrom });
