@@ -373,10 +373,8 @@ export function createWorkingStateManager(
         // status/stalled intervals and warn the user of the uncertainty.
         let isMidTurn = false
         try {
-          if (fsApi.existsSync(processingFilePath(chatId))) {
-            const mtime = fsApi.statSync(processingFilePath(chatId)).mtimeMs
-            isMidTurn = mtime >= startedAt
-          }
+          const mtime = fsApi.statSync(processingFilePath(chatId)).mtimeMs
+          isMidTurn = mtime >= startedAt
         } catch {}
 
         if (s && isMidTurn) {

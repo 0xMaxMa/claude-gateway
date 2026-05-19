@@ -617,7 +617,9 @@ export class SessionProcess extends EventEmitter {
           } else {
             fs.rmSync(processingPath, { force: true });
           }
-        } catch {}
+        } catch (err) {
+          this.logger.warn('Failed to write/delete .processing sentinel', { chatId: this.chatId, error: (err as Error).message });
+        }
       }
       if (!active && this._pendingRestart) {
         this.emit('deferredRestartReady');
