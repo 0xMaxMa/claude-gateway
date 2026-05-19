@@ -7,6 +7,12 @@ import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
+import {
+  CODING_TOOLS as SHARED_CODING_TOOLS,
+  TOOL_LABELS as SHARED_TOOL_LABELS,
+  extractToolDetail,
+  truncateDetail,
+} from '../utils/tool-labels';
 
 const MAX_HISTORY_MESSAGES = 50;
 const AUTO_RESTART_DELAY_MS = 5_000;
@@ -372,99 +378,8 @@ export class SessionProcess extends EventEmitter {
       }
     };
 
-    const CODING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
-
-    const TOOL_LABELS: Record<string, { emoji: string; verb: string }> = {
-      Read:         { emoji: '📖', verb: 'Reading' },
-      Edit:         { emoji: '✏️', verb: 'Editing' },
-      Write:        { emoji: '📝', verb: 'Writing' },
-      MultiEdit:    { emoji: '❤️‍🔥', verb: 'Editing' },
-      NotebookEdit: { emoji: '📕', verb: 'Editing notebook' },
-      Grep:         { emoji: '🔦', verb: 'Searching for' },
-      Glob:         { emoji: '📂', verb: 'Finding files' },
-      Bash:         { emoji: '💻', verb: 'Running' },
-      WebFetch:     { emoji: '🌐', verb: 'Fetching' },
-      WebSearch:    { emoji: '🔎', verb: 'Searching' },
-      Agent:        { emoji: '🤖', verb: 'Running agent' },
-      Task:         { emoji: '👉', verb: 'Running task' },
-      TodoWrite:    { emoji: '📋', verb: 'Updating tasks' },
-    };
-
-    function shortenPath(p: string): string {
-      // Keep last 2 segments for context (e.g. "src/api-router.ts" not just "api-router.ts")
-      const parts = p.split('/');
-      return parts.length > 2 ? parts.slice(-2).join('/') : parts[parts.length - 1] || p;
-    }
-
-    function truncateDetail(s: string, maxLines = 5, maxChars = 300): string {
-      const lines = s.split('\n').filter(l => l.trim());
-      const trimmedByLines = lines.length > maxLines;
-      const kept = lines.slice(0, maxLines);
-      let result = kept.join('\n');
-      if (result.length > maxChars) {
-        result = result.slice(0, maxChars) + '...';
-      } else if (trimmedByLines) {
-        result += '\n...';
-      }
-      return result;
-    }
-
-    function extractToolDetail(name: string, input: Record<string, unknown>): string {
-      const label = TOOL_LABELS[name] ?? { emoji: '🔧', verb: name };
-      const { emoji, verb } = label;
-
-      // Build context parts based on tool type
-      switch (name) {
-        case 'Read':
-        case 'Edit':
-        case 'Write':
-        case 'MultiEdit':
-        case 'NotebookEdit': {
-          const file = typeof input.file_path === 'string' ? shortenPath(input.file_path) : '';
-          const desc = typeof input.description === 'string' ? ` — ${input.description}` : '';
-          return truncateDetail(`${emoji} ${verb}: ${file}${desc}`);
-        }
-        case 'Grep': {
-          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
-          const path = typeof input.path === 'string' ? ` in ${shortenPath(input.path)}` : '';
-          return truncateDetail(`${emoji} ${verb}: ${pattern}${path}`);
-        }
-        case 'Glob': {
-          const pattern = typeof input.pattern === 'string' ? `"${input.pattern}"` : '';
-          return truncateDetail(`${emoji} ${verb}: ${pattern}`);
-        }
-        case 'Bash': {
-          const desc = typeof input.description === 'string' ? input.description : '';
-          const cmd = typeof input.command === 'string' ? input.command : '';
-          return truncateDetail(`${emoji} ${verb}: ${desc || cmd}`);
-        }
-        case 'WebFetch': {
-          const url = typeof input.url === 'string' ? input.url : '';
-          return truncateDetail(`${emoji} ${verb}: ${url}`);
-        }
-        case 'WebSearch': {
-          const query = typeof input.query === 'string' ? input.query : '';
-          return truncateDetail(`${emoji} ${verb}: "${query}"`);
-        }
-        case 'Agent':
-        case 'Task': {
-          const desc = typeof input.description === 'string' ? input.description : '';
-          const prompt = typeof input.prompt === 'string' ? input.prompt : '';
-          return truncateDetail(`${emoji} ${verb}: ${desc || prompt}`);
-        }
-        case 'TodoWrite': {
-          const todos = Array.isArray(input.todos) ? input.todos as { content?: string; status?: string }[] : [];
-          const active = todos.find(t => t.status === 'in_progress');
-          const detail = active?.content ?? `${todos.length} items`;
-          return truncateDetail(`${emoji} ${verb}: ${detail}`);
-        }
-        default: {
-          // Generic fallback: try description, then name
-          const desc = typeof input.description === 'string' ? input.description : '';
-          return truncateDetail(`${emoji} ${verb}: ${desc || '...'}`);
-        }
-      }
-    }
+    const CODING_TOOLS = SHARED_CODING_TOOLS;
+    const TOOL_LABELS = SHARED_TOOL_LABELS;
 
     let assistantBuffer = '';
     // Track partial message text to avoid double-counting when --include-partial-messages is active.

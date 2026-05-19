@@ -150,7 +150,7 @@ export interface SessionIndex {
 
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
-  | { type: 'tool_use'; name: string; id: string }
+  | { type: 'tool_use'; name: string; id: string; input?: Record<string, unknown> }
   | { type: 'thinking'; text: string }
   | { type: 'result'; text: string }
   | { type: 'error'; message: string };

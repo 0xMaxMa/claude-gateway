@@ -1686,6 +1686,7 @@ export class AgentRunner extends EventEmitter {
             type: 'tool_use',
             name: (obj['name'] as string) ?? '',
             id: (obj['id'] as string) ?? '',
+            input: (obj['input'] as Record<string, unknown>) ?? {},
           });
         }
 
