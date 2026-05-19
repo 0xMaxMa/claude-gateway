@@ -1,4 +1,9 @@
 import { Router, Request, Response } from 'express';
+
+function maskToken(token: string): string {
+  if (token.length <= 12) return '•'.repeat(token.length);
+  return token.slice(0, 8) + '•••••' + token.slice(-4);
+}
 import { randomUUID, createHash, randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -472,6 +477,8 @@ export function createApiRouter(
         avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
         telegram_connected: !!cfg.telegram?.botToken,
         discord_connected: !!cfg.discord?.botToken,
+        telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
+        discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
       }));
     res.json({ agents });
   });
@@ -1117,7 +1124,7 @@ export function createApiRouter(
       }
     }
 
-    res.json({ agent: { id: agentId, description: cfg.description, model: cfg.claude?.model, allow_tools: cfg.allow_tools ?? false, telegram_connected: !!cfg.telegram?.botToken, discord_connected: !!cfg.discord?.botToken } });
+    res.json({ agent: { id: agentId, description: cfg.description, model: cfg.claude?.model, allow_tools: cfg.allow_tools ?? false, telegram_connected: !!cfg.telegram?.botToken, discord_connected: !!cfg.discord?.botToken, telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null, discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null } });
   });
 
   /**
