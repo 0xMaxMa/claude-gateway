@@ -63,6 +63,24 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/skills/install` | Admin | Install a skill from a GitHub/raw URL |
 | `DELETE` | `/api/v1/agents/:agentId/skills/:name` | Write | Delete a skill |
 
+### App Store API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/apps/registry` | Key | Fetch community registry (5-min cached) |
+| `GET` | `/api/v1/apps/registry/:name` | Key | Get versions of a registry app |
+| `GET` | `/api/v1/apps` | Key | List installed apps |
+| `POST` | `/api/v1/apps/install` | Admin | Start async install → `jobId` |
+| `GET` | `/api/v1/apps/jobs/:jobId` | Key | Poll install/update job status + logs |
+| `GET` | `/api/v1/apps/:name` | Key | Get installed app info |
+| `DELETE` | `/api/v1/apps/:name` | Admin | Uninstall app |
+| `POST` | `/api/v1/apps/:name/start` | Admin | Start stopped app |
+| `POST` | `/api/v1/apps/:name/stop` | Admin | Stop running app |
+| `POST` | `/api/v1/apps/:name/restart` | Admin | Restart app |
+| `GET` | `/api/v1/apps/:name/version` | Key | Check installed vs latest version |
+| `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → `jobId` |
+| `GET` | `/app/:name/:portName/*` | None | Reverse proxy to installed app |
+
 ### Cron API
 
 | Method | Path | Auth | Description |
@@ -1813,6 +1831,435 @@ curl -H "X-Api-Key: my-secret-key-123" \
 | 400 | Path traversal attempt or invalid path |
 | 403 | Key has no access to agent |
 | 404 | Agent or file not found |
+
+---
+
+## App Store API
+
+Manage Docker-compose apps installed on the gateway. Apps can be sourced from the community registry or a custom GitHub repository.
+
+**Auth levels:** All App Store endpoints require API key auth. Write operations (install, update, uninstall, start/stop/restart) require an **admin** key.
+
+**Proxy routes:** Installed apps are exposed at `/app/:name/:portName/*` (no auth required at proxy layer — authentication is handled by each app).
+
+---
+
+### Endpoints Overview
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/apps/registry` | Key | Fetch community registry (5-min cached) |
+| `GET` | `/api/v1/apps/registry/:name` | Key | Get versions of a specific registry app |
+| `GET` | `/api/v1/apps` | Key | List all installed apps |
+| `POST` | `/api/v1/apps/install` | Admin | Start async install → returns `jobId` |
+| `GET` | `/api/v1/apps/jobs/:jobId` | Key | Poll install/update job status + logs |
+| `GET` | `/api/v1/apps/:name` | Key | Get installed app info |
+| `DELETE` | `/api/v1/apps/:name` | Admin | Uninstall app (docker down + cleanup) |
+| `POST` | `/api/v1/apps/:name/start` | Admin | Start stopped app |
+| `POST` | `/api/v1/apps/:name/stop` | Admin | Stop running app |
+| `POST` | `/api/v1/apps/:name/restart` | Admin | Restart app |
+| `GET` | `/api/v1/apps/:name/version` | Key | Check current + latest version |
+| `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → returns `jobId` |
+
+---
+
+### GET /api/v1/apps/registry
+
+Fetch the community registry (cached 5 minutes, falls back to stale on network failure).
+
+```bash
+curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps/registry | jq
+```
+
+```json
+{
+  "updated_at": "2026-05-19T00:00:00.000Z",
+  "apps": [
+    {
+      "name": "agent-note",
+      "description": "Note-taking app with AI agent",
+      "repo": "https://github.com/0xMaxMa/app-agent-note",
+      "author": "0xMaxMa",
+      "versions": [
+        { "version": "1.0.0", "commit": "abc123def456abc123def456abc123def456abc1", "approved_at": "2026-05-01T00:00:00.000Z" }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/v1/apps/registry/:name
+
+Get all versions of a specific app from the community registry.
+
+```bash
+curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps/registry/agent-note | jq
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 404 | App not found in registry |
+| 502 | Registry fetch failed |
+
+---
+
+### GET /api/v1/apps
+
+List all installed apps and their status.
+
+```bash
+curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps | jq
+```
+
+```json
+{
+  "apps": [
+    {
+      "name": "agent-note",
+      "version": "1.0.0",
+      "commit": "abc123def456abc123def456abc123def456abc1",
+      "githubUrl": "https://github.com/0xMaxMa/app-agent-note",
+      "installPath": "/home/user/.claude-gateway/apps/agent-note",
+      "ports": [{ "name": "web", "service": "app", "containerPort": 4000, "type": "web", "rateLimit": 200 }],
+      "sockets": {},
+      "installedAt": "2026-05-19T10:00:00.000Z",
+      "updatedAt": "2026-05-19T10:00:00.000Z",
+      "status": "running",
+      "source": "registry"
+    }
+  ]
+}
+```
+
+**`status` values:** `running` | `stopped` | `error` | `building`
+
+**`source` values:** `registry` | `custom` | `local`
+
+---
+
+### POST /api/v1/apps/install
+
+Start an asynchronous install job. Returns immediately with a `jobId` to poll.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `registry_app` | One of | App name from community registry |
+| `version` | No | Specific version from registry (default: latest) |
+| `github_url` | One of | Custom GitHub repo URL |
+| `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted) |
+| `local_path` | One of | Pre-baked local path under `~/.claude-gateway/apps/` |
+| `env_vars` | No | Pre-supplied env vars (secrets declared in app.yaml) |
+
+**Mode A — registry install:**
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"registry_app": "agent-note"}' \
+  http://localhost:10850/api/v1/apps/install | jq
+```
+
+**Mode A — registry install with specific version:**
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"registry_app": "agent-note", "version": "1.0.0"}' \
+  http://localhost:10850/api/v1/apps/install | jq
+```
+
+**Mode B — custom GitHub repo:**
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "github_url": "https://github.com/myorg/my-app",
+    "commit": "abc123def456abc123def456abc123def456abc1",
+    "env_vars": { "DATABASE_URL": "postgres://..." }
+  }' \
+  http://localhost:10850/api/v1/apps/install | jq
+```
+
+```json
+{ "jobId": "550e8400-e29b-41d4-a716-446655440000" }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Missing required fields or invalid commit format |
+| 403 | Not an admin key |
+
+> Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone → validate `app.yaml` → generate compose → build images → start containers → register proxy routes.
+
+---
+
+### GET /api/v1/apps/jobs/:jobId
+
+Poll the status of an async install or update job.
+
+```bash
+curl -H "X-Api-Key: my-key" \
+  http://localhost:10850/api/v1/apps/jobs/550e8400-e29b-41d4-a716-446655440000 | jq
+```
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "logs": [
+    "[2026-05-19T10:00:01.000Z] Cloning https://github.com/0xMaxMa/app-agent-note",
+    "[2026-05-19T10:00:05.000Z] Checked out commit abc123de",
+    "[2026-05-19T10:00:06.000Z] Validating app.yaml",
+    "[2026-05-19T10:00:07.000Z] Generating docker-compose.yml",
+    "[2026-05-19T10:00:07.000Z] Building images",
+    "[2026-05-19T10:00:45.000Z] Starting containers",
+    "[2026-05-19T10:00:50.000Z] Containers healthy",
+    "[2026-05-19T10:00:50.000Z] Install complete: {\"web\":\"/app/agent-note/web/\"}"
+  ],
+  "result": {
+    "appName": "agent-note",
+    "proxyUrls": { "web": "/app/agent-note/web/" },
+    "secretKeys": ["DATABASE_URL"],
+    "agentDeclaration": null
+  },
+  "startedAt": 1747648800000,
+  "updatedAt": 1747648850000
+}
+```
+
+**`status` values:** `pending` | `running` | `completed` | `failed`
+
+When `status` is `failed`, `error` contains the failure message.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 404 | Job ID not found |
+
+---
+
+### GET /api/v1/apps/:name
+
+Get info for an installed app.
+
+```bash
+curl -H "X-Api-Key: my-key" \
+  http://localhost:10850/api/v1/apps/agent-note | jq
+```
+
+Returns the full `AppEntry` object (same shape as items in `GET /api/v1/apps`).
+
+---
+
+### DELETE /api/v1/apps/:name
+
+Uninstall an app: `docker compose down --rmi all`, remove proxy routes, sockets, agent entry, and app files.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: admin-key" \
+  http://localhost:10850/api/v1/apps/agent-note | jq
+```
+
+```json
+{ "deleted": true, "name": "agent-note" }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 403 | Not an admin key |
+| 404 | App not installed |
+
+---
+
+### POST /api/v1/apps/:name/start|stop|restart
+
+Start, stop, or restart an installed app's containers.
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  http://localhost:10850/api/v1/apps/agent-note/restart | jq
+```
+
+```json
+{ "name": "agent-note", "action": "restart" }
+```
+
+---
+
+### GET /api/v1/apps/:name/version
+
+Check the currently installed version vs latest in the registry. Only meaningful for `source: "registry"` apps.
+
+```bash
+curl -H "X-Api-Key: my-key" \
+  http://localhost:10850/api/v1/apps/agent-note/version | jq
+```
+
+```json
+{
+  "installed": "1.0.0",
+  "installed_commit": "abc123def456abc123def456abc123def456abc1",
+  "latest": "1.1.0",
+  "latest_commit": "def456abc123def456abc123def456abc123def4",
+  "behind": true,
+  "updateable": true
+}
+```
+
+For custom/local apps, `latest` and `latest_commit` are `null` and `updateable` is `false`.
+
+---
+
+### POST /api/v1/apps/:name/update
+
+Start an async update to the latest registry version. Uses blue/green swap: build new version in `/tmp/`, stop old containers, start new, swap directories, rollback automatically if new containers fail health check.
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  http://localhost:10850/api/v1/apps/agent-note/update | jq
+```
+
+```json
+{ "jobId": "661f9511-f30c-52e5-b827-557766551111" }
+```
+
+Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | App source is `custom` or `local` (cannot be updated via this endpoint) |
+| 403 | Not an admin key |
+| 404 | App not installed |
+
+---
+
+### App Proxy
+
+Installed apps with `ports` declared in their `app.yaml` are accessible at:
+
+```
+/app/:appName/:portName/*
+```
+
+No gateway auth is required — apps handle their own authentication. Rate limiting is applied per-port as declared in `app.yaml` (`rate_limit` field, default 200 req/s).
+
+```
+# Example: web app on port 4000 with portName "web"
+http://localhost:10850/app/agent-note/web/
+
+# Example: API on port 3000 with portName "api"
+http://localhost:10850/app/getpod-manager/api/v1/metrics
+```
+
+**Port type behaviour:**
+
+| Type | Path behaviour |
+|------|---------------|
+| `api` | Strips `/app/:name/:portName` prefix before forwarding |
+| `web` | Preserves full original URL path (required for SPAs) |
+
+---
+
+### app.yaml Reference
+
+Every installable app must include an `app.yaml` at the repository root.
+
+**Minimal example:**
+
+```yaml
+apiVersion: "1.0"
+name: my-app
+version: "1.0.0"
+commit: "abc123def456abc123def456abc123def456abc1"
+description: "My application"
+
+services:
+  app:
+    build: .
+    ports:
+      - name: web
+        container: 4000
+        type: web
+        rate_limit: 200
+```
+
+**Full field reference:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `apiVersion` | Yes | Always `"1.0"` |
+| `name` | Yes | App slug `[a-z0-9][a-z0-9-]{1,63}` |
+| `version` | Yes | Semantic version |
+| `commit` | Yes | Pinned commit SHA |
+| `description` | No | Human-readable description |
+| `resources.cpu` | No | CPU limit (default 1.0, max 4.0) |
+| `resources.memory` | No | Memory limit e.g. `"256M"`, `"1G"` (max 2G) |
+| `services.<name>` | Yes | One or more service definitions |
+| `services.agent` | No | Agent service declaration (see below) |
+
+**Service fields:**
+
+| Field | Description |
+|-------|-------------|
+| `build` | Relative path to Dockerfile directory |
+| `image` | Docker image (mutually exclusive with `build`) |
+| `command` | Override container command |
+| `entrypoint` | Override container entrypoint |
+| `environment` | Static env vars (`KEY=value`) or secret keys (`KEY` without `=`) |
+| `volumes` | Volume mounts (named volumes or host paths within app dir) |
+| `ports` | Array of port declarations (see below) |
+| `depends_on` | Service dependency list |
+| `healthcheck` | Docker healthcheck (test, interval, timeout, retries) |
+| `gateway_api` | Host script bridge via Unix socket (see below) |
+
+**Banned fields:** `network_mode: host`, `privileged`, `cap_add`. The gateway always injects `cap_drop: ALL`, `restart: unless-stopped`, `env_file: .env`, and resource limits.
+
+**Agent service declaration:**
+
+```yaml
+services:
+  agent:
+    path: ./agent      # relative path to agent workspace within repo
+    name: my-agent     # agent ID, must match [a-z][a-z0-9-]{1,63}
+```
+
+When declared, the gateway injects a `debian:stable-slim` container, mounts the claude CLI and node binaries, and registers the agent in `config.json`. Messages to this agent are dispatched via `docker exec`.
+
+**Host script bridge (`gateway_api`):**
+
+```yaml
+services:
+  app:
+    gateway_api:
+      socket: /var/run/gateway.sock
+      scripts:
+        resize-disk:
+          path: scripts/resize-disk.sh
+          timeout: 60s
+          args:
+            - name: size_gb
+              type: string
+              pattern: "^\\d+$"
+```
+
+The container receives a Unix socket mounted from the host. POST `http+unix://<socket>/tool/script/<name>` with `{"args": {"size_gb": "20"}}` to invoke the script. The gateway only exposes `PATH` and `HOME` to scripts.
 
 ---
 

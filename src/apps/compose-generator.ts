@@ -232,7 +232,7 @@ export function generateCompose(
     // build or image
     if (svc.build) {
       const resolved = path.resolve(appDir, svc.build);
-      if (!resolved.startsWith(appDir)) {
+      if (!resolved.startsWith(appDir + path.sep) && resolved !== appDir) {
         throw new Error(
           `Service "${svcName}".build must be within the app directory`,
         );
@@ -446,7 +446,7 @@ function validateService(
       throw new Error(`Service "${svcName}".build must be a string`);
     }
     const resolved = path.resolve(appDir, obj['build']);
-    if (!resolved.startsWith(appDir)) {
+    if (!resolved.startsWith(appDir + path.sep) && resolved !== appDir) {
       throw new Error(`Service "${svcName}".build must be within the app directory`);
     }
   }
@@ -719,7 +719,7 @@ function validateScript(
     );
   }
   const resolved = path.resolve(appDir, scriptPath);
-  if (!resolved.startsWith(appDir)) {
+  if (!resolved.startsWith(appDir + path.sep) && resolved !== appDir) {
     throw new Error(
       `Service "${svcName}".gateway_api.scripts["${scriptName}"].path must be within the app directory`,
     );
