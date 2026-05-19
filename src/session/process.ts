@@ -175,7 +175,6 @@ export class SessionProcess extends EventEmitter {
 
     const historyText = recent
       .map(m => {
-        // system role carries injected summaries (e.g. [Image Context Summary]) from the runner
         if (m.role === 'system') return `System: ${m.content}`;
         return `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`;
       })
