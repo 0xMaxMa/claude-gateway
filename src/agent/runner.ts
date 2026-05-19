@@ -1299,6 +1299,7 @@ export class AgentRunner extends EventEmitter {
 
   startDiscordReceiver(): void {
     if (this.discordReceiver?.isRunning()) return;
+    if (!this.agentConfig.discord?.botToken) return;
     this.discordReceiver = new DiscordReceiver(
       this.agentConfig,
       this.callbackPort,
