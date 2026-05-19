@@ -1274,7 +1274,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   getAgentConfig(): AgentConfig {
-    return this.agentConfig;
+    return { ...this.agentConfig };
   }
 
   startTelegramReceiver(): void {
@@ -1295,7 +1295,6 @@ export class AgentRunner extends EventEmitter {
     this.receiver = null;
     this.logger.info('TelegramReceiver stopped', { agentId: this.agentConfig.id });
   }
-
 
   startDiscordReceiver(): void {
     if (this.discordReceiver?.isRunning()) return;

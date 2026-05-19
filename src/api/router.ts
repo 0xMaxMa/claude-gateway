@@ -1,9 +1,4 @@
 import { Router, Request, Response } from 'express';
-
-function maskToken(token: string): string {
-  if (token.length <= 12) return '•'.repeat(token.length);
-  return token.slice(0, 8) + '•••••' + token.slice(-4);
-}
 import { randomUUID, createHash, randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -26,6 +21,11 @@ type AuthedRequest = Request & { apiKey: ApiKey };
 
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-() ]+$/;
+
+function maskToken(token: string): string {
+  if (token.length <= 12) return '•'.repeat(token.length);
+  return token.slice(0, 8) + '•••••' + token.slice(-4);
+}
 
 /** Detect MIME type from file magic bytes (first 12 bytes). */
 function detectMimeFromMagic(header: Buffer): string | null {
@@ -657,8 +657,12 @@ export function createApiRouter(
 
   function writeTelegramAccess(agentId: string, access: TelegramAccess): void {
     const stateDir = getTelegramStateDir(agentId);
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2));
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2));
+    } catch (err) {
+      throw new Error(`Failed to write Telegram access config: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -1146,6 +1150,7 @@ export function createApiRouter(
         }
       } else {
         delete cfg.telegram;
+        agentRunners.get(agentId)?.stopTelegramReceiver();
       }
     }
     if (discord_bot_token !== undefined) {
@@ -1160,10 +1165,23 @@ export function createApiRouter(
         }
       } else {
         delete cfg.discord;
+        agentRunners.get(agentId)?.stopDiscordReceiver();
       }
     }
 
-    res.json({ agent: { id: agentId, description: cfg.description, model: cfg.claude?.model, allow_tools: cfg.allow_tools ?? false, telegram_connected: !!cfg.telegram?.botToken, discord_connected: !!cfg.discord?.botToken, telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null, discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null, telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null } });
+    res.json({
+      agent: {
+        id: agentId,
+        description: cfg.description,
+        model: cfg.claude?.model,
+        allow_tools: cfg.allow_tools ?? false,
+        telegram_connected: !!cfg.telegram?.botToken,
+        discord_connected: !!cfg.discord?.botToken,
+        telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
+        discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
+        telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null,
+      },
+    });
   });
 
   /**
@@ -1180,7 +1198,7 @@ export function createApiRouter(
     const expired = Object.keys(access.pending).filter((code) => access.pending[code].expiresAt <= now);
     if (expired.length > 0) {
       expired.forEach((code) => { delete access.pending[code]; });
-      writeTelegramAccess(agentId, access);
+      try { writeTelegramAccess(agentId, access); } catch { /* non-fatal cleanup */ }
     }
     const pending = Object.entries(access.pending)
       .map(([code, p]) => ({ code, senderId: p.senderId, chatId: p.chatId, createdAt: p.createdAt, expiresAt: p.expiresAt }));
@@ -1203,10 +1221,15 @@ export function createApiRouter(
     if (!entry || entry.expiresAt < Date.now()) { res.status(404).json({ error: 'Pairing code not found or expired' }); return; }
     if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId);
     delete access.pending[code];
-    writeTelegramAccess(agentId, access);
-    const approvedDir = path.join(getTelegramStateDir(agentId), 'approved');
-    fs.mkdirSync(approvedDir, { recursive: true });
-    fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.chatId);
+    try {
+      writeTelegramAccess(agentId, access);
+      const approvedDir = path.join(getTelegramStateDir(agentId), 'approved');
+      fs.mkdirSync(approvedDir, { recursive: true });
+      fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.chatId);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to approve pairing: ${(err as Error).message}` });
+      return;
+    }
     res.json({ ok: true, senderId: entry.senderId });
   });
 
@@ -1224,7 +1247,12 @@ export function createApiRouter(
     const access = readTelegramAccess(agentId);
     if (!access.pending[code]) { res.status(404).json({ error: 'Pairing code not found' }); return; }
     delete access.pending[code];
-    writeTelegramAccess(agentId, access);
+    try {
+      writeTelegramAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to deny pairing: ${(err as Error).message}` });
+      return;
+    }
     res.json({ ok: true });
   });
 
@@ -1238,8 +1266,13 @@ export function createApiRouter(
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const stateDir = getTelegramStateDir(agentId);
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(path.join(stateDir, 'awaiting-owner'), '');
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'awaiting-owner'), '');
+    } catch (err) {
+      res.status(500).json({ error: `Failed to write sentinel: ${(err as Error).message}` });
+      return;
+    }
     res.json({ ok: true });
   });
 
@@ -1277,7 +1310,12 @@ export function createApiRouter(
     if (!dmPolicy || !valid.includes(dmPolicy)) { res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return; }
     const access = readTelegramAccess(agentId);
     access.dmPolicy = dmPolicy as TelegramAccess['dmPolicy'];
-    writeTelegramAccess(agentId, access);
+    try {
+      writeTelegramAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update policy: ${(err as Error).message}` });
+      return;
+    }
     res.json({ ok: true, dmPolicy });
   });
 
@@ -1306,7 +1344,12 @@ export function createApiRouter(
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const access = readTelegramAccess(agentId);
     access.allowFrom = access.allowFrom.filter((id) => id !== userId);
-    writeTelegramAccess(agentId, access);
+    try {
+      writeTelegramAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update allowlist: ${(err as Error).message}` });
+      return;
+    }
     res.json({ ok: true });
   });
 
