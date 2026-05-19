@@ -1266,6 +1266,32 @@ export function createApiRouter(
   });
 
   /**
+   * GET /api/v1/agents/:agentId/telegram/allowlist
+   * Return all users in allowFrom for an agent's Telegram channel.
+   */
+  router.get('/v1/agents/:agentId/telegram/allowlist', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readTelegramAccess(agentId);
+    res.json({ allowFrom: access.allowFrom });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/telegram/allow/:userId
+   * Remove a user from the allowFrom list. Admin only.
+   */
+  router.delete('/v1/agents/:agentId/telegram/allow/:userId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, userId } = req.params as { agentId: string; userId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readTelegramAccess(agentId);
+    access.allowFrom = access.allowFrom.filter((id) => id !== userId);
+    writeTelegramAccess(agentId, access);
+    res.json({ ok: true });
+  });
+
+  /**
    * DELETE /api/v1/agents/:agentId
    *
    * Remove agent from config.json and stop the running runner. Requires admin key.
