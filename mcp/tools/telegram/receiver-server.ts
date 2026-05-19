@@ -250,7 +250,11 @@ function gate(ctx: Context): GateResult {
       } else {
         rmSync(AWAITING_OWNER_FILE, { force: true })
       }
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // Unexpected I/O error — deny to be safe rather than silently allowing
+        return { action: 'drop' }
+      }
       // ENOENT — no sentinel, continue normal gate logic
     }
   }

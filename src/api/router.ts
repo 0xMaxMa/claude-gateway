@@ -1177,8 +1177,12 @@ export function createApiRouter(
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const access = readTelegramAccess(agentId);
     const now = Date.now();
+    const expired = Object.keys(access.pending).filter((code) => access.pending[code].expiresAt <= now);
+    if (expired.length > 0) {
+      expired.forEach((code) => { delete access.pending[code]; });
+      writeTelegramAccess(agentId, access);
+    }
     const pending = Object.entries(access.pending)
-      .filter(([, p]) => p.expiresAt > now)
       .map(([code, p]) => ({ code, senderId: p.senderId, chatId: p.chatId, createdAt: p.createdAt, expiresAt: p.expiresAt }));
     res.json({ pending });
   });
@@ -1298,6 +1302,7 @@ export function createApiRouter(
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     const { agentId, userId } = req.params as { agentId: string; userId: string };
+    if (!/^\d+$/.test(userId)) { res.status(400).json({ error: 'Invalid userId: must be a numeric Telegram user ID' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     const access = readTelegramAccess(agentId);
     access.allowFrom = access.allowFrom.filter((id) => id !== userId);
