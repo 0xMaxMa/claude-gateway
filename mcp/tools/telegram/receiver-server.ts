@@ -114,7 +114,7 @@ type GroupPolicy = {
 }
 
 type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled'
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
@@ -233,6 +233,13 @@ function gate(ctx: Context): GateResult {
   const chatType = ctx.chat?.type
 
   if (chatType === 'private') {
+    if (access.dmPolicy === 'open') {
+      if (!access.allowFrom.includes(senderId)) {
+        access.allowFrom.push(senderId)
+        saveAccess(access)
+      }
+      return { action: 'deliver', access }
+    }
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
     if (access.dmPolicy === 'allowlist') return { action: 'drop' }
 

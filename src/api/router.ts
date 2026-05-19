@@ -479,6 +479,7 @@ export function createApiRouter(
         discord_connected: !!cfg.discord?.botToken,
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
+        telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
       }));
     res.json({ agents });
   });
@@ -620,6 +621,44 @@ export function createApiRouter(
     return configPath
       ? path.join(path.dirname(configPath), 'agents')
       : path.join(os.homedir(), '.claude-gateway', 'agents');
+  }
+
+  function getTelegramStateDir(agentId: string): string {
+    const agentsBase = getAgentsBaseDir();
+    const cfg = agentConfigs.get(agentId);
+    const workspace = cfg?.workspace
+      ? (cfg.workspace.startsWith('~') ? path.join(os.homedir(), cfg.workspace.slice(1)) : cfg.workspace)
+      : path.join(agentsBase, agentId, 'workspace');
+    return path.join(workspace, '.telegram-state');
+  }
+
+  type TelegramAccess = {
+    dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+    allowFrom: string[];
+    groups: Record<string, unknown>;
+    pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }>;
+  };
+
+  function readTelegramAccess(agentId: string): TelegramAccess {
+    const accessFile = path.join(getTelegramStateDir(agentId), 'access.json');
+    try {
+      const raw = fs.readFileSync(accessFile, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<TelegramAccess>;
+      return {
+        dmPolicy: parsed.dmPolicy ?? 'pairing',
+        allowFrom: parsed.allowFrom ?? [],
+        groups: parsed.groups ?? {},
+        pending: parsed.pending ?? {},
+      };
+    } catch {
+      return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} };
+    }
+  }
+
+  function writeTelegramAccess(agentId: string, access: TelegramAccess): void {
+    const stateDir = getTelegramStateDir(agentId);
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2));
   }
 
   /**
@@ -1124,7 +1163,75 @@ export function createApiRouter(
       }
     }
 
-    res.json({ agent: { id: agentId, description: cfg.description, model: cfg.claude?.model, allow_tools: cfg.allow_tools ?? false, telegram_connected: !!cfg.telegram?.botToken, discord_connected: !!cfg.discord?.botToken, telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null, discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null } });
+    res.json({ agent: { id: agentId, description: cfg.description, model: cfg.claude?.model, allow_tools: cfg.allow_tools ?? false, telegram_connected: !!cfg.telegram?.botToken, discord_connected: !!cfg.discord?.botToken, telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null, discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null, telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null } });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/telegram/pending
+   * List pending Telegram pairing requests (non-expired).
+   */
+  router.get('/v1/agents/:agentId/telegram/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readTelegramAccess(agentId);
+    const now = Date.now();
+    const pending = Object.entries(access.pending)
+      .filter(([, p]) => p.expiresAt > now)
+      .map(([code, p]) => ({ code, senderId: p.senderId, chatId: p.chatId, createdAt: p.createdAt, expiresAt: p.expiresAt }));
+    res.json({ pending });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/telegram/approve
+   * Approve a pending Telegram pairing by code.
+   */
+  router.post('/v1/agents/:agentId/telegram/approve', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code required' }); return; }
+    const access = readTelegramAccess(agentId);
+    const entry = access.pending[code];
+    if (!entry || entry.expiresAt < Date.now()) { res.status(404).json({ error: 'Pairing code not found or expired' }); return; }
+    if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId);
+    delete access.pending[code];
+    writeTelegramAccess(agentId, access);
+    const approvedDir = path.join(getTelegramStateDir(agentId), 'approved');
+    fs.mkdirSync(approvedDir, { recursive: true });
+    fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.chatId);
+    res.json({ ok: true, senderId: entry.senderId });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/telegram/deny
+   * Deny and remove a pending Telegram pairing by code.
+   */
+  router.post('/v1/agents/:agentId/telegram/deny', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code required' }); return; }
+    const access = readTelegramAccess(agentId);
+    if (!access.pending[code]) { res.status(404).json({ error: 'Pairing code not found' }); return; }
+    delete access.pending[code];
+    writeTelegramAccess(agentId, access);
+    res.json({ ok: true });
+  });
+
+  /**
+   * PATCH /api/v1/agents/:agentId/telegram/policy
+   * Update the Telegram DM policy for an agent.
+   */
+  router.patch('/v1/agents/:agentId/telegram/policy', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { dmPolicy } = req.body as { dmPolicy?: string };
+    const valid = ['open', 'pairing', 'allowlist', 'disabled'];
+    if (!dmPolicy || !valid.includes(dmPolicy)) { res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return; }
+    const access = readTelegramAccess(agentId);
+    access.dmPolicy = dmPolicy as TelegramAccess['dmPolicy'];
+    writeTelegramAccess(agentId, access);
+    res.json({ ok: true, dmPolicy });
   });
 
   /**
