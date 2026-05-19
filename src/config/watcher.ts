@@ -109,17 +109,24 @@ export class ConfigWatcher extends EventEmitter {
 
       // Emit channel.added / channel.removed when tokens change on existing agents
       for (const change of fieldChanges) {
-        if (!change.oldValue && change.newValue) {
+        const added = !change.oldValue && change.newValue;
+        const removed = change.oldValue && !change.newValue;
+        // Token replaced (revoke + recreate): stop old receiver, start new one
+        const replaced = change.oldValue && change.newValue && change.oldValue !== change.newValue;
+
+        if (added || replaced) {
           if (change.field === 'discord.botToken') {
+            if (replaced) this.emit('channel.removed', change.agentId, 'discord');
             this.logger.info('Discord channel added to agent', { agentId: change.agentId });
             this.emit('channel.added', change.agentId, 'discord');
           }
           if (change.field === 'telegram.botToken') {
+            if (replaced) this.emit('channel.removed', change.agentId, 'telegram');
             this.logger.info('Telegram channel added to agent', { agentId: change.agentId });
             this.emit('channel.added', change.agentId, 'telegram');
           }
         }
-        if (change.oldValue && !change.newValue) {
+        if (removed) {
           if (change.field === 'discord.botToken') {
             this.logger.info('Discord channel removed from agent', { agentId: change.agentId });
             this.emit('channel.removed', change.agentId, 'discord');

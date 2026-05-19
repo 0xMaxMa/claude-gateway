@@ -1592,7 +1592,7 @@ if (RECEIVER_MODE) {
         }
         if (err instanceof Error && err.message === 'Aborted delay') return
         process.stderr.write(`telegram channel (receiver): polling failed: ${err}\n`)
-        return
+        process.exit(1)
       }
     }
   })()
