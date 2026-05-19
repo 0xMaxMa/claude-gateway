@@ -323,6 +323,51 @@ describe('createWorkingStateManager', () => {
         expect.stringContaining('5 minutes'),
       )
     })
+
+    test('keeps typing alive and sends uncertainty warning when .processing is fresh (mid-turn)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const processingPath = `${TYPING_DIR}/${CHAT_ID}.processing`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+      mgr.start(CHAT_ID)
+      // Write .processing at t=0 (same as startedAt) → mtime >= startedAt → isMidTurn = true
+      fsApi.writeFileSync(processingPath, String(Date.now()))
+
+      jest.advanceTimersByTime(STALLED_TIMEOUT_MS)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(bot.sendMessage).toHaveBeenCalledWith(
+        CHAT_ID,
+        expect.stringContaining('No output for 5 min'),
+      )
+      // State must still be alive — stop() was NOT called
+      expect(mgr.states.has(CHAT_ID)).toBe(true)
+    })
+
+    test('falls through to full stop() when .processing mtime predates current turn (stale sentinel)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const processingPath = `${TYPING_DIR}/${CHAT_ID}.processing`
+
+      // Write .processing at t=0 (stale from previous crashed turn)
+      fsApi.writeFileSync(processingPath, String(Date.now()))
+
+      // Advance time so start() captures a later startedAt
+      jest.advanceTimersByTime(1_000)
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+      mgr.start(CHAT_ID)  // startedAt = 1000 > processingMtime = 0 → isMidTurn = false
+
+      jest.advanceTimersByTime(STALLED_TIMEOUT_MS)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(bot.sendMessage).toHaveBeenCalledWith(
+        CHAT_ID,
+        expect.stringContaining('Claude has not responded in 5 minutes'),
+      )
+      // State deleted — stop() was called
+      expect(mgr.states.has(CHAT_ID)).toBe(false)
+    })
   })
 
   describe('notifyError()', () => {

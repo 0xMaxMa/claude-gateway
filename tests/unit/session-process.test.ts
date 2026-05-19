@@ -1010,6 +1010,73 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // ── interrupt() ────────────────────────────────────────────────────────────
 
+  // IP8: setProcessing(true) for telegram writes .processing sentinel
+  it('IP8: setProcessing(true) for telegram writes .processing file', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
+
+    sp.setProcessing(true);
+
+    expect(fs.existsSync(processingPath)).toBe(true);
+    await sp.stop();
+  });
+
+  // IP9: setProcessing(false) for telegram deletes .processing sentinel
+  it('IP9: setProcessing(false) for telegram deletes .processing file', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
+
+    sp.setProcessing(true);
+    expect(fs.existsSync(processingPath)).toBe(true);
+
+    sp.setProcessing(false);
+    expect(fs.existsSync(processingPath)).toBe(false);
+    await sp.stop();
+  });
+
+  // IP10: setProcessing for discord source does NOT write .processing
+  it('IP10: setProcessing(true) for discord does not write .processing file', async () => {
+    const sp = new SessionProcess('s1', 'discord', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const discordPath = path.join(agentConfig.workspace, '.discord-state', 'typing', 's1.processing');
+    const telegramPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
+
+    sp.setProcessing(true);
+
+    expect(fs.existsSync(discordPath)).toBe(false);
+    expect(fs.existsSync(telegramPath)).toBe(false);
+    await sp.stop();
+  });
+
+  // IP11: setProcessing for api source does NOT write .processing
+  it('IP11: setProcessing(true) for api does not write .processing file', async () => {
+    const sp = new SessionProcess('s1', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
+
+    sp.setProcessing(true);
+
+    expect(fs.existsSync(processingPath)).toBe(false);
+    await sp.stop();
+  });
+
+  // IP12: stop() cleans up .processing sentinel for telegram
+  it('IP12: stop() cleans up .processing file for telegram source', async () => {
+    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
+
+    sp.setProcessing(true);
+    expect(fs.existsSync(processingPath)).toBe(true);
+
+    await sp.stop();
+    expect(fs.existsSync(processingPath)).toBe(false);
+  });
+
+  // ── interrupt() ────────────────────────────────────────────────────────────
+
   it('U-SP-INT-01: interrupt() sends SIGINT when a turn is in flight', async () => {
     const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();

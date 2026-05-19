@@ -55,7 +55,6 @@ export const STALLED_CHECK_INTERVAL_MS = 15_000  // check heartbeat freshness ev
 export const TYPING_INTERVAL_MS = 4_000    // sendChatAction every 4s (Telegram expires at 5s)
 export const STATUS_INTERVAL_MS = 10_000   // status update every 10s
 export const STATUS_INITIAL_DELAY_MS = 5_000  // first status message after 5s
-export const KEEPALIVE_INTERVAL_MS = 25_000  // typing keepalive every 25s, independent of stalled detection
 
 export const ERROR_MESSAGES: Record<string, string> = {
   PROCESS_FAILED: '❌ Claude stopped unexpectedly. Please try sending a new message.',
@@ -355,19 +354,33 @@ export function createWorkingStateManager(
         try { lastActivity = fsApi.statSync(hbPath).mtimeMs } catch {}
       }
       if (Date.now() - lastActivity >= STALLED_TIMEOUT_MS) {
-        await botApi.sendMessage(
-          chatId,
-          '⚠️ Claude has not responded in 5 minutes. It may be waiting for input or stuck. Please try sending a new message.',
-        ).catch(() => {})
         const s = states.get(chatId)
-        // If session is still marked as processing (e.g., waiting for sub-agent), keep typing
-        // alive so the user sees activity, but stop status/stalled checks to reduce noise.
-        if (s && fsApi.existsSync(processingFilePath(chatId))) {
+        // A .processing sentinel written during this turn (mtime >= startedAt) means the
+        // session is genuinely mid-turn (e.g., waiting for a sub-agent). We can't know
+        // whether it's still making progress, so we keep typing alive but stop noisy
+        // status/stalled intervals and warn the user of the uncertainty.
+        let isMidTurn = false
+        try {
+          if (fsApi.existsSync(processingFilePath(chatId))) {
+            const mtime = fsApi.statSync(processingFilePath(chatId)).mtimeMs
+            isMidTurn = mtime >= startedAt
+          }
+        } catch {}
+
+        if (s && isMidTurn) {
+          await botApi.sendMessage(
+            chatId,
+            '⚠️ No output for 5 min — may be a long sub-agent task or stuck. Typing is still active. Send a new message to cancel if needed.',
+          ).catch(() => {})
           clearInterval(s.stalledInterval)
           clearInterval(s.statusInterval)
           if (s.initialStatusTimer) clearTimeout(s.initialStatusTimer)
           s.initialStatusTimer = null
         } else {
+          await botApi.sendMessage(
+            chatId,
+            '⚠️ Claude has not responded in 5 minutes. It may be waiting for input or stuck. Please try sending a new message.',
+          ).catch(() => {})
           await stop(chatId)
         }
       }

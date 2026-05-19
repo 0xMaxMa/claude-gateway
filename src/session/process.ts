@@ -608,7 +608,7 @@ export class SessionProcess extends EventEmitter {
     if (this._processing !== active) {
       this._processing = active;
       this.emit('processingChange', active);
-      if (this.source !== 'api') {
+      if (this.source === 'telegram') {
         const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
         try {
           if (active) {
@@ -657,7 +657,7 @@ export class SessionProcess extends EventEmitter {
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
-    if (this.source !== 'api') {
+    if (this.source === 'telegram') {
       try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
     }
     if (!this.process) return;
