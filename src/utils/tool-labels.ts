@@ -82,7 +82,7 @@ export function extractToolDetail(name: string, input: Record<string, unknown>):
       return truncateDetail(`${emoji} ${verb}: ${desc || cmd}`);
     }
     case 'WebFetch':
-    case 'mcp__browser__navigate': {
+    case 'mcp__browser__navigate': { // both use input.url
       const url = typeof input.url === 'string' ? input.url : '';
       return truncateDetail(`${emoji} ${verb}: ${url}`);
     }

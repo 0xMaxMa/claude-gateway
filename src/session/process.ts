@@ -8,8 +8,8 @@ import { AgentConfig, GatewayConfig } from '../types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import {
-  CODING_TOOLS as SHARED_CODING_TOOLS,
-  TOOL_LABELS as SHARED_TOOL_LABELS,
+  CODING_TOOLS,
+  TOOL_LABELS,
   extractToolDetail,
   truncateDetail,
 } from '../utils/tool-labels';
@@ -378,8 +378,7 @@ export class SessionProcess extends EventEmitter {
       }
     };
 
-    const CODING_TOOLS = SHARED_CODING_TOOLS;
-    const TOOL_LABELS = SHARED_TOOL_LABELS;
+    // CODING_TOOLS and TOOL_LABELS imported from shared utility above
 
     let assistantBuffer = '';
     // Track partial message text to avoid double-counting when --include-partial-messages is active.
