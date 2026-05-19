@@ -565,6 +565,20 @@ export function createApiRouter(
       return;
     }
 
+    // Update in-memory agentConfigs immediately so GET /api/v1/agents returns the new agent
+    // without waiting for the file watcher (~500ms debounce).
+    agentConfigs.set(id, {
+      id,
+      description: (description as string).trim(),
+      workspace: workspaceAbs,
+      env: path.join(workspaceAbs, '.env'),
+      claude: {
+        model: typeof model === 'string' && model.trim() ? model.trim() : 'claude-sonnet-4-6',
+        dangerouslySkipPermissions: false,
+        extraFlags: [],
+      },
+    });
+
     // Config written successfully — now create workspace directory and stub files.
     const stubFiles: Record<string, string> = {
       'AGENTS.md': `# Agent: ${id}\n\n${(description as string).trim()}\n`,
@@ -797,6 +811,18 @@ export function createApiRouter(
       });
       return;
     }
+
+    // Update in-memory agentConfigs immediately so GET /api/v1/agents returns the new agent
+    // without waiting for the file watcher (~500ms debounce).
+    agentConfigs.set(agentId, {
+      id: agentId,
+      description: wizard.prompt.slice(0, 200).trim(),
+      workspace: workspaceDirAbs,
+      env: path.join(workspaceDirAbs, '.env'),
+      claude: { model: defaultModel, dangerouslySkipPermissions: false, extraFlags: [] },
+      ...(wizard.signatureEmoji ? { signatureEmoji: wizard.signatureEmoji } : {}),
+      ...(avatarFilename ? { avatar: avatarFilename } : {}),
+    });
 
     wizardStore.update(wizardId, { step: 'confirmed' });
     const avatarUrl = avatarFilename ? `/api/v1/agents/${agentId}/avatar` : null;
