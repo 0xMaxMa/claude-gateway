@@ -61,8 +61,6 @@ export interface AppYaml {
   version: string;
   description?: string;
   author?: string;
-  source?: string;
-  commit: string;
   resources?: { cpu?: number; memory?: string };
   services: Record<string, AppYamlService | AppYamlAgentService>;
 }
@@ -143,7 +141,6 @@ export function parseAppYaml(content: string, appDir: string): AppYaml {
   requireString(obj, 'apiVersion');
   requireString(obj, 'name');
   requireString(obj, 'version');
-  requireString(obj, 'commit');
 
   if (typeof obj['services'] !== 'object' || obj['services'] === null) {
     throw new Error('app.yaml: "services" must be an object');
