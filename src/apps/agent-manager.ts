@@ -59,19 +59,46 @@ export class AgentManager {
 
     const claudeBin = run('which claude');
     // Resolve symlink so Docker bind-mounts the real file, not a dangling symlink.
-    // Then derive the node_modules root that actually contains claude-code
-    // (it may differ from `npm root -g` when installed via system package manager).
     const realClaudeBin = fs.realpathSync(claudeBin);
     const nodeModulesMarker = '/node_modules/';
     const npmRoot = realClaudeBin.includes(nodeModulesMarker)
       ? realClaudeBin.split(nodeModulesMarker)[0] + '/node_modules'
       : run('npm root -g');
 
-    return {
-      claudeBin: realClaudeBin,
-      nodeBin: run('which node'),
-      npmRoot,
-    };
+    const nodeBin = fs.realpathSync(run('which node'));
+
+    // When the gateway runs inside a container, claude/node live on the overlay
+    // filesystem (a different device than the bind-mounted /home/dev volume).
+    // Remote Docker daemons (e.g. docker-builder DinD) can only bind-mount paths
+    // from the bind-mounted volume — overlay paths appear as empty directories.
+    // Fix: copy both binaries to ~/.claude-gateway/bin/ which is on the shared volume.
+    const homeBinDir = path.join(os.homedir(), '.claude-gateway', 'bin');
+    try {
+      const homeDev = fs.statSync(path.join(os.homedir(), '.claude-gateway')).dev;
+      const claudeDev = fs.statSync(realClaudeBin).dev;
+      const nodeDev = fs.statSync(nodeBin).dev;
+
+      if (claudeDev !== homeDev || nodeDev !== homeDev) {
+        fs.mkdirSync(homeBinDir, { recursive: true });
+        const destClaude = path.join(homeBinDir, 'claude');
+        const destNode = path.join(homeBinDir, 'node');
+        // Only copy if missing or different size (avoid 249MB copy on every detect)
+        const needsCopy = (src: string, dest: string): boolean => {
+          try { return fs.statSync(src).size !== fs.statSync(dest).size; } catch { return true; }
+        };
+        if (needsCopy(realClaudeBin, destClaude)) {
+          fs.copyFileSync(realClaudeBin, destClaude);
+          fs.chmodSync(destClaude, 0o755);
+        }
+        if (needsCopy(nodeBin, destNode)) {
+          fs.copyFileSync(nodeBin, destNode);
+          fs.chmodSync(destNode, 0o755);
+        }
+        return { claudeBin: destClaude, nodeBin: destNode, npmRoot: homeBinDir };
+      }
+    } catch { /* stat failed — proceed with detected paths */ }
+
+    return { claudeBin: realClaudeBin, nodeBin, npmRoot };
   }
 
   /**
