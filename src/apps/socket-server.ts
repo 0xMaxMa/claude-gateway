@@ -16,6 +16,8 @@ export interface ScriptDefinition {
     name: string;
     type: string;
     pattern?: string;
+    /** Compiled RegExp from pattern — cached at startup to avoid per-request ReDoS risk */
+    _compiledPattern?: RegExp;
   }>;
 }
 
@@ -44,6 +46,15 @@ export class SocketServer {
   start(socketPath: string, config: SocketConfig): Promise<void> {
     if (this.servers.has(socketPath)) {
       return Promise.resolve();
+    }
+
+    // Pre-compile arg patterns at startup to avoid per-request ReDoS risk
+    for (const scriptDef of Object.values(config.scripts)) {
+      for (const argDef of scriptDef.args ?? []) {
+        if (argDef.pattern && !argDef._compiledPattern) {
+          try { argDef._compiledPattern = new RegExp(argDef.pattern); } catch { /* invalid pattern */ }
+        }
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -219,10 +230,8 @@ export class SocketServer {
         return `Argument "${argDef.name}" exceeds maximum length of ${MAX_ARG_LEN}`;
       }
       if (argDef.pattern) {
-        let re: RegExp;
-        try {
-          re = new RegExp(argDef.pattern);
-        } catch {
+        const re = argDef._compiledPattern;
+        if (!re) {
           return `Internal error: invalid pattern for argument "${argDef.name}"`;
         }
         if (!re.test(val)) {

@@ -71,6 +71,7 @@ type SpawnFn = (
 const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+const GITHUB_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?$/;
 
 // ─── Installer ────────────────────────────────────────────────────────────────
 
@@ -727,6 +728,9 @@ export class AppInstaller {
     }
 
     if (options.githubUrl) {
+      if (!GITHUB_URL_RE.test(options.githubUrl)) {
+        throw new Error(`githubUrl must be a valid https://github.com/<owner>/<repo> URL`);
+      }
       let commit: string;
       if (options.commit) {
         if (!COMMIT_RE.test(options.commit)) {

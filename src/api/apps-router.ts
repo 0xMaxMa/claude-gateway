@@ -75,7 +75,7 @@ export function createAppsRouter(
       githubUrl: typeof body.github_url === 'string' ? body.github_url : undefined,
       commit: typeof body.commit === 'string' ? body.commit : undefined,
       localPath: typeof body.local_path === 'string' ? body.local_path : undefined,
-      envVars: typeof body.env_vars === 'object' && body.env_vars !== null
+      envVars: typeof body.env_vars === 'object' && body.env_vars !== null && !Array.isArray(body.env_vars)
         ? (body.env_vars as Record<string, string>)
         : undefined,
     };
