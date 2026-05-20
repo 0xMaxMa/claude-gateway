@@ -56,10 +56,21 @@ export class AgentManager {
   detectAgentPaths(): AgentPaths {
     const run = (cmd: string): string =>
       execSync(cmd, { encoding: 'utf-8' }).toString().trim();
+
+    const claudeBin = run('which claude');
+    // Resolve symlink so Docker bind-mounts the real file, not a dangling symlink.
+    // Then derive the node_modules root that actually contains claude-code
+    // (it may differ from `npm root -g` when installed via system package manager).
+    const realClaudeBin = fs.realpathSync(claudeBin);
+    const nodeModulesMarker = '/node_modules/';
+    const npmRoot = realClaudeBin.includes(nodeModulesMarker)
+      ? realClaudeBin.split(nodeModulesMarker)[0] + '/node_modules'
+      : run('npm root -g');
+
     return {
-      claudeBin: run('which claude'),
+      claudeBin: realClaudeBin,
       nodeBin: run('which node'),
-      npmRoot: run('npm root -g'),
+      npmRoot,
     };
   }
 
