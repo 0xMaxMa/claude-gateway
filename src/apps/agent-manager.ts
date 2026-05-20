@@ -11,6 +11,8 @@ export interface AgentPaths {
   claudeBin: string;
   nodeBin: string;
   npmRoot: string;
+  /** Pinned claude-code version for Dockerfile.agent builds (e.g. "2.1.129"). */
+  claudeVersion?: string;
 }
 
 interface RawConfig {
@@ -94,11 +96,26 @@ export class AgentManager {
           fs.copyFileSync(nodeBin, destNode);
           fs.chmodSync(destNode, 0o755);
         }
-        return { claudeBin: destClaude, nodeBin: destNode, npmRoot: homeBinDir };
+        // Detect version here too (before copying completes, use source binary).
+        let claudeVersion: string | undefined;
+        try {
+          const out = execSync(`"${realClaudeBin}" --version 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
+          const m = out.match(/(\d+\.\d+\.\d+)/);
+          claudeVersion = m?.[1];
+        } catch { /* ignore */ }
+        return { claudeBin: destClaude, nodeBin: destNode, npmRoot: homeBinDir, claudeVersion };
       }
     } catch { /* stat failed — proceed with detected paths */ }
 
-    return { claudeBin: realClaudeBin, nodeBin, npmRoot };
+    // Detect claude version for Dockerfile.agent pinning.
+    let claudeVersion: string | undefined;
+    try {
+      const out = execSync(`"${realClaudeBin}" --version 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
+      const m = out.match(/(\d+\.\d+\.\d+)/);
+      claudeVersion = m?.[1];
+    } catch { /* ignore */ }
+
+    return { claudeBin: realClaudeBin, nodeBin, npmRoot, claudeVersion };
   }
 
   /**
@@ -109,33 +126,38 @@ export class AgentManager {
     if (!entry.agentDeclaration || !entry.agentPaths) return;
 
     const composePath = path.join(entry.installPath, 'docker-compose.yml');
+    const dockerfilePath = path.join(entry.installPath, 'Dockerfile.agent');
     const raw = fs.readFileSync(composePath, 'utf-8');
     const compose = yaml.load(raw, { schema: yaml.DEFAULT_SCHEMA }) as Record<string, unknown>;
 
-    const { claudeBin, nodeBin, npmRoot } = entry.agentPaths;
     const { name: agentName } = entry.agentDeclaration;
     const workspacePath = path.join(this.agentsDir, agentName, 'workspace');
-    const homeDir = os.homedir();
+    const version = entry.agentPaths.claudeVersion
+      ? `@anthropic-ai/claude-code@${entry.agentPaths.claudeVersion}`
+      : '@anthropic-ai/claude-code';
 
-    // Only add individual file mounts if they live outside npmRoot.
-    // Mounting bin/claude + bin/node + bin/ together causes Docker to see the
-    // file mount-points as directories inside the directory mount.
-    const extraMounts: string[] = [];
-    if (!claudeBin.startsWith(npmRoot + path.sep)) extraMounts.push(`${claudeBin}:${claudeBin}:ro`);
-    if (!nodeBin.startsWith(npmRoot + path.sep)) extraMounts.push(`${nodeBin}:${nodeBin}:ro`);
+    // Build a self-contained agent image with claude pre-installed.
+    // This avoids bind-mounting host binaries into remote Docker daemons (e.g.
+    // DinD docker-builder) where the gateway's filesystem is not reachable.
+    const dockerfile = [
+      'FROM node:22-slim',
+      `RUN npm install -g ${version}`,
+      'CMD ["sleep", "infinity"]',
+    ].join('\n');
+    fs.writeFileSync(dockerfilePath, dockerfile + '\n', 'utf-8');
 
     const agentService = {
-      image: 'debian:stable-slim',
+      build: {
+        context: '.',
+        dockerfile: 'Dockerfile.agent',
+        network: 'host',
+      },
       command: 'sleep infinity',
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
       volumes: [
-        ...extraMounts,
-        `${npmRoot}:${npmRoot}:ro`,
-        `${homeDir}/.claude.json:${homeDir}/.claude.json:ro`,
-        `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
         `${workspacePath}:/workspace`,
       ],
     };
@@ -165,7 +187,8 @@ export class AgentManager {
     fs.rmSync(workspaceLink, { force: true });
     fs.symlinkSync(targetDir, workspaceLink);
 
-    const claudeBin = entry.agentPaths?.claudeBin ?? 'claude';
+    // Agent image has claude installed via npm — use the plain command name (in PATH).
+    const claudeBin = 'claude';
 
     await this.upsertConfigEntry(agentName, {
       id: agentName,

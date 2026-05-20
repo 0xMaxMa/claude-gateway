@@ -53,7 +53,7 @@ function makeEntry(
     status: 'running',
     source: 'registry',
     agentDeclaration: { path: './agent', name: agentName },
-    agentPaths: { claudeBin: '/usr/local/bin/claude', nodeBin: '/usr/bin/node', npmRoot: '/usr/lib/node_modules' },
+    agentPaths: { claudeBin: '/usr/local/bin/claude', nodeBin: '/usr/bin/node', npmRoot: '/usr/lib/node_modules', claudeVersion: '2.1.0' },
   };
 }
 
@@ -91,7 +91,10 @@ describe('AgentManager', () => {
 
       expect(services['agent']).toBeDefined();
       const agentSvc = services['agent'] as Record<string, unknown>;
-      expect(agentSvc['image']).toBe('debian:stable-slim');
+      // Dockerfile-based build — no 'image' key
+      expect(agentSvc['build']).toBeDefined();
+      const build = agentSvc['build'] as Record<string, unknown>;
+      expect(build['dockerfile']).toBe('Dockerfile.agent');
       expect(agentSvc['command']).toBe('sleep infinity');
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
@@ -129,7 +132,8 @@ describe('AgentManager', () => {
       const agentSvc = services['agent'] as Record<string, unknown>;
       const volumes = agentSvc['volumes'] as string[];
 
-      expect(volumes.some((v) => v.includes('/usr/local/bin/claude'))).toBe(true);
+      // No binary mounts — claude is installed inside the image
+      expect(volumes.some((v) => v.includes('/usr/local/bin/claude'))).toBe(false);
       expect(volumes.some((v) => v.includes('/workspace'))).toBe(true);
     });
 
@@ -188,7 +192,7 @@ describe('AgentManager', () => {
       expect(agentEntry).toBeDefined();
       expect(agentEntry!['type']).toBe('app-agent');
       expect(agentEntry!['container']).toBe('my-app-agent');
-      expect(agentEntry!['claudeBin']).toBe('/usr/local/bin/claude');
+      expect(agentEntry!['claudeBin']).toBe('claude'); // plain command, in PATH inside image
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {
