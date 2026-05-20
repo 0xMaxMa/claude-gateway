@@ -339,9 +339,23 @@ export class SessionProcess extends EventEmitter {
     // app-agent: route through docker exec so claude runs inside the container
     const isAppAgent = this.agentConfig.type === 'app-agent' && this.agentConfig.container;
     const spawnBin = isAppAgent ? 'docker' : claudeBin;
+
+    // env vars that must be forwarded into the container via `docker exec -e`
+    const containerEnv: Record<string, string> = {
+      HOME: '/root',
+      CLAUDE_WORKSPACE: '/workspace',
+      TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
+      GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
+    };
+    for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'GATEWAY_API_URL']) {
+      if (process.env[key]) containerEnv[key] = process.env[key]!;
+    }
+    const dockerEnvFlags = Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+
     const spawnArgs = isAppAgent
       ? [
           'exec', '--workdir', '/workspace', '-i',
+          ...dockerEnvFlags,
           this.agentConfig.container!,
           this.agentConfig.claudeBin ?? claudeBin,
           ...allArgs,
