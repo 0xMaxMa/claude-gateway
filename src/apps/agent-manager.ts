@@ -117,6 +117,13 @@ export class AgentManager {
     const workspacePath = path.join(this.agentsDir, agentName, 'workspace');
     const homeDir = os.homedir();
 
+    // Only add individual file mounts if they live outside npmRoot.
+    // Mounting bin/claude + bin/node + bin/ together causes Docker to see the
+    // file mount-points as directories inside the directory mount.
+    const extraMounts: string[] = [];
+    if (!claudeBin.startsWith(npmRoot + path.sep)) extraMounts.push(`${claudeBin}:${claudeBin}:ro`);
+    if (!nodeBin.startsWith(npmRoot + path.sep)) extraMounts.push(`${nodeBin}:${nodeBin}:ro`);
+
     const agentService = {
       image: 'debian:stable-slim',
       command: 'sleep infinity',
@@ -125,8 +132,7 @@ export class AgentManager {
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
       volumes: [
-        `${claudeBin}:${claudeBin}:ro`,
-        `${nodeBin}:${nodeBin}:ro`,
+        ...extraMounts,
         `${npmRoot}:${npmRoot}:ro`,
         `${homeDir}/.claude.json:${homeDir}/.claude.json:ro`,
         `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
