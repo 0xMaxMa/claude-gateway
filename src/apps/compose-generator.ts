@@ -49,6 +49,7 @@ export interface AppYamlService {
   depends_on?: string[];
   healthcheck?: AppYamlHealthcheck;
   gateway_api?: AppYamlGatewayApi;
+  cap_add?: string[];
 }
 
 export interface AppYamlAgentService {
@@ -107,6 +108,13 @@ const BANNED_PORTS = new Set([22, 80, 443, 10850]);
 const ALLOWED_SERVICE_FIELDS = new Set([
   'build', 'image', 'command', 'entrypoint', 'working_dir', 'user',
   'environment', 'volumes', 'ports', 'depends_on', 'healthcheck', 'gateway_api',
+  'cap_add',
+]);
+// Capabilities that are safe to grant back after cap_drop ALL.
+// Needed by e.g. postgres (CHOWN, SETUID, SETGID) and services that bind low ports (NET_BIND_SERVICE).
+const ALLOWED_CAPS = new Set([
+  'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID',
+  'NET_BIND_SERVICE', 'KILL', 'AUDIT_WRITE',
 ]);
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[a-z0-9._\-/:@]+$/;
@@ -228,6 +236,17 @@ export function generateCompose(
       cap_drop: ['ALL'],
       env_file: '.env',
     };
+
+    // Allow explicitly declared caps back (whitelist only)
+    if (svc.cap_add && svc.cap_add.length > 0) {
+      const denied = svc.cap_add.filter((c) => !ALLOWED_CAPS.has(c));
+      if (denied.length > 0) {
+        throw new Error(
+          `Service "${svcName}".cap_add contains disallowed capabilities: ${denied.join(', ')}. Allowed: ${[...ALLOWED_CAPS].join(', ')}`,
+        );
+      }
+      composeSvc.cap_add = svc.cap_add;
+    }
 
     // build or image
     if (svc.build) {
@@ -505,6 +524,17 @@ function validateService(
 
   if (obj['gateway_api'] !== undefined) {
     validateGatewayApi(svcName, obj['gateway_api'], appDir);
+  }
+
+  if (obj['cap_add'] !== undefined) {
+    if (!Array.isArray(obj['cap_add'])) {
+      throw new Error(`Service "${svcName}".cap_add must be an array`);
+    }
+    for (const cap of obj['cap_add'] as unknown[]) {
+      if (typeof cap !== 'string') {
+        throw new Error(`Service "${svcName}".cap_add entries must be strings`);
+      }
+    }
   }
 
   return svcDef as AppYamlService;
