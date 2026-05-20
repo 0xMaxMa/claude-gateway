@@ -1951,10 +1951,10 @@ Start an asynchronous install job. Returns immediately with a `jobId` to poll.
 |-------|----------|-------------|
 | `registry_app` | One of | App name from community registry |
 | `version` | No | Specific version from registry (default: latest) |
-| `github_url` | One of | Custom GitHub repo URL |
-| `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted) |
+| `github_url` | One of | GitHub repo URL — must be `https://github.com/<owner>/<repo>` (no other hosts accepted) |
+| `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted). Omit to auto-resolve HEAD. |
 | `local_path` | One of | Absolute path to local project dir (dev mode — symlinked, source never deleted) |
-| `env_vars` | No | Pre-supplied env vars (secrets declared in app.yaml) |
+| `env_vars` | No | Pre-supplied env vars as a JSON **object** (not array). Keys must match vars declared in `app.yaml`. |
 
 **Mode A — registry install:**
 ```bash
@@ -2014,10 +2014,10 @@ curl -X POST \
 
 | Status | When |
 |--------|------|
-| 400 | Missing required fields, invalid commit format, or path does not exist |
+| 400 | Missing required fields, invalid commit format, invalid `github_url` format, `env_vars` not an object, or path does not exist |
 | 403 | Not an admin key |
 
-> Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone/symlink → validate `app.yaml` → generate compose → build images → start containers → register proxy routes.
+> Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone/symlink → validate `app.yaml` → generate compose → build images → start containers → register proxy routes. On failure, container logs are appended to `logs` before rollback.
 
 ---
 
@@ -2057,7 +2057,23 @@ curl -H "X-Api-Key: my-key" \
 
 **`status` values:** `pending` | `running` | `completed` | `failed`
 
-When `status` is `failed`, `error` contains the failure message.
+When `status` is `failed`, `error` contains the failure message. If the containers started but failed the healthcheck, container logs are appended to `logs` before rollback:
+
+```json
+{
+  "id": "...",
+  "status": "failed",
+  "logs": [
+    "[2026-05-19T10:00:45.000Z] Starting containers",
+    "[2026-05-19T10:00:47.000Z]   my-app  | 2026/05/19 10:00:46 API_KEY is required",
+    "[2026-05-19T10:00:47.000Z]   my-app  | 2026/05/19 10:00:47 API_KEY is required",
+    "[2026-05-19T10:00:47.000Z] Build/start failed — rolling back"
+  ],
+  "error": "Command failed: docker compose — container my-app is unhealthy",
+  "startedAt": 1747648845000,
+  "updatedAt": 1747648847000
+}
+```
 
 **Error responses:**
 
@@ -2179,6 +2195,8 @@ Installed apps with `ports` declared in their `app.yaml` are accessible at:
 
 No gateway auth is required — apps handle their own authentication. Rate limiting is applied per-port as declared in `app.yaml` (`rate_limit` field, default 200 req/s).
 
+Both `:appName` and `:portName` must match `[a-z0-9][a-z0-9-]{1,63}` — requests with names outside this pattern are rejected with `400`.
+
 ```
 # Example: web app on port 4000 with portName "web"
 http://localhost:10850/app/agent-note/web/
@@ -2278,7 +2296,13 @@ services:
               pattern: "^\\d+$"
 ```
 
-The container receives a Unix socket mounted from the host. POST `http+unix://<socket>/tool/script/<name>` with `{"args": {"size_gb": "20"}}` to invoke the script. The gateway only exposes `PATH` and `HOME` to scripts.
+The gateway mounts a **directory** (not a socket file) into the container. This means the socket file (`gateway.sock` inside that directory) is stable across gateway restarts — the container's bind mount points to the directory inode, so it always sees the latest socket.
+
+The container connects to `http+unix://<socket>/tool/script/<name>` and POST `{"args": {"size_gb": "20"}}` to invoke a declared script. The gateway only exposes `PATH` and `HOME` to scripts.
+
+**Request body limit:** 1 MB. Requests larger than this are rejected with `413`.
+
+**Arg validation:** Each argument is validated against its declared `pattern` (compiled once at socket startup, not per request). Values exceeding 256 characters are rejected.
 
 ---
 

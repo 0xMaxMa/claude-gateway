@@ -26,6 +26,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **Config auto-migration** — automatic schema migration when config format changes
 - **Access control** — allowlist, open, or pairing-based Telegram access policies
 - **HTTP API** — REST API with key-based auth for external integrations
+- **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
 - **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
 - **Session persistence** — conversation history saved and restored across restarts
 
@@ -414,10 +415,46 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `POST` | `/api/v1/agents/wizard/:wizardId/channel` | Verify bot token and generate pairing code (admin) |
 | `POST` | `/api/v1/agents/wizard/:wizardId/channel/verify` | Poll for pairing code confirmation (admin) |
 | `POST` | `/api/v1/agents/wizard/:wizardId/complete` | Skip channel and finalise wizard (admin) |
+| `GET` | `/api/v1/apps/registry` | Browse community app registry (admin key) |
+| `POST` | `/api/v1/apps/install` | Install app from registry, GitHub, or local path → `jobId` (admin) |
+| `GET` | `/api/v1/apps/jobs/:jobId` | Poll install/update job status and logs |
+| `GET` | `/api/v1/apps` | List installed apps |
+| `GET` | `/api/v1/apps/:name` | Get app info |
+| `DELETE` | `/api/v1/apps/:name` | Uninstall app (admin) |
+| `POST` | `/api/v1/apps/:name/start\|stop\|restart` | Start/stop/restart app containers (admin) |
+| `POST` | `/api/v1/apps/:name/update` | Blue-green update with auto-rollback → `jobId` (admin) |
+| `GET` | `/app/:name/:portName/*` | Reverse proxy to installed app (no auth) |
 
 **Wizard API** — create agents programmatically with the same flow as the interactive `make create-agent` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
 
 See **[API.md](./API.md)** for full reference with request/response schemas and curl examples.
+
+---
+
+## App Store
+
+Install Docker-compose apps on the gateway. Apps get a reverse-proxied HTTP endpoint, an optional Unix socket bridge for executing host scripts, and optional AI agent injection.
+
+**Quick install from registry:**
+
+```bash
+curl -X POST http://localhost:10850/api/v1/apps/install \
+  -H "X-Api-Key: <admin-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"registry_app": "getpod-manager", "env_vars": {"API_KEY": "<secret>"}}'
+```
+
+**Poll until done:**
+
+```bash
+curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq .status
+```
+
+**App is then live at** `/app/getpod-manager/<portName>/`.
+
+Apps can also be installed from a GitHub URL (`github_url` + `commit`) or a local path (`local_path`) for development. Updates use a **blue-green swap with automatic rollback** — the old containers stay intact until the new version passes its healthcheck.
+
+See **[API.md — App Store section](./API.md#app-store-api)** for the full reference including `app.yaml` schema, `gateway_api` host-script bridge, and agent injection.
 
 ---
 
