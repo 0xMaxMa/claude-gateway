@@ -131,7 +131,7 @@ const MAX_MEMORY_MB = 2048;
 export function parseAppYaml(content: string, appDir: string): AppYaml {
   let raw: unknown;
   try {
-    raw = yaml.load(content);
+    raw = yaml.load(content, { schema: yaml.DEFAULT_SCHEMA });
   } catch (e) {
     throw new Error(`Failed to parse app.yaml: ${(e as Error).message}`);
   }

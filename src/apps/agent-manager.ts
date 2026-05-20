@@ -72,7 +72,7 @@ export class AgentManager {
 
     const composePath = path.join(entry.installPath, 'docker-compose.yml');
     const raw = fs.readFileSync(composePath, 'utf-8');
-    const compose = yaml.load(raw) as Record<string, unknown>;
+    const compose = yaml.load(raw, { schema: yaml.DEFAULT_SCHEMA }) as Record<string, unknown>;
 
     const { claudeBin, nodeBin, npmRoot } = entry.agentPaths;
     const { name: agentName } = entry.agentDeclaration;

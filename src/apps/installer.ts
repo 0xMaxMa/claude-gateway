@@ -318,13 +318,13 @@ export class AppInstaller {
     }
 
     for (const key of generated.secretKeys) {
-      const val = envVars[key] ?? '';
+      const val = (envVars[key] ?? '').replace(/[\r\n]/g, '');
       envLines.push(`${key}=${val}`);
     }
     // Also write any explicitly provided vars not already declared as secrets
     for (const [k, v] of Object.entries(envVars)) {
       if (!generated.secretKeys.includes(k)) {
-        envLines.push(`${k}=${v}`);
+        envLines.push(`${k}=${v.replace(/[\r\n]/g, '')}`);
       }
     }
 

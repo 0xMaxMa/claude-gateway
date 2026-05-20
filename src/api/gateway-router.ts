@@ -17,6 +17,8 @@ import { RegistryClient } from '../apps/registry-client';
 import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
 
+const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
 // ─── Proxy types ──────────────────────────────────────────────────────────────
 
 interface ProxyRoute {
@@ -224,6 +226,10 @@ export class GatewayRouter {
     // Reverse proxy: /app/:name/:portName/* → http://127.0.0.1:<port>/*
     // This must be registered AFTER API routes to avoid conflicts.
     this.app.use('/app/:name/:portName', (req: Request, res: Response) => {
+      if (!APP_NAME_RE.test(req.params.name) || !APP_NAME_RE.test(req.params.portName)) {
+        res.status(400).json({ error: 'Invalid app or port name' });
+        return;
+      }
       const key = `${req.params.name}:${req.params.portName}`;
       const route = this.routeMap.get(key);
       if (!route) {

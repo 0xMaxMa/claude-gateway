@@ -234,9 +234,19 @@ export class SocketServer {
   }
 
   private readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+    const MAX_BODY = 1 * 1024 * 1024; // 1 MB
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      let size = 0;
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_BODY) {
+          reject(new Error('Request body too large'));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on('end', () => {
         try {
           const raw = Buffer.concat(chunks).toString('utf-8');
