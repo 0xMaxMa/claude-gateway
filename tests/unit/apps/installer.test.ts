@@ -23,7 +23,7 @@ function makeCallbacks(): InstallerCallbacks & {
     deregistered,
     registerRoutes(appName, ports) { registeredRoutes.push({ appName, ports }); },
     deregisterRoutes(appName) { deregistered.push(appName); },
-    startSocket(_socketPath: string, _socket: ComposeSocket) {},
+    startSocket(_socketPath: string, _socket: ComposeSocket) { return Promise.resolve(); },
     stopSockets(_appName: string) {},
   };
 }
@@ -81,13 +81,16 @@ function failingSpawn(failOn: string) {
 describe('AppInstaller', () => {
   let tmpDir: string;
   let appsDir: string;
+  let srcDir: string;
   let registry: AppsRegistry;
   let callbacks: ReturnType<typeof makeCallbacks>;
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
     appsDir = path.join(tmpDir, 'apps');
+    srcDir = path.join(tmpDir, 'projects');
     fs.mkdirSync(appsDir);
+    fs.mkdirSync(srcDir);
     const appsJsonPath = path.join(tmpDir, 'apps.json');
     registry = new AppsRegistry(appsJsonPath);
     callbacks = makeCallbacks();
@@ -107,7 +110,7 @@ describe('AppInstaller', () => {
 
   describe('install() — local path', () => {
     it('returns a job ID immediately', () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       expect(typeof jobId).toBe('string');
@@ -115,7 +118,7 @@ describe('AppInstaller', () => {
     });
 
     it('job is in pending/running state immediately after call', () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       const job = installer.getJob(jobId);
@@ -124,7 +127,7 @@ describe('AppInstaller', () => {
     });
 
     it('job completes with correct result after async install', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
 
@@ -135,7 +138,7 @@ describe('AppInstaller', () => {
     });
 
     it('registers proxy routes on success', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);
@@ -145,7 +148,7 @@ describe('AppInstaller', () => {
     });
 
     it('persists entry to apps.json with status running', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);
@@ -156,7 +159,7 @@ describe('AppInstaller', () => {
     });
 
     it('writes .env file to app dir', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({
         localPath: appDir,
@@ -169,7 +172,7 @@ describe('AppInstaller', () => {
     });
 
     it('injects BASE_PATH into env for web-type ports', async () => {
-      const appDir = path.join(appsDir, 'web-app');
+      const appDir = path.join(srcDir, 'web-app');
       fs.mkdirSync(appDir, { recursive: true });
       fs.writeFileSync(
         path.join(appDir, 'app.yaml'),
@@ -196,7 +199,7 @@ services:
       expect(envContent).toContain('BASE_PATH=/app/web-app/web');
     });
 
-    it('fails when local_path is outside apps directory', async () => {
+    it('fails when local_path has no app.yaml', async () => {
       const outsidePath = path.join(tmpDir, 'evil-app');
       fs.mkdirSync(outsidePath);
       const installer = makeInstaller();
@@ -204,7 +207,7 @@ services:
       const job = await waitForJob(installer, jobId, 5000);
 
       expect(job.status).toBe('failed');
-      expect(job.error).toMatch(/must be within/);
+      expect(job.error).toMatch(/app\.yaml not found/);
     });
 
     it('fails when local_path does not exist', async () => {
@@ -219,7 +222,7 @@ services:
     });
 
     it('fails when docker compose up fails', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const spawn = failingSpawn('up');
       const installer = makeInstaller(spawn as typeof successSpawn);
       const jobId = installer.install({ localPath: appDir });
@@ -230,7 +233,7 @@ services:
     });
 
     it('fails when app is already installed', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       // First install
       const jobId1 = installer.install({ localPath: appDir });
@@ -253,7 +256,7 @@ services:
     });
 
     it('returns the job state', () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       const job = installer.getJob(jobId);
@@ -271,7 +274,7 @@ services:
     });
 
     it('calls deregisterRoutes callback', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);
@@ -281,7 +284,7 @@ services:
     });
 
     it('removes entry from apps.json', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);
@@ -302,7 +305,7 @@ services:
     });
 
     it('updates status to stopped on stop', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);
@@ -313,7 +316,7 @@ services:
     });
 
     it('updates status to running on start', async () => {
-      const appDir = makeAppDir(appsDir, 'my-app');
+      const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       const jobId = installer.install({ localPath: appDir });
       await waitForJob(installer, jobId, 5000);

@@ -45,7 +45,7 @@ function makeInstaller(
   const callbacks: InstallerCallbacks = {
     registerRoutes: jest.fn((_appName: string, _ports: ComposePort[]) => {}),
     deregisterRoutes: jest.fn((_appName: string) => {}),
-    startSocket: jest.fn((_socketPath: string, _socket: ComposeSocket) => {}),
+    startSocket: jest.fn((_socketPath: string, _socket: ComposeSocket) => Promise.resolve()),
     stopSockets: jest.fn((_appName: string) => {}),
   };
   const installer = new AppInstaller(

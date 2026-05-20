@@ -1953,7 +1953,7 @@ Start an asynchronous install job. Returns immediately with a `jobId` to poll.
 | `version` | No | Specific version from registry (default: latest) |
 | `github_url` | One of | Custom GitHub repo URL |
 | `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted) |
-| `local_path` | One of | Pre-baked local path under `~/.claude-gateway/apps/` |
+| `local_path` | One of | Absolute path to local project dir (dev mode — symlinked, source never deleted) |
 | `env_vars` | No | Pre-supplied env vars (secrets declared in app.yaml) |
 
 **Mode A — registry install:**
@@ -1987,6 +1987,25 @@ curl -X POST \
   http://localhost:10850/api/v1/apps/install | jq
 ```
 
+**Mode C — local dev (symlink):**
+
+Use when developing an app locally. Creates a symlink `~/.claude-gateway/apps/{name}` → your project directory instead of cloning. The full install pipeline (validate, compose, build, start) runs the same as other modes. Uninstalling removes only the symlink — your source directory is never touched.
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"local_path": "/home/dev/projects/my-app"}' \
+  http://localhost:10850/api/v1/apps/install | jq
+```
+
+After editing source, restart the app to pick up changes:
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  http://localhost:10850/api/v1/apps/my-app/restart | jq
+```
+
 ```json
 { "jobId": "550e8400-e29b-41d4-a716-446655440000" }
 ```
@@ -1995,10 +2014,10 @@ curl -X POST \
 
 | Status | When |
 |--------|------|
-| 400 | Missing required fields or invalid commit format |
+| 400 | Missing required fields, invalid commit format, or path does not exist |
 | 403 | Not an admin key |
 
-> Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone → validate `app.yaml` → generate compose → build images → start containers → register proxy routes.
+> Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone/symlink → validate `app.yaml` → generate compose → build images → start containers → register proxy routes.
 
 ---
 

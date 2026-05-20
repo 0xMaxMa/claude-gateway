@@ -623,9 +623,10 @@ services:
       const compose = readCompose(outputPath);
       const svc = (compose.services as Record<string, unknown>).app as Record<string, unknown>;
       const vols = svc.volumes as string[];
-      const socketVol = vols.find((v: string) => v.endsWith(':/run/gateway.sock'));
+      // Now mounts directory (getpod-manager-app/) → /run instead of socket file → /run/gateway.sock
+      const socketVol = vols.find((v: string) => v.endsWith(':/run'));
       expect(socketVol).toBeDefined();
-      expect(socketVol).toMatch(/getpod-manager-app\.sock/);
+      expect(socketVol).toMatch(/getpod-manager-app/);
     });
 
     it('returns socket metadata in result.sockets', () => {
@@ -633,7 +634,7 @@ services:
       expect(result.sockets).toHaveLength(1);
       expect(result.sockets[0].service).toBe('app');
       expect(result.sockets[0].hostSocketPath).toMatch(
-        /\/run\/claude-gateway\/apps\/getpod-manager-app\.sock/,
+        /getpod-manager-app\/gateway\.sock/,
       );
       expect(result.sockets[0].scripts['resize-disk']).toMatchObject({
         path: 'scripts/resize-disk.sh',

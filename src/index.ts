@@ -40,7 +40,8 @@ import { AppsRegistry } from './apps/registry';
 import { RegistryClient } from './apps/registry-client';
 import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
-import { SocketServer } from './apps/socket-server';
+import { SocketServer, parseTimeoutMs } from './apps/socket-server';
+import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 
 function expandTilde(p: string): string {
   if (p === '~' || p.startsWith('~/')) {
@@ -333,6 +334,44 @@ async function startAgent(
   startupResults.push({ id: agentConfig.id, status: 'started', workspace: agentConfig.workspace });
 }
 
+async function restoreSockets(registry: AppsRegistry, socketServer: SocketServer): Promise<void> {
+  const apps = await registry.list();
+  for (const app of apps) {
+    if (app.status !== 'running') continue;
+    if (Object.keys(app.sockets).length === 0) continue;
+
+    const yamlPath = path.join(app.installPath, 'app.yaml');
+    if (!fs.existsSync(yamlPath)) continue;
+
+    let appYaml: ReturnType<typeof parseAppYaml>;
+    try {
+      appYaml = parseAppYaml(fs.readFileSync(yamlPath, 'utf-8'), app.installPath);
+    } catch {
+      continue;
+    }
+
+    for (const [svcName, sockPath] of Object.entries(app.sockets)) {
+      const svc = appYaml.services[svcName] as AppYamlService | undefined;
+      if (!svc?.gateway_api) continue;
+
+      try { fs.unlinkSync(sockPath); } catch { /* stale or absent */ }
+      fs.mkdirSync(path.dirname(sockPath), { recursive: true });
+
+      socketServer.start(sockPath, {
+        appName: app.name,
+        serviceName: svcName,
+        appDir: app.installPath,
+        scripts: Object.fromEntries(
+          Object.entries(svc.gateway_api.scripts ?? {}).map(([name, s]: [string, AppYamlScript]) => [
+            name,
+            { path: s.path, timeoutMs: parseTimeoutMs(s.timeout), args: s.args },
+          ]),
+        ),
+      });
+    }
+  }
+}
+
 async function main(): Promise<void> {
   // Load agent .env files before config interpolation so ${TOKEN} vars resolve
   const gatewayAgentsDir = path.join(path.dirname(CONFIG_PATH), 'agents');
@@ -442,7 +481,7 @@ async function main(): Promise<void> {
       // No-op until router is ready; router.loadProxyRoutes() handles startup restore
     },
     deregisterRoutes: (_appName: string) => {},
-    startSocket: (_socketPath: string, _socket: import('./apps/compose-generator').ComposeSocket, _scripts: Record<string, import('./apps/installer').ScriptConfig>) => {},
+    startSocket: (_socketPath: string, _socket: import('./apps/compose-generator').ComposeSocket, _scripts: Record<string, import('./apps/installer').ScriptConfig>, _appDir: string) => Promise.resolve(),
     stopSockets: (_appName: string) => {},
   };
 
@@ -469,18 +508,17 @@ async function main(): Promise<void> {
   installerCallbacks.deregisterRoutes = (appName) => {
     router.deregisterProxyRoutes(appName);
   };
-  installerCallbacks.startSocket = (socketPath, socket, scripts) => {
-    const appName = path.basename(socketPath).split('-')[0] ?? 'unknown';
-    socketServer.start(socketPath, {
-      appName,
+  installerCallbacks.startSocket = (socketPath, socket, scripts, appDir) => {
+    return socketServer.start(socketPath, {
+      appName: socket.service.split('-')[0] ?? 'unknown',
       serviceName: socket.service,
-      appDir: path.dirname(socketPath),
+      appDir,
       scripts: Object.fromEntries(
         Object.entries(scripts).map(([name, s]) => [
           name,
           {
             path: s.path,
-            timeoutMs: parseInt(s.timeout, 10) * 1000,
+            timeoutMs: parseTimeoutMs(s.timeout),
             args: s.args,
           },
         ]),
@@ -491,16 +529,17 @@ async function main(): Promise<void> {
     socketServer.stopApp(appName);
   };
 
-  // Restore proxy routes and agent entries for apps that were running before restart
+  // Restore proxy routes, sockets, and agent entries for apps that were running before restart
   try {
     await router.loadProxyRoutes(appsRegistry);
+    await restoreSockets(appsRegistry, socketServer);
     const reconcileErrors = await agentManager.reconcileAgents(appsRegistry);
     if (reconcileErrors.length > 0) {
       for (const e of reconcileErrors) {
         globalLogger.warn(`App store: reconcile failed for "${e.app}": ${e.error}`);
       }
     }
-    globalLogger.info('App store: proxy routes and agent entries restored');
+    globalLogger.info('App store: proxy routes, sockets, and agent entries restored');
   } catch (err) {
     globalLogger.warn('App store: startup restore failed (non-fatal)', { error: (err as Error).message });
   }

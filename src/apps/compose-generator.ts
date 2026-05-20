@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as yaml from 'js-yaml';
 
@@ -112,7 +113,9 @@ const IMAGE_RE = /^[a-z0-9._\-/:@]+$/;
 const NAMED_VOLUME_RE = /^[a-z0-9_-]+$/;
 const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,63}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
-const SOCKET_DIR = '/run/claude-gateway/apps';
+// Use homedir so the socket path is on the host-mounted volume and accessible
+// to remote Docker daemons (e.g. docker-builder DinD) via a shared bind mount.
+const SOCKET_DIR = path.join(os.homedir(), '.claude-gateway', 'sockets');
 
 const DEFAULT_CPU = 1.0;
 const DEFAULT_MEMORY = '256M';
@@ -234,7 +237,7 @@ export function generateCompose(
           `Service "${svcName}".build must be within the app directory`,
         );
       }
-      composeSvc.build = svc.build;
+      composeSvc.build = { context: svc.build, network: 'host' };
     } else if (svc.image) {
       if (svc.image.endsWith(':latest')) {
         result.warnings.push(
@@ -271,7 +274,7 @@ export function generateCompose(
     for (const vol of svc.volumes ?? []) {
       composeVolumes.push(vol);
       const src = vol.split(':')[0];
-      if (!src.startsWith('/')) {
+      if (!src.startsWith('/') && !src.startsWith('${')) {
         namedVolumes.add(src);
       }
     }
@@ -313,11 +316,15 @@ export function generateCompose(
       };
     }
 
-    // gateway_api — inject socket volume, record for installer
+    // gateway_api — inject socket directory volume, record for installer
     if (svc.gateway_api) {
-      const hostSockPath = path.join(SOCKET_DIR, `${appName}-${svcName}.sock`);
+      const hostSockDir = path.join(SOCKET_DIR, `${appName}-${svcName}`);
+      const hostSockPath = path.join(hostSockDir, 'gateway.sock');
       const containerSockPath = svc.gateway_api.socket;
-      const sockVol = `${hostSockPath}:${containerSockPath}`;
+      // Mount the parent directory so Docker bind-mount captures the directory inode
+      // (stable), not the socket file inode (recreated on each gateway restart).
+      const containerSockDir = containerSockPath.replace(/\/[^/]+$/, '') || '/';
+      const sockVol = `${hostSockDir}:${containerSockDir}`;
       composeSvc.volumes = [
         ...((composeSvc.volumes as string[] | undefined) ?? []),
         sockVol,
@@ -579,6 +586,15 @@ function validateVolumes(svcName: string, volList: unknown): void {
       } catch (err) {
         const e = err as NodeJS.ErrnoException;
         if (e.code !== 'ENOENT') throw e; // path doesn't exist yet — OK
+      }
+    } else if (/^\$\{[A-Z_][A-Z0-9_]*(:-[^}]*)?\}(\/[^.][^:]*)?(\/\.\.)?/.test(src) && src.startsWith('${')) {
+      // Env var substitution: ${VAR} or ${VAR:-default} — Docker Compose expands at runtime.
+      // Reject if the suffix contains traversal sequences.
+      const suffix = src.replace(/^\$\{[^}]+\}/, '');
+      if (suffix.includes('..')) {
+        throw new Error(
+          `Service "${svcName}".volumes source contains path traversal: "${src}"`,
+        );
       }
     } else {
       // Named volume

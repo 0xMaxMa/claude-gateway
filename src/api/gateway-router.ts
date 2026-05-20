@@ -25,6 +25,18 @@ interface ProxyRoute {
   rateLimit: number;
 }
 
+/** Extract hostname from DOCKER_HOST (tcp://host:port) for app container proxy. */
+function resolveAppProxyHost(): string {
+  const dockerHost = process.env.DOCKER_HOST;
+  if (dockerHost?.startsWith('tcp://')) {
+    const url = new URL(dockerHost);
+    return url.hostname;
+  }
+  return '127.0.0.1';
+}
+
+const APP_PROXY_HOST = resolveAppProxyHost();
+
 interface RateBucket {
   tokens: number;
   lastRefill: number;
@@ -234,12 +246,23 @@ export class GatewayRouter {
           ) || '/');
 
       const options: http.RequestOptions = {
-        hostname: '127.0.0.1',
+        hostname: APP_PROXY_HOST,
         port: route.port,
         path: targetPath,
         method: req.method,
-        headers: { ...req.headers, host: `127.0.0.1:${route.port}` },
+        headers: { ...req.headers, host: `${APP_PROXY_HOST}:${route.port}` },
       };
+
+      // express.json() drains req stream; re-serialize parsed body so proxy gets correct bytes.
+      let proxyBody: Buffer | undefined;
+      if (req.body !== undefined && req.method !== 'GET' && req.method !== 'HEAD') {
+        proxyBody = Buffer.from(JSON.stringify(req.body), 'utf-8');
+        options.headers = {
+          ...options.headers,
+          'content-type': 'application/json',
+          'content-length': proxyBody.length.toString(),
+        };
+      }
 
       const proxy = http.request(options, (proxyRes) => {
         res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
@@ -250,7 +273,11 @@ export class GatewayRouter {
           res.status(502).json({ error: `App unavailable: ${err.message}` });
         }
       });
-      req.pipe(proxy, { end: true });
+      if (proxyBody) {
+        proxy.end(proxyBody);
+      } else {
+        proxy.end();
+      }
     });
 
     // Health check

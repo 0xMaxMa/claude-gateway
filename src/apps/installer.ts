@@ -50,7 +50,7 @@ export interface JobState {
 export interface InstallerCallbacks {
   registerRoutes(appName: string, ports: ComposePort[]): void;
   deregisterRoutes(appName: string): void;
-  startSocket(socketPath: string, socket: ComposeSocket, scripts: Record<string, ScriptConfig>): void;
+  startSocket(socketPath: string, socket: ComposeSocket, scripts: Record<string, ScriptConfig>, appDir: string): Promise<void>;
   stopSockets(appName: string): void;
 }
 
@@ -95,6 +95,13 @@ export class AppInstaller {
 
   /** Start an async install job. Returns jobId immediately. */
   install(options: InstallOptions): string {
+    // Check synchronously before spawning async job to prevent races
+    const tentativeName = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
+    if (this.installingNames.has(tentativeName)) {
+      throw new Error(`An install for "${tentativeName}" is already in progress`);
+    }
+    this.installingNames.add(tentativeName);
+
     const jobId = crypto.randomUUID();
     const job: JobState = {
       id: jobId,
@@ -109,10 +116,7 @@ export class AppInstaller {
     void this.runInstall(job, options).catch((err: unknown) => {
       this.failJob(job, err instanceof Error ? err.message : String(err));
     }).finally(() => {
-      // installingNames cleaned up inside runInstall on success;
-      // on error we may not know canonical name yet — clear any remnant
-      const tentative = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
-      this.installingNames.delete(tentative);
+      this.installingNames.delete(tentativeName);
     });
 
     return jobId;
@@ -159,9 +163,15 @@ export class AppInstaller {
       await this.agentManager.deleteAgent(entry);
     }
 
-    // Remove app files (but not the dir itself if it's a symlink target)
-    if (fs.existsSync(appDir)) {
-      fs.rmSync(appDir, { recursive: true, force: true });
+    // Remove app files — symlink only for local-dev installs, full rmSync for cloned installs
+    let appDirStat: fs.Stats | null = null;
+    try { appDirStat = fs.lstatSync(appDir); } catch { /* already gone */ }
+    if (appDirStat) {
+      if (appDirStat.isSymbolicLink()) {
+        fs.unlinkSync(appDir);
+      } else {
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
     }
 
     await this.registry.remove(appName);
@@ -191,13 +201,7 @@ export class AppInstaller {
     job.status = 'running';
     job.updatedAt = Date.now();
 
-    // Temporary sentinel — replaced with canonical app name once app.yaml is parsed
     const tentativeName = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
-    if (this.installingNames.has(tentativeName)) {
-      throw new Error(`An install for "${tentativeName}" is already in progress`);
-    }
-    this.installingNames.add(tentativeName);
-
     const { localPath } = options;
 
     // ── Resolve app dir and commit ────────────────────────────────────────
@@ -209,22 +213,28 @@ export class AppInstaller {
     let version = options.version ?? '0.0.0';
 
     if (localPath) {
-      // Mode B — local pre-baked path
+      // Mode B — local dev path (symlinked into appsDir)
       const resolved = path.resolve(localPath);
-      if (!resolved.startsWith(this.appsDir + path.sep) && resolved !== this.appsDir) {
-        throw new Error(
-          `local_path must be within ${this.appsDir} — got "${localPath}"`,
-        );
-      }
       if (!fs.existsSync(resolved)) {
-        throw new Error(`local_path does not exist: "${localPath}"`);
+        throw new Error(`local_path does not exist: "${resolved}"`);
       }
-      appDir = resolved;
-      appName = path.basename(resolved);
+      // Read app.yaml from local path first to get canonical app name
+      const localYamlPath = path.join(resolved, 'app.yaml');
+      if (!fs.existsSync(localYamlPath)) {
+        throw new Error(`app.yaml not found in "${resolved}"`);
+      }
+      const localYamlContent = fs.readFileSync(localYamlPath, 'utf-8');
+      const localAppYaml = parseAppYaml(localYamlContent, resolved);
+      appName = localAppYaml.name;
+      appDir = path.join(this.appsDir, appName);
+      if (fs.existsSync(appDir)) {
+        throw new Error(`App "${appName}" is already installed. Uninstall first.`);
+      }
+      fs.symlinkSync(resolved, appDir);
       commit = 'local';
       githubUrl = '';
       source = 'local';
-      this.log(job, `Using local path: ${appDir}`);
+      this.log(job, `Symlinked ${resolved} → ${appDir}`);
     } else {
       // Mode A — registry or GitHub
       ({ appName, commit, githubUrl, source, version } = await this.resolveSource(
@@ -250,6 +260,9 @@ export class AppInstaller {
       this.run(['git', 'checkout', 'FETCH_HEAD'], appDir);
       this.log(job, `Checked out commit ${commit.slice(0, 8)}`);
     }
+
+    // From here — appDir exists. Wrap in try so any failure cleans it up.
+    try {
 
     // Validate app name from app.yaml matches
     this.log(job, 'Validating app.yaml');
@@ -323,16 +336,16 @@ export class AppInstaller {
     }
 
     // ── Create socket files ───────────────────────────────────────────────
-    const SOCK_DIR = '/run/claude-gateway/apps';
+    // Use homedir so sockets are on the host-mounted volume and visible to remote
+    // Docker daemons (e.g. docker-builder DinD) via a shared bind mount.
+    const SOCK_DIR = path.join(os.homedir(), '.claude-gateway', 'sockets');
     if (generated.sockets.length > 0) {
       fs.mkdirSync(SOCK_DIR, { recursive: true });
     }
     for (const sock of generated.sockets) {
       const sockPath = sock.hostSocketPath;
-      // Remove stale socket file if it exists
-      if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
       try {
-        this.callbacks.startSocket(sockPath, sock, sock.scripts);
+        await this.callbacks.startSocket(sockPath, sock, sock.scripts, appDir);
       } catch (err) {
         throw new Error(`Failed to start socket for service "${sock.service}": ${(err as Error).message}`);
       }
@@ -385,13 +398,37 @@ export class AppInstaller {
 
     await this.registry.upsert(entry);
 
-    // ── docker compose build ──────────────────────────────────────────────
-    this.log(job, 'Building images');
-    this.run(['docker', 'compose', 'build'], appDir, 600_000);
+    try {
+      // ── docker compose build ──────────────────────────────────────────────
+      this.log(job, 'Building images');
+      this.run(['docker', 'compose', 'build'], appDir, 600_000);
 
-    // ── docker compose up -d ──────────────────────────────────────────────
-    this.log(job, 'Starting containers');
-    this.run(['docker', 'compose', 'up', '-d', '--wait'], appDir, 120_000);
+      // ── docker compose up -d ──────────────────────────────────────────────
+      this.log(job, 'Starting containers');
+      try {
+        this.run(['docker', 'compose', 'up', '-d', '--wait'], appDir, 120_000);
+      } catch (upErr) {
+        // Capture container logs to help diagnose startup failures
+        try {
+          const { stdout } = this.run(
+            ['docker', 'compose', 'logs', '--no-color', '--tail=50'],
+            appDir,
+            10_000,
+          );
+          if (stdout.trim()) {
+            for (const line of stdout.trim().split('\n')) {
+              this.log(job, `  ${line}`);
+            }
+          }
+        } catch {
+          // ignore log capture errors
+        }
+        throw upErr;
+      }
+    } catch (err) {
+      this.log(job, 'Build/start failed — rolling back');
+      throw err; // outer catch handles full cleanup
+    }
 
     // ── Update status to running ──────────────────────────────────────────
     await this.registry.updateStatus(appName, 'running');
@@ -424,6 +461,27 @@ export class AppInstaller {
     job.updatedAt = Date.now();
     this.log(job, `Install complete: ${JSON.stringify(proxyUrls)}`);
     this.installingNames.delete(appName);
+
+    } catch (err) {
+      // Outer rollback: clean up appDir and all registered resources
+      this.installingNames.delete(appName);
+      this.installingNames.delete(tentativeName);
+      await this.registry.remove(appName).catch(() => {});
+      this.callbacks.stopSockets(appName);
+      this.callbacks.deregisterRoutes(appName);
+      try {
+        this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all', '--volumes'], appDir, 60_000);
+      } catch { /* containers may not have started yet */ }
+      try {
+        const stat = fs.lstatSync(appDir);
+        if (stat.isSymbolicLink()) {
+          fs.unlinkSync(appDir);
+        } else {
+          fs.rmSync(appDir, { recursive: true, force: true });
+        }
+      } catch { /* already gone */ }
+      throw err;
+    }
   }
 
   // ─── Update pipeline ──────────────────────────────────────────────────────
@@ -580,8 +638,7 @@ export class AppInstaller {
       this.callbacks.registerRoutes(appName, generated.ports);
       for (const sock of generated.sockets) {
         const sockPath = sock.hostSocketPath;
-        if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
-        this.callbacks.startSocket(sockPath, sock, sock.scripts);
+        await this.callbacks.startSocket(sockPath, sock, sock.scripts, finalDir);
       }
 
       // ── Clean up old backup (best-effort) ─────────────────────────────────
@@ -669,16 +726,26 @@ export class AppInstaller {
       };
     }
 
-    if (options.githubUrl && options.commit) {
-      if (!COMMIT_RE.test(options.commit)) {
-        throw new Error(
-          `commit must be a 40-char hex string — branch names are not allowed`,
-        );
+    if (options.githubUrl) {
+      let commit: string;
+      if (options.commit) {
+        if (!COMMIT_RE.test(options.commit)) {
+          throw new Error(`commit must be a 40-char hex string — branch names are not allowed`);
+        }
+        commit = options.commit;
+      } else {
+        // Auto-resolve HEAD commit via git ls-remote
+        this.log(job, `Resolving HEAD commit for ${options.githubUrl}`);
+        const { stdout } = this.run(['git', 'ls-remote', options.githubUrl, 'HEAD'], process.cwd());
+        const match = stdout.trim().match(/^([0-9a-f]{40})\s+HEAD/);
+        if (!match) throw new Error(`Could not resolve HEAD commit for ${options.githubUrl}`);
+        commit = match[1];
+        this.log(job, `Resolved HEAD → ${commit.slice(0, 8)}`);
       }
       const appName = options.githubUrl.split('/').pop()?.replace(/\.git$/, '') ?? 'app';
       return {
         appName,
-        commit: options.commit,
+        commit,
         githubUrl: options.githubUrl,
         source: 'custom',
         version: defaultVersion,

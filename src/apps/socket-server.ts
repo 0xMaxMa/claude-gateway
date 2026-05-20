@@ -41,36 +41,43 @@ export class SocketServer {
    * Create a Unix socket server at socketPath.
    * The socket is created with the caller's umask; chmod 600 is applied after bind.
    */
-  start(socketPath: string, config: SocketConfig): void {
+  start(socketPath: string, config: SocketConfig): Promise<void> {
     if (this.servers.has(socketPath)) {
-      return; // Already listening
+      return Promise.resolve();
     }
 
-    const server = http.createServer((req, res) => {
-      void this.handleRequest(req, res, socketPath, config);
-    });
-
-    const netServer = server.listen(socketPath, () => {
-      try {
-        fs.chmodSync(socketPath, 0o600);
-      } catch {
-        // chmod may fail in test environments — not fatal
+    return new Promise((resolve, reject) => {
+      // Ensure parent directory exists (socket lives inside a per-app subdirectory)
+      try { fs.mkdirSync(path.dirname(socketPath), { recursive: true }); } catch { /* exists */ }
+      // Clean up any stale socket or leftover directory before binding
+      if (fs.existsSync(socketPath)) {
+        try { fs.rmSync(socketPath, { recursive: true, force: true }); } catch { /* already gone */ }
       }
-    }) as unknown as net.Server;
 
-    netServer.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        // Stale socket — remove and retry once
-        try { fs.unlinkSync(socketPath); } catch { /* already gone */ }
-        netServer.once('error', (retryErr: NodeJS.ErrnoException) => {
-          this.servers.delete(socketPath);
-          throw new Error(`Socket server failed after retry: ${retryErr.message}`);
-        });
-        netServer.listen(socketPath);
-      }
+      const server = http.createServer((req, res) => {
+        void this.handleRequest(req, res, socketPath, config);
+      });
+
+      const netServer = server.listen(socketPath, () => {
+        try {
+          // 0o666: containers with cap_drop:ALL lack CAP_DAC_OVERRIDE so they cannot
+          // bypass file permissions even as root — world-writable is required here.
+          // Exposure is bounded: only containers with this socket explicitly bind-mounted
+          // in their compose file can reach it.
+          fs.chmodSync(socketPath, 0o666);
+        } catch {
+          // chmod may fail in test environments — not fatal
+        }
+        resolve();
+      }) as unknown as net.Server;
+
+      netServer.on('error', (err: NodeJS.ErrnoException) => {
+        this.servers.delete(socketPath);
+        reject(new Error(`Socket server failed: ${err.message}`));
+      });
+
+      this.servers.set(socketPath, netServer);
     });
-
-    this.servers.set(socketPath, netServer);
   }
 
   stop(socketPath: string): void {
@@ -79,7 +86,7 @@ export class SocketServer {
     server.close();
     this.servers.delete(socketPath);
     try {
-      fs.unlinkSync(socketPath);
+      fs.rmSync(socketPath, { recursive: true, force: true });
     } catch {
       // Already removed
     }
@@ -91,12 +98,16 @@ export class SocketServer {
     }
   }
 
-  /** Stop all sockets whose path contains the app name prefix (e.g. "my-app-"). */
+  /** Stop all sockets whose path is under the app's socket directory (e.g. "my-app-svc/"). */
   stopApp(appName: string): void {
     const prefix = `${appName}-`;
     for (const socketPath of [...this.servers.keys()]) {
-      const basename = socketPath.split('/').pop() ?? '';
-      if (basename.startsWith(prefix)) {
+      const parts = socketPath.split('/');
+      // New layout: .../sockets/appName-svcName/gateway.sock — check parent dir
+      const parentDir = parts[parts.length - 2] ?? '';
+      // Legacy layout: .../sockets/appName-svcName.sock — check basename
+      const basename = parts[parts.length - 1] ?? '';
+      if (parentDir.startsWith(prefix) || basename.startsWith(prefix)) {
         this.stop(socketPath);
       }
     }
@@ -156,13 +167,15 @@ export class SocketServer {
     // Execute script via bash — re-resolve realpath at execute time to guard against symlink swaps
     const scriptAbsPath = path.resolve(config.appDir, scriptDef.path);
     let realScriptPath: string;
+    let realAppDir: string;
     try {
       realScriptPath = fs.realpathSync(scriptAbsPath);
+      realAppDir = fs.realpathSync(config.appDir);
     } catch {
       this.send(res, 403, { error: 'Script not accessible' });
       return;
     }
-    if (!realScriptPath.startsWith(config.appDir + path.sep) && realScriptPath !== config.appDir) {
+    if (!realScriptPath.startsWith(realAppDir + path.sep) && realScriptPath !== realAppDir) {
       this.send(res, 403, { error: 'Script path escapes app directory' });
       return;
     }
