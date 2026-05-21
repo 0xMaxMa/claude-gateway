@@ -1667,7 +1667,7 @@ export class AgentRunner extends EventEmitter {
         // Partial assistant message (from --include-partial-messages)
         // Contains cumulative text; compute delta and emit as text_delta
         if (obj['type'] === 'assistant') {
-          const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+          const msg = obj['message'] as { content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: Record<string, unknown> }> } | undefined;
           if (Array.isArray(msg?.content)) {
             let fullText = '';
             for (const block of msg!.content) {
@@ -1679,6 +1679,18 @@ export class AgentRunner extends EventEmitter {
               callbacks.onChunk({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
+            // Emit tool_use with full input from final assistant message content.
+            // Partial messages carry empty input: {} — skip those, only emit when input is populated.
+            for (const block of msg!.content) {
+              if (block.type === 'tool_use' && block.name && block.input && Object.keys(block.input).length > 0) {
+                callbacks.onChunk({
+                  type: 'tool_use',
+                  name: block.name,
+                  id: block.id ?? '',
+                  input: block.input,
+                });
+              }
+            }
           }
         }
 
