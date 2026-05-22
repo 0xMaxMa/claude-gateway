@@ -98,6 +98,9 @@ export class SocketServer {
     this.servers.delete(socketPath);
     try {
       fs.rmSync(socketPath, { recursive: true, force: true });
+      // Clean up the parent socket directory if empty (created per-app at install time)
+      const parentDir = path.dirname(socketPath);
+      try { fs.rmdirSync(parentDir); } catch { /* non-empty or already gone — OK */ }
     } catch {
       // Already removed
     }

@@ -46,14 +46,14 @@ function makeEntry(
     commit: 'abc123def456abc123def456abc123def456abc1',
     githubUrl: 'https://github.com/test/my-app',
     installPath,
-    ports: [{ name: 'api', service: 'app', containerPort: 5000, type: 'api', rateLimit: 60 }],
+    ports: [{ name: 'api', service: 'app', hostPort: 5000, containerPort: 5000, type: 'api', rateLimit: 60 }],
     sockets: {},
     installedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     status: 'running',
     source: 'registry',
     agentDeclaration: { path: './agent', name: agentName },
-    agentPaths: { claudeBin: '/usr/local/bin/claude', nodeBin: '/usr/bin/node', npmRoot: '/usr/lib/node_modules', claudeVersion: '2.1.0' },
+    agentPaths: { claudeBin: '/usr/local/bin/claude', nodeBin: '/usr/bin/node', npmRoot: '/usr/lib/node_modules' },
   };
 }
 
@@ -91,11 +91,10 @@ describe('AgentManager', () => {
 
       expect(services['agent']).toBeDefined();
       const agentSvc = services['agent'] as Record<string, unknown>;
-      // Dockerfile-based build — no 'image' key
-      expect(agentSvc['build']).toBeDefined();
-      const build = agentSvc['build'] as Record<string, unknown>;
-      expect(build['dockerfile']).toBe('Dockerfile.agent');
-      expect(agentSvc['command']).toBe('sleep infinity');
+      // debian:stable-slim base image — glibc required for host node binary
+      expect(agentSvc['image']).toBe('debian:stable-slim');
+      expect(typeof agentSvc['command']).toBe('string');
+      expect((agentSvc['command'] as string)).toContain('sleep infinity');
       expect(agentSvc['container_name']).toBe('my-app-agent');
     });
 
@@ -122,7 +121,7 @@ describe('AgentManager', () => {
       expect(services['agent']).toBeDefined();
     });
 
-    it('injects correct volumes into agent service', () => {
+    it('mounts binaries, auth files, and workspace as volumes', () => {
       const entry = makeEntry(tmpDir);
       manager.injectAgentService(entry);
 
@@ -132,9 +131,11 @@ describe('AgentManager', () => {
       const agentSvc = services['agent'] as Record<string, unknown>;
       const volumes = agentSvc['volumes'] as string[];
 
-      // No binary mounts — claude is installed inside the image
-      expect(volumes.some((v) => v.includes('/usr/local/bin/claude'))).toBe(false);
-      expect(volumes.some((v) => v.includes('/workspace'))).toBe(true);
+      expect(volumes).toBeDefined();
+      expect(volumes.some((v) => v.includes('claude') && v.endsWith(':ro'))).toBe(true);
+      expect(volumes.some((v) => v.endsWith(':/workspace'))).toBe(true);
+      expect(volumes.some((v) => v.includes('.claude.json') && v.endsWith(':ro'))).toBe(true);
+      expect(volumes.some((v) => v.includes('settings.json') && v.endsWith(':ro'))).toBe(true);
     });
 
     it('is a no-op when agentDeclaration is null', () => {
@@ -163,11 +164,18 @@ describe('AgentManager', () => {
   // ─── upsertAgent() ────────────────────────────────────────────────────────
 
   describe('upsertAgent()', () => {
-    it('creates a workspace symlink', async () => {
+    it('creates agents/{name}/ dir with workspace symlink inside', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);
 
-      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
+      // agents/my-agent is a real directory
+      const agentDir = path.join(tmpDir, 'agents', 'my-agent');
+      expect(fs.existsSync(agentDir)).toBe(true);
+      expect(fs.lstatSync(agentDir).isDirectory()).toBe(true);
+      expect(fs.lstatSync(agentDir).isSymbolicLink()).toBe(false);
+
+      // workspace symlink is inside the dir
+      const workspaceLink = path.join(agentDir, 'workspace');
       expect(fs.existsSync(workspaceLink)).toBe(true);
       expect(fs.lstatSync(workspaceLink).isSymbolicLink()).toBe(true);
     });
@@ -178,7 +186,7 @@ describe('AgentManager', () => {
 
       const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
       const target = fs.readlinkSync(workspaceLink);
-      expect(target).toBe(path.join(entry.installPath, './agent'));
+      expect(target).toBe(path.join(entry.installPath, 'agent'));
     });
 
     it('writes agent entry to config.json', async () => {
@@ -192,7 +200,7 @@ describe('AgentManager', () => {
       expect(agentEntry).toBeDefined();
       expect(agentEntry!['type']).toBe('app-agent');
       expect(agentEntry!['container']).toBe('my-app-agent');
-      expect(agentEntry!['claudeBin']).toBe('claude'); // plain command, in PATH inside image
+      expect(agentEntry!['claudeBin']).toBe('/usr/local/bin/claude'); // actual host path, volume-mounted
     });
 
     it('is idempotent — calling twice does not duplicate entry', async () => {
@@ -219,7 +227,7 @@ describe('AgentManager', () => {
 
       const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
       const target = fs.readlinkSync(workspaceLink);
-      expect(target).toBe(path.join(entry.installPath, './agent-v2'));
+      expect(target).toBe(path.join(entry.installPath, 'agent-v2'));
     });
 
     it('is a no-op when agentDeclaration is null', async () => {
@@ -227,7 +235,7 @@ describe('AgentManager', () => {
       const noAgentEntry = { ...entry, agentDeclaration: null };
       await manager.upsertAgent(noAgentEntry);
 
-      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
+      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent');
       expect(fs.existsSync(workspaceLink)).toBe(false);
     });
   });
@@ -235,15 +243,18 @@ describe('AgentManager', () => {
   // ─── deleteAgent() ────────────────────────────────────────────────────────
 
   describe('deleteAgent()', () => {
-    it('removes the workspace symlink', async () => {
+    it('removes the workspace symlink but preserves the agent dir (for session history)', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);
 
-      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
+      const agentDir = path.join(tmpDir, 'agents', 'my-agent');
+      const workspaceLink = path.join(agentDir, 'workspace');
       expect(fs.existsSync(workspaceLink)).toBe(true);
 
       await manager.deleteAgent(entry);
+      // Workspace symlink is removed but agent dir (and sessions) are kept
       expect(fs.existsSync(workspaceLink)).toBe(false);
+      expect(fs.existsSync(agentDir)).toBe(true);
     });
 
     it('removes the config.json entry', async () => {
@@ -260,12 +271,14 @@ describe('AgentManager', () => {
     it('is a no-op for entry without agentDeclaration', async () => {
       const entry = makeEntry(tmpDir);
       const noAgentEntry = { ...entry, agentDeclaration: null };
-      await expect(manager.deleteAgent(noAgentEntry)).resolves.not.toThrow();
+      await manager.deleteAgent(noAgentEntry);
+      // no throw = pass
     });
 
     it('is a no-op when symlink does not exist', async () => {
       const entry = makeEntry(tmpDir);
-      await expect(manager.deleteAgent(entry)).resolves.not.toThrow();
+      await manager.deleteAgent(entry);
+      // no throw = pass
     });
   });
 
@@ -302,7 +315,7 @@ describe('AgentManager', () => {
       const errors = await manager.reconcileAgents(registry);
       expect(errors).toHaveLength(0);
 
-      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent', 'workspace');
+      const workspaceLink = path.join(tmpDir, 'agents', 'my-agent');
       expect(fs.existsSync(workspaceLink)).toBe(true);
     });
 

@@ -46,6 +46,7 @@ services:
     image: nginx:1.25
     ports:
       - name: api
+        host: ${port}
         container: ${port}
         type: api
     healthcheck:
@@ -186,6 +187,7 @@ services:
     image: node:20-alpine
     ports:
       - name: web
+        host: 3000
         container: 3000
         type: web
 `.trim(),

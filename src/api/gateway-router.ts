@@ -355,10 +355,9 @@ export class GatewayRouter {
   }
 
   async start(port: number): Promise<void> {
+    const host = process.env.GATEWAY_BIND ?? '0.0.0.0';
     return new Promise((resolve, reject) => {
-      // Bind to 127.0.0.1 only — docker bridge network cannot reach it,
-      // preventing containers from calling the gateway API directly.
-      this.server = this.app.listen(port, '127.0.0.1', () => {
+      this.server = this.app.listen(port, host, () => {
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -400,7 +399,7 @@ export class GatewayRouter {
     for (const app of apps) {
       if (app.status !== 'running') continue;
       for (const port of app.ports) {
-        this.registerProxyRoute(app.name, port.name, port.containerPort, port.type, port.rateLimit);
+        this.registerProxyRoute(app.name, port.name, port.hostPort, port.type, port.rateLimit);
       }
     }
   }

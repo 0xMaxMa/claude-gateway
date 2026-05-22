@@ -7,6 +7,7 @@ import * as os from 'node:os';
 export interface PortEntry {
   name: string;
   service: string;
+  hostPort: number;
   containerPort: number;
   type: 'api' | 'web';
   rateLimit: number;

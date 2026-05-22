@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop create-agent update-agent pair mcp-install release
+.PHONY: help start stop create-agent update-agent pair mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -41,3 +41,27 @@ mcp-install: ## Install MCP gateway dependencies
 
 release: ## Interactive release — choose patch/minor/major with version preview and confirm
 	@bash scripts/release.sh
+
+pm2-start: ## Build and start gateway via pm2 (auto-restart on crash, saves process list)
+	npm run build
+	-pm2 delete gateway
+	pm2 start node --name gateway -- --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+	pm2 save
+
+pm2-stop: ## Stop gateway via pm2
+	pm2 stop gateway
+
+pm2-restart: ## Build and restart gateway via pm2
+	npm run build
+	pm2 restart gateway
+
+pm2-remove: ## Delete gateway from pm2 process list
+	pm2 delete gateway
+	pm2 save
+
+pm2-logs: ## Tail gateway logs via pm2
+	pm2 logs gateway
+
+pm2-startup: ## Register pm2 to start on boot (run once — requires sudo)
+	@echo "Run the following command to enable pm2 on system boot:"
+	@pm2 startup | grep "sudo env" || true

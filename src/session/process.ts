@@ -255,7 +255,7 @@ export class SessionProcess extends EventEmitter {
             DISCORD_DM_POLICY: this.agentConfig.discord?.dmPolicy ?? 'disabled',
             DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
             GATEWAY_AGENT_ID: this.agentConfig.id,
-            GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '3000'}`,
+            GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
@@ -322,9 +322,21 @@ export class SessionProcess extends EventEmitter {
   private async spawnProcess(): Promise<void> {
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
+
+    // Determine if this is a docker-exec app-agent before computing paths
+    const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
+
     const mcpConfigPath = this.writeMcpConfig();
+
+    // For app-agents, Claude runs inside the container where /workspace is mounted.
+    // Convert host paths (agentConfig.workspace-relative) to container paths (/workspace/...).
+    const toContainerPath = (hostPath: string): string =>
+      `/workspace/${path.relative(this.agentConfig.workspace, hostPath)}`;
+    const effectiveMcpPath = (isAppAgent && mcpConfigPath) ? toContainerPath(mcpConfigPath) : mcpConfigPath;
+    const containerRestartPath = isAppAgent ? toContainerPath(this.restartSignalPath) : this.restartSignalPath;
+
     const freshModel = this.readFreshModel();
-    const args = this.buildArgs(mcpConfigPath, freshModel);
+    const args = this.buildArgs(effectiveMcpPath, freshModel);
 
     const claudeBinRaw = process.env.CLAUDE_BIN ?? 'claude';
     const claudeBinParts = claudeBinRaw.split(' ');
@@ -336,25 +348,24 @@ export class SessionProcess extends EventEmitter {
       source: this.source,
     });
 
-    // app-agent: route through docker exec so claude runs inside the container
-    const isAppAgent = this.agentConfig.type === 'app-agent' && this.agentConfig.container;
     const spawnBin = isAppAgent ? 'docker' : claudeBin;
 
     // env vars that must be forwarded into the container via `docker exec -e`
+    let containerUid = 1000;
+    try { containerUid = os.userInfo().uid; } catch { /* use 1000 */ }
+
     const containerEnv: Record<string, string> = {
-      HOME: '/root',
+      HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
       TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
-      GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
+      GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
-    for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'GATEWAY_API_URL']) {
-      if (process.env[key]) containerEnv[key] = process.env[key]!;
-    }
+    if (process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
     const dockerEnvFlags = Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 
     const spawnArgs = isAppAgent
       ? [
-          'exec', '--workdir', '/workspace', '-i',
+          'exec', '--workdir', '/workspace', '--user', String(containerUid), '-i',
           ...dockerEnvFlags,
           this.agentConfig.container!,
           this.agentConfig.claudeBin ?? claudeBin,
@@ -513,8 +524,12 @@ export class SessionProcess extends EventEmitter {
               assistantBuffer = '';
             } else {
               if (assistantBuffer.trim()) {
-                const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
-                this.appendToStore(assistantMsg).catch(() => {});
+                // For non-API sessions (Telegram/Discord), persist here via appendTelegramMessage.
+                // For API sessions, runner.ts already persists via appendMessage — skip to avoid double-write.
+                if (this.source !== 'api') {
+                  const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
+                  this.appendToStore(assistantMsg).catch(() => {});
+                }
                 assistantBuffer = '';
               }
               // Emit tokenUsage using message_start context (accurate per-call context window usage)

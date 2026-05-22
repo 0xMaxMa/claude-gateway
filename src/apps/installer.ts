@@ -148,12 +148,44 @@ export class AppInstaller {
 
   async uninstall(appName: string): Promise<void> {
     const entry = await this.registry.get(appName);
-    if (!entry) throw new Error(`App "${appName}" is not installed`);
+
+    // Orphaned install: directory exists on disk but not in registry — clean up filesystem only
+    if (!entry) {
+      const orphanDir = path.join(this.appsDir, appName);
+      if (!fs.existsSync(orphanDir)) {
+        throw new Error(`App "${appName}" is not installed`);
+      }
+      const stat = fs.lstatSync(orphanDir);
+      const resolvedDir = stat.isSymbolicLink() ? fs.realpathSync(orphanDir) : orphanDir;
+
+      // Bring down any running containers before touching the filesystem
+      const orphanCompose = path.join(resolvedDir, 'docker-compose.yml');
+      if (fs.existsSync(orphanCompose)) {
+        try { this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], resolvedDir, 120_000); }
+        catch { /* best-effort — proceed with cleanup regardless */ }
+      }
+
+      if (stat.isSymbolicLink()) {
+        fs.unlinkSync(orphanDir);
+      } else {
+        this.rmrf(orphanDir);
+      }
+      return;
+    }
 
     const appDir = entry.installPath;
 
-    // docker compose down --rmi all
-    this.run(['docker', 'compose', 'down', '--rmi', 'all'], appDir, 120_000);
+    // docker compose down --rmi all (graceful fallback if dir is already gone)
+    if (fs.existsSync(appDir)) {
+      try {
+        this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], appDir, 120_000);
+      } catch { /* best-effort — continue cleanup */ }
+    } else {
+      // Dir gone — stop containers by project label only (no compose file needed, no --rmi all)
+      try {
+        this.run(['docker', 'compose', '-p', appName, 'down'], os.tmpdir(), 120_000);
+      } catch { /* best-effort */ }
+    }
 
     // Remove proxy routes + sockets
     this.callbacks.deregisterRoutes(appName);
@@ -164,14 +196,14 @@ export class AppInstaller {
       await this.agentManager.deleteAgent(entry);
     }
 
-    // Remove app files — symlink only for local-dev installs, full rmSync for cloned installs
+    // Remove app files — symlink only for local-dev installs, full rmrf for cloned installs
     let appDirStat: fs.Stats | null = null;
     try { appDirStat = fs.lstatSync(appDir); } catch { /* already gone */ }
     if (appDirStat) {
       if (appDirStat.isSymbolicLink()) {
         fs.unlinkSync(appDir);
       } else {
-        fs.rmSync(appDir, { recursive: true, force: true });
+        this.rmrf(appDir);
       }
     }
 
@@ -186,8 +218,8 @@ export class AppInstaller {
     if (!entry) throw new Error(`App "${appName}" is not installed`);
 
     const args = action === 'restart'
-      ? ['docker', 'compose', 'restart']
-      : ['docker', 'compose', action === 'start' ? 'up' : 'stop', ...(action === 'start' ? ['-d'] : [])];
+      ? ['docker', 'compose', '-p', appName, 'restart']
+      : ['docker', 'compose', '-p', appName, action === 'start' ? 'up' : 'stop', ...(action === 'start' ? ['-d'] : [])];
 
     this.run(args, entry.installPath, 60_000);
     await this.registry.updateStatus(
@@ -229,7 +261,24 @@ export class AppInstaller {
       appName = localAppYaml.name;
       appDir = path.join(this.appsDir, appName);
       if (fs.existsSync(appDir)) {
-        throw new Error(`App "${appName}" is already installed. Uninstall first.`);
+        const registryEntry = await this.registry.get(appName);
+        if (registryEntry) {
+          throw new Error(`App "${appName}" is already installed. Uninstall first.`);
+        }
+        // Orphaned directory (registry missing) — bring down containers first
+        const stat = fs.lstatSync(appDir);
+        const resolvedAppDir = stat.isSymbolicLink() ? fs.realpathSync(appDir) : appDir;
+        const orphanCompose = path.join(resolvedAppDir, 'docker-compose.yml');
+        if (fs.existsSync(orphanCompose)) {
+          try { this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], resolvedAppDir, 120_000); }
+          catch { /* best-effort */ }
+        }
+        if (stat.isSymbolicLink()) {
+          fs.unlinkSync(appDir);
+        } else {
+          this.rmrf(appDir);
+        }
+        this.log(job, `Removed orphaned app directory for "${appName}"`);
       }
       fs.symlinkSync(resolved, appDir);
       commit = 'local';
@@ -247,9 +296,18 @@ export class AppInstaller {
 
       // Check for existing install
       if (fs.existsSync(appDir)) {
-        throw new Error(
-          `App "${appName}" is already installed. Use update to upgrade.`,
-        );
+        const registryEntry = await this.registry.get(appName);
+        if (registryEntry) {
+          throw new Error(`App "${appName}" is already installed. Use update to upgrade.`);
+        }
+        // Orphaned directory (registry missing) — bring down containers first
+        const orphanCompose = path.join(appDir, 'docker-compose.yml');
+        if (fs.existsSync(orphanCompose)) {
+          try { this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], appDir, 120_000); }
+          catch { /* best-effort */ }
+        }
+        this.rmrf(appDir);
+        this.log(job, `Removed orphaned app directory for "${appName}"`);
       }
 
       // Shallow fetch of specific commit — avoids downloading full repo history
@@ -261,6 +319,9 @@ export class AppInstaller {
       this.run(['git', 'checkout', 'FETCH_HEAD'], appDir);
       this.log(job, `Checked out commit ${commit.slice(0, 8)}`);
     }
+
+    // Track registered agent name for rollback (set after upsertAgent succeeds)
+    let registeredAgentName: string | undefined;
 
     // From here — appDir exists. Wrap in try so any failure cleans it up.
     try {
@@ -284,13 +345,36 @@ export class AppInstaller {
     // Conflict check — app name (atomic with install lock held)
     const existing = await this.registry.get(appName);
     if (existing) {
-      throw new Error(`App "${appName}" is already installed`);
+      if (fs.existsSync(appDir)) {
+        throw new Error(`App "${appName}" is already installed`);
+      }
+      // Orphaned registry entry: disk is gone but apps.json still has the app.
+      // Clean up the stale entry so install can proceed cleanly.
+      await this.registry.remove(appName).catch(() => {});
+      this.log(job, `Cleaned up orphaned registry entry for "${appName}"`);
     }
 
     // ── Generate docker-compose.yml ───────────────────────────────────────
     this.log(job, 'Generating docker-compose.yml');
     const composePath = path.join(appDir, 'docker-compose.yml');
     const generated = generateCompose(appYaml, appName, appDir, composePath);
+
+    // Conflict check — host port uniqueness across all installed apps
+    const installedApps = await this.registry.list();
+    const usedHostPorts = new Map<number, string>();
+    for (const app of installedApps) {
+      for (const port of app.ports) {
+        usedHostPorts.set(port.hostPort, app.name);
+      }
+    }
+    for (const port of generated.ports) {
+      const owner = usedHostPorts.get(port.hostPort);
+      if (owner) {
+        throw new Error(
+          `Host port ${port.hostPort} (port "${port.name}") is already used by app "${owner}"`,
+        );
+      }
+    }
 
     // Conflict check — agent name (if app declares an agent), inside install lock
     if (generated.agentDeclaration && this.agentManager) {
@@ -363,6 +447,7 @@ export class AppInstaller {
     const portEntries: PortEntry[] = generated.ports.map((p) => ({
       name: p.name,
       service: p.service,
+      hostPort: p.hostPort,
       containerPort: p.containerPort,
       type: p.type,
       rateLimit: p.rateLimit,
@@ -395,24 +480,40 @@ export class AppInstaller {
     if (generated.agentDeclaration && this.agentManager && agentPaths) {
       this.agentManager.injectAgentService(entry);
       this.log(job, `Agent service injected for ${generated.agentDeclaration.name}`);
+      // Pre-pull the agent base image so compose up --wait doesn't time out during pull
+      this.log(job, 'Pre-pulling agent base image');
+      try {
+        this.run(['docker', 'pull', 'debian:stable-slim'], appDir, 300_000);
+      } catch {
+        // non-fatal — compose up will attempt its own pull
+      }
     }
 
     await this.registry.upsert(entry);
 
+    // ── Create agent workspace symlink + config.json entry (before compose up) ──
+    // Symlink is created early so it's visible during the container startup wait
+    // and so the gateway can hot-reload the agent config while containers spin up.
+    if (generated.agentDeclaration && this.agentManager) {
+      await this.agentManager.upsertAgent(entry);
+      registeredAgentName = generated.agentDeclaration.name;
+      this.log(job, `Agent "${generated.agentDeclaration.name}" registered`);
+    }
+
     try {
       // ── docker compose build ──────────────────────────────────────────────
       this.log(job, 'Building images');
-      this.run(['docker', 'compose', 'build'], appDir, 600_000);
+      this.run(['docker', 'compose', '-p', appName, 'build'], appDir, 600_000);
 
       // ── docker compose up -d ──────────────────────────────────────────────
       this.log(job, 'Starting containers');
       try {
-        this.run(['docker', 'compose', 'up', '-d', '--wait'], appDir, 120_000);
+        this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], appDir, 600_000);
       } catch (upErr) {
         // Capture container logs to help diagnose startup failures
         try {
           const { stdout } = this.run(
-            ['docker', 'compose', 'logs', '--no-color', '--tail=50'],
+            ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
             appDir,
             10_000,
           );
@@ -434,12 +535,6 @@ export class AppInstaller {
     // ── Update status to running ──────────────────────────────────────────
     await this.registry.updateStatus(appName, 'running');
     this.log(job, 'Containers healthy');
-
-    // ── Create agent workspace symlink + config.json entry ───────────────
-    if (generated.agentDeclaration && this.agentManager) {
-      await this.agentManager.upsertAgent(entry);
-      this.log(job, `Agent "${generated.agentDeclaration.name}" registered`);
-    }
 
     // ── Register proxy routes ─────────────────────────────────────────────
     this.callbacks.registerRoutes(appName, generated.ports);
@@ -468,6 +563,9 @@ export class AppInstaller {
       this.installingNames.delete(appName);
       this.installingNames.delete(tentativeName);
       await this.registry.remove(appName).catch(() => {});
+      if (registeredAgentName && this.agentManager) {
+        await this.agentManager.deleteAgentByName(registeredAgentName).catch(() => {});
+      }
       this.callbacks.stopSockets(appName);
       this.callbacks.deregisterRoutes(appName);
       try {
@@ -586,7 +684,7 @@ export class AppInstaller {
       // ── Start new containers ──────────────────────────────────────────────
       this.log(job, 'Starting new containers');
       try {
-        this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], tmpDir, 120_000);
+        this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], tmpDir, 600_000);
       } catch (upErr) {
         // Rollback: bring old containers back up from old install path
         this.log(job, 'New containers failed — rolling back to previous version');
@@ -595,6 +693,7 @@ export class AppInstaller {
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
             name: p.name,
             service: p.service,
+            hostPort: p.hostPort,
             containerPort: p.containerPort,
             type: p.type,
             rateLimit: p.rateLimit,
@@ -763,6 +862,19 @@ export class AppInstaller {
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
+  /** Remove a directory recursively. Falls back to `sudo rm -rf` for root-owned files. */
+  private rmrf(dirPath: string): void {
+    try {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EACCES') {
+        this.run(['sudo', 'rm', '-rf', dirPath]);
+      } else {
+        throw err;
+      }
+    }
+  }
+
   private run(
     args: string[],
     cwd?: string,
@@ -775,9 +887,9 @@ export class AppInstaller {
     };
     const result = this.spawn(args[0], args.slice(1), opts);
     if (result.status !== 0) {
-      const errDetail = result.stderr.trim() || result.stdout.trim();
+      const errDetail = (result.stderr.trim() || result.stdout.trim()).slice(-2000);
       throw new Error(
-        `Command failed: ${args[0]} ${args[1]} — ${errDetail.slice(0, 500)}`,
+        `Command failed: ${args[0]} ${args[1]} — ${errDetail}`,
       );
     }
     return { stdout: result.stdout, stderr: result.stderr };

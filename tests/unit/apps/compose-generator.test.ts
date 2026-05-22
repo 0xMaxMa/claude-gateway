@@ -31,6 +31,7 @@ services:
     image: nginx:1.25
     ports:
       - name: app
+        host: 8080
         container: 8080
         type: api
 `.trim();
@@ -45,6 +46,7 @@ services:
     build: .
     ports:
       - name: app
+        host: 8080
         container: 8080
 `.trim();
 
@@ -95,6 +97,7 @@ services:
   web:
     ports:
       - name: app
+        host: 8080
         container: 8080
 `.trim();
       expect(() => parseAppYaml(y, dir)).toThrow('"build" or "image"');
@@ -549,6 +552,39 @@ services:
       expect(hc.timeout).toBe('10s');
       expect(hc.retries).toBe(3);
     });
+
+    it('prepends BASE_PATH to healthcheck URL for web-type port', () => {
+      const yamlWithWebPort = `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    build: ./app
+    ports:
+      - name: web
+        host: 3000
+        container: 3000
+        type: web
+    healthcheck:
+      test: wget -qO- http://127.0.0.1:3000/api/health
+      interval: 30s
+`.trim();
+      generate(yamlWithWebPort, 'my-app');
+      const compose = readCompose(outputPath);
+      const svc = (compose.services as Record<string, unknown>).app as Record<string, unknown>;
+      const hc = svc.healthcheck as Record<string, unknown>;
+      expect(hc.test).toEqual(['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/app/my-app/web/api/health']);
+    });
+
+    it('does not modify healthcheck URL for non-web port', () => {
+      generate(yamlWithHc);
+      const compose = readCompose(outputPath);
+      const svc = (compose.services as Record<string, unknown>).web as Record<string, unknown>;
+      const hc = svc.healthcheck as Record<string, unknown>;
+      expect(hc.test).toEqual(['CMD-SHELL', 'wget -qO- http://localhost:8080/health']);
+    });
   });
 
   describe('depends_on', () => {
@@ -731,6 +767,7 @@ services:
     build: .
     ports:
       - name: web
+        host: 4000
         container: 4000
         type: web
     environment:
@@ -785,6 +822,14 @@ services:
       const app = services.app as Record<string, unknown>;
       const deps = app.depends_on as Record<string, { condition: string }>;
       expect(deps.db.condition).toBe('service_healthy');
+
+      // BASE_PATH injected as build arg for web port
+      const appBuild = (services.app as Record<string, unknown>).build as Record<string, unknown>;
+      expect(appBuild.args).toEqual({ BASE_PATH: '/app/agent-note/web' });
+
+      // Healthcheck URL gets BASE_PATH prepended for web port
+      const appHc = app.healthcheck as Record<string, unknown>;
+      expect(appHc.test).toEqual(['CMD-SHELL', 'wget -qO- http://localhost:4000/app/agent-note/web/api/health']);
 
       // Security defaults on both services
       for (const svcName of ['app', 'db']) {

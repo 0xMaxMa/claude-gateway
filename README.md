@@ -63,6 +63,10 @@ cat > ~/.claude-gateway/.env << 'EOF'
 # HTTP port (default: 10850)
 # PORT=10850
 
+# Bind address (default: 0.0.0.0 — all interfaces)
+# Set to 127.0.0.1 if a host-network reverse proxy (e.g. Traefik) is used
+# GATEWAY_BIND=127.0.0.1
+
 # Path to gateway config (default: ~/.claude-gateway/config.json)
 # GATEWAY_CONFIG=~/.claude-gateway/config.json
 EOF
@@ -454,6 +458,25 @@ curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq 
 
 Apps can also be installed from a GitHub URL (`github_url` + `commit`) or a local path (`local_path`) for development. Updates use a **blue-green swap with automatic rollback** — the old containers stay intact until the new version passes its healthcheck.
 
+**Reverse proxy configuration:**
+
+The gateway proxies `/app/:name/:portName/*` to the app containers. Two env vars control how the gateway reaches them:
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `GATEWAY_BIND` | `0.0.0.0` | Gateway HTTP listen address. Must be `0.0.0.0` (default) when a **containerized** reverse proxy (Caddy, nginx in Docker) needs to reach the gateway. Set to `127.0.0.1` only if using a **host-network** proxy (Traefik on host) — loopback is not reachable across container boundaries. |
+| `DOCKER_HOST` | _(system default)_ | Docker socket/TCP address. When set to `tcp://host:port` (e.g. DinD), the gateway automatically uses the host extracted from `DOCKER_HOST` to proxy to app containers instead of `127.0.0.1`. |
+
+Example Caddyfile for apps behind Caddy in Docker:
+
+```caddy
+handle /app* {
+    reverse_proxy dev-server:10850
+}
+```
+
+(`handle`, not `handle_path` — preserve the `/app` prefix so the gateway's router can match it.)
+
 See **[API.md — App Store section](./API.md#app-store-api)** for the full reference including `app.yaml` schema, `gateway_api` host-script bridge, and agent injection.
 
 ---
@@ -816,7 +839,7 @@ Once paired, the following bot commands are available in a private chat:
 
 ## Monitoring
 
-The gateway runs an HTTP server on port 10850 (set `PORT` env var to change):
+The gateway runs an HTTP server on port 10850 (set `PORT` env var to change, `GATEWAY_BIND` to set the bind address):
 
 | Endpoint | Description |
 |----------|-------------|

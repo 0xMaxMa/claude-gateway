@@ -7,6 +7,7 @@ import * as yaml from 'js-yaml';
 
 export interface AppYamlPort {
   name: string;
+  host: number;
   container: number;
   type?: 'api' | 'web';
   rate_limit?: number;
@@ -50,6 +51,7 @@ export interface AppYamlService {
   healthcheck?: AppYamlHealthcheck;
   gateway_api?: AppYamlGatewayApi;
   cap_add?: string[];
+  resources?: { cpu?: number; memory?: string };
 }
 
 export interface AppYamlAgentService {
@@ -72,6 +74,7 @@ export interface AppYaml {
 export interface ComposePort {
   name: string;
   service: string;
+  hostPort: number;
   containerPort: number;
   type: 'api' | 'web';
   rateLimit: number;
@@ -108,12 +111,12 @@ const BANNED_PORTS = new Set([22, 80, 443, 10850]);
 const ALLOWED_SERVICE_FIELDS = new Set([
   'build', 'image', 'command', 'entrypoint', 'working_dir', 'user',
   'environment', 'volumes', 'ports', 'depends_on', 'healthcheck', 'gateway_api',
-  'cap_add',
+  'cap_add', 'resources',
 ]);
 // Capabilities that are safe to grant back after cap_drop ALL.
 // Needed by e.g. postgres (CHOWN, SETUID, SETGID) and services that bind low ports (NET_BIND_SERVICE).
 const ALLOWED_CAPS = new Set([
-  'CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID',
+  'CHOWN', 'DAC_OVERRIDE', 'DAC_READ_SEARCH', 'FOWNER', 'SETUID', 'SETGID',
   'NET_BIND_SERVICE', 'KILL', 'AUDIT_WRITE',
 ]);
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
@@ -256,7 +259,12 @@ export function generateCompose(
           `Service "${svcName}".build must be within the app directory`,
         );
       }
-      composeSvc.build = { context: svc.build, network: 'host' };
+      const buildConfig: Record<string, unknown> = { context: svc.build, network: 'host' };
+      const webPort = (svc.ports ?? []).find((p) => (p.type ?? 'api') === 'web');
+      if (webPort) {
+        buildConfig.args = { BASE_PATH: `/app/${appName}/${webPort.name}` };
+      }
+      composeSvc.build = buildConfig;
     } else if (svc.image) {
       if (svc.image.endsWith(':latest')) {
         result.warnings.push(
@@ -291,24 +299,31 @@ export function generateCompose(
     // volumes
     const composeVolumes: string[] = [];
     for (const vol of svc.volumes ?? []) {
-      composeVolumes.push(vol);
-      const src = vol.split(':')[0];
-      if (!src.startsWith('/') && !src.startsWith('${')) {
-        namedVolumes.add(src);
+      const [src, ...rest] = vol.split(':');
+      if (src.startsWith('./') || src.startsWith('../')) {
+        // Relative bind mount — resolve to absolute path so Docker daemon gets a real path
+        const absPath = path.resolve(appDir, src);
+        composeVolumes.push([absPath, ...rest].join(':'));
+      } else {
+        composeVolumes.push(vol);
+        if (!src.startsWith('/') && !src.startsWith('${')) {
+          namedVolumes.add(src);
+        }
       }
     }
     if (composeVolumes.length > 0) composeSvc.volumes = composeVolumes;
 
-    // ports — use containerPort as both host and container port
     for (const portDef of svc.ports ?? []) {
-      const portNum = portDef.container;
+      const containerPort = portDef.container;
+      const hostPort = portDef.host;
       composeSvc.ports = (composeSvc.ports as string[] | undefined) ?? [];
-      (composeSvc.ports as string[]).push(`${portNum}:${portNum}`);
+      (composeSvc.ports as string[]).push(`${hostPort}:${containerPort}`);
 
       result.ports.push({
         name: portDef.name,
         service: svcName,
-        containerPort: portNum,
+        hostPort,
+        containerPort,
         type: portDef.type ?? 'api',
         rateLimit: portDef.rate_limit ?? 200,
       });
@@ -327,8 +342,17 @@ export function generateCompose(
 
     // healthcheck
     if (svc.healthcheck) {
+      let healthTest = svc.healthcheck.test;
+      const webPort = (svc.ports ?? []).find((p) => (p.type ?? 'api') === 'web');
+      if (webPort) {
+        const basePath = `/app/${appName}/${webPort.name}`;
+        healthTest = healthTest.replace(
+          /(https?:\/\/(?:127\.0\.0\.1|localhost):\d+)(\/)/g,
+          `$1${basePath}/`,
+        );
+      }
       composeSvc.healthcheck = {
-        test: ['CMD-SHELL', svc.healthcheck.test],
+        test: ['CMD-SHELL', healthTest],
         interval: svc.healthcheck.interval ?? '30s',
         timeout: svc.healthcheck.timeout ?? '10s',
         retries: svc.healthcheck.retries ?? 3,
@@ -366,12 +390,20 @@ export function generateCompose(
       });
     }
 
-    // Resource limits (always injected)
+    // Resource limits: per-service overrides global default
+    const svcCpu = svc.resources?.cpu !== undefined
+      ? Math.min(svc.resources.cpu, MAX_CPU)
+      : cpu;
+    const svcMemRaw = svc.resources?.memory ?? memStr;
+    const svcMemMB = parseMemoryMB(svcMemRaw);
+    if (svcMemMB > MAX_MEMORY_MB) {
+      throw new Error(`Service "${svcName}".resources.memory ${svcMemRaw} exceeds maximum of 2G`);
+    }
     composeSvc.deploy = {
       resources: {
         limits: {
-          cpus: String(cpu),
-          memory: memStr,
+          cpus: String(svcCpu),
+          memory: svcMemRaw,
         },
       },
     };
@@ -537,6 +569,14 @@ function validateService(
     }
   }
 
+  if (obj['resources'] !== undefined) {
+    try {
+      validateResources(obj['resources']);
+    } catch (e) {
+      throw new Error(`Service "${svcName}".${(e as Error).message.replace(/^app\.yaml: /, '')}`);
+    }
+  }
+
   return svcDef as AppYamlService;
 }
 
@@ -626,6 +666,13 @@ function validateVolumes(svcName: string, volList: unknown): void {
           `Service "${svcName}".volumes source contains path traversal: "${src}"`,
         );
       }
+    } else if (src.startsWith('./') || src.startsWith('../')) {
+      // Relative bind mount (e.g. ./postgres) — validate no double traversal beyond ./
+      if (src.includes('/../') || src.endsWith('/..')) {
+        throw new Error(
+          `Service "${svcName}".volumes source contains path traversal: "${src}"`,
+        );
+      }
     } else {
       // Named volume
       if (!NAMED_VOLUME_RE.test(src)) {
@@ -658,7 +705,8 @@ function validatePorts(svcName: string, portList: unknown): void {
   if (!Array.isArray(portList)) {
     throw new Error(`Service "${svcName}".ports must be an array`);
   }
-  const seen = new Set<number>();
+  const seenContainer = new Set<number>();
+  const seenHost = new Set<number>();
   for (const portDef of portList as unknown[]) {
     if (typeof portDef !== 'object' || portDef === null) {
       throw new Error(`Service "${svcName}".ports entries must be objects`);
@@ -672,18 +720,37 @@ function validatePorts(svcName: string, portList: unknown): void {
         `Service "${svcName}".ports["${p['name']}"].container must be an integer`,
       );
     }
-    const port = p['container'] as number;
-    if (port < 1024 || BANNED_PORTS.has(port)) {
+    const containerPort = p['container'] as number;
+    if (containerPort < 1024 || BANNED_PORTS.has(containerPort)) {
       throw new Error(
-        `Service "${svcName}".ports["${p['name']}"].container ${port} is banned`,
+        `Service "${svcName}".ports["${p['name']}"].container ${containerPort} is banned`,
       );
     }
-    if (seen.has(port)) {
+    if (seenContainer.has(containerPort)) {
       throw new Error(
-        `Service "${svcName}".ports has duplicate container port ${port}`,
+        `Service "${svcName}".ports has duplicate container port ${containerPort}`,
       );
     }
-    seen.add(port);
+    seenContainer.add(containerPort);
+
+    if (typeof p['host'] !== 'number' || !Number.isInteger(p['host'])) {
+      throw new Error(
+        `Service "${svcName}".ports["${p['name']}"].host is required and must be an integer`,
+      );
+    }
+    const hostPort = p['host'] as number;
+    if (hostPort < 1024 || BANNED_PORTS.has(hostPort)) {
+      throw new Error(
+        `Service "${svcName}".ports["${p['name']}"].host ${hostPort} is banned`,
+      );
+    }
+    if (seenHost.has(hostPort)) {
+      throw new Error(
+        `Service "${svcName}".ports has duplicate host port ${hostPort}`,
+      );
+    }
+    seenHost.add(hostPort);
+
     if (p['type'] !== undefined && p['type'] !== 'api' && p['type'] !== 'web') {
       throw new Error(
         `Service "${svcName}".ports["${p['name']}"].type must be "api" or "web"`,

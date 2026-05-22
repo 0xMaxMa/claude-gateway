@@ -11,8 +11,6 @@ export interface AgentPaths {
   claudeBin: string;
   nodeBin: string;
   npmRoot: string;
-  /** Pinned claude-code version for Dockerfile.agent builds (e.g. "2.1.129"). */
-  claudeVersion?: string;
 }
 
 interface RawConfig {
@@ -60,105 +58,52 @@ export class AgentManager {
       execSync(cmd, { encoding: 'utf-8' }).toString().trim();
 
     const claudeBin = run('which claude');
-    // Resolve symlink so Docker bind-mounts the real file, not a dangling symlink.
     const realClaudeBin = fs.realpathSync(claudeBin);
-    const nodeModulesMarker = '/node_modules/';
-    const npmRoot = realClaudeBin.includes(nodeModulesMarker)
-      ? realClaudeBin.split(nodeModulesMarker)[0] + '/node_modules'
-      : run('npm root -g');
-
     const nodeBin = fs.realpathSync(run('which node'));
+    const npmRoot = run('npm root -g');
 
-    // When the gateway runs inside a container, claude/node live on the overlay
-    // filesystem (a different device than the bind-mounted /home/dev volume).
-    // Remote Docker daemons (e.g. docker-builder DinD) can only bind-mount paths
-    // from the bind-mounted volume — overlay paths appear as empty directories.
-    // Fix: copy both binaries to ~/.claude-gateway/bin/ which is on the shared volume.
-    const homeBinDir = path.join(os.homedir(), '.claude-gateway', 'bin');
-    try {
-      const homeDev = fs.statSync(path.join(os.homedir(), '.claude-gateway')).dev;
-      const claudeDev = fs.statSync(realClaudeBin).dev;
-      const nodeDev = fs.statSync(nodeBin).dev;
-
-      if (claudeDev !== homeDev || nodeDev !== homeDev) {
-        fs.mkdirSync(homeBinDir, { recursive: true });
-        const destClaude = path.join(homeBinDir, 'claude');
-        const destNode = path.join(homeBinDir, 'node');
-        // Only copy if missing or different size (avoid 249MB copy on every detect)
-        const needsCopy = (src: string, dest: string): boolean => {
-          try { return fs.statSync(src).size !== fs.statSync(dest).size; } catch { return true; }
-        };
-        if (needsCopy(realClaudeBin, destClaude)) {
-          fs.copyFileSync(realClaudeBin, destClaude);
-          fs.chmodSync(destClaude, 0o755);
-        }
-        if (needsCopy(nodeBin, destNode)) {
-          fs.copyFileSync(nodeBin, destNode);
-          fs.chmodSync(destNode, 0o755);
-        }
-        // Detect version here too (before copying completes, use source binary).
-        let claudeVersion: string | undefined;
-        try {
-          const out = execSync(`"${realClaudeBin}" --version 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
-          const m = out.match(/(\d+\.\d+\.\d+)/);
-          claudeVersion = m?.[1];
-        } catch { /* ignore */ }
-        return { claudeBin: destClaude, nodeBin: destNode, npmRoot: homeBinDir, claudeVersion };
-      }
-    } catch { /* stat failed — proceed with detected paths */ }
-
-    // Detect claude version for Dockerfile.agent pinning.
-    let claudeVersion: string | undefined;
-    try {
-      const out = execSync(`"${realClaudeBin}" --version 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
-      const m = out.match(/(\d+\.\d+\.\d+)/);
-      claudeVersion = m?.[1];
-    } catch { /* ignore */ }
-
-    return { claudeBin: realClaudeBin, nodeBin, npmRoot, claudeVersion };
+    return { claudeBin: realClaudeBin, nodeBin, npmRoot };
   }
 
   /**
    * Inject the `agent` service into an already-generated docker-compose.yml.
    * No-op if entry has no agentDeclaration or agentPaths.
+   *
+   * Uses debian:stable-slim (glibc required — host node binary is glibc-linked).
+   * All binaries and auth files are bind-mounted directly from their resolved host paths.
    */
   injectAgentService(entry: AppEntry): void {
     if (!entry.agentDeclaration || !entry.agentPaths) return;
 
     const composePath = path.join(entry.installPath, 'docker-compose.yml');
-    const dockerfilePath = path.join(entry.installPath, 'Dockerfile.agent');
     const raw = fs.readFileSync(composePath, 'utf-8');
     const compose = yaml.load(raw, { schema: yaml.DEFAULT_SCHEMA }) as Record<string, unknown>;
 
-    const { name: agentName } = entry.agentDeclaration;
-    const workspacePath = path.join(this.agentsDir, agentName, 'workspace');
-    const version = entry.agentPaths.claudeVersion
-      ? `@anthropic-ai/claude-code@${entry.agentPaths.claudeVersion}`
-      : '@anthropic-ai/claude-code';
+    const { name: agentName, path: agentRelPath } = entry.agentDeclaration;
+    const { claudeBin, nodeBin, npmRoot } = entry.agentPaths;
+    const homeDir = os.homedir();
+    // Resolve symlinks so Docker daemon gets the real path — avoids Docker creating
+    // a root-owned empty directory instead of bind-mounting the existing one.
+    const workspaceDir = fs.realpathSync(path.join(entry.installPath, agentRelPath));
 
-    // Build a self-contained agent image with claude pre-installed.
-    // This avoids bind-mounting host binaries into remote Docker daemons (e.g.
-    // DinD docker-builder) where the gateway's filesystem is not reachable.
-    const dockerfile = [
-      'FROM node:22-slim',
-      `RUN npm install -g ${version}`,
-      'CMD ["sleep", "infinity"]',
-    ].join('\n');
-    fs.writeFileSync(dockerfilePath, dockerfile + '\n', 'utf-8');
+    let uid = 1000;
+    try { uid = os.userInfo().uid; } catch { /* use 1000 */ }
 
+    // mkdir homedir inside container so claude can find bind-mounted ~/.claude.json
     const agentService = {
-      build: {
-        context: '.',
-        dockerfile: 'Dockerfile.agent',
-        network: 'host',
-      },
-      command: 'sleep infinity',
+      image: 'debian:stable-slim',
+      command: `sh -c "mkdir -p /workspace && mkdir -p ${homeDir} && sleep infinity"`,
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
       volumes: [
-        `${workspacePath}:/workspace`,
+        `${claudeBin}:${claudeBin}:ro`,
+        `${nodeBin}:/usr/bin/node:ro`,
+        `${npmRoot}:${npmRoot}:ro`,
+        `${homeDir}/.claude.json:${homeDir}/.claude.json:ro`,
+        `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
+        `${workspaceDir}:/workspace`,
       ],
     };
 
@@ -170,32 +115,34 @@ export class AgentManager {
   }
 
   /**
-   * Create the agent workspace symlink and upsert the config.json entry.
+   * Create ~/.claude-gateway/agents/{agentName} → ~/.claude-gateway/apps/{app}/agent
+   * symlink and upsert the config.json entry.
+   *
+   * Docker mounts the real targetDir directly, so it never touches this symlink
+   * and cannot pre-create it as a root-owned directory.
    * Idempotent — safe to call multiple times (reconcile, reinstall).
    */
   async upsertAgent(entry: AppEntry): Promise<void> {
-    if (!entry.agentDeclaration) return;
+    if (!entry.agentDeclaration || !entry.agentPaths) return;
 
     const { name: agentName, path: agentRelPath } = entry.agentDeclaration;
-    const workspaceLink = path.join(this.agentsDir, agentName, 'workspace');
-    const targetDir = path.join(entry.installPath, agentRelPath);
+    // Layout mirrors a normal agent: agents/{agentName}/ (real dir) + workspace/ (symlink)
+    // This ensures process.ts configPath resolution (workspace/../../.. → gateway base) is correct.
+    const agentDir = path.join(this.agentsDir, agentName);
+    const workspaceLink = path.join(agentDir, 'workspace');
+    const targetDir = fs.realpathSync(path.join(entry.installPath, agentRelPath));
 
-    // Ensure parent directory exists
-    fs.mkdirSync(path.dirname(workspaceLink), { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
 
-    // Remove stale symlink / file before recreating (force is a no-op if not present)
-    fs.rmSync(workspaceLink, { force: true });
+    try { fs.rmSync(workspaceLink, { force: true, recursive: true }); } catch { /* ignore */ }
     fs.symlinkSync(targetDir, workspaceLink);
-
-    // Agent image has claude installed via npm — use the plain command name (in PATH).
-    const claudeBin = 'claude';
 
     await this.upsertConfigEntry(agentName, {
       id: agentName,
       type: 'app-agent',
       description: `Agent for app ${entry.name}`,
       container: `${entry.name}-agent`,
-      claudeBin,
+      claudeBin: entry.agentPaths.claudeBin,
       workspace: workspaceLink,
       env: '',
       claude: {
@@ -207,15 +154,22 @@ export class AgentManager {
   }
 
   /**
-   * Remove the workspace symlink and the config.json entry for an app-agent.
+   * Remove the workspace symlink and config entry for this app's agent.
+   * Preserves the agent dir (and its sessions) so reinstalling picks up history.
    */
   async deleteAgent(entry: AppEntry): Promise<void> {
     if (!entry.agentDeclaration) return;
-    const { name: agentName } = entry.agentDeclaration;
+    await this.deleteAgentByName(entry.agentDeclaration.name);
+  }
 
+  /**
+   * Remove by agent name — used in install rollback where AppEntry may not be in scope.
+   * Only removes the workspace symlink; preserves sessions/ and other data so that
+   * a reinstall picks up the same conversation history.
+   */
+  async deleteAgentByName(agentName: string): Promise<void> {
     const workspaceLink = path.join(this.agentsDir, agentName, 'workspace');
-    fs.rmSync(workspaceLink, { force: true });
-
+    try { fs.rmSync(workspaceLink, { force: true }); } catch { /* already gone */ }
     await this.removeConfigEntry(agentName);
   }
 
@@ -244,9 +198,10 @@ export class AgentManager {
    * Called before an update to preserve agent memory across version swaps.
    */
   backupMemory(agentName: string): string | null {
-    const memPath = path.join(this.agentsDir, agentName, 'workspace', 'MEMORY.md');
+    const workspace = this.getWorkspacePath(agentName);
+    if (!workspace) return null;
     try {
-      return fs.readFileSync(memPath, 'utf-8');
+      return fs.readFileSync(path.join(workspace, 'MEMORY.md'), 'utf-8');
     } catch {
       return null;
     }
@@ -256,8 +211,15 @@ export class AgentManager {
    * Write MEMORY.md back after a successful update.
    */
   restoreMemory(agentName: string, content: string): void {
-    const memPath = path.join(this.agentsDir, agentName, 'workspace', 'MEMORY.md');
-    fs.writeFileSync(memPath, content, 'utf-8');
+    const workspace = this.getWorkspacePath(agentName);
+    if (!workspace) return;
+    fs.writeFileSync(path.join(workspace, 'MEMORY.md'), content, 'utf-8');
+  }
+
+  private getWorkspacePath(agentName: string): string | null {
+    const config = this.readConfig();
+    const agent = config.agents.find((a) => a['id'] === agentName && a['type'] === 'app-agent');
+    return agent ? (agent['workspace'] as string) : null;
   }
 
   /**

@@ -200,6 +200,24 @@ async function startAgent(
     }
   }
 
+  // ── Create stub workspace files if missing (e.g. freshly-installed app-agents) ──
+  const WORKSPACE_STUBS: Record<string, string> = {
+    'AGENTS.md': `# Agent: ${agentConfig.id}\n`,
+    'SOUL.md': '',
+    'MEMORY.md': '',
+  };
+  for (const [filename, content] of Object.entries(WORKSPACE_STUBS)) {
+    const filePath = path.join(agentConfig.workspace, filename);
+    if (!fs.existsSync(filePath)) {
+      try {
+        fs.writeFileSync(filePath, content, 'utf-8');
+        logger.info(`Created stub ${filename}`);
+      } catch (err) {
+        logger.warn(`Failed to create stub ${filename}`, { error: (err as Error).message });
+      }
+    }
+  }
+
   // ── Per-agent workspace validation (fail fast per-agent, not whole gateway) ──
   const validation = validateWorkspaceFast(agentConfig.workspace);
   if (!validation.ok) {
@@ -502,7 +520,7 @@ async function main(): Promise<void> {
   // Wire installer callbacks now that the router is available
   installerCallbacks.registerRoutes = (appName, ports) => {
     for (const port of ports) {
-      router.registerProxyRoute(appName, port.name, port.containerPort, port.type, port.rateLimit);
+      router.registerProxyRoute(appName, port.name, port.hostPort, port.type, port.rateLimit);
     }
   };
   installerCallbacks.deregisterRoutes = (appName) => {

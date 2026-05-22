@@ -28,7 +28,7 @@ function makeEntry(overrides: Partial<AppEntry> = {}): AppEntry {
     commit: 'abc123def456abc123def456abc123def456abc1',
     githubUrl: 'https://github.com/test/test-app',
     installPath: '/home/ubuntu/.claude-gateway/apps/test-app',
-    ports: [{ name: 'api', service: 'app', containerPort: 5000, type: 'api', rateLimit: 200 }],
+    ports: [{ name: 'api', service: 'app', hostPort: 5000, containerPort: 5000, type: 'api', rateLimit: 200 }],
     sockets: {},
     installedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
