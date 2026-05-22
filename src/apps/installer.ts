@@ -218,6 +218,10 @@ export class AppInstaller {
     const entry = await this.registry.get(appName);
     if (!entry) throw new Error(`App "${appName}" is not installed`);
 
+    if (action === 'start' || action === 'restart') {
+      this.stopConflictingContainers(appName);
+    }
+
     const args = action === 'restart'
       ? ['docker', 'compose', '-p', appName, 'restart']
       : ['docker', 'compose', '-p', appName, action === 'start' ? 'up' : 'stop', ...(action === 'start' ? ['-d'] : [])];
@@ -508,26 +512,7 @@ export class AppInstaller {
 
       // ── docker compose up -d ──────────────────────────────────────────────
       this.log(job, 'Starting containers');
-      try {
-        this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], appDir, 600_000);
-      } catch (upErr) {
-        // Capture container logs to help diagnose startup failures
-        try {
-          const { stdout } = this.run(
-            ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
-            appDir,
-            10_000,
-          );
-          if (stdout.trim()) {
-            for (const line of stdout.trim().split('\n')) {
-              this.log(job, `  ${line}`);
-            }
-          }
-        } catch {
-          // ignore log capture errors
-        }
-        throw upErr;
-      }
+      this.composeUp(appName, appDir, job);
     } catch (err) {
       this.log(job, 'Build/start failed — rolling back');
       throw err; // outer catch handles full cleanup
@@ -685,7 +670,7 @@ export class AppInstaller {
       // ── Start new containers ──────────────────────────────────────────────
       this.log(job, 'Starting new containers');
       try {
-        this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], tmpDir, 600_000);
+        this.composeUp(appName, tmpDir, job);
       } catch (upErr) {
         // Rollback: bring old containers back up from old install path
         this.log(job, 'New containers failed — rolling back to previous version');
@@ -878,6 +863,62 @@ export class AppInstaller {
       } else {
         throw err;
       }
+    }
+  }
+
+  /**
+   * Stop conflicting containers then run `docker compose up -d --wait`.
+   * Captures container logs into the job on failure before rethrowing.
+   */
+  private composeUp(appName: string, dir: string, job: JobState): void {
+    this.stopConflictingContainers(appName);
+    try {
+      this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], dir, 600_000);
+    } catch (upErr) {
+      try {
+        const { stdout } = this.run(
+          ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
+          dir,
+          10_000,
+        );
+        if (stdout.trim()) {
+          for (const line of stdout.trim().split('\n')) {
+            this.log(job, `  ${line}`);
+          }
+        }
+      } catch { /* ignore log capture errors */ }
+      throw upErr;
+    }
+  }
+
+  /**
+   * Stop and remove any containers whose name matches `${appName}-*` but belong
+   * to a different compose project. Prevents "container name already in use" when
+   * the same app was previously started from a different path/project name.
+   */
+  private stopConflictingContainers(appName: string): void {
+    let output: string;
+    try {
+      const result = this.run(
+        ['docker', 'ps', '-a',
+          '--filter', `name=^${appName}-`,
+          '--format', '{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}'],
+        os.tmpdir(),
+        15_000,
+      );
+      output = result.stdout.trim();
+    } catch {
+      return;
+    }
+    if (!output) return;
+
+    for (const line of output.split('\n')) {
+      const parts = line.split('\t');
+      const id = parts[0];
+      const project = parts[2];
+      if (!id || !project || project === appName) continue;
+      try { this.run(['docker', 'stop', id], os.tmpdir(), 15_000); } catch { /* ignore */ }
+      try { this.run(['docker', 'rm', id], os.tmpdir(), 15_000); } catch { /* ignore */ }
     }
   }
 

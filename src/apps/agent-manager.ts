@@ -92,7 +92,7 @@ export class AgentManager {
     // mkdir homedir inside container so claude can find bind-mounted ~/.claude.json
     const agentService = {
       image: 'debian:stable-slim',
-      command: `sh -c "mkdir -p /workspace && mkdir -p ${homeDir} && sleep infinity"`,
+      command: `sh -c "apt-get update -qq && apt-get install -y curl -qq && mkdir -p /workspace && mkdir -p ${homeDir} && sleep infinity"`,
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
