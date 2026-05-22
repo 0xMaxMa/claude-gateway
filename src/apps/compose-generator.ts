@@ -259,6 +259,15 @@ export function generateCompose(
           `Service "${svcName}".build must be within the app directory`,
         );
       }
+      try {
+        const realResolved = fs.realpathSync(resolved);
+        const realAppDir = fs.realpathSync(appDir);
+        if (!realResolved.startsWith(realAppDir + path.sep) && realResolved !== realAppDir) {
+          throw new Error(`Service "${svcName}".build escapes the app directory via a symlink`);
+        }
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      }
       const buildConfig: Record<string, unknown> = { context: svc.build, network: 'host' };
       const webPort = (svc.ports ?? []).find((p) => (p.type ?? 'api') === 'web');
       if (webPort) {
@@ -503,6 +512,16 @@ function validateService(
     const resolved = path.resolve(appDir, obj['build']);
     if (!resolved.startsWith(appDir + path.sep) && resolved !== appDir) {
       throw new Error(`Service "${svcName}".build must be within the app directory`);
+    }
+    // Resolve symlinks to prevent path traversal via symlinks inside the app dir
+    try {
+      const realResolved = fs.realpathSync(resolved);
+      const realAppDir = fs.realpathSync(appDir);
+      if (!realResolved.startsWith(realAppDir + path.sep) && realResolved !== realAppDir) {
+        throw new Error(`Service "${svcName}".build escapes the app directory via a symlink`);
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
     }
   }
 

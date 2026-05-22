@@ -71,7 +71,8 @@ type SpawnFn = (
 const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
-const GITHUB_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(\.git)?$/;
+// Disallow '..' in owner/repo segments — prevents path traversal via edge-case git URL parsing.
+const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(\.git)?$/;
 
 // ─── Installer ────────────────────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ export class AppInstaller {
     // Check synchronously before spawning async job to prevent races
     const tentativeName = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
     if (this.installingNames.has(tentativeName)) {
-      throw new Error(`An install for "${tentativeName}" is already in progress`);
+      throw new Error(`App "${tentativeName}" is already being installed`);
     }
     this.installingNames.add(tentativeName);
 
@@ -271,7 +272,7 @@ export class AppInstaller {
         const orphanCompose = path.join(resolvedAppDir, 'docker-compose.yml');
         if (fs.existsSync(orphanCompose)) {
           try { this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], resolvedAppDir, 120_000); }
-          catch { /* best-effort */ }
+          catch (e) { this.log(job, `Warning: orphan container cleanup failed: ${(e as Error).message}`); }
         }
         if (stat.isSymbolicLink()) {
           fs.unlinkSync(appDir);
@@ -304,7 +305,7 @@ export class AppInstaller {
         const orphanCompose = path.join(appDir, 'docker-compose.yml');
         if (fs.existsSync(orphanCompose)) {
           try { this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], appDir, 120_000); }
-          catch { /* best-effort */ }
+          catch (e) { this.log(job, `Warning: orphan container cleanup failed: ${(e as Error).message}`); }
         }
         this.rmrf(appDir);
         this.log(job, `Removed orphaned app directory for "${appName}"`);
@@ -337,7 +338,7 @@ export class AppInstaller {
     // Switch lock to canonical app name (atomic: add canonical before removing tentative)
     appName = appYaml.name;
     if (this.installingNames.has(appName) && appName !== tentativeName) {
-      throw new Error(`An install for "${appName}" is already in progress`);
+      throw new Error(`App "${appName}" is already being installed`);
     }
     this.installingNames.add(appName);
     this.installingNames.delete(tentativeName);
@@ -616,7 +617,7 @@ export class AppInstaller {
 
     this.log(job, `Updating ${appName} from ${entry.version} → ${latest.version}`);
 
-    const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${Date.now()}`);
+    const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${crypto.randomUUID()}`);
     try {
       // ── Shallow fetch of specific commit into tmp dir ─────────────────────
       this.log(job, `Cloning ${app.repo}`);
@@ -688,6 +689,7 @@ export class AppInstaller {
       } catch (upErr) {
         // Rollback: bring old containers back up from old install path
         this.log(job, 'New containers failed — rolling back to previous version');
+        let rollbackFailed = false;
         try {
           this.run(['docker', 'compose', '-p', appName, 'up', '-d'], entry.installPath, 120_000);
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
@@ -700,16 +702,20 @@ export class AppInstaller {
           })));
           await this.registry.updateStatus(appName, 'running');
         } catch (rollbackErr) {
+          rollbackFailed = true;
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
         fs.rmSync(tmpDir, { recursive: true, force: true });
+        if (rollbackFailed) {
+          throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
+        }
         throw upErr;
       }
 
       // ── Swap dirs ─────────────────────────────────────────────────────────
       this.log(job, 'Swapping app directories');
       const finalDir = path.join(this.appsDir, appName);
-      const oldBackupDir = `${finalDir}-old-${Date.now()}`;
+      const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
       fs.renameSync(finalDir, oldBackupDir);
       fs.renameSync(tmpDir, finalDir);
 

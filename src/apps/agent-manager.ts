@@ -137,20 +137,26 @@ export class AgentManager {
     try { fs.rmSync(workspaceLink, { force: true, recursive: true }); } catch { /* ignore */ }
     fs.symlinkSync(targetDir, workspaceLink);
 
-    await this.upsertConfigEntry(agentName, {
-      id: agentName,
-      type: 'app-agent',
-      description: `Agent for app ${entry.name}`,
-      container: `${entry.name}-agent`,
-      claudeBin: entry.agentPaths.claudeBin,
-      workspace: workspaceLink,
-      env: '',
-      claude: {
-        model: 'claude-sonnet-4-6',
-        dangerouslySkipPermissions: true,
-        extraFlags: [],
-      },
-    });
+    try {
+      await this.upsertConfigEntry(agentName, {
+        id: agentName,
+        type: 'app-agent',
+        description: `Agent for app ${entry.name}`,
+        container: `${entry.name}-agent`,
+        claudeBin: entry.agentPaths.claudeBin,
+        workspace: workspaceLink,
+        env: '',
+        claude: {
+          model: 'claude-sonnet-4-6',
+          dangerouslySkipPermissions: true,
+          extraFlags: [],
+        },
+      });
+    } catch (err) {
+      // Rollback workspace symlink if config write fails to avoid orphaned symlink
+      try { fs.rmSync(workspaceLink, { force: true }); } catch { /* best-effort */ }
+      throw err;
+    }
   }
 
   /**
