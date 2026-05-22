@@ -243,13 +243,11 @@ export class GatewayRouter {
         return;
       }
 
-      // Path forwarding: api strips prefix, web preserves full path
+      // Path forwarding: api strips /app/:name/:portName prefix; web keeps full path
+      // because web apps are built with basePath=/app/:name/:portName and handle it themselves.
       const targetPath = route.type === 'api'
         ? (req.path || '/')
-        : (req.originalUrl.replace(
-            `/app/${req.params.name}/${req.params.portName}`,
-            '',
-          ) || '/');
+        : (req.originalUrl || '/');
 
       const options: http.RequestOptions = {
         hostname: APP_PROXY_HOST,

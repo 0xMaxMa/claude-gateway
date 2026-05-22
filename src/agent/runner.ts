@@ -1384,9 +1384,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
-    // Register session in api-{chatId} index.json on first use
-    const internalChatIdForSession = `api-${chatId}`;
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdForSession, sessionId).catch((err: unknown) => {
+    // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
@@ -1577,9 +1576,8 @@ export class AgentRunner extends EventEmitter {
       throw err;
     }
 
-    // Register session in api-{chatId} index.json on first use
-    const internalChatIdStream = `api-${chatId}`;
-    await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatIdStream, sessionId).catch((err: unknown) => {
+    // Register session in api-{chatId} index.json on first use (store adds channel prefix internally)
+    await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
       this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
     });
 
@@ -1820,7 +1818,8 @@ export class AgentRunner extends EventEmitter {
 
   async executeApiCommand(sessionId: string, chatId: string, command: string): Promise<Record<string, unknown>> {
     const agentId = this.agentConfig.id;
-    const internalChatId = `api-${chatId}`;
+    const storeChatId = chatId;           // sessionStore adds channel prefix internally
+    const dbChatId = `api-${chatId}`;    // historyDb uses full channel-chatId key
 
     if (command === '/model') {
       return { model: this.agentConfig.claude.model };
@@ -1838,7 +1837,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     if (command === '/session') {
-      const index = await this.sessionStore.listSessions(agentId, internalChatId, 'api').catch(() => null);
+      const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
       const meta = index?.sessions.find((s) => s.id === sessionId);
       const effectiveModel = this.agentConfig.claude.model;
       if (!meta) return { sessionId, sessionName: null, messageCount: 0, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
@@ -1858,15 +1857,15 @@ export class AgentRunner extends EventEmitter {
 
     if (command === '/clear') {
       const ch = 'api' as const;
-      await this.sessionStore.clearTelegramSessionHistory(agentId, internalChatId, sessionId, ch);
-      await this.sessionStore.updateSessionMeta(agentId, internalChatId, sessionId, {
+      await this.sessionStore.clearTelegramSessionHistory(agentId, storeChatId, sessionId, ch);
+      await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
         totalTokensUsed: 0,
         lastInputTokens: 0,
         archivedCount: 0,
         loadedAtSpawn: undefined,
         messageCountAtSpawn: undefined,
       }, ch);
-      const mediaPaths = this.historyDb.clearSession(internalChatId, sessionId);
+      const mediaPaths = this.historyDb.clearSession(dbChatId, sessionId);
       MediaStore.deleteMediaFiles(this.agentsBaseDir, agentId, mediaPaths);
       this.restartProcess(sessionId).catch(() => {});
       return { success: true };
@@ -1879,8 +1878,8 @@ export class AgentRunner extends EventEmitter {
       const modelConfig = availableModels.find((m) => m.id === compactEffectiveModel);
       const contextWindow = modelConfig?.contextWindow ?? 200000;
       const compactor = new SessionCompactor(this.sessionStore);
-      const result = await compactor.compact(agentId, internalChatId, sessionId, compactEffectiveModel, contextWindow, ch);
-      await this.sessionStore.updateSessionMeta(agentId, internalChatId, sessionId, {
+      const result = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
+      await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
         loadedAtSpawn: undefined,
         archivedCount: undefined,
         messageCountAtSpawn: undefined,
@@ -1904,7 +1903,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async listApiSessions(chatId: string): Promise<import('../types').SessionIndex> {
-    return this.sessionStore.listSessions(this.agentConfig.id, `api-${chatId}`, 'api');
+    return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
   async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
@@ -1925,11 +1924,11 @@ export class AgentRunner extends EventEmitter {
         sessionName = undefined;
       }
     }
-    return this.sessionStore.createTelegramSession(this.agentConfig.id, `api-${chatId}`, sessionName, 'api');
+    return this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
   }
 
   async getApiSessionInfo(chatId: string, sessionId: string): Promise<Record<string, unknown> | null> {
-    const index = await this.sessionStore.listSessions(this.agentConfig.id, `api-${chatId}`, 'api').catch(() => null);
+    const index = await this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api').catch(() => null);
     const meta = index?.sessions.find((s) => s.id === sessionId);
     if (!meta) return null;
     const effectiveModel = this.agentConfig.claude.model;
@@ -1949,25 +1948,23 @@ export class AgentRunner extends EventEmitter {
 
   async updateApiSession(chatId: string, sessionId: string, updates: { sessionName?: string }): Promise<{ sessionId: string; sessionName?: string }> {
     if (updates.sessionName) {
-      const internalChatId = `api-${chatId}`;
       // Ensure session exists in the file index (may be missing for older sessions stored only in SQLite)
-      await this.sessionStore.ensureApiSession(this.agentConfig.id, internalChatId, sessionId).catch((err: unknown) => {
+      await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId).catch((err: unknown) => {
         this.logger.warn('Failed to register API session in index', { agentId: this.agentConfig.id, chatId, sessionId, error: (err as Error).message });
       });
-      await this.sessionStore.updateSessionMeta(this.agentConfig.id, internalChatId, sessionId, { name: updates.sessionName }, 'api');
+      await this.sessionStore.updateSessionMeta(this.agentConfig.id, chatId, sessionId, { name: updates.sessionName }, 'api');
     }
     return { sessionId, ...(updates.sessionName ? { sessionName: updates.sessionName } : {}) };
   }
 
   async deleteApiSession(chatId: string, sessionId: string): Promise<void> {
-    const internalChatId = `api-${chatId}`;
-    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, internalChatId, sessionId, 'api').catch((err: unknown) => {
+    await this.sessionStore.deleteTelegramSession(this.agentConfig.id, chatId, sessionId, 'api').catch((err: unknown) => {
       // Legacy sessions (stored only in SQLite, no file index entry) are treated as already deleted
       if (err instanceof SessionNotInIndexError) return;
       throw err;
     });
     // Purge from SQLite so the session no longer appears in listSessions()
-    const mediaPaths = this.historyDb.clearSession(internalChatId, sessionId);
+    const mediaPaths = this.historyDb.clearSession(`api-${chatId}`, sessionId);
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
   }
 
