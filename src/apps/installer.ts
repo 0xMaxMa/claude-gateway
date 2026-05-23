@@ -265,8 +265,10 @@ export class AppInstaller {
       const localAppYaml = parseAppYaml(localYamlContent, resolved);
       appName = localAppYaml.name;
       appDir = path.join(this.appsDir, appName);
-      if (fs.existsSync(appDir)) {
-        const registryEntry = await this.registry.get(appName);
+      const diskExists = fs.existsSync(appDir);
+      const registryEntry = await this.registry.get(appName);
+
+      if (diskExists) {
         if (registryEntry) {
           throw new Error(`App "${appName}" is already installed. Uninstall first.`);
         }
@@ -284,7 +286,13 @@ export class AppInstaller {
           this.rmrf(appDir);
         }
         this.log(job, `Removed orphaned app directory for "${appName}"`);
+      } else if (registryEntry) {
+        // Orphaned registry entry: disk is gone but apps.json still has the app.
+        // Clean up before creating symlink so install can proceed.
+        await this.registry.remove(appName).catch(() => {});
+        this.log(job, `Cleaned up orphaned registry entry for "${appName}"`);
       }
+
       fs.symlinkSync(resolved, appDir);
       commit = 'local';
       githubUrl = '';
