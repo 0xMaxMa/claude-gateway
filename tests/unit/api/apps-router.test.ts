@@ -16,8 +16,12 @@ const ADMIN_KEY: ApiKey = { key: 'admin-key', agents: '*', admin: true };
 const READ_KEY: ApiKey = { key: 'read-key', agents: '*' };
 const API_KEYS: ApiKey[] = [ADMIN_KEY, READ_KEY];
 
+function makeTmpDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'apps-router-test-'));
+}
+
 function makeTmpPath(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'apps-router-test-'));
+  const dir = makeTmpDir();
   return path.join(dir, 'apps.json');
 }
 
@@ -41,6 +45,7 @@ function makeEntry(overrides: Partial<AppEntry> = {}): AppEntry {
 /** Create a stub AppInstaller backed by an in-memory job map */
 function makeInstaller(
   registry: AppsRegistry,
+  appsDir?: string,
 ): { installer: AppInstaller; callbacks: InstallerCallbacks } {
   const callbacks: InstallerCallbacks = {
     registerRoutes: jest.fn((_appName: string, _ports: ComposePort[]) => {}),
@@ -53,6 +58,7 @@ function makeInstaller(
     new RegistryClient(),
     callbacks,
     jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 }),
+    appsDir ?? makeTmpDir(),
   );
   return { installer, callbacks };
 }
@@ -206,7 +212,8 @@ describe('createAppsRouter()', () => {
     });
 
     it('returns 202 with jobId for local_path install', async () => {
-      const fakeLocalPath = path.join(os.homedir(), '.claude-gateway', 'apps', 'fake-app');
+      // Use a tmp path — the job will fail async (no app.yaml), but the API accepts it immediately
+      const fakeLocalPath = path.join(os.tmpdir(), 'fake-app-nonexistent');
       const res = await request(app)
         .post('/api/v1/apps/install')
         .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
