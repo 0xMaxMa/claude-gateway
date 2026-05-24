@@ -344,8 +344,8 @@ export function createApiRouter(
         ? timeout_ms
         : DEFAULT_TIMEOUT_MS;
 
-    // Slash command dispatch — runs instead of sending to Claude
-    if (message.trim().startsWith('/')) {
+    // Built-in command dispatch — only intercept known commands, let everything else reach Claude
+    if (AgentRunner.isApiBuiltinCommand(message.trim())) {
       try {
         const result = await runner.executeApiCommand(sessionId, chatIdStr, message.trim());
         res.json({ command: message.trim(), session_id: sessionId, result });

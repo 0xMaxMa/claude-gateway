@@ -12,6 +12,12 @@ export interface AgentConfig {
   description: string;
   workspace: string;
   env: string;
+  /** 'app-agent' = docker-exec based agent installed from an app store app */
+  type?: 'app-agent';
+  /** Docker container name — required when type === 'app-agent' */
+  container?: string;
+  /** Absolute path to the claude binary mounted inside the container */
+  claudeBin?: string;
   telegram?: {
     botToken: string;
   };
