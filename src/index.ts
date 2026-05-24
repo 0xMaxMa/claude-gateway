@@ -501,6 +501,27 @@ async function main(): Promise<void> {
     deregisterRoutes: (_appName: string) => {},
     startSocket: (_socketPath: string, _socket: import('./apps/compose-generator').ComposeSocket, _scripts: Record<string, import('./apps/installer').ScriptConfig>, _appDir: string) => Promise.resolve(),
     stopSockets: (_appName: string) => {},
+    reinitializeAgent: async (agentName: string) => {
+      const runner = ctx.agentRunners.get(agentName);
+      const agentConfig = ctx.agentConfigs.get(agentName);
+      if (!runner || !agentConfig) return; // first install — agent.added will call startAgent
+      const logger = createLogger(agentName, ctx.logDir);
+      try {
+        const updated = await loadWorkspace(agentConfig.workspace, {
+          mcpToolsDir: ctx.mcpToolsDir,
+          sharedSkillsDir: ctx.sharedSkillsDir,
+          logger,
+        });
+        const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
+        await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
+        logger.info('Rewrote CLAUDE.md after reinstall', { chars: updated.systemPrompt.length });
+        if (updated.skillRegistry) {
+          runner.setSkillRegistry(updated.skillRegistry);
+        }
+      } catch (err) {
+        logger.error('Failed to reinitialize agent workspace after reinstall', { error: (err as Error).message });
+      }
+    },
   };
 
   const appInstaller = new AppInstaller(

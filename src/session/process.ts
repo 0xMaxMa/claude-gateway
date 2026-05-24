@@ -173,6 +173,12 @@ export class SessionProcess extends EventEmitter {
       return { historyPrompt: null, loadedAtSpawn, archivedCount, messageCountAtSpawn };
     }
 
+    // If the last message is a dangling user turn (session was interrupted before Claude responded),
+    // inject a synthetic assistant acknowledgement so the conversation structure stays valid.
+    if (recent[recent.length - 1]?.role === 'user') {
+      recent.push({ role: 'assistant', content: '[Session was interrupted before I could respond.]', ts: Date.now() });
+    }
+
     const historyText = recent
       .map(m => {
         // system role carries injected summaries (e.g. [Image Context Summary]) from the runner

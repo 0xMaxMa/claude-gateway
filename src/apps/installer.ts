@@ -52,6 +52,7 @@ export interface InstallerCallbacks {
   deregisterRoutes(appName: string): void;
   startSocket(socketPath: string, socket: ComposeSocket, scripts: Record<string, ScriptConfig>, appDir: string): Promise<void>;
   stopSockets(appName: string): void;
+  reinitializeAgent?(agentName: string): Promise<void>;
 }
 
 export interface ScriptConfig {
@@ -511,6 +512,7 @@ export class AppInstaller {
       await this.agentManager.upsertAgent(entry);
       registeredAgentName = generated.agentDeclaration.name;
       this.log(job, `Agent "${generated.agentDeclaration.name}" registered`);
+      await this.callbacks.reinitializeAgent?.(generated.agentDeclaration.name);
     }
 
     try {
@@ -731,6 +733,7 @@ export class AppInstaller {
       if (generated.agentDeclaration && this.agentManager) {
         await this.agentManager.upsertAgent(finalEntry);
         this.log(job, `Agent "${generated.agentDeclaration.name}" re-registered`);
+        await this.callbacks.reinitializeAgent?.(generated.agentDeclaration.name);
       }
 
       // ── Re-register proxy routes + sockets ───────────────────────────────

@@ -13,6 +13,7 @@ import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
+import { isBuiltinCommand } from './builtin-commands';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
@@ -77,7 +78,7 @@ function buildApiSystemNote(allowTools: boolean, imagePaths?: string[]): string 
   if (imagePaths?.length) {
     imageNote = ` The user attached ${imagePaths.length} image(s). Read them with the Read tool:\n${imagePaths.map(p => `- ${p}`).join('\n')}`;
   }
-  return `[SYSTEM: This is an API request. ${memoryOverride} ${toolNote}${imageNote}]\n`;
+  return `<api-context>This is an API request. ${memoryOverride} ${toolNote}${imageNote}</api-context>\n`;
 }
 
 export class AgentRunner extends EventEmitter {
@@ -206,9 +207,9 @@ export class AgentRunner extends EventEmitter {
           const channelSource = (meta['source'] === 'discord' ? 'discord' : 'telegram') as 'telegram' | 'discord';
           this.channelSourceMap.set(chatId, channelSource);
 
-          // Check if this is a session management command
+          // Check if this is a built-in channel command
           const trimmedContent = content.trim();
-          if (this.isSessionCommand(trimmedContent)) {
+          if (isBuiltinCommand(trimmedContent, channelSource)) {
             this.handleSessionCommand(chatId, trimmedContent)
               .then(() => this.writeTypingDone(chatId))
               .catch((err) => {
@@ -882,11 +883,8 @@ export class AgentRunner extends EventEmitter {
     return proc;
   }
 
-  /**
-   * Returns true if the message content is a session management command.
-   */
-  private isSessionCommand(content: string): boolean {
-    return /^\/sessions?\b|^\/new(\s|$)|^\/clear\b|^\/compact\b|^\/rename(\s|$)|^\/stop(\s|$)/.test(content);
+  static isApiBuiltinCommand(content: string): boolean {
+    return isBuiltinCommand(content, 'api');
   }
 
   /**

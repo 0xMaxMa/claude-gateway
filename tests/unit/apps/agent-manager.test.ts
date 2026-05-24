@@ -91,8 +91,10 @@ describe('AgentManager', () => {
 
       expect(services['agent']).toBeDefined();
       const agentSvc = services['agent'] as Record<string, unknown>;
-      // debian:stable-slim base image — glibc required for host node binary
-      expect(agentSvc['image']).toBe('debian:stable-slim');
+      // built from Dockerfile.agent (debian:stable-slim) so compose uses build: not image:
+      const build = agentSvc['build'] as Record<string, unknown>;
+      expect(build).toBeDefined();
+      expect(build['dockerfile']).toBe('Dockerfile.agent');
       expect(typeof agentSvc['command']).toBe('string');
       expect((agentSvc['command'] as string)).toContain('sleep infinity');
       expect(agentSvc['container_name']).toBe('my-app-agent');

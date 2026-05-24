@@ -89,14 +89,27 @@ export class AgentManager {
     let uid = 1000;
     try { uid = os.userInfo().uid; } catch { /* use 1000 */ }
 
-    // mkdir homedir inside container so claude can find bind-mounted ~/.claude.json
+    // Write Dockerfile.agent: install curl + pre-create ~/.claude owned by host uid so
+    // Docker bind-mounts land inside a uid-1000-owned dir and Claude Code can freely
+    // create subdirs (session-env, todos, etc.) at runtime without cap_drop: ALL blocking chown.
+    const dockerfileAgentPath = path.join(entry.installPath, 'Dockerfile.agent');
+    fs.writeFileSync(dockerfileAgentPath, [
+      'FROM debian:stable-slim',
+      `RUN apt-get update && apt-get install -y curl --no-install-recommends \\`,
+      `    && rm -rf /var/lib/apt/lists/* \\`,
+      `    && mkdir -p ${homeDir}/.claude \\`,
+      `    && chown -R ${uid}:${uid} ${homeDir}`,
+    ].join('\n') + '\n');
+
     const agentService = {
-      image: 'debian:stable-slim',
-      command: `sh -c "apt-get update -qq && apt-get install -y curl -qq && mkdir -p /workspace && mkdir -p ${homeDir} && sleep infinity"`,
+      build: { context: entry.installPath, dockerfile: 'Dockerfile.agent' },
+      user: `${uid}:${uid}`,
+      command: `sleep infinity`,
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
       security_opt: ['no-new-privileges'],
+      env_file: '.env',
       volumes: [
         `${claudeBin}:${claudeBin}:ro`,
         `${nodeBin}:/usr/bin/node:ro`,
@@ -146,6 +159,7 @@ export class AgentManager {
         claudeBin: entry.agentPaths.claudeBin,
         workspace: workspaceLink,
         env: '',
+        allow_tools: true,
         claude: {
           model: 'claude-sonnet-4-6',
           dangerouslySkipPermissions: true,
