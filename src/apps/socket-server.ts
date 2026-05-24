@@ -73,8 +73,9 @@ export class SocketServer {
         try {
           // 0o666: containers with cap_drop:ALL lack CAP_DAC_OVERRIDE so they cannot
           // bypass file permissions even as root — world-writable is required here.
-          // Exposure is bounded: only containers with this socket explicitly bind-mounted
-          // in their compose file can reach it.
+          // Exposure is bounded to containers that have this socket explicitly bind-mounted
+          // in their compose file. On multi-tenant hosts, any host process can also reach
+          // this socket — ensure the host is not shared with untrusted processes.
           fs.chmodSync(socketPath, 0o666);
         } catch {
           // chmod may fail in test environments — not fatal

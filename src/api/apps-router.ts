@@ -3,7 +3,16 @@ import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
-import { RegistryClient } from '../apps/registry-client';
+import { RegistryClient, RegistryVersion } from '../apps/registry-client';
+
+function selectLatest(versions: RegistryVersion[]): RegistryVersion | undefined {
+  if (versions.length === 0) return undefined;
+  const withDate = versions.filter((v) => v.approved_at);
+  if (withDate.length > 0) {
+    return withDate.reduce((a, b) => (a.approved_at > b.approved_at ? a : b));
+  }
+  return versions[versions.length - 1];
+}
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -199,7 +208,7 @@ export function createAppsRouter(
           });
           return;
         }
-        const latest = app.versions[app.versions.length - 1];
+        const latest = selectLatest(app.versions);
         res.json({
           installed: entry.version,
           installed_commit: entry.commit,

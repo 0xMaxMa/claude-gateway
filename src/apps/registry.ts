@@ -91,9 +91,16 @@ export class AppsRegistry {
         try {
           const holderPid = parseInt(fs.readFileSync(lockPath, 'utf-8'), 10);
           if (!isNaN(holderPid) && holderPid !== process.pid) {
-            try { process.kill(holderPid, 0); } catch {
-              fs.unlinkSync(lockPath); // Stale — remove and retry immediately
-              continue;
+            try {
+              process.kill(holderPid, 0);
+              // Process is alive — wait and retry
+            } catch (killErr) {
+              if ((killErr as NodeJS.ErrnoException).code !== 'EPERM') {
+                // ESRCH: process doesn't exist — stale lock, remove and retry immediately
+                fs.unlinkSync(lockPath);
+                continue;
+              }
+              // EPERM: process exists but owned by another user (e.g. root) — it's alive, don't steal lock
             }
           }
         } catch { /* Can't read lock file — retry */ }

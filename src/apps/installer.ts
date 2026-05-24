@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { SpawnSyncOptionsWithStringEncoding, spawnSync } from 'node:child_process';
 import { AppsRegistry, AppEntry, PortEntry } from './registry';
-import { RegistryClient } from './registry-client';
+import { RegistryClient, RegistryVersion } from './registry-client';
 import {
   parseAppYaml,
   generateCompose,
@@ -98,6 +98,8 @@ export class AppInstaller {
 
   /** Start an async install job. Returns jobId immediately. */
   install(options: InstallOptions): string {
+    this.pruneOldJobs();
+
     // Check synchronously before spawning async job to prevent races
     const tentativeName = options.registryApp ?? options.githubUrl ?? options.localPath ?? 'unknown';
     if (this.installingNames.has(tentativeName)) {
@@ -131,6 +133,13 @@ export class AppInstaller {
 
   /** Start an async update job. Returns jobId immediately. */
   update(appName: string): string {
+    this.pruneOldJobs();
+
+    if (this.installingNames.has(appName)) {
+      throw new Error(`App "${appName}" is already being installed or updated`);
+    }
+    this.installingNames.add(appName);
+
     const jobId = crypto.randomUUID();
     const job: JobState = {
       id: jobId,
@@ -143,6 +152,8 @@ export class AppInstaller {
 
     void this.runUpdate(job, appName).catch((err: unknown) => {
       this.failJob(job, err instanceof Error ? err.message : String(err));
+    }).finally(() => {
+      this.installingNames.delete(appName);
     });
 
     return jobId;
@@ -219,19 +230,14 @@ export class AppInstaller {
     const entry = await this.registry.get(appName);
     if (!entry) throw new Error(`App "${appName}" is not installed`);
 
-    if (action === 'start' || action === 'restart') {
-      this.stopConflictingContainers(appName);
+    if (action === 'stop') {
+      this.run(['docker', 'compose', '-p', appName, 'stop'], entry.installPath, 60_000);
+      await this.registry.updateStatus(appName, 'stopped');
+    } else {
+      // start / restart: stop conflicting containers and wait for healthcheck
+      this.composeUp(appName, entry.installPath);
+      await this.registry.updateStatus(appName, 'running');
     }
-
-    const args = action === 'restart'
-      ? ['docker', 'compose', '-p', appName, 'restart']
-      : ['docker', 'compose', '-p', appName, action === 'start' ? 'up' : 'stop', ...(action === 'start' ? ['-d'] : [])];
-
-    this.run(args, entry.installPath, 60_000);
-    await this.registry.updateStatus(
-      appName,
-      action === 'stop' ? 'stopped' : 'running',
-    );
   }
 
   // ─── Internal install pipeline ────────────────────────────────────────────
@@ -594,7 +600,7 @@ export class AppInstaller {
     // Resolve latest version
     const app = await this.registryClient.findApp(appName);
     if (!app) throw new Error(`App "${appName}" not found in registry`);
-    const latest = app.versions[app.versions.length - 1];
+    const latest = selectLatest(app.versions);
     if (!latest) throw new Error(`No versions available for "${appName}"`);
 
     if (latest.commit === entry.commit) {
@@ -808,7 +814,7 @@ export class AppInstaller {
         // No version specified — use latest
         const app = await this.registryClient.findApp(options.registryApp);
         if (!app) throw new Error(`App "${options.registryApp}" not found in registry`);
-        const latest = app.versions[app.versions.length - 1];
+        const latest = selectLatest(app.versions);
         if (!latest) throw new Error(`No versions available for "${options.registryApp}"`);
         this.log(job, `Using latest version ${latest.version}`);
         return {
@@ -870,6 +876,7 @@ export class AppInstaller {
       fs.rmSync(dirPath, { recursive: true, force: true });
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'EACCES') {
+        console.warn(`[installer] EACCES removing "${dirPath}" — falling back to sudo rm -rf`);
         this.run(['sudo', 'rm', '-rf', dirPath]);
       } else {
         throw err;
@@ -880,25 +887,38 @@ export class AppInstaller {
   /**
    * Stop conflicting containers then run `docker compose up -d --wait`.
    * Captures container logs into the job on failure before rethrowing.
+   * job is optional — when omitted (e.g. startStopRestart) logs go to stderr.
    */
-  private composeUp(appName: string, dir: string, job: JobState): void {
+  private composeUp(appName: string, dir: string, job?: JobState): void {
     this.stopConflictingContainers(appName);
     try {
       this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], dir, 600_000);
     } catch (upErr) {
-      try {
-        const { stdout } = this.run(
-          ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
-          dir,
-          10_000,
-        );
-        if (stdout.trim()) {
-          for (const line of stdout.trim().split('\n')) {
-            this.log(job, `  ${line}`);
+      if (job) {
+        try {
+          const { stdout } = this.run(
+            ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
+            dir,
+            10_000,
+          );
+          if (stdout.trim()) {
+            for (const line of stdout.trim().split('\n')) {
+              this.log(job, `  ${line}`);
+            }
           }
-        }
-      } catch { /* ignore log capture errors */ }
+        } catch { /* ignore log capture errors */ }
+      }
       throw upErr;
+    }
+  }
+
+  /** Evict terminal jobs older than 24 hours to bound memory growth. */
+  private pruneOldJobs(): void {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const [id, job] of this.jobs) {
+      if ((job.status === 'completed' || job.status === 'failed') && job.updatedAt < cutoff) {
+        this.jobs.delete(id);
+      }
     }
   }
 
@@ -964,6 +984,22 @@ export class AppInstaller {
     job.updatedAt = Date.now();
     this.log(job, `FAILED: ${error}`);
   }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Select the latest version from a registry versions array.
+ * Sorts by approved_at (ISO string comparison is correct for ISO dates).
+ * Falls back to last array element when approved_at is absent.
+ */
+function selectLatest(versions: RegistryVersion[]): RegistryVersion | undefined {
+  if (versions.length === 0) return undefined;
+  const withDate = versions.filter((v) => v.approved_at);
+  if (withDate.length > 0) {
+    return withDate.reduce((a, b) => (a.approved_at > b.approved_at ? a : b));
+  }
+  return versions[versions.length - 1];
 }
 
 // ─── Default spawn implementation ─────────────────────────────────────────────
