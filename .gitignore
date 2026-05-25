@@ -50,3 +50,5 @@ tasks/
 CLAUDE.md
 tests/e2e/pr58-api-e2e.sh
 release.md
+restart
+docker-stats.sh

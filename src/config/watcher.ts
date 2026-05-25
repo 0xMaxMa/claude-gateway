@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import * as os from 'os';
 import { loadConfig } from './loader';
 import { AgentConfig, GatewayConfig, Logger } from '../types';
 import { createWatcher, WatchHandle } from '../watch/factory';
@@ -71,6 +72,7 @@ export class ConfigWatcher extends EventEmitter {
     let newConfig: GatewayConfig;
     try {
       newConfig = loadConfig(this.configPath);
+      newConfig.gateway.logDir = newConfig.gateway.logDir.replace(/^~(?=\/|$)/, os.homedir());
     } catch (err) {
       this.logger.error('Config reload failed, keeping current config', {
         error: (err as Error).message,

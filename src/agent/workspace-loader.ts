@@ -61,17 +61,22 @@ function truncateFile(content: string): { content: string; truncated: boolean } 
  * Also handles bootstrap.md.done → BOOTSTRAP.md.done
  */
 export function migrateWorkspaceFiles(workspaceDir: string): void {
-  for (const [lower, upper] of Object.entries(LOWERCASE_TO_UPPERCASE)) {
-    const lowerPath = path.join(workspaceDir, lower);
-    const upperPath = path.join(workspaceDir, upper);
+  // Use readdirSync for case-sensitive filename matching on all platforms.
+  // fs.existsSync is case-insensitive on Windows, causing both lowerExists and
+  // upperExists to resolve to the same file and delete the only copy.
+  const dirFiles = new Set(fs.readdirSync(workspaceDir));
 
-    const lowerExists = fs.existsSync(lowerPath);
-    const upperExists = fs.existsSync(upperPath);
+  for (const [lower, upper] of Object.entries(LOWERCASE_TO_UPPERCASE)) {
+    const lowerExists = dirFiles.has(lower);
+    const upperExists = dirFiles.has(upper);
 
     if (lowerExists && !upperExists) {
+      const lowerPath = path.join(workspaceDir, lower);
+      const upperPath = path.join(workspaceDir, upper);
       fs.renameSync(lowerPath, upperPath);
       console.log(`[workspace] Migrated: ${lower} → ${upper}`);
     } else if (lowerExists && upperExists) {
+      const lowerPath = path.join(workspaceDir, lower);
       console.log(
         `[workspace] WARNING: both ${lower} and ${upper} exist — keeping ${upper}, removing ${lower}`
       );
