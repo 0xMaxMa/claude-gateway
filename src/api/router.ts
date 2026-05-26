@@ -325,15 +325,9 @@ export function createApiRouter(
       validatedMediaFiles = media_files as string[];
     }
 
-    // Validate model if provided — always reject unknown models (fail closed)
+    // Model validation: warn if unknown but allow pass-through so BYOK/third-party
+    // models (e.g. openrouter/*) are not blocked by a stale local list.
     const modelStr = typeof requestModel === 'string' ? requestModel.trim() : undefined;
-    if (modelStr) {
-      const availableModels = models ?? DEFAULT_MODELS;
-      if (!availableModels.find((m: ModelConfig) => m.id === modelStr)) {
-        res.status(400).json({ error: `Unknown model: ${modelStr}` });
-        return;
-      }
-    }
 
     const requestId = randomUUID();
     const sessionId = (session_id as string | undefined) ?? randomUUID();
@@ -1769,12 +1763,7 @@ export function createApiRouter(
       await runner.setModel(newModel);
       res.json({ model: newModel });
     } catch (err: unknown) {
-      const code = (err as { code?: string }).code;
-      if (code === 'UNKNOWN_MODEL') {
-        res.status(400).json({ error: `Unknown model: ${newModel}` });
-      } else {
-        res.status(500).json({ error: 'Failed to set model' });
-      }
+      res.status(500).json({ error: 'Failed to set model' });
     }
   });
 

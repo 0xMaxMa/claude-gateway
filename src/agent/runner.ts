@@ -1890,10 +1890,8 @@ export class AgentRunner extends EventEmitter {
   }
 
   async setModel(newModel: string): Promise<void> {
-    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    if (!availableModels.find((m) => m.id === newModel)) {
-      throw Object.assign(new Error(`Unknown model: ${newModel}`), { code: 'UNKNOWN_MODEL' });
-    }
+    // Allow any model string through — BYOK/third-party models (openrouter/* etc.)
+    // are validated by the upstream provider, not the local config list.
     this.agentConfig.claude.model = newModel;
     try { this.persistModelToConfig(newModel); } catch (err) {
       this.logger.error('Failed to persist model to config', { error: (err as Error).message });
