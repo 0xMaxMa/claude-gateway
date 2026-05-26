@@ -1527,7 +1527,10 @@ export class AgentRunner extends EventEmitter {
           // result event = end of turn
           if (obj['type'] === 'result') {
             session.setProcessing(false);
-            const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
+            // Use || instead of ?? so an empty-string result falls back to the
+            // accumulated buffer (needed for non-Anthropic models e.g. OpenRouter,
+            // which emit result:"" even though the text arrived via stream_event chunks).
+            const resultText = (obj['result'] as string | undefined) || buffer.join('');
             done(resultText);
           }
         } catch {
@@ -1733,7 +1736,8 @@ export class AgentRunner extends EventEmitter {
         if (obj['type'] === 'result') {
           session.setProcessing(false);
           lastPartialText = ''; // reset for next turn
-          const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
+          // Use || so empty-string result falls back to buffer (OpenRouter emits result:"").
+          const resultText = (obj['result'] as string | undefined) || buffer.join('');
           done(resultText);
         }
       } catch {
@@ -2071,7 +2075,8 @@ export class AgentRunner extends EventEmitter {
         }
         if (obj['type'] === 'result') {
           session.setProcessing(false);
-          const resultText = (obj['result'] as string | undefined) ?? buffer.join('');
+          // Use || so empty-string result falls back to buffer (OpenRouter emits result:"").
+          const resultText = (obj['result'] as string | undefined) || buffer.join('');
           done(resultText);
         }
       } catch { /* non-JSON */ }
