@@ -325,10 +325,9 @@ export function createApiRouter(
       validatedMediaFiles = media_files as string[];
     }
 
-    // Model validation: warn if unknown but allow pass-through so BYOK/third-party
-    // models (e.g. openrouter/*) are not blocked by a stale local list.
+    // Allow any model string — BYOK/third-party models (e.g. openrouter/*) are validated
+    // by the upstream provider, not the local config list.
     const modelStr = typeof requestModel === 'string' ? requestModel.trim() : undefined;
-
     const requestId = randomUUID();
     const sessionId = (session_id as string | undefined) ?? randomUUID();
     const chatIdStr = (chat_id as string).trim();

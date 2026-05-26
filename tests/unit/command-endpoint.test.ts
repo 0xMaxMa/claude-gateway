@@ -200,24 +200,24 @@ describe('AgentRunner /command endpoint', () => {
   });
 
   // --------------------------------------------------------------------------
-  // U-CMD-03: set_model with invalid model returns error
+  // U-CMD-03: set_model accepts unknown/third-party models as pass-through (BYOK)
   // --------------------------------------------------------------------------
-  it('U-CMD-03: set_model with invalid model returns error', async () => {
+  it('U-CMD-03: set_model accepts unknown model as pass-through', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     const port = getCallbackPort(runner);
 
     const { data } = await sendCommand(port, {
       command: 'set_model',
-      payload: { model: 'invalid-model' },
+      payload: { model: 'openrouter/meta-llama/llama-3.1-70b' },
     });
 
-    expect(data.success).toBe(false);
-    expect(data.error).toContain('Unknown model');
+    expect(data.success).toBe(true);
+    expect(data.model).toBe('openrouter/meta-llama/llama-3.1-70b');
 
-    // Verify model was NOT changed
+    // Verify model was changed
     const { data: getResult } = await sendCommand(port, { command: 'get_model' });
-    expect(getResult.model).toBe('claude-opus-4-6');
+    expect(getResult.model).toBe('openrouter/meta-llama/llama-3.1-70b');
   });
 
   // --------------------------------------------------------------------------
