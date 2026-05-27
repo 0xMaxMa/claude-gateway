@@ -1692,48 +1692,13 @@ export class AgentRunner extends EventEmitter {
           }
         }
 
-        // stream_event from --output-format stream-json
-        // Tool use arrives as 3 events: content_block_start (name+id) → content_block_delta
-        // (input_json_delta chunks) → content_block_stop (emit complete tool_use chunk)
-        if (obj['type'] === 'stream_event') {
-          const event = obj['event'] as Record<string, unknown> | undefined;
-          const index = event?.['index'] as number | undefined;
-
-          if (event?.['type'] === 'content_block_start') {
-            const cb = event['content_block'] as Record<string, unknown> | undefined;
-            if (cb?.['type'] === 'tool_use' && index !== undefined) {
-              toolBlocks.set(index, {
-                id: (cb['id'] as string) ?? '',
-                name: (cb['name'] as string) ?? '',
-                chunks: [],
-              });
-            }
-          }
-
-          if (event?.['type'] === 'content_block_delta') {
-            const delta = event['delta'] as Record<string, unknown> | undefined;
-            if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
-              buffer.push(delta['text']);
-              // Update lastPartialText so the final 'assistant' message won't re-send the full text
-              lastPartialText += delta['text'];
-              callbacks.onChunk({ type: 'text_delta', text: delta['text'] });
-            }
-            if (delta?.['type'] === 'input_json_delta' && index !== undefined) {
-              toolBlocks.get(index)?.chunks.push((delta['partial_json'] as string) ?? '');
-            }
-          }
-
-          if (event?.['type'] === 'content_block_stop' && index !== undefined) {
-            const block = toolBlocks.get(index);
-            if (block) {
-              toolBlocks.delete(index);
-              try {
-                const input = JSON.parse(block.chunks.join('') || '{}') as Record<string, unknown>;
-                callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input });
-              } catch { /* malformed tool input JSON — skip */ }
-            }
-          }
-        }
+        // stream_event from --output-format stream-json (tool_use + text_delta)
+        this._applyStreamEvent(obj, toolBlocks, callbacks.onChunk, (text) => {
+          buffer.push(text);
+          // Update lastPartialText so the final 'assistant' message won't re-send the full text
+          lastPartialText += text;
+          callbacks.onChunk({ type: 'text_delta', text });
+        });
 
         // Text from delta field (other formats)
         if (obj['type'] !== 'assistant' && obj['type'] !== 'text' && obj['type'] !== 'result' && obj['type'] !== 'stream_event') {
@@ -2094,44 +2059,13 @@ export class AgentRunner extends EventEmitter {
           const text = (obj['text'] as string) ?? '';
           if (text) { buffer.push(text); callbacks.onChunk({ type: 'text_delta', text }); }
         }
-        if (obj['type'] === 'stream_event') {
-          const event = obj['event'] as Record<string, unknown> | undefined;
-          const index = event?.['index'] as number | undefined;
-
-          if (event?.['type'] === 'content_block_start') {
-            const cb = event['content_block'] as Record<string, unknown> | undefined;
-            if (cb?.['type'] === 'tool_use' && index !== undefined) {
-              toolBlocks.set(index, {
-                id: (cb['id'] as string) ?? '',
-                name: (cb['name'] as string) ?? '',
-                chunks: [],
-              });
-            }
-          }
-
-          if (event?.['type'] === 'content_block_delta') {
-            const delta = event['delta'] as Record<string, unknown> | undefined;
-            if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
-              buffer.push(delta['text']);
-              lastPartialText += delta['text'];
-              callbacks.onChunk({ type: 'text_delta', text: delta['text'] });
-            }
-            if (delta?.['type'] === 'input_json_delta' && index !== undefined) {
-              toolBlocks.get(index)?.chunks.push((delta['partial_json'] as string) ?? '');
-            }
-          }
-
-          if (event?.['type'] === 'content_block_stop' && index !== undefined) {
-            const block = toolBlocks.get(index);
-            if (block) {
-              toolBlocks.delete(index);
-              try {
-                const input = JSON.parse(block.chunks.join('') || '{}') as Record<string, unknown>;
-                callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input });
-              } catch { /* malformed tool input JSON — skip */ }
-            }
-          }
-        }
+        // stream_event from --output-format stream-json (tool_use + text_delta)
+        this._applyStreamEvent(obj, toolBlocks, callbacks.onChunk, (text) => {
+          buffer.push(text);
+          // Update lastPartialText so the final 'assistant' message won't re-send the full text
+          lastPartialText += text;
+          callbacks.onChunk({ type: 'text_delta', text });
+        });
         if (obj['type'] === 'result') {
           session.setProcessing(false);
           // Use || so empty-string result falls back to buffer (OpenRouter emits result:"").
@@ -2158,6 +2092,49 @@ export class AgentRunner extends EventEmitter {
     return () => {
       if (!settled) { settled = true; cleanup(); }
     };
+  }
+
+  private _applyStreamEvent(
+    obj: Record<string, unknown>,
+    toolBlocks: Map<number, { id: string; name: string; chunks: string[] }>,
+    onChunk: (event: StreamEvent) => void,
+    onTextDelta: (text: string) => void,
+  ): void {
+    if (obj['type'] !== 'stream_event') return;
+    const event = obj['event'] as Record<string, unknown> | undefined;
+    const index = event?.['index'] as number | undefined;
+
+    if (event?.['type'] === 'content_block_start') {
+      const cb = event['content_block'] as Record<string, unknown> | undefined;
+      if (cb?.['type'] === 'tool_use' && index !== undefined) {
+        toolBlocks.set(index, {
+          id: (cb['id'] as string) ?? '',
+          name: (cb['name'] as string) ?? '',
+          chunks: [],
+        });
+      }
+    }
+
+    if (event?.['type'] === 'content_block_delta') {
+      const delta = event['delta'] as Record<string, unknown> | undefined;
+      if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
+        onTextDelta(delta['text']);
+      }
+      if (delta?.['type'] === 'input_json_delta' && index !== undefined) {
+        toolBlocks.get(index)?.chunks.push((delta['partial_json'] as string) ?? '');
+      }
+    }
+
+    if (event?.['type'] === 'content_block_stop' && index !== undefined) {
+      const block = toolBlocks.get(index);
+      if (block) {
+        toolBlocks.delete(index);
+        try {
+          const input = JSON.parse(block.chunks.join('') || '{}') as Record<string, unknown>;
+          onChunk({ type: 'tool_use', name: block.name, id: block.id, input });
+        } catch { /* malformed tool input JSON — skip */ }
+      }
+    }
   }
 
   /**
