@@ -881,6 +881,223 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect((textDeltas[1] as { text: string }).text).toBe(' world');
   }, 15000);
 
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-16: stream_event tool_use blocks are accumulated and emitted
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-16: stream_event tool_use blocks accumulate and emit tool_use chunk', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t16',
+        'test-chat',
+        'run bash',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+    const session = getSessions(runner).get('stream-t16')!;
+
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_01', name: 'Bash', input: {} } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '"echo hello"}' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 1 },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+
+    const result = await donePromise;
+    expect(result).toBe('done');
+
+    const toolChunks = chunks.filter(c => c.type === 'tool_use');
+    expect(toolChunks).toHaveLength(1);
+    const tc = toolChunks[0] as { type: 'tool_use'; name: string; id: string; input: Record<string, unknown> };
+    expect(tc.name).toBe('Bash');
+    expect(tc.id).toBe('toolu_01');
+    expect(tc.input).toEqual({ command: 'echo hello' });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-17: multiple tool calls in one turn (different indices)
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-17: multiple tool calls at different indices emit separate tool_use chunks', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t17',
+        'test-chat',
+        'multi tool',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+    const session = getSessions(runner).get('stream-t17')!;
+
+    // Tool A at index 0
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'id-a', name: 'Read', input: {} } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/a"}' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+    }));
+
+    // Tool B at index 2
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'id-b', name: 'Write', input: {} } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/b"}' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 2 },
+    }));
+
+    session.emit('output', JSON.stringify({ type: 'result', result: 'done' }));
+    await donePromise;
+
+    const toolChunks = chunks.filter(c => c.type === 'tool_use') as Array<{ name: string; id: string; input: Record<string, unknown> }>;
+    expect(toolChunks).toHaveLength(2);
+    expect(toolChunks[0].name).toBe('Read');
+    expect(toolChunks[0].input).toEqual({ file_path: '/a' });
+    expect(toolChunks[1].name).toBe('Write');
+    expect(toolChunks[1].input).toEqual({ file_path: '/b' });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-18: malformed partial JSON in tool input is silently skipped
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-18: malformed tool input JSON is skipped without throwing', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t18',
+        'test-chat',
+        'bad json',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+    const session = getSessions(runner).get('stream-t18')!;
+
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'id-bad', name: 'Bash', input: {} } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'NOT_VALID_JSON' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'ok' }));
+
+    const result = await donePromise;
+    expect(result).toBe('ok');
+    // No tool_use chunk should be emitted for malformed input
+    expect(chunks.filter(c => c.type === 'tool_use')).toHaveLength(0);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-AR-STREAM-19: tool_use and text_delta coexist in same turn
+  // --------------------------------------------------------------------------
+  it('T-AR-STREAM-19: tool_use and text_delta both emit in the same turn', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t19',
+        'test-chat',
+        'mixed',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+    const session = getSessions(runner).get('stream-t19')!;
+
+    // text block first
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Running...' } },
+    }));
+    // tool block
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'id-c', name: 'Bash', input: {} } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":"ls"}' } },
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 1 },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Running...' }));
+
+    await donePromise;
+
+    expect(chunks.filter(c => c.type === 'text_delta')).toHaveLength(1);
+    expect(chunks.filter(c => c.type === 'tool_use')).toHaveLength(1);
+    const tc = chunks.find(c => c.type === 'tool_use') as { name: string; input: Record<string, unknown> };
+    expect(tc.name).toBe('Bash');
+    expect(tc.input).toEqual({ command: 'ls' });
+  }, 15000);
+
   // T-AR-STREAM-ALLOW-TOOLS-1: allowTools=false injects "Do NOT call any tools"
   it('T-AR-STREAM-ALLOW-TOOLS-1: allowTools=false includes tool-restriction instruction', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);

@@ -1619,6 +1619,8 @@ export class AgentRunner extends EventEmitter {
     let settled = false;
     // Track partial message text for delta computation (--include-partial-messages)
     let lastPartialText = '';
+    // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
+    const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
     const done = (result: string) => {
       if (settled) return;
@@ -1691,9 +1693,23 @@ export class AgentRunner extends EventEmitter {
         }
 
         // stream_event from --output-format stream-json
-        // Format: {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
+        // Tool use arrives as 3 events: content_block_start (name+id) → content_block_delta
+        // (input_json_delta chunks) → content_block_stop (emit complete tool_use chunk)
         if (obj['type'] === 'stream_event') {
           const event = obj['event'] as Record<string, unknown> | undefined;
+          const index = event?.['index'] as number | undefined;
+
+          if (event?.['type'] === 'content_block_start') {
+            const cb = event['content_block'] as Record<string, unknown> | undefined;
+            if (cb?.['type'] === 'tool_use' && index !== undefined) {
+              toolBlocks.set(index, {
+                id: (cb['id'] as string) ?? '',
+                name: (cb['name'] as string) ?? '',
+                chunks: [],
+              });
+            }
+          }
+
           if (event?.['type'] === 'content_block_delta') {
             const delta = event['delta'] as Record<string, unknown> | undefined;
             if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
@@ -1701,6 +1717,20 @@ export class AgentRunner extends EventEmitter {
               // Update lastPartialText so the final 'assistant' message won't re-send the full text
               lastPartialText += delta['text'];
               callbacks.onChunk({ type: 'text_delta', text: delta['text'] });
+            }
+            if (delta?.['type'] === 'input_json_delta' && index !== undefined) {
+              toolBlocks.get(index)?.chunks.push((delta['partial_json'] as string) ?? '');
+            }
+          }
+
+          if (event?.['type'] === 'content_block_stop' && index !== undefined) {
+            const block = toolBlocks.get(index);
+            if (block) {
+              toolBlocks.delete(index);
+              try {
+                const input = JSON.parse(block.chunks.join('') || '{}') as Record<string, unknown>;
+                callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input });
+              } catch { /* malformed tool input JSON — skip */ }
             }
           }
         }
@@ -1712,16 +1742,6 @@ export class AgentRunner extends EventEmitter {
             buffer.push(deltaText);
             callbacks.onChunk({ type: 'text_delta', text: deltaText });
           }
-        }
-
-        // Tool use
-        if (obj['type'] === 'tool_use') {
-          callbacks.onChunk({
-            type: 'tool_use',
-            name: (obj['name'] as string) ?? '',
-            id: (obj['id'] as string) ?? '',
-            input: (obj['input'] as Record<string, unknown>) ?? {},
-          });
         }
 
         // Thinking
@@ -2013,6 +2033,7 @@ export class AgentRunner extends EventEmitter {
     const buffer: string[] = [];
     let settled = false;
     let lastPartialText = '';
+    const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
     const done = (result: string) => {
       if (settled) return;
@@ -2072,6 +2093,44 @@ export class AgentRunner extends EventEmitter {
         if (obj['type'] === 'text') {
           const text = (obj['text'] as string) ?? '';
           if (text) { buffer.push(text); callbacks.onChunk({ type: 'text_delta', text }); }
+        }
+        if (obj['type'] === 'stream_event') {
+          const event = obj['event'] as Record<string, unknown> | undefined;
+          const index = event?.['index'] as number | undefined;
+
+          if (event?.['type'] === 'content_block_start') {
+            const cb = event['content_block'] as Record<string, unknown> | undefined;
+            if (cb?.['type'] === 'tool_use' && index !== undefined) {
+              toolBlocks.set(index, {
+                id: (cb['id'] as string) ?? '',
+                name: (cb['name'] as string) ?? '',
+                chunks: [],
+              });
+            }
+          }
+
+          if (event?.['type'] === 'content_block_delta') {
+            const delta = event['delta'] as Record<string, unknown> | undefined;
+            if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string' && delta['text']) {
+              buffer.push(delta['text']);
+              lastPartialText += delta['text'];
+              callbacks.onChunk({ type: 'text_delta', text: delta['text'] });
+            }
+            if (delta?.['type'] === 'input_json_delta' && index !== undefined) {
+              toolBlocks.get(index)?.chunks.push((delta['partial_json'] as string) ?? '');
+            }
+          }
+
+          if (event?.['type'] === 'content_block_stop' && index !== undefined) {
+            const block = toolBlocks.get(index);
+            if (block) {
+              toolBlocks.delete(index);
+              try {
+                const input = JSON.parse(block.chunks.join('') || '{}') as Record<string, unknown>;
+                callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input });
+              } catch { /* malformed tool input JSON — skip */ }
+            }
+          }
         }
         if (obj['type'] === 'result') {
           session.setProcessing(false);
