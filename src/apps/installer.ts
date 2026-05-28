@@ -354,6 +354,7 @@ export class AppInstaller {
     if (!APP_NAME_RE.test(appYaml.name)) {
       throw new Error(`Invalid app name in app.yaml: "${appYaml.name}"`);
     }
+    version = appYaml.version;
     // Switch lock to canonical app name (atomic: add canonical before removing tentative)
     appName = appYaml.name;
     if (this.installingNames.has(appName) && appName !== tentativeName) {
