@@ -159,6 +159,38 @@ describe('AppInstaller', () => {
       expect(entry?.source).toBe('local');
     });
 
+    it('persists version from app.yaml into registry entry', async () => {
+      const appDir = path.join(srcDir, 'versioned-app');
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, 'app.yaml'),
+        `
+apiVersion: apps.getpod.ai/v1
+name: versioned-app
+version: 3.1.4
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5100
+        container: 5100
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5100/health
+      interval: 30s
+`.trim(),
+        'utf-8',
+      );
+      const installer = makeInstaller();
+      const jobId = installer.install({ localPath: appDir });
+      await waitForJob(installer, jobId, 5000);
+
+      const entry = await registry.get('versioned-app');
+      expect(entry?.version).toBe('3.1.4');
+    });
+
     it('writes .env file to app dir', async () => {
       const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
@@ -350,6 +382,46 @@ services:
       const job = await waitForJob(installer, jobId, 5000);
       expect(job.status).toBe('failed');
       expect(job.error).toMatch(/registryApp|githubUrl|localPath/);
+    });
+
+    it('persists version from app.yaml after clone', async () => {
+      const commit = 'a'.repeat(40);
+      const githubUrl = 'https://github.com/test/cloned-app';
+
+      // Simulate git checkout by writing app.yaml into cwd when checkout runs
+      const cloneSpawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: cloned-app
+version: 2.3.4
+commit: "${commit}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5200
+        container: 5200
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5200/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      const installer = makeInstaller(cloneSpawn);
+      const jobId = installer.install({ githubUrl, commit });
+      await waitForJob(installer, jobId, 5000);
+
+      const entry = await registry.get('cloned-app');
+      expect(entry?.version).toBe('2.3.4');
     });
   });
 });
