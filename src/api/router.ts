@@ -2088,6 +2088,69 @@ export function createApiRouter(
     }
   });
 
+  /**
+   * POST /api/v1/agents/:agentId/greeting
+   * Read GREETING.md from the agent workspace and create a new session where the
+   * agent sends a proactive welcome message.  The trigger prompt is NOT stored in
+   * the session history (skipUserMessage: true), so the conversation looks as if
+   * the agent reached out first.
+   *
+   * Returns 204 (no body) when GREETING.md does not exist — no session is created.
+   * Requires a write or admin API key.
+   */
+  router.post('/v1/agents/:agentId/greeting', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    if (!apiKey.write && !apiKey.admin) {
+      res.status(403).json({ error: 'greeting requires a write or admin API key' });
+      return;
+    }
+
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    const chatId = (req.query['chat_id'] ?? (req.body as Record<string, unknown>)?.['chat_id']) as string | undefined;
+    if (!chatId || typeof chatId !== 'string' || !chatId.trim()) {
+      res.status(400).json({ error: 'chat_id is required' });
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(chatId.trim())) {
+      res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+      return;
+    }
+    const resolvedChatId = chatId.trim();
+
+    const greetingPath = path.join(runner.workspacePath, 'GREETING.md');
+    let greetingContent: string;
+    try {
+      greetingContent = await fsp.readFile(greetingPath, 'utf-8');
+    } catch {
+      res.status(204).send();
+      return;
+    }
+
+    if (!greetingContent.trim()) {
+      res.status(204).send();
+      return;
+    }
+
+    try {
+      const meta = await runner.createApiSession(resolvedChatId, greetingContent);
+      await runner.sendApiMessage(meta.id, resolvedChatId, greetingContent, {
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+        skipUserMessage: true,
+      });
+      res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   return router;
 }
 

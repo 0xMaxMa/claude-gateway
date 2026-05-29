@@ -168,6 +168,10 @@ export class AgentRunner extends EventEmitter {
     return this.skillRegistry;
   }
 
+  get workspacePath(): string {
+    return this.agentConfig.workspace;
+  }
+
   /**
    * Bind a local HTTP server that receives POST /channel from TelegramReceiver.
    * Each payload is routed to the appropriate SessionProcess by chat_id.
