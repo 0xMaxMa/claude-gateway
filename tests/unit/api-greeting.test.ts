@@ -81,6 +81,20 @@ function buildApp(runner: MockGreetingRunner) {
   return app;
 }
 
+// Poll until the file is gone (avoids arbitrary setTimeout for fire-and-forget unlink)
+async function waitForFileDeleted(filePath: string, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      await fs.access(filePath);
+      await new Promise(r => setTimeout(r, 20));
+    } catch {
+      return;
+    }
+  }
+  throw new Error(`File ${filePath} still exists after ${timeoutMs}ms`);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('POST /api/v1/agents/:agentId/greeting', () => {
@@ -116,6 +130,26 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
       .set('X-Api-Key', 'sk-write')
       .send({ chat_id: 'testchat' });
     expect(res.status).toBe(204);
+    expect(runner.createApiSessionCalls).toHaveLength(0);
+  });
+
+  // T-GREETING-500-EACCES: non-ENOENT readFile error (e.g. EACCES) returns 500, not 204
+  it('T-GREETING-500-EACCES: permission error on GREETING.md returns 500', async () => {
+    const greetingPath = path.join(tmpDir, 'GREETING.md');
+    await fs.writeFile(greetingPath, 'Welcome!');
+    await fs.chmod(greetingPath, 0o000);
+    // root can read any file — skip assertion in that environment
+    if ((process.getuid?.() ?? -1) === 0) {
+      await fs.chmod(greetingPath, 0o644);
+      return;
+    }
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ chat_id: 'testchat' });
+    await fs.chmod(greetingPath, 0o644);
+    expect(res.status).toBe(500);
     expect(runner.createApiSessionCalls).toHaveLength(0);
   });
 
@@ -155,21 +189,20 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
       .send({ chat_id: 'testchat', session_name: 'Welcome' });
-    // Give fire-and-forget unlink time to complete
-    await new Promise(r => setTimeout(r, 50));
-    await expect(fs.access(greetingPath)).rejects.toThrow();
+    await waitForFileDeleted(greetingPath);
   });
 
   // T-GREETING-IDEMPOTENT: second call returns 204 because GREETING.md was deleted
   it('T-GREETING-IDEMPOTENT: second call returns 204 after first success', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const greetingPath = path.join(tmpDir, 'GREETING.md');
+    await fs.writeFile(greetingPath, 'Welcome!');
     const app = buildApp(runner);
     const first = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
       .send({ chat_id: 'testchat', session_name: 'Welcome' });
     expect(first.status).toBe(201);
-    await new Promise(r => setTimeout(r, 50));
+    await waitForFileDeleted(greetingPath);
     const second = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
