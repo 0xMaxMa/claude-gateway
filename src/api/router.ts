@@ -277,8 +277,9 @@ export function createApiRouter(
       timeout_ms?: unknown;
       media_files?: unknown;
       model?: unknown;
+      store_user_message?: unknown;
     };
-    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel } = body;
+    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message } = body;
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: 'message is required and must be a non-empty string' });
@@ -324,6 +325,12 @@ export function createApiRouter(
       }
       validatedMediaFiles = media_files as string[];
     }
+
+    if (store_user_message !== undefined && typeof store_user_message !== 'boolean') {
+      res.status(400).json({ error: 'store_user_message must be a boolean if provided' });
+      return;
+    }
+    const skipUserMessage = store_user_message === false;
 
     // Allow any model string — BYOK/third-party models (e.g. openrouter/*) are validated
     // by the upstream provider, not the local config list.
@@ -393,7 +400,7 @@ export function createApiRouter(
           chatIdStr,
           message.trim(),
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage },
         );
 
         // Client disconnect -> cleanup
@@ -423,6 +430,7 @@ export function createApiRouter(
           allowTools: allowToolsSync,
           mediaFiles: validatedMediaFiles,
           model: modelStr,
+          skipUserMessage,
         });
         res.json({
           request_id: requestId,

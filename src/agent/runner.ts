@@ -1372,7 +1372,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     message: string,
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string },
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean },
   ): Promise<string> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -1399,24 +1399,25 @@ export class AgentRunner extends EventEmitter {
     // (same pattern as Telegram — Claude Code reads files via Read tool instead of base64 inline)
     const imagePaths = finalMediaFiles?.length ? this.resolveMediaPaths(finalMediaFiles) : [];
 
-    // Persist user message
     const apiUserTs = Date.now();
-    await this.sessionStore
-      .appendMessage(this.agentConfig.id, sessionId, {
+    if (!opts.skipUserMessage) {
+      await this.sessionStore
+        .appendMessage(this.agentConfig.id, sessionId, {
+          role: 'user',
+          content: message,
+          ts: apiUserTs,
+        })
+        .catch(() => {});
+      this.historyDb.insertMessage({
+        chatId: `api-${chatId}`,
+        sessionId,
+        source: 'api',
         role: 'user',
         content: message,
+        mediaFiles: finalMediaFiles?.length ? finalMediaFiles : undefined,
         ts: apiUserTs,
-      })
-      .catch(() => {});
-    this.historyDb.insertMessage({
-      chatId: `api-${chatId}`,
-      sessionId,
-      source: 'api',
-      role: 'user',
-      content: message,
-      mediaFiles: finalMediaFiles?.length ? finalMediaFiles : undefined,
-      ts: apiUserTs,
-    });
+      });
+    }
 
     this.pendingApiSessions.add(sessionId);
     session.touch();
@@ -1567,7 +1568,7 @@ export class AgentRunner extends EventEmitter {
       onDone: (fullText: string) => void;
       onError: (err: Error) => void;
     },
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string },
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean },
   ): Promise<() => void> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -1593,24 +1594,25 @@ export class AgentRunner extends EventEmitter {
     // Resolve media files to absolute paths for file-path based image passing
     const imagePathsStream = finalMediaFilesStream?.length ? this.resolveMediaPaths(finalMediaFilesStream) : [];
 
-    // Persist user message
     const streamUserTs = Date.now();
-    await this.sessionStore
-      .appendMessage(this.agentConfig.id, sessionId, {
+    if (!opts.skipUserMessage) {
+      await this.sessionStore
+        .appendMessage(this.agentConfig.id, sessionId, {
+          role: 'user',
+          content: message,
+          ts: streamUserTs,
+        })
+        .catch(() => {});
+      this.historyDb.insertMessage({
+        chatId: `api-${chatId}`,
+        sessionId,
+        source: 'api',
         role: 'user',
         content: message,
+        mediaFiles: finalMediaFilesStream?.length ? finalMediaFilesStream : undefined,
         ts: streamUserTs,
-      })
-      .catch(() => {});
-    this.historyDb.insertMessage({
-      chatId: `api-${chatId}`,
-      sessionId,
-      source: 'api',
-      role: 'user',
-      content: message,
-      mediaFiles: finalMediaFilesStream?.length ? finalMediaFilesStream : undefined,
-      ts: streamUserTs,
-    });
+      });
+    }
 
     this.pendingApiSessions.add(sessionId);
     session.touch();
