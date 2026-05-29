@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { AgentRunner, DEFAULT_MODELS } from '../agent/runner';
-import { AgentConfig, ApiKey, ModelConfig } from '../types';
+import { AgentConfig, ApiKey, ModelConfig, SessionMeta } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB } from '../history/db';
@@ -2112,18 +2112,19 @@ export function createApiRouter(
       res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    const sessionName = typeof body.session_name === 'string' ? body.session_name : undefined;
+    const rawSessionName = typeof body.session_name === 'string' ? body.session_name.trim() : undefined;
+    const sessionName = rawSessionName ? rawSessionName.slice(0, 200) : undefined;
 
     const greetingPath = path.join(runner.workspacePath, 'GREETING.md');
     let content: string;
     try {
       content = (await fsp.readFile(greetingPath, 'utf-8')).trim();
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        res.status(500).json({ error: `Failed to read GREETING.md: ${(err as Error).message}` });
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        res.status(204).send();
         return;
       }
-      res.status(204).send();
+      res.status(500).json({ error: `Failed to read GREETING.md: ${(err as Error).message}` });
       return;
     }
 
@@ -2132,7 +2133,7 @@ export function createApiRouter(
       return;
     }
 
-    let meta: { id: string; name: string } | undefined;
+    let meta: SessionMeta | undefined;
     try {
       meta = await runner.createApiSession(resolvedChatId, content, sessionName);
       await runner.sendApiMessage(meta.id, resolvedChatId, content, {
@@ -2149,9 +2150,10 @@ export function createApiRouter(
       res.status(500).json({ error: (err as Error).message });
       return;
     }
-    fsp.unlink(greetingPath).catch((e) =>
-      console.error(`[api] Failed to delete GREETING.md for '${agentId}': ${(e as Error).message}`)
-    );
+    // Await unlink so a rapid second request doesn't race and re-read the file
+    try { await fsp.unlink(greetingPath); } catch (e) {
+      console.error(`[api] Failed to delete GREETING.md for '${agentId}': ${(e as Error).message}`);
+    }
     res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
   });
 
