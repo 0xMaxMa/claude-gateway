@@ -26,6 +26,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
+| `POST` | `/api/v1/agents/:agentId/greeting` | Write | Create a proactive welcome session from `GREETING.md`; returns 204 if file absent |
 | `GET` | `/api/v1/models` | Key | List all supported Claude models |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
 
@@ -577,6 +578,7 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 | `stream` | No | `true` to enable SSE streaming (default `false`) |
 | `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000) |
 | `media_files` | No | Array of `mediaPath` strings returned by the Media Upload endpoint |
+| `store_user_message` | No | Set to `false` to skip persisting the user message in session history — only the assistant response is stored. Requires a write or admin key. Useful for proactive/trigger prompts where the user trigger should be invisible. |
 
 #### Slash command dispatch
 
@@ -773,6 +775,55 @@ Manage API sessions for a specific agent and `chat_id`. Sessions are stored at `
 **`chat_id`** identifies the caller. Use any stable string (e.g. `"myapp"`, `"user-123"`, `"getpod"`). It is **required** on all session endpoints — pass it as:
 - Query string for `GET` and `DELETE` requests: `?chat_id=myapp`
 - Request body for `POST` and `PATCH` requests: `{"chat_id": "myapp", ...}`
+
+---
+
+### POST /api/v1/agents/:agentId/greeting
+
+Create a proactive welcome session. The endpoint reads `GREETING.md` from the agent's workspace directory and sends its content to the agent as a trigger prompt. Only the **assistant response** is stored in session history — the trigger prompt itself is invisible to the session (uses `store_user_message: false` internally).
+
+Returns `204 No Content` (no session created) if `GREETING.md` does not exist or is empty.
+
+**Auth:** Write or Admin key required.
+
+**Request:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `chat_id` | Yes | Caller identity — same as other session endpoints |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: my-write-key" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "getpod"}' \
+  http://localhost:10850/api/v1/agents/getpod/greeting
+```
+
+**Response `201`** — session created, agent responded:
+
+```json
+{
+  "greeted": true,
+  "sessionId": "7f3a1c2d-89ab-4def-b012-345678901234",
+  "sessionName": "Welcome to GetPod"
+}
+```
+
+**Response `204`** — `GREETING.md` not found or empty; no session created.
+
+**`GREETING.md` format:**
+
+Place the file at `~/.claude-gateway/agents/{agentId}/workspace/GREETING.md`. Its content is used as the prompt sent to the agent. It is **not** concatenated into the agent system prompt — it is a one-time trigger only.
+
+```markdown
+The user's environment is ready. Send a warm, concise welcome message
+introducing yourself and what you can help with.
+```
+
+**Notes:**
+- Calling this endpoint twice creates two separate sessions (idempotency is the caller's responsibility — check session list first if needed).
+- The session is auto-named from the greeting prompt content (same logic as `POST /sessions`).
 
 ---
 
