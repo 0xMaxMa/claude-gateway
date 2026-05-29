@@ -1399,8 +1399,12 @@ export class AgentRunner extends EventEmitter {
     // (same pattern as Telegram — Claude Code reads files via Read tool instead of base64 inline)
     const imagePaths = finalMediaFiles?.length ? this.resolveMediaPaths(finalMediaFiles) : [];
 
-    const apiUserTs = Date.now();
+    // skipUserMessage omits the trigger from both session context and history so only the
+    // assistant response is visible — intentional for system-initiated messages (e.g. cron welcome).
+    // Claude still receives the prompt via channelXml for this turn; session restarts will not
+    // replay it, which is the desired behaviour for one-shot proactive messages.
     if (!opts.skipUserMessage) {
+      const apiUserTs = Date.now();
       await this.sessionStore
         .appendMessage(this.agentConfig.id, sessionId, {
           role: 'user',
@@ -1594,8 +1598,8 @@ export class AgentRunner extends EventEmitter {
     // Resolve media files to absolute paths for file-path based image passing
     const imagePathsStream = finalMediaFilesStream?.length ? this.resolveMediaPaths(finalMediaFilesStream) : [];
 
-    const streamUserTs = Date.now();
     if (!opts.skipUserMessage) {
+      const streamUserTs = Date.now();
       await this.sessionStore
         .appendMessage(this.agentConfig.id, sessionId, {
           role: 'user',

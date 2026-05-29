@@ -331,6 +331,10 @@ export function createApiRouter(
       return;
     }
     const skipUserMessage = store_user_message === false;
+    if (skipUserMessage && !apiKey.write && !apiKey.admin) {
+      res.status(403).json({ error: 'store_user_message: false requires a write or admin API key' });
+      return;
+    }
 
     // Allow any model string — BYOK/third-party models (e.g. openrouter/*) are validated
     // by the upstream provider, not the local config list.
