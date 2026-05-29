@@ -1997,9 +1997,11 @@ export function createApiRouter(
     if (!ctx) return;
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
-    const body = req.body as { sessionName?: unknown };
-    const sessionName = typeof body.sessionName === 'string' ? body.sessionName.trim() : undefined;
-    if (!sessionName) { res.status(400).json({ error: 'sessionName is required' }); return; }
+    const body = req.body as { session_name?: unknown; sessionName?: unknown };
+    // Accept session_name (preferred, snake_case) or sessionName (camelCase, backward compat)
+    const rawName = body.session_name ?? body.sessionName;
+    const sessionName = typeof rawName === 'string' ? rawName.trim() : undefined;
+    if (!sessionName) { res.status(400).json({ error: 'session_name is required' }); return; }
     try {
       const result = await runner.updateApiSession(chatId, sessionId, { sessionName });
       res.json(result);
@@ -2102,7 +2104,8 @@ export function createApiRouter(
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
     const body = req.body as { chat_id?: unknown; session_name?: unknown };
-    const rawChatId = (req.query['chat_id'] ?? body.chat_id) as string | undefined;
+    // Accept chat_id from body (preferred) or query param (backward compat)
+    const rawChatId = (body.chat_id ?? req.query['chat_id']) as string | undefined;
     const resolvedChatId = typeof rawChatId === 'string' ? rawChatId.trim() : '';
     if (!resolvedChatId) {
       res.status(400).json({ error: 'chat_id is required' });
@@ -2136,25 +2139,26 @@ export function createApiRouter(
     let meta: SessionMeta | undefined;
     try {
       meta = await runner.createApiSession(resolvedChatId, content, sessionName);
-      await runner.sendApiMessage(meta.id, resolvedChatId, content, {
-        timeoutMs: DEFAULT_TIMEOUT_MS,
-        skipUserMessage: true,
-      });
     } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (code === 'CONFLICT' && meta) {
-        res.status(409).json({ error: 'session already has a pending request', sessionId: meta.id });
-        return;
-      }
-      if (meta) runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
       res.status(500).json({ error: (err as Error).message });
       return;
     }
-    // Await unlink so a rapid second request doesn't race and re-read the file
+
+    // Unlink before responding — prevents re-read race if the client retries immediately
     try { await fsp.unlink(greetingPath); } catch (e) {
       console.error(`[api] Failed to delete GREETING.md for '${agentId}': ${(e as Error).message}`);
     }
-    res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
+
+    // Return 202 immediately so the client can redirect while the greeting generates in the background
+    res.status(202).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
+
+    runner.sendApiMessage(meta.id, resolvedChatId, content, {
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+      skipUserMessage: true,
+    }).catch((err: Error) => {
+      console.error(`[api] Greeting background processing failed for '${agentId}': ${err.message}`);
+      if (meta) runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
+    });
   });
 
   return router;

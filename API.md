@@ -26,7 +26,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
-| `POST` | `/api/v1/agents/:agentId/greeting` | Write | Create a proactive welcome session from `GREETING.md`; returns 204 if file absent |
+| `POST` | `/api/v1/agents/:agentId/greeting` | Write | Create a proactive welcome session from `GREETING.md`; returns 202 immediately, generates greeting in background; returns 204 if file absent |
 | `GET` | `/api/v1/models` | Key | List all supported Claude models |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
 
@@ -790,7 +790,7 @@ Returns `204 No Content` (no session created) if `GREETING.md` does not exist or
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `chat_id` | Yes | Caller identity — same as other session endpoints |
+| `chat_id` | Yes | Caller identity — same as other session endpoints. Accepted in request body (preferred) or as a query param for backward compatibility |
 | `session_name` | No | Explicit session title (max 200 chars); skips the LLM auto-naming call (~15s) when provided |
 
 ```bash
@@ -801,7 +801,7 @@ curl -X POST \
   http://localhost:10850/api/v1/agents/getpod/greeting
 ```
 
-**Response `201`** — session created, agent responded:
+**Response `202`** — session created; greeting is generating in the background:
 
 ```json
 {
@@ -810,6 +810,8 @@ curl -X POST \
   "sessionName": "Welcome to GetPod"
 }
 ```
+
+The session exists immediately and the client can redirect to it. The assistant's greeting message arrives asynchronously (poll `GET /sessions/:id/messages` or open the chat UI to receive it).
 
 **Response `204`** — `GREETING.md` not found or empty; no session created.
 
@@ -823,8 +825,9 @@ introducing yourself and what you can help with.
 ```
 
 **Notes:**
-- `GREETING.md` is **deleted after a successful greeting** (201 response). Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning GREETING.md will trigger a new greeting on next call.
+- `GREETING.md` is **deleted before the `202` response** is sent. Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning GREETING.md will trigger a new greeting on next call.
 - Pass `session_name` to avoid the ~15s LLM title-generation call. If omitted, the session is auto-named from the greeting prompt content (same logic as `POST /sessions`).
+- Greeting generation runs in the background. If generation fails, the empty session is cleaned up automatically; the client should handle the case where the session has no messages yet.
 
 ---
 
@@ -919,13 +922,13 @@ Rename a session.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `chat_id` | Yes | Caller identity |
-| `sessionName` | Yes | New session name |
+| `session_name` | Yes | New session name (snake_case preferred; `sessionName` also accepted for backward compatibility) |
 
 ```bash
 curl -X PATCH \
   -H "X-Api-Key: my-secret-key-123" \
   -H "Content-Type: application/json" \
-  -d '{"chat_id": "myapp", "sessionName": "Q3 Infra Discussion"}' \
+  -d '{"chat_id": "myapp", "session_name": "Q3 Infra Discussion"}' \
   http://localhost:10850/api/v1/agents/alfred/sessions/da19d84a | jq
 ```
 
