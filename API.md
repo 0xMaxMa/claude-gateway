@@ -939,6 +939,10 @@ curl -X PATCH \
 }
 ```
 
+**Notes:**
+- Request body accepts `session_name` (snake_case, preferred) or `sessionName` (camelCase, backward compatibility). When both are present, `session_name` takes priority.
+- The response body always uses camelCase (`sessionName`), consistent with all other API responses.
+
 ---
 
 ### DELETE /api/v1/agents/:agentId/sessions/:sessionId
