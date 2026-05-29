@@ -2157,7 +2157,7 @@ export function createApiRouter(
       skipUserMessage: true,
     }).catch((err: Error) => {
       console.error(`[api] Greeting background processing failed for '${agentId}': ${err.message}`);
-      if (meta) runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
+      runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
     });
   });
 
