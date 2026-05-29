@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { AgentRunner, DEFAULT_MODELS } from '../agent/runner';
-import { AgentConfig, ApiKey, ModelConfig } from '../types';
+import { AgentConfig, ApiKey, ModelConfig, SessionMeta } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB } from '../history/db';
@@ -2088,16 +2088,7 @@ export function createApiRouter(
     }
   });
 
-  /**
-   * POST /api/v1/agents/:agentId/greeting
-   * Read GREETING.md from the agent workspace and create a new session where the
-   * agent sends a proactive welcome message.  The trigger prompt is NOT stored in
-   * the session history (skipUserMessage: true), so the conversation looks as if
-   * the agent reached out first.
-   *
-   * Returns 204 (no body) when GREETING.md does not exist — no session is created.
-   * Requires a write or admin API key.
-   */
+  // POST /api/v1/agents/:agentId/greeting — one-shot proactive welcome from GREETING.md
   router.post('/v1/agents/:agentId/greeting', auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
@@ -2110,47 +2101,58 @@ export function createApiRouter(
     const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
-    const chatId = (req.query['chat_id'] ?? (req.body as Record<string, unknown>)?.['chat_id']) as string | undefined;
-    if (!chatId || typeof chatId !== 'string' || !chatId.trim()) {
+    const body = req.body as { chat_id?: unknown; session_name?: unknown };
+    const rawChatId = (req.query['chat_id'] ?? body.chat_id) as string | undefined;
+    const resolvedChatId = typeof rawChatId === 'string' ? rawChatId.trim() : '';
+    if (!resolvedChatId) {
       res.status(400).json({ error: 'chat_id is required' });
       return;
     }
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(chatId.trim())) {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(resolvedChatId)) {
       res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    const resolvedChatId = chatId.trim();
+    const rawSessionName = typeof body.session_name === 'string' ? body.session_name.trim() : undefined;
+    const sessionName = rawSessionName ? rawSessionName.slice(0, 200) : undefined;
 
     const greetingPath = path.join(runner.workspacePath, 'GREETING.md');
-    let greetingContent: string;
+    let content: string;
     try {
-      greetingContent = await fsp.readFile(greetingPath, 'utf-8');
-    } catch {
+      content = (await fsp.readFile(greetingPath, 'utf-8')).trim();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        res.status(204).send();
+        return;
+      }
+      res.status(500).json({ error: `Failed to read GREETING.md: ${(err as Error).message}` });
+      return;
+    }
+
+    if (!content) {
       res.status(204).send();
       return;
     }
 
-    if (!greetingContent.trim()) {
-      res.status(204).send();
-      return;
-    }
-
-    const meta = await runner.createApiSession(resolvedChatId, greetingContent);
+    let meta: SessionMeta | undefined;
     try {
-      await runner.sendApiMessage(meta.id, resolvedChatId, greetingContent, {
+      meta = await runner.createApiSession(resolvedChatId, content, sessionName);
+      await runner.sendApiMessage(meta.id, resolvedChatId, content, {
         timeoutMs: DEFAULT_TIMEOUT_MS,
         skipUserMessage: true,
       });
     } catch (err) {
       const code = (err as { code?: string }).code;
-      if (code === 'CONFLICT') {
+      if (code === 'CONFLICT' && meta) {
         res.status(409).json({ error: 'session already has a pending request', sessionId: meta.id });
         return;
       }
-      // Clean up the orphaned session so the caller does not need to
-      runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
+      if (meta) runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
       res.status(500).json({ error: (err as Error).message });
       return;
+    }
+    // Await unlink so a rapid second request doesn't race and re-read the file
+    try { await fsp.unlink(greetingPath); } catch (e) {
+      console.error(`[api] Failed to delete GREETING.md for '${agentId}': ${(e as Error).message}`);
     }
     res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
   });
