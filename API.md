@@ -791,12 +791,13 @@ Returns `204 No Content` (no session created) if `GREETING.md` does not exist or
 | Field | Required | Description |
 |-------|----------|-------------|
 | `chat_id` | Yes | Caller identity — same as other session endpoints |
+| `session_name` | No | Explicit session title; skips the LLM auto-naming call (~15s) when provided |
 
 ```bash
 curl -X POST \
   -H "X-Api-Key: my-write-key" \
   -H "Content-Type: application/json" \
-  -d '{"chat_id": "getpod"}' \
+  -d '{"chat_id": "getpod", "session_name": "Welcome to GetPod"}' \
   http://localhost:10850/api/v1/agents/getpod/greeting
 ```
 
@@ -822,8 +823,8 @@ introducing yourself and what you can help with.
 ```
 
 **Notes:**
-- Calling this endpoint twice creates two separate sessions (idempotency is the caller's responsibility — check session list first if needed).
-- The session is auto-named from the greeting prompt content (same logic as `POST /sessions`).
+- `GREETING.md` is **deleted after a successful greeting** (201 response). Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning GREETING.md will trigger a new greeting on next call.
+- Pass `session_name` to avoid the ~15s LLM title-generation call. If omitted, the session is auto-named from the greeting prompt content (same logic as `POST /sessions`).
 
 ---
 

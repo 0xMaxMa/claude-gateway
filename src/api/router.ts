@@ -2120,6 +2120,7 @@ export function createApiRouter(
       return;
     }
     const resolvedChatId = chatId.trim();
+    const sessionName = (req.body as Record<string, unknown>)?.['session_name'] as string | undefined;
 
     const greetingPath = path.join(runner.workspacePath, 'GREETING.md');
     let greetingContent: string;
@@ -2135,7 +2136,7 @@ export function createApiRouter(
       return;
     }
 
-    const meta = await runner.createApiSession(resolvedChatId, greetingContent);
+    const meta = await runner.createApiSession(resolvedChatId, greetingContent, sessionName);
     try {
       await runner.sendApiMessage(meta.id, resolvedChatId, greetingContent, {
         timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -2152,6 +2153,8 @@ export function createApiRouter(
       res.status(500).json({ error: (err as Error).message });
       return;
     }
+    // Delete GREETING.md so subsequent calls return 204 (one-shot sentinel)
+    fsp.unlink(greetingPath).catch(() => {});
     res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
   });
 
