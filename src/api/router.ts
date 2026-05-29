@@ -2102,12 +2102,8 @@ export function createApiRouter(
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
 
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
-      return;
-    }
-    if (!apiKey.write && !apiKey.admin) {
-      res.status(403).json({ error: 'greeting requires a write or admin API key' });
+    if (!canWriteAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `greeting requires write or admin access to agent '${agentId}'` });
       return;
     }
 
@@ -2139,16 +2135,24 @@ export function createApiRouter(
       return;
     }
 
+    const meta = await runner.createApiSession(resolvedChatId, greetingContent);
     try {
-      const meta = await runner.createApiSession(resolvedChatId, greetingContent);
       await runner.sendApiMessage(meta.id, resolvedChatId, greetingContent, {
         timeoutMs: DEFAULT_TIMEOUT_MS,
         skipUserMessage: true,
       });
-      res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
     } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'CONFLICT') {
+        res.status(409).json({ error: 'session already has a pending request', sessionId: meta.id });
+        return;
+      }
+      // Clean up the orphaned session so the caller does not need to
+      runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
       res.status(500).json({ error: (err as Error).message });
+      return;
     }
+    res.status(201).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
   });
 
   return router;
