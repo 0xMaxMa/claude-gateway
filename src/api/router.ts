@@ -2103,12 +2103,16 @@ export function createApiRouter(
     const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
-    const body = req.body as { session_id?: unknown };
+    const body = req.body as { session_id?: unknown; chat_id?: unknown };
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
     if (!sessionId) {
       res.status(400).json({ error: 'session_id is required' });
       return;
     }
+    // chat_id is optional — provide the same value used when creating the session via POST /sessions
+    // so the greeting message lands in the correct historyDb bucket (api-{chatId}).
+    // If omitted, sessionId is used as the bucket key, which creates a secondary index entry.
+    const chatId = typeof body.chat_id === 'string' && body.chat_id.trim() ? body.chat_id.trim() : sessionId;
 
     if (runner.hasActiveApiSession(sessionId)) {
       res.status(409).json({ error: 'Session already has a pending request' });
@@ -2171,7 +2175,7 @@ export function createApiRouter(
 
       cleanup = await runner.sendApiMessageStream(
         sessionId,
-        sessionId,
+        chatId,
         content,
         sseCallbacks,
         { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true },
@@ -2180,6 +2184,9 @@ export function createApiRouter(
       res.on('close', cleanup);
     } catch (err: unknown) {
       const code = (err as { code?: string }).code;
+      // res.headersSent is always true here (writeHead is called before sendApiMessageStream),
+      // so the !res.headersSent branches below are kept for parity with the /messages endpoint
+      // pattern — they guard against future code reordering, not any current reachable path.
       if (!res.headersSent) {
         if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });

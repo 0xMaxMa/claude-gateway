@@ -796,6 +796,7 @@ Returns `204 No Content` if `GREETING.md` does not exist or is empty.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `session_id` | Yes | ID of an existing session to deliver the greeting into |
+| `chat_id` | No | Same `chat_id` used when the session was created; ensures the greeting message is stored in the correct history bucket. Defaults to `session_id` when omitted (creates a secondary index entry) |
 
 ```bash
 curl -N -X POST \

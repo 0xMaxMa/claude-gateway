@@ -23,6 +23,7 @@ class MockGreetingRunner extends EventEmitter {
   activeSession = false;
   cleanupCalled = false;
   capturedCallbacks: SseCallbacks | null = null;
+  capturedChatId: string | null = null;
 
   constructor(workspacePath: string) {
     super();
@@ -39,13 +40,14 @@ class MockGreetingRunner extends EventEmitter {
 
   async sendApiMessageStream(
     _sessionId: string,
-    _chatId: string,
+    chatId: string,
     _message: string,
     callbacks: SseCallbacks,
     _opts: { timeoutMs: number; skipUserMessage?: boolean },
   ): Promise<() => void> {
     if (this.sendStreamThrow) throw this.sendStreamThrow;
     this.capturedCallbacks = callbacks;
+    this.capturedChatId = chatId;
     // Fire callbacks asynchronously to simulate streaming
     setImmediate(() => {
       if (this.sendStreamResult instanceof Error) {
@@ -321,5 +323,40 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const events = parseSseEvents(res.text);
     const errEvent = events.find(e => e['type'] === 'error');
     expect(errEvent?.['message']).toMatch(/spawn failed/);
+  });
+
+  // ── chatId routing ─────────────────────────────────────────────────────────
+
+  it('T-GREETING-CHATID-PROVIDED: chat_id passed to sendApiMessageStream when present', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
+    expect(runner.capturedChatId).toBe('user-123');
+  });
+
+  it('T-GREETING-CHATID-FALLBACK: sessionId used as chatId when chat_id is absent', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc' });
+    expect(runner.capturedChatId).toBe('sess-abc');
+  });
+
+  // ── Disconnect cleanup ─────────────────────────────────────────────────────
+
+  it('T-GREETING-CLEANUP: cleanup function is called when response closes', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc' });
+    // After res.end() the socket closes, firing 'close' which invokes the cleanup
+    expect(runner.cleanupCalled).toBe(true);
   });
 });
