@@ -26,7 +26,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
-| `POST` | `/api/v1/agents/:agentId/greeting` | Write | Create a proactive welcome session from `GREETING.md`; returns 202 immediately, generates greeting in background; returns 204 if file absent |
+| `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
 | `GET` | `/api/v1/models` | Key | List all supported Claude models |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
 
@@ -780,40 +780,43 @@ Manage API sessions for a specific agent and `chat_id`. Sessions are stored at `
 
 ### POST /api/v1/agents/:agentId/greeting
 
-Create a proactive welcome session. The endpoint reads `GREETING.md` from the agent's workspace directory and sends its content to the agent as a trigger prompt. Only the **assistant response** is stored in session history — the trigger prompt itself is invisible to the session (uses `store_user_message: false` internally).
+Stream a proactive welcome into an **existing** session. The endpoint reads `GREETING.md` from the agent's workspace and sends its content to the agent as a trigger prompt via SSE. Only the **assistant response** is stored in session history — the trigger prompt is invisible (uses `store_user_message: false` internally).
 
-Returns `204 No Content` (no session created) if `GREETING.md` does not exist or is empty.
+Returns `204 No Content` if `GREETING.md` does not exist or is empty.
 
 **Auth:** Write or Admin key required.
+
+**Two-step flow:**
+
+1. Create the session first: `POST /api/v1/agents/:agentId/sessions` → redirect the user to the chat UI with the returned `session_id`.
+2. Once in the chat UI, trigger the greeting: `POST /api/v1/agents/:agentId/greeting` with `session_id` → stream the assistant's opening message as SSE with typing animation visible to the user.
 
 **Request:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `chat_id` | Yes | Caller identity — same as other session endpoints. Accepted in request body (preferred) or as a query param for backward compatibility |
-| `session_name` | No | Explicit session title (max 200 chars); skips the LLM auto-naming call (~15s) when provided |
+| `session_id` | Yes | ID of an existing session to deliver the greeting into |
 
 ```bash
-curl -X POST \
+curl -N -X POST \
   -H "X-Api-Key: my-write-key" \
   -H "Content-Type: application/json" \
-  -d '{"chat_id": "getpod", "session_name": "Welcome to GetPod"}' \
+  -d '{"session_id": "7f3a1c2d-89ab-4def-b012-345678901234"}' \
   http://localhost:10850/api/v1/agents/getpod/greeting
 ```
 
-**Response `202`** — session created; greeting is generating in the background:
+**Response `200` (SSE stream)** — greeting is streaming:
 
-```json
-{
-  "greeted": true,
-  "sessionId": "7f3a1c2d-89ab-4def-b012-345678901234",
-  "sessionName": "Welcome to GetPod"
-}
+```
+data: {"type":"text_delta","text":"Hello! "}
+data: {"type":"text_delta","text":"Welcome to GetPod."}
+data: {"type":"result","text":"Hello! Welcome to GetPod.","session_id":"7f3a1c2d-..."}
+data: [DONE]
 ```
 
-The session exists immediately and the client can redirect to it. The assistant's greeting message arrives asynchronously (poll `GET /sessions/:id/messages` or open the chat UI to receive it).
+If the session has an active request in flight, the endpoint returns `409` before sending SSE headers.
 
-**Response `204`** — `GREETING.md` not found or empty; no session created.
+**Response `204`** — `GREETING.md` not found or empty; nothing sent to session.
 
 **`GREETING.md` format:**
 
@@ -825,9 +828,9 @@ introducing yourself and what you can help with.
 ```
 
 **Notes:**
-- `GREETING.md` is **deleted before the `202` response** is sent. Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning GREETING.md will trigger a new greeting on next call.
-- Pass `session_name` to avoid the ~15s LLM title-generation call. If omitted, the session is auto-named from the greeting prompt content (same logic as `POST /sessions`).
-- Greeting generation runs in the background. If generation fails, the empty session is cleaned up automatically; the client should handle the case where the session has no messages yet.
+- `GREETING.md` is **deleted before streaming begins**. Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning `GREETING.md` enables a new greeting on the next call.
+- The SSE stream format matches `POST /messages` with `stream: true` — use the same client-side handler.
+- If the agent errors mid-stream, an `{"type":"error","message":"..."}` SSE event is sent and the stream closes.
 
 ---
 

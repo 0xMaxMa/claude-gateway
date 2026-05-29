@@ -5,23 +5,24 @@ import * as path from 'path';
 import * as os from 'os';
 import { EventEmitter } from 'events';
 import { createApiRouter } from '../../src/api/router';
-import { AgentConfig, ApiKey, SessionMeta } from '../../src/types';
+import { AgentConfig, ApiKey, StreamEvent } from '../../src/types';
 
 // ── Mock AgentRunner for greeting tests ─────────────────────────────────────
 
+type SseCallbacks = {
+  onChunk: (event: StreamEvent) => void;
+  onDone: (text: string) => void;
+  onError: (err: Error) => void;
+};
+
 class MockGreetingRunner extends EventEmitter {
   private _workspacePath: string;
-  sendApiMessageResult: string | Error = 'Hello!';
-  createApiSessionResult: SessionMeta = {
-    id: 'sess-abc123',
-    name: 'Welcome to GetPod',
-    createdAt: Date.now(),
-    lastActive: Date.now(),
-    messageCount: 0,
-    totalTokensUsed: 0,
-  };
-  createApiSessionCalls: Array<{ chatId: string; prompt?: string; name?: string }> = [];
-  deleteApiSessionCalls: Array<{ chatId: string; sessionId: string }> = [];
+  sendStreamResult: string | Error = 'Hello from agent!';
+  // When set, sendApiMessageStream throws synchronously before returning
+  sendStreamThrow: Error | null = null;
+  activeSession = false;
+  cleanupCalled = false;
+  capturedCallbacks: SseCallbacks | null = null;
 
   constructor(workspacePath: string) {
     super();
@@ -32,26 +33,30 @@ class MockGreetingRunner extends EventEmitter {
     return this._workspacePath;
   }
 
-  async createApiSession(chatId: string, prompt?: string, name?: string): Promise<SessionMeta> {
-    this.createApiSessionCalls.push({ chatId, prompt, name });
-    return this.createApiSessionResult;
+  hasActiveApiSession(_sessionId: string): boolean {
+    return this.activeSession;
   }
 
-  async sendApiMessage(
+  async sendApiMessageStream(
     _sessionId: string,
     _chatId: string,
     _message: string,
+    callbacks: SseCallbacks,
     _opts: { timeoutMs: number; skipUserMessage?: boolean },
-  ): Promise<string> {
-    if (this.sendApiMessageResult instanceof Error) throw this.sendApiMessageResult;
-    return this.sendApiMessageResult;
+  ): Promise<() => void> {
+    if (this.sendStreamThrow) throw this.sendStreamThrow;
+    this.capturedCallbacks = callbacks;
+    // Fire callbacks asynchronously to simulate streaming
+    setImmediate(() => {
+      if (this.sendStreamResult instanceof Error) {
+        callbacks.onError(this.sendStreamResult);
+      } else {
+        callbacks.onChunk({ type: 'text_delta', text: this.sendStreamResult });
+        callbacks.onDone(this.sendStreamResult);
+      }
+    });
+    return () => { this.cleanupCalled = true; };
   }
-
-  async deleteApiSession(_chatId: string, _sessionId: string): Promise<void> {
-    this.deleteApiSessionCalls.push({ chatId: _chatId, sessionId: _sessionId });
-  }
-
-  hasActiveApiSession(_sessionId: string): boolean { return false; }
 }
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -81,7 +86,6 @@ function buildApp(runner: MockGreetingRunner) {
   return app;
 }
 
-// Poll until the file is gone (avoids arbitrary setTimeout for async unlink)
 async function waitForFileDeleted(filePath: string, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -93,6 +97,17 @@ async function waitForFileDeleted(filePath: string, timeoutMs = 2000): Promise<v
     }
   }
   throw new Error(`File ${filePath} still exists after ${timeoutMs}ms`);
+}
+
+// Parse SSE response body into event objects
+function parseSseEvents(body: string): Array<Record<string, unknown>> {
+  return body
+    .split('\n\n')
+    .filter(chunk => chunk.startsWith('data: ') && chunk.slice(6) !== '[DONE]')
+    .map(chunk => {
+      try { return JSON.parse(chunk.slice(6)) as Record<string, unknown>; } catch { return {}; }
+    })
+    .filter(e => Object.keys(e).length > 0);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -110,35 +125,106 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  // T-GREETING-204-NO-FILE: returns 204 when GREETING.md does not exist
+  // ── 204 no-op paths ────────────────────────────────────────────────────────
+
   it('T-GREETING-204-NO-FILE: returns 204 when GREETING.md is absent', async () => {
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat' });
+      .send({ session_id: 'sess-abc' });
     expect(res.status).toBe(204);
-    expect(runner.createApiSessionCalls).toHaveLength(0);
+    expect(runner.capturedCallbacks).toBeNull();
   });
 
-  // T-GREETING-204-EMPTY: returns 204 when GREETING.md is empty/whitespace
   it('T-GREETING-204-EMPTY: returns 204 when GREETING.md is empty', async () => {
     await fs.writeFile(path.join(tmpDir, 'GREETING.md'), '   \n  ');
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat' });
+      .send({ session_id: 'sess-abc' });
     expect(res.status).toBe(204);
-    expect(runner.createApiSessionCalls).toHaveLength(0);
+    expect(runner.capturedCallbacks).toBeNull();
   });
 
-  // T-GREETING-500-EACCES: non-ENOENT readFile error (e.g. EACCES) returns 500, not 204
+  // ── Input validation ───────────────────────────────────────────────────────
+
+  it('T-GREETING-400-NO-SESSION: missing session_id returns 400', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/session_id/i);
+  });
+
+  it('T-GREETING-400-EMPTY-SESSION: empty session_id returns 400', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  // ── Conflict ───────────────────────────────────────────────────────────────
+
+  it('T-GREETING-409-ACTIVE: returns 409 when session is already active', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    runner.activeSession = true;
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(409);
+    expect(runner.capturedCallbacks).toBeNull();
+  });
+
+  // ── Auth ───────────────────────────────────────────────────────────────────
+
+  it('T-GREETING-403-READ-KEY: read-only key is rejected with 403', async () => {
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-read-only')
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/write or admin/i);
+  });
+
+  it('T-GREETING-403-ADMIN-OK: admin key is accepted', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-admin')
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+  });
+
+  // ── 404 ────────────────────────────────────────────────────────────────────
+
+  it('T-GREETING-404-UNKNOWN-AGENT: unknown agent returns 404', async () => {
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post('/api/v1/agents/nonexistent/greeting')
+      .set('X-Api-Key', 'sk-admin')
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(404);
+  });
+
+  // ── 500 on read error ──────────────────────────────────────────────────────
+
   it('T-GREETING-500-EACCES: permission error on GREETING.md returns 500', async () => {
     const greetingPath = path.join(tmpDir, 'GREETING.md');
     await fs.writeFile(greetingPath, 'Welcome!');
     await fs.chmod(greetingPath, 0o000);
-    // root can read any file — skip assertion in that environment
     if ((process.getuid?.() ?? -1) === 0) {
       await fs.chmod(greetingPath, 0o644);
       return;
@@ -147,76 +233,58 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat' });
+      .send({ session_id: 'sess-abc' });
     await fs.chmod(greetingPath, 0o644);
     expect(res.status).toBe(500);
-    expect(runner.createApiSessionCalls).toHaveLength(0);
+    expect(runner.capturedCallbacks).toBeNull();
   });
 
-  // T-GREETING-202-NO-NAME: returns 202 immediately without waiting for LLM
-  it('T-GREETING-202-NO-NAME: returns 202 without session_name, passes undefined to createApiSession', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome, the VM is ready!');
+  // ── SSE streaming ──────────────────────────────────────────────────────────
+
+  it('T-GREETING-200-SSE: happy path returns 200 SSE with text_delta + result + [DONE]', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome to the platform!');
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat' });
-    expect(res.status).toBe(202);
-    expect(res.body.greeted).toBe(true);
-    expect(res.body.sessionId).toBe('sess-abc123');
-    expect(res.body.sessionName).toBe('Welcome to GetPod');
-    expect(runner.createApiSessionCalls[0].name).toBeUndefined();
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    const events = parseSseEvents(res.text);
+    const chunk = events.find(e => e['type'] === 'text_delta');
+    const result = events.find(e => e['type'] === 'result');
+    expect(chunk).toBeDefined();
+    expect(result?.['session_id']).toBe('sess-abc');
+    expect(res.text).toContain('[DONE]');
   });
 
-  // T-GREETING-202-WITH-NAME: passes session_name to createApiSession, skipping LLM naming
-  it('T-GREETING-202-WITH-NAME: passes session_name to createApiSession when provided', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome, the VM is ready!');
+  it('T-GREETING-200-AGENT-ERROR: agent error during stream sends error SSE event', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    runner.sendStreamResult = new Error('agent crashed');
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat', session_name: 'My Custom Title' });
-    expect(res.status).toBe(202);
-    expect(runner.createApiSessionCalls[0].name).toBe('My Custom Title');
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(200);
+    const events = parseSseEvents(res.text);
+    const errEvent = events.find(e => e['type'] === 'error');
+    expect(errEvent?.['message']).toMatch(/agent crashed/);
   });
 
-  // T-GREETING-CHAT-ID-QUERY: chat_id as query param is accepted for backward compat
-  it('T-GREETING-CHAT-ID-QUERY: chat_id as query param is accepted (backward compat)', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post(`/api/v1/agents/${AGENT_ID}/greeting?chat_id=testchat`)
-      .set('X-Api-Key', 'sk-write')
-      .send({ session_name: 'Welcome' });
-    expect(res.status).toBe(202);
-    expect(runner.createApiSessionCalls[0].chatId).toBe('testchat');
-  });
+  // ── File lifecycle ─────────────────────────────────────────────────────────
 
-  // T-GREETING-CHAT-ID-BODY-PREFERRED: body chat_id takes priority over query param
-  it('T-GREETING-CHAT-ID-BODY-PREFERRED: body chat_id takes priority over query param', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post(`/api/v1/agents/${AGENT_ID}/greeting?chat_id=query-id`)
-      .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'body-id', session_name: 'Welcome' });
-    expect(res.status).toBe(202);
-    expect(runner.createApiSessionCalls[0].chatId).toBe('body-id');
-  });
-
-  // T-GREETING-DELETES-FILE: GREETING.md is deleted before the 202 response
-  it('T-GREETING-DELETES-FILE: GREETING.md is deleted before 202 response', async () => {
+  it('T-GREETING-DELETES-FILE: GREETING.md is deleted before streaming begins', async () => {
     const greetingPath = path.join(tmpDir, 'GREETING.md');
-    await fs.writeFile(greetingPath, 'Welcome, the VM is ready!');
+    await fs.writeFile(greetingPath, 'Welcome!');
     const app = buildApp(runner);
     await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat', session_name: 'Welcome' });
+      .send({ session_id: 'sess-abc' });
     await waitForFileDeleted(greetingPath);
   });
 
-  // T-GREETING-IDEMPOTENT: second call returns 204 because GREETING.md was deleted
   it('T-GREETING-IDEMPOTENT: second call returns 204 after first success', async () => {
     const greetingPath = path.join(tmpDir, 'GREETING.md');
     await fs.writeFile(greetingPath, 'Welcome!');
@@ -224,81 +292,34 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const first = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat', session_name: 'Welcome' });
-    expect(first.status).toBe(202);
+      .send({ session_id: 'sess-abc' });
+    expect(first.status).toBe(200);
     await waitForFileDeleted(greetingPath);
     const second = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat', session_name: 'Welcome' });
+      .send({ session_id: 'sess-abc' });
     expect(second.status).toBe(204);
-    expect(runner.createApiSessionCalls).toHaveLength(1);
   });
 
-  // T-GREETING-403-READ-KEY: read-only key returns 403
-  it('T-GREETING-403-READ-KEY: read-only key is rejected with 403', async () => {
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
-      .set('X-Api-Key', 'sk-read-only')
-      .send({ chat_id: 'testchat' });
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/write or admin/i);
-  });
+  // ── Sync throw after headers ───────────────────────────────────────────────
 
-  // T-GREETING-403-ADMIN-OK: admin key succeeds
-  it('T-GREETING-403-ADMIN-OK: admin key is accepted', async () => {
+  // SSE headers are written before sendApiMessageStream is called. If sendApiMessageStream
+  // throws synchronously (e.g. subprocess spawn failure), the error must be delivered as
+  // an SSE error event — JSON 500 is impossible once headers are flushed.
+  it('T-GREETING-SSE-ERROR-ON-THROW: sync throw from sendApiMessageStream delivers SSE error event', async () => {
     await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
-      .set('X-Api-Key', 'sk-admin')
-      .send({ chat_id: 'testchat', session_name: 'Welcome' });
-    expect(res.status).toBe(202);
-  });
-
-  // T-GREETING-400-NO-CHAT: missing chat_id returns 400
-  it('T-GREETING-400-NO-CHAT: missing chat_id returns 400', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    runner.sendStreamThrow = new Error('spawn failed');
     const app = buildApp(runner);
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({});
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/chat_id/i);
-  });
-
-  // T-GREETING-404-UNKNOWN-AGENT: unknown agent returns 404
-  it('T-GREETING-404-UNKNOWN-AGENT: unknown agent returns 404', async () => {
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post('/api/v1/agents/nonexistent/greeting')
-      .set('X-Api-Key', 'sk-admin')
-      .send({ chat_id: 'testchat' });
-    expect(res.status).toBe(404);
-  });
-
-  // T-GREETING-BG-CLEANUP: background sendApiMessage failure cleans up orphaned session
-  it('T-GREETING-BG-CLEANUP: background failure cleans up orphaned session', async () => {
-    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
-    runner.sendApiMessageResult = new Error('internal failure');
-    let cleanupResolve!: () => void;
-    const cleanupDone = new Promise<void>(r => { cleanupResolve = r; });
-    const origDelete = runner.deleteApiSession.bind(runner);
-    runner.deleteApiSession = async (...args: Parameters<typeof runner.deleteApiSession>) => {
-      await origDelete(...args);
-      cleanupResolve();
-    };
-    const app = buildApp(runner);
-    const res = await supertest.default(app)
-      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
-      .set('X-Api-Key', 'sk-write')
-      .send({ chat_id: 'testchat', session_name: 'Welcome' });
-    // Response is 202 immediately; cleanup happens in background
-    expect(res.status).toBe(202);
-    await cleanupDone;
-    expect(runner.deleteApiSessionCalls).toHaveLength(1);
-    expect(runner.deleteApiSessionCalls[0].sessionId).toBe('sess-abc123');
+      .send({ session_id: 'sess-abc' });
+    // Headers already flushed — status is 200, error comes via SSE
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    const events = parseSseEvents(res.text);
+    const errEvent = events.find(e => e['type'] === 'error');
+    expect(errEvent?.['message']).toMatch(/spawn failed/);
   });
 });

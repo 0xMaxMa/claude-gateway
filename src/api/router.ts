@@ -2090,7 +2090,7 @@ export function createApiRouter(
     }
   });
 
-  // POST /api/v1/agents/:agentId/greeting — one-shot proactive welcome from GREETING.md
+  // POST /api/v1/agents/:agentId/greeting — stream a proactive welcome from GREETING.md into an existing session
   router.post('/v1/agents/:agentId/greeting', auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
@@ -2103,20 +2103,17 @@ export function createApiRouter(
     const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
-    const body = req.body as { chat_id?: unknown; session_name?: unknown };
-    // Accept chat_id from body (preferred) or query param (backward compat)
-    const rawChatId = (body.chat_id ?? req.query['chat_id']) as string | undefined;
-    const resolvedChatId = typeof rawChatId === 'string' ? rawChatId.trim() : '';
-    if (!resolvedChatId) {
-      res.status(400).json({ error: 'chat_id is required' });
+    const body = req.body as { session_id?: unknown };
+    const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
+    if (!sessionId) {
+      res.status(400).json({ error: 'session_id is required' });
       return;
     }
-    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(resolvedChatId)) {
-      res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+
+    if (runner.hasActiveApiSession(sessionId)) {
+      res.status(409).json({ error: 'Session already has a pending request' });
       return;
     }
-    const rawSessionName = typeof body.session_name === 'string' ? body.session_name.trim() : undefined;
-    const sessionName = rawSessionName ? rawSessionName.slice(0, 200) : undefined;
 
     const greetingPath = path.join(runner.workspacePath, 'GREETING.md');
     let content: string;
@@ -2136,29 +2133,66 @@ export function createApiRouter(
       return;
     }
 
-    let meta: SessionMeta | undefined;
-    try {
-      meta = await runner.createApiSession(resolvedChatId, content, sessionName);
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-      return;
-    }
-
-    // Unlink before responding — prevents re-read race if the client retries immediately
+    // Unlink before streaming — prevents re-read race if the client retries immediately
     try { await fsp.unlink(greetingPath); } catch (e) {
       console.error(`[api] Failed to delete GREETING.md for '${agentId}': ${(e as Error).message}`);
     }
 
-    // Return 202 immediately so the client can redirect while the greeting generates in the background
-    res.status(202).json({ greeted: true, sessionId: meta.id, sessionName: meta.name });
+    let cleanup: (() => void) | undefined;
+    try {
+      const sseCallbacks = {
+        onChunk: (event: import('../types').StreamEvent) => {
+          try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
+        },
+        onDone: (fullText: string) => {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, session_id: sessionId })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+          } catch { /* client gone */ }
+        },
+        onError: (err: Error) => {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+            res.end();
+          } catch { /* client gone */ }
+        },
+      };
 
-    runner.sendApiMessage(meta.id, resolvedChatId, content, {
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-      skipUserMessage: true,
-    }).catch((err: Error) => {
-      console.error(`[api] Greeting background processing failed for '${agentId}': ${err.message}`);
-      runner.deleteApiSession(resolvedChatId, meta.id).catch(() => undefined);
-    });
+      // Preflight conflict check already done above; throw-based check catches races after headers
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.flushHeaders();
+      res.socket?.setNoDelay(true);
+
+      cleanup = await runner.sendApiMessageStream(
+        sessionId,
+        sessionId,
+        content,
+        sseCallbacks,
+        { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true },
+      );
+
+      res.on('close', cleanup);
+    } catch (err: unknown) {
+      const code = (err as { code?: string }).code;
+      if (!res.headersSent) {
+        if (code === 'CONFLICT') {
+          res.status(409).json({ error: 'Session already has a pending request' });
+        } else {
+          res.status(500).json({ error: (err as Error).message ?? 'Internal error' });
+        }
+      } else {
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: (err as Error).message ?? 'Internal error' })}\n\n`);
+          res.end();
+        } catch { /* client gone */ }
+      }
+    }
   });
 
   return router;
