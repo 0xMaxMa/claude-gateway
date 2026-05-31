@@ -1550,4 +1550,102 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
     await sp.stop();
   });
+
+  // R8: after recovery, the respawned subprocess rebuilds its prompt from clean
+  // text-only history — proving the loop is actually broken, not just the kill issued.
+  it('R8: respawn after recovery reloads clean text-only history (no thinking blocks)', async () => {
+    await sessionStore.appendTelegramMessage('alfred', 'chat:rec8', 'chat:rec8', {
+      role: 'user', content: 'hello boss', ts: Date.now(),
+    });
+    await sessionStore.appendTelegramMessage('alfred', 'chat:rec8', 'chat:rec8', {
+      role: 'assistant', content: 'clean reply', ts: Date.now(),
+    });
+
+    const sp = new SessionProcess('chat:rec8', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const firstProcess = lastProcess!;
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+
+    // Fake timers make the respawn deterministic and isolate this test from any
+    // real auto-restart timers left pending by earlier tests in the suite.
+    jest.useFakeTimers();
+    try {
+      // 400 → recovery kills the subprocess
+      firstProcess.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+      expect(firstProcess.kill).toHaveBeenCalledWith('SIGTERM');
+
+      // mock kill() scheduled 'exit' on (faked) nextTick → flush it so the exit
+      // handler runs scheduleRestart() and arms the AUTO_RESTART_DELAY_MS timer.
+      jest.advanceTimersByTime(1);
+      // fire the auto-restart timer → spawnProcess() (its fs reads are synchronous)
+      jest.advanceTimersByTime(6000);
+      // drain the microtasks from spawnProcess's awaits (promises are not faked)
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    const respawned = lastProcess!;
+    expect(respawned).not.toBe(firstProcess);
+
+    // The respawned subprocess gets a fresh prompt rebuilt from text history —
+    // clean, with no corrupted thinking content.
+    const initialWrite = respawned.stdin!.write.mock.calls[0][0] as string;
+    const text: string = JSON.parse(initialWrite).message.content[0].text;
+    expect(text).toContain('Conversation history');
+    expect(text).toContain('clean reply');
+    expect(text).not.toContain('cannot be modified');
+
+    await sp.stop();
+  });
+
+  // R9: the whole point of the tightened detection — an agent whose own reply
+  // discusses the error phrase must NOT be misread as a real 400.
+  it('R9: assistant text mentioning the error phrase in a clean turn does not trigger recovery', async () => {
+    const sp = new SessionProcess('chat:rec9', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const chatty = JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'end_turn',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'text',
+          text: 'The 400 error "blocks in the latest assistant message cannot be modified" happens when thinking blocks change mid-stream.',
+        }],
+      },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(chatty + '\n'));
+    // Successful result whose text also echoes the phrase
+    const okResult = JSON.stringify({
+      type: 'result', is_error: false,
+      result: 'Explained why thinking blocks cannot be modified once sent.',
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(okResult + '\n'));
+
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
+
+  // R10: a failed result that mentions the loose keywords but lacks the full API
+  // signature must not trigger recovery (no two-word substring match anymore).
+  it('R10: a failed result lacking the full signature does not trigger recovery', async () => {
+    const sp = new SessionProcess('chat:rec10', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const loose = JSON.stringify({
+      type: 'result', is_error: true,
+      result: 'I was thinking, but this file cannot be modified.',
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(loose + '\n'));
+
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
 });

@@ -798,7 +798,11 @@ export class AgentRunner extends EventEmitter {
             // sending a duplicate message to the channel.
             // Skip forwarding when session is in query mode (internal image summary request).
             const resultText = typeof obj['result'] === 'string' ? obj['result'] : '';
-            if (resultText.trim() && !proc.queryMode && !replyCalled) {
+            // Suppress the corrupted-thinking 400: the session auto-respawns to recover,
+            // so the raw API error must not reach the user's chat or the history DB.
+            const isThinkingCorruption =
+              obj['is_error'] === true && SessionProcess.isThinkingCorruptionError(resultText);
+            if (resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
               const text = resultText.trim();
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB

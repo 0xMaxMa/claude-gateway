@@ -45,9 +45,6 @@ export class SessionProcess extends EventEmitter {
   private readonly configPath: string;
   private readonly restartSignalPath: string;
   queryMode = false;
-  // Set when a corrupted-thinking-block 400 is detected, so the trailing result
-  // event skips persisting the API error text and we respawn with clean history.
-  private _recovering = false;
   private thinkingRecoveryCount = 0;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
@@ -333,7 +330,6 @@ export class SessionProcess extends EventEmitter {
   }
 
   private async spawnProcess(): Promise<void> {
-    this._recovering = false;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
 
@@ -449,12 +445,6 @@ export class SessionProcess extends EventEmitter {
         if (!line.trim()) continue;
         this.emit('output', line);
         this.logger.debug('session output', { line });
-        // A previous turn's thinking block was corrupted (e.g. interrupted mid-stream),
-        // and Claude Code keeps replaying it from in-memory history → every turn 400s.
-        // Respawn to reload clean text-only history and break the loop.
-        if (this.source !== 'api' && !this.queryMode && SessionProcess.isThinkingCorruptionError(line)) {
-          this.recoverFromCorruptedThinking();
-        }
         // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
@@ -533,6 +523,15 @@ export class SessionProcess extends EventEmitter {
             writeStatus(obj.is_error ? 'error' : 'done');
             // A clean turn means the in-memory history is healthy again — refill the budget.
             if (!obj.is_error) this.thinkingRecoveryCount = 0;
+            // A previous turn's thinking block was corrupted (e.g. interrupted mid-stream),
+            // and Claude Code keeps replaying it from in-memory history → every turn 400s.
+            // Detect strictly on the failed result's error text (not assistant deltas) so an
+            // agent merely discussing the error phrase can never trigger a spurious respawn.
+            const corruptedThinking =
+              this.source !== 'api' &&
+              !this.queryMode &&
+              obj.is_error === true &&
+              SessionProcess.isThinkingCorruptionError(typeof obj.result === 'string' ? obj.result : '');
             if (this.queryMode) {
               if (this._queryTimer) clearTimeout(this._queryTimer);
               if (!this._querySettled) {
@@ -544,11 +543,12 @@ export class SessionProcess extends EventEmitter {
               }
               this._queryBuffer = '';
               assistantBuffer = '';
-            } else if (this._recovering) {
-              // Don't persist the 400 API error text as an assistant message — we're
-              // about to respawn with clean history.
+            } else if (corruptedThinking) {
+              // Don't persist the 400 API error text as an assistant message — respawn
+              // to reload clean text-only history and break the loop.
               assistantBuffer = '';
               lastMessageStartContext = 0;
+              this.recoverFromCorruptedThinking();
             } else {
               if (assistantBuffer.trim()) {
                 // For non-API sessions (Telegram/Discord), persist here via appendTelegramMessage.
@@ -622,11 +622,12 @@ export class SessionProcess extends EventEmitter {
 
   /**
    * Detect the Anthropic API 400 raised when a previously-emitted thinking block
-   * is sent back altered. Claude Code surfaces the raw API error text on stdout,
-   * so a substring match is the most robust signal across output formats.
+   * is sent back altered. Match the full API signature (not loose keywords) so it
+   * only fires on the genuine error text, never on prose that mentions thinking blocks.
+   * Callers must gate this on a failed result (is_error === true).
    */
-  private static isThinkingCorruptionError(line: string): boolean {
-    return line.includes('cannot be modified') && line.includes('thinking');
+  static isThinkingCorruptionError(errorText: string): boolean {
+    return errorText.includes('blocks in the latest assistant message cannot be modified');
   }
 
   /**
@@ -644,7 +645,6 @@ export class SessionProcess extends EventEmitter {
       return;
     }
     this.thinkingRecoveryCount++;
-    this._recovering = true;
     this.logger.warn('Corrupted thinking block detected (400) — respawning to restore clean history', {
       sessionId: this.sessionId,
       attempt: this.thinkingRecoveryCount,
