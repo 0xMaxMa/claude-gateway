@@ -713,12 +713,18 @@ export class SessionProcess extends EventEmitter {
 
     return new Promise((resolve) => {
       const proc = this.process!;
+      let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
       proc.once('exit', () => {
+        if (forceKillTimer !== null) {
+          clearTimeout(forceKillTimer);
+          forceKillTimer = null;
+        }
         this.process = null;
         resolve();
       });
       proc.kill('SIGTERM');
-      setTimeout(() => {
+      forceKillTimer = setTimeout(() => {
+        forceKillTimer = null;
         if (this.process) proc.kill('SIGKILL');
       }, 10_000);
     });

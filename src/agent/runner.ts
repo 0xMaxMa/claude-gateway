@@ -25,10 +25,11 @@ const DEFAULT_MAX_CONCURRENT = 20;
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export const DEFAULT_MODELS: ModelConfig[] = [
-  { id: 'claude-opus-4-7', label: 'Opus 4.7', alias: 'opus', contextWindow: 1000000 },
-  { id: 'claude-opus-4-6', label: 'Opus 4.6', alias: 'opus46', contextWindow: 1000000 },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', alias: 'sonnet', contextWindow: 1000000 },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku', contextWindow: 200000 },
+  { id: 'claude-opus-4-8',          label: 'Opus 4.8',   alias: 'opus',   contextWindow: 1000000 },
+  { id: 'claude-opus-4-7',          label: 'Opus 4.7',   alias: 'opus47', contextWindow: 1000000 },
+  { id: 'claude-opus-4-6',          label: 'Opus 4.6',   alias: 'opus46', contextWindow: 1000000 },
+  { id: 'claude-sonnet-4-6',        label: 'Sonnet 4.6', alias: 'sonnet', contextWindow: 1000000 },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', alias: 'haiku',  contextWindow: 200000 },
 ];
 
 const PROTECTED_WORKSPACE_FILES = [
@@ -1325,8 +1326,12 @@ export class AgentRunner extends EventEmitter {
     }
     this.cancelCleanup?.();
     this.cancelCleanup = null;
-    this.callbackServer?.close();
-    this.callbackServer = null;
+    if (this.callbackServer) {
+      const srv = this.callbackServer;
+      this.callbackServer = null;
+      srv.closeAllConnections?.();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
     this.receiver?.stop();
     this.discordReceiver?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.stop()));

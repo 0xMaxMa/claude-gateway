@@ -312,12 +312,12 @@ Update an agent's description, model, or allow_tools flag. Requires write access
 curl -X PATCH \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
-  -d '{"model": "claude-opus-4-7"}' \
+  -d '{"model": "claude-opus-4-8"}' \
   http://localhost:10850/api/v1/agents/alfred | jq
 ```
 
 ```json
-{ "agent": { "id": "alfred", "description": "Personal assistant", "model": "claude-opus-4-7", "allow_tools": false } }
+{ "agent": { "id": "alfred", "description": "Personal assistant", "model": "claude-opus-4-8", "allow_tools": false } }
 ```
 
 ---
@@ -728,8 +728,9 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "models": [
-    { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "alias": "sonnet", "contextWindow": 200000, "multiplier": 1 },
-    { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "alias": "opus", "contextWindow": 200000, "multiplier": 3 }
+    { "id": "claude-opus-4-8", "name": "Claude Opus 4.8", "alias": "opus",   "contextWindow": 1000000, "multiplier": 3 },
+    { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "alias": "opus47", "contextWindow": 1000000, "multiplier": 3 },
+    { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "alias": "sonnet", "contextWindow": 1000000, "multiplier": 1 }
   ]
 }
 ```
@@ -744,18 +745,18 @@ Set the active model for a specific agent. Persists to `config.json`. Requires a
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `model` | Yes | Claude model ID (e.g. `"claude-opus-4-7"`) |
+| `model` | Yes | Claude model ID (e.g. `"claude-opus-4-8"`) |
 
 ```bash
 curl -X PUT \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
-  -d '{"model": "claude-opus-4-7"}' \
+  -d '{"model": "claude-opus-4-8"}' \
   http://localhost:10850/api/v1/agents/alfred/model | jq
 ```
 
 ```json
-{ "model": "claude-opus-4-7" }
+{ "model": "claude-opus-4-8" }
 ```
 
 **Error responses:**
