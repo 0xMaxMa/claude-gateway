@@ -1406,3 +1406,148 @@ describe('SessionProcess — API model-switch history injection', () => {
     expect(text).not.toContain('Conversation history');
   });
 });
+
+// ── Corrupted thinking-block recovery (issue #114) ──────────────────────────────
+
+describe('SessionProcess — corrupted thinking-block recovery', () => {
+  let tmpDir: string;
+  let sessionStore: SessionStore;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  // The exact Anthropic 400 surfaced by Claude Code on stdout, wrapped as a result event.
+  const THINKING_400 =
+    'API Error: 400 messages.1.content.11: `thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. These blocks must remain as they were in the original response.';
+
+  function errorResultLine(): string {
+    return JSON.stringify({ type: 'result', is_error: true, result: THINKING_400 });
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-recover-'));
+    agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace') });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
+    lastProcess = null;
+    spawnMock = require('child_process').spawn as jest.Mock;
+    spawnMock.mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // R1: a 400 thinking-block error triggers a respawn (kill + restart marker)
+  it('R1: thinking-block 400 on stdout kills the subprocess to respawn with clean history', async () => {
+    const sp = new SessionProcess('chat:rec', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+
+    expect(lastProcess!.kill).toHaveBeenCalledWith('SIGTERM');
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(true);
+    expect((sp as unknown as { thinkingRecoveryCount: number }).thinkingRecoveryCount).toBe(1);
+
+    await sp.stop();
+  });
+
+  // R2: the 400 error text is not persisted as an assistant message
+  it('R2: API error text is not persisted to the session store during recovery', async () => {
+    const sp = new SessionProcess('chat:rec2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Assistant text carrying the error, then the result event.
+    const assistantErr = JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'end_turn',
+      message: { role: 'assistant', content: [{ type: 'text', text: THINKING_400 }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(assistantErr + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+
+    await new Promise(r => setTimeout(r, 100));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:rec2', 'chat:rec2');
+    const assistantMsgs = messages.filter(m => m.role === 'assistant');
+    expect(assistantMsgs.some(m => m.content.includes('cannot be modified'))).toBe(false);
+
+    await sp.stop();
+  });
+
+  // R3: recovery is bounded — once the budget is spent, no further respawn
+  it('R3: recovery stops after MAX_THINKING_RECOVERIES to avoid an infinite respawn loop', async () => {
+    const sp = new SessionProcess('chat:rec3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Simulate the budget already being exhausted by prior respawns.
+    (sp as unknown as { thinkingRecoveryCount: number }).thinkingRecoveryCount = 2;
+
+    lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+
+    // No respawn attempted: neither killed nor flagged for restart.
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
+
+  // R4: a clean turn refills the recovery budget
+  it('R4: a successful result resets the recovery budget', async () => {
+    const sp = new SessionProcess('chat:rec4', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    (sp as unknown as { thinkingRecoveryCount: number }).thinkingRecoveryCount = 1;
+
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: 'ok' }) + '\n'));
+
+    expect((sp as unknown as { thinkingRecoveryCount: number }).thinkingRecoveryCount).toBe(0);
+
+    await sp.stop();
+  });
+
+  // R5: API sessions are not auto-respawned by this path (runner owns API error handling)
+  it('R5: api source does not auto-respawn on a thinking-block 400', async () => {
+    const sp = new SessionProcess('api:rec', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
+
+  // R6: recovery does not fire while serving an internal query()
+  it('R6: query mode does not trigger recovery', async () => {
+    const sp = new SessionProcess('chat:rec6', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const queryPromise = sp.query('describe images', 1000);
+    lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
+
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    // Settle the query so the test doesn't leak a pending timer.
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+    await queryPromise;
+    await sp.stop();
+  });
+
+  // R7: an ordinary (non-thinking) error does not trigger a respawn
+  it('R7: a generic error result does not trigger recovery', async () => {
+    const sp = new SessionProcess('chat:rec7', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const generic = JSON.stringify({ type: 'result', is_error: true, result: 'API Error: 500 internal server error' });
+    lastProcess!.stdout!.emit('data', Buffer.from(generic + '\n'));
+
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
+});

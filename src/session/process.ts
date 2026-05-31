@@ -17,6 +17,9 @@ import {
 const MAX_HISTORY_MESSAGES = 50;
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
+// Bound how many times a single session may auto-respawn to recover from a
+// corrupted thinking block, so a recovery that never helps can't loop forever.
+const MAX_THINKING_RECOVERIES = 2;
 const CHANNELS_ACTIVATION_PROMPT =
   'Channels mode is active. Wait for incoming messages from your channels and respond to them.';
 
@@ -42,6 +45,10 @@ export class SessionProcess extends EventEmitter {
   private readonly configPath: string;
   private readonly restartSignalPath: string;
   queryMode = false;
+  // Set when a corrupted-thinking-block 400 is detected, so the trailing result
+  // event skips persisting the API error text and we respawn with clean history.
+  private _recovering = false;
+  private thinkingRecoveryCount = 0;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
   private _queryTimer?: ReturnType<typeof setTimeout>;
@@ -326,6 +333,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private async spawnProcess(): Promise<void> {
+    this._recovering = false;
     const { historyPrompt, loadedAtSpawn, archivedCount, messageCountAtSpawn } = await this.buildInitialPrompt();
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
 
@@ -441,6 +449,12 @@ export class SessionProcess extends EventEmitter {
         if (!line.trim()) continue;
         this.emit('output', line);
         this.logger.debug('session output', { line });
+        // A previous turn's thinking block was corrupted (e.g. interrupted mid-stream),
+        // and Claude Code keeps replaying it from in-memory history → every turn 400s.
+        // Respawn to reload clean text-only history and break the loop.
+        if (this.source !== 'api' && !this.queryMode && SessionProcess.isThinkingCorruptionError(line)) {
+          this.recoverFromCorruptedThinking();
+        }
         // Try to capture assistant text for SessionStore + update status file
         try {
           const obj = JSON.parse(line);
@@ -517,6 +531,8 @@ export class SessionProcess extends EventEmitter {
           if (obj.type === 'result') {
             lastPartialText = ''; // reset for next turn
             writeStatus(obj.is_error ? 'error' : 'done');
+            // A clean turn means the in-memory history is healthy again — refill the budget.
+            if (!obj.is_error) this.thinkingRecoveryCount = 0;
             if (this.queryMode) {
               if (this._queryTimer) clearTimeout(this._queryTimer);
               if (!this._querySettled) {
@@ -528,6 +544,11 @@ export class SessionProcess extends EventEmitter {
               }
               this._queryBuffer = '';
               assistantBuffer = '';
+            } else if (this._recovering) {
+              // Don't persist the 400 API error text as an assistant message — we're
+              // about to respawn with clean history.
+              assistantBuffer = '';
+              lastMessageStartContext = 0;
             } else {
               if (assistantBuffer.trim()) {
                 // For non-API sessions (Telegram/Discord), persist here via appendTelegramMessage.
@@ -597,6 +618,41 @@ export class SessionProcess extends EventEmitter {
         );
       }
     }, AUTO_RESTART_DELAY_MS);
+  }
+
+  /**
+   * Detect the Anthropic API 400 raised when a previously-emitted thinking block
+   * is sent back altered. Claude Code surfaces the raw API error text on stdout,
+   * so a substring match is the most robust signal across output formats.
+   */
+  private static isThinkingCorruptionError(line: string): boolean {
+    return line.includes('cannot be modified') && line.includes('thinking');
+  }
+
+  /**
+   * Recover from a corrupted thinking block by respawning the subprocess.
+   * The gateway stores history as plain text, so buildInitialPrompt() reloads a
+   * thinking-block-free prompt on respawn — clearing the offending in-memory turn
+   * that Claude Code was replaying on every request.
+   */
+  private recoverFromCorruptedThinking(): void {
+    if (this.restartRequested || this.stopping) return; // already respawning
+    if (this.thinkingRecoveryCount >= MAX_THINKING_RECOVERIES) {
+      this.logger.error('Thinking-block recovery limit reached — not respawning again', {
+        sessionId: this.sessionId,
+      });
+      return;
+    }
+    this.thinkingRecoveryCount++;
+    this._recovering = true;
+    this.logger.warn('Corrupted thinking block detected (400) — respawning to restore clean history', {
+      sessionId: this.sessionId,
+      attempt: this.thinkingRecoveryCount,
+    });
+    // Reuse graceful-restart semantics so the respawn doesn't count as a crash.
+    this.restartRequested = true;
+    this.setProcessing(false);
+    if (this.process) this.process.kill('SIGTERM');
   }
 
   sendMessage(text: string): void {
