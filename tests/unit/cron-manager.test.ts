@@ -29,7 +29,7 @@ function makeTmpDir(): string {
 
 function makeRunner(response = 'agent ok') {
   return {
-    sendApiMessage: jest.fn().mockResolvedValue(response),
+    sendApiMessage: jest.fn().mockResolvedValue({ text: response, attachments: [] }),
   };
 }
 
