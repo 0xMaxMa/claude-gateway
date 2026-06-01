@@ -1,12 +1,12 @@
 ---
 name: open-browser
-description: "ALWAYS invoke this skill when user says 'เปิด [site]', 'open [site]', or asks to navigate to a website. Never call MCP browser tools directly."
+description: "ALWAYS invoke this skill when user says 'browser [site]', 'open [site]', or asks to navigate to a website. Never call MCP browser tools directly."
 user-invocable: true
 ---
 
 # open-browser
 
-When user says "เปิด X", "navigate to X", "open X in browser", "switch to tab X", etc.
+When user says "open X in browser", "navigate to X", "open chrome", "browser to X", "switch to tab X", etc.
 
 ## Rules
 
