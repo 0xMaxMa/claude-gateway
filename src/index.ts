@@ -26,7 +26,7 @@ import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';
 import { watchSkills } from './skills';
-import { syncSharedSkills } from './skills/sync';
+import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { CronScheduler } from './cron/scheduler';
@@ -437,9 +437,12 @@ async function main(): Promise<void> {
   const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
   const personalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+  const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
+  const logDir = expandTilde(config.gateway.logDir);
 
-  // Initial sync: copy shared skills to ~/.claude/skills/ so the Skill tool sees them
+  // Initial sync: copy shared and module skills to ~/.claude/skills/ so the Skill tool sees them
   syncSharedSkills(sharedSkillsDir, personalSkillsDir, globalLogger);
+  syncModuleSkills(mcpToolsDir, personalSkillsDir, globalLogger);
 
   // Watch shared-skills for changes and re-sync to ~/.claude/skills/ on any update
   createWatcher({
@@ -451,8 +454,15 @@ async function main(): Promise<void> {
     },
   });
 
-  const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
-  const logDir = expandTilde(config.gateway.logDir);
+  // Watch module skills for changes and re-sync to ~/.claude/skills/
+  createWatcher({
+    paths: [`${mcpToolsDir}/**/skills/**/SKILL.md`],
+    debounceMs: 250,
+    chokidarOpts: { depth: 4 },
+    onChange: () => {
+      syncModuleSkills(mcpToolsDir, personalSkillsDir, globalLogger);
+    },
+  });
 
   // Start persistent cron manager (needed before startAgent so hot-added agents can reference it)
   const cronManager = new CronManager(
