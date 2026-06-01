@@ -55,6 +55,8 @@ If `browser_navigate` or `browser_navigate_tab` returns error like `tab "t99" no
 
 Call `mcp__gateway__browser_screenshot` → `result` is either an HTTP URL or an absolute file path.
 
+Detect channel: `api_reply` tool available = API session; `telegram_reply` tool available = Telegram session.
+
 | Channel | Condition | Action |
 |---------|-----------|--------|
 | API | result starts with `http` | `api_reply(text=result)` |
