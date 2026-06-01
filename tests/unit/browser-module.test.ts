@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { BrowserModule } from '../../mcp/tools/browser/module';
 
 describe('BrowserModule', () => {
@@ -277,6 +280,125 @@ describe('BrowserModule', () => {
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       const headers = init.headers as Record<string, string>;
       expect(headers['Authorization']).toBeUndefined();
+    });
+  });
+
+  // --- browser_screenshot URL construction ---
+
+  describe('browser_screenshot', () => {
+    const smallJpegB64 = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAARC';
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bm-screenshot-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function makeScreenshotRpc(b64: string, mime = 'image/jpeg') {
+      return {
+        jsonrpc: '2.0',
+        id: 1,
+        result: { content: [{ type: 'image', data: b64, mimeType: mime }] },
+      };
+    }
+
+    it('returns filesystem path when GATEWAY_SESSION_MEDIA_DIR is not set', async () => {
+      delete process.env.GATEWAY_SESSION_MEDIA_DIR;
+      fetchMock.mockResolvedValue(
+        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess1' });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0].text as string;
+      expect(text).toMatch(/^\/tmp\//);
+      expect(text).toMatch(/browser_shot_sess1.*\.jpg$/);
+    });
+
+    it('returns HTTP URL when GATEWAY_SESSION_MEDIA_DIR, GATEWAY_API_URL, GATEWAY_AGENT_ID are set', async () => {
+      const mediaDir = path.join(tmpDir, 'api-sess2');
+      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
+      process.env.GATEWAY_API_URL = 'http://127.0.0.1:10850';
+      process.env.GATEWAY_AGENT_ID = 'my-agent';
+      fetchMock.mockResolvedValue(
+        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess2' });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0].text as string;
+      expect(text).toMatch(/^http:\/\/127\.0\.0\.1:10850\/v1\/agents\/my-agent\/media\/api-sess2\/browser_shot_sess2_/);
+      expect(text).toMatch(/\.jpg$/);
+      // File must exist on disk
+      const filename = path.basename(text.split('/').pop()!);
+      expect(fs.existsSync(path.join(mediaDir, filename))).toBe(true);
+    });
+
+    it('falls back to filesystem path when GATEWAY_API_URL is missing', async () => {
+      const mediaDir = path.join(tmpDir, 'api-sess3');
+      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
+      delete process.env.GATEWAY_API_URL;
+      process.env.GATEWAY_AGENT_ID = 'my-agent';
+      fetchMock.mockResolvedValue(
+        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess3' });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0].text as string;
+      expect(text).toMatch(/^\/tmp\//);
+    });
+
+    it('falls back to filesystem path when GATEWAY_AGENT_ID is missing', async () => {
+      const mediaDir = path.join(tmpDir, 'api-sess4');
+      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
+      process.env.GATEWAY_API_URL = 'http://127.0.0.1:10850';
+      delete process.env.GATEWAY_AGENT_ID;
+      fetchMock.mockResolvedValue(
+        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess4' });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0].text as string;
+      // When GATEWAY_AGENT_ID missing → no URL → falls back to filepath in mediaDir
+      expect(text).toMatch(/browser_shot_sess4.*\.jpg$/);
+      // Should be a filesystem path, not a URL
+      expect(text).not.toMatch(/^http/);
+    });
+
+    it('URL-encodes agent ID with special characters', async () => {
+      const mediaDir = path.join(tmpDir, 'api-sess5');
+      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
+      process.env.GATEWAY_API_URL = 'http://localhost:10850';
+      process.env.GATEWAY_AGENT_ID = 'my agent/v2';
+      fetchMock.mockResolvedValue(
+        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess5' });
+      const text = result.content[0].text as string;
+      expect(text).toContain('/v1/agents/my%20agent%2Fv2/media/');
+    });
+
+    it('saves PNG when mimeType is image/png', async () => {
+      const mediaDir = path.join(tmpDir, 'api-sess6');
+      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
+      process.env.GATEWAY_API_URL = 'http://localhost:10850';
+      process.env.GATEWAY_AGENT_ID = 'agent1';
+      fetchMock.mockResolvedValue(
+        new Response(
+          `data: ${JSON.stringify(makeScreenshotRpc('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'image/png'))}\n\n`,
+          { status: 200 },
+        ),
+      );
+      const mod = new BrowserModule();
+      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess6' });
+      const text = result.content[0].text as string;
+      expect(text).toMatch(/\.png$/);
     });
   });
 });
