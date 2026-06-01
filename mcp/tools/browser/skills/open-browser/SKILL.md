@@ -53,9 +53,11 @@ If `browser_navigate` or `browser_navigate_tab` returns error like `tab "t99" no
 
 ### Step 5 — Screenshot and confirm
 
-Call `mcp__gateway__browser_screenshot` — result is absolute file path.
+Call `mcp__gateway__browser_screenshot`.
 
-Send to Telegram with the screenshot attached.
+The result determines how to reply:
+- **HTTP URL** (API session — result starts with `http`): Call `api_reply` with the URL in the text field, e.g. `api_reply(text="Screenshot: <url>")`
+- **Absolute file path** (Telegram/terminal session): Call `mcp__gateway__telegram_reply` with `files=[result_path]`
 
 ## Multi-tab Management
 
