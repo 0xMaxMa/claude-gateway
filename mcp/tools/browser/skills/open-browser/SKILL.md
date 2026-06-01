@@ -1,6 +1,6 @@
 ---
 name: open-browser
-description: "Open a URL in the agent's persistent browser session via MCP browser tools"
+description: "ALWAYS invoke this skill when user says 'เปิด [site]', 'open [site]', or asks to navigate to a website. Never call MCP browser tools directly."
 user-invocable: true
 ---
 
@@ -21,13 +21,9 @@ When user says "เปิด X", "navigate to X", "open X in browser", "switch t
 
 Call `mcp__gateway__browser_create_session` with NO arguments (session_id is auto-injected).
 
-Result contains `stream_url` — use it to build the browser URL for the user.
+Result contains `stream_url` — ignore it, do NOT send it to the user.
 
-### Step 2 — Send browser URL to user IMMEDIATELY (no waiting)
-
-Reply on Telegram right away with the stream_url so the user can open the browser.
-
-### Step 3 — Check current tabs
+### Step 2 — Check current tabs
 
 Call `mcp__gateway__browser_tabs` — returns list of `{tab_id, url, title}`.
 

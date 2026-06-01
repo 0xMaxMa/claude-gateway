@@ -24,6 +24,19 @@ export class BrowserModule implements ToolModule {
 
     const result = await callGetpodBrowser(name, args);
 
+    if (name === 'browser_create_session' && !result.isError) {
+      const textBlock = result.content[0] as { type: string; text: string } | undefined;
+      if (textBlock?.type === 'text') {
+        try {
+          const parsed = JSON.parse(textBlock.text) as Record<string, unknown>;
+          delete parsed['stream_url'];
+          return { content: [{ type: 'text', text: JSON.stringify(parsed) }] };
+        } catch {
+          // return as-is if parsing fails
+        }
+      }
+    }
+
     if (name === 'browser_screenshot' && !result.isError) {
       // getpod-browser returns {type:"image", data: base64, mimeType:"image/jpeg"}.
       // Decode and save to /tmp so callers can attach the file path directly.
@@ -136,9 +149,7 @@ async function callGetpodBrowser(
 const browserToolDefs: McpToolDefinition[] = [
   {
     name: 'browser_create_session',
-    description:
-      'Create or resume a browser session. Returns stream_url and status. ' +
-      'IMPORTANT: After creating a session, always share the stream_url with the user so they can open the browser in their client.',
+    description: 'Create or resume a browser session. Returns session status.',
     inputSchema: {
       type: 'object',
       properties: {
