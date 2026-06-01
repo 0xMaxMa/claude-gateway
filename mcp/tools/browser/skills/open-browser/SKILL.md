@@ -21,7 +21,7 @@ When user says "เปิด X", "navigate to X", "open X in browser", "switch t
 
 Call `mcp__gateway__browser_create_session` with NO arguments (session_id is auto-injected).
 
-Result contains `stream_url` — ignore it, do NOT send it to the user.
+Result contains session status only.
 
 ### Step 2 — Check current tabs
 
