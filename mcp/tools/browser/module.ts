@@ -59,7 +59,10 @@ export class BrowserModule implements ToolModule {
           if (apiUrl && agentId) {
             // mediaDir is <agentBase>/media/<subdir>; parent is the agent's media root
             const agentMediaRoot = path.dirname(mediaDir);
-            const relPath = path.relative(agentMediaRoot, filePath);
+            const relPath = path.relative(agentMediaRoot, filePath)
+              .split(path.sep)
+              .map(encodeURIComponent)
+              .join('/');
             return {
               content: [{ type: 'text', text: `${apiUrl}/v1/agents/${encodeURIComponent(agentId)}/media/${relPath}` }],
             };

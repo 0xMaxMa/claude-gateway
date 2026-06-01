@@ -332,12 +332,13 @@ describe('BrowserModule', () => {
       const text = result.content[0].text as string;
       expect(text).toMatch(/^http:\/\/127\.0\.0\.1:10850\/v1\/agents\/my-agent\/media\/api-sess2\/browser_shot_sess2_/);
       expect(text).toMatch(/\.jpg$/);
-      // File must exist on disk
-      const filename = path.basename(text.split('/').pop()!);
+      // File must exist on disk — decode percent-encoded filename from URL
+      const encodedFilename = text.split('/').pop()!;
+      const filename = decodeURIComponent(encodedFilename);
       expect(fs.existsSync(path.join(mediaDir, filename))).toBe(true);
     });
 
-    it('falls back to filesystem path when GATEWAY_API_URL is missing', async () => {
+    it('falls back to filesystem path in mediaDir when GATEWAY_API_URL is missing', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess3');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
       delete process.env.GATEWAY_API_URL;
@@ -349,10 +350,13 @@ describe('BrowserModule', () => {
       const result = await mod.handleTool('browser_screenshot', { session_id: 'sess3' });
       expect(result.isError).toBeFalsy();
       const text = result.content[0].text as string;
-      expect(text).toMatch(/^\/tmp\//);
+      // No URL available → returns absolute filesystem path inside mediaDir
+      expect(text).not.toMatch(/^http/);
+      expect(text).toMatch(/browser_shot_sess3.*\.jpg$/);
+      expect(text.startsWith(mediaDir)).toBe(true);
     });
 
-    it('falls back to filesystem path when GATEWAY_AGENT_ID is missing', async () => {
+    it('falls back to filesystem path in mediaDir when GATEWAY_AGENT_ID is missing', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess4');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
       process.env.GATEWAY_API_URL = 'http://127.0.0.1:10850';
@@ -364,10 +368,10 @@ describe('BrowserModule', () => {
       const result = await mod.handleTool('browser_screenshot', { session_id: 'sess4' });
       expect(result.isError).toBeFalsy();
       const text = result.content[0].text as string;
-      // When GATEWAY_AGENT_ID missing → no URL → falls back to filepath in mediaDir
-      expect(text).toMatch(/browser_shot_sess4.*\.jpg$/);
-      // Should be a filesystem path, not a URL
+      // No agent ID → cannot build URL → returns absolute filesystem path inside mediaDir
       expect(text).not.toMatch(/^http/);
+      expect(text).toMatch(/browser_shot_sess4.*\.jpg$/);
+      expect(text.startsWith(mediaDir)).toBe(true);
     });
 
     it('URL-encodes agent ID with special characters', async () => {
