@@ -46,6 +46,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/compact` | Key | Summarise old history, keep only recent messages |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/stop` | Key | Interrupt the in-flight turn |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/restart` | Key | Graceful session restart |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/attachments` | Key | Register file paths as attachments for the current turn (called internally by `api_reply` MCP tool) |
 
 ### Workspace File API
 
@@ -852,9 +853,14 @@ curl -X POST \
   "agent_id": "alfred",
   "response": "Hello! I'm Alfred, your personal assistant. I can help you with...",
   "session_id": "da19d84a-6a36-4f57-b419-d322d82c4db8",
-  "duration_ms": 2341
+  "duration_ms": 2341,
+  "attachments": [
+    { "type": "image", "url": "/v1/agents/alfred/media/api-sess-id/browser_shot_default_1234567890.jpg" }
+  ]
 }
 ```
+
+> `attachments` is only present when the agent captured images during the turn (e.g. via `browser_screenshot`). Each entry has `type: "image"` and a `url` that can be fetched via `GET /api/v1/agents/:agentId/media/*`.
 
 **Continue a session:**
 
@@ -905,6 +911,8 @@ data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
 data: {"type":"text_delta","text":"Here's the explanation..."}
 data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
 data: [DONE]
+
+> When images are captured during the turn, the `result` event also includes `"attachments": [{"type":"image","url":"..."}]`.
 ```
 
 ### Requests with tool use
@@ -936,7 +944,7 @@ Regardless of `allow_tools`, the agent will not create or update workspace ident
 | `text_delta` | `text` | Incremental text chunk |
 | `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
 | `thinking` | `text` | Agent reasoning (if available) |
-| `result` | `text`, `request_id`, `session_id`, `duration_ms` | Final aggregated result |
+| `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | Final aggregated result; `attachments` present only when images were captured |
 | `error` | `message` | Error event |
 
 The stream ends with `data: [DONE]`.
