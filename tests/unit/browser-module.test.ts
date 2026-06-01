@@ -186,7 +186,9 @@ describe('BrowserModule', () => {
       const result = await mod.handleTool('browser_create_session', { session_id: 'test-session' });
       expect(result.isError).toBeFalsy();
       expect(result.content[0].type).toBe('text');
-      expect(result.content[0].text).toContain('stream_url');
+      // stream_url is stripped by handleTool before returning to agent
+      expect(result.content[0].text).not.toContain('stream_url');
+      expect(result.content[0].text).toContain('session_id');
     });
 
     it('sends correct JSON-RPC body to getpod-browser', async () => {

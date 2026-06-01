@@ -39,14 +39,22 @@ export class BrowserModule implements ToolModule {
 
     if (name === 'browser_screenshot' && !result.isError) {
       // getpod-browser returns {type:"image", data: base64, mimeType:"image/jpeg"}.
-      // Decode and save to /tmp so callers can attach the file path directly.
+      // Decode and save so callers can attach the file path directly.
+      // For API sessions, save to the session media dir so files are HTTP-accessible.
       const block = result.content[0] as Record<string, string> | undefined;
       const b64 = block?.['data'] ?? '';
       const mime = block?.['mimeType'] ?? 'image/jpeg';
       if (b64) {
         const ext = mime.includes('png') ? 'png' : 'jpg';
         const sid = (args.session_id as string | undefined) ?? 'default';
-        const filePath = path.join('/tmp', `browser_shot_${sid}.${ext}`);
+        const mediaDir = process.env.GATEWAY_SESSION_MEDIA_DIR;
+        let filePath: string;
+        if (mediaDir) {
+          fs.mkdirSync(mediaDir, { recursive: true });
+          filePath = path.join(mediaDir, `browser_shot_${sid}_${Date.now()}.${ext}`);
+        } else {
+          filePath = path.join('/tmp', `browser_shot_${sid}.${ext}`);
+        }
         fs.writeFileSync(filePath, Buffer.from(b64, 'base64'));
         return { content: [{ type: 'text', text: filePath }] };
       }

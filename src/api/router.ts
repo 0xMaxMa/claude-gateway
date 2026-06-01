@@ -367,9 +367,11 @@ export function createApiRouter(
           onChunk: (event: import('../types').StreamEvent) => {
             try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
           },
-          onDone: (fullText: string) => {
+          onDone: (fullText: string, attachments: import('../types').ApiAttachment[]) => {
             try {
-              res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, request_id: requestId, session_id: sessionId, duration_ms: Date.now() - startTime })}\n\n`);
+              const resultEvent: Record<string, unknown> = { type: 'result', text: fullText, request_id: requestId, session_id: sessionId, duration_ms: Date.now() - startTime };
+              if (attachments.length) resultEvent['attachments'] = attachments;
+              res.write(`data: ${JSON.stringify(resultEvent)}\n\n`);
               res.write('data: [DONE]\n\n');
               res.end();
             } catch { /* client gone */ }
@@ -429,20 +431,22 @@ export function createApiRouter(
       try {
         const agentCfgSync = agentConfigs.get(agentId)!;
         const allowToolsSync = agentCfgSync.allow_tools ?? !!apiKey.allow_tools;
-        const response = await runner.sendApiMessage(sessionId, chatIdStr, message.trim(), {
+        const { text: responseText, attachments } = await runner.sendApiMessage(sessionId, chatIdStr, message.trim(), {
           timeoutMs,
           allowTools: allowToolsSync,
           mediaFiles: validatedMediaFiles,
           model: modelStr,
           skipUserMessage,
         });
-        res.json({
+        const syncResult: Record<string, unknown> = {
           request_id: requestId,
           agent_id: agentId,
-          response,
+          response: responseText,
           session_id: sessionId,
           duration_ms: Date.now() - startTime,
-        });
+        };
+        if (attachments.length) syncResult['attachments'] = attachments;
+        res.json(syncResult);
       } catch (err: unknown) {
         const code = (err as { code?: string }).code;
         if (code === 'TIMEOUT') {
@@ -1599,6 +1603,50 @@ export function createApiRouter(
   });
 
   /**
+   * POST /api/v1/agents/:agentId/sessions/:sessionId/attachments
+   * Register file paths as attachments for the current API session turn.
+   * Called by the api_reply MCP tool from within the agent subprocess.
+   * Body: { files: string[] }  — absolute file paths within the agent's media directory.
+   */
+  router.post(
+    '/v1/agents/:agentId/sessions/:sessionId/attachments',
+    auth,
+    (req: Request, res: Response) => {
+      const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
+      const apiKey = (req as AuthedRequest).apiKey;
+      if (!canAccessAgent(apiKey, agentId)) {
+        res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+        return;
+      }
+      const runner = agentRunners.get(agentId);
+      if (!runner) {
+        res.status(404).json({ error: `Agent '${agentId}' not found` });
+        return;
+      }
+      const body = req.body as Record<string, unknown>;
+      const files = body['files'];
+      if (!Array.isArray(files) || files.some((f) => typeof f !== 'string')) {
+        res.status(400).json({ error: 'files must be an array of strings' });
+        return;
+      }
+      // Validate all paths stay within the agent's media directory
+      const agentsBaseDir = runner.getAgentsBaseDir();
+      const mediaRoot = path.join(agentsBaseDir, agentId, 'media') + path.sep;
+      const validFiles: string[] = [];
+      for (const f of files as string[]) {
+        const real = path.resolve(f);
+        if (!real.startsWith(mediaRoot)) {
+          res.status(400).json({ error: `File path outside media directory: ${f}` });
+          return;
+        }
+        validFiles.push(real);
+      }
+      runner.addApiAttachments(sessionId, validFiles);
+      res.json({ ok: true, count: validFiles.length });
+    },
+  );
+
+  /**
    * POST /api/v1/agents/:agentId/media
    * Upload a media file as raw binary body (image/* or application/pdf).
    * Headers: Content-Type (mime type), X-Filename (optional original filename)
@@ -2161,7 +2209,7 @@ export function createApiRouter(
             res.end();
           } catch { /* client gone */ }
         },
-      };
+      } satisfies Parameters<typeof runner.sendApiMessageStream>[3];
 
       // Preflight conflict check already done above; throw-based check catches races after headers
       res.writeHead(200, {

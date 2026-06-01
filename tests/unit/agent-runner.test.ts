@@ -2895,3 +2895,76 @@ describe('AgentRunner — sendMessageToSession SSE tool_use', () => {
     expect(tc.input).toEqual({ command: 'ls' });
   }, 15000);
 });
+
+// ── AgentRunner — API attachment buffer ────────────────────────────────────────
+
+describe('AgentRunner — API attachment buffer', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-attach-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    agentConfig = makeAgentConfig(workspace);
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('addApiAttachments and popApiAttachments round-trip', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
+    const filePath = `${mediaRoot}api-sess/shot.jpg`;
+
+    runner.addApiAttachments('sess-1', [filePath]);
+    const attachments = runner.popApiAttachments('sess-1');
+
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].type).toBe('image');
+    expect(attachments[0].url).toContain('/v1/agents/alfred/media/');
+    expect(attachments[0].url).toContain('shot.jpg');
+  });
+
+  it('popApiAttachments clears the buffer', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
+    runner.addApiAttachments('sess-2', [`${mediaRoot}api-sess/a.jpg`]);
+
+    runner.popApiAttachments('sess-2');
+    const second = runner.popApiAttachments('sess-2');
+    expect(second).toHaveLength(0);
+  });
+
+  it('popApiAttachments returns empty array when no attachments registered', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    expect(runner.popApiAttachments('unknown-sess')).toEqual([]);
+  });
+
+  it('filters out files outside the agent media directory', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    runner.addApiAttachments('sess-3', ['/tmp/evil/traversal.jpg']);
+    const attachments = runner.popApiAttachments('sess-3');
+    expect(attachments).toHaveLength(0);
+  });
+
+  it('accumulates multiple addApiAttachments calls', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
+    runner.addApiAttachments('sess-4', [`${mediaRoot}api-s/a.jpg`]);
+    runner.addApiAttachments('sess-4', [`${mediaRoot}api-s/b.jpg`]);
+    const attachments = runner.popApiAttachments('sess-4');
+    expect(attachments).toHaveLength(2);
+  });
+
+  it('attachment URL uses agent id and relative path', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
+    runner.addApiAttachments('sess-5', [`${mediaRoot}api-sess/screen.jpg`]);
+    const attachments = runner.popApiAttachments('sess-5');
+    expect(attachments[0].url).toBe('/v1/agents/alfred/media/api-sess/screen.jpg');
+  });
+});

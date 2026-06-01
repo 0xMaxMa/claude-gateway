@@ -154,11 +154,16 @@ export interface SessionIndex {
   sessions: SessionMeta[];
 }
 
+export type ApiAttachment = {
+  type: 'image';
+  url: string;
+};
+
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use'; name: string; id: string; input?: Record<string, unknown> }
   | { type: 'thinking'; text: string }
-  | { type: 'result'; text: string }
+  | { type: 'result'; text: string; attachments?: ApiAttachment[] }
   | { type: 'error'; message: string };
 
 export interface Logger {

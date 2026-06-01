@@ -271,6 +271,10 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
             GATEWAY_SESSION_ID: this.sessionId,
+            // For API sessions: absolute path to session media dir so browser screenshots land there
+            GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
+              ? path.resolve(this.agentConfig.workspace, '..', 'media', `api-${this.sessionId}`)
+              : '',
           },
         },
       },
