@@ -25,8 +25,15 @@ describe('ApiModule', () => {
       expect(new ApiModule().toolVisibility).toBe('current-channel');
     });
 
-    it('isEnabled returns true', () => {
+    it('isEnabled returns true when GATEWAY_ORIGIN_CHANNEL is api', () => {
+      process.env.GATEWAY_ORIGIN_CHANNEL = 'api';
       expect(new ApiModule().isEnabled()).toBe(true);
+      delete process.env.GATEWAY_ORIGIN_CHANNEL;
+    });
+
+    it('isEnabled returns false when GATEWAY_ORIGIN_CHANNEL is not api', () => {
+      delete process.env.GATEWAY_ORIGIN_CHANNEL;
+      expect(new ApiModule().isEnabled()).toBe(false);
     });
   });
 

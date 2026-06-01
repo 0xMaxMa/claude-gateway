@@ -5,7 +5,7 @@ export class ApiModule implements ToolModule {
   toolVisibility: ToolVisibility = 'current-channel';
 
   isEnabled(): boolean {
-    return true;
+    return process.env.GATEWAY_ORIGIN_CHANNEL === 'api';
   }
 
   getTools(): McpToolDefinition[] {
@@ -66,6 +66,7 @@ export class ApiModule implements ToolModule {
             ...(apiKey ? { 'X-Api-Key': apiKey } : {}),
           },
           body: JSON.stringify({ files }),
+          signal: AbortSignal.timeout(5000),
         },
       );
       if (!res.ok) {

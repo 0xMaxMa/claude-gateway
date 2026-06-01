@@ -2915,10 +2915,16 @@ describe('AgentRunner — API attachment buffer', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  function createMediaFile(tmpDir: string, relPath: string): string {
+    const absPath = path.join(tmpDir, 'agents', 'alfred', 'media', relPath);
+    fs.mkdirSync(path.dirname(absPath), { recursive: true });
+    fs.writeFileSync(absPath, 'fake-image-data');
+    return absPath;
+  }
+
   it('addApiAttachments and popApiAttachments round-trip', () => {
     const runner = new AgentRunner(agentConfig, gatewayConfig);
-    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
-    const filePath = `${mediaRoot}api-sess/shot.jpg`;
+    const filePath = createMediaFile(tmpDir, 'api-sess/shot.jpg');
 
     runner.addApiAttachments('sess-1', [filePath]);
     const attachments = runner.popApiAttachments('sess-1');
@@ -2931,8 +2937,8 @@ describe('AgentRunner — API attachment buffer', () => {
 
   it('popApiAttachments clears the buffer', () => {
     const runner = new AgentRunner(agentConfig, gatewayConfig);
-    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
-    runner.addApiAttachments('sess-2', [`${mediaRoot}api-sess/a.jpg`]);
+    const filePath = createMediaFile(tmpDir, 'api-sess/a.jpg');
+    runner.addApiAttachments('sess-2', [filePath]);
 
     runner.popApiAttachments('sess-2');
     const second = runner.popApiAttachments('sess-2');
@@ -2951,19 +2957,28 @@ describe('AgentRunner — API attachment buffer', () => {
     expect(attachments).toHaveLength(0);
   });
 
-  it('accumulates multiple addApiAttachments calls', () => {
+  it('filters out files that do not exist on disk', () => {
     const runner = new AgentRunner(agentConfig, gatewayConfig);
     const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
-    runner.addApiAttachments('sess-4', [`${mediaRoot}api-s/a.jpg`]);
-    runner.addApiAttachments('sess-4', [`${mediaRoot}api-s/b.jpg`]);
+    runner.addApiAttachments('sess-nonexist', [`${mediaRoot}api-s/ghost.jpg`]);
+    const attachments = runner.popApiAttachments('sess-nonexist');
+    expect(attachments).toHaveLength(0);
+  });
+
+  it('accumulates multiple addApiAttachments calls', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const fileA = createMediaFile(tmpDir, 'api-s/a.jpg');
+    const fileB = createMediaFile(tmpDir, 'api-s/b.jpg');
+    runner.addApiAttachments('sess-4', [fileA]);
+    runner.addApiAttachments('sess-4', [fileB]);
     const attachments = runner.popApiAttachments('sess-4');
     expect(attachments).toHaveLength(2);
   });
 
   it('attachment URL uses agent id and relative path', () => {
     const runner = new AgentRunner(agentConfig, gatewayConfig);
-    const mediaRoot = path.join(tmpDir, 'agents', 'alfred', 'media') + path.sep;
-    runner.addApiAttachments('sess-5', [`${mediaRoot}api-sess/screen.jpg`]);
+    const filePath = createMediaFile(tmpDir, 'api-sess/screen.jpg');
+    runner.addApiAttachments('sess-5', [filePath]);
     const attachments = runner.popApiAttachments('sess-5');
     expect(attachments[0].url).toBe('/v1/agents/alfred/media/api-sess/screen.jpg');
   });

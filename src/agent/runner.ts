@@ -684,6 +684,7 @@ export class AgentRunner extends EventEmitter {
       if (idleEntry) {
         await idleEntry[1].stop();
         this.sessions.delete(idleEntry[0]);
+        this.cleanupApiSessionMediaDir(idleEntry[0], idleEntry[1].source);
         this.logger.info('Evicted idle session', { sessionId: idleEntry[0] });
       } else {
         throw new Error(`Session pool full: ${this.maxConcurrent} concurrent sessions`);
@@ -1250,6 +1251,7 @@ export class AgentRunner extends EventEmitter {
           this.logger.info('Stopping idle session', { sessionId: id });
           await proc.stop();
           this.sessions.delete(id);
+          this.cleanupApiSessionMediaDir(id, proc.source);
         }
       }
     }, 5 * 60 * 1000);
@@ -1827,12 +1829,22 @@ export class AgentRunner extends EventEmitter {
     const mediaRoot = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
     return paths
       .map((absPath): ApiAttachment | null => {
-        const real = absPath.startsWith(mediaRoot) ? absPath : null;
-        if (!real) return null;
+        if (!absPath.startsWith(mediaRoot)) return null;
+        if (!fs.existsSync(absPath)) return null;
         const rel = absPath.slice(mediaRoot.length).replace(/\\/g, '/');
         return { type: 'image', url: `/v1/agents/${encodeURIComponent(this.agentConfig.id)}/media/${rel}` };
       })
       .filter((a): a is ApiAttachment => a !== null);
+  }
+
+  private cleanupApiSessionMediaDir(sessionId: string, source: string): void {
+    if (source !== 'api') return;
+    const mediaDir = path.join(this.agentsBaseDir, this.agentConfig.id, 'media', `api-${sessionId}`);
+    try {
+      fs.rmSync(mediaDir, { recursive: true, force: true });
+    } catch {
+      // best-effort — log nothing, just don't crash the cleaner
+    }
   }
 
   getAgentsBaseDir(): string {
