@@ -265,6 +265,8 @@ export class SessionProcess extends EventEmitter {
             DISCORD_DM_POLICY: this.agentConfig.discord?.dmPolicy ?? 'disabled',
             DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
             GATEWAY_AGENT_ID: this.agentConfig.id,
+            // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
+            // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.
             GATEWAY_API_URL: process.env.GATEWAY_API_URL ?? `http://127.0.0.1:${process.env.PORT ?? '10850'}`,
             GATEWAY_API_KEY: this.findApiKeyForAgent(this.agentConfig.id),
             GATEWAY_ORIGIN_CHANNEL: this.source,
