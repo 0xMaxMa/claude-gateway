@@ -39,8 +39,8 @@ export class BrowserModule implements ToolModule {
 
     if (name === 'browser_screenshot' && !result.isError) {
       // getpod-browser returns {type:"image", data: base64, mimeType:"image/jpeg"}.
-      // Decode and save so callers can attach the file path directly.
-      // For API sessions, save to the session media dir so files are HTTP-accessible.
+      // Always return the absolute file path — callers use api_reply(files=[path])
+      // and the gateway converts the path to an attachment URL in the response.
       const block = result.content[0] as Record<string, string> | undefined;
       const b64 = block?.['data'] ?? '';
       const mime = block?.['mimeType'] ?? 'image/jpeg';

@@ -337,7 +337,7 @@ describe('BrowserModule', () => {
       expect(fs.existsSync(text)).toBe(true);
     });
 
-    it('returns file path inside mediaDir when GATEWAY_API_URL is missing', async () => {
+    it('returns file path inside mediaDir regardless of env vars', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess3');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
       delete process.env.GATEWAY_API_URL;
