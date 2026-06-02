@@ -58,7 +58,7 @@ export class ApiModule implements ToolModule {
 
     try {
       const res = await fetch(
-        `${apiUrl}/v1/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/attachments`,
+        `${apiUrl}/api/v1/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/attachments`,
         {
           method: 'POST',
           headers: {

@@ -107,7 +107,7 @@ describe('ApiModule', () => {
       expect(result.content[0].text).toContain('2 file(s)');
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toContain('/v1/agents/test-agent/sessions/sess-123/attachments');
+      expect(url).toBe('http://localhost:10850/api/v1/agents/test-agent/sessions/sess-123/attachments');
       const body = JSON.parse(init.body as string) as { files: string[] };
       expect(body.files).toEqual(['/abs/path/a.jpg', '/abs/path/b.jpg']);
       const headers = init.headers as Record<string, string>;
