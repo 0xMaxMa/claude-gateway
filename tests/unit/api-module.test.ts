@@ -84,10 +84,22 @@ describe('ApiModule', () => {
       delete process.env.GATEWAY_API_URL;
       delete process.env.GATEWAY_AGENT_ID;
       delete process.env.GATEWAY_SESSION_ID;
+      delete process.env.GATEWAY_API_KEY;
       const mod = new ApiModule();
       const result = await mod.handleTool('api_reply', { files: ['/some/file.jpg'] });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('missing');
+    });
+
+    it('returns isError when GATEWAY_API_KEY is missing', async () => {
+      process.env.GATEWAY_API_URL = 'http://localhost:10850';
+      process.env.GATEWAY_AGENT_ID = 'test-agent';
+      process.env.GATEWAY_SESSION_ID = 'sess-123';
+      delete process.env.GATEWAY_API_KEY;
+      const mod = new ApiModule();
+      const result = await mod.handleTool('api_reply', { files: ['/some/file.jpg'] });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('GATEWAY_API_KEY');
     });
 
     it('calls gateway attachments endpoint with correct body', async () => {
@@ -118,6 +130,7 @@ describe('ApiModule', () => {
       process.env.GATEWAY_API_URL = 'http://localhost:10850';
       process.env.GATEWAY_AGENT_ID = 'agent';
       process.env.GATEWAY_SESSION_ID = 'sess';
+      process.env.GATEWAY_API_KEY = 'test-key';
 
       fetchMock.mockResolvedValue(new Response('Forbidden', { status: 403 }));
 
@@ -131,6 +144,7 @@ describe('ApiModule', () => {
       process.env.GATEWAY_API_URL = 'http://localhost:10850';
       process.env.GATEWAY_AGENT_ID = 'agent';
       process.env.GATEWAY_SESSION_ID = 'sess';
+      process.env.GATEWAY_API_KEY = 'test-key';
 
       fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
 
@@ -138,22 +152,6 @@ describe('ApiModule', () => {
       const result = await mod.handleTool('api_reply', { files: ['/a.jpg'] });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('ECONNREFUSED');
-    });
-
-    it('sends request without Authorization header when GATEWAY_API_KEY is not set', async () => {
-      process.env.GATEWAY_API_URL = 'http://localhost:10850';
-      process.env.GATEWAY_AGENT_ID = 'agent';
-      process.env.GATEWAY_SESSION_ID = 'sess';
-      delete process.env.GATEWAY_API_KEY;
-
-      fetchMock.mockResolvedValue(new Response(JSON.stringify({ ok: true, count: 1 }), { status: 200 }));
-
-      const mod = new ApiModule();
-      await mod.handleTool('api_reply', { files: ['/a.jpg'] });
-
-      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      const headers = init.headers as Record<string, string>;
-      expect(headers['X-Api-Key']).toBeUndefined();
     });
   });
 });

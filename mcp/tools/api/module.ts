@@ -49,9 +49,9 @@ export class ApiModule implements ToolModule {
     const sessionId = process.env.GATEWAY_SESSION_ID;
     const apiKey = process.env.GATEWAY_API_KEY;
 
-    if (!apiUrl || !agentId || !sessionId) {
+    if (!apiUrl || !agentId || !sessionId || !apiKey) {
       return {
-        content: [{ type: 'text', text: 'api_reply: missing GATEWAY_API_URL, GATEWAY_AGENT_ID, or GATEWAY_SESSION_ID' }],
+        content: [{ type: 'text', text: 'api_reply: missing GATEWAY_API_URL, GATEWAY_AGENT_ID, GATEWAY_SESSION_ID, or GATEWAY_API_KEY' }],
         isError: true,
       };
     }
