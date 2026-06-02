@@ -54,19 +54,6 @@ export class BrowserModule implements ToolModule {
           const filename = `browser_shot_${sid}_${Date.now()}.${ext}`;
           filePath = path.join(mediaDir, filename);
           fs.writeFileSync(filePath, Buffer.from(b64, 'base64'));
-          const apiUrl = process.env.GATEWAY_API_URL;
-          const agentId = process.env.GATEWAY_AGENT_ID;
-          if (apiUrl && agentId) {
-            // mediaDir is <agentBase>/media/<subdir>; parent is the agent's media root
-            const agentMediaRoot = path.dirname(mediaDir);
-            const relPath = path.relative(agentMediaRoot, filePath)
-              .split(path.sep)
-              .map(encodeURIComponent)
-              .join('/');
-            return {
-              content: [{ type: 'text', text: `${apiUrl}/v1/agents/${encodeURIComponent(agentId)}/media/${relPath}` }],
-            };
-          }
           return { content: [{ type: 'text', text: filePath }] };
         }
         filePath = path.join('/tmp', `browser_shot_${sid}.${ext}`);

@@ -318,7 +318,7 @@ describe('BrowserModule', () => {
       expect(text).toMatch(/browser_shot_sess1.*\.jpg$/);
     });
 
-    it('returns HTTP URL when GATEWAY_SESSION_MEDIA_DIR, GATEWAY_API_URL, GATEWAY_AGENT_ID are set', async () => {
+    it('returns file path inside mediaDir regardless of GATEWAY_API_URL and GATEWAY_AGENT_ID', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess2');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
       process.env.GATEWAY_API_URL = 'http://127.0.0.1:10850';
@@ -330,15 +330,14 @@ describe('BrowserModule', () => {
       const result = await mod.handleTool('browser_screenshot', { session_id: 'sess2' });
       expect(result.isError).toBeFalsy();
       const text = result.content[0].text as string;
-      expect(text).toMatch(/^http:\/\/127\.0\.0\.1:10850\/v1\/agents\/my-agent\/media\/api-sess2\/browser_shot_sess2_/);
-      expect(text).toMatch(/\.jpg$/);
-      // File must exist on disk — decode percent-encoded filename from URL
-      const encodedFilename = text.split('/').pop()!;
-      const filename = decodeURIComponent(encodedFilename);
-      expect(fs.existsSync(path.join(mediaDir, filename))).toBe(true);
+      // Always returns absolute file path — agent uses api_reply(files=[path]) to attach
+      expect(text).not.toMatch(/^http/);
+      expect(text.startsWith(mediaDir)).toBe(true);
+      expect(text).toMatch(/browser_shot_sess2.*\.jpg$/);
+      expect(fs.existsSync(text)).toBe(true);
     });
 
-    it('falls back to filesystem path in mediaDir when GATEWAY_API_URL is missing', async () => {
+    it('returns file path inside mediaDir when GATEWAY_API_URL is missing', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess3');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
       delete process.env.GATEWAY_API_URL;
@@ -350,49 +349,14 @@ describe('BrowserModule', () => {
       const result = await mod.handleTool('browser_screenshot', { session_id: 'sess3' });
       expect(result.isError).toBeFalsy();
       const text = result.content[0].text as string;
-      // No URL available → returns absolute filesystem path inside mediaDir
       expect(text).not.toMatch(/^http/);
       expect(text).toMatch(/browser_shot_sess3.*\.jpg$/);
       expect(text.startsWith(mediaDir)).toBe(true);
     });
 
-    it('falls back to filesystem path in mediaDir when GATEWAY_AGENT_ID is missing', async () => {
-      const mediaDir = path.join(tmpDir, 'api-sess4');
-      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
-      process.env.GATEWAY_API_URL = 'http://127.0.0.1:10850';
-      delete process.env.GATEWAY_AGENT_ID;
-      fetchMock.mockResolvedValue(
-        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
-      );
-      const mod = new BrowserModule();
-      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess4' });
-      expect(result.isError).toBeFalsy();
-      const text = result.content[0].text as string;
-      // No agent ID → cannot build URL → returns absolute filesystem path inside mediaDir
-      expect(text).not.toMatch(/^http/);
-      expect(text).toMatch(/browser_shot_sess4.*\.jpg$/);
-      expect(text.startsWith(mediaDir)).toBe(true);
-    });
-
-    it('URL-encodes agent ID with special characters', async () => {
-      const mediaDir = path.join(tmpDir, 'api-sess5');
-      process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
-      process.env.GATEWAY_API_URL = 'http://localhost:10850';
-      process.env.GATEWAY_AGENT_ID = 'my agent/v2';
-      fetchMock.mockResolvedValue(
-        new Response(`data: ${JSON.stringify(makeScreenshotRpc(smallJpegB64))}\n\n`, { status: 200 }),
-      );
-      const mod = new BrowserModule();
-      const result = await mod.handleTool('browser_screenshot', { session_id: 'sess5' });
-      const text = result.content[0].text as string;
-      expect(text).toContain('/v1/agents/my%20agent%2Fv2/media/');
-    });
-
     it('saves PNG when mimeType is image/png', async () => {
       const mediaDir = path.join(tmpDir, 'api-sess6');
       process.env.GATEWAY_SESSION_MEDIA_DIR = mediaDir;
-      process.env.GATEWAY_API_URL = 'http://localhost:10850';
-      process.env.GATEWAY_AGENT_ID = 'agent1';
       fetchMock.mockResolvedValue(
         new Response(
           `data: ${JSON.stringify(makeScreenshotRpc('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'image/png'))}\n\n`,
