@@ -1076,14 +1076,6 @@ export function createApiRouter(
       res.status(403).json({ error: 'Write permission required' });
       return;
     }
-    if (!configPath) {
-      res.status(501).json({ error: 'Agent management not available (no configPath)' });
-      return;
-    }
-    if (!agentConfigs.has(agentId)) {
-      res.status(404).json({ error: `Agent '${agentId}' not found` });
-      return;
-    }
 
     const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; exclude_skills?: unknown };
     const { description, model, allow_tools, telegram_bot_token, discord_bot_token, exclude_skills } = body;
@@ -1112,6 +1104,15 @@ export function createApiRouter(
         res.status(400).json({ error: 'exclude_skills must be an array of strings or null' });
         return;
       }
+    }
+
+    if (!configPath) {
+      res.status(501).json({ error: 'Agent management not available (no configPath)' });
+      return;
+    }
+    if (!agentConfigs.has(agentId)) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
     }
 
     try {

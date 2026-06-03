@@ -76,12 +76,25 @@ GATEWAY_KEY=$(jq -r '.gateway.api.keys[] | select(.admin==true) | .key' ~/.claud
 
 **Optional:** `model` (default `claude-sonnet-4-6`)
 
-**Call:**
+**Call** (omit `model` if user accepts the default):
 ```bash
+# With default model
 curl -s -X POST http://localhost:10850/api/v1/agents \
   -H "Authorization: Bearer $GATEWAY_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"id":"<id>","description":"<description>","model":"<model>"}'
+  -d "{\"id\":\"$AGENT_ID\",\"description\":\"$AGENT_DESC\"}"
+
+# With custom model
+curl -s -X POST http://localhost:10850/api/v1/agents \
+  -H "Authorization: Bearer $GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"$AGENT_ID\",\"description\":\"$AGENT_DESC\",\"model\":\"$AGENT_MODEL\"}"
+```
+
+Set variables first to avoid quoting issues:
+```bash
+AGENT_ID="my-agent"
+AGENT_DESC="Description of the agent"
 ```
 
 After success: workspace is at `~/.claude-gateway/agents/<id>/workspace/`. The agent has no channel — it can only be reached via API. To add a channel later, use `mcp__gateway__agent_update` with `action: add_channel`.
