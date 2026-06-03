@@ -489,6 +489,7 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
+        exclude_skills: cfg.excludeSkills ?? null,
       }));
     res.json({ agents });
   });
