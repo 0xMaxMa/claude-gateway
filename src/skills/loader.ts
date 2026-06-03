@@ -10,6 +10,8 @@ export interface LoadSkillsOptions {
   workspaceDir: string;
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
+  /** Skill keys to remove from the final registry (applied after all sources are merged). Workspace skills are never excluded. */
+  excludeSkills?: string[];
   logger?: { warn: (msg: string) => void };
 }
 
@@ -138,6 +140,16 @@ export function loadSkills(opts: LoadSkillsOptions): SkillRegistry {
   const workspaceSkills = scanSkillDir(workspaceSkillsDir, 'workspace');
   for (const skill of workspaceSkills) {
     registry.set(skill.name, skill);
+  }
+
+  // Exclude specified skills (module/shared only — workspace skills are never excluded)
+  if (opts.excludeSkills && opts.excludeSkills.length > 0) {
+    const excludeSet = new Set(opts.excludeSkills);
+    for (const [key, skill] of registry) {
+      if (excludeSet.has(key) && skill.source !== 'workspace') {
+        registry.delete(key);
+      }
+    }
   }
 
   // Warn about missing binary dependencies

@@ -233,6 +233,7 @@ async function startAgent(
     workspace = await loadWorkspace(agentConfig.workspace, {
       mcpToolsDir,
       sharedSkillsDir,
+      excludeSkills: agentConfig.excludeSkills,
       logger,
     });
   } catch (err) {
@@ -297,6 +298,7 @@ async function startAgent(
       const updated = await loadWorkspace(agentConfig.workspace, {
         mcpToolsDir,
         sharedSkillsDir,
+        excludeSkills: agentConfig.excludeSkills,
         logger,
       });
       // Rewrite CLAUDE.md with updated system prompt and restart subprocess
@@ -326,6 +328,7 @@ async function startAgent(
         const updated = await loadWorkspace(agentConfig.workspace, {
           mcpToolsDir,
           sharedSkillsDir,
+          excludeSkills: agentConfig.excludeSkills,
           logger,
         });
         if (updated.skillRegistry) {
@@ -520,6 +523,7 @@ async function main(): Promise<void> {
         const updated = await loadWorkspace(agentConfig.workspace, {
           mcpToolsDir: ctx.mcpToolsDir,
           sharedSkillsDir: ctx.sharedSkillsDir,
+          excludeSkills: agentConfig.excludeSkills,
           logger,
         });
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');

@@ -97,6 +97,7 @@ function reloadRunnerRegistry(
     workspaceDir: config.workspace,
     mcpToolsDir: MCP_TOOLS_DIR,
     sharedSkillsDir: SHARED_SKILLS_DIR,
+    excludeSkills: config.excludeSkills,
   });
   runner.setSkillRegistry(registry);
 }
@@ -132,7 +133,7 @@ export function createSkillsRouter(
     const runner = agents?.get(agentId);
     const registry = runner
       ? runner.getSkillRegistry()
-      : loadSkills({ workspaceDir: config.workspace, mcpToolsDir: MCP_TOOLS_DIR, sharedSkillsDir: SHARED_SKILLS_DIR });
+      : loadSkills({ workspaceDir: config.workspace, mcpToolsDir: MCP_TOOLS_DIR, sharedSkillsDir: SHARED_SKILLS_DIR, excludeSkills: config.excludeSkills });
 
     const skills = [...registry.skills.entries()].map(([key, skill]) => ({
       key,
@@ -171,7 +172,7 @@ export function createSkillsRouter(
     const runner = agents?.get(agentId);
     const registry = runner
       ? runner.getSkillRegistry()
-      : loadSkills({ workspaceDir: config.workspace, mcpToolsDir: MCP_TOOLS_DIR, sharedSkillsDir: SHARED_SKILLS_DIR });
+      : loadSkills({ workspaceDir: config.workspace, mcpToolsDir: MCP_TOOLS_DIR, sharedSkillsDir: SHARED_SKILLS_DIR, excludeSkills: config.excludeSkills });
 
     const scopeFilter = req.query['scope'] as string | undefined;
 
