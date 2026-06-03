@@ -1,11 +1,11 @@
 ---
 name: create-agent
-description: "Create a new Claude Gateway agent — collect info from the user and call mcp__gateway__agent_create"
+description: "Create a new Claude Gateway agent — with or without a channel bot"
 ---
 
 # Create Agent
 
-Guide the user through creating a new Claude Gateway agent and call `mcp__gateway__agent_create` when ready.
+Create a new Claude Gateway agent. Two modes depending on whether the user wants a chat channel (Telegram/Discord bot) or an API-only agent.
 
 ## When to invoke
 
@@ -14,73 +14,83 @@ Invoke this skill when the user says things like:
 - "I want a new bot for Y"
 - "set up an agent that does Z"
 
-## Step 1 — Collect required information
+---
 
-Ask for any missing required fields. Collect them in a single message if possible.
+## Step 1 — Determine mode
 
-**Required:**
+Ask the user: does the new agent need a Telegram or Discord bot? 
+
+- **Yes → Channel mode** (MCP tool, requires bot token)
+- **No → API-only mode** (REST API, no token needed)
+
+---
+
+## Mode A — Channel mode (Telegram or Discord)
+
+Use `mcp__gateway__agent_create`.
+
+**Required fields to collect:**
 | Field | Description |
 |-------|-------------|
-| `id` | Agent ID — lowercase letters, digits, `_`, `-`. 2–32 chars. Must start with a letter. |
-| `description` | One paragraph describing the agent's role, personality, and capabilities. |
+| `id` | Agent ID — lowercase, letters/digits/`_`/`-`, 2–32 chars, starts with a letter |
+| `description` | One paragraph: role, personality, capabilities |
 | `channel` | `telegram` or `discord` |
-| `bot_token` | Bot token from BotFather (Telegram) or Discord Developer Portal |
+| `bot_token` | Token from BotFather (Telegram) or Discord Developer Portal |
 
-**Optional (ask only if the user wants to customize):**
+**Optional fields (ask only if user wants to customize):**
 | Field | Default | Description |
 |-------|---------|-------------|
-| `model` | `claude-sonnet-4-6` | Claude model to use |
-| `dm_policy` | `allowlist` | Who can DM the bot: `open`, `allowlist`, or `pairing` |
-| `signature_emoji` | none | Emoji the agent signs off with |
+| `model` | `claude-sonnet-4-6` | Claude model |
+| `dm_policy` | `allowlist` | `open`, `allowlist`, or `pairing` |
+| `signature_emoji` | none | Emoji sign-off |
 
-**User ID — do NOT ask, auto-fill from context:**
-- If `channel=telegram`: set `telegram_user_id` to the sender's `chat_id` from the inbound message. Never ask the user for this.
-- If `channel=discord`: set `discord_user_id` to the sender's user ID from the inbound message. Never ask the user for this.
-- This auto-adds the creator to the DM allowlist so they can immediately use the bot.
+**User ID — auto-fill from inbound message context, never ask:**
+- `channel=telegram` → set `telegram_user_id` to the sender's `chat_id`
+- `channel=discord` → set `discord_user_id` to the sender's user ID
+- Never mix Telegram chat_id (6–15 digits) into `discord_user_id` or vice versa
 
-## Step 2 — Generate workspace files
+**Generate workspace files automatically** from `id` + `description`:
+- `agents_md` — full AGENTS.md (role, rules, capabilities)
+- `soul_md` — full SOUL.md (personality, values)
+- `user_md` — USER.md (inferred from conversation context)
 
-Once you have `id` and `description`, **generate** `agents_md`, `soul_md`, and `user_md` automatically — do not ask the user to write these.
+**Confirm, then call `mcp__gateway__agent_create`.**
 
-**`agents_md`** — write a complete `AGENTS.md` covering:
-- Agent name and role
-- Rules (tone, scope, what to do/not do)
-- Capabilities list
+After success: agent is live immediately (hot-added). If `dm_policy` is `pairing`, user must start a chat with the bot first. If `allowlist`, only their user ID (already added) can DM it.
 
-**`soul_md`** — write a `SOUL.md` covering:
-- Personality and communication style
-- Values and priorities
+---
 
-**`user_md`** — write a `USER.md` covering:
-- What is known about the user's role, language preference, and context (infer from the conversation)
+## Mode B — API-only mode (no bot channel)
 
-Base all three on the user's description and conversation context. Make them specific and actionable — generic stubs are not useful.
+Use the REST API directly via curl. Read the admin API key first:
 
-## Step 3 — Confirm and create
-
-Show the user a brief summary:
-```
-Agent: <id>
-Channel: <channel>
-Model: <model>
-DM policy: <dm_policy>
-Description: <first sentence>
+```bash
+GATEWAY_KEY=$(jq -r '.gateway.api.keys[] | select(.admin==true) | .key' ~/.claude-gateway/config.json | head -1)
 ```
 
-Then call `mcp__gateway__agent_create` with all collected and generated fields.
+**Required fields to collect:**
+| Field | Description |
+|-------|-------------|
+| `id` | Agent ID — same rules as Mode A |
+| `description` | One paragraph: role, personality, capabilities |
 
-## Step 4 — Report result
+**Optional:** `model` (default `claude-sonnet-4-6`)
 
-After creation succeeds, tell the user:
-- The agent is live (no restart needed — hot-added)
-- Workspace location: `~/.claude-gateway/agents/<id>/workspace/`
-- Next step: if `dm_policy` is `pairing`, they must start a conversation with the bot first to complete pairing; if `allowlist`, only their user ID (already added) can DM it
+**Call:**
+```bash
+curl -s -X POST http://localhost:10850/api/v1/agents \
+  -H "Authorization: Bearer $GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"<id>","description":"<description>","model":"<model>"}'
+```
 
-If creation fails, show the error message and ask the user to correct the relevant field.
+After success: workspace is at `~/.claude-gateway/agents/<id>/workspace/`. The agent has no channel — it can only be reached via API. To add a channel later, use `mcp__gateway__agent_update` with `action: add_channel`.
+
+---
 
 ## Notes
 
 - Never fabricate a `bot_token` — always ask the user
 - `id` must be unique; if creation fails with "already exists", ask the user to choose a different id
-- `dm_policy: open` means anyone who knows the bot can message it — warn the user if they choose this
-- Never put a Telegram chat_id (6–15 digits) in `discord_user_id`, or a Discord Snowflake (17–19 digits) in `telegram_user_id`
+- `dm_policy: open` means anyone who knows the bot can message it — warn the user
+- Mode B agents can have a channel added later via `mcp__gateway__agent_update`
