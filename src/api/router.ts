@@ -1088,8 +1088,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown };
-    const { description, model, allow_tools, telegram_bot_token, discord_bot_token } = body;
+    const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; exclude_skills?: unknown };
+    const { description, model, allow_tools, telegram_bot_token, discord_bot_token, exclude_skills } = body;
     if (description !== undefined && (typeof description !== 'string' || !description.trim())) {
       res.status(400).json({ error: 'description must be a non-empty string' });
       return;
@@ -1109,6 +1109,12 @@ export function createApiRouter(
     if (discord_bot_token !== undefined && discord_bot_token !== null && typeof discord_bot_token !== 'string') {
       res.status(400).json({ error: 'discord_bot_token must be a string or null' });
       return;
+    }
+    if (exclude_skills !== undefined && exclude_skills !== null) {
+      if (!Array.isArray(exclude_skills) || !(exclude_skills as unknown[]).every((s) => typeof s === 'string')) {
+        res.status(400).json({ error: 'exclude_skills must be an array of strings or null' });
+        return;
+      }
     }
 
     try {
@@ -1136,6 +1142,13 @@ export function createApiRouter(
             agent.discord = { ...(existing ?? {}), botToken: (discord_bot_token as string).trim() };
           }
         }
+        if (exclude_skills !== undefined) {
+          if (exclude_skills === null || (Array.isArray(exclude_skills) && (exclude_skills as string[]).length === 0)) {
+            delete (agent as Record<string, unknown>).excludeSkills;
+          } else {
+            agent.excludeSkills = exclude_skills as string[];
+          }
+        }
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to write config: ${(err as Error).message}` });
@@ -1147,6 +1160,13 @@ export function createApiRouter(
     if (description !== undefined) cfg.description = (description as string).trim();
     if (model !== undefined && cfg.claude) cfg.claude.model = (model as string).trim();
     if (allow_tools !== undefined) cfg.allow_tools = allow_tools;
+    if (exclude_skills !== undefined) {
+      if (exclude_skills === null || (Array.isArray(exclude_skills) && (exclude_skills as string[]).length === 0)) {
+        delete cfg.excludeSkills;
+      } else {
+        cfg.excludeSkills = exclude_skills as string[];
+      }
+    }
     if (telegram_bot_token !== undefined) {
       const token = typeof telegram_bot_token === 'string' ? telegram_bot_token.trim() : null;
       if (token) {
@@ -1189,6 +1209,7 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null,
+        exclude_skills: cfg.excludeSkills ?? null,
       },
     });
   });
