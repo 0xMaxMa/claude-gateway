@@ -348,6 +348,73 @@ describe('PATCH /api/v1/agents/:agentId — access control', () => {
   });
 });
 
+describe('GET /api/v1/agents — exclude_skills field', () => {
+  it('EX-GET-1: returns exclude_skills: null when not set on agent', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .get('/api/v1/agents')
+      .set({ Authorization: 'Bearer sk-test-admin' });
+    expect(res.status).toBe(200);
+    const agent = res.body.agents.find((a: { id: string }) => a.id === AGENT_ID);
+    expect(agent).toBeDefined();
+    expect(agent.exclude_skills).toBeNull();
+  });
+
+  it('EX-GET-2: returns exclude_skills array when set on agent', async () => {
+    const configWithExclude: AgentConfig = { ...agentConfig, excludeSkills: ['agent:create-agent'] };
+    const configs = new Map([[AGENT_ID, configWithExclude]]);
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createApiRouter(new Map(), configs, apiKeys));
+    const res = await supertest.default(app)
+      .get('/api/v1/agents')
+      .set({ Authorization: 'Bearer sk-test-admin' });
+    expect(res.status).toBe(200);
+    const agent = res.body.agents.find((a: { id: string }) => a.id === AGENT_ID);
+    expect(agent.exclude_skills).toEqual(['agent:create-agent']);
+  });
+});
+
+describe('PATCH /api/v1/agents/:agentId — exclude_skills validation', () => {
+  it('EX-PATCH-1: rejects exclude_skills that is not an array', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ exclude_skills: 'agent:create-agent' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/exclude_skills must be an array/i);
+  });
+
+  it('EX-PATCH-2: rejects exclude_skills array containing non-string elements', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ exclude_skills: [123] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/exclude_skills must be an array/i);
+  });
+
+  it('EX-PATCH-3: accepts exclude_skills: null without configPath (reaches 501)', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ exclude_skills: null });
+    expect(res.status).toBe(501); // validation passed, no configPath
+  });
+
+  it('EX-PATCH-4: accepts valid exclude_skills array without configPath (reaches 501)', async () => {
+    const app = buildApp(async () => 'ok');
+    const res = await supertest.default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set({ Authorization: 'Bearer sk-test-write' })
+      .send({ exclude_skills: ['agent:create-agent'] });
+    expect(res.status).toBe(501); // validation passed, no configPath
+  });
+});
+
 describe('DELETE /api/v1/agents/:agentId — access control', () => {
   it('returns 403 for non-admin key', async () => {
     const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
