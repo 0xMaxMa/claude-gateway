@@ -32,11 +32,15 @@ Ask for any missing required fields. Collect them in a single message if possibl
 | `model` | `claude-sonnet-4-6` | Claude model to use |
 | `dm_policy` | `allowlist` | Who can DM the bot: `open`, `allowlist`, or `pairing` |
 | `signature_emoji` | none | Emoji the agent signs off with |
-| `telegram_user_id` | — | Auto-add the user to the DM allowlist (Telegram only) |
+
+**User ID — do NOT ask, auto-fill from context:**
+- If `channel=telegram`: set `telegram_user_id` to the sender's `chat_id` from the inbound message. Never ask the user for this.
+- If `channel=discord`: set `discord_user_id` to the sender's user ID from the inbound message. Never ask the user for this.
+- This auto-adds the creator to the DM allowlist so they can immediately use the bot.
 
 ## Step 2 — Generate workspace files
 
-Once you have `id` and `description`, **generate** `agents_md` and `soul_md` automatically — do not ask the user to write these.
+Once you have `id` and `description`, **generate** `agents_md`, `soul_md`, and `user_md` automatically — do not ask the user to write these.
 
 **`agents_md`** — write a complete `AGENTS.md` covering:
 - Agent name and role
@@ -47,7 +51,10 @@ Once you have `id` and `description`, **generate** `agents_md` and `soul_md` aut
 - Personality and communication style
 - Values and priorities
 
-Base both on the user's description. Make them specific and actionable — generic stubs are not useful.
+**`user_md`** — write a `USER.md` covering:
+- What is known about the user's role, language preference, and context (infer from the conversation)
+
+Base all three on the user's description and conversation context. Make them specific and actionable — generic stubs are not useful.
 
 ## Step 3 — Confirm and create
 
@@ -60,14 +67,14 @@ DM policy: <dm_policy>
 Description: <first sentence>
 ```
 
-Then call `mcp__gateway__agent_create` with all collected fields.
+Then call `mcp__gateway__agent_create` with all collected and generated fields.
 
 ## Step 4 — Report result
 
 After creation succeeds, tell the user:
 - The agent is live (no restart needed — hot-added)
-- How to find it: the agent workspace is at `~/.claude-gateway/agents/<id>/workspace/`
-- Next step: if `dm_policy` is `pairing` or `allowlist`, they need to pair or add their user ID
+- Workspace location: `~/.claude-gateway/agents/<id>/workspace/`
+- Next step: if `dm_policy` is `pairing`, they must start a conversation with the bot first to complete pairing; if `allowlist`, only their user ID (already added) can DM it
 
 If creation fails, show the error message and ask the user to correct the relevant field.
 
@@ -76,3 +83,4 @@ If creation fails, show the error message and ask the user to correct the releva
 - Never fabricate a `bot_token` — always ask the user
 - `id` must be unique; if creation fails with "already exists", ask the user to choose a different id
 - `dm_policy: open` means anyone who knows the bot can message it — warn the user if they choose this
+- Never put a Telegram chat_id (6–15 digits) in `discord_user_id`, or a Discord Snowflake (17–19 digits) in `telegram_user_id`
