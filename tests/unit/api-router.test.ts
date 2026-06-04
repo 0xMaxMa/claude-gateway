@@ -59,6 +59,7 @@ class MockAgentRunner extends EventEmitter {
     this._activeApiSessions.add(sessionId);
   }
 
+  // Required by media_files path validation in the router
   getAgentsBaseDir(): string {
     return '/tmp';
   }
@@ -503,6 +504,20 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
       .send({ chat_id: 'test-chat', stream: true });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/message is required/i);
+  });
+
+  // T4b: stream + image-only (no message) returns 200 SSE
+  it('T4b: stream with image-only (no message) returns 200', async () => {
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
+      cb.onDone('Saw the image.', []);
+      return () => {};
+    });
+    const { status } = await collectSSE(app, {
+      chat_id: 'test-chat',
+      stream: true,
+      media_files: ['ui-upload/abc/test.jpg'],
+    });
+    expect(status).toBe(200);
   });
 
   // T5: conflict returns 409 JSON
