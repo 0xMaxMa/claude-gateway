@@ -3,6 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 6000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) return;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+}
+
 // ── Mock child_process ────────────────────────────────────────────────────────
 
 interface MockStdin {
@@ -390,7 +398,7 @@ describe('SessionProcess restart watcher notify payload', () => {
     await sp.start();
 
     // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 500));
 
     // Write restart signal with notify payload
     const signalPath = path.join(stateDir, 'restart-chat123');
@@ -398,8 +406,13 @@ describe('SessionProcess restart watcher notify payload', () => {
       notify: { chat_id: 'chat123', text: 'Model changed to claude-sonnet-4-6 — back online!' },
     }));
 
-    // Wait for chokidar to detect the file and trigger the handler
-    await new Promise(r => setTimeout(r, 1000));
+    // Poll until appendTelegramMessage is called with a restart marker
+    const hasMarker = () => sessionStore.appendTelegramMessage.mock.calls.some(
+      (c: unknown[]) => typeof c[3] === 'object' && c[3] !== null &&
+        typeof (c[3] as { content?: string }).content === 'string' &&
+        (c[3] as { content: string }).content.includes('Graceful restart completed'),
+    );
+    await pollUntil(hasMarker);
 
     // Check that appendTelegramMessage was called with a marker containing notify instruction
     // appendTelegramMessage(agentId, chatId, sessionId, message) — message is arg[3]
@@ -436,14 +449,19 @@ describe('SessionProcess restart watcher notify payload', () => {
     await sp.start();
 
     // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 500));
 
     // Write empty restart signal (self-restart)
     const signalPath = path.join(stateDir, 'restart-chat456');
     fs.writeFileSync(signalPath, '');
 
-    // Wait for chokidar to detect the file and trigger the handler
-    await new Promise(r => setTimeout(r, 1000));
+    // Poll until appendTelegramMessage is called with a restart marker
+    const hasMarker = () => sessionStore.appendTelegramMessage.mock.calls.some(
+      (c: unknown[]) => typeof c[3] === 'object' && c[3] !== null &&
+        typeof (c[3] as { content?: string }).content === 'string' &&
+        (c[3] as { content: string }).content.includes('Graceful restart completed'),
+    );
+    await pollUntil(hasMarker);
 
     // Check that appendTelegramMessage was called with default marker (no notify)
     // appendTelegramMessage(agentId, chatId, sessionId, message) — message is arg[3]

@@ -47,8 +47,15 @@ function modifySkillFile(name: string): void {
   fs.writeFileSync(file, SKILL_CONTENT + '\nModified!');
 }
 
-const WATCHER_INIT_MS = 500;
-const EVENT_SETTLE_MS = 2000;
+const WATCHER_INIT_MS = 1000;
+
+async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 6000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) return;
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+}
 
 describe('Skill File Watcher', () => {
   test('W1: detects new SKILL.md file', async () => {
@@ -61,11 +68,11 @@ describe('Skill File Watcher', () => {
 
     await new Promise((r) => setTimeout(r, WATCHER_INIT_MS));
     writeSkillFile('new-skill');
-    await new Promise((r) => setTimeout(r, EVENT_SETTLE_MS));
+    await pollUntil(() => callCount >= 1);
 
     await watcher.close();
     expect(callCount).toBeGreaterThanOrEqual(1);
-  }, 10000);
+  }, 12000);
 
   test('W2: detects SKILL.md deletion', async () => {
     writeSkillFile('to-delete');
@@ -79,11 +86,11 @@ describe('Skill File Watcher', () => {
 
     await new Promise((r) => setTimeout(r, WATCHER_INIT_MS));
     deleteSkillFile('to-delete');
-    await new Promise((r) => setTimeout(r, EVENT_SETTLE_MS));
+    await pollUntil(() => callCount >= 1);
 
     await watcher.close();
     expect(callCount).toBeGreaterThanOrEqual(1);
-  }, 10000);
+  }, 12000);
 
   test('W3: detects SKILL.md modification', async () => {
     writeSkillFile('to-modify');
@@ -97,11 +104,11 @@ describe('Skill File Watcher', () => {
 
     await new Promise((r) => setTimeout(r, WATCHER_INIT_MS));
     modifySkillFile('to-modify');
-    await new Promise((r) => setTimeout(r, EVENT_SETTLE_MS));
+    await pollUntil(() => callCount >= 1);
 
     await watcher.close();
     expect(callCount).toBeGreaterThanOrEqual(1);
-  }, 10000);
+  }, 12000);
 
   test('W4: debounces multiple rapid changes into fewer calls', async () => {
     let callCount = 0;
@@ -117,12 +124,14 @@ describe('Skill File Watcher', () => {
       writeSkillFile(`rapid-${i}`);
     }
 
-    await new Promise((r) => setTimeout(r, EVENT_SETTLE_MS));
+    // Wait for at least one call, then let debounce settle before asserting max
+    await pollUntil(() => callCount >= 1);
+    await new Promise((r) => setTimeout(r, 400));
 
     await watcher.close();
     expect(callCount).toBeGreaterThanOrEqual(1);
     expect(callCount).toBeLessThanOrEqual(3);
-  }, 10000);
+  }, 12000);
 
   test('returns no-op handle for empty dirs', async () => {
     const watcher = watchSkills({
