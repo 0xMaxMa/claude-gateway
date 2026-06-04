@@ -281,11 +281,11 @@ export function createApiRouter(
     };
     const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message } = body;
 
-    if (!message || typeof message !== 'string' || !message.trim()) {
-      res.status(400).json({ error: 'message is required and must be a non-empty string' });
+    if (message !== undefined && typeof message !== 'string') {
+      res.status(400).json({ error: 'message must be a string if provided' });
       return;
     }
-    if (message.length > MAX_MESSAGE_LENGTH) {
+    if (typeof message === 'string' && message.length > MAX_MESSAGE_LENGTH) {
       res.status(400).json({ error: `message too long (max ${MAX_MESSAGE_LENGTH} characters)` });
       return;
     }
@@ -326,6 +326,15 @@ export function createApiRouter(
       validatedMediaFiles = media_files as string[];
     }
 
+    // Allow message OR media_files. Image-only sends pass an empty text
+    // alongside the image_path attribute on channelXml so Claude can Read the file.
+    const trimmedMessage = typeof message === 'string' ? message.trim() : '';
+    const hasMedia = !!(validatedMediaFiles && validatedMediaFiles.length);
+    if (!trimmedMessage && !hasMedia) {
+      res.status(400).json({ error: 'message is required and must be a non-empty string (or provide media_files)' });
+      return;
+    }
+
     if (store_user_message !== undefined && typeof store_user_message !== 'boolean') {
       res.status(400).json({ error: 'store_user_message must be a boolean if provided' });
       return;
@@ -348,11 +357,12 @@ export function createApiRouter(
         ? timeout_ms
         : DEFAULT_TIMEOUT_MS;
 
-    // Built-in command dispatch — only intercept known commands, let everything else reach Claude
-    if (AgentRunner.isApiBuiltinCommand(message.trim())) {
+    // Built-in command dispatch — only intercept known commands, let everything else reach Claude.
+    // Image-only sends have an empty trimmedMessage and never match built-in commands.
+    if (trimmedMessage && AgentRunner.isApiBuiltinCommand(trimmedMessage)) {
       try {
-        const result = await runner.executeApiCommand(sessionId, chatIdStr, message.trim());
-        res.json({ command: message.trim(), session_id: sessionId, result });
+        const result = await runner.executeApiCommand(sessionId, chatIdStr, trimmedMessage);
+        res.json({ command: trimmedMessage, session_id: sessionId, result });
       } catch (err: unknown) {
         res.status(500).json({ error: (err as Error).message ?? 'Command failed' });
       }
@@ -404,7 +414,7 @@ export function createApiRouter(
         cleanup = await runner.sendApiMessageStream(
           sessionId,
           chatIdStr,
-          message.trim(),
+          trimmedMessage,
           sseCallbacks,
           { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage },
         );
@@ -431,7 +441,7 @@ export function createApiRouter(
       try {
         const agentCfgSync = agentConfigs.get(agentId)!;
         const allowToolsSync = agentCfgSync.allow_tools ?? !!apiKey.allow_tools;
-        const { text: responseText, attachments } = await runner.sendApiMessage(sessionId, chatIdStr, message.trim(), {
+        const { text: responseText, attachments } = await runner.sendApiMessage(sessionId, chatIdStr, trimmedMessage, {
           timeoutMs,
           allowTools: allowToolsSync,
           mediaFiles: validatedMediaFiles,

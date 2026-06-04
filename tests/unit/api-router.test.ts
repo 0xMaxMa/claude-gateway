@@ -58,6 +58,10 @@ class MockAgentRunner extends EventEmitter {
   markSessionActive(sessionId: string): void {
     this._activeApiSessions.add(sessionId);
   }
+
+  getAgentsBaseDir(): string {
+    return '/tmp';
+  }
 }
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
@@ -152,23 +156,49 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     );
   });
 
-  it('returns 400 when message is missing', async () => {
+  it('returns 400 when message is missing and no media_files provided', async () => {
     const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({});
+      .send({ chat_id: 'test-chat' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/message is required/i);
   });
 
-  it('returns 400 when message is empty string', async () => {
+  it('returns 400 when message is empty string and no media_files provided', async () => {
     const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ message: '   ' });
+      .send({ message: '   ', chat_id: 'test-chat' });
     expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/message is required/i);
+  });
+
+  it('returns 200 when message is missing but media_files is provided (image-only)', async () => {
+    let receivedMessage: string | undefined;
+    const app = buildApp(async (_sid, _chatId, msg) => {
+      receivedMessage = msg;
+      return { text: 'Saw the image.', attachments: [] };
+    });
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ chat_id: 'test-chat', media_files: ['ui-upload/abc/test.jpg'] });
+    expect(res.status).toBe(200);
+    expect(res.body.response).toBe('Saw the image.');
+    // Runner receives empty string when no text was provided
+    expect(receivedMessage).toBe('');
+  });
+
+  it('returns 200 when message is empty string but media_files is provided', async () => {
+    const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: '   ', chat_id: 'test-chat', media_files: ['ui-upload/abc/test.jpg'] });
+    expect(res.status).toBe(200);
   });
 
   it('returns 400 when message exceeds 10,000 chars', async () => {
@@ -462,7 +492,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
   });
 
   // T4: no message returns 400 JSON
-  it('T4: stream with no message returns 400 JSON', async () => {
+  it('T4: stream with no message and no media_files returns 400 JSON', async () => {
     const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
       cb.onDone('ok', []);
       return () => {};
@@ -470,7 +500,7 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     const res = await supertest.default(app)
       .post(POST_URL)
       .set(AUTH)
-      .send({ stream: true });
+      .send({ chat_id: 'test-chat', stream: true });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/message is required/i);
   });
