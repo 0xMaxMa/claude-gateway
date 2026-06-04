@@ -88,7 +88,6 @@ export function migrateWorkspaceFiles(workspaceDir: string): void {
 export interface LoadWorkspaceOptions {
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
-  excludeSkills?: string[];
   logger?: { warn: (msg: string) => void };
 }
 
@@ -130,7 +129,6 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     workspaceDir,
     mcpToolsDir: opts?.mcpToolsDir,
     sharedSkillsDir: opts?.sharedSkillsDir,
-    excludeSkills: opts?.excludeSkills,
     logger: opts?.logger,
   });
   const skillsSection = renderSkillsSection(skillRegistry);

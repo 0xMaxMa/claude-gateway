@@ -48,8 +48,6 @@ export interface AgentConfig {
   history?: HistoryConfig;
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
-  /** Skill names to exclude from this agent's skill registry (module and shared skills only). */
-  excludeSkills?: string[];
 }
 
 export interface AgentStats {
