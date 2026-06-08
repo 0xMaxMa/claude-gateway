@@ -398,4 +398,25 @@ describe('HistoryDB.listSessions', () => {
     expect(session!.createdAt).toBe(early);
     expect(session!.lastActivity).toBe(late);
   });
+
+  it('returns lastMessageRole as the role of the most recent message', () => {
+    const db = makeDb();
+    const ts = Date.now();
+    insertMsg(db, { sessionId: 'sess-r', ts: ts - 2000, content: 'hello', role: 'user' });
+    insertMsg(db, { sessionId: 'sess-r', ts: ts - 1000, content: 'hi there', role: 'assistant' });
+    insertMsg(db, { sessionId: 'sess-r', ts, content: 'follow-up', role: 'user' });
+
+    const [session] = db.listSessions();
+    expect(session!.lastMessageRole).toBe('user');
+  });
+
+  it('returns lastMessageRole as assistant when last message is from assistant', () => {
+    const db = makeDb();
+    const ts = Date.now();
+    insertMsg(db, { sessionId: 'sess-a', ts: ts - 1000, content: 'question', role: 'user' });
+    insertMsg(db, { sessionId: 'sess-a', ts, content: 'answer', role: 'assistant' });
+
+    const [session] = db.listSessions();
+    expect(session!.lastMessageRole).toBe('assistant');
+  });
 });
