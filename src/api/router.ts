@@ -1943,10 +1943,23 @@ export function createApiRouter(
   router.get('/v1/agents/:agentId/sessions', auth, async (req: Request, res: Response) => {
     const ctx = resolveApiSession(req, res);
     if (!ctx) return;
-    const { runner, agentId, chatId } = ctx;
+    const { runner, chatId } = ctx;
     try {
       const index = await runner.listApiSessions(chatId);
-      res.json(index);
+      const historySessions = runner.getHistoryDb().listSessions();
+      const roleMap = new Map(
+        historySessions
+          .filter((s) => s.chatId === `api-${chatId}`)
+          .map((s) => [s.sessionId, s.lastMessageRole]),
+      );
+      const enriched = {
+        ...index,
+        sessions: index.sessions.map((s) => ({
+          ...s,
+          lastMessageRole: roleMap.get(s.id) ?? null,
+        })),
+      };
+      res.json(enriched);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
