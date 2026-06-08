@@ -834,6 +834,51 @@ describe('AgentRunner — sendApiMessageStream', () => {
     ).resolves.toBeDefined();
   }, 15000);
 
+  // T14b: response is persisted to history DB after client disconnect
+  it('T14b: response persisted to history DB after client disconnect', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    let onClientDisconnect: (() => void) | undefined;
+    let doneText = '';
+    let doneFiredResolve!: () => void;
+    const doneFired = new Promise<void>((res) => { doneFiredResolve = res; });
+
+    runner.sendApiMessageStream(
+      'stream-t14b',
+      'test-chat',
+      'persist after disconnect',
+      {
+        onChunk: () => {},
+        onDone: (text) => { doneText = text; doneFiredResolve(); },
+        onError: () => {},
+      },
+      { timeoutMs: 10000 },
+    ).then((fn) => { onClientDisconnect = fn; });
+
+    // Wait for stream to start and disconnect fn to be available
+    await new Promise(r => setTimeout(r, 200));
+    expect(onClientDisconnect).toBeDefined();
+
+    // Simulate SSE client disconnect before result arrives
+    onClientDisconnect!();
+
+    // Simulate Claude completing the response after disconnect
+    const session = getSessions(runner).get('stream-t14b')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Persisted response' }));
+
+    // onDone must still fire even though client disconnected
+    await doneFired;
+    expect(doneText).toBe('Persisted response');
+
+    // History DB must contain the assistant message
+    const page = runner.getHistoryDb().getMessages('api-test-chat');
+    const msgs = page.messages as Array<{ role: string; content: string }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('Persisted response');
+  }, 15000);
+
   // --------------------------------------------------------------------------
   // T-AR-STREAM-15: Partial assistant messages produce incremental text_delta chunks
   // --------------------------------------------------------------------------
