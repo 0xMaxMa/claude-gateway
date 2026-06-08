@@ -781,17 +781,17 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect((err as Error & { code: string }).code).toBe('TIMEOUT');
   }, 15000);
 
-  // T14: cleanup function removes listeners
-  it('T14: cleanup function removes listeners and frees session slot', async () => {
+  // T14: onClientDisconnect keeps stream alive; session freed only after result
+  it('T14: onClientDisconnect keeps session active; slot freed on result', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    let cleanup: (() => void) | undefined;
-    const cleanupReady = new Promise<void>((resolve) => {
+    let onClientDisconnect: (() => void) | undefined;
+    const streamStarted = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t14',
         'test-chat',
-        'cleanup test',
+        'disconnect test',
         {
           onChunk: () => {},
           onDone: () => {},
@@ -799,20 +799,27 @@ describe('AgentRunner — sendApiMessageStream', () => {
         },
         { timeoutMs: 10000 },
       ).then((fn) => {
-        cleanup = fn;
+        onClientDisconnect = fn;
         resolve();
       });
     });
 
     await new Promise(r => setTimeout(r, 200));
-    await cleanupReady;
+    await streamStarted;
 
     expect(runner.hasActiveApiSession('stream-t14')).toBe(true);
 
-    // Call cleanup
-    cleanup!();
+    // Simulate SSE client disconnect — session must stay active server-side
+    onClientDisconnect!();
+    expect(runner.hasActiveApiSession('stream-t14')).toBe(true);
 
-    // Session slot should be freed
+    // Simulate Claude completing the response after disconnect
+    const session = getSessions(runner).get('stream-t14')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Response after disconnect' }));
+
+    await new Promise(r => setTimeout(r, 100));
+
+    // Session slot freed once result arrives
     expect(runner.hasActiveApiSession('stream-t14')).toBe(false);
 
     // Should be able to start a new stream on same session
@@ -820,7 +827,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
       runner.sendApiMessageStream(
         'stream-t14',
         'test-chat',
-        'after cleanup',
+        'after result',
         { onChunk: () => {}, onDone: () => {}, onError: () => {} },
         { timeoutMs: 5000 },
       ),

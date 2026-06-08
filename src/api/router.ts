@@ -419,7 +419,7 @@ export function createApiRouter(
           { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage },
         );
 
-        // Client disconnect -> cleanup
+        // Client disconnect — marks SSE writes as no-op; stream continues server-side until result is saved to DB
         res.on('close', cleanup);
       } catch (err: unknown) {
         const code = (err as { code?: string }).code;

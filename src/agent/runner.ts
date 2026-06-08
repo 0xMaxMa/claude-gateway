@@ -1579,8 +1579,8 @@ export class AgentRunner extends EventEmitter {
   /**
    * Send a message to an API session and stream back events via callbacks.
    *
-   * Returns a cleanup function that removes all listeners and frees the session slot.
-   * The caller MUST invoke cleanup on client disconnect or when done.
+   * Returns a disconnect handler for the caller to wire to the SSE close event.
+   * On client disconnect the stream continues server-side until the result is saved to DB.
    */
   async sendApiMessageStream(
     sessionId: string,
@@ -1642,6 +1642,7 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
+    let clientGone = false;
     // Track partial message text for delta computation (--include-partial-messages)
     let lastPartialText = '';
     // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
@@ -1652,7 +1653,7 @@ export class AgentRunner extends EventEmitter {
       settled = true;
       cleanup();
       const attachments = this.popApiAttachments(sessionId);
-      // Persist assistant reply
+      // Persist assistant reply regardless of whether the SSE client is still connected
       if (result.trim()) {
         const streamAssistantTs = Date.now();
         this.sessionStore
@@ -1687,6 +1688,10 @@ export class AgentRunner extends EventEmitter {
       this.pendingApiSessions.delete(sessionId);
     };
 
+    // Called when the SSE client disconnects. Marks clientGone so SSE writes
+    // fail silently, but keeps onOutput listening so the result is still saved to DB.
+    const onClientDisconnect = () => { clientGone = true; };
+
     const onOutput = (line: string) => {
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
@@ -1703,7 +1708,7 @@ export class AgentRunner extends EventEmitter {
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              callbacks.onChunk({ type: 'text_delta', text: delta });
+              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
@@ -1714,16 +1719,16 @@ export class AgentRunner extends EventEmitter {
           const text = (obj['text'] as string) ?? '';
           if (text) {
             buffer.push(text);
-            callbacks.onChunk({ type: 'text_delta', text });
+            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
           }
         }
 
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          callbacks.onChunk({ type: 'text_delta', text });
+          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
         });
 
         // Text from delta field (other formats)
@@ -1731,13 +1736,13 @@ export class AgentRunner extends EventEmitter {
           const deltaText = (obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined;
           if (deltaText) {
             buffer.push(deltaText);
-            callbacks.onChunk({ type: 'text_delta', text: deltaText });
+            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: deltaText });
           }
         }
 
         // Thinking
         if (obj['type'] === 'thinking') {
-          callbacks.onChunk({
+          if (!clientGone) callbacks.onChunk({
             type: 'thinking',
             text: (obj['text'] as string) ?? '',
           });
@@ -1793,13 +1798,7 @@ export class AgentRunner extends EventEmitter {
     session.setProcessing(true);
     session.sendMessage(channelXml);
 
-    // Return cleanup function for client disconnect
-    return () => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-      }
-    };
+    return onClientDisconnect;
   }
 
   /**
@@ -2061,6 +2060,7 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
+    let clientGone = false;
     let lastPartialText = '';
     const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
@@ -2101,6 +2101,8 @@ export class AgentRunner extends EventEmitter {
       session.off('output', onOutput);
     };
 
+    const onClientDisconnect = () => { clientGone = true; };
+
     const onOutput = (line: string) => {
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
@@ -2114,21 +2116,21 @@ export class AgentRunner extends EventEmitter {
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              callbacks.onChunk({ type: 'text_delta', text: delta });
+              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
         }
         if (obj['type'] === 'text') {
           const text = (obj['text'] as string) ?? '';
-          if (text) { buffer.push(text); callbacks.onChunk({ type: 'text_delta', text }); }
+          if (text) { buffer.push(text); if (!clientGone) callbacks.onChunk({ type: 'text_delta', text }); }
         }
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          callbacks.onChunk({ type: 'text_delta', text });
+          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
         });
         if (obj['type'] === 'result') {
           session.setProcessing(false);
@@ -2153,9 +2155,7 @@ export class AgentRunner extends EventEmitter {
     session.setProcessing(true);
     session.sendMessage(channelXml);
 
-    return () => {
-      if (!settled) { settled = true; cleanup(); }
-    };
+    return onClientDisconnect;
   }
 
   private _applyStreamEvent(
