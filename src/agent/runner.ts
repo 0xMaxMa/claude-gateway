@@ -1958,6 +1958,20 @@ export class AgentRunner extends EventEmitter {
   async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
     let sessionName = name;
     if (!sessionName && prompt) {
+      sessionName = prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt;
+    }
+
+    const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
+
+    if (!name && prompt) {
+      this.generateSessionNameInBackground(chatId, meta.id, prompt);
+    }
+
+    return meta;
+  }
+
+  private generateSessionNameInBackground(chatId: string, sessionId: string, prompt: string): void {
+    (async () => {
       try {
         const { execFile } = await import('child_process');
         const { promisify } = await import('util');
@@ -1968,12 +1982,14 @@ export class AgentRunner extends EventEmitter {
           ['-p', titlePrompt, '--output-format', 'text', '--model', 'claude-haiku-4-5-20251001'],
           { timeout: 15000, encoding: 'utf-8' },
         );
-        sessionName = stdout.trim().slice(0, 60) || undefined;
-      } catch {
-        sessionName = undefined;
+        const aiName = stdout.trim().slice(0, 60) || undefined;
+        if (aiName) {
+          await this.sessionStore.updateSessionMeta(this.agentConfig.id, chatId, sessionId, { name: aiName }, 'api');
+        }
+      } catch (err) {
+        this.logger.warn('Background session name generation failed', { sessionId, error: (err as Error).message });
       }
-    }
-    return this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
+    })();
   }
 
   async getApiSessionInfo(chatId: string, sessionId: string): Promise<Record<string, unknown> | null> {
