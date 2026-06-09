@@ -1956,10 +1956,9 @@ export class AgentRunner extends EventEmitter {
   }
 
   async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
-    let sessionName = name;
-    if (!sessionName && prompt) {
-      sessionName = prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt;
-    }
+    const sessionName = name ?? (prompt
+      ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)
+      : undefined);
 
     const meta = await this.sessionStore.createTelegramSession(this.agentConfig.id, chatId, sessionName, 'api');
 
