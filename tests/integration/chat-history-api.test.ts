@@ -8,6 +8,7 @@
  */
 
 import * as fs from 'fs';
+import * as http from 'http';
 import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
@@ -486,4 +487,69 @@ describe('Chat History API integration (planning-50)', () => {
     await router.stop();
     await runner.stop();
   });
+
+  // ─── I-HIST-13: SSE disconnect — assistant reply still persists ──────────
+  it('I-HIST-13: assistant reply persisted after SSE client disconnects mid-stream', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-13-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-13-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const sid = randomUUID();
+    const chatId = `api-${sid}`;
+    const port = ((router as unknown as { server: http.Server }).server.address() as { port: number }).port;
+
+    // Stream request — disconnect right after first data arrives
+    await new Promise<void>((resolve) => {
+      const reqBody = JSON.stringify({ message: 'disconnect test message', chat_id: sid, session_id: sid, stream: true });
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/api/v1/agents/alfred/messages',
+          method: 'POST',
+          headers: {
+            'X-Api-Key': API_KEY_ADMIN,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(reqBody),
+          },
+        },
+        (res) => {
+          res.once('data', () => { res.destroy(); resolve(); });
+        },
+      );
+      req.on('error', () => {});
+      req.write(reqBody);
+      req.end();
+    });
+
+    // Poll until Claude finishes server-side and persists the assistant reply
+    const app = router.getApp();
+    let messages: Array<{ role: string; content: string }> = [];
+    await waitFor(async () => {
+      const res = await supertest(app)
+        .get(`/api/v1/agents/alfred/chats/${chatId}/messages`)
+        .set('X-Api-Key', API_KEY_ADMIN);
+      messages = (res.body.messages as Array<{ role: string; content: string }>) ?? [];
+      return messages.some(m => m.role === 'assistant');
+    }, 10000, 200);
+
+    const userMsg = messages.find(m => m.role === 'user');
+    expect(userMsg).toBeDefined();
+    expect(userMsg!.content).toBe('disconnect test message');
+
+    const assistantMsg = messages.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toContain('disconnect test message');
+
+    await router.stop();
+    await runner.stop();
+  }, 15000);
 });

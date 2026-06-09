@@ -609,6 +609,55 @@ describe('POST /api/v1/agents/:agentId/messages (stream: true)', () => {
     expect(cleanupCalled).toBe(true);
   }, 10000);
 
+  // T8b: onDone fires after SSE client disconnects — no crash, router stays stable
+  it('T8b: onDone fires after SSE client disconnects — no crash', async () => {
+    let onDoneCalled = false;
+    let savedCallbacks: StreamCallbacks | undefined;
+
+    const { app } = buildStreamApp(async (_sid, _chatId, _msg, cb) => {
+      savedCallbacks = cb;
+      cb.onChunk({ type: 'text_delta', text: 'partial' });
+      // Disconnect handler: simulate Claude finishing after client leaves
+      return () => {
+        setTimeout(() => {
+          savedCallbacks!.onDone('full response after disconnect', []);
+          onDoneCalled = true;
+        }, 50);
+      };
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const server = app.listen(0, () => {
+        const addr = server.address() as { port: number };
+        const reqBody = JSON.stringify({ message: 'hi', chat_id: 'test-chat', stream: true });
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: addr.port,
+            path: POST_URL,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer sk-test-app',
+              'Content-Length': Buffer.byteLength(reqBody),
+            },
+          },
+          (res) => {
+            res.once('data', () => { res.destroy(); });
+          },
+        );
+        req.on('error', () => {});
+        req.write(reqBody);
+        req.end();
+        setTimeout(() => { server.close(); resolve(); }, 500);
+      });
+      server.on('error', reject);
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+    expect(onDoneCalled).toBe(true);
+  }, 10000);
+
   // T-ALLOW-TOOLS-1: key with allow_tools=true passes allowTools=true to runner
   it('T-ALLOW-TOOLS-1: key with allow_tools=true passes allowTools=true to runner', async () => {
     let capturedOpts: { timeoutMs: number; allowTools?: boolean } | undefined;

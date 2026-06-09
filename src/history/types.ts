@@ -60,6 +60,7 @@ export interface SessionSummary {
   createdAt: number;
   lastActivity: number;
   lastMessage: string | null;
+  lastMessageRole: MessageRole | null;
   sessionName: string | null;
 }
 

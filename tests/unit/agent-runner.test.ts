@@ -781,17 +781,17 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect((err as Error & { code: string }).code).toBe('TIMEOUT');
   }, 15000);
 
-  // T14: cleanup function removes listeners
-  it('T14: cleanup function removes listeners and frees session slot', async () => {
+  // T14: onClientDisconnect keeps stream alive; session freed only after result
+  it('T14: onClientDisconnect keeps session active; slot freed on result', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    let cleanup: (() => void) | undefined;
-    const cleanupReady = new Promise<void>((resolve) => {
+    let onClientDisconnect: (() => void) | undefined;
+    const streamStarted = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t14',
         'test-chat',
-        'cleanup test',
+        'disconnect test',
         {
           onChunk: () => {},
           onDone: () => {},
@@ -799,20 +799,27 @@ describe('AgentRunner — sendApiMessageStream', () => {
         },
         { timeoutMs: 10000 },
       ).then((fn) => {
-        cleanup = fn;
+        onClientDisconnect = fn;
         resolve();
       });
     });
 
     await new Promise(r => setTimeout(r, 200));
-    await cleanupReady;
+    await streamStarted;
 
     expect(runner.hasActiveApiSession('stream-t14')).toBe(true);
 
-    // Call cleanup
-    cleanup!();
+    // Simulate SSE client disconnect — session must stay active server-side
+    onClientDisconnect!();
+    expect(runner.hasActiveApiSession('stream-t14')).toBe(true);
 
-    // Session slot should be freed
+    // Simulate Claude completing the response after disconnect
+    const session = getSessions(runner).get('stream-t14')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Response after disconnect' }));
+
+    await new Promise(r => setTimeout(r, 100));
+
+    // Session slot freed once result arrives
     expect(runner.hasActiveApiSession('stream-t14')).toBe(false);
 
     // Should be able to start a new stream on same session
@@ -820,11 +827,56 @@ describe('AgentRunner — sendApiMessageStream', () => {
       runner.sendApiMessageStream(
         'stream-t14',
         'test-chat',
-        'after cleanup',
+        'after result',
         { onChunk: () => {}, onDone: () => {}, onError: () => {} },
         { timeoutMs: 5000 },
       ),
     ).resolves.toBeDefined();
+  }, 15000);
+
+  // T14b: response is persisted to history DB after client disconnect
+  it('T14b: response persisted to history DB after client disconnect', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    let onClientDisconnect: (() => void) | undefined;
+    let doneText = '';
+    let doneFiredResolve!: () => void;
+    const doneFired = new Promise<void>((res) => { doneFiredResolve = res; });
+
+    runner.sendApiMessageStream(
+      'stream-t14b',
+      'test-chat',
+      'persist after disconnect',
+      {
+        onChunk: () => {},
+        onDone: (text) => { doneText = text; doneFiredResolve(); },
+        onError: () => {},
+      },
+      { timeoutMs: 10000 },
+    ).then((fn) => { onClientDisconnect = fn; });
+
+    // Wait for stream to start and disconnect fn to be available
+    await new Promise(r => setTimeout(r, 200));
+    expect(onClientDisconnect).toBeDefined();
+
+    // Simulate SSE client disconnect before result arrives
+    onClientDisconnect!();
+
+    // Simulate Claude completing the response after disconnect
+    const session = getSessions(runner).get('stream-t14b')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Persisted response' }));
+
+    // onDone must still fire even though client disconnected
+    await doneFired;
+    expect(doneText).toBe('Persisted response');
+
+    // History DB must contain the assistant message
+    const page = runner.getHistoryDb().getMessages('api-test-chat');
+    const msgs = page.messages as Array<{ role: string; content: string }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('Persisted response');
   }, 15000);
 
   // --------------------------------------------------------------------------
