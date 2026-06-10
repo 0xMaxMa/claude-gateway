@@ -975,16 +975,25 @@ bot.command('models', async ctx => {
   if (!CALLBACK_URL_BASE) return
 
   try {
-    const res = await fetch(CALLBACK_URL_BASE + '/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
-    })
-    const data = (await res.json()) as { model?: string }
-    const currentModel = data.model ?? ''
+    const [modelRes, modelsRes] = await Promise.all([
+      fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
+      }),
+      fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'get_models', chat_id: String(ctx.chat.id) }),
+      }),
+    ])
+    const modelData = (await modelRes.json()) as { model?: string }
+    const modelsData = (await modelsRes.json()) as { models?: { id: string; label: string; alias: string }[] }
+    const currentModel = modelData.model ?? ''
+    const availableModels = modelsData.models ?? AVAILABLE_MODELS
 
     const keyboard = new InlineKeyboard()
-    for (const m of AVAILABLE_MODELS) {
+    for (const m of availableModels) {
       const prefix = m.id === currentModel ? '\u2705 ' : ''
       keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
     }

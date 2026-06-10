@@ -356,6 +356,12 @@ export class AgentRunner extends EventEmitter {
       return;
     }
 
+    if (command === 'get_models') {
+      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+      respond({ models: availableModels.map(m => ({ id: m.id, label: m.label, alias: m.alias })) });
+      return;
+    }
+
     if (command === 'set_model') {
       const newModel = typeof body.payload?.model === 'string' ? body.payload.model : '';
 
