@@ -1966,15 +1966,36 @@ export function createApiRouter(
       res.status(400).json({ error: 'Invalid avatar path' });
       return;
     }
-    if (!fs.existsSync(avatarPath)) { res.status(404).json({ error: 'Avatar file not found' }); return; }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(avatarPath);
+    } catch {
+      res.status(404).json({ error: 'Avatar file not found' });
+      return;
+    }
 
     const ext = path.extname(avatarPath).slice(1).toLowerCase();
     const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
     const contentType = mimeMap[ext] ?? 'application/octet-stream';
 
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+    // Weak ETag — mtime+size cannot guarantee byte-identical content so strong ETag is inappropriate.
+    const etag = `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
+
+    // no-cache forces revalidation on every request; ETag allows 304 when file is unchanged.
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('ETag', etag);
+    res.setHeader('Last-Modified', new Date(stat.mtimeMs).toUTCString());
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    // If-None-Match may be a comma-separated list of ETags; check each token.
+    const ifNoneMatch = req.headers['if-none-match'];
+    const matched = ifNoneMatch && ifNoneMatch.split(',').map(t => t.trim()).includes(etag);
+    if (matched) {
+      res.status(304).end();
+      return;
+    }
     res.sendFile(avatarPath);
   });
 
