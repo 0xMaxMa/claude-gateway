@@ -409,6 +409,11 @@ async function restoreSockets(registry: AppsRegistry, socketServer: SocketServer
   }
 }
 
+// Module-level flag and shutdown reference so crash handlers can clean up child
+// processes even when the error occurs outside main()'s try/catch scope.
+let isShuttingDown = false;
+let registeredShutdown: ((signal: string) => Promise<void>) | null = null;
+
 async function main(): Promise<void> {
   // Load agent .env files before config interpolation so ${TOKEN} vars resolve
   const gatewayAgentsDir = path.join(path.dirname(CONFIG_PATH), 'agents');
@@ -738,11 +743,6 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT').then(() => process.exit(0)));
 }
 
-// Module-level flag and shutdown reference so crash handlers can clean up child
-// processes even when the error occurs outside main()'s try/catch scope.
-let isShuttingDown = false;
-let registeredShutdown: ((signal: string) => Promise<void>) | null = null;
-
 async function emergencyShutdown(label: string, detail: unknown): Promise<void> {
   console.error(`[gateway] ${label}:`, detail);
   if (registeredShutdown && !isShuttingDown) {
@@ -758,9 +758,13 @@ async function emergencyShutdown(label: string, detail: unknown): Promise<void> 
 // the process immediately via main().catch() — bypassing shutdown() and leaving
 // child receiver processes (bun) alive as zombies that accumulate across restarts.
 process.on('unhandledRejection', (reason) => {
+  // If a clean SIGTERM shutdown is already in progress, don't interrupt it with
+  // a crash exit — let the in-progress shutdown finish and exit 0.
+  if (isShuttingDown) return;
   emergencyShutdown('unhandledRejection', reason).finally(() => process.exit(1));
 });
 process.on('uncaughtException', (err) => {
+  if (isShuttingDown) return;
   emergencyShutdown('uncaughtException', err).finally(() => process.exit(1));
 });
 
