@@ -141,6 +141,10 @@ const AGENT_ENV_PATH_RE = /[/\\]agents[/\\]([^/\\]+)[/\\]\.env$/;
  * Collect all botToken placeholder values from template agents so that
  * repairInjectedAgentFields can distinguish leaked template credentials
  * from legitimate user credentials (which also use ${VAR} format).
+ *
+ * Iterates all agents in the template array (typically only index 0 exists).
+ * PLACEHOLDER_RE is intentional here — template configs always ship with
+ * unresolved ${VAR} references, never resolved tokens.
  */
 function extractTemplateCredentials(templateAgents: Array<Record<string, unknown>>): Set<string> {
   const creds = new Set<string>();
