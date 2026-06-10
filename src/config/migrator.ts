@@ -65,9 +65,22 @@ function deepMerge(
   }
 }
 
+// Per-agent fields that are instance-specific and must never be copied from a
+// template agent into user agents during migration (credentials, identity, paths).
+const AGENT_CREDENTIAL_FIELDS = new Set([
+  'env',
+  'telegram',
+  'discord',
+  'workspace',
+  'avatar',
+  'id',
+  'description',
+]);
+
 /**
  * Merge missing fields from template agent into each user agent.
  * Uses the first agent in the template as the schema source.
+ * Instance-specific fields (credentials, paths, identity) are always excluded.
  */
 function mergeAgentArrays(
   userAgents: Array<Record<string, unknown>>,
@@ -78,7 +91,11 @@ function mergeAgentArrays(
   if (templateAgents.length === 0) return;
   const schema = templateAgents[0];
   for (let i = 0; i < userAgents.length; i++) {
-    deepMerge(userAgents[i], schema, `agents[${i}]`, added, ignorePaths);
+    const agentIgnorePaths = new Set(ignorePaths);
+    for (const field of AGENT_CREDENTIAL_FIELDS) {
+      agentIgnorePaths.add(`agents[${i}].${field}`);
+    }
+    deepMerge(userAgents[i], schema, `agents[${i}]`, added, agentIgnorePaths);
   }
 }
 

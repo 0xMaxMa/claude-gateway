@@ -201,8 +201,12 @@ export function loadConfig(configPath: string): GatewayConfig {
   }
 
   if (interpolatedAgents.length === 0) {
+    const bakPath = configPath + '.bak';
+    const migrationHint = fs.existsSync(bakPath)
+      ? ` A migration backup exists at "${bakPath}" — this may be a migration issue where credential fields were incorrectly injected into your agents. Check the backup and restore if needed.`
+      : '';
     throw new ConfigValidationError(
-      'No valid agents found in config. All agents were skipped due to configuration errors.'
+      `No valid agents found in config. All agents were skipped due to configuration errors.${migrationHint}`
     );
   }
 
