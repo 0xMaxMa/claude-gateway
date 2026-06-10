@@ -10,6 +10,8 @@ import {
   loadCleanTemplate,
   stripIgnoredPaths,
   pruneAgentPaths,
+  repairInjectedAgentFields,
+  AGENT_CREDENTIAL_FIELDS,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -729,6 +731,46 @@ describe('config-migrator', () => {
       expect(written.gateway.port).toBe(3000); // existing value preserved
     });
 
+    it('does not inject credential fields from template into API-only agents (regression #136)', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.5',
+        agents: [
+          { id: 'getpod', description: 'API-only agent' },
+          { id: 'feedback-me', description: 'API-only agent' },
+        ],
+      });
+      const templatePath = writeJson('template.json', {
+        _migration: { ignorePaths: ['gateway.api'] },
+        configVersion: '1.0.6',
+        agents: [
+          {
+            id: 'alfred',
+            env: '~/.claude-gateway/agents/alfred/.env',
+            telegram: { botToken: '${ALFRED_BOT_TOKEN}' },
+            signatureEmoji: '🤖',
+          },
+        ],
+      });
+
+      const result = migrateConfig(configPath, templatePath, '1.0.6');
+
+      expect(result.migrated).toBe(true);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+      // credential fields must NOT leak into API-only agents
+      expect(updated.agents[0].telegram).toBeUndefined();
+      expect(updated.agents[0].env).toBeUndefined();
+      expect(updated.agents[0].id).toBe('getpod');
+
+      expect(updated.agents[1].telegram).toBeUndefined();
+      expect(updated.agents[1].env).toBeUndefined();
+      expect(updated.agents[1].id).toBe('feedback-me');
+
+      // non-credential fields should still be merged
+      expect(updated.agents[0].signatureEmoji).toBe('🤖');
+      expect(updated.agents[1].signatureEmoji).toBe('🤖');
+    });
+
     it('does not migrate when versions match', () => {
       const config = { configVersion: '1.1.0', gateway: { port: 3000 }, agents: [] };
       const template = {
@@ -762,6 +804,75 @@ describe('config-migrator', () => {
       expect(fs.existsSync(`${configPath}.bak`)).toBe(true);
       const bak = JSON.parse(fs.readFileSync(`${configPath}.bak`, 'utf-8'));
       expect(bak.configVersion).toBe('1.0.0'); // backup has original
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // repairInjectedAgentFields
+  // ---------------------------------------------------------------------------
+  describe('repairInjectedAgentFields', () => {
+    it('removes telegram block when botToken is a ${} placeholder', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'getpod', telegram: { botToken: '${ALFRED_BOT_TOKEN}' } },
+        { id: 'feedback', telegram: { botToken: '${OTHER_TOKEN}' } },
+      ];
+      const removed = repairInjectedAgentFields(agents);
+      expect(agents[0].telegram).toBeUndefined();
+      expect(agents[1].telegram).toBeUndefined();
+      expect(removed).toContain('agents[0].telegram');
+      expect(removed).toContain('agents[1].telegram');
+    });
+
+    it('preserves telegram when botToken is a real resolved value', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'alfred', telegram: { botToken: '123456789:AAHfiq...' } },
+      ];
+      const removed = repairInjectedAgentFields(agents);
+      expect(agents[0].telegram).toBeDefined();
+      expect(removed).toHaveLength(0);
+    });
+
+    it('is a no-op when agents have no telegram', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'api-only', description: 'no telegram' },
+      ];
+      const removed = repairInjectedAgentFields(agents);
+      expect(removed).toHaveLength(0);
+    });
+
+    it('repairs configs broken by the 1.2.26 bug during next migration', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.6',
+        agents: [
+          { id: 'getpod', telegram: { botToken: '${ALFRED_BOT_TOKEN}' }, env: '~/.claude-gateway/agents/alfred/.env' },
+        ],
+      });
+      const templatePath = writeJson('template.json', {
+        configVersion: '1.0.7',
+        agents: [{ id: 'alfred', telegram: { botToken: '${ALFRED_BOT_TOKEN}' }, signatureEmoji: '' }],
+      });
+
+      const result = migrateConfig(configPath, templatePath, '1.0.7');
+
+      expect(result.migrated).toBe(true);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      // placeholder telegram should be removed by repair step
+      expect(updated.agents[0].telegram).toBeUndefined();
+      expect(result.removedFields).toContain('agents[0].telegram');
+      // non-credential fields merged normally
+      expect(updated.agents[0].signatureEmoji).toBe('');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // AGENT_CREDENTIAL_FIELDS — ensure all known instance-specific fields covered
+  // ---------------------------------------------------------------------------
+  describe('AGENT_CREDENTIAL_FIELDS', () => {
+    it('contains all instance-specific fields', () => {
+      const expected = ['env', 'telegram', 'discord', 'workspace', 'avatar', 'id', 'name', 'description'];
+      for (const field of expected) {
+        expect(AGENT_CREDENTIAL_FIELDS.has(field)).toBe(true);
+      }
     });
   });
 });

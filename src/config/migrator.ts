@@ -74,6 +74,7 @@ const AGENT_CREDENTIAL_FIELDS = new Set([
   'workspace',
   'avatar',
   'id',
+  'name',
   'description',
 ]);
 
@@ -126,6 +127,36 @@ function pruneAgentPaths(
         delete obj[leaf];
         const fullPath = `agents[${i}].${dotPath}`;
         if (!removed.includes(fullPath)) removed.push(fullPath);
+      }
+    }
+  }
+  return removed;
+}
+
+const PLACEHOLDER_RE = /^\$\{[^}]+\}$/;
+
+/**
+ * Remove channel blocks (telegram/discord) from agents where the botToken is an
+ * unresolved ${VAR} placeholder — a sign that the block was injected by a prior
+ * buggy migration rather than configured by the user.
+ * Returns the list of paths removed.
+ */
+export function repairInjectedAgentFields(
+  agents: Array<Record<string, unknown>>,
+): string[] {
+  const removed: string[] = [];
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
+    for (const channel of ['telegram', 'discord'] as const) {
+      const block = agent[channel];
+      if (
+        block &&
+        typeof block === 'object' &&
+        !Array.isArray(block) &&
+        PLACEHOLDER_RE.test(String((block as Record<string, unknown>).botToken ?? ''))
+      ) {
+        delete agent[channel];
+        removed.push(`agents[${i}].${channel}`);
       }
     }
   }
@@ -295,6 +326,11 @@ export function detectMigration(
     );
   }
 
+  // Repair credential fields that were incorrectly injected by earlier buggy migrations
+  if (Array.isArray(configClone.agents)) {
+    removed.push(...repairInjectedAgentFields(configClone.agents as Array<Record<string, unknown>>));
+  }
+
   // configVersion will always be updated
   if (!added.includes('configVersion')) {
     added.push('configVersion');
@@ -349,6 +385,11 @@ export function applyMigration(
     removed.push(
       ...pruneAgentPaths(config.agents as Array<Record<string, unknown>>, removePaths),
     );
+  }
+
+  // Repair credential fields that were incorrectly injected by earlier buggy migrations
+  if (Array.isArray(config.agents)) {
+    removed.push(...repairInjectedAgentFields(config.agents as Array<Record<string, unknown>>));
   }
 
   // Update configVersion
@@ -451,4 +492,4 @@ function migrateModels(
 }
 
 // Exported for testing
-export { compareSemver, deepMerge, migrateModels, pruneAgentPaths };
+export { compareSemver, deepMerge, migrateModels, pruneAgentPaths, AGENT_CREDENTIAL_FIELDS };
