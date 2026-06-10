@@ -280,6 +280,9 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
     expect(res.status).toBe(200);
     expect(res.body.warning).toBe('service will restart');
 
+    jest.runAllTimers();
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+
     if (savedInvocationId !== undefined) process.env.INVOCATION_ID = savedInvocationId;
     else delete process.env.INVOCATION_ID;
   });
