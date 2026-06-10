@@ -708,8 +708,10 @@ async function main(): Promise<void> {
 
   configWatcher.start();
 
-  // Graceful shutdown
+  // Graceful shutdown — idempotent: safe to call from multiple signal/error sources.
   const shutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
     console.log(`[gateway] Received ${signal}, shutting down...`);
 
     for (const scheduler of schedulers) {
@@ -727,14 +729,41 @@ async function main(): Promise<void> {
     }
 
     console.log('[gateway] Shutdown complete.');
-    process.exit(0);
   };
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  // Expose shutdown to the module-level crash handlers registered below.
+  registeredShutdown = shutdown;
+
+  process.on('SIGTERM', () => shutdown('SIGTERM').then(() => process.exit(0)));
+  process.on('SIGINT', () => shutdown('SIGINT').then(() => process.exit(0)));
 }
 
+// Module-level flag and shutdown reference so crash handlers can clean up child
+// processes even when the error occurs outside main()'s try/catch scope.
+let isShuttingDown = false;
+let registeredShutdown: ((signal: string) => Promise<void>) | null = null;
+
+async function emergencyShutdown(label: string, detail: unknown): Promise<void> {
+  console.error(`[gateway] ${label}:`, detail);
+  if (registeredShutdown && !isShuttingDown) {
+    try {
+      await registeredShutdown(label);
+    } catch (e) {
+      console.error('[gateway] Error during emergency shutdown:', e);
+    }
+  }
+}
+
+// Without these handlers, any unhandled rejection or uncaught exception crashes
+// the process immediately via main().catch() — bypassing shutdown() and leaving
+// child receiver processes (bun) alive as zombies that accumulate across restarts.
+process.on('unhandledRejection', (reason) => {
+  emergencyShutdown('unhandledRejection', reason).finally(() => process.exit(1));
+});
+process.on('uncaughtException', (err) => {
+  emergencyShutdown('uncaughtException', err).finally(() => process.exit(1));
+});
+
 main().catch((err) => {
-  console.error('[gateway] Fatal error:', err);
-  process.exit(1);
+  emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
 });
