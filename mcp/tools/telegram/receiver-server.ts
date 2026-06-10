@@ -984,11 +984,11 @@ bot.command('models', async ctx => {
       fetch(CALLBACK_URL_BASE + '/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_models', chat_id: String(ctx.chat.id) }),
+        body: JSON.stringify({ command: 'get_models' }),
       }),
     ])
     const modelData = (await modelRes.json()) as { model?: string }
-    const modelsData = (await modelsRes.json()) as { models?: { id: string; label: string; alias: string }[] }
+    const modelsData = (await modelsRes.json()) as { models?: { id: string; label: string }[] }
     const currentModel = modelData.model ?? ''
     const availableModels = modelsData.models ?? AVAILABLE_MODELS
 

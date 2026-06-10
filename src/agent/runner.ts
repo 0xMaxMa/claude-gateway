@@ -358,7 +358,7 @@ export class AgentRunner extends EventEmitter {
 
     if (command === 'get_models') {
       const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-      respond({ models: availableModels.map(m => ({ id: m.id, label: m.label, alias: m.alias })) });
+      respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
       return;
     }
 
