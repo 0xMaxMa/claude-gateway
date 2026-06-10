@@ -173,7 +173,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
         warning: isManaged ? 'service will restart' : 'process will stop — restart manually',
       });
 
-      setTimeout(() => process.exit(0), 500);
+      setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
     } else {
       res.json({ package: packageName, from, to, updated: true, warning: null });
     }

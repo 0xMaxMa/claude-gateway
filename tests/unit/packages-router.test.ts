@@ -45,20 +45,20 @@ function makeApp(withAuth = true) {
   return app;
 }
 
-// Keep track of the exit spy
-let exitSpy: jest.SpyInstance;
+// Keep track of the kill spy
+let killSpy: jest.SpyInstance;
 
 beforeEach(() => {
   _resetCache();
   jest.clearAllMocks();
-  // Prevent process.exit from actually exiting during tests
-  exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-  // Suppress timer-based exit: fast-forward timers
+  // Prevent process.kill from actually sending signals during tests
+  killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true);
+  // Suppress timer-based kill: fast-forward timers
   jest.useFakeTimers();
 });
 
 afterEach(() => {
-  exitSpy.mockRestore();
+  killSpy.mockRestore();
   jest.useRealTimers();
 });
 
@@ -252,9 +252,9 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
     if (savedPm2Home !== undefined) process.env.PM2_HOME = savedPm2Home;
     if (savedPmId !== undefined) process.env.pm_id = savedPmId;
 
-    // process.exit(0) should be scheduled
+    // process.kill(pid, 'SIGTERM') should be scheduled
     jest.runAllTimers();
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
   });
 
   it('T11: claude-gateway updated — systemd managed warning', async () => {
@@ -346,7 +346,7 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
     });
 
     jest.runAllTimers();
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
   it('T15: 403 when non-admin key attempts update', async () => {
