@@ -390,6 +390,64 @@ describe('GET /api/v1/agents/:agentId/avatar', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Regression: stale agentConfigs after extension change (PUT jpeg → PUT png → GET)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('avatar extension change regression', () => {
+  it('GET returns 200 immediately after PUT with different extension (no stale 404)', async () => {
+    const { app, tmpDir, agentDir, agentConfigs } = buildCtx({ avatar: 'avatar.jpeg' });
+    try {
+      // Seed the old jpeg file on disk (as if uploaded previously)
+      fs.writeFileSync(path.join(agentDir, 'avatar.jpeg'), makeJpegBuffer(200));
+
+      // PUT a PNG — this should delete avatar.jpeg, write avatar.png, and update agentConfigs in-memory
+      const putRes = await supertest.default(app)
+        .put(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${WRITE_KEY}`)
+        .set('Content-Type', 'image/png')
+        .send(makePngBuffer(200));
+      expect(putRes.status).toBe(200);
+
+      // In-memory map must reflect the new filename immediately (before any file watcher fires)
+      expect(agentConfigs.get(AGENT_ID)?.avatar).toBe('avatar.png');
+
+      // GET immediately after — must NOT return 404 "Avatar file not found"
+      const getRes = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${READ_KEY}`);
+      expect(getRes.status).toBe(200);
+      expect(getRes.headers['content-type']).toMatch(/image\/png/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('GET returns 404 after DELETE — agentConfigs.avatar removed immediately', async () => {
+    const { app, tmpDir, agentDir, agentConfigs } = buildCtx({ avatar: 'avatar.png' });
+    try {
+      fs.writeFileSync(path.join(agentDir, 'avatar.png'), makePngBuffer(200));
+
+      const delRes = await supertest.default(app)
+        .delete(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${WRITE_KEY}`);
+      expect(delRes.status).toBe(204);
+
+      // In-memory map must have avatar removed immediately
+      expect(agentConfigs.get(AGENT_ID)?.avatar).toBeUndefined();
+
+      // GET must return 404 (no avatar set), not 500 or stale file reference
+      const getRes = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${READ_KEY}`);
+      expect(getRes.status).toBe(404);
+      expect(getRes.body.error).toMatch(/no avatar/i);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Wizard State (unit tests for WizardStore)
 // ─────────────────────────────────────────────────────────────────────────────
 

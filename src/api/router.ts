@@ -1938,8 +1938,8 @@ export function createApiRouter(
     }
 
     // Update in-memory map immediately — same reason as PUT handler above.
-    const deleteCfg = agentConfigs.get(agentId);
-    if (deleteCfg) delete deleteCfg.avatar;
+    const cfg = agentConfigs.get(agentId);
+    if (cfg) delete cfg.avatar;
 
     res.status(204).send();
   });
