@@ -840,6 +840,20 @@ describe('config-migrator', () => {
       expect(removed).toHaveLength(0);
     });
 
+    it('removes env path that references a different agent directory', () => {
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'getpod', env: '~/.claude-gateway/agents/alfred/.env' },
+        { id: 'alfred', env: '~/.claude-gateway/agents/alfred/.env' },
+      ];
+      const removed = repairInjectedAgentFields(agents);
+      // getpod's env references alfred — should be removed
+      expect(agents[0].env).toBeUndefined();
+      expect(removed).toContain('agents[0].env');
+      // alfred's env references itself — should be kept
+      expect(agents[1].env).toBe('~/.claude-gateway/agents/alfred/.env');
+      expect(removed).not.toContain('agents[1].env');
+    });
+
     it('repairs configs broken by the 1.2.26 bug during next migration', () => {
       const configPath = writeJson('config.json', {
         configVersion: '1.0.6',
@@ -856,9 +870,11 @@ describe('config-migrator', () => {
 
       expect(result.migrated).toBe(true);
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      // placeholder telegram should be removed by repair step
+      // placeholder telegram and mismatched env should be removed
       expect(updated.agents[0].telegram).toBeUndefined();
+      expect(updated.agents[0].env).toBeUndefined();
       expect(result.removedFields).toContain('agents[0].telegram');
+      expect(result.removedFields).toContain('agents[0].env');
       // non-credential fields merged normally
       expect(updated.agents[0].signatureEmoji).toBe('');
     });

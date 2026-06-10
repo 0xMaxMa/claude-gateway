@@ -134,11 +134,16 @@ function pruneAgentPaths(
 }
 
 const PLACEHOLDER_RE = /^\$\{[^}]+\}$/;
+// Matches ~/.claude-gateway/agents/<id>/.env — captures the agent id in the path
+const AGENT_ENV_PATH_RE = /[/\\]agents[/\\]([^/\\]+)[/\\]\.env$/;
 
 /**
- * Remove channel blocks (telegram/discord) from agents where the botToken is an
- * unresolved ${VAR} placeholder — a sign that the block was injected by a prior
- * buggy migration rather than configured by the user.
+ * Remove fields from agents that were incorrectly injected by a prior buggy
+ * migration (where the template agent's credentials leaked into user agents).
+ *
+ * - telegram/discord: removed when botToken is an unresolved ${VAR} placeholder
+ * - env: removed when the path references a different agent's directory
+ *
  * Returns the list of paths removed.
  */
 export function repairInjectedAgentFields(
@@ -147,6 +152,8 @@ export function repairInjectedAgentFields(
   const removed: string[] = [];
   for (let i = 0; i < agents.length; i++) {
     const agent = agents[i];
+
+    // Remove channel blocks whose botToken is a ${VAR} placeholder
     for (const channel of ['telegram', 'discord'] as const) {
       const block = agent[channel];
       if (
@@ -157,6 +164,15 @@ export function repairInjectedAgentFields(
       ) {
         delete agent[channel];
         removed.push(`agents[${i}].${channel}`);
+      }
+    }
+
+    // Remove env paths that point to a different agent's directory
+    if (typeof agent.env === 'string') {
+      const match = AGENT_ENV_PATH_RE.exec(agent.env);
+      if (match && match[1] !== String(agent.id ?? '')) {
+        delete agent.env;
+        removed.push(`agents[${i}].env`);
       }
     }
   }
