@@ -370,7 +370,48 @@ describe('GET /api/v1/agents/:agentId/avatar', () => {
         .set('Authorization', `Bearer ${READ_KEY}`);
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/image\/png/);
-      expect(res.headers['cache-control']).toMatch(/max-age=3600/);
+      expect(res.headers['cache-control']).toBe('no-cache');
+      expect(res.headers['etag']).toBeDefined();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 304 when ETag matches (If-None-Match)', async () => {
+    const { app, tmpDir, agentDir } = buildCtx({ avatar: 'avatar.png' });
+    try {
+      const buf = makePngBuffer(200);
+      fs.writeFileSync(path.join(agentDir, 'avatar.png'), buf);
+
+      // First request — get the ETag
+      const first = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${READ_KEY}`);
+      expect(first.status).toBe(200);
+      const etag = first.headers['etag'];
+      expect(etag).toBeDefined();
+
+      // Second request with matching If-None-Match — must return 304
+      const second = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${READ_KEY}`)
+        .set('If-None-Match', etag);
+      expect(second.status).toBe(304);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 200 with new content when ETag does not match (file changed)', async () => {
+    const { app, tmpDir, agentDir } = buildCtx({ avatar: 'avatar.png' });
+    try {
+      fs.writeFileSync(path.join(agentDir, 'avatar.png'), makePngBuffer(200));
+
+      const res = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/avatar`)
+        .set('Authorization', `Bearer ${READ_KEY}`)
+        .set('If-None-Match', '"stale-etag"');
+      expect(res.status).toBe(200);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

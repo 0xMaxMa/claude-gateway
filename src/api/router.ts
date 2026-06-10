@@ -1972,9 +1972,19 @@ export function createApiRouter(
     const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
     const contentType = mimeMap[ext] ?? 'application/octet-stream';
 
-    res.setHeader('Cache-Control', 'private, max-age=3600');
+    const stat = fs.statSync(avatarPath);
+    const etag = `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
+
+    // no-cache forces revalidation on every request; ETag allows 304 when file is unchanged.
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('ETag', etag);
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
     res.sendFile(avatarPath);
   });
 
