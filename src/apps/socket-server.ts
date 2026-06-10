@@ -109,12 +109,13 @@ export class SocketServer {
     server.close();
     this.servers.delete(socketPath);
     try {
-      fs.rmSync(socketPath, { recursive: true, force: true });
-      // Clean up the parent socket directory if empty (created per-app at install time)
-      const parentDir = path.dirname(socketPath);
-      try { fs.rmdirSync(parentDir); } catch { /* non-empty or already gone — OK */ }
+      fs.unlinkSync(socketPath);
+      // Do NOT remove the parent directory — it is a Docker bind-mount source.
+      // Deleting it causes Docker to recreate it as root:root on next container start,
+      // which prevents the gateway from creating a new socket inside it after restart.
+      // The directory is removed only on app uninstall (installer.ts teardown).
     } catch {
-      // Already removed
+      // Already removed or never existed
     }
   }
 

@@ -375,26 +375,36 @@ async function restoreSockets(registry: AppsRegistry, socketServer: SocketServer
       try { fs.unlinkSync(sockPath); } catch { /* stale or absent */ }
       // Ensure socket directory is writable by the current process.
       // If owned by root (from a prior sudo run), remove and recreate it.
+      // rmSync is wrapped: EPERM on rmSync must not skip the remaining sockets.
       const sockDir = path.dirname(sockPath);
-      const dirStat = fs.statSync(sockDir, { throwIfNoEntry: false });
-      if (dirStat) {
-        try { fs.accessSync(sockDir, fs.constants.W_OK); } catch {
-          fs.rmSync(sockDir, { recursive: true, force: true });
+      try {
+        const dirStat = fs.statSync(sockDir, { throwIfNoEntry: false });
+        if (dirStat) {
+          try { fs.accessSync(sockDir, fs.constants.W_OK); } catch {
+            fs.rmSync(sockDir, { recursive: true, force: true });
+          }
         }
+        fs.mkdirSync(sockDir, { recursive: true });
+      } catch (err) {
+        console.warn(`[gateway] Failed to prepare socket dir ${sockDir}: ${(err as Error).message} — skipping ${app.name}/${svcName}`);
+        continue;
       }
-      fs.mkdirSync(sockDir, { recursive: true });
 
-      socketServer.start(sockPath, {
-        appName: app.name,
-        serviceName: svcName,
-        appDir: app.installPath,
-        scripts: Object.fromEntries(
-          Object.entries(svc.gateway_api.scripts ?? {}).map(([name, s]: [string, AppYamlScript]) => [
-            name,
-            { path: s.path, timeoutMs: parseTimeoutMs(s.timeout), args: s.args },
-          ]),
-        ),
-      });
+      try {
+        await socketServer.start(sockPath, {
+          appName: app.name,
+          serviceName: svcName,
+          appDir: app.installPath,
+          scripts: Object.fromEntries(
+            Object.entries(svc.gateway_api.scripts ?? {}).map(([name, s]: [string, AppYamlScript]) => [
+              name,
+              { path: s.path, timeoutMs: parseTimeoutMs(s.timeout), args: s.args },
+            ]),
+          ),
+        });
+      } catch (err) {
+        console.warn(`[gateway] Failed to restore socket for ${app.name}/${svcName}: ${(err as Error).message} — skipping`);
+      }
     }
   }
 }
