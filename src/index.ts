@@ -373,7 +373,16 @@ async function restoreSockets(registry: AppsRegistry, socketServer: SocketServer
       if (!svc?.gateway_api) continue;
 
       try { fs.unlinkSync(sockPath); } catch { /* stale or absent */ }
-      fs.mkdirSync(path.dirname(sockPath), { recursive: true });
+      // Ensure socket directory is writable by the current process.
+      // If owned by root (from a prior sudo run), remove and recreate it.
+      const sockDir = path.dirname(sockPath);
+      const dirStat = fs.statSync(sockDir, { throwIfNoEntry: false });
+      if (dirStat) {
+        try { fs.accessSync(sockDir, fs.constants.W_OK); } catch {
+          fs.rmSync(sockDir, { recursive: true, force: true });
+        }
+      }
+      fs.mkdirSync(sockDir, { recursive: true });
 
       socketServer.start(sockPath, {
         appName: app.name,

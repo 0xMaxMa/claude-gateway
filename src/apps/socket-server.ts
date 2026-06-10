@@ -58,8 +58,19 @@ export class SocketServer {
     }
 
     return new Promise((resolve, reject) => {
-      // Ensure parent directory exists (socket lives inside a per-app subdirectory)
-      try { fs.mkdirSync(path.dirname(socketPath), { recursive: true }); } catch { /* exists */ }
+      // Ensure parent directory exists and is writable by the current process.
+      // If it exists but is owned by root (from a previous sudo run), remove and recreate it
+      // so the gateway process (running as ubuntu) can create the socket inside.
+      const sockDir = path.dirname(socketPath);
+      try {
+        const stat = fs.statSync(sockDir, { throwIfNoEntry: false });
+        if (stat) {
+          try { fs.accessSync(sockDir, fs.constants.W_OK); } catch {
+            fs.rmSync(sockDir, { recursive: true, force: true });
+          }
+        }
+        fs.mkdirSync(sockDir, { recursive: true });
+      } catch { /* best-effort */ }
       // Clean up any stale socket or leftover directory before binding
       if (fs.existsSync(socketPath)) {
         try { fs.rmSync(socketPath, { recursive: true, force: true }); } catch { /* already gone */ }
