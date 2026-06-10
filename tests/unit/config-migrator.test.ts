@@ -811,23 +811,26 @@ describe('config-migrator', () => {
   // repairInjectedAgentFields
   // ---------------------------------------------------------------------------
   describe('repairInjectedAgentFields', () => {
-    it('removes telegram block when botToken is a ${} placeholder', () => {
+    it('removes telegram block only when botToken exactly matches a template credential', () => {
+      const templateCreds = new Set(['${ALFRED_BOT_TOKEN}']);
       const agents: Array<Record<string, unknown>> = [
+        // leaked from template — should be removed
         { id: 'getpod', telegram: { botToken: '${ALFRED_BOT_TOKEN}' } },
-        { id: 'feedback', telegram: { botToken: '${OTHER_TOKEN}' } },
+        // user's own placeholder — must NOT be removed
+        { id: 'feedback', telegram: { botToken: '${FEEDBACK_BOT_TOKEN}' } },
       ];
-      const removed = repairInjectedAgentFields(agents);
+      const removed = repairInjectedAgentFields(agents, templateCreds);
       expect(agents[0].telegram).toBeUndefined();
-      expect(agents[1].telegram).toBeUndefined();
+      expect(agents[1].telegram).toBeDefined();
       expect(removed).toContain('agents[0].telegram');
-      expect(removed).toContain('agents[1].telegram');
+      expect(removed).not.toContain('agents[1].telegram');
     });
 
     it('preserves telegram when botToken is a real resolved value', () => {
       const agents: Array<Record<string, unknown>> = [
         { id: 'alfred', telegram: { botToken: '123456789:AAHfiq...' } },
       ];
-      const removed = repairInjectedAgentFields(agents);
+      const removed = repairInjectedAgentFields(agents, new Set());
       expect(agents[0].telegram).toBeDefined();
       expect(removed).toHaveLength(0);
     });
@@ -836,7 +839,17 @@ describe('config-migrator', () => {
       const agents: Array<Record<string, unknown>> = [
         { id: 'api-only', description: 'no telegram' },
       ];
-      const removed = repairInjectedAgentFields(agents);
+      const removed = repairInjectedAgentFields(agents, new Set());
+      expect(removed).toHaveLength(0);
+    });
+
+    it('is a no-op for telegram when templateCredentials is empty', () => {
+      // Even if botToken is a placeholder, empty templateCreds = no leaked values to detect
+      const agents: Array<Record<string, unknown>> = [
+        { id: 'getpod', telegram: { botToken: '${GETPOD_BOT_TOKEN}' } },
+      ];
+      const removed = repairInjectedAgentFields(agents, new Set());
+      expect(agents[0].telegram).toBeDefined();
       expect(removed).toHaveLength(0);
     });
 
@@ -845,7 +858,7 @@ describe('config-migrator', () => {
         { id: 'getpod', env: '~/.claude-gateway/agents/alfred/.env' },
         { id: 'alfred', env: '~/.claude-gateway/agents/alfred/.env' },
       ];
-      const removed = repairInjectedAgentFields(agents);
+      const removed = repairInjectedAgentFields(agents, new Set());
       // getpod's env references alfred — should be removed
       expect(agents[0].env).toBeUndefined();
       expect(removed).toContain('agents[0].env');

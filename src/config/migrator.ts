@@ -138,32 +138,57 @@ const PLACEHOLDER_RE = /^\$\{[^}]+\}$/;
 const AGENT_ENV_PATH_RE = /[/\\]agents[/\\]([^/\\]+)[/\\]\.env$/;
 
 /**
+ * Collect all botToken placeholder values from template agents so that
+ * repairInjectedAgentFields can distinguish leaked template credentials
+ * from legitimate user credentials (which also use ${VAR} format).
+ */
+function extractTemplateCredentials(templateAgents: Array<Record<string, unknown>>): Set<string> {
+  const creds = new Set<string>();
+  for (const agent of templateAgents) {
+    for (const ch of ['telegram', 'discord'] as const) {
+      const block = agent[ch];
+      if (block && typeof block === 'object' && !Array.isArray(block)) {
+        const bt = String((block as Record<string, unknown>).botToken ?? '');
+        if (PLACEHOLDER_RE.test(bt)) creds.add(bt);
+      }
+    }
+  }
+  return creds;
+}
+
+/**
  * Remove fields from agents that were incorrectly injected by a prior buggy
  * migration (where the template agent's credentials leaked into user agents).
  *
- * - telegram/discord: removed when botToken is an unresolved ${VAR} placeholder
- * - env: removed when the path references a different agent's directory
+ * - telegram/discord: removed only when botToken exactly matches a known template
+ *   credential placeholder (e.g. "${ALFRED_BOT_TOKEN}"). User agents legitimately
+ *   store their own "${AGENT_BOT_TOKEN}" placeholders which must NOT be removed.
+ * - env: removed when the path references a different agent's directory.
  *
  * Returns the list of paths removed.
  */
 export function repairInjectedAgentFields(
   agents: Array<Record<string, unknown>>,
+  templateCredentials: Set<string>,
 ): string[] {
   const removed: string[] = [];
   for (let i = 0; i < agents.length; i++) {
     const agent = agents[i];
 
-    // Remove channel blocks whose botToken is a ${VAR} placeholder
-    for (const channel of ['telegram', 'discord'] as const) {
-      const block = agent[channel];
-      if (
-        block &&
-        typeof block === 'object' &&
-        !Array.isArray(block) &&
-        PLACEHOLDER_RE.test(String((block as Record<string, unknown>).botToken ?? ''))
-      ) {
-        delete agent[channel];
-        removed.push(`agents[${i}].${channel}`);
+    // Remove channel blocks whose botToken exactly matches a template credential —
+    // meaning it was leaked from the template agent into this user agent.
+    if (templateCredentials.size > 0) {
+      for (const channel of ['telegram', 'discord'] as const) {
+        const block = agent[channel];
+        if (
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          templateCredentials.has(String((block as Record<string, unknown>).botToken ?? ''))
+        ) {
+          delete agent[channel];
+          removed.push(`agents[${i}].${channel}`);
+        }
       }
     }
 
@@ -344,7 +369,15 @@ export function detectMigration(
 
   // Repair credential fields that were incorrectly injected by earlier buggy migrations
   if (Array.isArray(configClone.agents)) {
-    removed.push(...repairInjectedAgentFields(configClone.agents as Array<Record<string, unknown>>));
+    const templateCreds = extractTemplateCredentials(
+      (template.agents as Array<Record<string, unknown>>) ?? [],
+    );
+    removed.push(
+      ...repairInjectedAgentFields(
+        configClone.agents as Array<Record<string, unknown>>,
+        templateCreds,
+      ),
+    );
   }
 
   // configVersion will always be updated
@@ -405,7 +438,15 @@ export function applyMigration(
 
   // Repair credential fields that were incorrectly injected by earlier buggy migrations
   if (Array.isArray(config.agents)) {
-    removed.push(...repairInjectedAgentFields(config.agents as Array<Record<string, unknown>>));
+    const templateCreds = extractTemplateCredentials(
+      (template.agents as Array<Record<string, unknown>>) ?? [],
+    );
+    removed.push(
+      ...repairInjectedAgentFields(
+        config.agents as Array<Record<string, unknown>>,
+        templateCreds,
+      ),
+    );
   }
 
   // Update configVersion
