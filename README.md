@@ -29,6 +29,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
 - **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
 - **Session persistence** — conversation history saved and restored across restarts
+- **PTY backend** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; uses `TranscriptTailer` for reliable output instead of ANSI parsing; app-agents always stay headless
 
 ---
 
@@ -202,7 +203,6 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
       },
       "claude": {
         "model": "claude-sonnet-4-6",
-        "dangerouslySkipPermissions": true,
         "extraFlags": []
       },
       "heartbeat": {
@@ -269,9 +269,28 @@ Access policy is configured per-channel in the agent's workspace state file, not
 | `open` | Anyone can DM the agent |
 | `pairing` | New users DM the bot to receive a pairing code; approve with `npm run pair` |
 
-### `dangerouslySkipPermissions`
+### `gateway.headless`
 
-Set to `true` for all agents running headless (no interactive terminal). Without it the agent cannot use MCP tools like sending Telegram replies.
+Controls the Claude subprocess backend for all non-app agents.
+
+| Value | Backend | Description |
+|-------|---------|-------------|
+| `true` *(default)* | Headless (`--print`) | Stateless invocation, lowest overhead |
+| `false` | PTY shell wrapper | Interactive pseudo-terminal — full TUI support |
+
+**App-agents always run headless** regardless of this setting.
+
+`--dangerously-skip-permissions` is always injected by the gateway automatically — there is no per-agent config field for it.
+
+```json
+{
+  "gateway": {
+    "headless": false
+  }
+}
+```
+
+This setting is hot-reloadable — new sessions pick it up without a restart.
 
 ### `gateway.api.keys`
 
@@ -878,7 +897,6 @@ npm run typecheck
 
 **Agent fails to start**
 - Check workspace path exists and contains `AGENTS.md`
-- Check `dangerouslySkipPermissions: true` is set in config
 - Check logs in `~/.claude-gateway/logs/<id>.log`
 
 **Agent not responding to messages**
