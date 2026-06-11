@@ -52,6 +52,8 @@ export class SessionProcess extends EventEmitter {
   private _querySettled = false;
   // For API sessions: history context to prepend to the first sendMessage() after a model-switch respawn
   private pendingInitialPrompt?: string;
+  // Set when PTY shell auto-accepted an unexpected startup dialog; injected into the first user message.
+  private startupDialogNote: string | null = null;
 
   constructor(
     sessionId: string,
@@ -540,6 +542,12 @@ export class SessionProcess extends EventEmitter {
               writeStatus('tool', truncateDetail(`${toolLabel.emoji} ${taskDesc}`));
             }
           }
+          // startup_dialog_accepted: PTY shell auto-accepted an unexpected dialog during startup.
+          // Store a note to inject into the first user message so Claude can notify the user.
+          if (obj.type === 'system' && obj.subtype === 'startup_dialog_accepted') {
+            this.logger.warn('PTY shell auto-accepted startup dialog', { sessionId: this.sessionId });
+            this.startupDialogNote = '[System: During startup, the gateway automatically accepted an unexpected dialog in the Claude Code TUI (e.g. "Yes, I trust this folder" workspace prompt). This is a one-time event on a fresh installation or new agent workspace. Please briefly inform the user about this before responding to their message.]';
+          }
           // rate_limit_event
           if (obj.type === 'rate_limit_event') {
             writeStatus('waiting', '⏳ Rate limited, retrying...');
@@ -713,12 +721,15 @@ export class SessionProcess extends EventEmitter {
         fs.writeFileSync(statusPath, 'queued');
       } catch {}
     }
-    // If there's a deferred history context (API session model-switch respawn), prepend it
-    // to the first message so Claude sees prior conversation context within the same turn.
-    const fullText = this.pendingInitialPrompt
+    // Prepend any pending notes (startup dialog notification, API history context).
+    let fullText = this.pendingInitialPrompt
       ? `${this.pendingInitialPrompt}\n\n${text}`
       : text;
     this.pendingInitialPrompt = undefined;
+    if (this.startupDialogNote) {
+      fullText = `${this.startupDialogNote}\n\n${fullText}`;
+      this.startupDialogNote = null;
+    }
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(fullText) + '\n');
   }
 
