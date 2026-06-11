@@ -372,36 +372,15 @@ export class AgentRunner extends EventEmitter {
         return;
       }
 
-      // Graceful restart ALL channel sessions via signal files so they pick up the new agent-level model.
-      // Signal file approach: chokidar watcher in SessionProcess detects the file, reads the notify
-      // payload, finishes in-flight work, then restarts — ensuring no mid-response interruption.
-      const chatId = body.chat_id ?? '';
       let restarted = false;
+      const restartPromises: Promise<void>[] = [];
       for (const [key, session] of this.sessions) {
-        // Only restart channel sessions (not API sessions which use per-session model)
         if (session.source !== 'api') {
           restarted = true;
-          const channel = this.channelSourceMap.get(key) ?? 'telegram';
-          const stateDir = channel === 'discord' ? '.discord-state' : '.telegram-state';
-          const signalPayload = JSON.stringify({
-            notify: { chat_id: chatId, text: `✅ Model changed to ${newModel}` },
-          });
-          const signalPath = path.join(
-            this.agentConfig.workspace,
-            stateDir,
-            `restart-${key}`,
-          );
-          try {
-            fs.mkdirSync(path.dirname(signalPath), { recursive: true });
-            fs.writeFileSync(signalPath, signalPayload);
-          } catch (err) {
-            this.logger.error('Failed to write restart signal for set_model', {
-              sessionKey: key,
-              error: (err as Error).message,
-            });
-          }
+          restartPromises.push(this.restartProcess(key));
         }
       }
+      await Promise.all(restartPromises);
 
       respond({ success: true, model: newModel, restarted });
       return;
@@ -411,29 +390,11 @@ export class AgentRunner extends EventEmitter {
       const chatId = body.chat_id ?? '';
       const session = this.sessions.get(chatId);
       if (!session) {
-        // No active session — nothing to restart, but not an error
         respond({ success: true, restarted: false });
         return;
       }
 
-      // Write restart signal with notify payload
-      const signalPayload = JSON.stringify({
-        notify: { chat_id: chatId, text: 'Session restarted — back online!' },
-      });
-      const signalPath = path.join(
-        this.agentConfig.workspace,
-        '.telegram-state',
-        `restart-${chatId}`,
-      );
-      try {
-        fs.mkdirSync(path.dirname(signalPath), { recursive: true });
-        fs.writeFileSync(signalPath, signalPayload);
-      } catch (err) {
-        this.logger.error('Failed to write restart signal', { error: (err as Error).message });
-        respond({ success: false, error: 'Failed to write restart signal' });
-        return;
-      }
-
+      await this.restartProcess(chatId);
       respond({ success: true, restarted: true });
       return;
     }
