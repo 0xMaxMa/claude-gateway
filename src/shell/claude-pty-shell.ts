@@ -25,7 +25,9 @@ const MAX_ENTER_RETRIES = 2;
 const FALLBACK_IDLE_QUIET_MS = 2000;
 const DIALOG_ACTION_COOLDOWN_MS = 2000;
 const STARTUP_TIMEOUT_MS = 120_000;
-const WATCHDOG_MS = Number(process.env.PTY_SHELL_WATCHDOG_MS ?? 30 * 60 * 1000);
+const WATCHDOG_MS = process.env.PTY_SHELL_WATCHDOG_MS
+  ? Number(process.env.PTY_SHELL_WATCHDOG_MS) || (30 * 60 * 1000)
+  : 30 * 60 * 1000;
 // Set PTY_SHELL_SKIP_DIALOG_DISMISS=1 to disable all TUI dialog auto-dismiss.
 // Use when a new Claude Code version changes TUI text and dialog patterns break.
 const SKIP_DIALOG_DISMISS = process.env.PTY_SHELL_SKIP_DIALOG_DISMISS === '1';
@@ -61,6 +63,7 @@ class Driver {
   private queue: string[] = [];
   private turn: ActiveTurn | null = null;
   private lastDialogActionAt = 0;
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
   private tailer!: TranscriptTailer;
 
@@ -91,7 +94,7 @@ class Driver {
 
     this.attachStdin();
     this.attachSignals();
-    setInterval(() => this.tick(), POLL_MS);
+    this.tickTimer = setInterval(() => this.tick(), POLL_MS);
   }
 
   // ---- stdin: gateway → wrapper -------------------------------------------
@@ -349,6 +352,7 @@ class Driver {
   private shutdown(code: number): void {
     if (this.exiting) return;
     this.exiting = true;
+    if (this.tickTimer) clearInterval(this.tickTimer);
     this.tailer.stop();
     this.host.kill();
     // PtyHost.onExit will exit(child code); this is the safety net.

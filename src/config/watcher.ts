@@ -102,12 +102,12 @@ export class ConfigWatcher extends EventEmitter {
 
       if (hotChanges.length > 0) {
         this.logger.info('Config hot-reloaded', {
-          fields: hotChanges.map(c => `${c.agentId}.${c.field}`),
+          fields: hotChanges.map(c => c.agentId ? `${c.agentId}.${c.field}` : c.field),
         });
       }
       if (coldChanges.length > 0) {
         this.logger.warn('Config changes require restart to take effect', {
-          fields: coldChanges.map(c => `${c.agentId}.${c.field}`),
+          fields: coldChanges.map(c => c.agentId ? `${c.agentId}.${c.field}` : c.field),
         });
       }
 
