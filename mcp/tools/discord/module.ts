@@ -329,7 +329,8 @@ export class DiscordModule implements ChannelModule {
     for (const filename of files) {
       if (!filename.endsWith('.json')) continue;
       const filePath = path.join(notifyDir, filename);
-      const channelId = filename.slice(0, -'.json'.length);
+      // Filename format: <channelId>-<timestamp>.json — strip suffix after last '-<digits>'
+      const channelId = filename.replace(/-\d+\.json$/, '').replace(/\.json$/, '');
       let text: string;
       try {
         const raw = fs.readFileSync(filePath, 'utf8');

@@ -399,7 +399,8 @@ function checkOutboundNotify(): void {
   for (const filename of files) {
     if (!filename.endsWith('.json')) continue
     const filePath = join(OUTBOUND_NOTIFY_DIR, filename)
-    const chatId = filename.slice(0, -'.json'.length)
+    // Filename format: <chatId>-<timestamp>.json — strip suffix after last '-<digits>'
+    const chatId = filename.replace(/-\d+\.json$/, '').replace(/\.json$/, '')
     let text: string
     try {
       const raw = readFileSync(filePath, 'utf8')

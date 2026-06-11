@@ -2251,7 +2251,7 @@ export class AgentRunner extends EventEmitter {
     try {
       fs.mkdirSync(notifyDir, { recursive: true });
       fs.writeFileSync(
-        path.join(notifyDir, `${chatId}.json`),
+        path.join(notifyDir, `${chatId}-${Date.now()}.json`),
         JSON.stringify({ text }),
       );
     } catch (err) {

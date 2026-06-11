@@ -202,6 +202,7 @@ class Driver {
     const turn = this.turn;
     if (!turn) return;
     this.turn = null;
+    this.startupNotifySent = false; // allow re-notification if a future dialog appears
     this.tailer.flush(); // drain any records written in the last poll window
     const text = turn.texts.join('');
     this.emitter.emitResult({
