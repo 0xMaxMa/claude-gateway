@@ -1,20 +1,31 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 
 /**
- * Pre-write hasTrustDialogAccepted: true for the given workspace path into
- * ~/.claude.json before spawning Claude Code so the trust-folder dialog never appears.
- * Safe to call repeatedly — skips the disk write if the flag is already set.
+ * Pre-write two flags before spawning Claude Code so no startup dialogs appear:
  *
- * @param cwd            Workspace directory path (the key in projects map).
- * @param claudeJsonPath Override for the config file path (used in tests).
+ *   ~/.claude.json          projects[cwd].hasTrustDialogAccepted = true
+ *                           → suppresses the workspace trust dialog
+ *
+ *   ~/.claude/settings.json hasCompletedOnboarding = true
+ *                           → suppresses the theme/style picker dialog
+ *
+ * Both writes are atomic (tmp+rename) and skip the disk write if the flag is
+ * already set. Paths can be overridden for testing.
  */
-export function preTrustWorkspace(cwd: string, claudeJsonPath?: string): void {
-  const configPath = claudeJsonPath ?? path.join(os.homedir(), '.claude.json');
-  const tmpPath = `${configPath}.tmp`;
+export function preTrustWorkspace(
+  cwd: string,
+  claudeJsonPath?: string,
+  settingsJsonPath?: string,
+): void {
+  _writeTrustFlag(cwd, claudeJsonPath ?? path.join(os.homedir(), '.claude.json'));
+  _writeOnboardingFlag(settingsJsonPath ?? path.join(os.homedir(), '.claude', 'settings.json'));
+}
 
+function _writeTrustFlag(cwd: string, configPath: string): void {
+  const tmpPath = `${configPath}.tmp`;
   let data: Record<string, unknown> = {};
   try {
     data = JSON.parse(fs.readFileSync(configPath, 'utf8')) as Record<string, unknown>;
@@ -29,7 +40,6 @@ export function preTrustWorkspace(cwd: string, claudeJsonPath?: string): void {
   }
   const projects = data.projects as Record<string, Record<string, unknown>>;
   if (!projects[cwd]) projects[cwd] = {};
-
   if (projects[cwd].hasTrustDialogAccepted === true) return;
 
   projects[cwd].hasTrustDialogAccepted = true;
@@ -41,15 +51,45 @@ export function preTrustWorkspace(cwd: string, claudeJsonPath?: string): void {
   }
 }
 
+function _writeOnboardingFlag(settingsPath: string): void {
+  const tmpPath = `${settingsPath}.tmp`;
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      process.stderr.write(`[pty-shell] WARN could not read ${settingsPath}: ${(err as Error).message}\n`);
+    }
+  }
+
+  if (data.hasCompletedOnboarding === true) return;
+
+  data.hasCompletedOnboarding = true;
+  try {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    fs.renameSync(tmpPath, settingsPath);
+  } catch (err) {
+    process.stderr.write(`[pty-shell] WARN could not write ${settingsPath}: ${(err as Error).message}\n`);
+  }
+}
+
 /**
  * Check whether Claude Code is authenticated.
  * Runs `claude auth status` and parses the JSON output.
- * Returns false on any error (missing binary, parse failure, etc.).
+ * Returns { loggedIn: false } on any error (missing binary, parse failure, etc.).
+ *
+ * Uses spawnSync with an args array — avoids shell interpolation of claudeBin.
  */
 export function checkAuthStatus(claudeBin = 'claude'): { loggedIn: boolean; authMethod?: string } {
+  const result = spawnSync(claudeBin, ['auth', 'status'], {
+    timeout: 10_000,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (result.error || result.status !== 0) return { loggedIn: false };
   try {
-    const out = execSync(`${claudeBin} auth status`, { timeout: 10_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    const parsed = JSON.parse(out.trim()) as { loggedIn?: boolean; authMethod?: string };
+    const parsed = JSON.parse(result.stdout.trim()) as { loggedIn?: boolean; authMethod?: string };
     return { loggedIn: parsed.loggedIn === true, authMethod: parsed.authMethod };
   } catch {
     return { loggedIn: false };

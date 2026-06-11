@@ -133,52 +133,71 @@ describe('ScreenModel raw-chunk busy detection', () => {
 
 describe('preTrustWorkspace', () => {
   let tmpDir: string;
-  let configPath: string;
+  let claudeJsonPath: string;
+  let settingsJsonPath: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-trust-test-'));
-    configPath = path.join(tmpDir, '.claude.json');
+    claudeJsonPath = path.join(tmpDir, '.claude.json');
+    settingsJsonPath = path.join(tmpDir, 'settings.json');
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('creates ~/.claude.json with trust entry when file is absent', () => {
-    preTrustWorkspace('/workspace/test', configPath);
-    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    expect(data.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
+  it('creates ~/.claude.json and settings.json when both absent', () => {
+    preTrustWorkspace('/workspace/test', claudeJsonPath, settingsJsonPath);
+    const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    expect(claudeJson.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
+    const settings = JSON.parse(fs.readFileSync(settingsJsonPath, 'utf8'));
+    expect(settings.hasCompletedOnboarding).toBe(true);
   });
 
-  it('adds trust entry to existing file without overwriting other data', () => {
-    fs.writeFileSync(configPath, JSON.stringify({ theme: 'dark', projects: { '/other': { foo: 'bar' } } }));
-    preTrustWorkspace('/workspace/new', configPath);
-    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  it('adds trust entry to existing ~/.claude.json without overwriting other data', () => {
+    fs.writeFileSync(claudeJsonPath, JSON.stringify({ theme: 'dark', projects: { '/other': { foo: 'bar' } } }));
+    preTrustWorkspace('/workspace/new', claudeJsonPath, settingsJsonPath);
+    const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.theme).toBe('dark');
     expect(data.projects['/other'].foo).toBe('bar');
     expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
   });
 
-  it('skips the write when trust flag is already set', () => {
-    const initial = JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } });
-    fs.writeFileSync(configPath, initial);
-    const mtime = fs.statSync(configPath).mtimeMs;
-    preTrustWorkspace('/ws', configPath);
-    expect(fs.statSync(configPath).mtimeMs).toBe(mtime); // file unchanged
+  it('adds hasCompletedOnboarding to existing settings.json without overwriting other keys', () => {
+    fs.writeFileSync(settingsJsonPath, JSON.stringify({ env: { FOO: 'bar' }, skipDangerousModePermissionPrompt: true }));
+    preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
+    const settings = JSON.parse(fs.readFileSync(settingsJsonPath, 'utf8'));
+    expect(settings.hasCompletedOnboarding).toBe(true);
+    expect(settings.env.FOO).toBe('bar');
+    expect(settings.skipDangerousModePermissionPrompt).toBe(true);
+  });
+
+  it('skips trust write when hasTrustDialogAccepted already set', () => {
+    fs.writeFileSync(claudeJsonPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } }));
+    const mtime = fs.statSync(claudeJsonPath).mtimeMs;
+    preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
+    expect(fs.statSync(claudeJsonPath).mtimeMs).toBe(mtime);
+  });
+
+  it('skips onboarding write when hasCompletedOnboarding already set', () => {
+    fs.writeFileSync(settingsJsonPath, JSON.stringify({ hasCompletedOnboarding: true }));
+    const mtime = fs.statSync(settingsJsonPath).mtimeMs;
+    preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
+    expect(fs.statSync(settingsJsonPath).mtimeMs).toBe(mtime);
   });
 
   it('sets trust when project entry exists but flag is missing', () => {
-    fs.writeFileSync(configPath, JSON.stringify({ projects: { '/ws': { someOtherKey: 1 } } }));
-    preTrustWorkspace('/ws', configPath);
-    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    fs.writeFileSync(claudeJsonPath, JSON.stringify({ projects: { '/ws': { someOtherKey: 1 } } }));
+    preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
+    const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
     expect(data.projects['/ws'].someOtherKey).toBe(1);
   });
 
-  it('handles malformed JSON gracefully and creates fresh file', () => {
-    fs.writeFileSync(configPath, 'not valid json');
-    expect(() => preTrustWorkspace('/ws', configPath)).not.toThrow();
-    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  it('handles malformed ~/.claude.json gracefully', () => {
+    fs.writeFileSync(claudeJsonPath, 'not valid json');
+    expect(() => preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath)).not.toThrow();
+    const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
   });
 });
