@@ -94,9 +94,8 @@ describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
     expect(TUI_BYPASS_PERMS).toContain('Yes, I accept');
   });
 
-  it('TRUST_FOLDER covers both old and new dialog wording', () => {
-    expect(TUI_TRUST_FOLDER).toContain('Do you trust the files in this folder');
-    expect(TUI_TRUST_FOLDER).toContain('Yes, I trust this folder');
+  it('TRUST_FOLDER matches expected dialog text', () => {
+    expect(TUI_TRUST_FOLDER).toBe('Do you trust the files in this folder');
   });
 
   it('CONFIRM_MARKER matches expected dialog text', () => {
