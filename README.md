@@ -38,6 +38,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - [Claude Code CLI](https://claude.ai/code) v2.1.0+ installed and authenticated — `channels mode` is required (`claude --version`)
 - [Bun](https://bun.sh) — runs the MCP server subprocess (`mcp/server.ts`)
 - A bot token per agent — Telegram (from [@BotFather](https://t.me/BotFather)) or Discord (from [Discord Developer Portal](https://discord.com/developers/applications))
+- **PTY backend only** (`claude.headless: false`): native build tools required for `node-pty` — `gcc`, `python3`, and `node-gyp` must be available at `npm install` time (pre-built binaries are included for common platforms; build tools are only needed if a pre-built binary is unavailable for your platform)
 
 ---
 

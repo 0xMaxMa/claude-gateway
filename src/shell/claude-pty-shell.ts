@@ -26,6 +26,9 @@ const FALLBACK_IDLE_QUIET_MS = 2000;
 const DIALOG_ACTION_COOLDOWN_MS = 2000;
 const STARTUP_TIMEOUT_MS = 120_000;
 const WATCHDOG_MS = Number(process.env.PTY_SHELL_WATCHDOG_MS ?? 30 * 60 * 1000);
+// Set PTY_SHELL_SKIP_DIALOG_DISMISS=1 to disable all TUI dialog auto-dismiss.
+// Use when a new Claude Code version changes TUI text and dialog patterns break.
+const SKIP_DIALOG_DISMISS = process.env.PTY_SHELL_SKIP_DIALOG_DISMISS === '1';
 
 const DEBUG = process.env.PTY_SHELL_DEBUG === '1';
 
@@ -264,7 +267,10 @@ class Driver {
     if (!turn.sawBusy
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
         && this.screen.hasPrompt()
-        && this.screen.quietMs() > 1500) {
+        && this.screen.quietMs() > 1500
+        && this.tailer.seenRecords === 0) {
+      // Only retry if the transcript is empty — a non-zero seenRecords means
+      // claude already started writing output (just slow to show "esc to interrupt").
       if (turn.enterRetries < MAX_ENTER_RETRIES) {
         turn.enterRetries++;
         turn.submittedAt = now;
@@ -293,6 +299,7 @@ class Driver {
   }
 
   private maybeHandleDialog(): void {
+    if (SKIP_DIALOG_DISMISS) return;
     const now = Date.now();
     if (now - this.lastDialogActionAt < DIALOG_ACTION_COOLDOWN_MS) return;
     if (this.screen.quietMs() < 500) return; // wait until the dialog is fully drawn

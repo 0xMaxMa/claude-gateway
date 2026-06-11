@@ -4,9 +4,11 @@ import * as pty from 'node-pty';
 const WRITE_CHUNK_BYTES = 8 * 1024;
 const WRITE_CHUNK_DELAY_MS = 10;
 
-// Any key matching these prefixes is scrubbed to prevent nested-claude
-// child-session behavior that silently stops transcript JSONL writes.
-const SCRUB_ENV_PREFIXES = ['CLAUDECODE', 'CLAUDE_CODE_'];
+// Keys matching these prefixes are scrubbed before spawning the child PTY:
+// CLAUDECODE/CLAUDE_CODE_ prevent nested-claude child-session behavior that
+// silently stops transcript JSONL writes; CLAUDE_REAL_BIN is a wrapper-only
+// variable and must not leak into the child.
+const SCRUB_ENV_PREFIXES = ['CLAUDECODE', 'CLAUDE_CODE_', 'CLAUDE_REAL_BIN'];
 
 // Auth vars that share the CLAUDE_CODE_ prefix but must be kept.
 const SCRUB_ENV_KEEPLIST = new Set(['CLAUDE_CODE_OAUTH_TOKEN']);

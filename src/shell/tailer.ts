@@ -49,6 +49,8 @@ export class TranscriptTailer {
   private partialLine = '';
   private timer: ReturnType<typeof setInterval> | null = null;
   private resolvedPath: string | null = null;
+  /** Total records dispatched since start — non-zero means claude is writing output. */
+  seenRecords = 0;
 
   constructor(
     private readonly cwd: string,
@@ -137,6 +139,7 @@ export class TranscriptTailer {
 
   private dispatch(record: Record<string, unknown>): void {
     if (record.isSidechain === true) return; // subagent-internal records
+    this.seenRecords++;
     if (record.type === 'assistant') {
       const message = record.message as AssistantRecord['message'] | undefined;
       if (message && Array.isArray(message.content)) {
