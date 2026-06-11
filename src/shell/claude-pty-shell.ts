@@ -36,6 +36,12 @@ const WATCHDOG_MS = process.env.PTY_SHELL_WATCHDOG_MS
 // Use when a new Claude Code version changes TUI text and dialog patterns break.
 const SKIP_DIALOG_DISMISS = process.env.PTY_SHELL_SKIP_DIALOG_DISMISS === '1';
 
+// Set PTY_SHELL_NO_BRACKETED_PASTE=1 if the Claude Code TUI ever disables bracketed
+// paste mode. Without bracketed paste, a newline inside the user's message would
+// submit the input early. sanitizeUserText() strips CR so the '\r' sent after the
+// text is the only submit trigger — safe in both modes.
+const NO_BRACKETED_PASTE = process.env.PTY_SHELL_NO_BRACKETED_PASTE === '1';
+
 const DEBUG = process.env.PTY_SHELL_DEBUG === '1';
 
 function logError(msg: string): void {
@@ -223,9 +229,15 @@ class Driver {
   }
 
   private async typeAndSubmit(text: string): Promise<void> {
-    // Bracketed paste so multiline text cannot submit early; \r must be a
-    // separate delayed write or the TUI treats it as part of the paste.
-    await this.host.writeChunked(`\x1b[200~${text}\x1b[201~`);
+    if (NO_BRACKETED_PASTE) {
+      // Fallback: sanitizeUserText() strips all CR, so '\r' below is the only
+      // submit trigger — safe for multiline text without bracketed paste.
+      await this.host.writeChunked(text);
+    } else {
+      // Bracketed paste prevents early submission on newlines inside the text.
+      // \r must be a separate delayed write or the TUI treats it as part of the paste.
+      await this.host.writeChunked(`\x1b[200~${text}\x1b[201~`);
+    }
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
     this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();

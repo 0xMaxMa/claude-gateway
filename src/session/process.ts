@@ -371,6 +371,8 @@ export class SessionProcess extends EventEmitter {
     const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
     let ptyRealBin: string | null = null;
     // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
+    // API sessions are excluded: the stalled detector is receiver-side (Telegram/Discord)
+    // and never watches API sessions — writing a heartbeat file for them would be a no-op.
     const ptyTypingDir = (usePtyShell && this.source !== 'api') ? this.typingDir : null;
     const ptyHeartbeatPath = ptyTypingDir ? path.join(ptyTypingDir, `${this.chatId}.heartbeat`) : null;
     if (usePtyShell) {

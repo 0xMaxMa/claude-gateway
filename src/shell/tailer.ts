@@ -30,7 +30,11 @@ export interface TailerEvents {
   onError: (err: Error) => void;
 }
 
-/** cwd → Claude Code project-dir slug (verified: `/` and `.` both become `-`). */
+/**
+ * cwd → Claude Code project-dir slug (verified against v2.1.x: `/` and `.` both become `-`).
+ * If Claude Code ever changes this scheme, findFile()'s fallback UUID scan will still
+ * locate the transcript — the primary path is just an optimistic fast path.
+ */
 export function projectSlug(cwd: string): string {
   return cwd.replace(/[/.]/g, '-');
 }
