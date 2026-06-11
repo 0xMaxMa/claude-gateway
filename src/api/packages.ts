@@ -28,18 +28,18 @@ interface CacheEntry {
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 let versionCache: CacheEntry | null = null;
-let updatingPackage: string | null = null;
+let isUpdating = false;
 
 export function _resetCache(): void {
   versionCache = null;
 }
 
 export function _resetLock(): void {
-  updatingPackage = null;
+  isUpdating = false;
 }
 
-export function _setLock(pkg: string): void {
-  updatingPackage = pkg;
+export function _setLock(): void {
+  isUpdating = true;
 }
 
 function getNpmListVersion(packageName: string): string | null {
@@ -98,16 +98,16 @@ function cleanStaleNpmTempDirs(npmRoot: string, packageName: string): void {
   const scopeDir = join(npmRoot, scope);
   let entries: string[];
   try {
-    entries = readdirSync(scopeDir) as string[];
+    entries = readdirSync(scopeDir, { withFileTypes: false }) as string[];
   } catch {
     return;
   }
 
   const prefix = `.${basename}-`;
   for (const entry of entries) {
-    if ((entry as string).startsWith(prefix)) {
+    if (entry.startsWith(prefix)) {
       try {
-        rmSync(join(scopeDir, entry as string), { recursive: true, force: true });
+        rmSync(join(scopeDir, entry), { recursive: true, force: true });
       } catch {
         // best-effort: ignore errors on individual temp dir removal
       }
@@ -199,12 +199,12 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
     }
 
     // Reject if another update is already in progress
-    if (updatingPackage !== null) {
+    if (isUpdating) {
       res.status(409).json({ error: 'update already in progress' });
       return;
     }
 
-    updatingPackage = name;
+    isUpdating = true;
     try {
       // Resolve npm global root for temp dir cleanup
       let npmRoot = '';
@@ -273,7 +273,7 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
         res.json({ package: packageName, from, to, updated: true, warning: null });
       }
     } finally {
-      updatingPackage = null;
+      isUpdating = false;
     }
   });
 

@@ -376,24 +376,6 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
 
 const NPM_ROOT = '/fake/npm/root';
 
-function mockExecSyncWithNpmRoot(npmListResponses: Record<string, string>, installResult?: 'ok' | Error) {
-  let listCallCount = 0;
-  mockExecSync.mockImplementation((cmd: unknown) => {
-    const cmdStr = cmd as string;
-    if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
-    if (cmdStr.includes('npm list')) {
-      const pkg = Object.keys(npmListResponses)[listCallCount % Object.keys(npmListResponses).length];
-      listCallCount++;
-      return npmListResponses[pkg] ?? '{}';
-    }
-    if (cmdStr.includes('npm install')) {
-      if (installResult instanceof Error) throw installResult;
-      return '';
-    }
-    return '{}';
-  });
-}
-
 describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
   it('T16: stale npm temp dir exists → pre-clean removes it, update succeeds', async () => {
     delete process.env.INVOCATION_ID;
@@ -489,7 +471,7 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
     mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
 
     // Simulate another update already in progress
-    _setLock('claude-code');
+    _setLock();
 
     const res = await request(makeApp())
       .post('/api/v1/packages/claude-code/update')
@@ -497,6 +479,40 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('update already in progress');
+  });
+
+  it('T18b: lock released after successful update — next request is not 409', async () => {
+    delete process.env.INVOCATION_ID;
+    delete process.env.PM2_HOME;
+    delete process.env.pm_id;
+
+    let listCount = 0;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+      if (cmdStr.includes('npm list')) {
+        listCount++;
+        const version = listCount <= 2 ? '1.0.5' : '1.1.0';
+        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+      }
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
+
+    const app = makeApp();
+
+    const res1 = await request(app)
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+    expect(res1.status).toBe(200);
+
+    // Reset fetch version so second request also sees an update available
+    listCount = 0;
+    const res2 = await request(app)
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+    expect(res2.status).not.toBe(409);
   });
 
   it('T19: non-ENOTEMPTY install failure → 500, no retry attempted', async () => {
