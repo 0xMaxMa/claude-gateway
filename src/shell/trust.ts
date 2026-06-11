@@ -40,9 +40,14 @@ function _writeTrustFlag(cwd: string, configPath: string): void {
   }
   const projects = data.projects as Record<string, Record<string, unknown>>;
   if (!projects[cwd]) projects[cwd] = {};
-  if (projects[cwd].hasTrustDialogAccepted === true) return;
+  if (
+    projects[cwd].hasTrustDialogAccepted === true &&
+    typeof projects[cwd].projectOnboardingSeenCount === 'number' &&
+    (projects[cwd].projectOnboardingSeenCount as number) > 0
+  ) return;
 
   projects[cwd].hasTrustDialogAccepted = true;
+  projects[cwd].projectOnboardingSeenCount = 1;
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
     fs.renameSync(tmpPath, configPath);

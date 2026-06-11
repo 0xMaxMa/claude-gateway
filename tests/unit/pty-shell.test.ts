@@ -150,6 +150,7 @@ describe('preTrustWorkspace', () => {
     preTrustWorkspace('/workspace/test', claudeJsonPath, settingsJsonPath);
     const claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(claudeJson.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
+    expect(claudeJson.projects['/workspace/test'].projectOnboardingSeenCount).toBe(1);
     const settings = JSON.parse(fs.readFileSync(settingsJsonPath, 'utf8'));
     expect(settings.hasCompletedOnboarding).toBe(true);
   });
@@ -161,6 +162,7 @@ describe('preTrustWorkspace', () => {
     expect(data.theme).toBe('dark');
     expect(data.projects['/other'].foo).toBe('bar');
     expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
+    expect(data.projects['/workspace/new'].projectOnboardingSeenCount).toBe(1);
   });
 
   it('adds hasCompletedOnboarding to existing settings.json without overwriting other keys', () => {
@@ -172,11 +174,18 @@ describe('preTrustWorkspace', () => {
     expect(settings.skipDangerousModePermissionPrompt).toBe(true);
   });
 
-  it('skips trust write when hasTrustDialogAccepted already set', () => {
-    fs.writeFileSync(claudeJsonPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } }));
+  it('skips trust write when both flags already set', () => {
+    fs.writeFileSync(claudeJsonPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true, projectOnboardingSeenCount: 1 } } }));
     const mtime = fs.statSync(claudeJsonPath).mtimeMs;
     preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
     expect(fs.statSync(claudeJsonPath).mtimeMs).toBe(mtime);
+  });
+
+  it('writes when hasTrustDialogAccepted set but projectOnboardingSeenCount missing', () => {
+    fs.writeFileSync(claudeJsonPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } }));
+    preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
+    const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
+    expect(data.projects['/ws'].projectOnboardingSeenCount).toBe(1);
   });
 
   it('skips onboarding write when hasCompletedOnboarding already set', () => {
@@ -191,6 +200,7 @@ describe('preTrustWorkspace', () => {
     preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath);
     const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
+    expect(data.projects['/ws'].projectOnboardingSeenCount).toBe(1);
     expect(data.projects['/ws'].someOtherKey).toBe(1);
   });
 
@@ -199,6 +209,7 @@ describe('preTrustWorkspace', () => {
     expect(() => preTrustWorkspace('/ws', claudeJsonPath, settingsJsonPath)).not.toThrow();
     const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
+    expect(data.projects['/ws'].projectOnboardingSeenCount).toBe(1);
   });
 });
 
