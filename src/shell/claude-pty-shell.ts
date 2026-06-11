@@ -58,6 +58,8 @@ interface ActiveTurn {
   texts: string[];
   usage: UsageInfo | null;
   dialogEscapes: number;
+  /** Snapshot of tailer.seenRecords at turn start — used to detect per-turn output. */
+  recordsAtStart: number;
 }
 
 class Driver {
@@ -215,6 +217,7 @@ class Driver {
       texts: [],
       usage: null,
       dialogEscapes: 0,
+      recordsAtStart: this.tailer.seenRecords,
     };
     void this.typeAndSubmit(text);
   }
@@ -287,9 +290,9 @@ class Driver {
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
         && this.screen.hasPrompt()
         && this.screen.quietMs() > 1500
-        && this.tailer.seenRecords === 0) {
-      // Only retry if the transcript is empty — a non-zero seenRecords means
-      // claude already started writing output (just slow to show "esc to interrupt").
+        && this.tailer.seenRecords === turn.recordsAtStart) {
+      // Only retry if no new records have appeared since this turn started —
+      // a delta > 0 means claude already started writing output.
       if (turn.enterRetries < MAX_ENTER_RETRIES) {
         turn.enterRetries++;
         turn.submittedAt = now;
