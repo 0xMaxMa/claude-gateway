@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop create-agent update-agent pair mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs
+.PHONY: help start stop create-agent update-agent pair mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -65,3 +65,16 @@ pm2-logs: ## Tail gateway logs via pm2
 pm2-startup: ## Register pm2 to start on boot (run once — requires sudo)
 	@echo "Run the following command to enable pm2 on system boot:"
 	@pm2 startup | grep "sudo env" || true
+
+system-start: ## Start gateway via systemd (sudo systemctl start claude-gateway)
+	sudo systemctl start claude-gateway
+
+system-stop: ## Stop gateway via systemd (sudo systemctl stop claude-gateway)
+	sudo systemctl stop claude-gateway
+
+system-restart: ## Build and restart gateway via systemd
+	npm run build
+	sudo systemctl restart claude-gateway
+
+system-logs: ## Tail gateway logs via journalctl
+	journalctl -f -u claude-gateway
