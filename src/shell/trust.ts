@@ -10,7 +10,6 @@ import { spawnSync } from 'child_process';
  *
  *   Top-level keys (read by getGlobalConfig()):
  *     hasCompletedOnboarding = true  → skips the theme/style picker (showSetupScreens check)
- *     theme = "dark"                 → satisfies the !config.theme condition in the same check
  *
  *   projects[cwd] entry:
  *     hasTrustDialogAccepted = true  → suppresses the workspace trust dialog
@@ -47,10 +46,7 @@ function _writeClaudeJsonFlags(cwd: string, configPath: string): void {
     projects[cwd].hasTrustDialogAccepted === true &&
     typeof projects[cwd].projectOnboardingSeenCount === 'number' &&
     (projects[cwd].projectOnboardingSeenCount as number) > 0;
-  const globalFlagsOk =
-    data.hasCompletedOnboarding === true &&
-    typeof data.theme === 'string' &&
-    (data.theme as string).length > 0;
+  const globalFlagsOk = data.hasCompletedOnboarding === true;
 
   if (projectFlagsOk && globalFlagsOk) return;
 
@@ -60,7 +56,6 @@ function _writeClaudeJsonFlags(cwd: string, configPath: string): void {
   }
   if (!globalFlagsOk) {
     data.hasCompletedOnboarding = true;
-    if (!data.theme) data.theme = 'dark';
   }
 
   try {

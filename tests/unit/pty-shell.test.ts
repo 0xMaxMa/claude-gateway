@@ -150,7 +150,6 @@ describe('preTrustWorkspace', () => {
     expect(data.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
     expect(data.projects['/workspace/test'].projectOnboardingSeenCount).toBe(1);
     expect(data.hasCompletedOnboarding).toBe(true);
-    expect(data.theme).toBe('dark');
   });
 
   it('adds flags to existing file without overwriting other data', () => {
@@ -162,20 +161,11 @@ describe('preTrustWorkspace', () => {
     expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
     expect(data.projects['/workspace/new'].projectOnboardingSeenCount).toBe(1);
     expect(data.hasCompletedOnboarding).toBe(true);
-    expect(data.theme).toBe('dark');
-  });
-
-  it('preserves existing theme value if already set', () => {
-    fs.writeFileSync(claudeJsonPath, JSON.stringify({ theme: 'light', projects: {} }));
-    preTrustWorkspace('/ws', claudeJsonPath);
-    const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
-    expect(data.theme).toBe('light');
   });
 
   it('skips write when all flags already set', () => {
     fs.writeFileSync(claudeJsonPath, JSON.stringify({
       hasCompletedOnboarding: true,
-      theme: 'dark',
       projects: { '/ws': { hasTrustDialogAccepted: true, projectOnboardingSeenCount: 1 } },
     }));
     const mtime = fs.statSync(claudeJsonPath).mtimeMs;
@@ -190,7 +180,6 @@ describe('preTrustWorkspace', () => {
     preTrustWorkspace('/ws', claudeJsonPath);
     const data = JSON.parse(fs.readFileSync(claudeJsonPath, 'utf8'));
     expect(data.hasCompletedOnboarding).toBe(true);
-    expect(data.theme).toBe('dark');
   });
 
   it('writes when hasTrustDialogAccepted set but projectOnboardingSeenCount missing', () => {
@@ -216,7 +205,6 @@ describe('preTrustWorkspace', () => {
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
     expect(data.projects['/ws'].projectOnboardingSeenCount).toBe(1);
     expect(data.hasCompletedOnboarding).toBe(true);
-    expect(data.theme).toBe('dark');
   });
 });
 
