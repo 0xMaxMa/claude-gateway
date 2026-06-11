@@ -4,7 +4,7 @@ export type DialogKind = 'bypass-permissions';
 
 /** The TUI renders spaces as U+00A0 (non-breaking) — normalize before matching. */
 function normalize(text: string): string {
-  return text.replace(/ /g, ' ');
+  return text.replace(/ /g, ' ');
 }
 
 /**
