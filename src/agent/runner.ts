@@ -21,6 +21,8 @@ import type { HistorySource } from '../history/types';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
+const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
+const DISCORD_API_BASE = 'https://discord.com/api/v10';
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -2249,7 +2251,7 @@ export class AgentRunner extends EventEmitter {
         return;
       }
       try {
-        const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        const resp = await fetch(`${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: chatId, text }),
@@ -2268,7 +2270,7 @@ export class AgentRunner extends EventEmitter {
         return;
       }
       try {
-        const resp = await fetch(`https://discord.com/api/v10/channels/${chatId}/messages`, {
+        const resp = await fetch(`${DISCORD_API_BASE}/channels/${chatId}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bot ${botToken}` },
           body: JSON.stringify({ content: text.slice(0, 2000) }),

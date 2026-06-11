@@ -76,6 +76,9 @@ class Driver {
   private turn: ActiveTurn | null = null;
   private lastDialogActionAt = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  // Prevents re-sending the channel notification every DIALOG_ACTION_COOLDOWN_MS when
+  // an unexpected dialog stays on screen because we intentionally don't auto-accept it.
+  private startupNotifySent = false;
   private host!: PtyHost;
   private tailer!: TranscriptTailer;
 
@@ -356,8 +359,13 @@ class Driver {
         // Unexpected dialog (e.g. login prompt, future unknown dialog). Notify the user
         // via their channel so they can intervene. Do NOT auto-accept — pressing Enter on
         // a login or account dialog could trigger unintended authentication flows.
-        logError(`unexpected numbered dialog — notifying channel:\n${this.screen.text()}`);
-        this.emitter.emitStartupDialogNotify(this.args.sessionId, this.screen.text());
+        // One-shot: the dialog stays on screen (nothing dismisses it), so the cooldown
+        // loop would re-fire every 2s without this guard.
+        if (!this.startupNotifySent) {
+          this.startupNotifySent = true;
+          logError(`unexpected numbered dialog — notifying channel:\n${this.screen.text()}`);
+          this.emitter.emitStartupDialogNotify(this.args.sessionId, this.screen.text());
+        }
         if (this.turn) {
           this.turn.dialogEscapes++;
           if (this.turn.dialogEscapes <= 2) {
