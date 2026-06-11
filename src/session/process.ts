@@ -540,13 +540,6 @@ export class SessionProcess extends EventEmitter {
               writeStatus('tool', truncateDetail(`${toolLabel.emoji} ${taskDesc}`));
             }
           }
-          // startup_dialog_notify: PTY shell hit an unexpected numbered dialog (e.g. login).
-          // Emit event — AgentRunner sends a direct channel message so the user can intervene.
-          if (obj.type === 'system' && obj.subtype === 'startup_dialog_notify') {
-            const screen = typeof obj.screen === 'string' ? obj.screen : '';
-            this.logger.warn('PTY shell blocked by unexpected dialog', { sessionId: this.sessionId });
-            this.emit('startupDialogNotify', { chatId: this.chatId, source: this.source, screen });
-          }
           // rate_limit_event
           if (obj.type === 'rate_limit_event') {
             writeStatus('waiting', '⏳ Rate limited, retrying...');

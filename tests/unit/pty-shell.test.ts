@@ -4,8 +4,6 @@ import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
-  TUI_TRUST_OPTION_RE,
-  TUI_CONFIRM_MARKER,
 } from '../../src/shell/screen';
 import { preTrustWorkspace } from '../../src/shell/trust';
 import * as os from 'os';
@@ -97,16 +95,6 @@ describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
     expect(TUI_BYPASS_PERMS).toContain('Yes, I accept');
   });
 
-  it('TRUST_OPTION_RE matches yes-style option 1 but not login-style', () => {
-    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Yes, I trust this folder')).toBe(true);
-    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Yes, I accept')).toBe(true);
-    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Login with Claude.ai')).toBe(false);
-    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Use API key')).toBe(false);
-  });
-
-  it('CONFIRM_MARKER matches expected dialog text', () => {
-    expect(TUI_CONFIRM_MARKER).toBe('Enter to confirm');
-  });
 });
 
 // consumeBusySeen is set synchronously from raw PTY bytes — no xterm async needed.
@@ -160,7 +148,6 @@ describe('preTrustWorkspace', () => {
     preTrustWorkspace('/workspace/test', configPath);
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     expect(data.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
-    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
   it('adds trust entry to existing file without overwriting other data', () => {
@@ -170,22 +157,14 @@ describe('preTrustWorkspace', () => {
     expect(data.theme).toBe('dark');
     expect(data.projects['/other'].foo).toBe('bar');
     expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
-    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
-  it('skips the write when both trust and onboarding flags are already set', () => {
-    const initial = JSON.stringify({ hasCompletedOnboarding: true, projects: { '/ws': { hasTrustDialogAccepted: true } } });
+  it('skips the write when trust flag is already set', () => {
+    const initial = JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } });
     fs.writeFileSync(configPath, initial);
     const mtime = fs.statSync(configPath).mtimeMs;
     preTrustWorkspace('/ws', configPath);
     expect(fs.statSync(configPath).mtimeMs).toBe(mtime); // file unchanged
-  });
-
-  it('sets hasCompletedOnboarding when trust is set but onboarding flag is missing', () => {
-    fs.writeFileSync(configPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } }));
-    preTrustWorkspace('/ws', configPath);
-    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
   it('sets trust when project entry exists but flag is missing', () => {
@@ -199,10 +178,8 @@ describe('preTrustWorkspace', () => {
   it('handles malformed JSON gracefully and creates fresh file', () => {
     fs.writeFileSync(configPath, 'not valid json');
     expect(() => preTrustWorkspace('/ws', configPath)).not.toThrow();
-    // Malformed file → read failure → start fresh; new file should be valid
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
-    expect(data.hasCompletedOnboarding).toBe(true);
   });
 });
 

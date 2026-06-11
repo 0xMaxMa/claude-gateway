@@ -92,15 +92,4 @@ export class ProtocolEmitter {
     });
   }
 
-  // Emitted when PTY shell encounters an unexpected numbered dialog (e.g. login prompt).
-  // SessionProcess forwards this as a 'startupDialogNotify' event; AgentRunner sends
-  // a direct channel message so the user knows the session is blocked.
-  emitStartupDialogNotify(sessionId: string, screen: string): void {
-    this.writeLine({
-      type: 'system',
-      subtype: 'startup_dialog_notify',
-      session_id: sessionId,
-      screen: screen.slice(0, 800),
-    });
-  }
 }

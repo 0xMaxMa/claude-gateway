@@ -17,7 +17,7 @@ import { ScreenModel } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
-import { preTrustWorkspace } from './trust';
+import { preTrustWorkspace, checkAuthStatus } from './trust';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -77,9 +77,6 @@ class Driver {
   private turn: ActiveTurn | null = null;
   private lastDialogActionAt = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
-  // Prevents re-sending the channel notification every DIALOG_ACTION_COOLDOWN_MS when
-  // an unexpected dialog stays on screen because we intentionally don't auto-accept it.
-  private startupNotifySent = false;
   private host!: PtyHost;
   private tailer!: TranscriptTailer;
 
@@ -90,8 +87,19 @@ class Driver {
   private readonly realBinParts = (process.env.CLAUDE_REAL_BIN ?? 'claude').split(' ');
 
   start(): void {
+    // Fail fast if Claude is not authenticated — avoids getting stuck on a login dialog.
+    const claudeBin = this.realBinParts[0];
+    const auth = checkAuthStatus(claudeBin);
+    if (!auth.loggedIn) {
+      logError('Claude is not authenticated. Run `claude login` on the server before starting the gateway.');
+      this.emitter.emitResult({
+        sessionId: this.args.sessionId, isError: true,
+        text: 'Claude is not authenticated. Please run `claude login` on the server.',
+        durationMs: 0, usage: null,
+      });
+      process.exit(1);
+    }
     // Pre-trust the workspace so the trust-folder dialog never appears.
-    // The trust-folder handler in maybeHandleDialog() remains as a safety fallback.
     preTrustWorkspace(process.cwd());
 
     const [realBin, ...realBinArgs] = this.realBinParts;
@@ -202,7 +210,6 @@ class Driver {
     const turn = this.turn;
     if (!turn) return;
     this.turn = null;
-    this.startupNotifySent = false; // allow re-notification if a future dialog appears
     this.tailer.flush(); // drain any records written in the last poll window
     const text = turn.texts.join('');
     this.emitter.emitResult({
@@ -345,42 +352,16 @@ class Driver {
     if (SKIP_DIALOG_DISMISS) return;
     const now = Date.now();
     if (now - this.lastDialogActionAt < DIALOG_ACTION_COOLDOWN_MS) return;
-    if (this.screen.quietMs() < 500) return; // wait until the dialog is fully drawn
+    if (this.screen.quietMs() < 500) return;
     const dialog = this.screen.detectDialog();
     if (!dialog) return;
     this.lastDialogActionAt = now;
 
-    switch (dialog) {
-      case 'bypass-permissions':
-        // --dangerously-skip-permissions is built into the wrapper, so the
-        // confirmation dialog is always accepted on the operator's behalf.
-        logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
-        this.host.writeRaw('2');
-        break;
-      case 'trust-folder':
-        // The gateway only ever runs claude in its own agent workspaces — always safe.
-        this.host.writeRaw('\r');
-        break;
-      case 'unknown-select':
-        // Unexpected dialog (e.g. login prompt, future unknown dialog). Notify the user
-        // via their channel so they can intervene. Do NOT auto-accept — pressing Enter on
-        // a login or account dialog could trigger unintended authentication flows.
-        // One-shot: the dialog stays on screen (nothing dismisses it), so the cooldown
-        // loop would re-fire every 2s without this guard.
-        if (!this.startupNotifySent) {
-          this.startupNotifySent = true;
-          logError(`unexpected numbered dialog — notifying channel:\n${this.screen.text()}`);
-          this.emitter.emitStartupDialogNotify(this.args.sessionId, this.screen.text());
-        }
-        if (this.turn) {
-          this.turn.dialogEscapes++;
-          if (this.turn.dialogEscapes <= 2) {
-            this.host.writeRaw('\x1b');
-          } else {
-            this.finishTurn(true, 'blocked by an unexpected TUI dialog');
-          }
-        }
-        break;
+    if (dialog === 'bypass-permissions') {
+      // --dangerously-skip-permissions is built into the wrapper, so the
+      // confirmation dialog is always accepted on the operator's behalf.
+      logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
+      this.host.writeRaw('2');
     }
   }
 

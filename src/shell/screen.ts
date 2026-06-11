@@ -1,10 +1,10 @@
 import { Terminal } from '@xterm/headless';
 
-export type DialogKind = 'bypass-permissions' | 'trust-folder' | 'unknown-select';
+export type DialogKind = 'bypass-permissions';
 
 /** The TUI renders spaces as U+00A0 (non-breaking) — normalize before matching. */
 function normalize(text: string): string {
-  return text.replace(/ /g, ' ');
+  return text.replace(/ /g, ' ');
 }
 
 /**
@@ -12,24 +12,13 @@ function normalize(text: string): string {
  * When upgrading Claude Code, re-check each constant against the new TUI output.
  * All matchers live here so a UI change requires touching exactly one file.
  *
- *   BUSY_MARKER        status bar text during an active turn
- *   PROMPT_RE          idle input caret pattern
- *   BYPASS_PERMS       "Bypass Permissions" dialog markers
- *   NUMBERED_SELECT_RE generic numbered select — combined with CONFIRM_MARKER
- *   TRUST_OPTION_RE    option-1 text begins with "Yes" → workspace trust dialog
- *                      Version-agnostic: matches "Yes, I trust this folder" (new),
- *                      "Yes, I accept" style, etc. without depending on question wording.
- *                      Login/auth dialogs always present option-1 as an action phrase
- *                      ("Login with Claude.ai", "Use API key") — never starts with "Yes".
+ *   BUSY_MARKER   status bar text during an active turn
+ *   PROMPT_RE     idle input caret pattern
+ *   BYPASS_PERMS  "Bypass Permissions" dialog markers
  */
 export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
-export const TUI_NUMBERED_SELECT_RE = /❯ 1\./;
-export const TUI_CONFIRM_MARKER = 'Enter to confirm';
-// Matches the selected option-1 text in a numbered select dialog.
-// Trust dialogs put "Yes, ..." as the first choice; login/auth dialogs do not.
-export const TUI_TRUST_OPTION_RE = /❯ 1\.\s+Yes\b/i;
 
 /**
  * Virtual terminal fed with raw PTY bytes. Used ONLY for liveness signals
@@ -88,15 +77,6 @@ export class ScreenModel {
     const text = this.text();
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
       return 'bypass-permissions';
-    }
-    // Numbered select where option 1 starts with "Yes" → workspace trust dialog.
-    // Detected by option text, not question wording, so it survives Claude Code version bumps.
-    if (TUI_NUMBERED_SELECT_RE.test(text) && text.includes(TUI_CONFIRM_MARKER) && TUI_TRUST_OPTION_RE.test(text)) {
-      return 'trust-folder';
-    }
-    // Generic numbered select (login prompt, unknown future dialog).
-    if (!text.includes(TUI_BUSY_MARKER) && TUI_NUMBERED_SELECT_RE.test(text) && text.includes(TUI_CONFIRM_MARKER)) {
-      return 'unknown-select';
     }
     return null;
   }

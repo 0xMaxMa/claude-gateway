@@ -62,7 +62,6 @@ if (!TOKEN) {
 
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const DEDUP_DIR = join(STATE_DIR, 'dedup')
-const OUTBOUND_NOTIFY_DIR = join(STATE_DIR, 'outbound-notify')
 
 // Initialize dedup dir once at startup (not on every message).
 initDedupDir(DEDUP_DIR)
@@ -387,36 +386,6 @@ function checkApprovals(): void {
 }
 
 setInterval(checkApprovals, 5000).unref()
-
-// Outbound notify: runner.ts drops { text } files here; we send them and clean up.
-function checkOutboundNotify(): void {
-  let files: string[]
-  try {
-    files = readdirSync(OUTBOUND_NOTIFY_DIR)
-  } catch {
-    return
-  }
-  for (const filename of files) {
-    if (!filename.endsWith('.json')) continue
-    const filePath = join(OUTBOUND_NOTIFY_DIR, filename)
-    // Filename format: <chatId>-<timestamp>.json — strip suffix after last '-<digits>'
-    const chatId = filename.replace(/-\d+\.json$/, '').replace(/\.json$/, '')
-    let text: string
-    try {
-      const raw = readFileSync(filePath, 'utf8')
-      text = (JSON.parse(raw) as { text: string }).text
-      rmSync(filePath, { force: true })
-    } catch {
-      rmSync(filePath, { force: true })
-      continue
-    }
-    void bot.api.sendMessage(chatId, text).catch(err => {
-      process.stderr.write(`telegram channel: outbound notify to ${chatId} failed: ${err}\n`)
-    })
-  }
-}
-
-setInterval(checkOutboundNotify, 5000).unref()
 
 // Telegram caps messages at 4096 chars. Split long replies, preferring
 // paragraph boundaries when chunkMode is 'newline'.

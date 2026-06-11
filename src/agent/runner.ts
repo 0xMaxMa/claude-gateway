@@ -718,13 +718,6 @@ export class AgentRunner extends EventEmitter {
     // CronScheduler, tests) receive them without needing individual session references.
     proc.on('output', (line: string) => this.emit('output', line));
 
-    // PTY shell hit an unexpected dialog (e.g. login prompt) — send a direct channel message
-    // so the user knows the session is blocked without waiting for them to message first.
-    proc.on('startupDialogNotify', ({ chatId, source, screen }: { chatId: string; source: string; screen: string }) => {
-      const text = `⚠️ Session startup blocked by an unexpected dialog.\n\nThe Claude Code TUI is waiting for input that cannot be auto-accepted (e.g. a login prompt).\n\nPlease SSH to the server and resolve it manually.\n\n— Screen:\n${screen.slice(0, 400)}`;
-      void this.sendDirectChannelMessage(chatId, source as 'telegram' | 'discord' | 'api', text);
-    });
-
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source !== 'api') {
       proc.once('failed', () => {
@@ -2235,31 +2228,6 @@ export class AgentRunner extends EventEmitter {
    */
   getCallbackPort(): number {
     return this.callbackPort;
-  }
-
-  private sendDirectChannelMessage(
-    chatId: string,
-    source: 'telegram' | 'discord' | 'api',
-    text: string,
-  ): void {
-    if (source !== 'telegram' && source !== 'discord') return;
-    // Delegate to the receiver process via a signal file — keeps all channel API
-    // calls in one place (receiver-server.ts / discord/module.ts) and avoids
-    // managing bot tokens outside the receiver layer.
-    const stateSubDir = source === 'discord' ? '.discord-state' : '.telegram-state';
-    const notifyDir = path.join(this.agentConfig.workspace, stateSubDir, 'outbound-notify');
-    try {
-      fs.mkdirSync(notifyDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(notifyDir, `${chatId}-${Date.now()}.json`),
-        JSON.stringify({ text }),
-      );
-    } catch (err) {
-      this.logger.warn('sendDirectChannelMessage: failed to write notify file', {
-        chatId,
-        error: (err as Error).message,
-      });
-    }
   }
 
   /**
