@@ -21,8 +21,6 @@ import type { HistorySource } from '../history/types';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
-const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram.org';
-const DISCORD_API_BASE = 'https://discord.com/api/v10';
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -2239,51 +2237,29 @@ export class AgentRunner extends EventEmitter {
     return this.callbackPort;
   }
 
-  private async sendDirectChannelMessage(
+  private sendDirectChannelMessage(
     chatId: string,
     source: 'telegram' | 'discord' | 'api',
     text: string,
-  ): Promise<void> {
-    if (source === 'telegram') {
-      const botToken = this.agentConfig.telegram?.botToken;
-      if (!botToken) {
-        this.logger.warn('sendDirectChannelMessage: no Telegram botToken', { chatId });
-        return;
-      }
-      try {
-        const resp = await fetch(`${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!resp.ok) {
-          this.logger.warn('Telegram direct send failed', { chatId, status: resp.status });
-        }
-      } catch (err) {
-        this.logger.warn('Telegram direct send error', { chatId, error: (err as Error).message });
-      }
-    } else if (source === 'discord') {
-      const botToken = this.agentConfig.discord?.botToken;
-      if (!botToken) {
-        this.logger.warn('sendDirectChannelMessage: no Discord botToken', { chatId });
-        return;
-      }
-      try {
-        const resp = await fetch(`${DISCORD_API_BASE}/channels/${chatId}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bot ${botToken}` },
-          body: JSON.stringify({ content: text.slice(0, 2000) }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!resp.ok) {
-          this.logger.warn('Discord direct send failed', { chatId, status: resp.status });
-        }
-      } catch (err) {
-        this.logger.warn('Discord direct send error', { chatId, error: (err as Error).message });
-      }
+  ): void {
+    if (source !== 'telegram' && source !== 'discord') return;
+    // Delegate to the receiver process via a signal file — keeps all channel API
+    // calls in one place (receiver-server.ts / discord/module.ts) and avoids
+    // managing bot tokens outside the receiver layer.
+    const stateSubDir = source === 'discord' ? '.discord-state' : '.telegram-state';
+    const notifyDir = path.join(this.agentConfig.workspace, stateSubDir, 'outbound-notify');
+    try {
+      fs.mkdirSync(notifyDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(notifyDir, `${chatId}.json`),
+        JSON.stringify({ text }),
+      );
+    } catch (err) {
+      this.logger.warn('sendDirectChannelMessage: failed to write notify file', {
+        chatId,
+        error: (err as Error).message,
+      });
     }
-    // API sessions: no direct send — the caller must poll for session state.
   }
 
   /**

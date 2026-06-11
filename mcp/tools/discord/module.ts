@@ -272,11 +272,17 @@ export class DiscordModule implements ChannelModule {
     const typingInterval = setInterval(() => { void this.processTypingSignals(typingDir, this.getToken()!); }, 8000);
     typingInterval.unref();
 
+    // Outbound notify: runner.ts drops { text } files in outbound-notify/; send and clean up.
+    const outboundNotifyDir = path.join(this.stateDir, 'outbound-notify');
+    const outboundNotifyInterval = setInterval(() => { void this.processOutboundNotify(outboundNotifyDir); }, 5000);
+    outboundNotifyInterval.unref();
+
     signal.addEventListener('abort', () => {
       this.running = false;
       clearInterval(approvedInterval);
       clearInterval(forwardInterval);
       clearInterval(typingInterval);
+      clearInterval(outboundNotifyInterval);
       this.client?.destroy?.();
     });
 
@@ -312,6 +318,29 @@ export class DiscordModule implements ChannelModule {
           // Discord doesn't support HTML — strip tags and send plain text
           text = text.replace(/<[^>]*>/g, '');
         }
+        await sendMessage(channel, text, {});
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  private async processOutboundNotify(notifyDir: string): Promise<void> {
+    let files: string[];
+    try { files = fs.readdirSync(notifyDir); } catch { return; }
+    for (const filename of files) {
+      if (!filename.endsWith('.json')) continue;
+      const filePath = path.join(notifyDir, filename);
+      const channelId = filename.slice(0, -'.json'.length);
+      let text: string;
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        text = (JSON.parse(raw) as { text: string }).text;
+        fs.rmSync(filePath, { force: true });
+      } catch {
+        fs.rmSync(filePath, { force: true });
+        continue;
+      }
+      try {
+        const channel = await this.client.channels.fetch(channelId);
         await sendMessage(channel, text, {});
       } catch { /* non-fatal */ }
     }
