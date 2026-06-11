@@ -5,7 +5,7 @@ import {
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
 } from '../../src/shell/screen';
-import { preTrustWorkspace } from '../../src/shell/trust';
+import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -205,6 +205,47 @@ describe('preTrustWorkspace', () => {
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
     expect(data.projects['/ws'].projectOnboardingSeenCount).toBe(1);
     expect(data.hasCompletedOnboarding).toBe(true);
+  });
+});
+
+describe('checkAuthStatus', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns loggedIn=false when binary does not exist', () => {
+    expect(checkAuthStatus('/nonexistent/claude-binary').loggedIn).toBe(false);
+  });
+
+  it('returns loggedIn=false when binary exits non-zero', () => {
+    expect(checkAuthStatus('false').loggedIn).toBe(false);
+  });
+
+  it('returns loggedIn=false when binary outputs invalid JSON', () => {
+    // echo outputs its args ("auth status") which is not valid JSON
+    expect(checkAuthStatus('echo').loggedIn).toBe(false);
+  });
+
+  it('returns loggedIn=true and authMethod when binary outputs valid JSON', () => {
+    const script = path.join(tmpDir, 'fake-claude.sh');
+    fs.writeFileSync(script, '#!/bin/sh\necho \'{"loggedIn":true,"authMethod":"oauth"}\'\n');
+    fs.chmodSync(script, 0o755);
+    const result = checkAuthStatus(script);
+    expect(result.loggedIn).toBe(true);
+    expect(result.authMethod).toBe('oauth');
+  });
+
+  it('returns loggedIn=false when JSON has loggedIn=false', () => {
+    const script = path.join(tmpDir, 'fake-claude-unauth.sh');
+    fs.writeFileSync(script, '#!/bin/sh\necho \'{"loggedIn":false}\'\n');
+    fs.chmodSync(script, 0o755);
+    expect(checkAuthStatus(script).loggedIn).toBe(false);
   });
 });
 
