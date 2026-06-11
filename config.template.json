@@ -53,6 +53,7 @@
       },
       "claude": {
         "model": "claude-opus-4-6",
+        "headless": true,
         "extraFlags": []
       },
       "signatureEmoji": "",
@@ -77,6 +78,7 @@
       },
       "claude": {
         "model": "claude-sonnet-4-6",
+        "headless": false,
         "extraFlags": []
       },
       "session": {
