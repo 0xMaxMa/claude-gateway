@@ -4,26 +4,23 @@ import * as pty from 'node-pty';
 const WRITE_CHUNK_BYTES = 8 * 1024;
 const WRITE_CHUNK_DELAY_MS = 10;
 
-/**
- * Nested-claude markers that must NOT leak into the wrapped TUI. When
- * interactive claude sees these (set when any claude process is an ancestor,
- * e.g. an agent running the wrapper from inside Claude Code), it switches to
- * SDK child-session behavior and silently stops writing the conversation
- * transcript JSONL — which is this wrapper's source of truth for output.
- * Auth vars like CLAUDE_CODE_OAUTH_TOKEN are intentionally kept.
- */
-const SCRUB_ENV_VARS = [
-  'CLAUDECODE',
-  'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_CODE_CHILD_SESSION',
-  'CLAUDE_CODE_SESSION_ID',
-  'CLAUDE_CODE_EXECPATH',
-  'CLAUDE_CODE_SSE_PORT',
-];
+// Any key matching these prefixes is scrubbed to prevent nested-claude
+// child-session behavior that silently stops transcript JSONL writes.
+const SCRUB_ENV_PREFIXES = ['CLAUDECODE', 'CLAUDE_CODE_'];
+
+// Auth vars that share the CLAUDE_CODE_ prefix but must be kept.
+const SCRUB_ENV_KEEPLIST = new Set(['CLAUDE_CODE_OAUTH_TOKEN']);
 
 function childEnv(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
-  for (const key of SCRUB_ENV_VARS) delete env[key];
+  for (const key of Object.keys(env)) {
+    if (
+      !SCRUB_ENV_KEEPLIST.has(key) &&
+      SCRUB_ENV_PREFIXES.some((p) => key.startsWith(p))
+    ) {
+      delete env[key];
+    }
+  }
   return env;
 }
 
