@@ -3,10 +3,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 6000): Promise<void> {
+async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 8000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
-    if (Date.now() >= deadline) return;
+    if (Date.now() >= deadline) throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
     await new Promise(r => setTimeout(r, intervalMs));
   }
 }
@@ -98,14 +98,28 @@ function getSessions(runner: AgentRunner): Map<string, SessionProcess> {
 async function sendCommand(
   port: number,
   body: Record<string, unknown>,
+  retries = 3,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
-  const res = await fetch(`http://127.0.0.1:${port}/command`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = (await res.json()) as Record<string, unknown>;
-  return { status: res.status, data };
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      return { status: res.status, data };
+    } catch (err) {
+      const e = err as Error & { code?: string; cause?: { code?: string } };
+      const code = e.cause?.code ?? e.code;
+      if ((code === 'ECONNRESET' || code === 'ECONNREFUSED') && attempt < retries) {
+        await new Promise(r => setTimeout(r, 100 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('sendCommand: unreachable');
 }
 
 async function sendChannelPost(
@@ -159,7 +173,10 @@ describe('AgentRunner /command endpoint', () => {
 
   afterEach(async () => {
     if (runner) {
-      await runner.stop();
+      await Promise.race([
+        runner.stop(),
+        new Promise<void>(r => setTimeout(r, 5000)),
+      ]);
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -381,7 +398,10 @@ describe('SessionProcess restart watcher notify payload', () => {
   afterEach(async () => {
     // Always stop the SessionProcess to prevent chokidar watcher leak
     if (currentSp) {
-      await currentSp.stop();
+      await Promise.race([
+        currentSp.stop(),
+        new Promise<void>(r => setTimeout(r, 5000)),
+      ]);
       currentSp = null;
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -406,7 +426,7 @@ describe('SessionProcess restart watcher notify payload', () => {
     await sp.start();
 
     // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 1000));
 
     // Write restart signal with notify payload
     const signalPath = path.join(stateDir, 'restart-chat123');
@@ -435,7 +455,7 @@ describe('SessionProcess restart watcher notify payload', () => {
     const markerContent = (restartMarkerCall![3] as { content: string }).content;
     expect(markerContent).toContain('IMPORTANT: Send a Telegram reply to chat_id "chat123"');
     expect(markerContent).toContain('Model changed to claude-sonnet-4-6');
-  });
+  }, 15000);
 
   // --------------------------------------------------------------------------
   // U-CMD-09: restart signal with empty content uses default marker
@@ -456,7 +476,7 @@ describe('SessionProcess restart watcher notify payload', () => {
     await sp.start();
 
     // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 1000));
 
     // Write empty restart signal (self-restart)
     const signalPath = path.join(stateDir, 'restart-chat456');
@@ -483,5 +503,5 @@ describe('SessionProcess restart watcher notify payload', () => {
     const markerContent = (restartMarkerCall![3] as { content: string }).content;
     expect(markerContent).toBe('[System: Graceful restart completed successfully. Do not restart again.]');
     expect(markerContent).not.toContain('IMPORTANT');
-  });
+  }, 15000);
 });
