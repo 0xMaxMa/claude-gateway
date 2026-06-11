@@ -634,8 +634,9 @@ async function main(): Promise<void> {
         case 'claude.extraFlags':
           agentConfig.claude.extraFlags = change.newValue as string[];
           break;
-        case 'claude.dangerouslySkipPermissions':
-          agentConfig.claude.dangerouslySkipPermissions = change.newValue as boolean;
+        case 'claude.headless':
+          // Applies to sessions spawned after the change; running sessions keep their backend.
+          agentConfig.claude.headless = change.newValue as boolean;
           break;
         case 'session.idleTimeoutMinutes':
           if (!agentConfig.session) agentConfig.session = {};

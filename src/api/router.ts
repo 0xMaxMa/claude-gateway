@@ -576,7 +576,6 @@ export function createApiRouter(
       env: path.join('~', '.claude-gateway', 'agents', id, 'workspace', '.env'),
       claude: {
         model: typeof model === 'string' && model.trim() ? model.trim() : 'claude-sonnet-4-6',
-        dangerouslySkipPermissions: false,
         extraFlags: [],
       },
     };
@@ -603,7 +602,6 @@ export function createApiRouter(
       env: path.join(workspaceAbs, '.env'),
       claude: {
         model: typeof model === 'string' && model.trim() ? model.trim() : 'claude-sonnet-4-6',
-        dangerouslySkipPermissions: false,
         extraFlags: [],
       },
     });
@@ -868,7 +866,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: absToTildePath(workspaceDirAbs),
       env: absToTildePath(path.join(workspaceDirAbs, '.env')),
-      claude: { model: defaultModel, dangerouslySkipPermissions: false, extraFlags: [] },
+      claude: { model: defaultModel, extraFlags: [] },
     };
     if (wizard.signatureEmoji) newAgent.signatureEmoji = wizard.signatureEmoji;
     if (avatarFilename) newAgent.avatar = avatarFilename;
@@ -890,7 +888,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: workspaceDirAbs,
       env: path.join(workspaceDirAbs, '.env'),
-      claude: { model: defaultModel, dangerouslySkipPermissions: false, extraFlags: [] },
+      claude: { model: defaultModel, extraFlags: [] },
       ...(wizard.signatureEmoji ? { signatureEmoji: wizard.signatureEmoji } : {}),
       ...(avatarFilename ? { avatar: avatarFilename } : {}),
     });

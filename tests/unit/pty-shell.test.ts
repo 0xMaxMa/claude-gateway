@@ -15,7 +15,7 @@ describe('pty-shell translateArgs', () => {
   ];
 
   it('consumes headless-only flags and passes the rest through', () => {
-    const { claudeArgs, model, skipPermissions } = translateArgs(GATEWAY_ARGS);
+    const { claudeArgs, model } = translateArgs(GATEWAY_ARGS);
     expect(claudeArgs).not.toContain('--print');
     expect(claudeArgs).not.toContain('--verbose');
     expect(claudeArgs).not.toContain('--include-partial-messages');
@@ -24,9 +24,16 @@ describe('pty-shell translateArgs', () => {
     expect(claudeArgs).not.toContain('stream-json');
     expect(claudeArgs).toContain('--mcp-config');
     expect(claudeArgs).toContain('/tmp/mcp.json');
-    expect(claudeArgs).toContain('--dangerously-skip-permissions');
     expect(model).toBe('claude-sonnet-4-6');
-    expect(skipPermissions).toBe(true);
+  });
+
+  it('always injects --dangerously-skip-permissions exactly once (built-in)', () => {
+    // present in input → still exactly one
+    const withFlag = translateArgs(GATEWAY_ARGS).claudeArgs;
+    expect(withFlag.filter((a) => a === '--dangerously-skip-permissions')).toHaveLength(1);
+    // absent from input → injected anyway
+    const withoutFlag = translateArgs(GATEWAY_ARGS.slice(0, -1)).claudeArgs;
+    expect(withoutFlag.filter((a) => a === '--dangerously-skip-permissions')).toHaveLength(1);
   });
 
   it('generates a session id and appends --session-id', () => {

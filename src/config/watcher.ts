@@ -8,7 +8,7 @@ import { createWatcher, WatchHandle } from '../watch/factory';
 const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
   'claude.model',
   'claude.extraFlags',
-  'claude.dangerouslySkipPermissions',
+  'claude.headless',
   'session.idleTimeoutMinutes',
   'session.maxConcurrent',
   'heartbeat.rateLimitMinutes',
@@ -175,7 +175,7 @@ export class ConfigWatcher extends EventEmitter {
       const fieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
         { field: 'claude.model', oldVal: oldAgent.claude.model, newVal: newAgent.claude.model },
         { field: 'claude.extraFlags', oldVal: oldAgent.claude.extraFlags, newVal: newAgent.claude.extraFlags },
-        { field: 'claude.dangerouslySkipPermissions', oldVal: oldAgent.claude.dangerouslySkipPermissions, newVal: newAgent.claude.dangerouslySkipPermissions },
+        { field: 'claude.headless', oldVal: oldAgent.claude.headless, newVal: newAgent.claude.headless },
         { field: 'session.idleTimeoutMinutes', oldVal: oldAgent.session?.idleTimeoutMinutes, newVal: newAgent.session?.idleTimeoutMinutes },
         { field: 'session.maxConcurrent', oldVal: oldAgent.session?.maxConcurrent, newVal: newAgent.session?.maxConcurrent },
         { field: 'heartbeat.rateLimitMinutes', oldVal: oldAgent.heartbeat?.rateLimitMinutes, newVal: newAgent.heartbeat?.rateLimitMinutes },

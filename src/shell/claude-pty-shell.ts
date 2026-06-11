@@ -64,12 +64,14 @@ class Driver {
   private readonly screen = new ScreenModel();
   private readonly emitter = new ProtocolEmitter();
   private readonly args = translateArgs(process.argv.slice(2));
-  private readonly realBin = process.env.CLAUDE_REAL_BIN ?? 'claude';
+  // CLAUDE_REAL_BIN may be multi-word (e.g. "node /path/cli.js"), same as CLAUDE_BIN.
+  private readonly realBinParts = (process.env.CLAUDE_REAL_BIN ?? 'claude').split(' ');
 
   start(): void {
-    logDebug(`session=${this.args.sessionId} bin=${this.realBin} args=${this.args.claudeArgs.join(' ')}`);
+    const [realBin, ...realBinArgs] = this.realBinParts;
+    logDebug(`session=${this.args.sessionId} bin=${this.realBinParts.join(' ')} args=${this.args.claudeArgs.join(' ')}`);
 
-    this.host = new PtyHost(this.realBin, this.args.claudeArgs, {
+    this.host = new PtyHost(realBin, [...realBinArgs, ...this.args.claudeArgs], {
       cols: this.screen.cols,
       rows: this.screen.rows,
       cwd: process.cwd(),
@@ -300,15 +302,10 @@ class Driver {
 
     switch (dialog) {
       case 'bypass-permissions':
-        // Operator explicitly configured dangerouslySkipPermissions — accepting
-        // the confirmation dialog matches that intent. Never accept otherwise.
-        if (this.args.skipPermissions) {
-          logWarn('accepting Bypass Permissions dialog (per --dangerously-skip-permissions)');
-          this.host.writeRaw('2');
-        } else {
-          logError('Bypass Permissions dialog shown but flag not set — refusing to accept');
-          this.shutdown(1);
-        }
+        // --dangerously-skip-permissions is built into the wrapper, so the
+        // confirmation dialog is always accepted on the operator's behalf.
+        logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
+        this.host.writeRaw('2');
         break;
       case 'trust-folder':
         // The gateway only ever runs claude in its own agent workspaces.

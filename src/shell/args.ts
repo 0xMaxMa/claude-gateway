@@ -21,8 +21,6 @@ export interface TranslatedArgs {
   sessionId: string;
   /** Model name as passed by the gateway (for the init event). */
   model: string;
-  /** Whether --dangerously-skip-permissions was requested by the gateway. */
-  skipPermissions: boolean;
 }
 
 /** Headless-only flags the wrapper consumes (claude interactive must not see them). */
@@ -43,17 +41,13 @@ export function translateArgs(argv: string[]): TranslatedArgs {
   const claudeArgs: string[] = [];
   let sessionId = '';
   let model = '';
-  let skipPermissions = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (CONSUME_FLAGS.has(arg)) continue;
     if (CONSUME_FLAGS_WITH_VALUE.has(arg)) { i++; continue; }
-    if (arg === '--dangerously-skip-permissions') {
-      skipPermissions = true;
-      claudeArgs.push(arg);
-      continue;
-    }
+    // Built-in below — consume here so it is never duplicated.
+    if (arg === '--dangerously-skip-permissions') continue;
     if (PASS_FLAGS_WITH_VALUE.has(arg)) {
       const value = argv[i + 1];
       if (value === undefined) throw new Error(`missing value for ${arg}`);
@@ -74,5 +68,9 @@ export function translateArgs(argv: string[]): TranslatedArgs {
     claudeArgs.push('--session-id', sessionId);
   }
 
-  return { claudeArgs, sessionId, model, skipPermissions };
+  // Built-in: the wrapper always runs claude with permissions skipped,
+  // matching the gateway's headless backend (no config flag anymore).
+  claudeArgs.push('--dangerously-skip-permissions');
+
+  return { claudeArgs, sessionId, model };
 }
