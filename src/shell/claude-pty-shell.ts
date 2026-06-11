@@ -10,6 +10,7 @@
  * session transcript JSONL (streamed mid-turn = message-level streaming);
  * the PTY screen is used only for busy/idle/dialog liveness signals.
  */
+import * as fs from 'fs';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
 import { ScreenModel } from './screen';
@@ -19,6 +20,9 @@ import { ProtocolEmitter } from './emitter';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
+// How often to touch the heartbeat file during an active turn (PTY mode keepalive).
+// Must be well under the receiver's STALLED_TIMEOUT_MS (300s) to prevent false warnings.
+const HEARTBEAT_INTERVAL_MS = 60_000;
 const SUBMIT_ENTER_DELAY_MS = 300;
 const SUBMIT_RETRY_AFTER_MS = 4000;
 const MAX_ENTER_RETRIES = 2;
@@ -227,6 +231,11 @@ class Driver {
   // ---- periodic liveness poll ----------------------------------------------
 
   private lastDumpAt = 0;
+  private lastHeartbeatAt = 0;
+  // Path to the receiver's heartbeat file (set via PTY_SHELL_HEARTBEAT_PATH env var).
+  // Written periodically during active turns so the stalled detector doesn't fire
+  // on long sub-agent tasks where the PTY is busy but no transcript lines are emitted.
+  private readonly heartbeatPath = process.env.PTY_SHELL_HEARTBEAT_PATH ?? null;
 
   private tick(): void {
     if (this.exiting) return;
@@ -256,6 +265,13 @@ class Driver {
 
     const turn = this.turn;
     if (!turn || turn.submittedAt === 0) return;
+
+    // Touch heartbeat so the receiver's stalled detector doesn't fire during
+    // long sub-agent tasks where the PTY is busy but no JSON lines are emitted.
+    if (this.heartbeatPath && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+      this.lastHeartbeatAt = now;
+      try { fs.writeFileSync(this.heartbeatPath, String(now)); } catch {}
+    }
 
     if (this.screen.consumeBusySeen() || this.screen.isBusy()) {
       turn.sawBusy = true;

@@ -370,6 +370,9 @@ export class SessionProcess extends EventEmitter {
     // host and cannot wrap a binary inside a docker-exec container.
     const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
     let ptyRealBin: string | null = null;
+    // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
+    const ptyTypingDir = (usePtyShell && this.source !== 'api') ? this.typingDir : null;
+    const ptyHeartbeatPath = ptyTypingDir ? path.join(ptyTypingDir, `${this.chatId}.heartbeat`) : null;
     if (usePtyShell) {
       const wrapperPath = path.resolve(__dirname, '..', 'shell', 'claude-pty-shell.js');
       // The wrapper resolves the real binary via CLAUDE_REAL_BIN; never let it
@@ -421,6 +424,7 @@ export class SessionProcess extends EventEmitter {
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
         ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
+        ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
       },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
