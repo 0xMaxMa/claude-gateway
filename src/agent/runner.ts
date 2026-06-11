@@ -1666,11 +1666,15 @@ export class AgentRunner extends EventEmitter {
         // Partial assistant message (from --include-partial-messages)
         // Contains cumulative text; compute delta and emit as text_delta
         if (obj['type'] === 'assistant') {
-          const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+          const msg = obj['message'] as { content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> } | undefined;
           if (Array.isArray(msg?.content)) {
             let fullText = '';
             for (const block of msg!.content) {
               if (block.type === 'text' && block.text) fullText += block.text;
+              // PTY mode (headless=false) emits tool_use blocks inside assistant messages
+              if (block.type === 'tool_use' && block.name && block.id) {
+                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+              }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
@@ -2089,11 +2093,15 @@ export class AgentRunner extends EventEmitter {
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
         if (obj['type'] === 'assistant') {
-          const msg = obj['message'] as { content?: Array<{ type: string; text?: string }> } | undefined;
+          const msg = obj['message'] as { content?: Array<{ type: string; text?: string; name?: string; id?: string; input?: unknown }> } | undefined;
           if (Array.isArray(msg?.content)) {
             let fullText = '';
             for (const block of msg!.content) {
               if (block.type === 'text' && block.text) fullText += block.text;
+              // PTY mode (headless=false) emits tool_use blocks inside assistant messages
+              if (block.type === 'tool_use' && block.name && block.id) {
+                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+              }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
