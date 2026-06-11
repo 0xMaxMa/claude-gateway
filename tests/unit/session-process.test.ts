@@ -428,6 +428,51 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-11a: --dangerously-skip-permissions is built-in (no config needed)
+  // --------------------------------------------------------------------------
+  it('U-SP-11a: --dangerously-skip-permissions is always passed (built-in)', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(args).toContain('--dangerously-skip-permissions');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-11b: gateway.headless=false spawns the PTY wrapper instead of claude
+  // --------------------------------------------------------------------------
+  it('U-SP-11b: gateway.headless=false spawns the claude-pty-shell wrapper', async () => {
+    gatewayConfig.gateway.headless = false;
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [bin, args, opts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+    expect(bin).toBe(process.execPath);
+    expect(args[0]).toMatch(/shell[/\\]claude-pty-shell\.js$/);
+    expect(args).toContain('--dangerously-skip-permissions');
+    expect(opts.env.CLAUDE_REAL_BIN).toBeDefined();
+    expect(opts.env.CLAUDE_REAL_BIN).not.toContain('claude-pty-shell');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-11c: gateway.headless omitted/true keeps the headless backend
+  // --------------------------------------------------------------------------
+  it('U-SP-11c: gateway.headless omitted or true spawns claude directly', async () => {
+    const sp1 = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp1.start();
+    gatewayConfig.gateway.headless = true;
+    const sp2 = new SessionProcess('chat:222', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp2.start();
+
+    for (const call of spawnMock.mock.calls) {
+      const [bin, args] = call as [string, string[]];
+      expect(bin).not.toBe(process.execPath);
+      expect(args.join(' ')).not.toContain('claude-pty-shell');
+      expect(args).toContain('--print');
+    }
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-12: User-scoped stdio MCP servers merged into mcp-config.json
   // --------------------------------------------------------------------------
   it('U-SP-12: user-scoped stdio mcpServers are merged into mcp-config.json', async () => {

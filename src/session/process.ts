@@ -321,9 +321,9 @@ export class SessionProcess extends EventEmitter {
       args.unshift('--mcp-config', mcpConfigPath);
     }
 
-    if (this.agentConfig.claude.dangerouslySkipPermissions) {
-      args.push('--dangerously-skip-permissions');
-    }
+    // Built-in: gateway sessions always run with permissions skipped.
+    // (The old claude.dangerouslySkipPermissions config is gone.)
+    args.push('--dangerously-skip-permissions');
 
     for (const flag of this.agentConfig.claude.extraFlags ?? []) {
       args.push(flag);
@@ -361,12 +361,37 @@ export class SessionProcess extends EventEmitter {
 
     const claudeBinRaw = process.env.CLAUDE_BIN ?? 'claude';
     const claudeBinParts = claudeBinRaw.split(' ');
-    const claudeBin = claudeBinParts[0];
-    const allArgs = [...claudeBinParts.slice(1), ...args];
+    let claudeBin = claudeBinParts[0];
+    let allArgs = [...claudeBinParts.slice(1), ...args];
+
+    // gateway.headless: false → run the interactive claude TUI under the
+    // claude-pty-shell PTY wrapper (same stream-json protocol on stdio).
+    // App-agents always stay headless: the wrapper (node-pty) lives on the
+    // host and cannot wrap a binary inside a docker-exec container.
+    const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
+    let ptyRealBin: string | null = null;
+    // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
+    // API sessions are excluded: the stalled detector is receiver-side (Telegram/Discord)
+    // and never watches API sessions — writing a heartbeat file for them would be a no-op.
+    const ptyTypingDir = (usePtyShell && this.source !== 'api') ? this.typingDir : null;
+    const ptyHeartbeatPath = ptyTypingDir ? path.join(ptyTypingDir, `${this.chatId}.heartbeat`) : null;
+    if (usePtyShell) {
+      const wrapperPath = path.resolve(__dirname, '..', 'shell', 'claude-pty-shell.js');
+      // The wrapper resolves the real binary via CLAUDE_REAL_BIN; never let it
+      // point back at the wrapper itself (legacy CLAUDE_BIN drop-in setups).
+      ptyRealBin = claudeBinRaw.includes('claude-pty-shell') ? 'claude' : claudeBinRaw;
+      claudeBin = process.execPath;
+      allArgs = [wrapperPath, ...args];
+    } else if (this.gatewayConfig.gateway.headless === false && isAppAgent) {
+      this.logger.warn('gateway.headless=false is not supported for app-agents — using headless backend', {
+        sessionId: this.sessionId,
+      });
+    }
 
     this.logger.info('Spawning session subprocess', {
       sessionId: this.sessionId,
       source: this.source,
+      backend: usePtyShell ? 'pty-shell' : 'headless',
     });
 
     const spawnBin = isAppAgent ? 'docker' : claudeBin;
@@ -400,6 +425,8 @@ export class SessionProcess extends EventEmitter {
         CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
+        ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
+        ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
       },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],

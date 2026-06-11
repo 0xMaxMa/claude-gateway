@@ -624,6 +624,15 @@ async function main(): Promise<void> {
     for (const change of changes) {
       if (!change.hotReloadable) continue;
 
+      // Gateway-level changes (agentId === '')
+      if (change.agentId === '') {
+        if (change.field === 'gateway.headless') {
+          // Applies to sessions spawned after the change; running sessions keep their backend.
+          config.gateway.headless = change.newValue as boolean | undefined;
+        }
+        continue;
+      }
+
       const agentConfig = agentConfigs.get(change.agentId);
       if (!agentConfig) continue;
 
@@ -633,9 +642,6 @@ async function main(): Promise<void> {
           break;
         case 'claude.extraFlags':
           agentConfig.claude.extraFlags = change.newValue as string[];
-          break;
-        case 'claude.dangerouslySkipPermissions':
-          agentConfig.claude.dangerouslySkipPermissions = change.newValue as boolean;
           break;
         case 'session.idleTimeoutMinutes':
           if (!agentConfig.session) agentConfig.session = {};

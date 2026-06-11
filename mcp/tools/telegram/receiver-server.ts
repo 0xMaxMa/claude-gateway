@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager } from './typing'
+import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -60,6 +61,24 @@ if (!TOKEN) {
 }
 
 const INBOX_DIR = join(STATE_DIR, 'inbox')
+const DEDUP_DIR = join(STATE_DIR, 'dedup')
+
+// Initialize dedup dir once at startup (not on every message).
+initDedupDir(DEDUP_DIR)
+// Prune stale markers left over from before this process started.
+_pruneDedup(DEDUP_DIR)
+
+function isDuplicate(chatId: string, msgId: number): boolean {
+  return _isDuplicate(DEDUP_DIR, chatId, msgId)
+}
+
+// Spread 11 concurrent receivers across the minute window with random jitter
+// so they don't all hit the dedup dir simultaneously on each tick.
+const pruneJitter = Math.floor(Math.random() * 60_000)
+setTimeout(() => {
+  _pruneDedup(DEDUP_DIR)
+  setInterval(() => _pruneDedup(DEDUP_DIR), 60_000).unref()
+}, pruneJitter).unref()
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -731,6 +750,12 @@ async function handleInbound(
   downloadImage: (() => Promise<string | undefined>) | undefined,
   attachment?: AttachmentMeta,
 ): Promise<void> {
+  // Dedup BEFORE gate: prevent duplicate processing for all message types, including
+  // pairing flows (avoids double pairing-reply messages during receiver restart overlap).
+  const earlyChat = ctx.chat?.id
+  const earlyMsgId = ctx.message?.message_id
+  if (earlyChat != null && earlyMsgId != null && isDuplicate(String(earlyChat), earlyMsgId)) return
+
   const result = gate(ctx)
 
   if (result.action === 'drop') return

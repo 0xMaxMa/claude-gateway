@@ -31,7 +31,8 @@ export interface AgentConfig {
   };
   claude: {
     model: string;
-    dangerouslySkipPermissions: boolean;
+    /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */
+    dangerouslySkipPermissions?: boolean;
     extraFlags: string[];
   };
   /** Heartbeat / cron settings */
@@ -88,6 +89,11 @@ export interface GatewayConfig {
     api?: {
       keys: ApiKey[];
     };
+    /**
+     * true (default) = headless backend (claude --print + stream-json).
+     * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
+     */
+    headless?: boolean;
     /** Global history retention/cleanup defaults */
     history?: HistoryConfig & {
       cleanupHour?: number;      // 0-23, default 0

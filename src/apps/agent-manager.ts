@@ -162,7 +162,6 @@ export class AgentManager {
         allow_tools: true,
         claude: {
           model: 'claude-sonnet-4-6',
-          dangerouslySkipPermissions: true,
           extraFlags: [],
         },
       });
