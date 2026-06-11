@@ -7,7 +7,10 @@ import {
   TUI_TRUST_OPTION_RE,
   TUI_CONFIRM_MARKER,
 } from '../../src/shell/screen';
+import { preTrustWorkspace } from '../../src/shell/trust';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 
 describe('pty-shell translateArgs', () => {
   const GATEWAY_ARGS = [
@@ -137,6 +140,59 @@ describe('ScreenModel raw-chunk busy detection', () => {
     screen.write('hello');
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.quietMs()).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe('preTrustWorkspace', () => {
+  let tmpDir: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-trust-test-'));
+    configPath = path.join(tmpDir, '.claude.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates ~/.claude.json with trust entry when file is absent', () => {
+    preTrustWorkspace('/workspace/test', configPath);
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(data.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
+  });
+
+  it('adds trust entry to existing file without overwriting other data', () => {
+    fs.writeFileSync(configPath, JSON.stringify({ theme: 'dark', projects: { '/other': { foo: 'bar' } } }));
+    preTrustWorkspace('/workspace/new', configPath);
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(data.theme).toBe('dark');
+    expect(data.projects['/other'].foo).toBe('bar');
+    expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
+  });
+
+  it('skips the write when already trusted', () => {
+    const initial = JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } });
+    fs.writeFileSync(configPath, initial);
+    const mtime = fs.statSync(configPath).mtimeMs;
+    preTrustWorkspace('/ws', configPath);
+    expect(fs.statSync(configPath).mtimeMs).toBe(mtime); // file unchanged
+  });
+
+  it('sets trust when project entry exists but flag is missing', () => {
+    fs.writeFileSync(configPath, JSON.stringify({ projects: { '/ws': { someOtherKey: 1 } } }));
+    preTrustWorkspace('/ws', configPath);
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
+    expect(data.projects['/ws'].someOtherKey).toBe(1);
+  });
+
+  it('handles malformed JSON gracefully and creates fresh file', () => {
+    fs.writeFileSync(configPath, 'not valid json');
+    expect(() => preTrustWorkspace('/ws', configPath)).not.toThrow();
+    // Malformed file → read failure → start fresh; new file should be valid
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
   });
 });
 

@@ -17,6 +17,7 @@ import { ScreenModel } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
+import { preTrustWorkspace } from './trust';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -89,6 +90,10 @@ class Driver {
   private readonly realBinParts = (process.env.CLAUDE_REAL_BIN ?? 'claude').split(' ');
 
   start(): void {
+    // Pre-trust the workspace so the trust-folder dialog never appears.
+    // The trust-folder handler in maybeHandleDialog() remains as a safety fallback.
+    preTrustWorkspace(process.cwd());
+
     const [realBin, ...realBinArgs] = this.realBinParts;
     logDebug(`session=${this.args.sessionId} bin=${this.realBinParts.join(' ')} args=${this.args.claudeArgs.join(' ')}`);
 
