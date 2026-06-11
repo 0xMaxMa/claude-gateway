@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { execSync } from 'child_process';
+import { readdirSync, rmSync } from 'fs';
+import { join } from 'path';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 
@@ -26,9 +28,18 @@ interface CacheEntry {
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 let versionCache: CacheEntry | null = null;
+let updatingPackage: string | null = null;
 
 export function _resetCache(): void {
   versionCache = null;
+}
+
+export function _resetLock(): void {
+  updatingPackage = null;
+}
+
+export function _setLock(pkg: string): void {
+  updatingPackage = pkg;
 }
 
 function getNpmListVersion(packageName: string): string | null {
@@ -69,6 +80,50 @@ async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
       };
     }),
   );
+}
+
+function getNpmGlobalRoot(): string {
+  return execSync('npm root -g', {
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 10_000,
+  }).trim();
+}
+
+function cleanStaleNpmTempDirs(npmRoot: string, packageName: string): void {
+  const match = packageName.match(/^(@[^/]+)\/(.+)$/);
+  if (!match) return;
+  const [, scope, basename] = match;
+
+  const scopeDir = join(npmRoot, scope);
+  let entries: string[];
+  try {
+    entries = readdirSync(scopeDir) as string[];
+  } catch {
+    return;
+  }
+
+  const prefix = `.${basename}-`;
+  for (const entry of entries) {
+    if ((entry as string).startsWith(prefix)) {
+      try {
+        rmSync(join(scopeDir, entry as string), { recursive: true, force: true });
+      } catch {
+        // best-effort: ignore errors on individual temp dir removal
+      }
+    }
+  }
+}
+
+function removePackageDir(npmRoot: string, packageName: string): void {
+  const match = packageName.match(/^(@[^/]+)\/(.+)$/);
+  if (!match) return;
+  const [, scope, basename] = match;
+  try {
+    rmSync(join(npmRoot, scope, basename), { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
 }
 
 export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
@@ -143,39 +198,82 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       return;
     }
 
-    // Run npm install
-    try {
-      execSync(`npm install -g ${packageName}@latest`, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 120_000,
-      });
-    } catch (err) {
-      const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? 'install failed';
-      res.status(500).json({ error: stderr });
+    // Reject if another update is already in progress
+    if (updatingPackage !== null) {
+      res.status(409).json({ error: 'update already in progress' });
       return;
     }
 
-    // Invalidate version cache after successful install
-    versionCache = null;
+    updatingPackage = name;
+    try {
+      // Resolve npm global root for temp dir cleanup
+      let npmRoot = '';
+      try {
+        npmRoot = getNpmGlobalRoot();
+      } catch {
+        // non-fatal: skip pre-clean if npm root unavailable
+      }
 
-    const to = getNpmListVersion(packageName);
+      // Pre-clean any stale npm temp dirs left by previous interrupted installs
+      if (npmRoot) {
+        cleanStaleNpmTempDirs(npmRoot, packageName);
+      }
 
-    if (name === 'claude-gateway') {
-      const isSystemd = !!process.env.INVOCATION_ID;
-      const isPm2 = !!process.env.PM2_HOME || process.env.pm_id !== undefined;
-      const isManaged = isSystemd || isPm2;
+      let installErr: unknown = null;
+      try {
+        execSync(`npm install -g ${packageName}@latest`, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 300_000,
+        });
+      } catch (err) {
+        const stderr = (err as { stderr?: Buffer }).stderr?.toString() ?? '';
+        if (npmRoot && (stderr.includes('ENOTEMPTY') || stderr.includes('ENOTDIR'))) {
+          // Remove stale temp dirs and the partially-installed package dir, then retry once
+          cleanStaleNpmTempDirs(npmRoot, packageName);
+          removePackageDir(npmRoot, packageName);
+          try {
+            execSync(`npm install -g ${packageName}@latest`, {
+              stdio: ['pipe', 'pipe', 'pipe'],
+              timeout: 300_000,
+            });
+          } catch (retryErr) {
+            installErr = retryErr;
+          }
+        } else {
+          installErr = err;
+        }
+      }
 
-      res.json({
-        package: packageName,
-        from,
-        to,
-        updated: true,
-        warning: isManaged ? 'service will restart' : 'process will stop — restart manually',
-      });
+      if (installErr !== null) {
+        const stderr = (installErr as { stderr?: Buffer }).stderr?.toString() ?? 'install failed';
+        res.status(500).json({ error: stderr });
+        return;
+      }
 
-      setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
-    } else {
-      res.json({ package: packageName, from, to, updated: true, warning: null });
+      // Invalidate version cache after successful install
+      versionCache = null;
+
+      const to = getNpmListVersion(packageName);
+
+      if (name === 'claude-gateway') {
+        const isSystemd = !!process.env.INVOCATION_ID;
+        const isPm2 = !!process.env.PM2_HOME || process.env.pm_id !== undefined;
+        const isManaged = isSystemd || isPm2;
+
+        res.json({
+          package: packageName,
+          from,
+          to,
+          updated: true,
+          warning: isManaged ? 'service will restart' : 'process will stop — restart manually',
+        });
+
+        setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
+      } else {
+        res.json({ package: packageName, from, to, updated: true, warning: null });
+      }
+    } finally {
+      updatingPackage = null;
     }
   });
 

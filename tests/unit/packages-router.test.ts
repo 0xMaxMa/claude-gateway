@@ -16,17 +16,26 @@
  * T13: POST /api/v1/packages/claude-gateway/update — registry unavailable → 503
  * T14: POST /api/v1/packages/claude-code/update — success, warning: null
  * T15: POST /api/v1/packages/claude-gateway/update — 403 when non-admin key
+ * T16: stale npm temp dir exists → pre-clean removes it, update succeeds
+ * T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds
+ * T18: concurrent update request → 409 while first is in flight
+ * T19: non-ENOTEMPTY install failure → 500, no retry
  */
 
 import express from 'express';
 import request from 'supertest';
 import { ApiKey } from '../../src/types';
 
-// Must mock child_process before importing the module under test
+// Must mock child_process and fs before importing the module under test
 jest.mock('child_process', () => ({ execSync: jest.fn() }));
+jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn() }));
 
 import { execSync } from 'child_process';
-import { createPackagesRouter, _resetCache } from '../../src/api/packages';
+import { readdirSync, rmSync } from 'fs';
+import { createPackagesRouter, _resetCache, _resetLock, _setLock } from '../../src/api/packages';
+
+const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
+const mockRmSync = rmSync as jest.MockedFunction<typeof rmSync>;
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
@@ -50,6 +59,7 @@ let killSpy: jest.SpyInstance;
 
 beforeEach(() => {
   _resetCache();
+  _resetLock();
   jest.clearAllMocks();
   // Prevent process.kill from actually sending signals during tests
   killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true);
@@ -359,5 +369,161 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('admin API key required');
+  });
+});
+
+// ─── T16-T19: ENOTEMPTY recovery & concurrency lock ─────────────────────────
+
+const NPM_ROOT = '/fake/npm/root';
+
+function mockExecSyncWithNpmRoot(npmListResponses: Record<string, string>, installResult?: 'ok' | Error) {
+  let listCallCount = 0;
+  mockExecSync.mockImplementation((cmd: unknown) => {
+    const cmdStr = cmd as string;
+    if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+    if (cmdStr.includes('npm list')) {
+      const pkg = Object.keys(npmListResponses)[listCallCount % Object.keys(npmListResponses).length];
+      listCallCount++;
+      return npmListResponses[pkg] ?? '{}';
+    }
+    if (cmdStr.includes('npm install')) {
+      if (installResult instanceof Error) throw installResult;
+      return '';
+    }
+    return '{}';
+  });
+}
+
+describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
+  it('T16: stale npm temp dir exists → pre-clean removes it, update succeeds', async () => {
+    delete process.env.INVOCATION_ID;
+    delete process.env.PM2_HOME;
+    delete process.env.pm_id;
+
+    let listCount = 0;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+      if (cmdStr.includes('npm list')) {
+        listCount++;
+        const version = listCount === 1 ? '1.0.5' : '1.1.0';
+        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+      }
+      // npm install — succeed
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+
+    // Simulate stale temp dir alongside the real package dir
+    mockReaddirSync.mockReturnValue(['claude-code', '.claude-code-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
+    mockRmSync.mockImplementation(() => undefined);
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(true);
+
+    // rmSync called for the stale temp entry only (not the real package dir in pre-clean)
+    const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
+    expect(rmCalls.some((p) => p.includes('.claude-code-O5kzWOwo'))).toBe(true);
+    expect(rmCalls.every((p) => !p.endsWith('/claude-code'))).toBe(true);
+  });
+
+  it('T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds', async () => {
+    let installAttempt = 0;
+    let listCount = 0;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+      if (cmdStr.includes('npm list')) {
+        listCount++;
+        const version = listCount === 1 ? '1.0.5' : '1.1.0';
+        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+      }
+      if (cmdStr.includes('npm install')) {
+        installAttempt++;
+        if (installAttempt === 1) {
+          const err = Object.assign(new Error('ENOTEMPTY'), {
+            stderr: Buffer.from(
+              'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /fake/npm/root/@anthropic-ai/claude-code',
+            ),
+          });
+          throw err;
+        }
+        // Retry succeeds
+        return '';
+      }
+      return '{}';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+
+    mockReaddirSync.mockReturnValue(['.claude-code-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
+    mockRmSync.mockImplementation(() => undefined);
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(true);
+    expect(installAttempt).toBe(2);
+
+    // Stale temp dir and package dir both removed before retry
+    const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
+    expect(rmCalls.some((p) => p.includes('.claude-code-O5kzWOwo'))).toBe(true);
+    expect(rmCalls.some((p) => p.endsWith('/claude-code'))).toBe(true);
+  });
+
+  it('T18: concurrent update request → 409 while first is in flight', async () => {
+    // Set up mocks so request reaches the lock check (from !== latest required)
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm list'))
+        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version: '1.0.5' } } });
+      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
+
+    // Simulate another update already in progress
+    _setLock('claude-code');
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('update already in progress');
+  });
+
+  it('T19: non-ENOTEMPTY install failure → 500, no retry attempted', async () => {
+    let installAttempt = 0;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
+      if (cmdStr.includes('npm list')) {
+        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version: '1.0.5' } } });
+      }
+      if (cmdStr.includes('npm install')) {
+        installAttempt++;
+        throw Object.assign(new Error('npm ERR! 404 Not Found'), {
+          stderr: Buffer.from('npm ERR! 404 Not Found — @anthropic-ai/claude-code@9.9.9'),
+        });
+      }
+      return '{}';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('npm ERR!');
+    expect(installAttempt).toBe(1);
   });
 });
