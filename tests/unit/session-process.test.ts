@@ -439,10 +439,10 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
-  // U-SP-11b: claude.headless=false spawns the PTY wrapper instead of claude
+  // U-SP-11b: gateway.headless=false spawns the PTY wrapper instead of claude
   // --------------------------------------------------------------------------
-  it('U-SP-11b: claude.headless=false spawns the claude-pty-shell wrapper', async () => {
-    agentConfig.claude.headless = false;
+  it('U-SP-11b: gateway.headless=false spawns the claude-pty-shell wrapper', async () => {
+    gatewayConfig.gateway.headless = false;
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
@@ -455,12 +455,12 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
-  // U-SP-11c: claude.headless omitted/true keeps the headless backend
+  // U-SP-11c: gateway.headless omitted/true keeps the headless backend
   // --------------------------------------------------------------------------
-  it('U-SP-11c: claude.headless omitted or true spawns claude directly', async () => {
+  it('U-SP-11c: gateway.headless omitted or true spawns claude directly', async () => {
     const sp1 = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp1.start();
-    agentConfig.claude.headless = true;
+    gatewayConfig.gateway.headless = true;
     const sp2 = new SessionProcess('chat:222', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp2.start();
 

@@ -364,11 +364,11 @@ export class SessionProcess extends EventEmitter {
     let claudeBin = claudeBinParts[0];
     let allArgs = [...claudeBinParts.slice(1), ...args];
 
-    // claude.headless: false → run the interactive claude TUI under the
+    // gateway.headless: false → run the interactive claude TUI under the
     // claude-pty-shell PTY wrapper (same stream-json protocol on stdio).
     // App-agents always stay headless: the wrapper (node-pty) lives on the
     // host and cannot wrap a binary inside a docker-exec container.
-    const usePtyShell = this.agentConfig.claude.headless === false && !isAppAgent;
+    const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
     let ptyRealBin: string | null = null;
     if (usePtyShell) {
       const wrapperPath = path.resolve(__dirname, '..', 'shell', 'claude-pty-shell.js');
@@ -377,8 +377,8 @@ export class SessionProcess extends EventEmitter {
       ptyRealBin = claudeBinRaw.includes('claude-pty-shell') ? 'claude' : claudeBinRaw;
       claudeBin = process.execPath;
       allArgs = [wrapperPath, ...args];
-    } else if (this.agentConfig.claude.headless === false && isAppAgent) {
-      this.logger.warn('claude.headless=false is not supported for app-agents — using headless backend', {
+    } else if (this.gatewayConfig.gateway.headless === false && isAppAgent) {
+      this.logger.warn('gateway.headless=false is not supported for app-agents — using headless backend', {
         sessionId: this.sessionId,
       });
     }

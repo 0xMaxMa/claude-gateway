@@ -7,10 +7,11 @@
     "removePaths": [
       "telegram.allowedUsers",
       "telegram.dmPolicy",
-      "claude.dangerouslySkipPermissions"
+      "claude.dangerouslySkipPermissions",
+      "claude.headless"
     ]
   },
-  "configVersion": "1.0.8",
+  "configVersion": "1.0.9",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -40,7 +41,8 @@
       "retentionDays": 60,
       "cleanupHour": 0,
       "cleanupTimezone": "UTC"
-    }
+    },
+    "headless": true
   },
   "agents": [
     {
@@ -53,7 +55,6 @@
       },
       "claude": {
         "model": "claude-opus-4-6",
-        "headless": true,
         "extraFlags": []
       },
       "signatureEmoji": "",
@@ -78,7 +79,6 @@
       },
       "claude": {
         "model": "claude-sonnet-4-6",
-        "headless": false,
         "extraFlags": []
       },
       "session": {
