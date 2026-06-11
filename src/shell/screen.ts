@@ -21,7 +21,12 @@ function normalize(text: string): string {
 export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
-export const TUI_TRUST_FOLDER = 'Do you trust the files in this folder';
+// All known phrasings across Claude Code versions — new installs use the second form.
+export const TUI_TRUST_FOLDER_PATTERNS = [
+  'Do you trust the files in this folder',
+  'Yes, I trust this folder',
+  'Is this a project you created or one you trust',
+] as const;
 export const TUI_NUMBERED_SELECT_RE = /❯ 1\./;
 export const TUI_CONFIRM_MARKER = 'Enter to confirm';
 
@@ -83,7 +88,7 @@ export class ScreenModel {
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
       return 'bypass-permissions';
     }
-    if (text.includes(TUI_TRUST_FOLDER)) {
+    if (TUI_TRUST_FOLDER_PATTERNS.some((p) => text.includes(p))) {
       return 'trust-folder';
     }
     // Generic numbered select dialog while no turn output is flowing.

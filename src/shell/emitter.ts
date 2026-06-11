@@ -92,13 +92,13 @@ export class ProtocolEmitter {
     });
   }
 
-  // Emitted when PTY shell auto-accepts an unexpected numbered dialog during startup
-  // (e.g. workspace trust prompt with new Claude Code wording the specific matchers missed).
-  // The session process catches this and notifies the user on their first message.
-  emitStartupDialogAccepted(sessionId: string, screen: string): void {
+  // Emitted when PTY shell encounters an unexpected numbered dialog (e.g. login prompt).
+  // SessionProcess forwards this as a 'startupDialogNotify' event; AgentRunner sends
+  // a direct channel message so the user knows the session is blocked.
+  emitStartupDialogNotify(sessionId: string, screen: string): void {
     this.writeLine({
       type: 'system',
-      subtype: 'startup_dialog_accepted',
+      subtype: 'startup_dialog_notify',
       session_id: sessionId,
       screen: screen.slice(0, 800),
     });

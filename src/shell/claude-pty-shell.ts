@@ -349,27 +349,22 @@ class Driver {
         this.host.writeRaw('2');
         break;
       case 'trust-folder':
-        // The gateway only ever runs claude in its own agent workspaces.
-        logWarn('accepting workspace trust dialog');
+        // The gateway only ever runs claude in its own agent workspaces — always safe.
         this.host.writeRaw('\r');
         break;
       case 'unknown-select':
-        if (!this.turn) {
-          if (!this.ready) {
-            // Startup: auto-accept to unblock Claude TUI (e.g. trust-folder with new wording).
-            // Emit event so the session can notify the user on their first message.
-            logWarn(`auto-accepting unexpected numbered dialog during startup:\n${this.screen.text()}`);
-            this.emitter.emitStartupDialogAccepted(this.args.sessionId, this.screen.text());
-            this.host.writeRaw('\r');
+        // Unexpected dialog (e.g. login prompt, future unknown dialog). Notify the user
+        // via their channel so they can intervene. Do NOT auto-accept — pressing Enter on
+        // a login or account dialog could trigger unintended authentication flows.
+        logError(`unexpected numbered dialog — notifying channel:\n${this.screen.text()}`);
+        this.emitter.emitStartupDialogNotify(this.args.sessionId, this.screen.text());
+        if (this.turn) {
+          this.turn.dialogEscapes++;
+          if (this.turn.dialogEscapes <= 2) {
+            this.host.writeRaw('\x1b');
+          } else {
+            this.finishTurn(true, 'blocked by an unexpected TUI dialog');
           }
-          break;
-        }
-        this.turn.dialogEscapes++;
-        logError(`unexpected dialog during turn (escape ${this.turn.dialogEscapes}/2):\n${this.screen.text()}`);
-        if (this.turn.dialogEscapes <= 2) {
-          this.host.writeRaw('\x1b');
-        } else {
-          this.finishTurn(true, 'blocked by an unexpected TUI dialog');
         }
         break;
     }

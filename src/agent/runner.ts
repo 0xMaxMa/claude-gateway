@@ -718,6 +718,13 @@ export class AgentRunner extends EventEmitter {
     // CronScheduler, tests) receive them without needing individual session references.
     proc.on('output', (line: string) => this.emit('output', line));
 
+    // PTY shell hit an unexpected dialog (e.g. login prompt) — send a direct channel message
+    // so the user knows the session is blocked without waiting for them to message first.
+    proc.on('startupDialogNotify', ({ chatId, source, screen }: { chatId: string; source: string; screen: string }) => {
+      const text = `⚠️ Session startup blocked by an unexpected dialog.\n\nThe Claude Code TUI is waiting for input that cannot be auto-accepted (e.g. a login prompt).\n\nPlease SSH to the server and resolve it manually.\n\n— Screen:\n${screen.slice(0, 400)}`;
+      void this.sendDirectChannelMessage(chatId, source as 'telegram' | 'discord' | 'api', text);
+    });
+
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source !== 'api') {
       proc.once('failed', () => {
@@ -2228,6 +2235,53 @@ export class AgentRunner extends EventEmitter {
    */
   getCallbackPort(): number {
     return this.callbackPort;
+  }
+
+  private async sendDirectChannelMessage(
+    chatId: string,
+    source: 'telegram' | 'discord' | 'api',
+    text: string,
+  ): Promise<void> {
+    if (source === 'telegram') {
+      const botToken = this.agentConfig.telegram?.botToken;
+      if (!botToken) {
+        this.logger.warn('sendDirectChannelMessage: no Telegram botToken', { chatId });
+        return;
+      }
+      try {
+        const resp = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) {
+          this.logger.warn('Telegram direct send failed', { chatId, status: resp.status });
+        }
+      } catch (err) {
+        this.logger.warn('Telegram direct send error', { chatId, error: (err as Error).message });
+      }
+    } else if (source === 'discord') {
+      const botToken = this.agentConfig.discord?.botToken;
+      if (!botToken) {
+        this.logger.warn('sendDirectChannelMessage: no Discord botToken', { chatId });
+        return;
+      }
+      try {
+        const resp = await fetch(`https://discord.com/api/v10/channels/${chatId}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bot ${botToken}` },
+          body: JSON.stringify({ content: text.slice(0, 2000) }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) {
+          this.logger.warn('Discord direct send failed', { chatId, status: resp.status });
+        }
+      } catch (err) {
+        this.logger.warn('Discord direct send error', { chatId, error: (err as Error).message });
+      }
+    }
+    // API sessions: no direct send — the caller must poll for session state.
   }
 
   /**
