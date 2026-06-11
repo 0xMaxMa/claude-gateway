@@ -4,27 +4,29 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 
 /**
- * Pre-write two flags before spawning Claude Code so no startup dialogs appear:
+ * Pre-write flags into ~/.claude.json before spawning Claude Code so no startup dialogs appear.
  *
- *   ~/.claude.json          projects[cwd].hasTrustDialogAccepted = true
- *                           → suppresses the workspace trust dialog
+ * All flags live in a single file (~/.claude.json), matching Claude Code's GlobalConfig:
  *
- *   ~/.claude/settings.json hasCompletedOnboarding = true
- *                           → suppresses the theme/style picker dialog
+ *   Top-level keys (read by getGlobalConfig()):
+ *     hasCompletedOnboarding = true  → skips the theme/style picker (showSetupScreens check)
+ *     theme = "dark"                 → satisfies the !config.theme condition in the same check
  *
- * Both writes are atomic (tmp+rename) and skip the disk write if the flag is
- * already set. Paths can be overridden for testing.
+ *   projects[cwd] entry:
+ *     hasTrustDialogAccepted = true  → suppresses the workspace trust dialog
+ *     projectOnboardingSeenCount = 1 → suppresses the per-project onboarding flow
+ *
+ * Writes are atomic (tmp+rename) and skipped if all flags are already set.
+ * The configPath parameter is exposed for testing only.
  */
 export function preTrustWorkspace(
   cwd: string,
   claudeJsonPath?: string,
-  settingsJsonPath?: string,
 ): void {
-  _writeTrustFlag(cwd, claudeJsonPath ?? path.join(os.homedir(), '.claude.json'));
-  _writeOnboardingFlag(settingsJsonPath ?? path.join(os.homedir(), '.claude', 'settings.json'));
+  _writeClaudeJsonFlags(cwd, claudeJsonPath ?? path.join(os.homedir(), '.claude.json'));
 }
 
-function _writeTrustFlag(cwd: string, configPath: string): void {
+function _writeClaudeJsonFlags(cwd: string, configPath: string): void {
   const tmpPath = `${configPath}.tmp`;
   let data: Record<string, unknown> = {};
   try {
@@ -40,42 +42,32 @@ function _writeTrustFlag(cwd: string, configPath: string): void {
   }
   const projects = data.projects as Record<string, Record<string, unknown>>;
   if (!projects[cwd]) projects[cwd] = {};
-  if (
+
+  const projectFlagsOk =
     projects[cwd].hasTrustDialogAccepted === true &&
     typeof projects[cwd].projectOnboardingSeenCount === 'number' &&
-    (projects[cwd].projectOnboardingSeenCount as number) > 0
-  ) return;
+    (projects[cwd].projectOnboardingSeenCount as number) > 0;
+  const globalFlagsOk =
+    data.hasCompletedOnboarding === true &&
+    typeof data.theme === 'string' &&
+    (data.theme as string).length > 0;
 
-  projects[cwd].hasTrustDialogAccepted = true;
-  projects[cwd].projectOnboardingSeenCount = 1;
+  if (projectFlagsOk && globalFlagsOk) return;
+
+  if (!projectFlagsOk) {
+    projects[cwd].hasTrustDialogAccepted = true;
+    projects[cwd].projectOnboardingSeenCount = 1;
+  }
+  if (!globalFlagsOk) {
+    data.hasCompletedOnboarding = true;
+    if (!data.theme) data.theme = 'dark';
+  }
+
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
     process.stderr.write(`[pty-shell] WARN could not write ${configPath}: ${(err as Error).message}\n`);
-  }
-}
-
-function _writeOnboardingFlag(settingsPath: string): void {
-  const tmpPath = `${settingsPath}.tmp`;
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      process.stderr.write(`[pty-shell] WARN could not read ${settingsPath}: ${(err as Error).message}\n`);
-    }
-  }
-
-  if (data.hasCompletedOnboarding === true) return;
-
-  data.hasCompletedOnboarding = true;
-  try {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-    fs.renameSync(tmpPath, settingsPath);
-  } catch (err) {
-    process.stderr.write(`[pty-shell] WARN could not write ${settingsPath}: ${(err as Error).message}\n`);
   }
 }
 
