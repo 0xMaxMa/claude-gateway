@@ -51,6 +51,9 @@ export class TranscriptTailer {
   private resolvedPath: string | null = null;
   /** Total records dispatched since start — non-zero means claude is writing output. */
   seenRecords = 0;
+  /** Timestamp of last fallback scan — caps expensive readdirSync to once per 2s. */
+  private lastFallbackScanMs = 0;
+  private static readonly FALLBACK_SCAN_INTERVAL_MS = 2_000;
 
   constructor(
     private readonly cwd: string,
@@ -81,6 +84,11 @@ export class TranscriptTailer {
       return expected;
     }
     // Fallback if the slug scheme ever changes: scan project dirs for the uuid.
+    // Capped to once per 2s — readdirSync over hundreds of project dirs every 150ms poll
+    // is expensive before the transcript file has been created.
+    const now = Date.now();
+    if (now - this.lastFallbackScanMs < TranscriptTailer.FALLBACK_SCAN_INTERVAL_MS) return null;
+    this.lastFallbackScanMs = now;
     const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
     let dirs: string[] = [];
     try { dirs = fs.readdirSync(projectsRoot); } catch { return null; }

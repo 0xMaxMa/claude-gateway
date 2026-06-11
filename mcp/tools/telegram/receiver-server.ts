@@ -750,6 +750,12 @@ async function handleInbound(
   downloadImage: (() => Promise<string | undefined>) | undefined,
   attachment?: AttachmentMeta,
 ): Promise<void> {
+  // Dedup BEFORE gate: prevent duplicate processing for all message types, including
+  // pairing flows (avoids double pairing-reply messages during receiver restart overlap).
+  const earlyChat = ctx.chat?.id
+  const earlyMsgId = ctx.message?.message_id
+  if (earlyChat != null && earlyMsgId != null && isDuplicate(String(earlyChat), earlyMsgId)) return
+
   const result = gate(ctx)
 
   if (result.action === 'drop') return
@@ -766,10 +772,6 @@ async function handleInbound(
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
   const msgId = ctx.message?.message_id
-
-  // Dedup: skip if another receiver instance already claimed this message_id.
-  // Handles Telegram re-delivery during receiver restart overlap (11 pollers, 1 slot).
-  if (msgId != null && isDuplicate(chat_id, msgId)) return
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
   // pending permission request, emit the structured event instead of

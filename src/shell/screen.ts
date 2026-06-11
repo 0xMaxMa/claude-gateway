@@ -14,6 +14,13 @@ function normalize(text: string): string {
  *
  * All TUI string matchers live here so a Claude Code release that changes
  * the UI requires touching exactly one file.
+ *
+ * Verified against Claude Code v2.x. When upgrading Claude Code, re-check:
+ *   isBusy            "esc to interrupt"         (status bar during active turn)
+ *   hasPrompt         /^❯ /m                     (idle input prompt)
+ *   bypass-perms      "Bypass Permissions mode" + "Yes, I accept"
+ *   trust-folder      "Do you trust the files in this folder"
+ *   unknown-select    /❯ 1\./ + "Enter to confirm"
  */
 export class ScreenModel {
   private term: Terminal;
