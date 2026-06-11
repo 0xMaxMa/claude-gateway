@@ -25,7 +25,7 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync, openSync, closeSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager } from './typing'
@@ -60,6 +60,40 @@ if (!TOKEN) {
 }
 
 const INBOX_DIR = join(STATE_DIR, 'inbox')
+const DEDUP_DIR = join(STATE_DIR, 'dedup')
+const DEDUP_TTL_MS = 5 * 60 * 1000 // 5 minutes
+
+/**
+ * Atomic check-and-mark using O_EXCL (create-or-fail).
+ * Returns true if this message_id was already processed by any receiver instance.
+ * Safe across multiple bun processes on the same filesystem.
+ */
+function isDuplicate(chatId: string, msgId: number): boolean {
+  try { mkdirSync(DEDUP_DIR, { recursive: true }) } catch {}
+  const file = join(DEDUP_DIR, `${chatId}-${msgId}`)
+  try {
+    const fd = openSync(file, 'wx') // O_CREAT | O_EXCL — fails if exists
+    closeSync(fd)
+    return false
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return true
+    return false // unexpected I/O error — let it through
+  }
+}
+
+function pruneDedup(): void {
+  try {
+    const now = Date.now()
+    for (const f of readdirSync(DEDUP_DIR)) {
+      try {
+        const file = join(DEDUP_DIR, f)
+        if (now - statSync(file).mtimeMs > DEDUP_TTL_MS) rmSync(file, { force: true })
+      } catch {}
+    }
+  } catch {}
+}
+
+setInterval(pruneDedup, 60_000).unref()
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -747,6 +781,10 @@ async function handleInbound(
   const from = ctx.from!
   const chat_id = String(ctx.chat!.id)
   const msgId = ctx.message?.message_id
+
+  // Dedup: skip if another receiver instance already claimed this message_id.
+  // Handles Telegram re-delivery during receiver restart overlap (11 pollers, 1 slot).
+  if (msgId != null && isDuplicate(chat_id, msgId)) return
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
   // pending permission request, emit the structured event instead of
