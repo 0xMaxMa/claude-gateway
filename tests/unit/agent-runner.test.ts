@@ -1361,6 +1361,102 @@ describe('AgentRunner — sendApiMessageStream', () => {
       .join('');
     expect(allDeltaText).toBe('Hello world');
   }, 15000);
+
+  // T-TOOL-USE-PTY: PTY mode (headless=false) emits tool_use blocks inside assistant messages
+  it('T-TOOL-USE-PTY: emits tool_use events from PTY-mode assistant message', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-tool-use-pty',
+        'test-chat',
+        'open google',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const session = getSessions(runner).get('stream-tool-use-pty')!;
+    expect(session).toBeDefined();
+
+    // Simulate PTY-mode assistant message with tool_use block (from emitter.ts emitAssistant)
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      session_id: 'stream-tool-use-pty',
+      stop_reason: 'tool_use',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tu_abc123', name: 'Bash', input: { command: 'ls' } },
+        ],
+      },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', result: '' }));
+
+    await donePromise;
+
+    const toolUseChunks = chunks.filter(c => c.type === 'tool_use');
+    expect(toolUseChunks).toHaveLength(1);
+    const toolEvent = toolUseChunks[0] as { type: 'tool_use'; name: string; id: string; input?: Record<string, unknown> };
+    expect(toolEvent.name).toBe('Bash');
+    expect(toolEvent.id).toBe('tu_abc123');
+    expect(toolEvent.input).toEqual({ command: 'ls' });
+  }, 15000);
+
+  // T-TOOL-USE-PTY-MIXED: PTY mode assistant message with both text and tool_use blocks
+  it('T-TOOL-USE-PTY-MIXED: emits both text_delta and tool_use from mixed assistant message', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const chunks: StreamEvent[] = [];
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-tool-use-mixed',
+        'test-chat',
+        'hello with tool',
+        {
+          onChunk: (event) => chunks.push(event),
+          onDone: (text) => resolve(text),
+          onError: () => {},
+        },
+        { timeoutMs: 5000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const session = getSessions(runner).get('stream-tool-use-mixed')!;
+
+    // Simulate assistant message with both text and tool_use
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      stop_reason: 'tool_use',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Opening now.' },
+          { type: 'tool_use', id: 'tu_xyz', name: 'Skill', input: { skill: 'browser' } },
+        ],
+      },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Opening now.' }));
+
+    await donePromise;
+
+    expect(chunks.some(c => c.type === 'text_delta')).toBe(true);
+    expect(chunks.some(c => c.type === 'tool_use')).toBe(true);
+    const toolEvent = chunks.find(c => c.type === 'tool_use') as { type: 'tool_use'; name: string; id: string } | undefined;
+    expect(toolEvent?.name).toBe('Skill');
+    expect(toolEvent?.id).toBe('tu_xyz');
+  }, 15000);
 });
 
 // ── Typing persistence tests ──────────────────────────────────────────────────
