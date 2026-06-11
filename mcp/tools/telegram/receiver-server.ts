@@ -25,10 +25,11 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync, openSync, closeSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager } from './typing'
+import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
@@ -61,39 +62,23 @@ if (!TOKEN) {
 
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const DEDUP_DIR = join(STATE_DIR, 'dedup')
-const DEDUP_TTL_MS = 5 * 60 * 1000 // 5 minutes
 
-/**
- * Atomic check-and-mark using O_EXCL (create-or-fail).
- * Returns true if this message_id was already processed by any receiver instance.
- * Safe across multiple bun processes on the same filesystem.
- */
+// Initialize dedup dir once at startup (not on every message).
+initDedupDir(DEDUP_DIR)
+// Prune stale markers left over from before this process started.
+_pruneDedup(DEDUP_DIR)
+
 function isDuplicate(chatId: string, msgId: number): boolean {
-  try { mkdirSync(DEDUP_DIR, { recursive: true }) } catch {}
-  const file = join(DEDUP_DIR, `${chatId}-${msgId}`)
-  try {
-    const fd = openSync(file, 'wx') // O_CREAT | O_EXCL — fails if exists
-    closeSync(fd)
-    return false
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return true
-    return false // unexpected I/O error — let it through
-  }
+  return _isDuplicate(DEDUP_DIR, chatId, msgId)
 }
 
-function pruneDedup(): void {
-  try {
-    const now = Date.now()
-    for (const f of readdirSync(DEDUP_DIR)) {
-      try {
-        const file = join(DEDUP_DIR, f)
-        if (now - statSync(file).mtimeMs > DEDUP_TTL_MS) rmSync(file, { force: true })
-      } catch {}
-    }
-  } catch {}
-}
-
-setInterval(pruneDedup, 60_000).unref()
+// Spread 11 concurrent receivers across the minute window with random jitter
+// so they don't all hit the dedup dir simultaneously on each tick.
+const pruneJitter = Math.floor(Math.random() * 60_000)
+setTimeout(() => {
+  _pruneDedup(DEDUP_DIR)
+  setInterval(() => _pruneDedup(DEDUP_DIR), 60_000).unref()
+}, pruneJitter).unref()
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.

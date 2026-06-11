@@ -73,8 +73,7 @@ system-stop: ## Stop gateway via systemd (sudo systemctl stop claude-gateway)
 	sudo systemctl stop claude-gateway
 
 system-restart: ## Build and restart gateway via systemd
-	npm run build
-	sudo systemctl restart claude-gateway
+	npm run build && sudo systemctl restart claude-gateway
 
 system-logs: ## Tail gateway logs via journalctl
 	journalctl -f -u claude-gateway
