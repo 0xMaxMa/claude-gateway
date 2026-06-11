@@ -4,7 +4,7 @@ import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
-  TUI_TRUST_FOLDER_PATTERNS,
+  TUI_TRUST_OPTION_RE,
   TUI_CONFIRM_MARKER,
 } from '../../src/shell/screen';
 import * as os from 'os';
@@ -94,10 +94,11 @@ describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
     expect(TUI_BYPASS_PERMS).toContain('Yes, I accept');
   });
 
-  it('TRUST_FOLDER_PATTERNS includes both old and new dialog text', () => {
-    expect(TUI_TRUST_FOLDER_PATTERNS).toContain('Do you trust the files in this folder');
-    expect(TUI_TRUST_FOLDER_PATTERNS).toContain('Yes, I trust this folder');
-    expect(TUI_TRUST_FOLDER_PATTERNS).toContain('Is this a project you created or one you trust');
+  it('TRUST_OPTION_RE matches yes-style option 1 but not login-style', () => {
+    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Yes, I trust this folder')).toBe(true);
+    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Yes, I accept')).toBe(true);
+    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Login with Claude.ai')).toBe(false);
+    expect(TUI_TRUST_OPTION_RE.test('❯ 1. Use API key')).toBe(false);
   });
 
   it('CONFIRM_MARKER matches expected dialog text', () => {

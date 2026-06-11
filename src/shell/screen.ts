@@ -15,20 +15,21 @@ function normalize(text: string): string {
  *   BUSY_MARKER        status bar text during an active turn
  *   PROMPT_RE          idle input caret pattern
  *   BYPASS_PERMS       "Bypass Permissions" dialog markers
- *   TRUST_FOLDER       workspace trust dialog marker
  *   NUMBERED_SELECT_RE generic numbered select — combined with CONFIRM_MARKER
+ *   TRUST_OPTION_RE    option-1 text begins with "Yes" → workspace trust dialog
+ *                      Version-agnostic: matches "Yes, I trust this folder" (new),
+ *                      "Yes, I accept" style, etc. without depending on question wording.
+ *                      Login/auth dialogs always present option-1 as an action phrase
+ *                      ("Login with Claude.ai", "Use API key") — never starts with "Yes".
  */
 export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
-// All known phrasings across Claude Code versions — new installs use the second form.
-export const TUI_TRUST_FOLDER_PATTERNS = [
-  'Do you trust the files in this folder',
-  'Yes, I trust this folder',
-  'Is this a project you created or one you trust',
-] as const;
 export const TUI_NUMBERED_SELECT_RE = /❯ 1\./;
 export const TUI_CONFIRM_MARKER = 'Enter to confirm';
+// Matches the selected option-1 text in a numbered select dialog.
+// Trust dialogs put "Yes, ..." as the first choice; login/auth dialogs do not.
+export const TUI_TRUST_OPTION_RE = /❯ 1\.\s+Yes\b/i;
 
 /**
  * Virtual terminal fed with raw PTY bytes. Used ONLY for liveness signals
@@ -88,10 +89,12 @@ export class ScreenModel {
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
       return 'bypass-permissions';
     }
-    if (TUI_TRUST_FOLDER_PATTERNS.some((p) => text.includes(p))) {
+    // Numbered select where option 1 starts with "Yes" → workspace trust dialog.
+    // Detected by option text, not question wording, so it survives Claude Code version bumps.
+    if (TUI_NUMBERED_SELECT_RE.test(text) && text.includes(TUI_CONFIRM_MARKER) && TUI_TRUST_OPTION_RE.test(text)) {
       return 'trust-folder';
     }
-    // Generic numbered select dialog while no turn output is flowing.
+    // Generic numbered select (login prompt, unknown future dialog).
     if (!text.includes(TUI_BUSY_MARKER) && TUI_NUMBERED_SELECT_RE.test(text) && text.includes(TUI_CONFIRM_MARKER)) {
       return 'unknown-select';
     }
