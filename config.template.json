@@ -6,10 +6,11 @@
     ],
     "removePaths": [
       "telegram.allowedUsers",
-      "telegram.dmPolicy"
+      "telegram.dmPolicy",
+      "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.7",
+  "configVersion": "1.0.8",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -52,7 +53,6 @@
       },
       "claude": {
         "model": "claude-opus-4-6",
-        "dangerouslySkipPermissions": true,
         "extraFlags": []
       },
       "signatureEmoji": "",
@@ -77,7 +77,6 @@
       },
       "claude": {
         "model": "claude-sonnet-4-6",
-        "dangerouslySkipPermissions": false,
         "extraFlags": []
       },
       "session": {
