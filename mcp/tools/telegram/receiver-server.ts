@@ -1182,14 +1182,8 @@ bot.on('callback_query:data', async ctx => {
       })
       const result = (await res.json()) as { success?: boolean; error?: string; restarted?: boolean }
       if (result.success) {
-        if (result.restarted === false) {
-          // No active session — model changed, no restart needed
-          await ctx.answerCallbackQuery({ text: `Model changed to ${newModel}` }).catch(() => {})
-          await ctx.editMessageText(`\u2705 Model changed to ${newModel}`).catch(() => {})
-        } else {
-          await ctx.answerCallbackQuery({ text: `Switching to ${newModel}...` }).catch(() => {})
-          await ctx.editMessageText(`\u23f3 Switching to ${newModel}...`).catch(() => {})
-        }
+        await ctx.answerCallbackQuery({ text: `Model changed to ${newModel}` }).catch(() => {})
+        await ctx.editMessageText(`\u2705 Model changed to ${newModel}`).catch(() => {})
       } else {
         await ctx.answerCallbackQuery({ text: result.error ?? 'Failed' }).catch(() => {})
       }
