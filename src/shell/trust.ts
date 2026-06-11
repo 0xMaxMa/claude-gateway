@@ -3,9 +3,10 @@ import * as os from 'os';
 import * as path from 'path';
 
 /**
- * Pre-write hasTrustDialogAccepted: true for the given workspace path into
- * ~/.claude.json before spawning Claude Code so the trust-folder dialog never
- * appears. Safe to call repeatedly — skips the disk write if already trusted.
+ * Pre-write hasTrustDialogAccepted: true for the given workspace path and
+ * hasCompletedOnboarding: true at root into ~/.claude.json before spawning
+ * Claude Code so the trust-folder and theme/onboarding dialogs never appear.
+ * Safe to call repeatedly — skips the disk write if both flags are already set.
  *
  * @param cwd            Workspace directory path (the key in projects map).
  * @param claudeJsonPath Override for the config file path (used in tests).
@@ -29,9 +30,13 @@ export function preTrustWorkspace(cwd: string, claudeJsonPath?: string): void {
   }
   const projects = data.projects as Record<string, Record<string, unknown>>;
   if (!projects[cwd]) projects[cwd] = {};
-  if (projects[cwd].hasTrustDialogAccepted === true) return; // already set — skip write
+
+  const alreadyTrusted = projects[cwd].hasTrustDialogAccepted === true;
+  const alreadyOnboarded = data.hasCompletedOnboarding === true;
+  if (alreadyTrusted && alreadyOnboarded) return; // both set — skip write
 
   projects[cwd].hasTrustDialogAccepted = true;
+  data.hasCompletedOnboarding = true;
   try {
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
     fs.renameSync(tmpPath, configPath);

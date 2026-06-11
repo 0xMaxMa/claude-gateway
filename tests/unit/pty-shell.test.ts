@@ -160,6 +160,7 @@ describe('preTrustWorkspace', () => {
     preTrustWorkspace('/workspace/test', configPath);
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     expect(data.projects['/workspace/test'].hasTrustDialogAccepted).toBe(true);
+    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
   it('adds trust entry to existing file without overwriting other data', () => {
@@ -169,14 +170,22 @@ describe('preTrustWorkspace', () => {
     expect(data.theme).toBe('dark');
     expect(data.projects['/other'].foo).toBe('bar');
     expect(data.projects['/workspace/new'].hasTrustDialogAccepted).toBe(true);
+    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
-  it('skips the write when already trusted', () => {
-    const initial = JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } });
+  it('skips the write when both trust and onboarding flags are already set', () => {
+    const initial = JSON.stringify({ hasCompletedOnboarding: true, projects: { '/ws': { hasTrustDialogAccepted: true } } });
     fs.writeFileSync(configPath, initial);
     const mtime = fs.statSync(configPath).mtimeMs;
     preTrustWorkspace('/ws', configPath);
     expect(fs.statSync(configPath).mtimeMs).toBe(mtime); // file unchanged
+  });
+
+  it('sets hasCompletedOnboarding when trust is set but onboarding flag is missing', () => {
+    fs.writeFileSync(configPath, JSON.stringify({ projects: { '/ws': { hasTrustDialogAccepted: true } } }));
+    preTrustWorkspace('/ws', configPath);
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(data.hasCompletedOnboarding).toBe(true);
   });
 
   it('sets trust when project entry exists but flag is missing', () => {
@@ -193,6 +202,7 @@ describe('preTrustWorkspace', () => {
     // Malformed file → read failure → start fresh; new file should be valid
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     expect(data.projects['/ws'].hasTrustDialogAccepted).toBe(true);
+    expect(data.hasCompletedOnboarding).toBe(true);
   });
 });
 
