@@ -361,10 +361,32 @@ export function createApiRouter(
     // Image-only sends have an empty trimmedMessage and never match built-in commands.
     if (trimmedMessage && AgentRunner.isApiBuiltinCommand(trimmedMessage)) {
       try {
-        const result = await runner.executeApiCommand(sessionId, chatIdStr, trimmedMessage);
-        res.json({ command: trimmedMessage, session_id: sessionId, result });
+        const { result, responseText } = await runner.executeApiCommand(
+          sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage },
+        );
+        if (stream) {
+          // Return SSE so the web frontend's streamMessage generator can parse events,
+          // show the assistant response in real-time, and get session_id for history refresh.
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          res.flushHeaders();
+          if (responseText) {
+            res.write(`data: ${JSON.stringify({ type: 'text_delta', text: responseText })}\n\n`);
+          }
+          res.write(`data: ${JSON.stringify({ type: 'result', text: responseText, session_id: sessionId, command: trimmedMessage, result })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } else {
+          res.json({ command: trimmedMessage, session_id: sessionId, result });
+        }
       } catch (err: unknown) {
-        res.status(500).json({ error: (err as Error).message ?? 'Command failed' });
+        if (!res.headersSent) {
+          res.status(500).json({ error: (err as Error).message ?? 'Command failed' });
+        }
       }
       return;
     }
@@ -2132,7 +2154,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const result = await runner.executeApiCommand(sessionId, chatId, '/clear');
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/clear', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2148,7 +2170,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const result = await runner.executeApiCommand(sessionId, chatId, '/compact');
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2164,7 +2186,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const result = await runner.executeApiCommand(sessionId, chatId, '/stop');
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/stop', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2180,7 +2202,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const result = await runner.executeApiCommand(sessionId, chatId, '/restart');
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/restart', { skipPersist: true });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });

@@ -1872,46 +1872,69 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
   }
 
-  async executeApiCommand(sessionId: string, chatId: string, command: string): Promise<Record<string, unknown>> {
+  async executeApiCommand(
+    sessionId: string,
+    chatId: string,
+    command: string,
+    opts?: { skipPersist?: boolean },
+  ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
     const dbChatId = `api-${chatId}`;    // historyDb uses full channel-chatId key
+    const skipPersist = opts?.skipPersist ?? false;
+
+    // Register session in the api-{chatId} index on first use (same as sendApiMessageStream)
+    await this.sessionStore.ensureApiSession(agentId, storeChatId, sessionId).catch((err: unknown) => {
+      this.logger.warn('Failed to register API session in index for command', { agentId, chatId, sessionId, error: (err as Error).message });
+    });
+
+    // Persist user message before executing so it appears in history.
+    // Skip for /clear — clearSession() below wipes the table anyway; only the response survives.
+    if (!skipPersist && command !== '/clear') {
+      const userTs = Date.now();
+      await this.sessionStore
+        .appendMessage(agentId, sessionId, { role: 'user', content: command, ts: userTs })
+        .catch(() => {});
+      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role: 'user', content: command, ts: userTs });
+    }
+
+    let result: Record<string, unknown>;
+    let responseText: string;
 
     if (command === '/model') {
-      return { model: this.agentConfig.claude.model };
-    }
-
-    if (command === '/stop') {
+      const model = this.agentConfig.claude.model;
+      result = { model };
+      responseText = `Current model: ${model}`;
+    } else if (command === '/stop') {
       const session = this.sessions.get(sessionId);
       const stopped = session ? session.interrupt() : false;
-      return { stopped };
-    }
-
-    if (command === '/restart') {
+      result = { stopped };
+      responseText = stopped ? 'Session interrupted.' : 'No active session to stop.';
+    } else if (command === '/restart') {
       this.restartProcess(sessionId).catch(() => {});
-      return { restarting: true };
-    }
-
-    if (command === '/session') {
+      result = { restarting: true };
+      responseText = 'Session is restarting.';
+    } else if (command === '/session') {
       const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
       const meta = index?.sessions.find((s) => s.id === sessionId);
       const effectiveModel = this.agentConfig.claude.model;
-      if (!meta) return { sessionId, sessionName: null, messageCount: 0, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
-      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-      const modelConfig = availableModels.find((m) => m.id === effectiveModel);
-      const contextWindow = modelConfig?.contextWindow ?? 200000;
-      const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
-      return {
-        sessionId,
-        sessionName: meta.name,
-        messageCount: meta.messageCount,
-        archivedCount: meta.archivedCount ?? 0,
-        contextUsedPct,
-        model: effectiveModel,
-      };
-    }
-
-    if (command === '/clear') {
+      if (!meta) {
+        result = { sessionId, sessionName: null, messageCount: 0, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
+        responseText = `Session: (unnamed)\nMessages: 0\nContext used: 0%\nModel: ${effectiveModel}`;
+      } else {
+        const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+        const modelConfig = availableModels.find((m) => m.id === effectiveModel);
+        const contextWindow = modelConfig?.contextWindow ?? 200000;
+        const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
+        result = { sessionId, sessionName: meta.name, messageCount: meta.messageCount, archivedCount: meta.archivedCount ?? 0, contextUsedPct, model: effectiveModel };
+        responseText = [
+          `Session: ${meta.name ?? '(unnamed)'}`,
+          `Messages: ${meta.messageCount}${(meta.archivedCount ?? 0) > 0 ? ` (${meta.archivedCount} archived)` : ''}`,
+          `Context used: ${contextUsedPct}%`,
+          `Model: ${effectiveModel}`,
+        ].join('\n');
+      }
+    } else if (command === '/clear') {
       const ch = 'api' as const;
       await this.sessionStore.clearTelegramSessionHistory(agentId, storeChatId, sessionId, ch);
       await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
@@ -1924,27 +1947,38 @@ export class AgentRunner extends EventEmitter {
       const mediaPaths = this.historyDb.clearSession(dbChatId, sessionId);
       MediaStore.deleteMediaFiles(this.agentsBaseDir, agentId, mediaPaths);
       this.restartProcess(sessionId).catch(() => {});
-      return { success: true };
-    }
-
-    if (command === '/compact') {
+      result = { success: true };
+      responseText = 'Session cleared.';
+    } else if (command === '/compact') {
       const ch = 'api' as const;
       const compactEffectiveModel = this.agentConfig.claude.model;
       const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
       const modelConfig = availableModels.find((m) => m.id === compactEffectiveModel);
       const contextWindow = modelConfig?.contextWindow ?? 200000;
       const compactor = new SessionCompactor(this.sessionStore);
-      const result = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
+      const compactResult = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
       await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
         loadedAtSpawn: undefined,
         archivedCount: undefined,
         messageCountAtSpawn: undefined,
       }, ch);
       await this.restartProcess(sessionId);
-      return { success: true, keptMessages: result.afterMessages, archivedMessages: result.beforeMessages - result.afterMessages };
+      result = { success: true, keptMessages: compactResult.afterMessages, archivedMessages: compactResult.beforeMessages - compactResult.afterMessages };
+      responseText = `Session compacted. Kept ${compactResult.afterMessages} messages, archived ${compactResult.beforeMessages - compactResult.afterMessages}.`;
+    } else {
+      throw new Error(`Unknown command: ${command}`);
     }
 
-    throw new Error(`Unknown command: ${command}`);
+    // Persist assistant response to history
+    if (!skipPersist) {
+      const assistantTs = Date.now();
+      await this.sessionStore
+        .appendMessage(agentId, sessionId, { role: 'assistant', content: responseText, ts: assistantTs })
+        .catch(() => {});
+      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role: 'assistant', content: responseText, ts: assistantTs });
+    }
+
+    return { result, responseText };
   }
 
   async setModel(newModel: string): Promise<void> {
