@@ -7,6 +7,7 @@ import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
+import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -419,6 +420,12 @@ export class SessionProcess extends EventEmitter {
         ]
       : allArgs;
 
+    let ptyStreamSocketPath: string | null = null;
+    if (usePtyShell) {
+      ptyStreamSocketPath = ptyStreamRegistry.socketPath(this.agentConfig.id, this.sessionId);
+      ptyStreamRegistry.listen(this.agentConfig.id, ptyStreamSocketPath);
+    }
+
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
@@ -427,6 +434,7 @@ export class SessionProcess extends EventEmitter {
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
         ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
+        ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -624,6 +632,7 @@ export class SessionProcess extends EventEmitter {
         signal,
         sessionId: this.sessionId,
       });
+      if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       if (!this.stopping) this.scheduleRestart();
     });

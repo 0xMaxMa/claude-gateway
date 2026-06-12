@@ -11,6 +11,7 @@
  * the PTY screen is used only for busy/idle/dialog liveness signals.
  */
 import * as fs from 'fs';
+import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
 import { ScreenModel } from './screen';
@@ -79,6 +80,7 @@ class Driver {
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
   private tailer!: TranscriptTailer;
+  private streamSocket: net.Socket | null = null;
 
   private readonly screen = new ScreenModel();
   private readonly emitter = new ProtocolEmitter();
@@ -105,11 +107,23 @@ class Driver {
     const [realBin, ...realBinArgs] = this.realBinParts;
     logDebug(`session=${this.args.sessionId} bin=${this.realBinParts.join(' ')} args=${this.args.claudeArgs.join(' ')}`);
 
+    const streamSocketPath = process.env.PTY_SHELL_STREAM_SOCKET;
+    if (streamSocketPath) {
+      const sock = net.createConnection(streamSocketPath);
+      sock.on('error', () => { /* registry may not be listening yet or already closed */ });
+      this.streamSocket = sock;
+    }
+
     this.host = new PtyHost(realBin, [...realBinArgs, ...this.args.claudeArgs], {
       cols: this.screen.cols,
       rows: this.screen.rows,
       cwd: process.cwd(),
-      onData: (d) => this.screen.write(d),
+      onData: (d) => {
+        this.screen.write(d);
+        if (this.streamSocket?.writable) {
+          try { this.streamSocket.write(d); } catch { /* socket closed */ }
+        }
+      },
       onExit: (code) => this.onChildExit(code),
     });
 
@@ -384,6 +398,7 @@ class Driver {
     this.exiting = true;
     if (this.tickTimer) clearInterval(this.tickTimer);
     this.tailer.stop();
+    if (this.streamSocket) { try { this.streamSocket.destroy(); } catch { /* ignore */ } }
     this.host.kill();
     // PtyHost.onExit will exit(child code); this is the safety net.
     setTimeout(() => process.exit(code), 1500).unref();

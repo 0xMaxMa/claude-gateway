@@ -1,8 +1,10 @@
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
 import { Server } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
+import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml } from '../ui/web-ui';
@@ -364,6 +366,28 @@ export class GatewayRouter {
         } else {
           reject(err);
         }
+      });
+
+      const wss = new WebSocketServer({ noServer: true });
+
+      this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
+        const url = req.url ?? '';
+        const match = url.match(/^\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
+        if (!match) {
+          socket.destroy();
+          return;
+        }
+        const agentId = decodeURIComponent(match[1]!);
+        if (!this.agents.has(agentId)) {
+          socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          ptyStreamRegistry.subscribe(agentId, ws);
+          ws.on('close', () => ptyStreamRegistry.unsubscribe(agentId, ws));
+          ws.on('error', () => ptyStreamRegistry.unsubscribe(agentId, ws));
+        });
       });
     });
   }
