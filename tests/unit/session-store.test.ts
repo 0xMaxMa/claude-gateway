@@ -375,4 +375,140 @@ describe('session-store', () => {
     expect(meta!.createdAt).toBe(originalCreatedAt);
     expect(meta!.messageCount).toBe(0);
   });
+
+  // ─── API channel routing (#160) ──────────────────────────────────────────────
+  //
+  // api sessions keep their conversation context in the flat sessions/{sessionId}.jsonl
+  // store (where appendMessage writes and buildInitialPrompt loads at spawn) — NOT the
+  // structured per-chat telegram-style store. The three SessionStore methods used by
+  // /compact and /clear must therefore route to the flat store when channel === 'api'.
+
+  const apiChatId = 'api-998877';            // storeChatId used by the runner (api-{chatId})
+  const apiSessionId = 'sess-abc123';        // the flat store is keyed by sessionId
+
+  // The flat store path the api branches must read/write.
+  const flatPath = (agentId: string, sessionId: string) =>
+    path.join(tmpDir, agentId, 'sessions', `${sessionId}.jsonl`);
+  // The structured api store dir that must stay untouched.
+  const structuredDir = (agentId: string, chatId: string) =>
+    path.join(tmpDir, agentId, 'sessions', `api-${chatId}`);
+
+  it('U-API-1: loadTelegramSession(api) reads from the flat sessions/{sessionId}.jsonl store', async () => {
+    // Seed the flat store exactly as the api append path does (keyed by sessionId).
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'hello from api'));
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('assistant', 'hi'));
+
+    const loaded = await store.loadTelegramSession('agent-x', apiChatId, apiSessionId, 'api');
+
+    expect(loaded).toHaveLength(2);
+    expect(loaded[0].content).toBe('hello from api');
+    expect(loaded[1].content).toBe('hi');
+    // Same data loadSession returns directly — they must agree.
+    expect(loaded).toEqual(await store.loadSession('agent-x', apiSessionId));
+  });
+
+  it('U-API-2: loadTelegramSession(api) ignores the structured per-chat store', async () => {
+    // Messages written only to the structured store must NOT surface for api.
+    await store.getOrCreateIndex('agent-x', apiChatId, 'api');
+    await store.appendTelegramMessage('agent-x', apiChatId, apiSessionId, makeMsg('user', 'structured only'), 'api')
+      .catch(() => {/* index may not contain sessionId; fine — flat store is what matters */});
+
+    const loaded = await store.loadTelegramSession('agent-x', apiChatId, apiSessionId, 'api');
+    // Flat store was never written → empty, regardless of the structured store.
+    expect(loaded).toEqual([]);
+  });
+
+  it('U-API-3: saveTelegramSession(api) overwrites the flat store and leaves the structured store empty', async () => {
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'old 1'));
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('assistant', 'old 2'));
+
+    const compacted = [
+      makeMsg('user', 'summary tail 1'),
+      makeMsg('assistant', 'summary tail 2'),
+    ];
+    await store.saveTelegramSession('agent-x', apiChatId, apiSessionId, compacted, 'api');
+
+    // Flat store now holds exactly the overwritten messages (what spawn will reload).
+    const reloaded = await store.loadSession('agent-x', apiSessionId);
+    expect(reloaded).toHaveLength(2);
+    expect(reloaded[0].content).toBe('summary tail 1');
+    expect(reloaded[1].content).toBe('summary tail 2');
+
+    // The structured api store dir must not have been created/written by the save.
+    const structuredSessionFile = path.join(structuredDir('agent-x', apiChatId), `${apiSessionId}.json`);
+    expect(fs.existsSync(structuredSessionFile)).toBe(false);
+  });
+
+  it('U-API-4: saveTelegramSession(api) writes newline-delimited JSONL the flat reader round-trips', async () => {
+    await store.saveTelegramSession('agent-x', apiChatId, apiSessionId, [makeMsg('user', 'only')], 'api');
+
+    const raw = fs.readFileSync(flatPath('agent-x', apiSessionId), 'utf-8');
+    expect(raw.endsWith('\n')).toBe(true);
+    expect(raw.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(raw.trim())).toMatchObject({ role: 'user', content: 'only' });
+  });
+
+  it('U-API-5: saveTelegramSession(api) with [] empties the flat file', async () => {
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'will be wiped'));
+
+    await store.saveTelegramSession('agent-x', apiChatId, apiSessionId, [], 'api');
+
+    expect(fs.readFileSync(flatPath('agent-x', apiSessionId), 'utf-8')).toBe('');
+    expect(await store.loadSession('agent-x', apiSessionId)).toEqual([]);
+  });
+
+  it('U-API-6: clearTelegramSessionHistory(api) truncates the flat store', async () => {
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'a'));
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('assistant', 'b'));
+    expect(await store.loadSession('agent-x', apiSessionId)).toHaveLength(2);
+
+    await store.clearTelegramSessionHistory('agent-x', apiChatId, apiSessionId, 'api');
+
+    // The flat file — what buildInitialPrompt loads at the next spawn — is now empty.
+    expect(await store.loadSession('agent-x', apiSessionId)).toEqual([]);
+    expect(await store.loadTelegramSession('agent-x', apiChatId, apiSessionId, 'api')).toEqual([]);
+  });
+
+  it('U-API-7: clearTelegramSessionHistory(api) resets the index messageCount when present', async () => {
+    // Register the session in the structured index (as ensureApiSession does).
+    await store.getOrCreateIndex('agent-x', apiChatId, 'api');
+    const idx = await store.loadIndex('agent-x', apiChatId, 'api');
+    expect(idx).not.toBeNull();
+    const seededId = idx!.sessions[0].id;
+    idx!.sessions[0].messageCount = 7;
+    await store.saveIndex('agent-x', apiChatId, idx!, 'api');
+
+    await store.clearTelegramSessionHistory('agent-x', apiChatId, seededId, 'api');
+
+    const after = await store.loadIndex('agent-x', apiChatId, 'api');
+    const meta = after!.sessions.find((s) => s.id === seededId);
+    expect(meta!.messageCount).toBe(0);
+  });
+
+  it('U-API-8: clearTelegramSessionHistory(api) is a no-op-safe when no index exists', async () => {
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'a'));
+
+    // No structured index was created — clear must still truncate the flat store and not throw.
+    await expect(
+      store.clearTelegramSessionHistory('agent-x', apiChatId, apiSessionId, 'api'),
+    ).resolves.toBeUndefined();
+    expect(await store.loadSession('agent-x', apiSessionId)).toEqual([]);
+  });
+
+  it('U-API-9: api routing leaves the telegram store path completely untouched', async () => {
+    // A telegram session for the same agent must be unaffected by api operations.
+    const tgIndex = await store.getOrCreateIndex('agent-x', 'tg-555');
+    const tgSessionId = tgIndex.activeSessionId;
+    await store.appendTelegramMessage('agent-x', 'tg-555', tgSessionId, makeMsg('user', 'telegram msg'));
+
+    // Drive the api branches.
+    await store.appendMessage('agent-x', apiSessionId, makeMsg('user', 'api msg'));
+    await store.saveTelegramSession('agent-x', apiChatId, apiSessionId, [makeMsg('user', 'api compacted')], 'api');
+    await store.clearTelegramSessionHistory('agent-x', apiChatId, apiSessionId, 'api');
+
+    // Telegram session still has its message and intact meta.
+    const tgMsgs = await store.loadTelegramSession('agent-x', 'tg-555', tgSessionId);
+    expect(tgMsgs).toHaveLength(1);
+    expect(tgMsgs[0].content).toBe('telegram msg');
+  });
 });
