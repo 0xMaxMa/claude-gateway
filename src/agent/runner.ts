@@ -1941,18 +1941,21 @@ export class AgentRunner extends EventEmitter {
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
         const meta = index?.sessions.find((s) => s.id === sessionId);
         const effectiveModel = this.agentConfig.claude.model;
+        // The api append path doesn't maintain the index messageCount, so count the flat store
+        // (the real conversation) directly rather than trusting meta.messageCount.
+        const messageCount = (await this.sessionStore.loadSession(agentId, sessionId).catch(() => [])).length;
         if (!meta) {
-          result = { sessionId, sessionName: null, messageCount: 0, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
-          responseText = `Session: (unnamed)\nMessages: 0\nContext used: 0%\nModel: ${effectiveModel}`;
+          result = { sessionId, sessionName: null, messageCount, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
+          responseText = `Session: (unnamed)\nMessages: ${messageCount}\nContext used: 0%\nModel: ${effectiveModel}`;
         } else {
           const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
           const modelConfig = availableModels.find((m) => m.id === effectiveModel);
           const contextWindow = modelConfig?.contextWindow ?? 200000;
           const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
-          result = { sessionId, sessionName: meta.name, messageCount: meta.messageCount, archivedCount: meta.archivedCount ?? 0, contextUsedPct, model: effectiveModel };
+          result = { sessionId, sessionName: meta.name, messageCount, archivedCount: meta.archivedCount ?? 0, contextUsedPct, model: effectiveModel };
           responseText = [
             `Session: ${meta.name ?? '(unnamed)'}`,
-            `Messages: ${meta.messageCount}${(meta.archivedCount ?? 0) > 0 ? ` (${meta.archivedCount} archived)` : ''}`,
+            `Messages: ${messageCount}${(meta.archivedCount ?? 0) > 0 ? ` (${meta.archivedCount} archived)` : ''}`,
             `Context used: ${contextUsedPct}%`,
             `Model: ${effectiveModel}`,
           ].join('\n');
@@ -1962,19 +1965,26 @@ export class AgentRunner extends EventEmitter {
         // telegram /sessions list. Marks the session this command runs in as (current).
         const index = await this.sessionStore.listSessions(agentId, storeChatId, 'api').catch(() => null);
         const list = index?.sessions ?? [];
-        result = {
-          sessions: list.map((s) => ({ id: s.id, name: s.name, messageCount: s.messageCount, current: s.id === sessionId })),
-          count: list.length,
-        };
-        if (!list.length) {
+        // Count each session's flat store directly — the api append path doesn't keep the
+        // index messageCount in sync.
+        const withCounts = await Promise.all(
+          list.map(async (s) => ({
+            id: s.id,
+            name: s.name,
+            messageCount: (await this.sessionStore.loadSession(agentId, s.id).catch(() => [])).length,
+            current: s.id === sessionId,
+          })),
+        );
+        result = { sessions: withCounts, count: withCounts.length };
+        if (!withCounts.length) {
           responseText = 'No sessions.';
         } else {
-          const lines = list.map((s) => {
+          const lines = withCounts.map((s) => {
             const n = s.messageCount;
-            const marker = s.id === sessionId ? ' (current)' : '';
+            const marker = s.current ? ' (current)' : '';
             return `• ${s.name ?? '(unnamed)'} — ${n} message${n === 1 ? '' : 's'}${marker}`;
           });
-          responseText = `Sessions (${list.length}):\n${lines.join('\n')}`;
+          responseText = `Sessions (${withCounts.length}):\n${lines.join('\n')}`;
         }
       } else if (cmd === '/clear') {
         const ch = 'api' as const;
