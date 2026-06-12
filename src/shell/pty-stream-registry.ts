@@ -4,13 +4,14 @@ import * as os from 'os';
 import * as path from 'path';
 import { WebSocket } from 'ws';
 
-class PtyStreamRegistry {
+export class PtyStreamRegistry {
   private readonly clients = new Map<string, Set<WebSocket>>();
   private readonly servers = new Map<string, net.Server>();
+  private readonly agentSockets = new Map<string, Set<string>>();
 
   socketPath(agentId: string, sessionKey: string): string {
     const safe = sessionKey.replace(/[^a-z0-9_-]/gi, '').slice(0, 32);
-    return path.join(os.tmpdir(), `gw-pty-${agentId}-${safe}.sock`);
+    return path.join(os.tmpdir(), `gw-pty-${safe}.sock`);
   }
 
   listen(agentId: string, socketPath: string): void {
@@ -26,6 +27,8 @@ class PtyStreamRegistry {
     server.on('error', () => { /* ignore — another process may have grabbed the path */ });
     server.listen(socketPath);
     this.servers.set(socketPath, server);
+    if (!this.agentSockets.has(agentId)) this.agentSockets.set(agentId, new Set());
+    this.agentSockets.get(agentId)!.add(socketPath);
   }
 
   close(socketPath: string): void {
@@ -34,14 +37,15 @@ class PtyStreamRegistry {
     server.close();
     this.servers.delete(socketPath);
     try { fs.unlinkSync(socketPath); } catch { /* already gone */ }
+    for (const [agentId, paths] of this.agentSockets) {
+      paths.delete(socketPath);
+      if (!paths.size) this.agentSockets.delete(agentId);
+    }
   }
 
   /** Returns true if at least one active PTY socket server is registered for this agent. */
   hasSockets(agentId: string): boolean {
-    for (const key of this.servers.keys()) {
-      if (key.includes(`gw-pty-${agentId}-`)) return true;
-    }
-    return false;
+    return (this.agentSockets.get(agentId)?.size ?? 0) > 0;
   }
 
   subscribe(agentId: string, ws: WebSocket): void {
