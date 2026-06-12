@@ -1888,14 +1888,21 @@ export class AgentRunner extends EventEmitter {
       this.logger.warn('Failed to register API session in index for command', { agentId, chatId, sessionId, error: (err as Error).message });
     });
 
+    // Persist a chat message to both the session context and the permanent history DB.
+    // No-op when skipPersist (programmatic REST callers shouldn't touch chat history).
+    const persist = async (role: 'user' | 'assistant', content: string) => {
+      if (skipPersist || !content) return;
+      const ts = Date.now();
+      await this.sessionStore
+        .appendMessage(agentId, sessionId, { role, content, ts })
+        .catch(() => {});
+      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts });
+    };
+
     // Persist user message before executing so it appears in history.
     // Skip for /clear — clearSession() below wipes the table anyway; only the response survives.
-    if (!skipPersist && command !== '/clear') {
-      const userTs = Date.now();
-      await this.sessionStore
-        .appendMessage(agentId, sessionId, { role: 'user', content: command, ts: userTs })
-        .catch(() => {});
-      this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role: 'user', content: command, ts: userTs });
+    if (command !== '/clear') {
+      await persist('user', command);
     }
 
     let result: Record<string, unknown>;
@@ -1968,6 +1975,12 @@ export class AgentRunner extends EventEmitter {
     } else {
       throw new Error(`Unknown command: ${command}`);
     }
+
+    // Persist the command's human-readable response as an assistant message so the
+    // conversation ends with an assistant turn. Without this the trailing message is
+    // the user command, and the web's computeIsPendingResponse keeps the typing
+    // indicator on forever (last.role === 'user').
+    await persist('assistant', responseText);
 
     return { result, responseText };
   }
