@@ -1447,8 +1447,9 @@ export class AgentRunner extends EventEmitter {
       const done = (result: string) => {
         cleanup();
         const attachments = this.popApiAttachments(sessionId);
-        // Persist assistant reply
-        if (result.trim()) {
+        // Persist assistant reply. Image-only replies (empty text but attachments
+        // present) must also persist — otherwise the screenshot vanishes from history.
+        if (result.trim() || attachments.length) {
           const apiAssistantTs = Date.now();
           this.sessionStore
             .appendMessage(this.agentConfig.id, sessionId, {
@@ -1463,6 +1464,7 @@ export class AgentRunner extends EventEmitter {
             source: 'api',
             role: 'assistant',
             content: result.trim(),
+            mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
             ts: apiAssistantTs,
           });
         }
@@ -1620,8 +1622,10 @@ export class AgentRunner extends EventEmitter {
       settled = true;
       cleanup();
       const attachments = this.popApiAttachments(sessionId);
-      // Persist assistant reply regardless of whether the SSE client is still connected
-      if (result.trim()) {
+      // Persist assistant reply regardless of whether the SSE client is still connected.
+      // Image-only replies (empty text but attachments present) must also persist —
+      // otherwise the screenshot vanishes from history once the stream ends.
+      if (result.trim() || attachments.length) {
         const streamAssistantTs = Date.now();
         this.sessionStore
           .appendMessage(this.agentConfig.id, sessionId, {
@@ -1636,6 +1640,7 @@ export class AgentRunner extends EventEmitter {
           source: 'api',
           role: 'assistant',
           content: result.trim(),
+          mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
           ts: streamAssistantTs,
         });
       }
@@ -1802,7 +1807,7 @@ export class AgentRunner extends EventEmitter {
         if (!absPath.startsWith(mediaRoot)) return null;
         if (!fs.existsSync(absPath)) return null;
         const rel = absPath.slice(mediaRoot.length).replace(/\\/g, '/');
-        return { type: 'image', url: `/v1/agents/${encodeURIComponent(this.agentConfig.id)}/media/${rel}` };
+        return { type: 'image', url: `/v1/agents/${encodeURIComponent(this.agentConfig.id)}/media/${rel}`, relPath: rel };
       })
       .filter((a): a is ApiAttachment => a !== null);
   }
