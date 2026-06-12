@@ -108,6 +108,14 @@ function getSessions(runner: AgentRunner): Map<string, SessionProcess> {
   return (runner as unknown as { sessions: Map<string, SessionProcess> }).sessions;
 }
 
+async function waitForSession(runner: AgentRunner, sessionId: string, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!getSessions(runner).has(sessionId)) {
+    if (Date.now() > deadline) throw new Error(`Session '${sessionId}' not spawned within ${timeoutMs}ms`);
+    await new Promise(r => setTimeout(r, 10));
+  }
+}
+
 function getIdleCleaner(runner: AgentRunner): ReturnType<typeof setInterval> | undefined {
   return (runner as unknown as { idleCleanerTimer?: ReturnType<typeof setInterval> })
     .idleCleanerTimer;
@@ -905,7 +913,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
       );
     });
 
-    await new Promise(r => setTimeout(r, 200));
+    await waitForSession(runner, 'stream-t14c');
 
     // Simulate the agent calling api_reply mid-turn (registers attachment),
     // then emitting the final result text.
@@ -920,7 +928,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const assistantMsg = msgs.find(m => m.role === 'assistant');
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg!.content).toBe('Screenshot ready');
-    expect(assistantMsg!.mediaFiles).toEqual(['/v1/agents/alfred/media/api-stream-t14c/shot.jpg']);
+    expect(assistantMsg!.mediaFiles).toEqual(['media/api-stream-t14c/shot.jpg']);
   }, 15000);
 
   // T14d: image-only replies (empty text but attachments present) still persist —
@@ -947,7 +955,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
       );
     });
 
-    await new Promise(r => setTimeout(r, 200));
+    await waitForSession(runner, 'stream-t14d');
 
     runner.addApiAttachments('stream-t14d', [mediaAbs]);
     const session = getSessions(runner).get('stream-t14d')!;
@@ -960,7 +968,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const assistantMsg = msgs.find(m => m.role === 'assistant');
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg!.content).toBe('');
-    expect(assistantMsg!.mediaFiles).toEqual(['/v1/agents/alfred/media/api-stream-t14d/only.jpg']);
+    expect(assistantMsg!.mediaFiles).toEqual(['media/api-stream-t14d/only.jpg']);
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -1540,6 +1548,101 @@ describe('AgentRunner — sendApiMessageStream', () => {
     const toolEvent = chunks.find(c => c.type === 'tool_use') as { type: 'tool_use'; name: string; id: string } | undefined;
     expect(toolEvent?.name).toBe('Skill');
     expect(toolEvent?.id).toBe('tu_xyz');
+  }, 15000);
+});
+
+// ── sendApiMessage (sync) tests ───────────────────────────────────────────────
+
+describe('AgentRunner — sendApiMessage (sync)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-sync-test-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    agentConfig = makeAgentConfig(workspace);
+    fs.mkdirSync(workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // T-API-SYNC-1: agent attachments are persisted to history mediaFiles (sync path)
+  it('T-API-SYNC-1: agent attachments are persisted to history mediaFiles', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', 'api-sync-t1', 'shot.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
+    const resultPromise = runner.sendApiMessage(
+      'sync-t1',
+      'test-chat-sync',
+      'browse and screenshot',
+      { timeoutMs: 10000 },
+    );
+
+    await waitForSession(runner, 'sync-t1');
+
+    runner.addApiAttachments('sync-t1', [mediaAbs]);
+    const session = getSessions(runner).get('sync-t1')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Screenshot ready' }));
+
+    const result = await resultPromise;
+    expect(result.text).toBe('Screenshot ready');
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0].url).toBe('/v1/agents/alfred/media/api-sync-t1/shot.jpg');
+
+    const page = runner.getHistoryDb().getMessages('api-test-chat-sync');
+    const msgs = page.messages as Array<{ role: string; content: string; mediaFiles?: string[] }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('Screenshot ready');
+    expect(assistantMsg!.mediaFiles).toEqual(['media/api-sync-t1/shot.jpg']);
+  }, 15000);
+
+  // T-API-SYNC-2: image-only reply (empty text) persists with mediaFiles (sync path)
+  it('T-API-SYNC-2: image-only replies persist via attachments', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', 'api-sync-t2', 'only.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
+    const resultPromise = runner.sendApiMessage(
+      'sync-t2',
+      'test-chat-sync-img',
+      'screenshot',
+      { timeoutMs: 10000 },
+    );
+
+    await waitForSession(runner, 'sync-t2');
+
+    runner.addApiAttachments('sync-t2', [mediaAbs]);
+    const session = getSessions(runner).get('sync-t2')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: '' }));
+
+    const result = await resultPromise;
+    expect(result.text).toBe('');
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0].url).toBe('/v1/agents/alfred/media/api-sync-t2/only.jpg');
+
+    const page = runner.getHistoryDb().getMessages('api-test-chat-sync-img');
+    const msgs = page.messages as Array<{ role: string; content: string; mediaFiles?: string[] }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('');
+    expect(assistantMsg!.mediaFiles).toEqual(['media/api-sync-t2/only.jpg']);
   }, 15000);
 });
 
@@ -3213,5 +3316,6 @@ describe('AgentRunner — API attachment buffer', () => {
     runner.addApiAttachments('sess-5', [filePath]);
     const attachments = runner.popApiAttachments('sess-5');
     expect(attachments[0].url).toBe('/v1/agents/alfred/media/api-sess/screen.jpg');
+    expect(attachments[0].relPath).toBe('api-sess/screen.jpg');
   });
 });

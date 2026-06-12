@@ -1464,7 +1464,7 @@ export class AgentRunner extends EventEmitter {
             source: 'api',
             role: 'assistant',
             content: result.trim(),
-            mediaFiles: attachments.length ? attachments.map((a) => a.url) : undefined,
+            mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
             ts: apiAssistantTs,
           });
         }
@@ -1640,7 +1640,7 @@ export class AgentRunner extends EventEmitter {
           source: 'api',
           role: 'assistant',
           content: result.trim(),
-          mediaFiles: attachments.length ? attachments.map((a) => a.url) : undefined,
+          mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
           ts: streamAssistantTs,
         });
       }
@@ -1807,7 +1807,7 @@ export class AgentRunner extends EventEmitter {
         if (!absPath.startsWith(mediaRoot)) return null;
         if (!fs.existsSync(absPath)) return null;
         const rel = absPath.slice(mediaRoot.length).replace(/\\/g, '/');
-        return { type: 'image', url: `/v1/agents/${encodeURIComponent(this.agentConfig.id)}/media/${rel}` };
+        return { type: 'image', url: `/v1/agents/${encodeURIComponent(this.agentConfig.id)}/media/${rel}`, relPath: rel };
       })
       .filter((a): a is ApiAttachment => a !== null);
   }

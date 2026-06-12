@@ -163,6 +163,7 @@ export interface SessionIndex {
 export type ApiAttachment = {
   type: 'image';
   url: string;
+  relPath: string;
 };
 
 export type StreamEvent =
