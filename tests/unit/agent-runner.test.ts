@@ -879,6 +879,90 @@ describe('AgentRunner — sendApiMessageStream', () => {
     expect(assistantMsg!.content).toBe('Persisted response');
   }, 15000);
 
+  // T14c: agent attachments (from api_reply) are persisted to mediaFiles so they
+  // survive history reload. Without this, the screenshot vanishes from chat history
+  // as soon as the live SSE stream ends — only the text remains.
+  it('T14c: agent attachments are persisted to history mediaFiles', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    // Create a real media file so popApiAttachments's existsSync guard passes.
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', 'api-stream-t14c', 'shot.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
+    const doneFired = new Promise<void>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t14c',
+        'test-chat-attach',
+        'browse and screenshot',
+        {
+          onChunk: () => {},
+          onDone: () => resolve(),
+          onError: () => {},
+        },
+        { timeoutMs: 10000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    // Simulate the agent calling api_reply mid-turn (registers attachment),
+    // then emitting the final result text.
+    runner.addApiAttachments('stream-t14c', [mediaAbs]);
+    const session = getSessions(runner).get('stream-t14c')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'Screenshot ready' }));
+
+    await doneFired;
+
+    const page = runner.getHistoryDb().getMessages('api-test-chat-attach');
+    const msgs = page.messages as Array<{ role: string; content: string; mediaFiles?: string[] }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('Screenshot ready');
+    expect(assistantMsg!.mediaFiles).toEqual(['/v1/agents/alfred/media/api-stream-t14c/shot.jpg']);
+  }, 15000);
+
+  // T14d: image-only replies (empty text but attachments present) still persist —
+  // the legacy `if (result.trim())` gate would have dropped them silently.
+  it('T14d: image-only replies persist via attachments', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', 'api-stream-t14d', 'only.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
+    const doneFired = new Promise<void>((resolve) => {
+      runner.sendApiMessageStream(
+        'stream-t14d',
+        'test-chat-img-only',
+        'screenshot',
+        {
+          onChunk: () => {},
+          onDone: () => resolve(),
+          onError: () => {},
+        },
+        { timeoutMs: 10000 },
+      );
+    });
+
+    await new Promise(r => setTimeout(r, 200));
+
+    runner.addApiAttachments('stream-t14d', [mediaAbs]);
+    const session = getSessions(runner).get('stream-t14d')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: '' }));
+
+    await doneFired;
+
+    const page = runner.getHistoryDb().getMessages('api-test-chat-img-only');
+    const msgs = page.messages as Array<{ role: string; content: string; mediaFiles?: string[] }>;
+    const assistantMsg = msgs.find(m => m.role === 'assistant');
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content).toBe('');
+    expect(assistantMsg!.mediaFiles).toEqual(['/v1/agents/alfred/media/api-stream-t14d/only.jpg']);
+  }, 15000);
+
   // --------------------------------------------------------------------------
   // T-AR-STREAM-15: Partial assistant messages produce incremental text_delta chunks
   // --------------------------------------------------------------------------
