@@ -394,6 +394,28 @@ export class SessionStore {
   }
 
   async clearTelegramSessionHistory(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<void> {
+    // api sessions keep their context in the flat sessions/{sessionId}.jsonl store (keyed by
+    // sessionId, loaded at spawn via loadSession) — not the structured per-chat store. Clearing
+    // the structured store would leave the real context untouched, so truncate the flat file.
+    if (channel === 'api') {
+      // Run both the flat-file truncation and the index update atomically on the
+      // session queue so a concurrent appendMessage cannot sneak in between and
+      // leave the index count at 0 while the flat store already has new messages.
+      // Inline the truncation (instead of calling resetSession) to avoid re-entrancy.
+      const sessionQueue = this.getQueue(agentId, sessionId);
+      await sessionQueue.add(async () => {
+        const filePath = this.resolvePath(agentId, sessionId);
+        try { fs.writeFileSync(filePath, '', 'utf-8'); } catch { /* file may not exist */ }
+        const apiIndex = await this.loadIndex(agentId, chatId, channel);
+        const apiMeta = apiIndex?.sessions.find((s) => s.id === sessionId);
+        if (apiIndex && apiMeta) {
+          apiMeta.messageCount = 0;
+          apiMeta.lastActive = Date.now();
+          await this.saveIndex(agentId, chatId, apiIndex, channel);
+        }
+      });
+      return;
+    }
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
       const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
@@ -437,6 +459,12 @@ export class SessionStore {
   }
 
   async loadTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<Message[]> {
+    // api context lives in the flat sessions/{sessionId}.jsonl store, consistent with how api
+    // messages are appended (appendMessage keyed by sessionId) and how buildInitialPrompt loads
+    // them at spawn (loadSession). Read from there so /compact sees the real conversation.
+    if (channel === 'api') {
+      return this.loadSession(agentId, sessionId);
+    }
     const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
     if (!fs.existsSync(sessionPath)) {
       return [];
@@ -457,6 +485,21 @@ export class SessionStore {
     messages: Message[],
     channel: 'telegram' | 'discord' | 'api' = 'telegram',
   ): Promise<void> {
+    // api: overwrite the flat sessions/{sessionId}.jsonl store (newline-delimited, keyed by
+    // sessionId, serialized on the same queue as appendMessage) so /compact's result is exactly
+    // what buildInitialPrompt loads at the next spawn.
+    if (channel === 'api') {
+      const apiQueue = this.getQueue(agentId, sessionId);
+      await apiQueue.add(async () => {
+        const filePath = this.resolvePath(agentId, sessionId);
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        const data = messages.length ? messages.map((m) => JSON.stringify(m)).join('\n') + '\n' : '';
+        const tmp = filePath + '.tmp';
+        fs.writeFileSync(tmp, data, 'utf-8');
+        fs.renameSync(tmp, filePath);
+      });
+      return;
+    }
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
       const sessionPath = this.resolveTelegramSessionPath(agentId, chatId, sessionId, channel);
