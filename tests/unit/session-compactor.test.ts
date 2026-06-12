@@ -263,8 +263,9 @@ describe('SessionCompactor', () => {
   // "Not enough messages to compact (0 messages)". These exercise the end-to-end fix:
   // SessionStore api routing + SessionCompactor.
   describe('api channel (#160)', () => {
-    // The runner passes storeChatId = api-{chatId}; the flat store is keyed by sessionId.
-    const apiStoreChatId = 'api-777000';
+    // The runner passes storeChatId = chatId (raw, no prefix) — the store adds the channel
+    // prefix internally. Using a raw chatId here matches real usage.
+    const apiStoreChatId = '777000';
     const apiSessionId = 'sess-compact-1';
 
     it('U-CMP-API-1: regression — pre-fix the structured store is empty so /compact would see 0 messages', async () => {
@@ -317,7 +318,7 @@ describe('SessionCompactor', () => {
       mockSpawnSync.mockReturnValueOnce(makeSpawnSuccess('summary'));
       await compactor.compact(agentId, apiStoreChatId, apiSessionId, 'claude-sonnet-4-6', 200000, 'api');
 
-      const apiDir = path.join(tmpDir, agentId, 'sessions', `api-${apiStoreChatId}`);
+      const apiDir = path.join(tmpDir, agentId, 'sessions', `api-${apiStoreChatId}`); // → sessions/api-777000
       const archives = fs.readdirSync(apiDir).filter(f => f.includes('.pre-compact-'));
       expect(archives).toHaveLength(1);
       const archived = JSON.parse(fs.readFileSync(path.join(apiDir, archives[0]), 'utf-8')) as Message[];
