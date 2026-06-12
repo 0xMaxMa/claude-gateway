@@ -121,7 +121,7 @@ class Driver {
       onData: (d) => {
         this.screen.write(d);
         if (this.streamSocket?.writable) {
-          try { this.streamSocket.write(d); } catch { /* socket closed */ }
+          try { this.streamSocket.write(d, 'latin1'); } catch { /* socket closed */ }
         }
       },
       onExit: (code) => this.onChildExit(code),

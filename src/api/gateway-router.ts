@@ -83,6 +83,7 @@ export class GatewayRouter {
   private readonly configs: Map<string, AgentConfig>;
   private readonly app: express.Application;
   private server: Server | null = null;
+  private wss: WebSocketServer | null = null;
 
   /** Per-agent message counters (output lines from subprocess) */
   private readonly messagesReceived: Map<string, number> = new Map();
@@ -368,7 +369,8 @@ export class GatewayRouter {
         }
       });
 
-      const wss = new WebSocketServer({ noServer: true });
+      this.wss = new WebSocketServer({ noServer: true });
+      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
         const url = req.url ?? '';
@@ -377,13 +379,30 @@ export class GatewayRouter {
           socket.destroy();
           return;
         }
+
+        // Auth: Bearer token or X-Api-Key header
+        const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
+        const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
+        if (!token || !apiKeys.some((k) => k.key === token)) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
         const agentId = decodeURIComponent(match[1]!);
         if (!this.agents.has(agentId)) {
           socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
           socket.destroy();
           return;
         }
-        wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+
+        this.wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          // If agent is not in PTY mode, no data will arrive — tell the client immediately
+          if (!ptyStreamRegistry.hasSockets(agentId)) {
+            ws.close(4404, 'agent not running in PTY mode');
+            return;
+          }
           ptyStreamRegistry.subscribe(agentId, ws);
           ws.on('close', () => ptyStreamRegistry.unsubscribe(agentId, ws));
           ws.on('error', () => ptyStreamRegistry.unsubscribe(agentId, ws));
@@ -427,6 +446,7 @@ export class GatewayRouter {
   }
 
   async stop(): Promise<void> {
+    this.wss?.close();
     return new Promise((resolve, reject) => {
       if (!this.server) {
         resolve();

@@ -17,7 +17,9 @@ class PtyStreamRegistry {
     try { fs.unlinkSync(socketPath); } catch { /* stale or absent */ }
 
     const server = net.createServer((conn) => {
-      conn.on('data', (chunk) => this.broadcast(agentId, chunk.toString()));
+      // Use latin1 to preserve raw byte sequences from the PTY without UTF-8 re-encoding
+      conn.setEncoding('latin1');
+      conn.on('data', (chunk: string) => this.broadcast(agentId, chunk));
       conn.on('error', () => { /* child exited */ });
     });
 
@@ -34,13 +36,24 @@ class PtyStreamRegistry {
     try { fs.unlinkSync(socketPath); } catch { /* already gone */ }
   }
 
+  /** Returns true if at least one active PTY socket server is registered for this agent. */
+  hasSockets(agentId: string): boolean {
+    for (const key of this.servers.keys()) {
+      if (key.includes(`gw-pty-${agentId}-`)) return true;
+    }
+    return false;
+  }
+
   subscribe(agentId: string, ws: WebSocket): void {
     if (!this.clients.has(agentId)) this.clients.set(agentId, new Set());
     this.clients.get(agentId)!.add(ws);
   }
 
   unsubscribe(agentId: string, ws: WebSocket): void {
-    this.clients.get(agentId)?.delete(ws);
+    const set = this.clients.get(agentId);
+    if (!set) return;
+    set.delete(ws);
+    if (!set.size) this.clients.delete(agentId);
   }
 
   broadcast(agentId: string, data: string): void {
@@ -48,7 +61,8 @@ class PtyStreamRegistry {
     if (!set?.size) return;
     for (const ws of set) {
       if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(data); } catch { /* client gone */ }
+        // Send as binary to preserve latin1 bytes faithfully; xterm.js accepts both
+        try { ws.send(Buffer.from(data, 'latin1')); } catch { /* client gone */ }
       }
     }
   }
