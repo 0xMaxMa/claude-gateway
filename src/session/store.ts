@@ -398,14 +398,22 @@ export class SessionStore {
     // sessionId, loaded at spawn via loadSession) — not the structured per-chat store. Clearing
     // the structured store would leave the real context untouched, so truncate the flat file.
     if (channel === 'api') {
-      await this.resetSession(agentId, sessionId);
-      const apiIndex = await this.loadIndex(agentId, chatId, channel);
-      const apiMeta = apiIndex?.sessions.find((s) => s.id === sessionId);
-      if (apiIndex && apiMeta) {
-        apiMeta.messageCount = 0;
-        apiMeta.lastActive = Date.now();
-        await this.saveIndex(agentId, chatId, apiIndex, channel);
-      }
+      // Run both the flat-file truncation and the index update atomically on the
+      // session queue so a concurrent appendMessage cannot sneak in between and
+      // leave the index count at 0 while the flat store already has new messages.
+      // Inline the truncation (instead of calling resetSession) to avoid re-entrancy.
+      const sessionQueue = this.getQueue(agentId, sessionId);
+      await sessionQueue.add(async () => {
+        const filePath = this.resolvePath(agentId, sessionId);
+        try { fs.writeFileSync(filePath, '', 'utf-8'); } catch { /* file may not exist */ }
+        const apiIndex = await this.loadIndex(agentId, chatId, channel);
+        const apiMeta = apiIndex?.sessions.find((s) => s.id === sessionId);
+        if (apiIndex && apiMeta) {
+          apiMeta.messageCount = 0;
+          apiMeta.lastActive = Date.now();
+          await this.saveIndex(agentId, chatId, apiIndex, channel);
+        }
+      });
       return;
     }
     const queue = this.getTelegramQueue(agentId, chatId);

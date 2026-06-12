@@ -38,8 +38,11 @@ function makeMockProcess(): MockChildProcess {
   return proc;
 }
 
+const mockSpawnSync = jest.fn();
+
 jest.mock('child_process', () => ({
   spawn: jest.fn(() => makeMockProcess()),
+  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
 }));
 
 // ── Imports ───────────────────────────────────────────────────────────────────
@@ -91,6 +94,7 @@ describe('executeApiCommand session counting (#160)', () => {
       JSON.stringify({ agents: [{ id: 'alfred', claude: { model: 'claude-opus-4-6' } }] }, null, 2) + '\n',
     );
     runner = new AgentRunner(makeAgentConfig(workspaceDir), makeGatewayConfig());
+    mockSpawnSync.mockReset();
   });
 
   afterEach(async () => {
@@ -150,6 +154,23 @@ describe('executeApiCommand session counting (#160)', () => {
     // Exactly one session is marked current.
     expect(sessions.filter((s) => s.current)).toHaveLength(1);
     expect(responseText).toContain('(current)');
+  });
+
+  it('U-RUN-05: /compact end-to-end — compacts the flat store and returns keptMessages count', async () => {
+    await seedFlatStore(sessionId, 6);
+    mockSpawnSync.mockReturnValueOnce({ status: 0, stdout: 'Compact summary.', stderr: '', error: undefined });
+
+    const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
+
+    expect(result.success).toBe(true);
+    // afterMessages = 1 summary + 6 verbatim (all < KEEP_LAST_MESSAGES default)
+    expect(result.keptMessages).toBe(7);
+    expect(responseText).toContain('compacted');
+    // The flat store must have been overwritten with the compacted result.
+    const flat = await getSessionStore(runner).loadSession(agentId, sessionId);
+    expect(flat.length).toBeGreaterThan(0);
+    expect(flat[0].role).toBe('system');
+    expect((flat[0].content as string)).toContain('[Conversation Summary]');
   });
 
   it('U-RUN-06: an unknown command throws before persisting anything', async () => {
