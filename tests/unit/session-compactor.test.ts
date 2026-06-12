@@ -254,4 +254,86 @@ describe('SessionCompactor', () => {
     const archiveFiles = fs.readdirSync(telegramDir).filter(f => f.includes('.pre-compact-'));
     expect(archiveFiles).toHaveLength(1);
   });
+
+  // ─── API channel /compact against the flat store (#160) ──────────────────────
+  //
+  // For the api channel, the conversation lives in the flat sessions/{sessionId}.jsonl
+  // store (appended by the api message path), NOT the structured telegram-style store.
+  // Before the fix, compact() read the empty structured store and always failed with
+  // "Not enough messages to compact (0 messages)". These exercise the end-to-end fix:
+  // SessionStore api routing + SessionCompactor.
+  describe('api channel (#160)', () => {
+    // The runner passes storeChatId = api-{chatId}; the flat store is keyed by sessionId.
+    const apiStoreChatId = 'api-777000';
+    const apiSessionId = 'sess-compact-1';
+
+    it('U-CMP-API-1: regression — pre-fix the structured store is empty so /compact would see 0 messages', async () => {
+      // Seed only the flat store, exactly as the api message path does.
+      for (let i = 0; i < 6; i++) {
+        const role: 'user' | 'assistant' = i % 2 === 0 ? 'user' : 'assistant';
+        await sessionStore.appendMessage(agentId, apiSessionId, makeMsg(role, `api message ${i}`));
+      }
+
+      // The OLD (buggy) behaviour read the structured store with the telegram default channel.
+      const structuredView = await sessionStore.loadTelegramSession(agentId, apiStoreChatId, apiSessionId /* telegram default */);
+      expect(structuredView).toEqual([]); // empty → would throw NotEnoughMessagesError(0)
+
+      // The fix: reading with the api channel surfaces the real conversation.
+      const apiView = await sessionStore.loadTelegramSession(agentId, apiStoreChatId, apiSessionId, 'api');
+      expect(apiView).toHaveLength(6);
+    });
+
+    it('U-CMP-API-2: compact(api) succeeds on a flat-store conversation and writes the result back to the flat store', async () => {
+      const messages: Message[] = [];
+      for (let i = 0; i < 6; i++) {
+        const role: 'user' | 'assistant' = i % 2 === 0 ? 'user' : 'assistant';
+        const msg = makeMsg(role, `api message ${i}`, Date.now() + i);
+        messages.push(msg);
+        await sessionStore.appendMessage(agentId, apiSessionId, msg);
+      }
+
+      mockSpawnSync.mockReturnValueOnce(makeSpawnSuccess('Concise api summary.'));
+
+      const result = await compactor.compact(agentId, apiStoreChatId, apiSessionId, 'claude-sonnet-4-6', 200000, 'api');
+
+      expect(result.beforeMessages).toBe(6);
+      expect(result.afterMessages).toBe(7); // 1 summary + 6 verbatim (all < KEEP_LAST_MESSAGES)
+
+      // The compacted result must land in the flat store — what buildInitialPrompt reloads at spawn.
+      const flat = await sessionStore.loadSession(agentId, apiSessionId);
+      expect(flat).toHaveLength(7);
+      expect(flat[0].role).toBe('system');
+      expect(flat[0].content).toContain('[Conversation Summary]');
+      expect(flat[0].content).toContain('Concise api summary.');
+      expect(flat[flat.length - 1].content).toBe('api message 5');
+    });
+
+    it('U-CMP-API-3: compact(api) archives the original under the structured api-{chatId} dir', async () => {
+      for (let i = 0; i < 6; i++) {
+        const role: 'user' | 'assistant' = i % 2 === 0 ? 'user' : 'assistant';
+        await sessionStore.appendMessage(agentId, apiSessionId, makeMsg(role, `api message ${i}`));
+      }
+
+      mockSpawnSync.mockReturnValueOnce(makeSpawnSuccess('summary'));
+      await compactor.compact(agentId, apiStoreChatId, apiSessionId, 'claude-sonnet-4-6', 200000, 'api');
+
+      const apiDir = path.join(tmpDir, agentId, 'sessions', `api-${apiStoreChatId}`);
+      const archives = fs.readdirSync(apiDir).filter(f => f.includes('.pre-compact-'));
+      expect(archives).toHaveLength(1);
+      const archived = JSON.parse(fs.readFileSync(path.join(apiDir, archives[0]), 'utf-8')) as Message[];
+      expect(archived).toHaveLength(6);
+    });
+
+    it('U-CMP-API-4: compact(api) with fewer than 5 flat-store messages still throws NotEnoughMessagesError', async () => {
+      await sessionStore.appendMessage(agentId, apiSessionId, makeMsg('user', 'one'));
+      await sessionStore.appendMessage(agentId, apiSessionId, makeMsg('assistant', 'two'));
+
+      await expect(
+        compactor.compact(agentId, apiStoreChatId, apiSessionId, 'claude-sonnet-4-6', 200000, 'api'),
+      ).rejects.toThrow(NotEnoughMessagesError);
+
+      // CLI must never be invoked when there's nothing to compact.
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+    });
+  });
 });
