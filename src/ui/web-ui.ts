@@ -224,7 +224,7 @@ export function generateDashboardHtml(): string {
     // Compute base path from current URL (handles reverse proxy sub-paths)
     function basePath() {
       const p = window.location.pathname;
-      return p.endsWith('/ui') ? p.slice(0, -2) : (p.endsWith('/ui/') ? p.slice(0, -3) : p.replace(/\\/$/, ''));
+      return p.endsWith('/ui') ? p.slice(0, -3) : (p.endsWith('/ui/') ? p.slice(0, -4) : p.replace(/\\/$/, ''));
     }
 
     function apiUrl(path) {
