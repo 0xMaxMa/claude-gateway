@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
+import { execSync } from 'child_process';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AgentRunner } from '../agent/runner';
@@ -298,6 +299,24 @@ export class GatewayRouter {
       res.send(generateDashboardHtml());
     });
 
+    // Process tree endpoint — returns raw ps data for dashboard
+    this.app.get('/processes', (_req: Request, res: Response) => {
+      try {
+        const out = execSync(
+          "ps -eo pid,ppid,stat,args --no-headers 2>/dev/null | grep -E 'claude|bun.*gateway|bun.*mcp|bun.*receiver|node.*dist/' | grep -v grep | grep -v vscode",
+          { encoding: 'utf8', timeout: 5000 }
+        );
+        const processes = out.trim().split('\n').filter(Boolean).map((line) => {
+          const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+          if (!m) return null;
+          return { pid: parseInt(m[1]), ppid: parseInt(m[2]), stat: m[3], args: m[4].trim() };
+        }).filter(Boolean);
+        res.json({ processes });
+      } catch {
+        res.json({ processes: [] });
+      }
+    });
+
     // Status endpoint — per-agent stats + heartbeat history
     this.app.get('/status', (_req: Request, res: Response) => {
       const uptimeMs = Date.now() - this.startedAt.getTime();
@@ -339,6 +358,7 @@ export class GatewayRouter {
           messagesReceived: this.messagesReceived.get(id) ?? 0,
           messagesSent: this.messagesSent.get(id) ?? 0,
           lastActivityAt: lastActivity ? lastActivity.toISOString() : null,
+          hasPtyStream: ptyStreamRegistry.hasSockets(id),
           heartbeat: {
             tasks: taskNames,
             lastResults,
