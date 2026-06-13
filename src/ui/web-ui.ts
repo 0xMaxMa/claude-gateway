@@ -128,65 +128,59 @@ export function generateDashboardHtml(): string {
     Last updated: <span id="last-updated">—</span>
   </div>
 
-  <h2>Agents</h2>
-  <table id="agents-table">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Status</th>
-        <th>Received</th>
-        <th>Sent</th>
-        <th>Last Activity</th>
-        <th>Live</th>
-      </tr>
-    </thead>
-    <tbody id="agents-tbody">
-      <tr><td colspan="6" class="ts">Loading...</td></tr>
-    </tbody>
-  </table>
-
-  <div class="pty-viewer" id="pty-viewer">
-    <div class="pty-viewer-header">
-      <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
-      <button class="pty-close" id="pty-close-btn" title="Close">✕</button>
+  <div style="display:grid;grid-template-columns:1fr 1.5fr;gap:24px;align-items:start;">
+    <!-- Left column: Processes -->
+    <div>
+      <h2>Processes</h2>
+      <div class="proc-tree" id="proc-tree">Loading...</div>
     </div>
-    <div id="pty-terminal"></div>
+
+    <!-- Right column: Agents + Sessions -->
+    <div>
+      <h2>Agents</h2>
+      <table id="agents-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Received</th>
+            <th>Sent</th>
+            <th>Last Activity</th>
+            <th>Live</th>
+          </tr>
+        </thead>
+        <tbody id="agents-tbody">
+          <tr><td colspan="6" class="ts">Loading...</td></tr>
+        </tbody>
+      </table>
+
+      <div class="pty-viewer" id="pty-viewer">
+        <div class="pty-viewer-header">
+          <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
+          <button class="pty-close" id="pty-close-btn" title="Close">✕</button>
+        </div>
+        <div id="pty-terminal"></div>
+      </div>
+
+      <h2>Sessions</h2>
+      <table id="sessions-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Chat ID</th>
+            <th>Session ID</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Uptime</th>
+            <th>Spawned</th>
+          </tr>
+        </thead>
+        <tbody id="sessions-tbody">
+          <tr><td colspan="7" class="ts">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
-
-  <h2>Heartbeat Tasks</h2>
-  <table id="heartbeat-table">
-    <thead>
-      <tr>
-        <th>Agent</th>
-        <th>Task</th>
-        <th>Last Run</th>
-        <th>Result</th>
-      </tr>
-    </thead>
-    <tbody id="heartbeat-tbody">
-      <tr><td colspan="4" class="ts">Loading...</td></tr>
-    </tbody>
-  </table>
-
-  <h2>Sessions (last 10 per agent)</h2>
-  <table id="sessions-table">
-    <thead>
-      <tr>
-        <th>Agent</th>
-        <th>Chat ID</th>
-        <th>Source</th>
-        <th>Status</th>
-        <th>Uptime</th>
-        <th>Spawned</th>
-      </tr>
-    </thead>
-    <tbody id="sessions-tbody">
-      <tr><td colspan="6" class="ts">Loading...</td></tr>
-    </tbody>
-  </table>
-
-  <h2>Processes</h2>
-  <div class="proc-tree" id="proc-tree">Loading...</div>
 
   <div id="error-msg" class="error" style="display:none;"></div>
 
@@ -215,12 +209,6 @@ export function generateDashboardHtml(): string {
       return running
         ? '<span class="badge badge-green">running</span>'
         : '<span class="badge badge-red">stopped</span>';
-    }
-
-    function resultBadge(suppressed, rateLimited) {
-      if (rateLimited) return '<span class="badge badge-gray">rate-limited</span>';
-      if (suppressed) return '<span class="badge badge-gray">suppressed</span>';
-      return '<span class="badge badge-green">sent</span>';
     }
 
     // Compute base path from current URL (handles reverse proxy sub-paths)
@@ -325,23 +313,6 @@ export function generateDashboardHtml(): string {
         document.getElementById('agents-tbody').innerHTML =
           agentRows.length ? agentRows.join('') : '<tr><td colspan="6" class="ts">No agents</td></tr>';
 
-        // Heartbeat table
-        const hbRows = [];
-        (data.agents || []).forEach(function(a) {
-          const lastResults = (a.heartbeat && a.heartbeat.lastResults) || [];
-          lastResults.forEach(function(r) {
-            if (!r) return;
-            hbRows.push('<tr>' +
-              '<td>' + a.id + '</td>' +
-              '<td>' + r.taskName + '</td>' +
-              '<td>' + fmtTs(r.ts) + '</td>' +
-              '<td>' + resultBadge(r.suppressed, r.rateLimited) + '</td>' +
-              '</tr>');
-          });
-        });
-        document.getElementById('heartbeat-tbody').innerHTML =
-          hbRows.length ? hbRows.join('') : '<tr><td colspan="4" class="ts">No heartbeat data yet</td></tr>';
-
         // Sessions table
         const sessRows = [];
         (data.agents || []).forEach(function(a) {
@@ -350,9 +321,11 @@ export function generateDashboardHtml(): string {
               ? '<span class="badge badge-green">running</span>'
               : '<span class="badge badge-gray">stopped</span>';
             const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">—</span>';
+            const shortSessId = s.sessionId ? s.sessionId.slice(0, 8) + '…' : '<span class="ts">—</span>';
             sessRows.push('<tr>' +
               '<td>' + a.id + '</td>' +
               '<td class="ts">' + s.chatId + '</td>' +
+              '<td class="ts">' + shortSessId + '</td>' +
               '<td>' + (s.source || '—') + '</td>' +
               '<td>' + statusBadge + '</td>' +
               '<td>' + uptime + '</td>' +
@@ -361,7 +334,7 @@ export function generateDashboardHtml(): string {
           });
         });
         document.getElementById('sessions-tbody').innerHTML =
-          sessRows.length ? sessRows.join('') : '<tr><td colspan="6" class="ts">No sessions yet</td></tr>';
+          sessRows.length ? sessRows.join('') : '<tr><td colspan="7" class="ts">No sessions yet</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
