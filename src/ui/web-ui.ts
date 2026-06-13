@@ -121,7 +121,7 @@ export function generateDashboardHtml(): string {
   </style>
 </head>
 <body>
-  <h1>Claude Gateway <span id="refresh-indicator">refreshing...</span></h1>
+  <h1>Claude Gateway <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span></h1>
   <div class="meta">
     Uptime: <span id="uptime">—</span> &nbsp;|&nbsp;
     Started: <span id="started-at">—</span> &nbsp;|&nbsp;
@@ -168,18 +168,20 @@ export function generateDashboardHtml(): string {
     </tbody>
   </table>
 
-  <h2>Recent Sessions (last 5 per agent)</h2>
+  <h2>Sessions (last 10 per agent)</h2>
   <table id="sessions-table">
     <thead>
       <tr>
         <th>Agent</th>
         <th>Chat ID</th>
-        <th>Messages</th>
-        <th>Last Activity</th>
+        <th>Source</th>
+        <th>Status</th>
+        <th>Uptime</th>
+        <th>Spawned</th>
       </tr>
     </thead>
     <tbody id="sessions-tbody">
-      <tr><td colspan="4" class="ts">Loading...</td></tr>
+      <tr><td colspan="6" class="ts">Loading...</td></tr>
     </tbody>
   </table>
 
@@ -224,7 +226,9 @@ export function generateDashboardHtml(): string {
     // Compute base path from current URL (handles reverse proxy sub-paths)
     function basePath() {
       const p = window.location.pathname;
-      return p.endsWith('/ui') ? p.slice(0, -3) : (p.endsWith('/ui/') ? p.slice(0, -4) : p.replace(/\\/$/, ''));
+      if (p.endsWith('/dashboard')) return p.slice(0, -10);
+      if (p.endsWith('/dashboard/')) return p.slice(0, -11);
+      return p.replace(/\\/$/, '');
     }
 
     function apiUrl(path) {
@@ -301,6 +305,7 @@ export function generateDashboardHtml(): string {
         document.getElementById('started-at').textContent = data.startedAt
           ? new Date(data.startedAt).toLocaleString() : '—';
         document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+        if (data.version) document.getElementById('gateway-version').textContent = 'v' + data.version;
         document.getElementById('error-msg').style.display = 'none';
 
         // Agents table (with Live button for PTY agents)
@@ -340,18 +345,23 @@ export function generateDashboardHtml(): string {
         // Sessions table
         const sessRows = [];
         (data.agents || []).forEach(function(a) {
-          const sessions = (a.sessions || []).slice(0, 5);
-          sessions.forEach(function(s) {
+          (a.sessions || []).forEach(function(s) {
+            const statusBadge = s.isRunning
+              ? '<span class="badge badge-green">running</span>'
+              : '<span class="badge badge-gray">stopped</span>';
+            const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">—</span>';
             sessRows.push('<tr>' +
               '<td>' + a.id + '</td>' +
-              '<td>' + s.chatId + '</td>' +
-              '<td>' + (s.messageCount || 0) + '</td>' +
-              '<td>' + fmtTs(s.lastActivity) + '</td>' +
+              '<td class="ts">' + s.chatId + '</td>' +
+              '<td>' + (s.source || '—') + '</td>' +
+              '<td>' + statusBadge + '</td>' +
+              '<td>' + uptime + '</td>' +
+              '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
               '</tr>');
           });
         });
         document.getElementById('sessions-tbody').innerHTML =
-          sessRows.length ? sessRows.join('') : '<tr><td colspan="4" class="ts">No sessions yet</td></tr>';
+          sessRows.length ? sessRows.join('') : '<tr><td colspan="6" class="ts">No sessions yet</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
@@ -387,13 +397,17 @@ export function generateDashboardHtml(): string {
         const a = p.args;
         if (a.includes('node') && a.includes('dist/index')) return 'orchestrator';
         if (a.includes('claude-pty-shell')) return 'pty';
-        if (a.includes('claude') && a.includes('--session-id')) {
-          const parent = pidMap[p.ppid];
-          return (parent && cat(parent) === 'pty') ? 'claude-pty' : 'claude-headless';
-        }
         if (a.includes('bun') && a.includes('mcp/server')) return 'mcp';
         if (a.includes('bun') && a.includes('telegram') && a.includes('receiver')) return 'telegram';
         if (a.includes('bun') && a.includes('discord') && a.includes('receiver')) return 'discord';
+        // Match both PTY (--session-id) and headless (--print) claude processes
+        if (a.includes('--mcp-config') && (a.includes('--session-id') || a.includes('--print'))) {
+          if (a.includes('--session-id')) {
+            const parent = pidMap[p.ppid];
+            return (parent && cat(parent) === 'pty') ? 'claude-pty' : 'claude-headless';
+          }
+          return 'claude-headless';
+        }
         return 'other';
       }
 

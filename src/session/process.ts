@@ -30,6 +30,7 @@ export class SessionProcess extends EventEmitter {
   readonly source: 'telegram' | 'discord' | 'api';
   private readonly sessionChannel: 'telegram' | 'discord';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
+  readonly spawnedAt = Date.now();
   modelOverride?: string; // per-session model override (set by runner from SessionMeta)
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;

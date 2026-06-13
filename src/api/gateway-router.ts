@@ -1,6 +1,8 @@
 import express, { Request, Response } from 'express';
 import * as http from 'node:http';
 import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AgentRunner } from '../agent/runner';
@@ -21,6 +23,18 @@ import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+function getGatewayVersion(): string {
+  try {
+    const pkgPath = path.join(__dirname, '..', '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const GATEWAY_VERSION = getGatewayVersion();
 
 // ─── Proxy types ──────────────────────────────────────────────────────────────
 
@@ -293,8 +307,8 @@ export class GatewayRouter {
       res.json({ status: 'ok', agents: [...this.agents.keys()] });
     });
 
-    // Web UI dashboard
-    this.app.get('/ui', (_req: Request, res: Response) => {
+    // Web dashboard
+    this.app.get('/dashboard', (_req: Request, res: Response) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(generateDashboardHtml());
     });
@@ -346,11 +360,7 @@ export class GatewayRouter {
         }).filter(Boolean);
 
         const lastActivity = this.lastActivityAt.get(id);
-        const sessions = (this.recentSessions.get(id) ?? []).slice(0, 5).map((s) => ({
-          chatId: s.chatId,
-          messageCount: s.messageCount,
-          lastActivity: s.lastActivity.toISOString(),
-        }));
+        const sessions = runner.getSessionsSummary();
 
         return {
           id,
@@ -371,6 +381,7 @@ export class GatewayRouter {
         agents: agentsStatus,
         uptime: Math.floor(uptimeMs / 1000),
         startedAt: this.startedAt.toISOString(),
+        version: GATEWAY_VERSION,
       });
     });
   }

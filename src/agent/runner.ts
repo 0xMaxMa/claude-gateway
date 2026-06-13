@@ -122,6 +122,9 @@ export class AgentRunner extends EventEmitter {
   // Buffers attachment file paths registered via api_reply tool for the current API session turn.
   private readonly pendingApiAttachments = new Map<string, string[]>();
 
+  // Session history ring-buffer (last 10 spawned, newest first)
+  private readonly sessionHistory: Array<{ chatId: string; sessionId: string; source: string; spawnedAt: number }> = [];
+
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
 
@@ -851,6 +854,8 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.sessions.set(mapKey, proc);
+    this.sessionHistory.unshift({ chatId: mapKey, sessionId: proc.sessionId, source: proc.source, spawnedAt: proc.spawnedAt });
+    if (this.sessionHistory.length > 10) this.sessionHistory.length = 10;
     if (source === 'telegram' || source === 'discord') {
       this.channelSourceMap.set(mapKey, source);
     }
@@ -1343,6 +1348,14 @@ export class AgentRunner extends EventEmitter {
 
   isRunning(): boolean {
     return this.receiver?.isRunning() ?? false;
+  }
+
+  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
+    const now = Date.now();
+    return this.sessionHistory.map((e) => {
+      const isRunning = this.sessions.has(e.chatId);
+      return { ...e, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000) };
+    });
   }
 
   /**
