@@ -98,6 +98,11 @@ export class SessionProcess extends EventEmitter {
       : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, msg);
   }
 
+  /** Public accessor for the model this session currently resolves to (for status/UI). */
+  get model(): string {
+    return this.readFreshModel();
+  }
+
   private readFreshModel(): string {
     // Per-session model override takes priority
     if (this.modelOverride) return this.modelOverride;

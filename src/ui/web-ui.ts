@@ -109,9 +109,9 @@ export function generateDashboardHtml(apiKey = ''): string {
       border: 1px solid #2d3748;
       border-radius: 6px;
       padding: 12px 16px;
-      white-space: pre;
+      white-space: pre-wrap;
+      word-break: break-word;
       color: #a0aec0;
-      overflow-x: auto;
     }
     .proc-tree .proc-orchestrator { color: #63b3ed; }
     .proc-tree .proc-pty { color: #68d391; }
@@ -156,8 +156,8 @@ export function generateDashboardHtml(apiKey = ''): string {
     Last updated: <span id="last-updated">&mdash;</span>
   </div>
 
-  <!-- Row: Processes 50% | Agent badges 50% -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
+  <!-- Row: Processes 70% | Agent badges 30% -->
+  <div style="display:grid;grid-template-columns:7fr 3fr;gap:24px;align-items:start;">
     <div>
       <h2>Processes</h2>
       <div class="proc-tree" id="proc-tree">Loading...</div>
@@ -178,6 +178,7 @@ export function generateDashboardHtml(apiKey = ''): string {
         <th>Chat ID</th>
         <th>Source</th>
         <th>Mode</th>
+        <th>Model</th>
         <th>Status</th>
         <th>Uptime</th>
         <th>Spawned</th>
@@ -185,7 +186,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       </tr>
     </thead>
     <tbody id="sessions-tbody">
-      <tr><td colspan="9" class="ts">Loading...</td></tr>
+      <tr><td colspan="10" class="ts">Loading...</td></tr>
     </tbody>
   </table>
 
@@ -247,6 +248,11 @@ export function generateDashboardHtml(apiKey = ''): string {
     let term = null;
     let ptyWs = null;
     let currentPtyAgent = null;
+    // Streaming UTF-8 decoder. The PTY stream carries raw UTF-8 bytes (box-drawing
+    // chars, spinner braille, emoji). Decoding them as latin1 mangles every
+    // multi-byte char into noise — decode as UTF-8 with {stream:true} so sequences
+    // split across WebSocket frames are reassembled instead of corrupted.
+    let utf8Decoder = null;
 
     function openPtyViewer(agentId) {
       if (currentPtyAgent === agentId && ptyWs && ptyWs.readyState === WebSocket.OPEN) return;
@@ -259,25 +265,36 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (!term) {
         term = new Terminal({
           theme: { background: '#0d1117', foreground: '#e2e8f0', cursor: '#63b3ed' },
-          fontSize: 10,
+          fontSize: 13,
+          lineHeight: 1.1,
           fontFamily: 'Menlo, Monaco, Consolas, monospace',
           // Fixed dimensions matching the server PTY — do NOT auto-fit, the
           // size mismatch is what makes the output unreadable.
           cols: PTY_COLS,
           rows: PTY_ROWS,
           scrollback: 5000,
+          // View-only mirror of the agent's TUI.
+          disableStdin: true,
+          cursorBlink: false,
+          convertEol: false,
         });
         term.open(document.getElementById('pty-terminal'));
       } else {
         term.reset();
       }
 
+      // Fresh decoder per session so a leftover partial byte from a previous
+      // viewing can't corrupt the first character of this stream.
+      utf8Decoder = new TextDecoder('utf-8');
+
       const url = wsUrl('/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream');
       ptyWs = new WebSocket(url);
       ptyWs.binaryType = 'arraybuffer';
 
       ptyWs.onmessage = function(ev) {
-        const data = ev.data instanceof ArrayBuffer ? new TextDecoder('latin1').decode(ev.data) : ev.data;
+        const data = ev.data instanceof ArrayBuffer
+          ? utf8Decoder.decode(ev.data, { stream: true })
+          : ev.data;
         term.write(data);
       };
       ptyWs.onclose = function(ev) {
@@ -312,6 +329,15 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (mode === 'pty-shell') return '<span class="badge badge-blue">pty-shell</span>';
       if (mode === 'headless') return '<span class="badge badge-purple">headless</span>';
       return '<span class="ts">' + escHtml(mode || '?') + '</span>';
+    }
+
+    // Prettify a model id for display: drop the "claude-" prefix and any
+    // trailing date stamp, e.g. claude-haiku-4-5-20251001 -> haiku-4-5.
+    // Full id is kept in the tooltip.
+    function fmtModel(m) {
+      if (!m) return '<span class="ts">&mdash;</span>';
+      const label = String(m).replace(/^claude-/, '').replace(/-\\d{8}$/, '');
+      return '<span class="badge badge-gray" title="' + escHtml(m) + '">' + escHtml(label) + '</span>';
     }
 
     // ── Status Refresh ────────────────────────────────────────────────────────
@@ -368,6 +394,7 @@ export function generateDashboardHtml(apiKey = ''): string {
               '<td>' + chatCell + '</td>' +
               '<td><span class="badge badge-gray">' + escHtml(s.source || '?') + '</span></td>' +
               '<td>' + modeBadge(s.mode) + '</td>' +
+              '<td>' + fmtModel(s.model) + '</td>' +
               '<td>' + statusBadge + '</td>' +
               '<td>' + uptime + '</td>' +
               '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
@@ -378,7 +405,7 @@ export function generateDashboardHtml(apiKey = ''): string {
         });
 
         document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="9" class="ts">No active sessions</td></tr>';
+          rows.length ? rows.join('') : '<tr><td colspan="10" class="ts">No active sessions</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
@@ -426,13 +453,14 @@ export function generateDashboardHtml(apiKey = ''): string {
         return 'other';
       }
 
-      function short(args, maxLen) {
-        return args.length > maxLen ? args.slice(0, maxLen) + '\\u2026' : args;
+      // Show full command lines (no truncation) — text wraps inside the box.
+      function full(args) {
+        return escHtml(args);
       }
 
       function sessionId(args) {
         const m = args.match(/--session-id\\s+(\\S+)/);
-        return m ? m[1].slice(0, 8) + '\\u2026' : '?';
+        return m ? escHtml(m[1]) : '?';
       }
 
       function agentName(args) {
@@ -458,7 +486,7 @@ export function generateDashboardHtml(apiKey = ''): string {
 
       if (orchestrator) {
         lines.push('<span class="proc-orchestrator">Orchestrator</span>');
-        lines.push('  PID ' + orchestrator.pid + '  <span class="proc-orchestrator">' + short(orchestrator.args, 40) + '</span>');
+        lines.push('  PID ' + orchestrator.pid + '  <span class="proc-orchestrator">' + full(orchestrator.args) + '</span>');
         lines.push('');
       }
 
@@ -499,7 +527,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       lines.push('<span class="proc-label">Orphans</span>');
       if (orphans.length) {
         orphans.forEach(function(p) {
-          lines.push('  \\u26a0 PID ' + p.pid + '  <span class="proc-orphan">' + short(p.args, 30) + '</span>');
+          lines.push('  \\u26a0 PID ' + p.pid + '  <span class="proc-orphan">' + full(p.args) + '</span>');
         });
       } else {
         lines.push('  <span class="ts">none \\u2705</span>');

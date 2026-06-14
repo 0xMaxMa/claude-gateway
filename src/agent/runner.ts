@@ -123,7 +123,7 @@ export class AgentRunner extends EventEmitter {
   private readonly pendingApiAttachments = new Map<string, string[]>();
 
   // Session history ring-buffer (last 10 spawned, newest first)
-  private readonly sessionHistory: Array<{ chatId: string; sessionId: string; source: string; mode: string; spawnedAt: number }> = [];
+  private readonly sessionHistory: Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; spawnedAt: number }> = [];
 
   // For API sessions the map key is the sessionId, so the real caller chatId
   // (e.g. the app/agent identifier) is not captured at spawn. Record it here
@@ -859,7 +859,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.sessions.set(mapKey, proc);
-    this.sessionHistory.unshift({ chatId: mapKey, sessionId: proc.sessionId, source: proc.source, mode: proc.backend, spawnedAt: proc.spawnedAt });
+    this.sessionHistory.unshift({ chatId: mapKey, sessionId: proc.sessionId, source: proc.source, mode: proc.backend, model: proc.model, spawnedAt: proc.spawnedAt });
     if (this.sessionHistory.length > 10) this.sessionHistory.length = 10;
     if (source === 'telegram' || source === 'discord') {
       this.channelSourceMap.set(mapKey, source);
@@ -1355,7 +1355,7 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
-  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
+  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
     const now = Date.now();
     return this.sessionHistory.map((e) => {
       const isRunning = this.sessions.has(e.chatId);
