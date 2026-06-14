@@ -78,15 +78,15 @@ export function generateDashboardHtml(apiKey = ''): string {
     #refresh-indicator { float: right; font-size: 0.75rem; color: #4a5568; }
     .error { color: #fc8181; font-size: 0.85rem; margin-top: 8px; }
     .btn-stream {
-      background: #1a365d;
-      color: #63b3ed;
-      border: 1px solid #2b6cb0;
+      background: #44337a;
+      color: #d6bcfa;
+      border: 1px solid #6b46c1;
       border-radius: 4px;
       padding: 2px 8px;
       font-size: 0.75rem;
       cursor: pointer;
     }
-    .btn-stream:hover { background: #2b6cb0; color: #ebf8ff; }
+    .btn-stream:hover { background: #6b46c1; color: #faf5ff; }
     .pty-viewer {
       display: none;
       margin-top: 24px;
@@ -105,7 +105,7 @@ export function generateDashboardHtml(apiKey = ''): string {
     }
     .pty-viewer-header .agent-label { color: #63b3ed; font-weight: 600; }
     .pty-viewer-header .session-label { color: #718096; font-family: monospace; font-size: 0.78rem; }
-    .pty-close {
+    .pty-close, .pty-refresh {
       background: none;
       border: none;
       color: #718096;
@@ -114,6 +114,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 0 4px;
     }
     .pty-close:hover { color: #fc8181; }
+    .pty-refresh:hover { color: #68d391; }
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
        output). We render at the native size and pan horizontally if the 200-col
@@ -125,7 +126,6 @@ export function generateDashboardHtml(apiKey = ''): string {
       background: #0d1117;
       overflow-x: auto;
       overflow-y: hidden;
-      max-height: 70vh;
       border-radius: 6px;
     }
     /* No scrollback in alt-screen mode → suppress xterm's vertical scrollbar. */
@@ -231,7 +231,10 @@ export function generateDashboardHtml(apiKey = ''): string {
   <div class="pty-viewer" id="pty-viewer">
     <div class="pty-viewer-header">
       <span>Shell Monitor &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
-      <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
+      <span>
+        <button class="pty-refresh" id="pty-refresh-btn" title="Refresh display">&#x21BA;</button>
+        <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
+      </span>
     </div>
     <div id="pty-terminal"></div>
   </div>
@@ -314,6 +317,7 @@ export function generateDashboardHtml(apiKey = ''): string {
     let term = null;
     let ptyWs = null;
     let currentPtyAgent = null;
+    let currentPtySession = null;
     // Streaming UTF-8 decoder. The PTY stream carries raw UTF-8 bytes (box-drawing
     // chars, spinner braille, emoji). Decoding them as latin1 mangles every
     // multi-byte char into noise — decode as UTF-8 with {stream:true} so sequences
@@ -334,6 +338,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       closePtyViewer();
 
       currentPtyAgent = agentId;
+      currentPtySession = sessionId;
       document.getElementById('pty-agent-label').textContent = agentId;
       // Append the session id after the agent name, e.g. "claude-founder · 3c01897c…".
       document.getElementById('pty-session-label').textContent = sessionId ? ' \\u00b7 ' + sessionId : '';
@@ -389,10 +394,23 @@ export function generateDashboardHtml(apiKey = ''): string {
     function closePtyViewer() {
       if (ptyWs) { ptyWs.close(); ptyWs = null; }
       currentPtyAgent = null;
+      currentPtySession = null;
       document.getElementById('pty-viewer').style.display = 'none';
     }
 
+    function refreshPtyViewer() {
+      if (!currentPtyAgent) return;
+      const agentId = currentPtyAgent;
+      const sessionId = currentPtySession;
+      // Close existing WS and reset terminal to a clean state, then reconnect.
+      if (ptyWs) { ptyWs.close(); ptyWs = null; }
+      currentPtyAgent = null; // bypass the early-return guard in openPtyViewer
+      if (term) term.reset();
+      openPtyViewer(agentId, sessionId);
+    }
+
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
+    document.getElementById('pty-refresh-btn').addEventListener('click', refreshPtyViewer);
 
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
@@ -493,7 +511,7 @@ export function generateDashboardHtml(apiKey = ''): string {
               ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
               : '<span class="ts">&mdash;</span>';
             const liveBtn = (a.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
-              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">▶ Live</button>'
+              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">💻 View</button>'
               : '<span class="ts">&mdash;</span>';
             rows.push(
               '<tr class="session-row">' +
