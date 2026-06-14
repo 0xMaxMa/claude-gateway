@@ -2,7 +2,7 @@
  * Generates a self-contained HTML dashboard page for the gateway status UI.
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
-export function generateDashboardHtml(): string {
+export function generateDashboardHtml(apiKey = ''): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -223,9 +223,12 @@ export function generateDashboardHtml(): string {
       return basePath() + path;
     }
 
+    const DASHBOARD_API_KEY = ${JSON.stringify(apiKey)};
+
     function wsUrl(path) {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      return proto + '//' + window.location.host + basePath() + path;
+      const base = proto + '//' + window.location.host + basePath() + path;
+      return DASHBOARD_API_KEY ? base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(DASHBOARD_API_KEY) : base;
     }
 
     // ── PTY Viewer ───────────────────────────────────────────────────────────

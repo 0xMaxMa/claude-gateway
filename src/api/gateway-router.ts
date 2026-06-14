@@ -309,8 +309,9 @@ export class GatewayRouter {
 
     // Web dashboard
     this.app.get('/dashboard', (_req: Request, res: Response) => {
+      const firstKey = (this.gatewayConfig?.gateway?.api?.keys ?? [])[0]?.key ?? '';
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(generateDashboardHtml());
+      res.send(generateDashboardHtml(firstKey));
     });
 
     // Process tree endpoint — returns raw ps data for dashboard
@@ -411,10 +412,13 @@ export class GatewayRouter {
           return;
         }
 
-        // Auth: Bearer token or X-Api-Key header
+        // Auth: Bearer token, X-Api-Key header, or ?key= query param (for browser WS)
         const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
         const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
-        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
+        const queryKey = new URL(url, 'http://localhost').searchParams.get('key') ?? '';
+        const token = authHeader.startsWith('Bearer ')
+          ? authHeader.slice(7).trim()
+          : xApiKey.trim() || queryKey.trim();
         if (!token || !apiKeys.some((k) => k.key === token)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
