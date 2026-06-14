@@ -43,7 +43,24 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 8px 12px;
       border-bottom: 1px solid #1a202c;
     }
-    tr:hover td { background: #1a202c; }
+    tr.agent-row td {
+      background: #131720;
+      font-weight: 600;
+      color: #90cdf4;
+    }
+    tr.agent-row:hover td { background: #1a202c; }
+    tr.session-row td {
+      padding-left: 28px;
+      background: #0f1117;
+      color: #cbd5e0;
+      font-size: 0.82rem;
+    }
+    tr.session-row:hover td { background: #1a202c; }
+    tr.session-row td:first-child::before {
+      content: '└─ ';
+      color: #4a5568;
+      font-family: monospace;
+    }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -108,7 +125,6 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 12px 16px;
       white-space: pre;
       color: #a0aec0;
-      margin-bottom: 24px;
       overflow-x: auto;
     }
     .proc-tree .proc-orchestrator { color: #63b3ed; }
@@ -118,6 +134,12 @@ export function generateDashboardHtml(apiKey = ''): string {
     .proc-tree .proc-receiver { color: #76e4f7; }
     .proc-tree .proc-orphan { color: #fc8181; }
     .proc-tree .proc-label { color: #718096; }
+    .session-id {
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #a0aec0;
+      word-break: break-all;
+    }
   </style>
 </head>
 <body>
@@ -128,29 +150,27 @@ export function generateDashboardHtml(apiKey = ''): string {
     Last updated: <span id="last-updated">—</span>
   </div>
 
-  <div style="display:grid;grid-template-columns:1fr 1.5fr;gap:24px;align-items:start;">
-    <!-- Left column: Processes -->
-    <div>
-      <h2>Processes</h2>
-      <div class="proc-tree" id="proc-tree">Loading...</div>
-    </div>
+  <!-- 80% / 20% layout — Agents+Sessions left, Processes right -->
+  <div style="display:grid;grid-template-columns:4fr 1fr;gap:24px;align-items:start;">
 
-    <!-- Right column: Agents + Sessions -->
+    <!-- Left column: Agents + Sessions (combined) -->
     <div>
-      <h2>Agents</h2>
+      <h2>Agents &amp; Sessions</h2>
       <table id="agents-table">
         <thead>
           <tr>
-            <th>ID</th>
+            <th>Agent / Session ID</th>
+            <th>Chat ID</th>
+            <th>Source</th>
             <th>Status</th>
-            <th>Received</th>
-            <th>Sent</th>
-            <th>Last Activity</th>
+            <th>Recv / Sent</th>
+            <th>Uptime</th>
+            <th>Last Activity / Spawned</th>
             <th>Live</th>
           </tr>
         </thead>
         <tbody id="agents-tbody">
-          <tr><td colspan="6" class="ts">Loading...</td></tr>
+          <tr><td colspan="8" class="ts">Loading...</td></tr>
         </tbody>
       </table>
 
@@ -161,24 +181,12 @@ export function generateDashboardHtml(apiKey = ''): string {
         </div>
         <div id="pty-terminal"></div>
       </div>
+    </div>
 
-      <h2>Sessions</h2>
-      <table id="sessions-table">
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Chat ID</th>
-            <th>Session ID</th>
-            <th>Source</th>
-            <th>Status</th>
-            <th>Uptime</th>
-            <th>Spawned</th>
-          </tr>
-        </thead>
-        <tbody id="sessions-tbody">
-          <tr><td colspan="7" class="ts">Loading...</td></tr>
-        </tbody>
-      </table>
+    <!-- Right column: Processes -->
+    <div>
+      <h2>Processes</h2>
+      <div class="proc-tree" id="proc-tree">Loading...</div>
     </div>
   </div>
 
@@ -299,45 +307,61 @@ export function generateDashboardHtml(apiKey = ''): string {
         if (data.version) document.getElementById('gateway-version').textContent = 'v' + data.version;
         document.getElementById('error-msg').style.display = 'none';
 
-        // Agents table (with Live button for PTY agents)
-        const agentRows = (data.agents || []).map(function(a) {
-          const liveBtn = a.hasPtyStream
-            ? '<button class="btn-stream" onclick="openPtyViewer(' + JSON.stringify(a.id) + ')">▶ Live</button>'
-            : '<span class="ts">—</span>';
-          return '<tr>' +
-            '<td>' + a.id + '</td>' +
-            '<td>' + badge(a.isRunning) + '</td>' +
-            '<td>' + (a.messagesReceived || 0) + '</td>' +
-            '<td>' + (a.messagesSent || 0) + '</td>' +
-            '<td>' + fmtTs(a.lastActivityAt) + '</td>' +
-            '<td>' + liveBtn + '</td>' +
-            '</tr>';
-        });
-        document.getElementById('agents-tbody').innerHTML =
-          agentRows.length ? agentRows.join('') : '<tr><td colspan="6" class="ts">No agents</td></tr>';
-
-        // Sessions table
-        const sessRows = [];
+        // Combined Agents + Sessions table
+        const rows = [];
         (data.agents || []).forEach(function(a) {
-          (a.sessions || []).forEach(function(s) {
-            const statusBadge = s.isRunning
-              ? '<span class="badge badge-green">running</span>'
-              : '<span class="badge badge-gray">stopped</span>';
-            const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">—</span>';
-            const shortSessId = s.sessionId ? s.sessionId.slice(0, 8) + '…' : '<span class="ts">—</span>';
-            sessRows.push('<tr>' +
-              '<td>' + a.id + '</td>' +
-              '<td class="ts">' + s.chatId + '</td>' +
-              '<td class="ts">' + shortSessId + '</td>' +
-              '<td>' + (s.source || '—') + '</td>' +
-              '<td>' + statusBadge + '</td>' +
-              '<td>' + uptime + '</td>' +
-              '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
-              '</tr>');
-          });
+          // Agent header row
+          rows.push(
+            '<tr class="agent-row">' +
+            '<td>' + a.id + '</td>' +
+            '<td class="ts">—</td>' +
+            '<td class="ts">—</td>' +
+            '<td>' + badge(a.isRunning) + '</td>' +
+            '<td>' + (a.messagesReceived || 0) + ' / ' + (a.messagesSent || 0) + '</td>' +
+            '<td class="ts">—</td>' +
+            '<td>' + fmtTs(a.lastActivityAt) + '</td>' +
+            '<td class="ts">—</td>' +
+            '</tr>'
+          );
+
+          // Session sub-rows
+          const sessions = a.sessions || [];
+          if (sessions.length === 0) {
+            rows.push(
+              '<tr class="session-row">' +
+              '<td colspan="8" class="ts" style="padding-left:28px;">no sessions</td>' +
+              '</tr>'
+            );
+          } else {
+            sessions.forEach(function(s) {
+              const statusBadge = s.isRunning
+                ? '<span class="badge badge-green">running</span>'
+                : '<span class="badge badge-gray">stopped</span>';
+              const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">—</span>';
+              const sessIdFull = s.sessionId
+                ? '<span class="session-id">' + s.sessionId + '</span>'
+                : '<span class="ts">—</span>';
+              const liveBtn = (a.hasPtyStream && s.isRunning)
+                ? '<button class="btn-stream" onclick="openPtyViewer(' + JSON.stringify(a.id) + ')">▶ Live</button>'
+                : '<span class="ts">—</span>';
+              rows.push(
+                '<tr class="session-row">' +
+                '<td>' + sessIdFull + '</td>' +
+                '<td class="ts">' + (s.chatId || '—') + '</td>' +
+                '<td>' + (s.source || '—') + '</td>' +
+                '<td>' + statusBadge + '</td>' +
+                '<td class="ts">—</td>' +
+                '<td>' + uptime + '</td>' +
+                '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
+                '<td>' + liveBtn + '</td>' +
+                '</tr>'
+              );
+            });
+          }
         });
-        document.getElementById('sessions-tbody').innerHTML =
-          sessRows.length ? sessRows.join('') : '<tr><td colspan="7" class="ts">No sessions yet</td></tr>';
+
+        document.getElementById('agents-tbody').innerHTML =
+          rows.length ? rows.join('') : '<tr><td colspan="8" class="ts">No agents</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
@@ -368,7 +392,6 @@ export function generateDashboardHtml(apiKey = ''): string {
       const pidMap = {};
       procs.forEach(function(p) { pidMap[p.pid] = p; });
 
-      // Categorize
       function cat(p) {
         const a = p.args;
         if (a.includes('node') && a.includes('dist/index')) return 'orchestrator';
@@ -376,7 +399,6 @@ export function generateDashboardHtml(apiKey = ''): string {
         if (a.includes('bun') && a.includes('mcp/server')) return 'mcp';
         if (a.includes('bun') && a.includes('telegram') && a.includes('receiver')) return 'telegram';
         if (a.includes('bun') && a.includes('discord') && a.includes('receiver')) return 'discord';
-        // Match both PTY (--session-id) and headless (--print) claude processes
         if (a.includes('--mcp-config') && (a.includes('--session-id') || a.includes('--print'))) {
           if (a.includes('--session-id')) {
             const parent = pidMap[p.ppid];
@@ -409,7 +431,6 @@ export function generateDashboardHtml(apiKey = ''): string {
       const discordReceivers = procs.filter(function(p) { return cat(p) === 'discord'; });
       const mcpServers = procs.filter(function(p) { return cat(p) === 'mcp'; });
 
-      // Find orphans: gateway-like procs whose ppid is not in our proc set
       const gatewayPids = new Set(procs.map(function(p) { return p.pid; }));
       const orphans = procs.filter(function(p) {
         const c = cat(p);
@@ -425,45 +446,45 @@ export function generateDashboardHtml(apiKey = ''): string {
       }
 
       const sessionCount = ptys.length + headless.length;
-      lines.push('<span class="proc-label">Sessions (' + sessionCount + ' total)</span>');
+      lines.push('<span class="proc-label">Sessions (' + sessionCount + ')</span>');
 
       ptys.forEach(function(pty) {
         const agent = agentName(pty.args);
-        lines.push('  PID ' + pty.pid + '  <span class="proc-pty">claude-pty-shell.js</span>  [agent=' + agent + ']  ← PTY wrapper');
+        lines.push('  PID ' + pty.pid + '  <span class="proc-pty">pty-shell</span>  [' + agent + ']');
         const claudeChild = procs.find(function(p) { return p.ppid === pty.pid && cat(p) === 'claude-pty'; });
         if (claudeChild) {
-          lines.push('    └─ PID ' + claudeChild.pid + '  <span class="proc-claude">claude --session-id ' + sessionId(claudeChild.args) + '</span>');
+          lines.push('  └─ PID ' + claudeChild.pid + '  <span class="proc-claude">claude ' + sessionId(claudeChild.args) + '</span>');
           const mcp = mcpServers.find(function(p) { return p.ppid === claudeChild.pid; });
           if (mcp) {
-            lines.push('         └─ PID ' + mcp.pid + '  <span class="proc-mcp">bun mcp/server.ts</span>');
+            lines.push('     └─ PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
           }
         }
       });
 
       headless.forEach(function(cl) {
-        lines.push('  PID ' + cl.pid + '  <span class="proc-claude">claude --print</span>  [headless]');
+        lines.push('  PID ' + cl.pid + '  <span class="proc-claude">claude --print</span>');
         const mcp = mcpServers.find(function(p) { return p.ppid === cl.pid; });
         if (mcp) {
-          lines.push('    └─ PID ' + mcp.pid + '  <span class="proc-mcp">bun mcp/server.ts</span>');
+          lines.push('  └─ PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
         }
       });
 
       if (sessionCount === 0) lines.push('  <span class="ts">— none —</span>');
       lines.push('');
 
-      lines.push('<span class="proc-label">Receivers &amp; Services</span>');
-      if (telegramReceivers.length) lines.push('  Telegram pollers  ×' + telegramReceivers.length + '  <span class="proc-receiver">(bun)</span>');
-      if (discordReceivers.length) lines.push('  Discord pollers   ×' + discordReceivers.length + '  <span class="proc-receiver">(bun)</span>');
+      lines.push('<span class="proc-label">Receivers</span>');
+      if (telegramReceivers.length) lines.push('  TG ×' + telegramReceivers.length);
+      if (discordReceivers.length) lines.push('  DC ×' + discordReceivers.length);
       if (!telegramReceivers.length && !discordReceivers.length) lines.push('  <span class="ts">— none —</span>');
       lines.push('');
 
       lines.push('<span class="proc-label">Orphans</span>');
       if (orphans.length) {
         orphans.forEach(function(p) {
-          lines.push('  PID ' + p.pid + '  <span class="proc-orphan">' + short(p.args, 60) + '</span>  (ppid=' + p.ppid + ')');
+          lines.push('  ⚠ PID ' + p.pid + '  <span class="proc-orphan">' + short(p.args, 30) + '</span>');
         });
       } else {
-        lines.push('  <span class="ts">— none —  ✅</span>');
+        lines.push('  <span class="ts">none ✅</span>');
       }
 
       document.getElementById('proc-tree').innerHTML = lines.join('\\n');

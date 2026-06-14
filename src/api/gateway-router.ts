@@ -406,7 +406,7 @@ export class GatewayRouter {
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
         const url = req.url ?? '';
-        const match = url.match(/^\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
+        const match = url.match(/\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
         if (!match) {
           socket.destroy();
           return;
