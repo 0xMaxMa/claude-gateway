@@ -3405,3 +3405,50 @@ describe('AgentRunner — getSessionsSummary dedup', () => {
     expect(rows[0].tokens).toBe(0);
   });
 });
+
+// ── writeMenuForward: atomic .menu file ────────────────────────────────────────
+describe('AgentRunner — writeMenuForward', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-menu-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    agentConfig = makeAgentConfig(workspace);
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function callWriteMenu(runner: AgentRunner, chatId: string, text: string, options: Array<{ label: string }>): void {
+    (runner as unknown as { writeMenuForward(c: string, t: string, o: Array<{ label: string }>): void })
+      .writeMenuForward(chatId, text, options);
+  }
+
+  it('writes a .menu file with correct JSON content', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const chatId = '997170033';
+    callWriteMenu(runner, chatId, 'Pick one:', [{ label: 'Alpha' }, { label: 'Beta' }]);
+
+    const typingDir = (runner as unknown as { getTypingDir(c: string): string }).getTypingDir(chatId);
+    const menuPath = path.join(typingDir, `${chatId}.menu`);
+    expect(fs.existsSync(menuPath)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(menuPath, 'utf8'));
+    expect(parsed.text).toBe('Pick one:');
+    expect(parsed.options).toEqual([{ label: 'Alpha' }, { label: 'Beta' }]);
+  });
+
+  it('leaves no .tmp file after successful write (atomic rename)', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const chatId = '997170033';
+    callWriteMenu(runner, chatId, 'Q', [{ label: 'X' }]);
+
+    const typingDir = (runner as unknown as { getTypingDir(c: string): string }).getTypingDir(chatId);
+    const tmpPath = path.join(typingDir, `${chatId}.menu.tmp`);
+    expect(fs.existsSync(tmpPath)).toBe(false);
+  });
+});

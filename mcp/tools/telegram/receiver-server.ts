@@ -690,6 +690,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 const SEND_ONLY = process.env.TELEGRAM_SEND_ONLY === 'true'
 const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 
+import { parseMenuFileContent } from './menu-parser'
+
 const BOT_COMMANDS = [
   { command: 'session', description: 'Show current session info' },
   { command: 'sessions', description: 'Manage conversation sessions' },
@@ -1693,9 +1695,9 @@ if (RECEIVER_MODE) {
       if (!name.endsWith('.menu')) continue
       const chatId = name.slice(0, -'.menu'.length)
       const menuPath = join(TYPING_DIR, name)
-      let parsed: { text?: unknown; options?: unknown }
+      let raw: string
       try {
-        parsed = JSON.parse(readFileSync(menuPath, 'utf8').trim()) as { text?: unknown; options?: unknown }
+        raw = readFileSync(menuPath, 'utf8').trim()
       } catch {
         // Malformed or mid-write (the runner writes atomically, so this is rare) —
         // drop it so the poller doesn't spin on the same bad file forever.
@@ -1705,18 +1707,9 @@ if (RECEIVER_MODE) {
       // Remove BEFORE sending: a slow or failing send must not let the next tick
       // re-deliver the same menu (which would stack duplicate button messages).
       rmSync(menuPath, { force: true })
-      const text = typeof parsed.text === 'string' ? parsed.text : ''
-      const options = Array.isArray(parsed.options)
-        ? (parsed.options as Array<{ label?: unknown }>)
-            .map(o => (typeof o?.label === 'string' ? o.label : ''))
-            .filter((l): l is string => l.length > 0)
-        : []
-      if (!text || options.length === 0) continue
-      const inline_keyboard = options.map((label, i) => [{
-        text: `${i + 1}. ${label}`.slice(0, 60),
-        callback_data: `choice:${i + 1}`,
-      }])
-      void bot.api.sendMessage(chatId, text, { reply_markup: { inline_keyboard } }).catch(err => {
+      const msg = parseMenuFileContent(raw)
+      if (!msg) continue
+      void bot.api.sendMessage(chatId, msg.text, { reply_markup: { inline_keyboard: msg.inline_keyboard } }).catch(err => {
         process.stderr.write(`telegram channel (receiver): failed to send menu to ${chatId}: ${err}\n`)
       })
     }

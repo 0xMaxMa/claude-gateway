@@ -122,7 +122,11 @@ class Driver {
     const streamSocketPath = process.env.PTY_SHELL_STREAM_SOCKET;
     if (streamSocketPath) {
       const sock = net.createConnection(streamSocketPath);
-      sock.on('error', () => { /* registry may not be listening yet or already closed */ });
+      sock.on('error', (err) => {
+        // Non-fatal: the registry socket may not be ready yet or was already closed.
+        // Log so timing issues are diagnosable without a restart.
+        logWarn(`stream socket error (${streamSocketPath}): ${err.message}`);
+      });
       this.streamSocket = sock;
     }
 

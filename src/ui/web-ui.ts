@@ -307,10 +307,21 @@ export function generateDashboardHtml(apiKey = ''): string {
       return basePath() + path;
     }
 
-    function wsUrl(path) {
+    async function wsPtyUrl(agentId) {
+      // Exchange the API key for a short-lived ticket so the key never appears in
+      // the WS URL (which would expose it in server logs and browser history).
+      if (!DASHBOARD_API_KEY) {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return proto + '//' + window.location.host + basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream';
+      }
+      const r = await fetch(apiUrl('/api/v1/pty-stream-ticket'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Api-Key': DASHBOARD_API_KEY },
+        body: JSON.stringify({ agentId }),
+      });
+      const { ticket } = await r.json();
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const base = proto + '//' + window.location.host + basePath() + path;
-      return DASHBOARD_API_KEY ? base + (base.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(DASHBOARD_API_KEY) : base;
+      return proto + '//' + window.location.host + basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream?ticket=' + ticket;
     }
 
     // ── PTY Viewer ───────────────────────────────────────────────────────────
@@ -333,7 +344,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       return s.replace(/\\x1b\\[\\?(1000|1001|1002|1003|1004|1005|1006|1015|1016)[hl]/g, '');
     }
 
-    function openPtyViewer(agentId, sessionId) {
+    async function openPtyViewer(agentId, sessionId) {
       if (currentPtyAgent === agentId && ptyWs && ptyWs.readyState === WebSocket.OPEN) return;
       closePtyViewer();
 
@@ -375,7 +386,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       // viewing can't corrupt the first character of this stream.
       utf8Decoder = new TextDecoder('utf-8');
 
-      const url = wsUrl('/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream');
+      const url = await wsPtyUrl(agentId);
       ptyWs = new WebSocket(url);
       ptyWs.binaryType = 'arraybuffer';
 
@@ -398,7 +409,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       document.getElementById('pty-viewer').style.display = 'none';
     }
 
-    function refreshPtyViewer() {
+    async function refreshPtyViewer() {
       if (!currentPtyAgent) return;
       const agentId = currentPtyAgent;
       const sessionId = currentPtySession;
@@ -406,16 +417,16 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (ptyWs) { ptyWs.close(); ptyWs = null; }
       currentPtyAgent = null; // bypass the early-return guard in openPtyViewer
       if (term) term.reset();
-      openPtyViewer(agentId, sessionId);
+      await openPtyViewer(agentId, sessionId);
     }
 
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
-    document.getElementById('pty-refresh-btn').addEventListener('click', refreshPtyViewer);
+    document.getElementById('pty-refresh-btn').addEventListener('click', () => void refreshPtyViewer());
 
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
       const btn = e.target.closest('.btn-stream');
-      if (btn) openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
+      if (btn) void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
     });
 
     function escHtml(s) {
