@@ -155,7 +155,7 @@ export function generateDashboardHtml(apiKey = ''): string {
   <div class="agents-bar" id="agents-bar"></div>
 
   <!-- 70% / 30% layout — Sessions left, Processes right -->
-  <div style="display:grid;grid-template-columns:7fr 3fr;gap:24px;align-items:start;">
+  <div style="display:grid;grid-template-columns:6fr 4fr;gap:24px;align-items:start;">
 
     <!-- Left column: Sessions table -->
     <div>
@@ -223,7 +223,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       const p = window.location.pathname;
       if (p.endsWith('/dashboard')) return p.slice(0, -10);
       if (p.endsWith('/dashboard/')) return p.slice(0, -11);
-      return p.replace(/\/$/, '');
+      return p.endsWith('/') ? p.slice(0, -1) : p;
     }
 
     function apiUrl(path) {
