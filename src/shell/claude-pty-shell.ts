@@ -121,7 +121,13 @@ class Driver {
       onData: (d) => {
         this.screen.write(d);
         if (this.streamSocket?.writable) {
-          try { this.streamSocket.write(d, 'latin1'); } catch { /* socket closed */ }
+          // node-pty emits UTF-8-decoded strings, so re-encode as UTF-8 to keep
+          // multi-byte glyphs (box-drawing ─│╭╮, the braille spinner, emoji)
+          // intact. Writing as latin1 would truncate every code point > 0xFF to
+          // a single byte — those land in the 0x00-0x1F control range and
+          // scramble the viewer's cursor positioning. The client decodes the
+          // stream with TextDecoder('utf-8'), so this is the matching encoding.
+          try { this.streamSocket.write(d, 'utf8'); } catch { /* socket closed */ }
         }
       },
       onExit: (code) => this.onChildExit(code),

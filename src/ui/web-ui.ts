@@ -271,7 +271,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (!term) {
         term = new Terminal({
           theme: { background: '#0d1117', foreground: '#e2e8f0', cursor: '#63b3ed' },
-          fontSize: 11,
+          fontSize: 10,
           lineHeight: 1.0,
           letterSpacing: 0,
           fontFamily: '"JetBrains Mono", "Cascadia Code", Menlo, Monaco, Consolas, "Courier New", monospace',
