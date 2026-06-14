@@ -109,6 +109,10 @@ export class GatewayRouter {
   private readonly ptyStreamTickets = new Map<string, { agentId: string; expiresAt: number }>();
   private ticketPruner: ReturnType<typeof setInterval> | null = null;
 
+  /** Short-lived dashboard session tokens (10 min TTL). Issued at /dashboard serve time
+   *  so the raw API key is never embedded in the HTML page source. */
+  private readonly dashboardTokens = new Map<string, number>(); // token → expiresAt
+
   /** Per-agent message counters (output lines from subprocess) */
   private readonly messagesReceived: Map<string, number> = new Map();
   private readonly messagesSent: Map<string, number> = new Map();
@@ -185,7 +189,49 @@ export class GatewayRouter {
   }
 
   private setupRoutes(): void {
+    if (process.env.DEV_MODE) {
+      process.stderr.write('[gateway] DEV_MODE=1 active — module cache busted on every /dashboard request. Never enable in production.\n');
+    }
     this.app.use(express.json());
+
+    // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
+    // MUST be registered before the apiRouter middleware so it handles its own auth
+    // (dashboard token or API key) without the apiRouter's auth gate intercepting first.
+    // The ticket is one-time-use with a 30s TTL so neither the API key nor the
+    // dashboard token appears in WS URLs (server access logs / browser history).
+    // Accepts two credential types:
+    //   • X-Api-Key / Bearer — full API key (programmatic clients)
+    //   • X-Dash-Token       — dashboard session token (browser, 10 min, issued at /dashboard)
+    this.app.post('/api/v1/pty-stream-ticket', (req: Request, res: Response) => {
+      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
+      const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
+      const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
+      const xDashToken = (req.headers['x-dash-token'] as string | undefined) ?? '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
+
+      // Validate: API key OR a live dashboard token.
+      const now = Date.now();
+      const dashExpiry = xDashToken ? (this.dashboardTokens.get(xDashToken) ?? 0) : 0;
+      const dashValid = dashExpiry > now;
+      if (dashValid) {
+        // Dashboard tokens are one-time-use: revoke immediately after auth so a
+        // leaked page source can't be replayed (each /dashboard visit gets a fresh one).
+        this.dashboardTokens.delete(xDashToken);
+      }
+      if (!dashValid && (!token || !apiKeys.some((k) => k.key === token))) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const agentId = (req.body as { agentId?: string })?.agentId ?? '';
+      if (!agentId || !this.agents.has(agentId)) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      const ticket = crypto.randomBytes(16).toString('hex');
+      const expiresAt = Date.now() + 30_000;
+      this.ptyStreamTickets.set(ticket, { agentId, expiresAt });
+      res.json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
+    });
 
     // Mount API router after body parser so req.body is populated
     if (this.gatewayConfig?.gateway?.api?.keys?.length) {
@@ -318,7 +364,11 @@ export class GatewayRouter {
 
     // Web dashboard
     this.app.get('/dashboard', (_req: Request, res: Response) => {
-      const firstKey = (this.gatewayConfig?.gateway?.api?.keys ?? [])[0]?.key ?? '';
+      // Issue a short-lived dashboard token (10 min) instead of embedding the raw
+      // API key in the HTML. A view-source leak exposes only a token that can
+      // exclusively obtain PTY stream tickets — not make arbitrary API calls.
+      const dashToken = crypto.randomBytes(16).toString('hex');
+      this.dashboardTokens.set(dashToken, Date.now() + 10 * 60 * 1000);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       if (process.env.DEV_MODE) {
         // Hot-reload: bust module cache so each browser refresh picks up the latest compiled web-ui.js
@@ -326,9 +376,9 @@ export class GatewayRouter {
         delete require.cache[webUiPath];
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { generateDashboardHtml: fresh } = require('../ui/web-ui') as typeof import('../ui/web-ui');
-        res.send(fresh(firstKey));
+        res.send(fresh(dashToken));
       } else {
-        res.send(generateDashboardHtml(firstKey));
+        res.send(generateDashboardHtml(dashToken));
       }
     });
 
@@ -343,7 +393,8 @@ export class GatewayRouter {
       exec(
         "ps -eo pid,ppid,stat,%cpu,%mem,rss,args --no-headers 2>/dev/null | grep -E 'claude|bun.*gateway|bun.*mcp|bun.*receiver|node.*dist/' | grep -v grep | grep -v vscode",
         { encoding: 'utf8', timeout: 5000 },
-        (_err, stdout) => {
+        (err, stdout) => {
+          if (err) process.stderr.write(`[processes] ps error: ${err.message}\n`);
           const processes = (stdout ?? '').trim().split('\n').filter(Boolean).map((line) => {
             const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/);
             if (!m) return null;
@@ -361,29 +412,6 @@ export class GatewayRouter {
           res.json({ processes });
         },
       );
-    });
-
-    // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
-    // The ticket is one-time-use with a 30s TTL so the API key never appears in WS URLs
-    // (which would expose it in server access logs and browser history).
-    this.app.post('/api/v1/pty-stream-ticket', (req: Request, res: Response) => {
-      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
-      const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
-      const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
-      if (!token || !apiKeys.some((k) => k.key === token)) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-      const agentId = (req.body as { agentId?: string })?.agentId ?? '';
-      if (!agentId || !this.agents.has(agentId)) {
-        res.status(404).json({ error: 'Agent not found' });
-        return;
-      }
-      const ticket = crypto.randomBytes(16).toString('hex');
-      const expiresAt = Date.now() + 30_000;
-      this.ptyStreamTickets.set(ticket, { agentId, expiresAt });
-      res.json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
     });
 
     // Status endpoint — per-agent stats + heartbeat history
@@ -464,11 +492,14 @@ export class GatewayRouter {
       this.wss = new WebSocketServer({ noServer: true });
       const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
 
-      // Prune expired tickets every 60s.
+      // Prune expired tickets and dashboard tokens every 60s.
       this.ticketPruner = setInterval(() => {
         const now = Date.now();
         for (const [k, v] of this.ptyStreamTickets) {
           if (v.expiresAt < now) this.ptyStreamTickets.delete(k);
+        }
+        for (const [k, exp] of this.dashboardTokens) {
+          if (exp < now) this.dashboardTokens.delete(k);
         }
       }, 60_000);
       this.ticketPruner.unref();

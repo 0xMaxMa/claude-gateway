@@ -82,7 +82,7 @@ export function buildChoiceComponents(options: Array<{ label: string }>): unknow
       return {
         type: 2, // Button
         style: 2, // Secondary
-        label: `${n}. ${options[i + j].label}`.slice(0, 80),
+        label: `${n}. ${o.label}`.slice(0, 80),
         custom_id: `choice:${n}`,
       };
     });

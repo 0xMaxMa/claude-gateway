@@ -1680,7 +1680,7 @@ describe('Phase 4: Web UI and status endpoint', () => {
     const configs = new Map<string, AgentConfig>([['p411-agent', agentCfg]]);
     const router = new GatewayRouter(agents, configs);
 
-    const res = await supertest(router.getApp()).get('/ui');
+    const res = await supertest(router.getApp()).get('/dashboard');
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/html/);

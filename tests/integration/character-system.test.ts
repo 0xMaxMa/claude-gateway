@@ -174,7 +174,7 @@ describe('Character System Integration', () => {
     await router.start(0);
 
     try {
-      const res = await supertest(router.getApp()).get('/ui');
+      const res = await supertest(router.getApp()).get('/dashboard');
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/text\/html/);
       const body = res.text.toLowerCase();

@@ -2,14 +2,14 @@
  * Generates a self-contained HTML dashboard page for the gateway status UI.
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
-export function generateDashboardHtml(apiKey = ''): string {
-  const safeKey = apiKey.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+export function generateDashboardHtml(dashToken = ''): string {
+  const safeToken = dashToken.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="api-key" content="${safeKey}">
+  <meta name="dash-token" content="${safeToken}">
   <title>Claude Gateway</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"/>
   <style>
@@ -92,7 +92,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       margin-top: 24px;
       border: 1px solid #2d3748;
       border-radius: 6px;
-      overflow: hidden;
+      overflow-x: hidden;
     }
     .pty-viewer-header {
       background: #1a202c;
@@ -200,8 +200,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       .meta { font-size: 0.78rem; }
       #refresh-indicator { float: none; display: block; margin-top: 4px; }
       .proc-tree { font-size: 0.72rem; padding: 10px 12px; }
-      /* On phones the PTY mirror can use the full viewport width and fit. */
-      #pty-terminal { max-height: 60vh; }
+      /* On phones allow horizontal pan only — no vertical clipping. */
     }
   </style>
 </head>
@@ -268,8 +267,9 @@ export function generateDashboardHtml(apiKey = ''): string {
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script>
-    // Read API key from meta tag (safe — no inline JS string injection)
-    const DASHBOARD_API_KEY = document.querySelector('meta[name="api-key"]') ? document.querySelector('meta[name="api-key"]').getAttribute('content') : '';
+    // Read short-lived dashboard token from meta tag (10 min, server-issued at page load).
+    // The raw API key is never embedded in HTML — only this scoped, expiring token is.
+    const DASHBOARD_API_KEY = document.querySelector('meta[name="dash-token"]') ? document.querySelector('meta[name="dash-token"]').getAttribute('content') : '';
 
     // Must match the server PTY size (src/shell/screen.ts ScreenModel defaults).
     const PTY_COLS = 200;
@@ -316,7 +316,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       }
       const r = await fetch(apiUrl('/api/v1/pty-stream-ticket'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Api-Key': DASHBOARD_API_KEY },
+        headers: { 'Content-Type': 'application/json', 'X-Dash-Token': DASHBOARD_API_KEY },
         body: JSON.stringify({ agentId }),
       });
       const { ticket } = await r.json();
@@ -378,6 +378,16 @@ export function generateDashboardHtml(apiKey = ''): string {
           convertEol: false,
         });
         term.open(document.getElementById('pty-terminal'));
+        // After open(), xterm has measured cell height. Pin the container height
+        // so all PTY_ROWS are always visible — prevents the alt-screen bottom rows
+        // (cost bar, status line) from being clipped by parent overflow or viewport.
+        requestAnimationFrame(function() {
+          const screen = document.querySelector('#pty-terminal .xterm-screen');
+          if (screen) {
+            const h = screen.offsetHeight;
+            if (h > 0) document.getElementById('pty-terminal').style.minHeight = h + 'px';
+          }
+        });
       } else {
         term.reset();
       }

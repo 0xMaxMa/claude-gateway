@@ -265,7 +265,20 @@ export class DiscordModule implements ChannelModule {
     // exactly like the user typing "N" (same InboundMessage → handler), so the
     // session's pending-menu handler injects the selection into the PTY.
     // Security mirrors the message path: the access gate must return 'deliver'.
-    this.client.on('interactionCreate', async (interaction: any) => {
+    // discord.js client is typed as `any` (dynamic import) so we narrow locally.
+    interface ButtonInteraction {
+      isButton?: () => boolean;
+      customId?: string;
+      guildId?: string | null;
+      channelId: string;
+      channel?: { isThread?: () => boolean };
+      user: { id: string; username: string };
+      message?: { id: string };
+      client: { user?: { id: string } };
+      reply(opts: { content: string; ephemeral: boolean }): Promise<unknown>;
+      update(opts: { components: unknown[] }): Promise<unknown>;
+    }
+    this.client.on('interactionCreate', async (interaction: ButtonInteraction) => {
       try {
         if (!interaction.isButton?.()) return;
         const m = /^choice:(\d+)$/.exec(interaction.customId ?? '');

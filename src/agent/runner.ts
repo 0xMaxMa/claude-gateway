@@ -1905,6 +1905,8 @@ export class AgentRunner extends EventEmitter {
   }
 
   private cleanupApiSessionMediaDir(sessionId: string, source: string): void {
+    // Always evict the chat-id mapping — safe no-op for non-api sessions.
+    this.apiChatIds.delete(sessionId);
     if (source !== 'api') return;
     const mediaDir = path.join(this.agentsBaseDir, this.agentConfig.id, 'media', `api-${sessionId}`);
     try {
