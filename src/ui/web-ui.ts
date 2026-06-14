@@ -3,12 +3,14 @@
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
 export function generateDashboardHtml(apiKey = ''): string {
+  const safeKey = apiKey.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Claude Gateway Status</title>
+  <meta name="api-key" content="${safeKey}">
+  <title>Claude Gateway</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,7 +21,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 24px;
     }
     h1 { color: #63b3ed; font-size: 1.5rem; margin-bottom: 8px; }
-    .meta { color: #718096; font-size: 0.85rem; margin-bottom: 24px; }
+    .meta { color: #718096; font-size: 0.85rem; margin-bottom: 16px; }
     .meta span { color: #a0aec0; }
     h2 { color: #90cdf4; font-size: 1.1rem; margin: 20px 0 10px; }
     table {
@@ -43,24 +45,8 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 8px 12px;
       border-bottom: 1px solid #1a202c;
     }
-    tr.agent-row td {
-      background: #131720;
-      font-weight: 600;
-      color: #90cdf4;
-    }
-    tr.agent-row:hover td { background: #1a202c; }
-    tr.session-row td {
-      padding-left: 28px;
-      background: #0f1117;
-      color: #cbd5e0;
-      font-size: 0.82rem;
-    }
+    tr.session-row td { background: #0f1117; color: #cbd5e0; font-size: 0.82rem; }
     tr.session-row:hover td { background: #1a202c; }
-    tr.session-row td:first-child::before {
-      content: '└─ ';
-      color: #4a5568;
-      font-family: monospace;
-    }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -71,13 +57,8 @@ export function generateDashboardHtml(apiKey = ''): string {
     .badge-green { background: #22543d; color: #68d391; }
     .badge-red { background: #742a2a; color: #fc8181; }
     .badge-gray { background: #2d3748; color: #a0aec0; }
-    .badge-blue { background: #1a365d; color: #63b3ed; }
     .ts { color: #718096; font-size: 0.8rem; }
-    #refresh-indicator {
-      float: right;
-      font-size: 0.75rem;
-      color: #4a5568;
-    }
+    #refresh-indicator { float: right; font-size: 0.75rem; color: #4a5568; }
     .error { color: #fc8181; font-size: 0.85rem; margin-top: 8px; }
     .btn-stream {
       background: #1a365d;
@@ -140,36 +121,59 @@ export function generateDashboardHtml(apiKey = ''): string {
       color: #a0aec0;
       word-break: break-all;
     }
+    /* Agent status badges bar */
+    .agents-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    .agent-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1a202c;
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      padding: 4px 12px;
+      font-size: 0.8rem;
+    }
+    .agent-badge .agent-name { color: #90cdf4; font-weight: 600; }
+    .agent-badge .dot-green { color: #68d391; }
+    .agent-badge .dot-red { color: #fc8181; }
   </style>
 </head>
 <body>
   <h1>Claude Gateway <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span></h1>
   <div class="meta">
-    Uptime: <span id="uptime">—</span> &nbsp;|&nbsp;
-    Started: <span id="started-at">—</span> &nbsp;|&nbsp;
-    Last updated: <span id="last-updated">—</span>
+    Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
+    Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
+    Last updated: <span id="last-updated">&mdash;</span>
   </div>
 
-  <!-- 80% / 20% layout — Agents+Sessions left, Processes right -->
-  <div style="display:grid;grid-template-columns:4fr 1fr;gap:24px;align-items:start;">
+  <!-- Agent status badges -->
+  <div class="agents-bar" id="agents-bar"></div>
 
-    <!-- Left column: Agents + Sessions (combined) -->
+  <!-- 70% / 30% layout — Sessions left, Processes right -->
+  <div style="display:grid;grid-template-columns:7fr 3fr;gap:24px;align-items:start;">
+
+    <!-- Left column: Sessions table -->
     <div>
-      <h2>Agents &amp; Sessions</h2>
-      <table id="agents-table">
+      <h2>Sessions</h2>
+      <table id="sessions-table">
         <thead>
           <tr>
-            <th>Agent / Session ID</th>
+            <th>Agent</th>
+            <th>Session ID</th>
             <th>Chat ID</th>
             <th>Source</th>
             <th>Status</th>
-            <th>Recv / Sent</th>
             <th>Uptime</th>
-            <th>Last Activity / Spawned</th>
+            <th>Spawned</th>
             <th>Live</th>
           </tr>
         </thead>
-        <tbody id="agents-tbody">
+        <tbody id="sessions-tbody">
           <tr><td colspan="8" class="ts">Loading...</td></tr>
         </tbody>
       </table>
@@ -177,7 +181,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       <div class="pty-viewer" id="pty-viewer">
         <div class="pty-viewer-header">
           <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
-          <button class="pty-close" id="pty-close-btn" title="Close">✕</button>
+          <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
         </div>
         <div id="pty-terminal"></div>
       </div>
@@ -195,7 +199,9 @@ export function generateDashboardHtml(apiKey = ''): string {
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script>
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // Read API key from meta tag (safe — no inline JS string injection)
+    const DASHBOARD_API_KEY = document.querySelector('meta[name="api-key"]') ? document.querySelector('meta[name="api-key"]').getAttribute('content') : '';
+
     function fmtUptime(seconds) {
       const h = Math.floor(seconds / 3600);
       const m = Math.floor((seconds % 3600) / 60);
@@ -206,32 +212,23 @@ export function generateDashboardHtml(apiKey = ''): string {
     }
 
     function fmtTs(ts) {
-      if (!ts) return '<span class="ts">—</span>';
+      if (!ts) return '<span class="ts">&mdash;</span>';
       try {
         const d = new Date(ts);
         return '<span class="ts">' + d.toLocaleTimeString() + ' ' + d.toLocaleDateString() + '</span>';
       } catch(e) { return ts; }
     }
 
-    function badge(running) {
-      return running
-        ? '<span class="badge badge-green">running</span>'
-        : '<span class="badge badge-red">stopped</span>';
-    }
-
-    // Compute base path from current URL (handles reverse proxy sub-paths)
     function basePath() {
       const p = window.location.pathname;
       if (p.endsWith('/dashboard')) return p.slice(0, -10);
       if (p.endsWith('/dashboard/')) return p.slice(0, -11);
-      return p.replace(/\\/$/, '');
+      return p.replace(/\/$/, '');
     }
 
     function apiUrl(path) {
       return basePath() + path;
     }
-
-    const DASHBOARD_API_KEY = ${JSON.stringify(apiKey)};
 
     function wsUrl(path) {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -275,12 +272,12 @@ export function generateDashboardHtml(apiKey = ''): string {
 
       ptyWs.onopen = function() { term.writeln('\\r\\x1b[32m[connected to ' + agentId + ']\\x1b[0m'); };
       ptyWs.onmessage = function(ev) {
-        const data = ev.data instanceof ArrayBuffer
-          ? new TextDecoder().decode(ev.data)
-          : ev.data;
+        const data = ev.data instanceof ArrayBuffer ? new TextDecoder().decode(ev.data) : ev.data;
         term.write(data);
       };
-      ptyWs.onclose = function() { if (term) term.writeln('\\r\\x1b[33m[disconnected]\\x1b[0m'); };
+      ptyWs.onclose = function(ev) {
+        if (term) term.writeln('\\r\\x1b[33m[disconnected: ' + (ev.reason || 'closed') + ']\\x1b[0m');
+      };
       ptyWs.onerror = function() { if (term) term.writeln('\\r\\x1b[31m[connection error]\\x1b[0m'); };
     }
 
@@ -292,6 +289,12 @@ export function generateDashboardHtml(apiKey = ''): string {
 
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
 
+    // Event delegation for Live buttons (avoids inline onclick + HTML injection)
+    document.getElementById('sessions-tbody').addEventListener('click', function(e) {
+      const btn = e.target.closest('.btn-stream');
+      if (btn) openPtyViewer(btn.getAttribute('data-agent-id'));
+    });
+
     // ── Status Refresh ────────────────────────────────────────────────────────
     async function refresh() {
       document.getElementById('refresh-indicator').textContent = 'refreshing...';
@@ -302,34 +305,27 @@ export function generateDashboardHtml(apiKey = ''): string {
 
         document.getElementById('uptime').textContent = fmtUptime(data.uptime || 0);
         document.getElementById('started-at').textContent = data.startedAt
-          ? new Date(data.startedAt).toLocaleString() : '—';
+          ? new Date(data.startedAt).toLocaleString() : '&mdash;';
         document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
         if (data.version) document.getElementById('gateway-version').textContent = 'v' + data.version;
         document.getElementById('error-msg').style.display = 'none';
 
-        // Combined Agents + Sessions table
+        // Agent badges bar
+        const badges = (data.agents || []).map(function(a) {
+          const dot = a.isRunning ? '<span class="dot-green">&#x25CF;</span>' : '<span class="dot-red">&#x25CF;</span>';
+          return '<span class="agent-badge">' + dot + ' <span class="agent-name">' + escHtml(a.id) + '</span></span>';
+        });
+        document.getElementById('agents-bar').innerHTML = badges.join('') || '<span class="ts">No agents</span>';
+
+        // Sessions table — flat list with agent column
         const rows = [];
         (data.agents || []).forEach(function(a) {
-          // Agent header row
-          rows.push(
-            '<tr class="agent-row">' +
-            '<td>' + a.id + '</td>' +
-            '<td class="ts">—</td>' +
-            '<td class="ts">—</td>' +
-            '<td>' + badge(a.isRunning) + '</td>' +
-            '<td>' + (a.messagesReceived || 0) + ' / ' + (a.messagesSent || 0) + '</td>' +
-            '<td class="ts">—</td>' +
-            '<td>' + fmtTs(a.lastActivityAt) + '</td>' +
-            '<td class="ts">—</td>' +
-            '</tr>'
-          );
-
-          // Session sub-rows
           const sessions = a.sessions || [];
           if (sessions.length === 0) {
             rows.push(
               '<tr class="session-row">' +
-              '<td colspan="8" class="ts" style="padding-left:28px;">no sessions</td>' +
+              '<td><span class="ts">' + escHtml(a.id) + '</span></td>' +
+              '<td colspan="7" class="ts">no sessions</td>' +
               '</tr>'
             );
           } else {
@@ -337,20 +333,20 @@ export function generateDashboardHtml(apiKey = ''): string {
               const statusBadge = s.isRunning
                 ? '<span class="badge badge-green">running</span>'
                 : '<span class="badge badge-gray">stopped</span>';
-              const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">—</span>';
-              const sessIdFull = s.sessionId
-                ? '<span class="session-id">' + s.sessionId + '</span>'
-                : '<span class="ts">—</span>';
+              const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
+              const sessId = s.sessionId
+                ? '<span class="session-id">' + escHtml(s.sessionId) + '</span>'
+                : '<span class="ts">&mdash;</span>';
               const liveBtn = (a.hasPtyStream && s.isRunning)
-                ? '<button class="btn-stream" onclick="openPtyViewer(' + JSON.stringify(a.id) + ')">▶ Live</button>'
-                : '<span class="ts">—</span>';
+                ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '">▶ Live</button>'
+                : '<span class="ts">&mdash;</span>';
               rows.push(
                 '<tr class="session-row">' +
-                '<td>' + sessIdFull + '</td>' +
-                '<td class="ts">' + (s.chatId || '—') + '</td>' +
-                '<td>' + (s.source || '—') + '</td>' +
+                '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
+                '<td>' + sessId + '</td>' +
+                '<td class="ts">' + escHtml(String(s.chatId || '&mdash;')) + '</td>' +
+                '<td>' + escHtml(s.source || '&mdash;') + '</td>' +
                 '<td>' + statusBadge + '</td>' +
-                '<td class="ts">—</td>' +
                 '<td>' + uptime + '</td>' +
                 '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
                 '<td>' + liveBtn + '</td>' +
@@ -360,8 +356,8 @@ export function generateDashboardHtml(apiKey = ''): string {
           }
         });
 
-        document.getElementById('agents-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="8" class="ts">No agents</td></tr>';
+        document.getElementById('sessions-tbody').innerHTML =
+          rows.length ? rows.join('') : '<tr><td colspan="8" class="ts">No sessions</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
@@ -369,6 +365,14 @@ export function generateDashboardHtml(apiKey = ''): string {
         document.getElementById('error-msg').style.display = 'block';
         document.getElementById('refresh-indicator').textContent = 'error';
       }
+    }
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
     }
 
     // ── Process Tree ─────────────────────────────────────────────────────────
@@ -410,12 +414,12 @@ export function generateDashboardHtml(apiKey = ''): string {
       }
 
       function short(args, maxLen) {
-        return args.length > maxLen ? args.slice(0, maxLen) + '…' : args;
+        return args.length > maxLen ? args.slice(0, maxLen) + '\\u2026' : args;
       }
 
       function sessionId(args) {
         const m = args.match(/--session-id\\s+(\\S+)/);
-        return m ? m[1].slice(0, 8) + '…' : '?';
+        return m ? m[1].slice(0, 8) + '\\u2026' : '?';
       }
 
       function agentName(args) {
@@ -453,38 +457,39 @@ export function generateDashboardHtml(apiKey = ''): string {
         lines.push('  PID ' + pty.pid + '  <span class="proc-pty">pty-shell</span>  [' + agent + ']');
         const claudeChild = procs.find(function(p) { return p.ppid === pty.pid && cat(p) === 'claude-pty'; });
         if (claudeChild) {
-          lines.push('  └─ PID ' + claudeChild.pid + '  <span class="proc-claude">claude ' + sessionId(claudeChild.args) + '</span>');
+          lines.push('  \\u2514\\u2500 PID ' + claudeChild.pid + '  <span class="proc-claude">claude ' + sessionId(claudeChild.args) + '</span>');
           const mcp = mcpServers.find(function(p) { return p.ppid === claudeChild.pid; });
           if (mcp) {
-            lines.push('     └─ PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
+            lines.push('     \\u2514\\u2500 PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
           }
         }
       });
 
       headless.forEach(function(cl) {
-        lines.push('  PID ' + cl.pid + '  <span class="proc-claude">claude --print</span>');
+        const agent = agentName(cl.args);
+        lines.push('  PID ' + cl.pid + '  <span class="proc-claude">claude --print</span>' + (agent !== '?' ? '  [' + agent + ']' : ''));
         const mcp = mcpServers.find(function(p) { return p.ppid === cl.pid; });
         if (mcp) {
-          lines.push('  └─ PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
+          lines.push('  \\u2514\\u2500 PID ' + mcp.pid + '  <span class="proc-mcp">mcp</span>');
         }
       });
 
-      if (sessionCount === 0) lines.push('  <span class="ts">— none —</span>');
+      if (sessionCount === 0) lines.push('  <span class="ts">\\u2014 none \\u2014</span>');
       lines.push('');
 
       lines.push('<span class="proc-label">Receivers</span>');
-      if (telegramReceivers.length) lines.push('  TG ×' + telegramReceivers.length);
-      if (discordReceivers.length) lines.push('  DC ×' + discordReceivers.length);
-      if (!telegramReceivers.length && !discordReceivers.length) lines.push('  <span class="ts">— none —</span>');
+      if (telegramReceivers.length) lines.push('  TG \\u00d7' + telegramReceivers.length);
+      if (discordReceivers.length) lines.push('  DC \\u00d7' + discordReceivers.length);
+      if (!telegramReceivers.length && !discordReceivers.length) lines.push('  <span class="ts">\\u2014 none \\u2014</span>');
       lines.push('');
 
       lines.push('<span class="proc-label">Orphans</span>');
       if (orphans.length) {
         orphans.forEach(function(p) {
-          lines.push('  ⚠ PID ' + p.pid + '  <span class="proc-orphan">' + short(p.args, 30) + '</span>');
+          lines.push('  \\u26a0 PID ' + p.pid + '  <span class="proc-orphan">' + short(p.args, 30) + '</span>');
         });
       } else {
-        lines.push('  <span class="ts">none ✅</span>');
+        lines.push('  <span class="ts">none \\u2705</span>');
       }
 
       document.getElementById('proc-tree').innerHTML = lines.join('\\n');
