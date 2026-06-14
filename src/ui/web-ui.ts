@@ -105,7 +105,7 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
     .pty-viewer-header .agent-label { color: #63b3ed; font-weight: 600; }
     .pty-viewer-header .session-label { color: #718096; font-family: monospace; font-size: 0.78rem; }
-    .pty-close, .pty-refresh {
+    .pty-close {
       background: none;
       border: none;
       color: #718096;
@@ -114,7 +114,6 @@ export function generateDashboardHtml(dashToken = ''): string {
       padding: 0 4px;
     }
     .pty-close:hover { color: #fc8181; }
-    .pty-refresh:hover { color: #68d391; }
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
        output). We render at the native size and pan horizontally if the 200-col
@@ -229,9 +228,8 @@ export function generateDashboardHtml(dashToken = ''): string {
        in view when streaming. -->
   <div class="pty-viewer" id="pty-viewer">
     <div class="pty-viewer-header">
-      <span>Shell Monitor &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
+      <span>Shell Process Viewer &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
       <span>
-        <button class="pty-refresh" id="pty-refresh-btn" title="Refresh display">&#x21BA;</button>
         <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
       </span>
     </div>
@@ -419,19 +417,7 @@ export function generateDashboardHtml(dashToken = ''): string {
       document.getElementById('pty-viewer').style.display = 'none';
     }
 
-    async function refreshPtyViewer() {
-      if (!currentPtyAgent) return;
-      const agentId = currentPtyAgent;
-      const sessionId = currentPtySession;
-      // Close existing WS and reset terminal to a clean state, then reconnect.
-      if (ptyWs) { ptyWs.close(); ptyWs = null; }
-      currentPtyAgent = null; // bypass the early-return guard in openPtyViewer
-      if (term) term.reset();
-      await openPtyViewer(agentId, sessionId);
-    }
-
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
-    document.getElementById('pty-refresh-btn').addEventListener('click', () => void refreshPtyViewer());
 
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
@@ -448,7 +434,7 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
 
     function modeBadge(mode) {
-      if (mode === 'pty-shell') return '<span class="badge badge-blue">pty-shell</span>';
+      if (mode === 'pty-shell') return '<span class="badge badge-blue">wrap-shell</span>';
       if (mode === 'headless') return '<span class="badge badge-purple">headless</span>';
       return '<span class="ts">' + escHtml(mode || '?') + '</span>';
     }
@@ -666,7 +652,7 @@ export function generateDashboardHtml(dashToken = ''): string {
 
       ptys.forEach(function(pty) {
         const agent = agentName(pty.args);
-        lines.push('  PID ' + pty.pid + '  <span class="proc-pty">pty-shell</span>  [' + agent + ']');
+        lines.push('  PID ' + pty.pid + '  <span class="proc-pty">wrap-shell</span>  [' + agent + ']');
         const claudeChild = procs.find(function(p) { return p.ppid === pty.pid && cat(p) === 'claude-pty'; });
         if (claudeChild) {
           lines.push('  \\u2514\\u2500 PID ' + claudeChild.pid + '  <span class="proc-claude">claude ' + sessionId(claudeChild.args) + '</span>');
