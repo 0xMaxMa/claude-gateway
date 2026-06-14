@@ -101,7 +101,13 @@ export function generateDashboardHtml(apiKey = ''): string {
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
        output). We render at the native size and scroll if it overflows. */
-    #pty-terminal { padding: 8px; background: #0d1117; overflow: auto; }
+    #pty-terminal {
+      padding: 8px;
+      background: #0d1117;
+      overflow: auto;
+      max-height: 70vh;
+      border-radius: 6px;
+    }
     .proc-tree {
       font-family: monospace;
       font-size: 0.82rem;
@@ -265,9 +271,12 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (!term) {
         term = new Terminal({
           theme: { background: '#0d1117', foreground: '#e2e8f0', cursor: '#63b3ed' },
-          fontSize: 13,
-          lineHeight: 1.1,
-          fontFamily: 'Menlo, Monaco, Consolas, monospace',
+          fontSize: 11,
+          lineHeight: 1.0,
+          letterSpacing: 0,
+          fontFamily: '"JetBrains Mono", "Cascadia Code", Menlo, Monaco, Consolas, "Courier New", monospace',
+          fontWeight: 400,
+          fontWeightBold: 600,
           // Fixed dimensions matching the server PTY — do NOT auto-fit, the
           // size mismatch is what makes the output unreadable.
           cols: PTY_COLS,
