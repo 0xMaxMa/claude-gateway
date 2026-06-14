@@ -57,6 +57,8 @@ export function generateDashboardHtml(apiKey = ''): string {
     .badge-green { background: #22543d; color: #68d391; }
     .badge-red { background: #742a2a; color: #fc8181; }
     .badge-gray { background: #2d3748; color: #a0aec0; }
+    .badge-blue { background: #1a365d; color: #63b3ed; }
+    .badge-purple { background: #44337a; color: #b794f4; }
     .ts { color: #718096; font-size: 0.8rem; }
     #refresh-indicator { float: right; font-size: 0.75rem; color: #4a5568; }
     .error { color: #fc8181; font-size: 0.85rem; margin-top: 8px; }
@@ -72,7 +74,7 @@ export function generateDashboardHtml(apiKey = ''): string {
     .btn-stream:hover { background: #2b6cb0; color: #ebf8ff; }
     .pty-viewer {
       display: none;
-      margin-bottom: 24px;
+      margin-top: 24px;
       border: 1px solid #2d3748;
       border-radius: 6px;
       overflow: hidden;
@@ -96,7 +98,10 @@ export function generateDashboardHtml(apiKey = ''): string {
       padding: 0 4px;
     }
     .pty-close:hover { color: #fc8181; }
-    #pty-terminal { padding: 8px; background: #0d1117; }
+    /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
+       viewer must NOT resize to the panel (that mismatch is what garbles the
+       output). We render at the native size and scroll if it overflows. */
+    #pty-terminal { padding: 8px; background: #0d1117; overflow: auto; }
     .proc-tree {
       font-family: monospace;
       font-size: 0.82rem;
@@ -151,56 +156,58 @@ export function generateDashboardHtml(apiKey = ''): string {
     Last updated: <span id="last-updated">&mdash;</span>
   </div>
 
-  <!-- Agent status badges -->
-  <div class="agents-bar" id="agents-bar"></div>
-
-  <!-- 70% / 30% layout — Sessions left, Processes right -->
-  <div style="display:grid;grid-template-columns:6fr 4fr;gap:24px;align-items:start;">
-
-    <!-- Left column: Sessions table -->
-    <div>
-      <h2>Sessions</h2>
-      <table id="sessions-table">
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Session ID</th>
-            <th>Chat ID</th>
-            <th>Source</th>
-            <th>Status</th>
-            <th>Uptime</th>
-            <th>Spawned</th>
-            <th>Live</th>
-          </tr>
-        </thead>
-        <tbody id="sessions-tbody">
-          <tr><td colspan="8" class="ts">Loading...</td></tr>
-        </tbody>
-      </table>
-
-      <div class="pty-viewer" id="pty-viewer">
-        <div class="pty-viewer-header">
-          <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
-          <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
-        </div>
-        <div id="pty-terminal"></div>
-      </div>
-    </div>
-
-    <!-- Right column: Processes -->
+  <!-- Row: Processes 50% | Agent badges 50% -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
     <div>
       <h2>Processes</h2>
       <div class="proc-tree" id="proc-tree">Loading...</div>
     </div>
+    <div>
+      <h2>Agents</h2>
+      <div class="agents-bar" id="agents-bar"></div>
+    </div>
+  </div>
+
+  <!-- Sessions — full width (session-centric, flat list) -->
+  <h2>Sessions</h2>
+  <table id="sessions-table">
+    <thead>
+      <tr>
+        <th>Agent</th>
+        <th>Session ID</th>
+        <th>Chat ID</th>
+        <th>Source</th>
+        <th>Mode</th>
+        <th>Status</th>
+        <th>Uptime</th>
+        <th>Spawned</th>
+        <th>Live</th>
+      </tr>
+    </thead>
+    <tbody id="sessions-tbody">
+      <tr><td colspan="9" class="ts">Loading...</td></tr>
+    </tbody>
+  </table>
+
+  <!-- PTY viewer — full width so the native 200-col terminal has room -->
+  <div class="pty-viewer" id="pty-viewer">
+    <div class="pty-viewer-header">
+      <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
+      <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
+    </div>
+    <div id="pty-terminal"></div>
   </div>
 
   <div id="error-msg" class="error" style="display:none;"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script>
     // Read API key from meta tag (safe — no inline JS string injection)
     const DASHBOARD_API_KEY = document.querySelector('meta[name="api-key"]') ? document.querySelector('meta[name="api-key"]').getAttribute('content') : '';
+
+    // Must match the server PTY size (src/shell/screen.ts ScreenModel defaults).
+    const PTY_COLS = 200;
+    const PTY_ROWS = 50;
 
     function fmtUptime(seconds) {
       const h = Math.floor(seconds / 3600);
@@ -238,7 +245,6 @@ export function generateDashboardHtml(apiKey = ''): string {
 
     // ── PTY Viewer ───────────────────────────────────────────────────────────
     let term = null;
-    let fitAddon = null;
     let ptyWs = null;
     let currentPtyAgent = null;
 
@@ -253,32 +259,31 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (!term) {
         term = new Terminal({
           theme: { background: '#0d1117', foreground: '#e2e8f0', cursor: '#63b3ed' },
-          fontSize: 13,
+          fontSize: 10,
           fontFamily: 'Menlo, Monaco, Consolas, monospace',
-          convertEol: true,
-          scrollback: 2000,
+          // Fixed dimensions matching the server PTY — do NOT auto-fit, the
+          // size mismatch is what makes the output unreadable.
+          cols: PTY_COLS,
+          rows: PTY_ROWS,
+          scrollback: 5000,
         });
-        fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
         term.open(document.getElementById('pty-terminal'));
-        fitAddon.fit();
       } else {
-        term.clear();
+        term.reset();
       }
 
       const url = wsUrl('/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream');
       ptyWs = new WebSocket(url);
       ptyWs.binaryType = 'arraybuffer';
 
-      ptyWs.onopen = function() { term.writeln('\\r\\x1b[32m[connected to ' + agentId + ']\\x1b[0m'); };
       ptyWs.onmessage = function(ev) {
-        const data = ev.data instanceof ArrayBuffer ? new TextDecoder().decode(ev.data) : ev.data;
+        const data = ev.data instanceof ArrayBuffer ? new TextDecoder('latin1').decode(ev.data) : ev.data;
         term.write(data);
       };
       ptyWs.onclose = function(ev) {
-        if (term) term.writeln('\\r\\x1b[33m[disconnected: ' + (ev.reason || 'closed') + ']\\x1b[0m');
+        if (term) term.writeln('\\r\\n\\x1b[33m[disconnected: ' + (ev.reason || 'closed') + ']\\x1b[0m');
       };
-      ptyWs.onerror = function() { if (term) term.writeln('\\r\\x1b[31m[connection error]\\x1b[0m'); };
+      ptyWs.onerror = function() { if (term) term.writeln('\\r\\n\\x1b[31m[connection error]\\x1b[0m'); };
     }
 
     function closePtyViewer() {
@@ -295,6 +300,20 @@ export function generateDashboardHtml(apiKey = ''): string {
       if (btn) openPtyViewer(btn.getAttribute('data-agent-id'));
     });
 
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function modeBadge(mode) {
+      if (mode === 'pty-shell') return '<span class="badge badge-blue">pty-shell</span>';
+      if (mode === 'headless') return '<span class="badge badge-purple">headless</span>';
+      return '<span class="ts">' + escHtml(mode || '?') + '</span>';
+    }
+
     // ── Status Refresh ────────────────────────────────────────────────────────
     async function refresh() {
       document.getElementById('refresh-indicator').textContent = 'refreshing...';
@@ -305,59 +324,61 @@ export function generateDashboardHtml(apiKey = ''): string {
 
         document.getElementById('uptime').textContent = fmtUptime(data.uptime || 0);
         document.getElementById('started-at').textContent = data.startedAt
-          ? new Date(data.startedAt).toLocaleString() : '&mdash;';
+          ? new Date(data.startedAt).toLocaleString() : '\\u2014';
         document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
         if (data.version) document.getElementById('gateway-version').textContent = 'v' + data.version;
         document.getElementById('error-msg').style.display = 'none';
 
-        // Agent badges bar
-        const badges = (data.agents || []).map(function(a) {
-          const dot = a.isRunning ? '<span class="dot-green">&#x25CF;</span>' : '<span class="dot-red">&#x25CF;</span>';
+        const agents = data.agents || [];
+
+        // Agent badges bar.
+        // Green = available. An agent with a channel receiver (telegram/discord)
+        // is green only while its receiver is running; API-only agents have no
+        // receiver, so they are always green as long as the gateway loaded them.
+        // Red = a channel agent whose receiver is down (genuinely stopped).
+        const badges = agents.map(function(a) {
+          const ok = a.hasChannel ? a.isRunning : true;
+          const dot = ok ? '<span class="dot-green">&#x25CF;</span>' : '<span class="dot-red">&#x25CF;</span>';
           return '<span class="agent-badge">' + dot + ' <span class="agent-name">' + escHtml(a.id) + '</span></span>';
         });
         document.getElementById('agents-bar').innerHTML = badges.join('') || '<span class="ts">No agents</span>';
 
-        // Sessions table — flat list with agent column
+        // Sessions table — flat, session-centric. One row per real session across
+        // all agents; agents with no session do not produce a row.
         const rows = [];
-        (data.agents || []).forEach(function(a) {
-          const sessions = a.sessions || [];
-          if (sessions.length === 0) {
+        agents.forEach(function(a) {
+          (a.sessions || []).forEach(function(s) {
+            const statusBadge = s.isRunning
+              ? '<span class="badge badge-green">running</span>'
+              : '<span class="badge badge-gray">stopped</span>';
+            const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
+            const sessId = s.sessionId
+              ? '<span class="session-id">' + escHtml(s.sessionId) + '</span>'
+              : '<span class="ts">&mdash;</span>';
+            const chatCell = s.chatId
+              ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
+              : '<span class="ts">&mdash;</span>';
+            const liveBtn = (a.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
+              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '">▶ Live</button>'
+              : '<span class="ts">&mdash;</span>';
             rows.push(
               '<tr class="session-row">' +
-              '<td><span class="ts">' + escHtml(a.id) + '</span></td>' +
-              '<td colspan="7" class="ts">no sessions</td>' +
+              '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
+              '<td>' + sessId + '</td>' +
+              '<td>' + chatCell + '</td>' +
+              '<td><span class="badge badge-gray">' + escHtml(s.source || '?') + '</span></td>' +
+              '<td>' + modeBadge(s.mode) + '</td>' +
+              '<td>' + statusBadge + '</td>' +
+              '<td>' + uptime + '</td>' +
+              '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
+              '<td>' + liveBtn + '</td>' +
               '</tr>'
             );
-          } else {
-            sessions.forEach(function(s) {
-              const statusBadge = s.isRunning
-                ? '<span class="badge badge-green">running</span>'
-                : '<span class="badge badge-gray">stopped</span>';
-              const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
-              const sessId = s.sessionId
-                ? '<span class="session-id">' + escHtml(s.sessionId) + '</span>'
-                : '<span class="ts">&mdash;</span>';
-              const liveBtn = (a.hasPtyStream && s.isRunning)
-                ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '">▶ Live</button>'
-                : '<span class="ts">&mdash;</span>';
-              rows.push(
-                '<tr class="session-row">' +
-                '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
-                '<td>' + sessId + '</td>' +
-                '<td class="ts">' + escHtml(String(s.chatId || '&mdash;')) + '</td>' +
-                '<td>' + escHtml(s.source || '&mdash;') + '</td>' +
-                '<td>' + statusBadge + '</td>' +
-                '<td>' + uptime + '</td>' +
-                '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
-                '<td>' + liveBtn + '</td>' +
-                '</tr>'
-              );
-            });
-          }
+          });
         });
 
         document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="8" class="ts">No sessions</td></tr>';
+          rows.length ? rows.join('') : '<tr><td colspan="9" class="ts">No active sessions</td></tr>';
 
         document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
       } catch(e) {
@@ -365,14 +386,6 @@ export function generateDashboardHtml(apiKey = ''): string {
         document.getElementById('error-msg').style.display = 'block';
         document.getElementById('refresh-indicator').textContent = 'error';
       }
-    }
-
-    function escHtml(s) {
-      return String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
     }
 
     // ── Process Tree ─────────────────────────────────────────────────────────

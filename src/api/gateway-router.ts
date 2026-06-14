@@ -363,9 +363,15 @@ export class GatewayRouter {
         const lastActivity = this.lastActivityAt.get(id);
         const sessions = runner.getSessionsSummary();
 
+        // An agent with a channel receiver configured (telegram/discord) has a
+        // meaningful running/stopped state. API-only agents have no receiver — they
+        // are always available as long as the gateway has them loaded.
+        const hasChannel = !!(agentConfig?.telegram?.botToken || agentConfig?.discord?.botToken);
+
         return {
           id,
           isRunning: runner.isRunning(),
+          hasChannel,
           messagesReceived: this.messagesReceived.get(id) ?? 0,
           messagesSent: this.messagesSent.get(id) ?? 0,
           lastActivityAt: lastActivity ? lastActivity.toISOString() : null,

@@ -31,6 +31,8 @@ export class SessionProcess extends EventEmitter {
   private readonly sessionChannel: 'telegram' | 'discord';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
   readonly spawnedAt = Date.now();
+  /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
+  backend: 'pty-shell' | 'headless' = 'headless';
   modelOverride?: string; // per-session model override (set by runner from SessionMeta)
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
@@ -371,6 +373,7 @@ export class SessionProcess extends EventEmitter {
     // App-agents always stay headless: the wrapper (node-pty) lives on the
     // host and cannot wrap a binary inside a docker-exec container.
     const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
+    this.backend = usePtyShell ? 'pty-shell' : 'headless';
     let ptyRealBin: string | null = null;
     // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
     // API sessions are excluded: the stalled detector is receiver-side (Telegram/Discord)

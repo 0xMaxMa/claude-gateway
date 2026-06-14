@@ -123,7 +123,12 @@ export class AgentRunner extends EventEmitter {
   private readonly pendingApiAttachments = new Map<string, string[]>();
 
   // Session history ring-buffer (last 10 spawned, newest first)
-  private readonly sessionHistory: Array<{ chatId: string; sessionId: string; source: string; spawnedAt: number }> = [];
+  private readonly sessionHistory: Array<{ chatId: string; sessionId: string; source: string; mode: string; spawnedAt: number }> = [];
+
+  // For API sessions the map key is the sessionId, so the real caller chatId
+  // (e.g. the app/agent identifier) is not captured at spawn. Record it here
+  // keyed by sessionId so the dashboard can show the actual chat id.
+  private readonly apiChatIds = new Map<string, string>();
 
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
@@ -854,7 +859,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.sessions.set(mapKey, proc);
-    this.sessionHistory.unshift({ chatId: mapKey, sessionId: proc.sessionId, source: proc.source, spawnedAt: proc.spawnedAt });
+    this.sessionHistory.unshift({ chatId: mapKey, sessionId: proc.sessionId, source: proc.source, mode: proc.backend, spawnedAt: proc.spawnedAt });
     if (this.sessionHistory.length > 10) this.sessionHistory.length = 10;
     if (source === 'telegram' || source === 'discord') {
       this.channelSourceMap.set(mapKey, source);
@@ -1350,11 +1355,14 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
-  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
+  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
     const now = Date.now();
     return this.sessionHistory.map((e) => {
       const isRunning = this.sessions.has(e.chatId);
-      return { ...e, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000) };
+      // For API sessions the ring-buffer chatId equals the sessionId (the map key);
+      // surface the real caller chatId instead when we have it.
+      const chatId = e.source === 'api' ? (this.apiChatIds.get(e.sessionId) ?? e.chatId) : e.chatId;
+      return { ...e, chatId, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000) };
     });
   }
 
@@ -1387,6 +1395,7 @@ export class AgentRunner extends EventEmitter {
 
     // Use model from request body if provided, otherwise use agent default
     const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    this.apiChatIds.set(sessionId, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFiles = opts.mediaFiles?.length
@@ -1590,6 +1599,7 @@ export class AgentRunner extends EventEmitter {
 
     // Use model from request body if provided, otherwise use agent default
     const session = await this.getOrSpawnSession(sessionId, 'api', undefined, opts.model);
+    this.apiChatIds.set(sessionId, chatId);
 
     // Promote UI-uploaded files from staging to permanent per-session storage
     const finalMediaFilesStream = opts.mediaFiles?.length

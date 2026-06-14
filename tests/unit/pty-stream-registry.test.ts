@@ -126,4 +126,47 @@ describe('PtyStreamRegistry', () => {
       expect(ws2.sentBuffers).toHaveLength(1);
     });
   });
+
+  describe('scrollback replay', () => {
+    it('replays buffered output to a client that subscribes after data arrived', () => {
+      // Data broadcast before anyone is subscribed is still buffered.
+      reg.broadcast('agent1', 'old-line-1\n');
+      reg.broadcast('agent1', 'old-line-2\n');
+
+      const ws = makeWs(1);
+      reg.subscribe('agent1', ws);
+
+      // First send to the late subscriber is the replayed scrollback.
+      expect(ws.sentBuffers).toHaveLength(1);
+      expect(ws.sentBuffers[0]).toEqual(Buffer.from('old-line-1\nold-line-2\n', 'latin1'));
+    });
+
+    it('does not replay across agents', () => {
+      reg.broadcast('agent1', 'a1-data');
+      const ws = makeWs(1);
+      reg.subscribe('agent2', ws);
+      expect(ws.sentBuffers).toHaveLength(0);
+    });
+
+    it('resets scrollback when a fresh session (first socket) starts', () => {
+      const sockPath = path.join(tmpDir, 'sb.sock');
+      reg.broadcast('agent1', 'stale-from-previous-session');
+      // New session begins → first listen() for the agent clears stale scrollback.
+      reg.listen('agent1', sockPath);
+      const ws = makeWs(1);
+      reg.subscribe('agent1', ws);
+      expect(ws.sentBuffers).toHaveLength(0);
+      reg.close(sockPath);
+    });
+
+    it('trims scrollback to the byte cap', () => {
+      // Push well over the 256 KiB cap; the retained buffer must stay bounded.
+      const chunk = 'x'.repeat(64 * 1024);
+      for (let i = 0; i < 8; i++) reg.broadcast('agent1', chunk);
+      const ws = makeWs(1);
+      reg.subscribe('agent1', ws);
+      expect(ws.sentBuffers).toHaveLength(1);
+      expect(ws.sentBuffers[0].length).toBeLessThanOrEqual(256 * 1024);
+    });
+  });
 });
