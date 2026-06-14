@@ -49,6 +49,10 @@ export class SessionProcess extends EventEmitter {
   private readonly configPath: string;
   private readonly restartSignalPath: string;
   queryMode = false;
+  // Latest context-window token usage (input context + output) for the most
+  // recent turn. Surfaced read-only for the status dashboard. Best-effort —
+  // reset to 0 until the first tokenUsage event fires.
+  private lastTotalTokens = 0;
   private thinkingRecoveryCount = 0;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
@@ -101,6 +105,11 @@ export class SessionProcess extends EventEmitter {
   /** Public accessor for the model this session currently resolves to (for status/UI). */
   get model(): string {
     return this.readFreshModel();
+  }
+
+  /** Latest context-window token usage for this session (for status/UI). */
+  get totalTokens(): number {
+    return this.lastTotalTokens;
   }
 
   private readFreshModel(): string {
@@ -620,6 +629,7 @@ export class SessionProcess extends EventEmitter {
               const outputTokens = usage?.output_tokens ?? 0;
               const totalTokens = lastMessageStartContext + outputTokens;
               if (lastMessageStartContext > 0) {
+                this.lastTotalTokens = totalTokens;
                 this.emit('tokenUsage', { inputTokens: lastMessageStartContext, outputTokens, totalTokens });
               }
               lastMessageStartContext = 0;

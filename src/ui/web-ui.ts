@@ -20,7 +20,16 @@ export function generateDashboardHtml(apiKey = ''): string {
       color: #e2e8f0;
       padding: 24px;
     }
-    h1 { color: #63b3ed; font-size: 1.5rem; margin-bottom: 8px; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; }
+    .rainbow {
+      background: linear-gradient(90deg, #ff0080, #ff8c00, #ffe600, #00d26a, #00b4ff, #a855f7, #ff0080);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: rainbow-shift 3s linear infinite;
+    }
+    @keyframes rainbow-shift { to { background-position: 200% center; } }
     .meta { color: #718096; font-size: 0.85rem; margin-bottom: 16px; }
     .meta span { color: #a0aec0; }
     h2 { color: #90cdf4; font-size: 1.1rem; margin: 20px 0 10px; }
@@ -59,6 +68,12 @@ export function generateDashboardHtml(apiKey = ''): string {
     .badge-gray { background: #2d3748; color: #a0aec0; }
     .badge-blue { background: #1a365d; color: #63b3ed; }
     .badge-purple { background: #44337a; color: #b794f4; }
+    /* Per-model badge colors — each model family gets a distinct hue. */
+    .badge-opus { background: #5a3a1a; color: #f6ad55; }
+    .badge-sonnet { background: #1a4a52; color: #4fd1c5; }
+    .badge-haiku { background: #22543d; color: #68d391; }
+    .badge-fable { background: #553052; color: #f687b3; }
+    .badge-model { background: #2d3748; color: #cbd5e0; }
     .ts { color: #718096; font-size: 0.8rem; }
     #refresh-indicator { float: right; font-size: 0.75rem; color: #4a5568; }
     .error { color: #fc8181; font-size: 0.85rem; margin-top: 8px; }
@@ -89,6 +104,7 @@ export function generateDashboardHtml(apiKey = ''): string {
       color: #a0aec0;
     }
     .pty-viewer-header .agent-label { color: #63b3ed; font-weight: 600; }
+    .pty-viewer-header .session-label { color: #718096; font-family: monospace; font-size: 0.78rem; }
     .pty-close {
       background: none;
       border: none;
@@ -100,14 +116,20 @@ export function generateDashboardHtml(apiKey = ''): string {
     .pty-close:hover { color: #fc8181; }
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
-       output). We render at the native size and scroll if it overflows. */
+       output). We render at the native size and pan horizontally if the 200-col
+       width overflows the panel. The Claude TUI uses the alternate screen buffer
+       (\x1b[?1049h), which has no scrollback by design — so there is nothing to
+       scroll vertically and we hide the (non-functional) vertical scrollbar. */
     #pty-terminal {
       padding: 8px;
       background: #0d1117;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: hidden;
       max-height: 70vh;
       border-radius: 6px;
     }
+    /* No scrollback in alt-screen mode → suppress xterm's vertical scrollbar. */
+    #pty-terminal .xterm-viewport { overflow-y: hidden !important; }
     .proc-tree {
       font-family: monospace;
       font-size: 0.82rem;
@@ -126,6 +148,7 @@ export function generateDashboardHtml(apiKey = ''): string {
     .proc-tree .proc-receiver { color: #76e4f7; }
     .proc-tree .proc-orphan { color: #fc8181; }
     .proc-tree .proc-label { color: #718096; }
+    .proc-tree .proc-summary { color: #f6e05e; font-weight: 600; }
     .session-id {
       font-family: monospace;
       font-size: 0.75rem;
@@ -152,18 +175,46 @@ export function generateDashboardHtml(apiKey = ''): string {
     .agent-badge .agent-name { color: #90cdf4; font-weight: 600; }
     .agent-badge .dot-green { color: #68d391; }
     .agent-badge .dot-red { color: #fc8181; }
+
+    /* Top row: Processes 70% | Agents 30%. Collapses to a single column on
+       narrow screens (see media query below). */
+    .top-grid {
+      display: grid;
+      grid-template-columns: 7fr 3fr;
+      gap: 24px;
+      align-items: start;
+    }
+    /* The Sessions table has 10 columns — too wide for phones. Wrap it so it
+       scrolls horizontally instead of breaking the layout. */
+    .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .table-wrap table { min-width: 820px; }
+
+    /* ── Responsive breakpoints ──────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .top-grid { grid-template-columns: 1fr; gap: 16px; }
+    }
+    @media (max-width: 640px) {
+      body { padding: 14px; }
+      h1 { font-size: 1.2rem; }
+      h2 { font-size: 1rem; }
+      .meta { font-size: 0.78rem; }
+      #refresh-indicator { float: none; display: block; margin-top: 4px; }
+      .proc-tree { font-size: 0.72rem; padding: 10px 12px; }
+      /* On phones the PTY mirror can use the full viewport width and fit. */
+      #pty-terminal { max-height: 60vh; }
+    }
   </style>
 </head>
 <body>
-  <h1>Claude Gateway <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span></h1>
+  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span></h1>
   <div class="meta">
     Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
     Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
     Last updated: <span id="last-updated">&mdash;</span>
   </div>
 
-  <!-- Row: Processes 70% | Agent badges 30% -->
-  <div style="display:grid;grid-template-columns:7fr 3fr;gap:24px;align-items:start;">
+  <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
+  <div class="top-grid">
     <div>
       <h2>Processes</h2>
       <div class="proc-tree" id="proc-tree">Loading...</div>
@@ -174,35 +225,40 @@ export function generateDashboardHtml(apiKey = ''): string {
     </div>
   </div>
 
-  <!-- Sessions — full width (session-centric, flat list) -->
-  <h2>Sessions</h2>
-  <table id="sessions-table">
-    <thead>
-      <tr>
-        <th>Agent</th>
-        <th>Session ID</th>
-        <th>Chat ID</th>
-        <th>Source</th>
-        <th>Mode</th>
-        <th>Model</th>
-        <th>Status</th>
-        <th>Uptime</th>
-        <th>Spawned</th>
-        <th>Live</th>
-      </tr>
-    </thead>
-    <tbody id="sessions-tbody">
-      <tr><td colspan="10" class="ts">Loading...</td></tr>
-    </tbody>
-  </table>
-
-  <!-- PTY viewer — full width so the native 200-col terminal has room -->
+  <!-- PTY viewer — full width so the native 200-col terminal has room.
+       Placed above the Sessions table so the live mirror is the first thing
+       in view when streaming. -->
   <div class="pty-viewer" id="pty-viewer">
     <div class="pty-viewer-header">
-      <span>PTY Live &mdash; <span class="agent-label" id="pty-agent-label"></span></span>
+      <span>Shell Monitor &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
       <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
     </div>
     <div id="pty-terminal"></div>
+  </div>
+
+  <!-- Sessions — full width (session-centric, flat list) -->
+  <h2>Sessions</h2>
+  <div class="table-wrap">
+    <table id="sessions-table">
+      <thead>
+        <tr>
+          <th>Agent</th>
+          <th>Session ID</th>
+          <th>Chat ID</th>
+          <th>Source</th>
+          <th>Mode</th>
+          <th>Model</th>
+          <th>Tokens</th>
+          <th>Status</th>
+          <th>Uptime</th>
+          <th>Spawned</th>
+          <th>Shell</th>
+        </tr>
+      </thead>
+      <tbody id="sessions-tbody">
+        <tr><td colspan="11" class="ts">Loading...</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div id="error-msg" class="error" style="display:none;"></div>
@@ -225,11 +281,15 @@ export function generateDashboardHtml(apiKey = ''): string {
       return s + 's';
     }
 
+    // Spawned timestamp, formatted like "6/14/2026, 10:32:31 PM" (en-US, 12h).
     function fmtTs(ts) {
       if (!ts) return '<span class="ts">&mdash;</span>';
       try {
         const d = new Date(ts);
-        return '<span class="ts">' + d.toLocaleTimeString() + ' ' + d.toLocaleDateString() + '</span>';
+        return '<span class="ts">' + d.toLocaleString('en-US', {
+          year: 'numeric', month: 'numeric', day: 'numeric',
+          hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
+        }) + '</span>';
       } catch(e) { return ts; }
     }
 
@@ -260,18 +320,29 @@ export function generateDashboardHtml(apiKey = ''): string {
     // split across WebSocket frames are reassembled instead of corrupted.
     let utf8Decoder = null;
 
-    function openPtyViewer(agentId) {
+    // The agent's TUI enables mouse tracking (DECSET 1000/1002/1003/1006...).
+    // While those modes are active, xterm.js forwards wheel/click events to the
+    // app as mouse escapes, which can leave stray report bytes in the view. This
+    // is a view-only mirror (disableStdin) so mouse reporting is useless here —
+    // strip the set/reset sequences to keep the mirror clean.
+    function stripMouseModes(s) {
+      return s.replace(/\\x1b\\[\\?(1000|1001|1002|1003|1004|1005|1006|1015|1016)[hl]/g, '');
+    }
+
+    function openPtyViewer(agentId, sessionId) {
       if (currentPtyAgent === agentId && ptyWs && ptyWs.readyState === WebSocket.OPEN) return;
       closePtyViewer();
 
       currentPtyAgent = agentId;
       document.getElementById('pty-agent-label').textContent = agentId;
+      // Append the session id after the agent name, e.g. "claude-founder · 3c01897c…".
+      document.getElementById('pty-session-label').textContent = sessionId ? ' \\u00b7 ' + sessionId : '';
       document.getElementById('pty-viewer').style.display = 'block';
 
       if (!term) {
         term = new Terminal({
           theme: { background: '#0d1117', foreground: '#e2e8f0', cursor: '#63b3ed' },
-          fontSize: 10,
+          fontSize: 11,
           lineHeight: 1.0,
           letterSpacing: 0,
           fontFamily: '"JetBrains Mono", "Cascadia Code", Menlo, Monaco, Consolas, "Courier New", monospace',
@@ -281,7 +352,10 @@ export function generateDashboardHtml(apiKey = ''): string {
           // size mismatch is what makes the output unreadable.
           cols: PTY_COLS,
           rows: PTY_ROWS,
-          scrollback: 5000,
+          // Alt-screen TUI has no scrollback (the live mirror only shows the
+          // current screen), so don't retain any — this also removes the
+          // non-functional vertical scrollbar.
+          scrollback: 0,
           // View-only mirror of the agent's TUI.
           disableStdin: true,
           cursorBlink: false,
@@ -304,7 +378,7 @@ export function generateDashboardHtml(apiKey = ''): string {
         const data = ev.data instanceof ArrayBuffer
           ? utf8Decoder.decode(ev.data, { stream: true })
           : ev.data;
-        term.write(data);
+        term.write(stripMouseModes(data));
       };
       ptyWs.onclose = function(ev) {
         if (term) term.writeln('\\r\\n\\x1b[33m[disconnected: ' + (ev.reason || 'closed') + ']\\x1b[0m');
@@ -323,7 +397,7 @@ export function generateDashboardHtml(apiKey = ''): string {
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
       const btn = e.target.closest('.btn-stream');
-      if (btn) openPtyViewer(btn.getAttribute('data-agent-id'));
+      if (btn) openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
     });
 
     function escHtml(s) {
@@ -340,13 +414,38 @@ export function generateDashboardHtml(apiKey = ''): string {
       return '<span class="ts">' + escHtml(mode || '?') + '</span>';
     }
 
+    // Source badge with a per-channel color: telegram=blue, discord=purple,
+    // api=gray. Unknown sources fall back to gray.
+    function sourceBadge(source) {
+      const s = String(source || '?').toLowerCase();
+      if (s === 'telegram') return '<span class="badge badge-blue">telegram</span>';
+      if (s === 'discord') return '<span class="badge badge-purple">discord</span>';
+      if (s === 'api') return '<span class="badge badge-gray">api</span>';
+      return '<span class="badge badge-gray">' + escHtml(source || '?') + '</span>';
+    }
+
     // Prettify a model id for display: drop the "claude-" prefix and any
     // trailing date stamp, e.g. claude-haiku-4-5-20251001 -> haiku-4-5.
-    // Full id is kept in the tooltip.
+    // Each model family gets a distinct badge color; full id kept in the tooltip.
     function fmtModel(m) {
       if (!m) return '<span class="ts">&mdash;</span>';
-      const label = String(m).replace(/^claude-/, '').replace(/-\\d{8}$/, '');
-      return '<span class="badge badge-gray" title="' + escHtml(m) + '">' + escHtml(label) + '</span>';
+      const id = String(m);
+      const label = id.replace(/^claude-/, '').replace(/-\\d{8}$/, '');
+      let cls = 'badge-model';
+      if (/opus/i.test(id)) cls = 'badge-opus';
+      else if (/sonnet/i.test(id)) cls = 'badge-sonnet';
+      else if (/haiku/i.test(id)) cls = 'badge-haiku';
+      else if (/fable/i.test(id)) cls = 'badge-fable';
+      return '<span class="badge ' + cls + '" title="' + escHtml(id) + '">' + escHtml(label) + '</span>';
+    }
+
+    // Format a context-window token count compactly: 1234 -> "1.2k", 45000 -> "45k".
+    // Full value is kept in the tooltip. 0/unknown renders as a dash.
+    function fmtTokens(n) {
+      const v = Number(n) || 0;
+      if (v <= 0) return '<span class="ts">&mdash;</span>';
+      const label = v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : String(v);
+      return '<span title="' + v.toLocaleString() + ' tokens">' + label + '</span>';
     }
 
     // ── Status Refresh ────────────────────────────────────────────────────────
@@ -394,16 +493,17 @@ export function generateDashboardHtml(apiKey = ''): string {
               ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
               : '<span class="ts">&mdash;</span>';
             const liveBtn = (a.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
-              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '">▶ Live</button>'
+              ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">▶ Live</button>'
               : '<span class="ts">&mdash;</span>';
             rows.push(
               '<tr class="session-row">' +
               '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
               '<td>' + sessId + '</td>' +
               '<td>' + chatCell + '</td>' +
-              '<td><span class="badge badge-gray">' + escHtml(s.source || '?') + '</span></td>' +
+              '<td>' + sourceBadge(s.source) + '</td>' +
               '<td>' + modeBadge(s.mode) + '</td>' +
               '<td>' + fmtModel(s.model) + '</td>' +
+              '<td>' + fmtTokens(s.tokens) + '</td>' +
               '<td>' + statusBadge + '</td>' +
               '<td>' + uptime + '</td>' +
               '<td>' + fmtTs(s.spawnedAt ? new Date(s.spawnedAt).toISOString() : null) + '</td>' +
@@ -414,9 +514,9 @@ export function generateDashboardHtml(apiKey = ''): string {
         });
 
         document.getElementById('sessions-tbody').innerHTML =
-          rows.length ? rows.join('') : '<tr><td colspan="10" class="ts">No active sessions</td></tr>';
+          rows.length ? rows.join('') : '<tr><td colspan="11" class="ts">No active sessions</td></tr>';
 
-        document.getElementById('refresh-indicator').textContent = 'auto-refresh 5s';
+        document.getElementById('refresh-indicator').textContent = 'auto-refresh 3s';
       } catch(e) {
         document.getElementById('error-msg').textContent = 'Error fetching status: ' + e.message;
         document.getElementById('error-msg').style.display = 'block';
@@ -444,6 +544,20 @@ export function generateDashboardHtml(apiKey = ''): string {
 
       const pidMap = {};
       procs.forEach(function(p) { pidMap[p.pid] = p; });
+
+      // Aggregate resource usage across the whole gateway process tree.
+      // %CPU is ps's lifetime average per process (summed → total load share);
+      // RSS is summed and may slightly over-count shared pages, but is a good
+      // proxy for "memory used by the gateway".
+      let totalCpu = 0, totalRssKb = 0;
+      procs.forEach(function(p) {
+        totalCpu += Number(p.cpu) || 0;
+        totalRssKb += Number(p.rssKb) || 0;
+      });
+      const totalMemMb = totalRssKb / 1024;
+      const memStr = totalMemMb >= 1024
+        ? (totalMemMb / 1024).toFixed(2) + ' GB'
+        : totalMemMb.toFixed(0) + ' MB';
 
       function cat(p) {
         const a = p.args;
@@ -478,6 +592,15 @@ export function generateDashboardHtml(apiKey = ''): string {
       }
 
       const lines = [];
+      // First line: total resource usage across the whole gateway tree.
+      lines.push(
+        '<span class="proc-summary">' +
+        '\\u2211 ' + procs.length + ' procs' +
+        '  \\u00b7  CPU ' + totalCpu.toFixed(1) + '%' +
+        '  \\u00b7  MEM ' + memStr +
+        '</span>'
+      );
+      lines.push('');
       const orchestrator = procs.find(function(p) { return cat(p) === 'orchestrator'; });
       const ptys = procs.filter(function(p) { return cat(p) === 'pty'; });
       const headless = procs.filter(function(p) { return cat(p) === 'claude-headless'; });
@@ -528,8 +651,8 @@ export function generateDashboardHtml(apiKey = ''): string {
       lines.push('');
 
       lines.push('<span class="proc-label">Receivers</span>');
-      if (telegramReceivers.length) lines.push('  TG \\u00d7' + telegramReceivers.length);
-      if (discordReceivers.length) lines.push('  DC \\u00d7' + discordReceivers.length);
+      if (telegramReceivers.length) lines.push('  Telegram \\u00d7' + telegramReceivers.length);
+      if (discordReceivers.length) lines.push('  Discord \\u00d7' + discordReceivers.length);
       if (!telegramReceivers.length && !discordReceivers.length) lines.push('  <span class="ts">\\u2014 none \\u2014</span>');
       lines.push('');
 
@@ -547,8 +670,9 @@ export function generateDashboardHtml(apiKey = ''): string {
 
     refresh();
     refreshProcesses();
-    setInterval(refresh, 5000);
-    setInterval(refreshProcesses, 10000);
+    setInterval(refresh, 3000);
+    // Process tree (with CPU/mem) is heavier (spawns ps) — refresh a bit slower.
+    setInterval(refreshProcesses, 6000);
   </script>
 </body>
 </html>`;

@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
-import { ScreenModel } from './screen';
+import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, extractChannelContent } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
@@ -30,6 +30,15 @@ const SUBMIT_RETRY_AFTER_MS = 4000;
 const MAX_ENTER_RETRIES = 2;
 const FALLBACK_IDLE_QUIET_MS = 2000;
 const DIALOG_ACTION_COOLDOWN_MS = 2000;
+// An interactive select menu must be stable (no PTY output) this long before we
+// bridge it to chat — avoids racing a menu that's still rendering.
+const MENU_STABLE_QUIET_MS = 700;
+// After injecting the digit for a menu choice, wait this long, then send Enter
+// only if the menu is still on screen (some TUIs confirm on the digit alone).
+const MENU_SELECT_ENTER_DELAY_MS = 250;
+// Set PTY_SHELL_SKIP_MENU_BRIDGE=1 to disable bridging interactive menus to chat
+// (falls back to leaving the menu on the PTY — use if a TUI update breaks the matcher).
+const SKIP_MENU_BRIDGE = process.env.PTY_SHELL_SKIP_MENU_BRIDGE === '1';
 const STARTUP_TIMEOUT_MS = 120_000;
 const WATCHDOG_MS = process.env.PTY_SHELL_WATCHDOG_MS
   ? Number(process.env.PTY_SHELL_WATCHDOG_MS) || (30 * 60 * 1000)
@@ -76,6 +85,9 @@ class Driver {
   private startedAt = Date.now();
   private queue: string[] = [];
   private turn: ActiveTurn | null = null;
+  // Set when an interactive menu has been bridged to chat and we're awaiting the
+  // user's choice. While set, the next stdin message is treated as a selection.
+  private pendingMenu: { options: MenuOption[] } | null = null;
   private lastDialogActionAt = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
@@ -181,6 +193,12 @@ class Driver {
         });
         return;
       }
+      // A menu is awaiting a choice — interpret this message as the selection
+      // (a typed number or a button tap, which both arrive as plain text).
+      if (this.pendingMenu) {
+        this.handleMenuReply(sanitized);
+        return;
+      }
       this.queue.push(sanitized);
       this.trySubmit();
     });
@@ -248,6 +266,12 @@ class Driver {
   private trySubmit(): void {
     if (!this.ready || this.turn || this.queue.length === 0 || this.exiting) return;
     const text = this.queue.shift() as string;
+    this.beginTurn();
+    void this.typeAndSubmit(text);
+  }
+
+  /** Initialize a fresh active turn (shared by normal submit and menu selection). */
+  private beginTurn(): void {
     const now = Date.now();
     this.turn = {
       startedAt: now,
@@ -261,7 +285,6 @@ class Driver {
       dialogEscapes: 0,
       recordsAtStart: this.tailer.seenRecords,
     };
-    void this.typeAndSubmit(text);
   }
 
   private async typeAndSubmit(text: string): Promise<void> {
@@ -330,9 +353,13 @@ class Driver {
       return;
     }
 
-    // Not busy. Possible: still rendering, swallowed Enter, dialog, or done
+    // Not busy. Possible: still rendering, swallowed Enter, dialog, menu, or done
     // (turn_duration normally ends the turn before we get here).
     this.maybeHandleDialog();
+
+    // Blocked on an interactive select menu → bridge it to chat and end the turn
+    // so the session goes idle (no watchdog kill) until the user picks an option.
+    if (this.maybeBridgeMenu(turn)) return;
 
     if (!turn.sawBusy
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
@@ -383,6 +410,72 @@ class Driver {
       logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
       this.host.writeRaw('2');
     }
+  }
+
+  // ---- interactive menu bridging ------------------------------------------
+
+  /**
+   * If the TUI is blocked on an interactive select menu, emit it to the gateway
+   * (rendered as chat buttons / numbered text) and end the turn so the session
+   * goes idle while we await the user's choice. Returns true if it bridged.
+   *
+   * Never auto-selects — a destructive option must be a human decision. The
+   * bypass-permissions dialog also shows the menu footer, so it's excluded here
+   * and left to maybeHandleDialog()'s auto-accept.
+   */
+  private maybeBridgeMenu(turn: ActiveTurn): boolean {
+    if (SKIP_MENU_BRIDGE || this.pendingMenu) return false;
+    if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return false;
+    if (this.screen.detectDialog() === 'bypass-permissions') return false;
+    const options = this.screen.detectMenu();
+    if (!options) return false;
+
+    const prompt = formatMenuPrompt(options);
+    logWarn(`interactive menu detected (${options.length} options) — bridging to chat`);
+    this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt, options });
+    // Carry the numbered list as the turn's result text too: this is the API
+    // fallback (no buttons) and what gets persisted to chat history.
+    turn.texts.push((turn.texts.length ? '\n\n' : '') + prompt);
+    this.pendingMenu = { options };
+    this.finishTurn(false);
+    return true;
+  }
+
+  /** Route a user's menu reply (typed number or button tap) to a selection. */
+  private handleMenuReply(text: string): void {
+    const menu = this.pendingMenu;
+    if (!menu) return;
+    // Channel turns arrive wrapped in a <channel …>…</channel> envelope, so the
+    // bare "1" is buried inside it — unwrap before parsing the selection.
+    const choiceText = extractChannelContent(text);
+    const n = parseMenuChoice(choiceText, menu.options.length);
+    if (n === null) {
+      // Not a valid choice — cancel the menu and treat the text as a new prompt
+      // so the user can break out by typing an instruction instead of a number.
+      // Re-queue the ORIGINAL envelope so Claude still sees the full channel context.
+      logWarn(`menu reply "${choiceText.slice(0, 40)}" is not a valid choice — cancelling menu`);
+      this.host.writeRaw('\x1b');
+      this.pendingMenu = null;
+      this.queue.push(text);
+      this.trySubmit();
+      return;
+    }
+    logDebug(`menu selection: ${n}`);
+    this.pendingMenu = null;
+    this.beginTurn();
+    void this.selectMenuOption(n);
+  }
+
+  /**
+   * Inject the keystrokes that select option `n`. Sends the digit, then Enter
+   * only if the menu is still on screen — self-correcting whether the TUI
+   * confirms on the digit alone or requires Enter.
+   */
+  private async selectMenuOption(n: number): Promise<void> {
+    this.host.writeRaw(String(n));
+    await new Promise((r) => setTimeout(r, MENU_SELECT_ENTER_DELAY_MS));
+    if (this.screen.detectMenu()) this.host.writeRaw('\r');
+    if (this.turn) this.turn.submittedAt = Date.now();
   }
 
   // ---- lifecycle ------------------------------------------------------------

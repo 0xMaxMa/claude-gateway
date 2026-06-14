@@ -4,6 +4,9 @@ import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
+  parseMenuChoice,
+  formatMenuPrompt,
+  extractChannelContent,
 } from '../../src/shell/screen';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import * as os from 'os';
@@ -128,6 +131,130 @@ describe('ScreenModel raw-chunk busy detection', () => {
     screen.write('hello');
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.quietMs()).toBeGreaterThanOrEqual(40);
+  });
+});
+
+// Feed a screen and let xterm's async write buffer flush before reading text().
+async function renderScreen(lines: string[]): Promise<ScreenModel> {
+  const screen = new ScreenModel();
+  screen.write(lines.join('\r\n'));
+  await new Promise((r) => setTimeout(r, 30));
+  return screen;
+}
+
+const MENU_FOOTER = 'Enter to select · ↑/↓ to navigate · Esc to cancel';
+
+describe('ScreenModel detectMenu', () => {
+  it('parses numbered options (with ❯ highlight + a divider) when the footer is present', async () => {
+    const screen = await renderScreen([
+      'Which option do you want?',
+      '',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '  3. Third choice',
+      '  ─────────────',
+      '  4. Chat about this',
+      '',
+      MENU_FOOTER,
+    ]);
+    const menu = screen.detectMenu();
+    expect(menu).not.toBeNull();
+    expect(menu!.map((o) => o.index)).toEqual([1, 2, 3, 4]);
+    expect(menu![0].label).toBe('First choice');
+    expect(menu![3].label).toBe('Chat about this');
+  });
+
+  it('ignores stale numbered scrollback above the live menu', async () => {
+    // Reproduces the live bug: a prior chat message rendered as "1. … 2. …"
+    // sat in scrollback above an AskUserQuestion menu, so detectMenu swept the
+    // phantom rows in — inflating the option list and shifting every index.
+    const screen = await renderScreen([
+      '1. restart gateway now',
+      '2. restart drops the running session',
+      '',
+      'Which option do you want?',
+      '',
+      '❯ 1. See the buttons',
+      '  2. Type the number',
+      '  3. Nothing showed up',
+      '',
+      MENU_FOOTER,
+    ]);
+    const menu = screen.detectMenu();
+    expect(menu).not.toBeNull();
+    // Only the real 1..3 run nearest the footer — phantom rows excluded.
+    expect(menu!.map((o) => o.index)).toEqual([1, 2, 3]);
+    expect(menu![0].label).toBe('See the buttons');
+    expect(menu!.map((o) => o.label)).not.toContain('restart gateway now');
+  });
+
+  it('returns null without the menu footer', async () => {
+    const screen = await renderScreen([
+      'Here is a numbered list in normal output:',
+      '1. not a menu',
+      '2. still not a menu',
+    ]);
+    expect(screen.detectMenu()).toBeNull();
+  });
+
+  it('returns null with the footer but fewer than two options', async () => {
+    const screen = await renderScreen([
+      'Confirm?',
+      '  1. Only choice',
+      MENU_FOOTER,
+    ]);
+    expect(screen.detectMenu()).toBeNull();
+  });
+});
+
+describe('parseMenuChoice', () => {
+  it('accepts a leading integer within range', () => {
+    expect(parseMenuChoice('1', 4)).toBe(1);
+    expect(parseMenuChoice('2.', 4)).toBe(2);
+    expect(parseMenuChoice('  3 pick this', 4)).toBe(3);
+  });
+
+  it('rejects non-numbers and out-of-range values', () => {
+    expect(parseMenuChoice('abc', 5)).toBeNull();
+    expect(parseMenuChoice('', 5)).toBeNull();
+    expect(parseMenuChoice('0', 5)).toBeNull();
+    expect(parseMenuChoice('9', 5)).toBeNull();
+  });
+});
+
+describe('extractChannelContent', () => {
+  it('unwraps a channel envelope so a menu reply parses as the bare choice', () => {
+    const xml = '<channel source="telegram" chat_id="997170033" message_id="42" user="boss" ts="2026-06-14T00:00:00.000Z">1</channel>';
+    expect(extractChannelContent(xml)).toBe('1');
+    // Regression: the whole reason taps/typed numbers failed — the envelope
+    // starts with "<", so parseMenuChoice on the raw XML returns null.
+    expect(parseMenuChoice(xml, 4)).toBeNull();
+    expect(parseMenuChoice(extractChannelContent(xml), 4)).toBe(1);
+  });
+
+  it('strips a nested <replied> block before the user content', () => {
+    const xml = '<channel source="discord" chat_id="9" message_id="1" user="u" ts="t"><replied message_id="7" user="bot">3. Pick C</replied>2</channel>';
+    expect(extractChannelContent(xml)).toBe('2');
+  });
+
+  it('returns plain text unchanged (raw API / typed reply)', () => {
+    expect(extractChannelContent('2')).toBe('2');
+    expect(extractChannelContent('  3 ')).toBe('  3 ');
+  });
+
+  it('ignores numeric noise in envelope attributes (chat_id, ts)', () => {
+    const xml = '<channel source="telegram" chat_id="997170033" ts="2026-06-14">4</channel>';
+    expect(extractChannelContent(xml)).toBe('4');
+    expect(parseMenuChoice(extractChannelContent(xml), 5)).toBe(4);
+  });
+});
+
+describe('formatMenuPrompt', () => {
+  it('renders a numbered list with the reply instruction', () => {
+    const text = formatMenuPrompt([{ index: 1, label: 'Alpha' }, { index: 2, label: 'Beta' }]);
+    expect(text).toContain('1. Alpha');
+    expect(text).toContain('2. Beta');
+    expect(text.toLowerCase()).toContain('reply with the number');
   });
 });
 

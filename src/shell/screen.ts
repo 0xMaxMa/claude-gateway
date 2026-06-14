@@ -2,6 +2,14 @@ import { Terminal } from '@xterm/headless';
 
 export type DialogKind = 'bypass-permissions';
 
+/** One selectable row in an interactive TUI menu (AskUserQuestion / plan approval). */
+export interface MenuOption {
+  /** 1-based number as shown in the TUI. */
+  index: number;
+  /** Human-readable label (first line only; sub-descriptions are ignored). */
+  label: string;
+}
+
 /** The TUI renders spaces as U+00A0 (non-breaking) — normalize before matching. */
 function normalize(text: string): string {
   return text.replace(/ /g, ' ');
@@ -19,6 +27,47 @@ function normalize(text: string): string {
 export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
+
+/**
+ * Interactive select-menu footer markers (e.g. AskUserQuestion). The footer reads
+ * "Enter to select · ↑/↓ to navigate · Esc to cancel"; we match on the two stable
+ * fragments so spacing/middle-dot variations across TUI versions don't break it.
+ */
+export const TUI_MENU_FOOTER = ['to navigate', 'to cancel'] as const;
+/** A numbered option row, with an optional leading ❯/> highlight marker. */
+export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
+
+/**
+ * Parse a user's menu reply (typed number or a button's choice payload) into a
+ * 1-based option index. Returns null for anything that isn't a leading integer
+ * within [1, count] — never trust chat input to be a valid selection.
+ */
+export function parseMenuChoice(text: string, count: number): number | null {
+  const m = /^\s*(\d+)/.exec(text);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n >= 1 && n <= count ? n : null;
+}
+
+/**
+ * Channel turns reach the wrapper wrapped in a <channel …>…</channel> envelope
+ * (see AgentRunner.buildChannelXml) — even a one-character menu reply like "1"
+ * arrives as `<channel source="telegram" …>1</channel>`. To interpret a menu
+ * selection we need the user's actual text, not the envelope, so pull out the
+ * inner content and drop any nested <replied> block. Returns the input
+ * unchanged when it is not a channel envelope (e.g. a raw API/typed reply).
+ */
+export function extractChannelContent(text: string): string {
+  const m = /<channel\b[^>]*>([\s\S]*)<\/channel>/.exec(text);
+  if (!m) return text;
+  return m[1].replace(/<replied\b[^>]*>[\s\S]*?<\/replied>/g, '').trim();
+}
+
+/** Build the chat-facing menu prompt (also the API/number fallback text). */
+export function formatMenuPrompt(options: MenuOption[]): string {
+  const lines = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
+  return `🔢 Choose an option — tap a button below, or reply with the number:\n\n${lines}`;
+}
 
 /**
  * Virtual terminal fed with raw PTY bytes. Used ONLY for liveness signals
@@ -79,5 +128,51 @@ export class ScreenModel {
       return 'bypass-permissions';
     }
     return null;
+  }
+
+  /**
+   * Detect an interactive select menu blocking on keyboard input (e.g. the
+   * AskUserQuestion / plan-approval prompt) and parse its numbered options.
+   * Returns the options in display order, or null when no menu is on screen.
+   *
+   * Requires the select-menu footer AND at least two numbered rows — ordinary
+   * numbered lists in assistant output never carry the footer, so this won't
+   * false-positive on them. The bypass-permissions dialog also matches the
+   * footer; callers must check detectDialog() first and let it auto-accept.
+   */
+  detectMenu(): MenuOption[] | null {
+    const text = this.text();
+    if (!TUI_MENU_FOOTER.every((s) => text.includes(s))) return null;
+    // Scan only the region ABOVE the footer — the live menu's options always
+    // sit between the question and the "to navigate · to cancel" footer.
+    const lines = text.split('\n');
+    const footerIdx = lines.findIndex((l) => TUI_MENU_FOOTER.some((s) => l.includes(s)));
+    const region = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
+
+    const matches: MenuOption[] = [];
+    for (const line of region) {
+      const m = TUI_MENU_OPTION_RE.exec(line);
+      if (m) matches.push({ index: Number(m[1]), label: m[2].trim() });
+    }
+    if (matches.length < 2) return null;
+
+    // Scrollback above the menu can contain stale numbered lines (e.g. a prior
+    // chat message rendered as "1. … 2. …"). The real select menu always numbers
+    // its options 1..N in order, so take the LAST run that starts at "1." and
+    // increments by one — that is the live menu nearest the footer, not history.
+    // This run's position is what selectMenuOption() types into the TUI, so it
+    // MUST mirror the on-screen numbering exactly.
+    let start = -1;
+    for (let i = 0; i < matches.length; i++) {
+      if (matches[i].index === 1) start = i;
+    }
+    if (start === -1) return null;
+    const run: MenuOption[] = [];
+    let expected = 1;
+    for (let i = start; i < matches.length && matches[i].index === expected; i++) {
+      run.push(matches[i]);
+      expected++;
+    }
+    return run.length >= 2 ? run : null;
   }
 }

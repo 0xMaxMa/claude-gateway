@@ -1157,6 +1157,45 @@ bot.command('clear', async ctx => {
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
+  // Handle interactive-menu choice: choice:<N>. A tap is routed back exactly like
+  // the user typing "N" — same content + meta as the text path — so the session's
+  // pending-menu handler injects the selection into the PTY. Security mirrors the
+  // text path: the tapper must be in allowFrom.
+  const choiceMatch = /^choice:(\d+)$/.exec(data)
+  if (choiceMatch) {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const chat_id = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+    const choice = choiceMatch[1]
+    // Remove the keyboard immediately to prevent double-selection.
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
+    await ctx.answerCallbackQuery({ text: `✓ ${choice}` }).catch(() => {})
+    const callbackUrl = process.env.CLAUDE_CHANNEL_CALLBACK
+    if (callbackUrl) {
+      const channelParams = {
+        content: choice,
+        meta: {
+          chat_id,
+          user: ctx.from.username ?? String(ctx.from.id),
+          user_id: String(ctx.from.id),
+          ts: new Date().toISOString(),
+        },
+      }
+      fetch(callbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(channelParams),
+      }).catch(err => {
+        process.stderr.write(`telegram channel: choice callback POST failed: ${err}\n`)
+      })
+      if (RECEIVER_MODE) typingManager.start(chat_id)
+    }
+    return
+  }
+
   // Handle model selection callback: model:<model_id>
   const modelMatch = /^model:(.+)$/.exec(data)
   if (modelMatch) {
@@ -1632,6 +1671,57 @@ if (RECEIVER_MODE) {
   }
   process.on('SIGTERM', shutdown)
   process.on('SIGINT', shutdown)
+
+  // Interactive-menu delivery. The AgentRunner drops a `<chatId>.menu` file in
+  // TYPING_DIR whenever the PTY session blocks on an interactive select menu
+  // (AskUserQuestion / plan approval). We render it as inline buttons here.
+  //
+  // This MUST be independent of the typing-indicator lifecycle: a menu can be
+  // emitted after typing has already been torn down (e.g. the agent called the
+  // reply tool earlier in the same turn, or the turn ended), and the old
+  // stop()-coupled drain would early-return on a missing typing state, leaving
+  // the .menu file orphaned and the user staring at a silent chat. A standalone
+  // poller — mirroring the Discord side — guarantees every menu reaches the chat.
+  function drainMenuFiles(): void {
+    let files: string[]
+    try {
+      files = readdirSync(TYPING_DIR)
+    } catch {
+      return
+    }
+    for (const name of files) {
+      if (!name.endsWith('.menu')) continue
+      const chatId = name.slice(0, -'.menu'.length)
+      const menuPath = join(TYPING_DIR, name)
+      let parsed: { text?: unknown; options?: unknown }
+      try {
+        parsed = JSON.parse(readFileSync(menuPath, 'utf8').trim()) as { text?: unknown; options?: unknown }
+      } catch {
+        // Malformed or mid-write (the runner writes atomically, so this is rare) —
+        // drop it so the poller doesn't spin on the same bad file forever.
+        rmSync(menuPath, { force: true })
+        continue
+      }
+      // Remove BEFORE sending: a slow or failing send must not let the next tick
+      // re-deliver the same menu (which would stack duplicate button messages).
+      rmSync(menuPath, { force: true })
+      const text = typeof parsed.text === 'string' ? parsed.text : ''
+      const options = Array.isArray(parsed.options)
+        ? (parsed.options as Array<{ label?: unknown }>)
+            .map(o => (typeof o?.label === 'string' ? o.label : ''))
+            .filter((l): l is string => l.length > 0)
+        : []
+      if (!text || options.length === 0) continue
+      const inline_keyboard = options.map((label, i) => [{
+        text: `${i + 1}. ${label}`.slice(0, 60),
+        callback_data: `choice:${i + 1}`,
+      }])
+      void bot.api.sendMessage(chatId, text, { reply_markup: { inline_keyboard } }).catch(err => {
+        process.stderr.write(`telegram channel (receiver): failed to send menu to ${chatId}: ${err}\n`)
+      })
+    }
+  }
+  setInterval(drainMenuFiles, 1000).unref()
 
   void (async () => {
     for (let attempt = 1; ; attempt++) {

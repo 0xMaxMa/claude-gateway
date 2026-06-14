@@ -311,20 +311,38 @@ export class GatewayRouter {
     this.app.get('/dashboard', (_req: Request, res: Response) => {
       const firstKey = (this.gatewayConfig?.gateway?.api?.keys ?? [])[0]?.key ?? '';
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(generateDashboardHtml(firstKey));
+      if (process.env.DEV_MODE) {
+        // Hot-reload: bust module cache so each browser refresh picks up the latest compiled web-ui.js
+        const webUiPath = require.resolve('../ui/web-ui');
+        delete require.cache[webUiPath];
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { generateDashboardHtml: fresh } = require('../ui/web-ui') as typeof import('../ui/web-ui');
+        res.send(fresh(firstKey));
+      } else {
+        res.send(generateDashboardHtml(firstKey));
+      }
     });
 
     // Process tree endpoint — returns raw ps data for dashboard
     this.app.get('/processes', (_req: Request, res: Response) => {
       try {
         const out = execSync(
-          "ps -eo pid,ppid,stat,args --no-headers 2>/dev/null | grep -E 'claude|bun.*gateway|bun.*mcp|bun.*receiver|node.*dist/' | grep -v grep | grep -v vscode",
+          "ps -eo pid,ppid,stat,%cpu,%mem,rss,args --no-headers 2>/dev/null | grep -E 'claude|bun.*gateway|bun.*mcp|bun.*receiver|node.*dist/' | grep -v grep | grep -v vscode",
           { encoding: 'utf8', timeout: 5000 }
         );
         const processes = out.trim().split('\n').filter(Boolean).map((line) => {
-          const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+          // pid ppid stat %cpu %mem rss args...
+          const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(.+)$/);
           if (!m) return null;
-          return { pid: parseInt(m[1]), ppid: parseInt(m[2]), stat: m[3], args: m[4].trim() };
+          return {
+            pid: parseInt(m[1]),
+            ppid: parseInt(m[2]),
+            stat: m[3],
+            cpu: parseFloat(m[4]),
+            mem: parseFloat(m[5]),
+            rssKb: parseInt(m[6]),
+            args: m[7].trim(),
+          };
         }).filter(Boolean);
         res.json({ processes });
       } catch {

@@ -16,9 +16,10 @@ import type {
   McpToolResult,
   ToolVisibility,
   InboundMessageHandler,
+  InboundMessage,
   ChannelId,
 } from '../../types';
-import { sendMessage } from './outbound';
+import { sendMessage, buildChoiceComponents } from './outbound';
 import { loadAccess, saveAccess, gate } from './access';
 import { maybeCreateThread } from './threading';
 import { createMessageHandler } from './inbound';
@@ -260,6 +261,61 @@ export class DiscordModule implements ChannelModule {
       }
     });
 
+    // Interactive-menu button clicks: custom_id `choice:N`. A click is routed
+    // exactly like the user typing "N" (same InboundMessage → handler), so the
+    // session's pending-menu handler injects the selection into the PTY.
+    // Security mirrors the message path: the access gate must return 'deliver'.
+    this.client.on('interactionCreate', async (interaction: any) => {
+      try {
+        if (!interaction.isButton?.()) return;
+        const m = /^choice:(\d+)$/.exec(interaction.customId ?? '');
+        if (!m) return;
+
+        const isDM = !interaction.guildId;
+        const isThread = interaction.channel?.isThread?.() ?? false;
+        const context: DiscordMessageContext = {
+          guildId: interaction.guildId ?? null,
+          channelId: interaction.channelId,
+          threadId: isThread ? interaction.channelId : null,
+          userId: interaction.user.id,
+          username: interaction.user.username,
+          messageId: interaction.message?.id ?? '',
+          isDM,
+          isThread,
+        };
+        const access = loadAccessFn();
+        const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));
+        if (result.action !== 'deliver') {
+          await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+          return;
+        }
+
+        // Disable the buttons (acknowledges the click + prevents double-selection).
+        await interaction.update({ components: [] }).catch(() => {});
+
+        const channelId = interaction.channelId;
+        const typingFileDir = path.join(this.stateDir, 'typing');
+        try {
+          fs.mkdirSync(typingFileDir, { recursive: true });
+          fs.writeFileSync(path.join(typingFileDir, channelId), '');
+        } catch {}
+
+        const inbound: InboundMessage = {
+          channel: 'discord',
+          accountId: interaction.client.user?.id ?? 'discord',
+          senderId: interaction.user.id,
+          chatId: channelId,
+          chatType: isDM ? 'direct' : 'group',
+          text: m[1],
+          messageId: interaction.message?.id ?? '',
+          ts: Date.now(),
+        };
+        await handler(inbound);
+      } catch (err) {
+        process.stderr.write(`discord: interaction handler error: ${err}\n`);
+      }
+    });
+
     const approvedDir = path.join(this.stateDir, 'approved');
     const approvedInterval = setInterval(() => { void this.checkApprovals(approvedDir); }, 5000);
     approvedInterval.unref();
@@ -288,6 +344,24 @@ export class DiscordModule implements ChannelModule {
     try { files = fs.readdirSync(typingDir); } catch { return; }
 
     for (const file of files) {
+      // Interactive menu: render the question with Secondary buttons. Each click
+      // routes back as a normal "N" message (see the interactionCreate handler).
+      if (file.endsWith('.menu')) {
+        const filePath = path.join(typingDir, file);
+        const channelId = file.slice(0, -'.menu'.length);
+        try {
+          const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8').trim()) as {
+            text: string;
+            options: Array<{ label: string }>;
+          };
+          fs.rmSync(filePath, { force: true });
+          if (parsed.text && Array.isArray(parsed.options) && parsed.options.length) {
+            const channel = await this.client.channels.fetch(channelId);
+            await sendMessage(channel, parsed.text, { components: buildChoiceComponents(parsed.options) });
+          }
+        } catch { /* non-fatal — result text carries the numbered list as fallback */ }
+        continue;
+      }
       if (!file.endsWith('.forward')) continue;
       const filePath = path.join(typingDir, file);
       const channelId = file.slice(0, -'.forward'.length);

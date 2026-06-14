@@ -15,6 +15,10 @@ help: ## Show this help message
 start: ## Build and start the gateway
 	npm run build && npm start
 
+start-dev: ## Dev mode — tsc --watch + hot-reload /dashboard on save (no gateway restart needed)
+	npm run build
+	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+
 stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 	@echo "Stopping claude-gateway..."
 	-@pkill -f "[n]ode dist/index\.js" 2>/dev/null || true

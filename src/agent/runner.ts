@@ -699,6 +699,9 @@ export class AgentRunner extends EventEmitter {
       // Auto-forward result text to channel if agent didn't call reply tool.
       let replyCalled = false;
       let replyToolUseId: string | null = null; // track id to detect failed tool calls
+      // Set when an interactive-menu prompt was rendered to the channel this turn,
+      // so the result's plain-text auto-forward is skipped (no duplicate message).
+      let menuSentThisTurn = false;
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
       const replyToolName = source === 'discord' ? 'mcp__gateway__discord_reply' : 'mcp__gateway__telegram_reply';
@@ -750,6 +753,31 @@ export class AgentRunner extends EventEmitter {
               }
             }
           }
+          // Interactive select menu blocking the PTY: render it as channel-native
+          // UI (inline buttons). This output handler only runs for Telegram/Discord
+          // sessions; API uses a separate path and falls back to the result text's
+          // numbered list (no buttons), as intended.
+          if (obj['type'] === 'system' && obj['subtype'] === 'menu_prompt') {
+            const promptText = typeof obj['prompt'] === 'string' ? obj['prompt'] : '';
+            const rawOptions = Array.isArray(obj['options']) ? obj['options'] as Array<{ label?: unknown }> : [];
+            const options = rawOptions
+              .map((o) => ({ label: typeof o?.label === 'string' ? o.label : '' }))
+              .filter((o) => o.label);
+            if (promptText && options.length) {
+              this.writeMenuForward(mapKey, promptText, options);
+              menuSentThisTurn = true;
+              // Persist the question to chat history so it's visible in the transcript.
+              const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
+              this.historyDb.insertMessage({
+                chatId: `${channelSrc}-${mapKey}`,
+                sessionId: actualSessionId,
+                source: channelSrc as HistorySource,
+                role: 'assistant',
+                content: promptText,
+                ts: Date.now(),
+              });
+            }
+          }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
             // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
@@ -781,7 +809,9 @@ export class AgentRunner extends EventEmitter {
             // so the raw API error must not reach the user's chat or the history DB.
             const isThinkingCorruption =
               obj['is_error'] === true && SessionProcess.isThinkingCorruptionError(resultText);
-            if (resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
+            // Skip when a menu was rendered to buttons this turn — the result
+            // text is the same numbered list and would duplicate the menu message.
+            if (resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
               const text = resultText.trim();
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
@@ -802,6 +832,7 @@ export class AgentRunner extends EventEmitter {
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
+            menuSentThisTurn = false;
             // Delay typing done — agent may continue with more work
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
@@ -1221,6 +1252,27 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Signal the channel receiver to render an interactive menu as native UI
+   * (inline buttons on Telegram/Discord). The receiver maps each option to a
+   * `choice:N` callback whose tap arrives back as a normal "N" message — the
+   * same as the user typing the number.
+   */
+  private writeMenuForward(chatId: string, text: string, options: Array<{ label: string }>): void {
+    const typingDir = this.getTypingDir(chatId);
+    try {
+      fs.mkdirSync(typingDir, { recursive: true });
+      // Write atomically (tmp + rename): the receiver polls this directory every
+      // second, so a non-atomic write could be read mid-flush as truncated JSON.
+      const finalPath = path.join(typingDir, `${chatId}.menu`);
+      const tmpPath = `${finalPath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify({ text, options }));
+      fs.renameSync(tmpPath, finalPath);
+    } catch {
+      // Non-fatal — the result text still carries the numbered list as a fallback.
+    }
+  }
+
   private startIdleCleaner(): void {
     this.idleCleanerTimer = setInterval(async () => {
       for (const [id, proc] of this.sessions) {
@@ -1355,15 +1407,32 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
-  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; isRunning: boolean; spawnedAt: number; uptimeSec: number }> {
+  getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; isRunning: boolean; spawnedAt: number; uptimeSec: number; tokens: number }> {
     const now = Date.now();
-    return this.sessionHistory.map((e) => {
-      const isRunning = this.sessions.has(e.chatId);
+    // A single logical session can appear multiple times in the ring buffer: a
+    // restart / model-switch / error-recovery respawn pushes a fresh entry with
+    // the SAME sessionId but a new spawnedAt. History is newest-first (unshift),
+    // so the first occurrence of a (source, sessionId, chatId) is the current
+    // incarnation — collapse to it so the dashboard shows one row per session
+    // instead of duplicating it.
+    const seen = new Set<string>();
+    const out: Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; isRunning: boolean; spawnedAt: number; uptimeSec: number; tokens: number }> = [];
+    for (const e of this.sessionHistory) {
+      const dedupKey = `${e.source}:${e.sessionId}:${e.chatId}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      const proc = this.sessions.get(e.chatId);
+      // Running only when the live process IS this incarnation: a stale entry
+      // from before a respawn must not borrow the new process's running state.
+      const isRunning = !!proc && proc.spawnedAt === e.spawnedAt;
       // For API sessions the ring-buffer chatId equals the sessionId (the map key);
       // surface the real caller chatId instead when we have it.
       const chatId = e.source === 'api' ? (this.apiChatIds.get(e.sessionId) ?? e.chatId) : e.chatId;
-      return { ...e, chatId, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000) };
-    });
+      // Live context-window token usage from the running process (0 when stopped).
+      const tokens = isRunning ? (proc?.totalTokens ?? 0) : 0;
+      out.push({ ...e, chatId, isRunning, uptimeSec: Math.floor((now - e.spawnedAt) / 1000), tokens });
+    }
+    return out;
   }
 
   /**

@@ -65,6 +65,8 @@ export type SendOptions = {
   embeds?: EmbedData[];
   files?: FileAttachment[];
   reply?: { messageReference: string };
+  /** Raw Discord message components (action rows of buttons), passed through to channel.send. */
+  components?: unknown[];
 };
 
 export type SentMessage = { id: string };
