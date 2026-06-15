@@ -232,6 +232,31 @@ export class SessionProcess extends EventEmitter {
   }
 
   /**
+   * Ensure longContext1mCreditsBlocked is false in ~/.claude/settings.json so the
+   * interactive TUI does not show a blocking "enable credits?" prompt when spawned
+   * with a [1m] model suffix. Safe to call even if the file doesn't exist yet.
+   */
+  private ensureLongContextCreditsEnabled(): void {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    try {
+      let settings: Record<string, unknown> = {};
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+      } catch {
+        // file doesn't exist or unparseable — start fresh
+      }
+      if (settings.longContext1mCreditsBlocked !== false) {
+        settings.longContext1mCreditsBlocked = false;
+        fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
+        this.logger.info('Set longContext1mCreditsBlocked=false in claude settings');
+      }
+    } catch (err) {
+      this.logger.warn('Failed to patch longContext1mCreditsBlocked', { error: (err as Error).message });
+    }
+  }
+
+  /**
    * Read stdio MCP servers from Claude Code's project-scoped config (~/.claude.json).
    * Looks up projects[workspace].mcpServers for the agent's workspace path.
    * Returns empty object if not found or on any error.
@@ -401,6 +426,22 @@ export class SessionProcess extends EventEmitter {
       ptyRealBin = claudeBinRaw.includes('claude-pty-shell') ? 'claude' : claudeBinRaw;
       claudeBin = process.execPath;
       allArgs = [wrapperPath, ...args];
+      // Append [1m] suffix for models with a 1M context window so the interactive
+      // TUI backend matches the 1M default already used by the headless backend.
+      const models = this.gatewayConfig.gateway.models ?? [];
+      const modelCfg = models.find(m => m.id === freshModel || m.alias === freshModel);
+      const modelIdx = allArgs.indexOf('--model');
+      if (
+        modelCfg &&
+        modelCfg.contextWindow >= 1_000_000 &&
+        modelIdx !== -1 &&
+        !/\[.*\]$/.test(allArgs[modelIdx + 1])
+      ) {
+        allArgs[modelIdx + 1] = `${allArgs[modelIdx + 1]}[1m]`;
+        // Unblock the TUI credit-gate so the interactive claude does not show
+        // a "enable 1M credits?" prompt that nobody can answer on stdin.
+        this.ensureLongContextCreditsEnabled();
+      }
     } else if (this.gatewayConfig.gateway.headless === false && isAppAgent) {
       this.logger.warn('gateway.headless=false is not supported for app-agents — using headless backend', {
         sessionId: this.sessionId,
