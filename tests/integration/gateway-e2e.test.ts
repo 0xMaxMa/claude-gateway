@@ -363,6 +363,9 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const gatewayCfg = makeGatewayConfig(logDir, [{ key: 'secret-key', agents: '*' }]);
       const runner = new AgentRunner(agentCfg, gatewayCfg);
       await runner.start();
+      // Tickets are bound to a session; stub one live session so the endpoint's
+      // session-belongs-to-agent check passes without spawning a real PTY.
+      jest.spyOn(runner, 'getSessionsSummary').mockReturnValue([{ sessionId: 'sess-x' } as any]);
       const agents = new Map([[agentId, runner]]);
       const configs = new Map([[agentId, agentCfg]]);
       const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
@@ -375,7 +378,7 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const res = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
         .set('X-Api-Key', 'secret-key')
-        .send({ agentId: 'ticket-agent-01' });
+        .send({ agentId: 'ticket-agent-01', sessionId: 'sess-x' });
       expect(res.status).toBe(200);
       expect(typeof res.body.ticket).toBe('string');
       expect(res.body.ticket).toHaveLength(32); // 16 bytes hex
@@ -416,14 +419,14 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const first = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
         .set('X-Dash-Token', dashToken)
-        .send({ agentId: 'ticket-agent-04' });
+        .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
       expect(first.status).toBe(200);
 
       // Second use with the same token: must be rejected (one-time-use).
       const second = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
         .set('X-Dash-Token', dashToken)
-        .send({ agentId: 'ticket-agent-04' });
+        .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
       expect(second.status).toBe(401);
 
       await router.stop(); await runner.stop();
@@ -434,8 +437,25 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const res = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
         .set('Authorization', 'Bearer secret-key')
-        .send({ agentId: 'ticket-agent-05' });
+        .send({ agentId: 'ticket-agent-05', sessionId: 'sess-x' });
       expect(res.status).toBe(200);
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-06: known agent but missing/unknown sessionId → 404', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-06');
+      // Missing sessionId.
+      const missing = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'ticket-agent-06' });
+      expect(missing.status).toBe(404);
+      // Unknown sessionId (not one of the agent's sessions).
+      const unknown = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'ticket-agent-06', sessionId: 'not-a-real-session' });
+      expect(unknown.status).toBe(404);
       await router.stop(); await runner.stop();
     });
   });

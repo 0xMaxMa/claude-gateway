@@ -105,8 +105,8 @@ export class GatewayRouter {
   private processesCache: { data: unknown[]; ts: number } | null = null;
   private static readonly PROCESSES_CACHE_TTL_MS = 3_000;
 
-  /** Short-lived WS auth tickets: ticket → { agentId, expiresAt }. One-time use. */
-  private readonly ptyStreamTickets = new Map<string, { agentId: string; expiresAt: number }>();
+  /** Short-lived WS auth tickets: ticket → { agentId, sessionId, expiresAt }. One-time use. */
+  private readonly ptyStreamTickets = new Map<string, { agentId: string; sessionId: string; expiresAt: number }>();
   private ticketPruner: ReturnType<typeof setInterval> | null = null;
 
   /** Short-lived dashboard session tokens (10 min TTL). Issued at /dashboard serve time
@@ -222,14 +222,25 @@ export class GatewayRouter {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const agentId = (req.body as { agentId?: string })?.agentId ?? '';
+      const body = (req.body as { agentId?: string; sessionId?: string }) ?? {};
+      const agentId = body.agentId ?? '';
+      const sessionId = body.sessionId ?? '';
       if (!agentId || !this.agents.has(agentId)) {
         res.status(404).json({ error: 'Agent not found' });
         return;
       }
+      // Bind the ticket to a specific session. Validate the session actually
+      // belongs to this agent so a ticket can't be minted for an arbitrary
+      // stream key. hasSockets() at WS time is the final gate on liveness.
+      const sessionExists = (this.agents.get(agentId)?.getSessionsSummary() ?? [])
+        .some((s) => s.sessionId === sessionId);
+      if (!sessionId || !sessionExists) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
       const ticket = crypto.randomBytes(16).toString('hex');
       const expiresAt = Date.now() + 30_000;
-      this.ptyStreamTickets.set(ticket, { agentId, expiresAt });
+      this.ptyStreamTickets.set(ticket, { agentId, sessionId, expiresAt });
       res.json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
     });
 
@@ -414,6 +425,43 @@ export class GatewayRouter {
       );
     });
 
+    // PTY screen snapshot — plain text, ANSI stripped. For agents that need to
+    // observe what is currently displayed in the PTY shell to detect hangs, menu
+    // states, or unexpected output without parsing escape codes.
+    // Auth: X-Api-Key or Authorization: Bearer header (API keys only — no dashboard token,
+    // as this endpoint is intended for programmatic/agent access, not the browser).
+    this.app.get('/api/v1/sessions/:sessionId/screen', (req: Request, res: Response) => {
+      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
+      const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
+      const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
+      if (!token || !apiKeys.some((k) => k.key === token)) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const sessionId = req.params['sessionId'] ?? '';
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+
+      if (!ptyStreamRegistry.hasSockets(sessionId)) {
+        res.status(404).json({ error: 'Session not found or not running in PTY mode' });
+        return;
+      }
+
+      ptyStreamRegistry.screenText(sessionId).then((snapshot) => {
+        if (!snapshot) {
+          res.status(404).json({ error: 'No screen data available for this session' });
+          return;
+        }
+        res.json(snapshot);
+      }).catch(() => {
+        res.status(500).json({ error: 'Failed to read screen state' });
+      });
+    });
+
     // Status endpoint — per-agent stats + heartbeat history
     this.app.get('/status', (_req: Request, res: Response) => {
       const uptimeMs = Date.now() - this.startedAt.getTime();
@@ -443,7 +491,12 @@ export class GatewayRouter {
         }).filter(Boolean);
 
         const lastActivity = this.lastActivityAt.get(id);
-        const sessions = runner.getSessionsSummary();
+        // PTY streams are keyed per session, so liveness is per session too.
+        const sessions = runner.getSessionsSummary().map((s) => ({
+          ...s,
+          hasPtyStream: ptyStreamRegistry.hasSockets(s.sessionId),
+        }));
+        const hasPtyStream = sessions.some((s) => s.hasPtyStream);
 
         // An agent with a channel receiver configured (telegram/discord) has a
         // meaningful running/stopped state. API-only agents have no receiver — they
@@ -457,7 +510,7 @@ export class GatewayRouter {
           messagesReceived: this.messagesReceived.get(id) ?? 0,
           messagesSent: this.messagesSent.get(id) ?? 0,
           lastActivityAt: lastActivity ? lastActivity.toISOString() : null,
-          hasPtyStream: ptyStreamRegistry.hasSockets(id),
+          hasPtyStream,
           heartbeat: {
             tasks: taskNames,
             lastResults,
@@ -527,19 +580,21 @@ export class GatewayRouter {
           }
           this.ptyStreamTickets.delete(ticketParam); // one-time use
           const agentId = entry.agentId;
+          const sessionId = entry.sessionId;
           if (!this.agents.has(agentId)) {
             socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
             socket.destroy();
             return;
           }
           this.wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-            if (!ptyStreamRegistry.hasSockets(agentId)) {
-              ws.close(4404, 'agent not running in PTY mode');
+            // Subscribe by sessionId — each session is its own isolated stream.
+            if (!ptyStreamRegistry.hasSockets(sessionId)) {
+              ws.close(4404, 'session not running in PTY mode');
               return;
             }
-            ptyStreamRegistry.subscribe(agentId, ws);
-            ws.on('close', () => ptyStreamRegistry.unsubscribe(agentId, ws));
-            ws.on('error', () => ptyStreamRegistry.unsubscribe(agentId, ws));
+            ptyStreamRegistry.subscribe(sessionId, ws);
+            ws.on('close', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+            ws.on('error', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
           });
           return;
         }
@@ -562,15 +617,22 @@ export class GatewayRouter {
           socket.destroy();
           return;
         }
+        // Streams are per-session; programmatic clients pass ?session=<sessionId>.
+        const sessionId = params.get('session') ?? '';
+        if (!sessionId) {
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
 
         this.wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-          if (!ptyStreamRegistry.hasSockets(agentId)) {
-            ws.close(4404, 'agent not running in PTY mode');
+          if (!ptyStreamRegistry.hasSockets(sessionId)) {
+            ws.close(4404, 'session not running in PTY mode');
             return;
           }
-          ptyStreamRegistry.subscribe(agentId, ws);
-          ws.on('close', () => ptyStreamRegistry.unsubscribe(agentId, ws));
-          ws.on('error', () => ptyStreamRegistry.unsubscribe(agentId, ws));
+          ptyStreamRegistry.subscribe(sessionId, ws);
+          ws.on('close', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+          ws.on('error', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
         });
       });
     });

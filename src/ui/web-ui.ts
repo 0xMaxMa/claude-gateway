@@ -11,7 +11,8 @@ export function generateDashboardHtml(dashToken = ''): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="dash-token" content="${safeToken}">
   <title>Claude Gateway</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css"
+    integrity="sha384-eDYu/eBZQNhtqTaA7Wl3XighXKxm/9VYF+Chh3hQS+UUlKQIJ14hK2imKu4n99aR" crossorigin="anonymous"/>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -105,7 +106,7 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
     .pty-viewer-header .agent-label { color: #63b3ed; font-weight: 600; }
     .pty-viewer-header .session-label { color: #718096; font-family: monospace; font-size: 0.78rem; }
-    .pty-close {
+    .pty-close, .pty-refresh {
       background: none;
       border: none;
       color: #718096;
@@ -114,6 +115,7 @@ export function generateDashboardHtml(dashToken = ''): string {
       padding: 0 4px;
     }
     .pty-close:hover { color: #fc8181; }
+    .pty-refresh:hover { color: #63b3ed; }
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
        output). We render at the native size and pan horizontally if the 200-col
@@ -230,6 +232,7 @@ export function generateDashboardHtml(dashToken = ''): string {
     <div class="pty-viewer-header">
       <span>Shell Process Viewer &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
       <span>
+        <button class="pty-refresh" id="pty-refresh-btn" title="Refresh (reconnect &amp; redraw)">&#x21ba;</button>
         <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
       </span>
     </div>
@@ -263,7 +266,8 @@ export function generateDashboardHtml(dashToken = ''): string {
 
   <div id="error-msg" class="error" style="display:none;"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
+    integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>
   <script>
     // Read short-lived dashboard token from meta tag (10 min, server-issued at page load).
     // The raw API key is never embedded in HTML — only this scoped, expiring token is.
@@ -305,21 +309,22 @@ export function generateDashboardHtml(dashToken = ''): string {
       return basePath() + path;
     }
 
-    async function wsPtyUrl(agentId) {
+    async function wsPtyUrl(agentId, sessionId) {
       // Exchange the API key for a short-lived ticket so the key never appears in
       // the WS URL (which would expose it in server logs and browser history).
+      // Streams are per-session, so the session id is always part of the request.
+      const base = basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream';
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       if (!DASHBOARD_API_KEY) {
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        return proto + '//' + window.location.host + basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream';
+        return proto + '//' + window.location.host + base + '?session=' + encodeURIComponent(sessionId);
       }
       const r = await fetch(apiUrl('/api/v1/pty-stream-ticket'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Dash-Token': DASHBOARD_API_KEY },
-        body: JSON.stringify({ agentId }),
+        body: JSON.stringify({ agentId, sessionId }),
       });
       const { ticket } = await r.json();
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      return proto + '//' + window.location.host + basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream?ticket=' + ticket;
+      return proto + '//' + window.location.host + base + '?ticket=' + ticket;
     }
 
     // ── PTY Viewer ───────────────────────────────────────────────────────────
@@ -343,7 +348,10 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
 
     async function openPtyViewer(agentId, sessionId) {
-      if (currentPtyAgent === agentId && ptyWs && ptyWs.readyState === WebSocket.OPEN) return;
+      // Compare the SESSION, not the agent: one agent can have several sessions,
+      // each its own stream. Guarding on agent alone made switching between two
+      // sessions of the same agent a no-op (the viewer never reconnected).
+      if (currentPtySession === sessionId && ptyWs && ptyWs.readyState === WebSocket.OPEN) return;
       closePtyViewer();
 
       currentPtyAgent = agentId;
@@ -394,7 +402,7 @@ export function generateDashboardHtml(dashToken = ''): string {
       // viewing can't corrupt the first character of this stream.
       utf8Decoder = new TextDecoder('utf-8');
 
-      const url = await wsPtyUrl(agentId);
+      const url = await wsPtyUrl(agentId, sessionId);
       ptyWs = new WebSocket(url);
       ptyWs.binaryType = 'arraybuffer';
 
@@ -417,7 +425,19 @@ export function generateDashboardHtml(dashToken = ''): string {
       document.getElementById('pty-viewer').style.display = 'none';
     }
 
+    // Refresh: force a clean reconnect of the CURRENT session. The server replays
+    // a freshly-serialized screen frame on subscribe, so this redraws from a clean
+    // xterm state — a manual escape hatch if the live stream ever drifts.
+    async function refreshPtyViewer() {
+      const agentId = currentPtyAgent;
+      const sessionId = currentPtySession;
+      if (!agentId) return;
+      closePtyViewer();
+      await openPtyViewer(agentId, sessionId);
+    }
+
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
+    document.getElementById('pty-refresh-btn').addEventListener('click', function() { void refreshPtyViewer(); });
 
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
@@ -517,7 +537,7 @@ export function generateDashboardHtml(dashToken = ''): string {
             const chatCell = s.chatId
               ? '<span class="session-id">' + escHtml(String(s.chatId)) + '</span>'
               : '<span class="ts">&mdash;</span>';
-            const liveBtn = (a.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
+            const liveBtn = (s.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
               ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">💻 View</button>'
               : '<span class="ts">&mdash;</span>';
             rows.push(

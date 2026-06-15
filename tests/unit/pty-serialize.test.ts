@@ -118,6 +118,40 @@ describe('serializeScreen', () => {
     expect(frame).toContain('38;2;100;200;50');
   });
 
+  it('preserves trailing spaces that carry a background color (isVisible trim)', async () => {
+    // A status bar is often blank glyphs painted only via background color. These
+    // cells contain a space char but ARE visible, so the serializer must NOT trim
+    // them as empty. Paint 5 blue-bg spaces, then leave the rest of the row default.
+    const a = makeTerm();
+    await write(a, '\x1b[2J\x1b[1;1H\x1b[44m     \x1b[0m');
+    const frame = serializeScreen(a);
+    const b = makeTerm();
+    await write(b, frame);
+
+    // Cells 0..4 must keep the blue (palette 4) background after the round-trip.
+    const lineB = b.buffer.active.getLine(0)!;
+    for (let x = 0; x < 5; x++) {
+      const cell = lineB.getCell(x)!;
+      expect(cell.isBgPalette()).toBe(true);
+      expect(cell.getBgColor()).toBe(4);
+    }
+    // Cell 5 (past the bar) must be a default-background cell.
+    expect(lineB.getCell(5)!.isBgDefault()).toBe(true);
+  });
+
+  it('preserves a trailing inverse-video space region', async () => {
+    // Inverse swaps fg/bg, so even default-color spaces become visible. The bottom
+    // bar in the bug report used \x1b[7m — confirm a trailing inverse run survives.
+    const a = makeTerm();
+    await write(a, '\x1b[2J\x1b[1;1H\x1b[7m   \x1b[0m');
+    const frame = serializeScreen(a);
+    expect(frame).toContain('\x1b[7m'); // inverse SGR must be emitted, not trimmed
+    const b = makeTerm();
+    await write(b, frame);
+    // isInverse() returns the flag bitmask (truthy number), not a literal boolean.
+    expect(b.buffer.active.getLine(0)!.getCell(0)!.isInverse()).toBeTruthy();
+  });
+
   it('restores the cursor position', async () => {
     const a = makeTerm();
     await write(a, '\x1b[2J\x1b[10;25HX');

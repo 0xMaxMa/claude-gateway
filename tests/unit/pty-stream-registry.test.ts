@@ -26,16 +26,22 @@ describe('PtyStreamRegistry', () => {
   });
 
   describe('socketPath', () => {
-    it('strips non-alphanumeric chars from sessionKey', () => {
-      const p = reg.socketPath('agent1', 'abc/def:xyz');
+    it('strips non-alphanumeric chars from the stream key', () => {
+      const p = reg.socketPath('abc/def:xyz');
       expect(path.basename(p)).not.toMatch(/[^a-z0-9_\-.]/i);
     });
 
-    it('truncates sessionKey to 32 chars', () => {
+    it('truncates the stream key to 48 chars (fits a full UUID)', () => {
       const longKey = 'a'.repeat(100);
-      const p = reg.socketPath('agent1', longKey);
+      const p = reg.socketPath(longKey);
       const safePart = path.basename(p).replace('gw-pty-', '').replace('.sock', '');
-      expect(safePart.length).toBeLessThanOrEqual(32);
+      expect(safePart.length).toBeLessThanOrEqual(48);
+    });
+
+    it('gives two distinct session ids distinct socket paths (no collision)', () => {
+      const a = reg.socketPath('53c1e240-0dd4-4a5f-8a65-5f3448368aab');
+      const b = reg.socketPath('3c01897c-204e-470a-a856-f3a260c49392');
+      expect(a).not.toEqual(b);
     });
   });
 
@@ -193,6 +199,100 @@ describe('PtyStreamRegistry', () => {
       expect(text).not.toContain('xxxxxxxxxx'); // stale noise must be gone
       // A 200x50 screen frame is far smaller than the old 256 KiB raw cap.
       expect(Buffer.concat(ws.sentBuffers).length).toBeLessThanOrEqual(256 * 1024);
+    });
+
+    it('isolates concurrent sessions of the same agent (regression: keyed by sessionId)', async () => {
+      // Two sessions for one agent — keyed by their own session ids. The bug was
+      // keying by agentId, which merged both into one interleaved mirror and made
+      // the viewer unable to target a specific session.
+      const sessA = 'sess-aaaa';
+      const sessB = 'sess-bbbb';
+      reg.broadcast(sessA, '\x1b[2J\x1b[1;1HSESSION-A-CONTENT');
+      reg.broadcast(sessB, '\x1b[2J\x1b[1;1HSESSION-B-CONTENT');
+
+      const wsA = makeWs(1);
+      const wsB = makeWs(1);
+      reg.subscribe(sessA, wsA);
+      reg.subscribe(sessB, wsB);
+      await waitForFrame(wsA);
+      await waitForFrame(wsB);
+
+      const textA = frameText(wsA);
+      const textB = frameText(wsB);
+      // Each subscriber sees only its own session's screen — no interleaving.
+      expect(textA).toContain('SESSION-A-CONTENT');
+      expect(textA).not.toContain('SESSION-B-CONTENT');
+      expect(textB).toContain('SESSION-B-CONTENT');
+      expect(textB).not.toContain('SESSION-A-CONTENT');
+    });
+
+    it('broadcast to one session does not reach another session\'s subscriber', () => {
+      const wsA = makeWs(1);
+      reg.subscribe('sess-A', wsA);
+      reg.broadcast('sess-B', 'only-for-B');
+      // Live byte for session B must not be delivered to session A's client.
+      expect(wsA.sentBuffers.every((b: Buffer) => !b.toString('latin1').includes('only-for-B'))).toBe(true);
+    });
+  });
+
+  describe('screenText', () => {
+    it('returns null when no mirror exists for the session', async () => {
+      expect(await reg.screenText('nonexistent')).toBeNull();
+    });
+
+    it('returns plain text with ANSI codes stripped', async () => {
+      // Feed ANSI-decorated content: bold + color + text
+      reg.broadcast('sess-st', '\x1b[2J\x1b[1;1H\x1b[1;32mHello\x1b[0m World');
+      const snap = await reg.screenText('sess-st');
+      expect(snap).not.toBeNull();
+      // Text content only — no escape sequences
+      expect(snap!.text).toContain('Hello World');
+      expect(snap!.text).not.toContain('\x1b[');
+    });
+
+    it('returns cursor position and dimensions', async () => {
+      reg.broadcast('sess-cur', '\x1b[2J\x1b[3;5HX');
+      const snap = await reg.screenText('sess-cur');
+      expect(snap).not.toBeNull();
+      expect(snap!.cursorRow).toBeGreaterThanOrEqual(0);
+      expect(snap!.cursorCol).toBeGreaterThanOrEqual(0);
+      expect(snap!.cols).toBe(200);
+      expect(snap!.rows).toBe(50);
+    });
+
+    it('trims trailing blank lines', async () => {
+      // Write only on row 1; rows 2-50 are blank
+      reg.broadcast('sess-trim', '\x1b[2J\x1b[1;1HOnlyOneLine');
+      const snap = await reg.screenText('sess-trim');
+      expect(snap).not.toBeNull();
+      const lines = snap!.text.split('\n');
+      // Last line should not be blank
+      expect(lines[lines.length - 1]).not.toBe('');
+      expect(snap!.text).toContain('OnlyOneLine');
+    });
+
+    it('handles multi-byte UTF-8 (Thai) without mojibake', async () => {
+      // Simulate production path: UTF-8 bytes → latin1 string (socket encoding)
+      const thaiMsg = 'สวัสดี';
+      const latin1 = Buffer.from(thaiMsg, 'utf8').toString('latin1');
+      reg.broadcast('sess-thai', `\x1b[2J\x1b[1;1H${latin1}`);
+      const snap = await reg.screenText('sess-thai');
+      expect(snap).not.toBeNull();
+      expect(snap!.text).toContain(thaiMsg);
+      expect(snap!.text).not.toMatch(/à¸/); // no mojibake
+    });
+
+    it('two sessions have independent screen snapshots', async () => {
+      reg.broadcast('sess-x', '\x1b[2J\x1b[1;1HSCREEN-X');
+      reg.broadcast('sess-y', '\x1b[2J\x1b[1;1HSCREEN-Y');
+      const [snapX, snapY] = await Promise.all([
+        reg.screenText('sess-x'),
+        reg.screenText('sess-y'),
+      ]);
+      expect(snapX!.text).toContain('SCREEN-X');
+      expect(snapX!.text).not.toContain('SCREEN-Y');
+      expect(snapY!.text).toContain('SCREEN-Y');
+      expect(snapY!.text).not.toContain('SCREEN-X');
     });
   });
 });

@@ -29,7 +29,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
 - **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
 - **Session persistence** — conversation history saved and restored across restarts
-- **PTY backend** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; uses `TranscriptTailer` for reliable output instead of ANSI parsing; app-agents always stay headless
+- **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; app-agents always stay headless
 
 ---
 

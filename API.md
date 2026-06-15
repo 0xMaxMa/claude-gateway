@@ -127,6 +127,45 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/media` | Key | Upload a media file (image/* or PDF) — returns `mediaPath` |
 | `GET` | `/api/v1/agents/:agentId/media/*` | Key | Serve a media file by path |
 
+### PTY Shell API
+
+Available only for agents running in wrap-shell (PTY) mode (`gateway.headless: false`).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/sessions/:sessionId/screen` | Key | Read the current visible screen as plain text — ANSI stripped, trailing blanks removed |
+
+**Response:**
+
+```json
+{
+  "text": "plain text content of the screen\ncursor is here",
+  "cursorRow": 12,
+  "cursorCol": 4,
+  "cols": 200,
+  "rows": 50
+}
+```
+
+- `text` — visible screen rows joined by `\n`, trailing blank lines stripped. Suitable for agent consumption (detect menus, prompts, hang states).
+- `cursorRow` / `cursorCol` — zero-based cursor position in the terminal grid.
+- `cols` / `rows` — terminal dimensions (matches server PTY size).
+
+Returns `404` if the session does not exist or is not running in wrap-shell mode.
+
+**Example:**
+
+```bash
+curl -s http://localhost:10850/api/v1/sessions/<sessionId>/screen \
+  -H "X-Api-Key: <key>"
+```
+
+The `sessionId` is the gateway session UUID. Find it from the process list:
+
+```bash
+curl -s http://localhost:10850/processes | grep -o 'sessions/[^/]*' | head -1
+```
+
 **Auth levels:** `Key` = any valid API key, `Write` = key with write access to the agent, `Admin` = key with `agents: "*"`.
 
 ---

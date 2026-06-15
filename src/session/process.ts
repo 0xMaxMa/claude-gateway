@@ -440,8 +440,10 @@ export class SessionProcess extends EventEmitter {
 
     let ptyStreamSocketPath: string | null = null;
     if (usePtyShell) {
-      ptyStreamSocketPath = ptyStreamRegistry.socketPath(this.agentConfig.id, this.sessionId);
-      ptyStreamRegistry.listen(this.agentConfig.id, ptyStreamSocketPath);
+      // Key the stream by sessionId, not agentId: one agent may run several
+      // concurrent sessions, each needing its own isolated PTY mirror.
+      ptyStreamSocketPath = ptyStreamRegistry.socketPath(this.sessionId);
+      ptyStreamRegistry.listen(this.sessionId, ptyStreamSocketPath);
     }
 
     const proc = spawn(spawnBin, spawnArgs, {

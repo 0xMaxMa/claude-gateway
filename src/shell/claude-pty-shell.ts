@@ -19,6 +19,7 @@ import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
+import { decideMenuCancel } from './menu-cancel';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -88,6 +89,16 @@ class Driver {
   // Set when an interactive menu has been bridged to chat and we're awaiting the
   // user's choice. While set, the next stdin message is treated as a selection.
   private pendingMenu: { options: MenuOption[] } | null = null;
+  // Set after ESC-cancelling a bridged menu in response to a free-text reply.
+  // The queued text is held until the TUI settles back to an idle prompt (driven
+  // by tick()), so the paste doesn't race Claude's cancellation redraw.
+  private menuCancel: { since: number; lastEscAt: number; escs: number } | null = null;
+  // Set after a /stop (SIGINT → ESC) interrupted the active turn. An interrupted
+  // turn writes no turn_duration record, so tick() ends it once the TUI is back to
+  // an idle prompt — otherwise a message queued right after /stop would hang behind
+  // a turn that never ends (until the watchdog). Reuses the menu-cancel settle
+  // decision (menuVisible is always false here, so it never re-sends ESC).
+  private interrupting: { since: number; lastEscAt: number; escs: number } | null = null;
   private lastDialogActionAt = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
@@ -219,6 +230,13 @@ class Driver {
       if (this.turn) {
         logWarn('SIGINT → sending ESC to interrupt current turn');
         this.host.writeRaw('\x1b');
+        // Arm interrupt-settle so tick() ends the (now interrupted) turn once the
+        // TUI returns to an idle prompt, then drains anything queued after /stop.
+        // No-op if already armed (repeated SIGINTs during the same interrupt).
+        if (!this.interrupting) {
+          const t = Date.now();
+          this.interrupting = { since: t, lastEscAt: t, escs: 1 };
+        }
       }
     });
     process.on('SIGTERM', () => {
@@ -252,6 +270,10 @@ class Driver {
     const turn = this.turn;
     if (!turn) return;
     this.turn = null;
+    // Clear any armed interrupt-settle — the turn is ending now regardless of how
+    // (interrupt path, normal turn_duration, or error), so a stale flag must not
+    // linger and block the next trySubmit().
+    this.interrupting = null;
     this.tailer.flush(); // drain any records written in the last poll window
     const text = turn.texts.join('');
     this.emitter.emitResult({
@@ -268,7 +290,10 @@ class Driver {
   // ---- turn submission -----------------------------------------------------
 
   private trySubmit(): void {
-    if (!this.ready || this.turn || this.queue.length === 0 || this.exiting) return;
+    // While menuCancel is armed, submission is deferred to tick() until the TUI
+    // settles after an ESC menu-cancel — don't let an event-driven trySubmit
+    // (e.g. a second incoming message) paste into the cancellation transition.
+    if (!this.ready || this.turn || this.queue.length === 0 || this.exiting || this.menuCancel || this.interrupting) return;
     const text = this.queue.shift() as string;
     this.beginTurn();
     void this.typeAndSubmit(text);
@@ -337,6 +362,56 @@ class Driver {
       if (now - this.startedAt > STARTUP_TIMEOUT_MS) {
         logError(`claude TUI did not become ready within startup timeout; screen:\n${this.screen.text()}`);
         this.shutdown(1);
+      }
+      return;
+    }
+
+    // Waiting for the TUI to settle after ESC-cancelling a bridged menu (the user
+    // typed a free-text reply instead of a number). Submit the queued prompt only
+    // once the menu is gone and the prompt is idle — otherwise the paste races
+    // Claude's cancellation redraw and never lands (→ watchdog hang).
+    if (this.menuCancel) {
+      const action = decideMenuCancel(this.menuCancel, {
+        now,
+        menuVisible: this.screen.detectMenu() !== null,
+        hasPrompt: this.screen.hasPrompt(),
+        isBusy: this.screen.isBusy(),
+        quietMs: this.screen.quietMs(),
+      });
+      if (action === 'submit') {
+        logDebug('menu cancelled and TUI settled — submitting queued prompt');
+        this.menuCancel = null;
+        this.trySubmit();
+      } else if (action === 'resend-esc') {
+        this.menuCancel.escs++;
+        this.menuCancel.lastEscAt = now;
+        logWarn(`menu still on screen after cancel — re-sending ESC (${this.menuCancel.escs}/3)`);
+        this.host.writeRaw('\x1b');
+      }
+      return;
+    }
+
+    // Settling after a /stop interrupt (SIGINT → ESC). The interrupted turn is
+    // still active (Claude writes no turn_duration for an interrupted turn), so
+    // end it as soon as the TUI is back to a quiet idle prompt — finishTurn()
+    // emits the result (clearing the gateway's in-flight state) and trySubmit()
+    // drains anything the user queued after /stop. Without this, a turn interrupted
+    // before any assistant output never meets the fallback below and the next
+    // message hangs behind it until the watchdog. menuVisible is false here, so the
+    // shared decision never returns 'resend-esc' — only 'wait' or (settle/timeout)
+    // 'submit'.
+    if (this.interrupting) {
+      const action = decideMenuCancel(this.interrupting, {
+        now,
+        menuVisible: false,
+        hasPrompt: this.screen.hasPrompt(),
+        isBusy: this.screen.isBusy(),
+        quietMs: this.screen.quietMs(),
+      });
+      if (action === 'submit') {
+        logDebug('interrupt settled — ending interrupted turn');
+        this.interrupting = null;
+        this.finishTurn(false);
       }
       return;
     }
@@ -457,11 +532,18 @@ class Driver {
       // Not a valid choice — cancel the menu and treat the text as a new prompt
       // so the user can break out by typing an instruction instead of a number.
       // Re-queue the ORIGINAL envelope so Claude still sees the full channel context.
+      //
+      // ESC makes Claude resume (it processes the menu cancellation), so the TUI
+      // is briefly busy/redrawing. Submitting the text immediately races that
+      // transition and the prompt never lands → 30-min watchdog hang. Instead we
+      // arm menuCancel and let tick() submit once the TUI is back to an idle
+      // prompt. trySubmit() is gated on !menuCancel so nothing fires early.
       logWarn(`menu reply "${choiceText.slice(0, 40)}" is not a valid choice — cancelling menu`);
       this.host.writeRaw('\x1b');
       this.pendingMenu = null;
       this.queue.push(text);
-      this.trySubmit();
+      const now = Date.now();
+      this.menuCancel = { since: now, lastEscAt: now, escs: 1 };
       return;
     }
     logDebug(`menu selection: ${n}`);
