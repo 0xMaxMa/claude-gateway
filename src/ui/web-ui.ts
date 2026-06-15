@@ -338,6 +338,10 @@ export function generateDashboardHtml(dashToken = ''): string {
     let ptyReconnectTimer = null;
     let ptyReconnectAttempts = 0;
     const PTY_RECONNECT_MAX_MS = 10000;
+    // Absolute cap so a session that ends without a clean 4404 (e.g. the gateway
+    // is gone for good) doesn't retry every 10s forever. After this many failed
+    // attempts in a row we give up and tell the user to click View again.
+    const PTY_RECONNECT_MAX_ATTEMPTS = 10;
     // Streaming UTF-8 decoder. The PTY stream carries raw UTF-8 bytes (box-drawing
     // chars, spinner braille, emoji). Decoding them as latin1 mangles every
     // multi-byte char into noise — decode as UTF-8 with {stream:true} so sequences
@@ -461,6 +465,10 @@ export function generateDashboardHtml(dashToken = ''): string {
     function schedulePtyReconnect(agentId, sessionId) {
       if (ptyReconnectTimer) return;                // already pending
       if (currentPtySession !== sessionId) return;  // viewer no longer wants this
+      if (ptyReconnectAttempts >= PTY_RECONNECT_MAX_ATTEMPTS) {
+        if (term) term.writeln('\\r\\n\\x1b[31m[disconnected — click View to retry]\\x1b[0m');
+        return;
+      }
       if (ptyReconnectAttempts === 0 && term) {
         term.writeln('\\r\\n\\x1b[33m[reconnecting\\u2026]\\x1b[0m');
       }

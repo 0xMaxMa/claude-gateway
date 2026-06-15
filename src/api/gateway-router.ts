@@ -106,6 +106,11 @@ export class GatewayRouter {
   private processesCache: { data: unknown[]; ts: number } | null = null;
   private static readonly PROCESSES_CACHE_TTL_MS = 3_000;
 
+  /** Core count is constant for the process lifetime — read once instead of
+   *  calling os.cpus() (a syscall) on every /processes poll. Used to normalize
+   *  ps per-core %CPU into a 0–100% figure on the dashboard. */
+  private static readonly NUM_CPUS = Math.max(1, os.cpus().length);
+
   /** Short-lived WS auth tickets: ticket → { agentId, sessionId, expiresAt }. One-time use. */
   private readonly ptyStreamTickets = new Map<string, { agentId: string; sessionId: string; expiresAt: number }>();
   private ticketPruner: ReturnType<typeof setInterval> | null = null;
@@ -399,7 +404,7 @@ export class GatewayRouter {
     this.app.get('/processes', (_req: Request, res: Response) => {
       const now = Date.now();
       if (this.processesCache && now - this.processesCache.ts < GatewayRouter.PROCESSES_CACHE_TTL_MS) {
-        res.json({ processes: this.processesCache.data, numCpus: os.cpus().length });
+        res.json({ processes: this.processesCache.data, numCpus: GatewayRouter.NUM_CPUS });
         return;
       }
       exec(
@@ -421,7 +426,7 @@ export class GatewayRouter {
             };
           }).filter(Boolean);
           this.processesCache = { data: processes, ts: Date.now() };
-          res.json({ processes, numCpus: os.cpus().length });
+          res.json({ processes, numCpus: GatewayRouter.NUM_CPUS });
         },
       );
     });

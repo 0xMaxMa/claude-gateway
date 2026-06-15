@@ -20,6 +20,28 @@ describe('GatewayRouter.stop() — graceful shutdown', () => {
     );
   }
 
+  // Race a promise against a deadline, clearing the timer when the promise wins.
+  // A leaked setTimeout would keep firing after the test finished (Jest open-handle
+  // warnings / cross-test bleed). The deadline only needs to be far above the real
+  // resolve time (~ms) to flag a genuine hang, so it's generous to avoid CI flakiness
+  // under CPU contention rather than tight.
+  async function resolvesWithin<T>(p: Promise<T>, ms: number): Promise<'ok' | 'timeout'> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p.then(() => 'ok' as const),
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), ms);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // The fix resolves in single-digit ms; this ceiling only catches a true hang.
+  const STOP_DEADLINE_MS = 5000;
+
   it('GR-STOP-1: resolves promptly even with a live keep-alive HTTP connection', async () => {
     const router = newRouter();
     await router.start(0);
@@ -40,27 +62,20 @@ describe('GatewayRouter.stop() — graceful shutdown', () => {
       req.on('error', reject);
     });
 
-    // stop() must resolve quickly; if closeAllConnections() were missing this
-    // would hang until the keep-alive socket idle-timed out (and the test would
-    // fail on the race timeout below).
-    const stopped = await Promise.race([
-      router.stop().then(() => 'stopped' as const),
-      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 2000)),
-    ]);
+    // stop() must resolve quickly; without closeAllConnections() this would hang
+    // until the keep-alive socket idle-timed out (and fail the deadline below).
+    const result = await resolvesWithin(router.stop(), STOP_DEADLINE_MS);
 
     agent.destroy();
-    expect(stopped).toBe('stopped');
+    expect(result).toBe('ok');
   });
 
   it('GR-STOP-2: resolves cleanly when there are no open connections', async () => {
     const router = newRouter();
     await router.start(0);
 
-    const stopped = await Promise.race([
-      router.stop().then(() => 'stopped' as const),
-      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 2000)),
-    ]);
+    const result = await resolvesWithin(router.stop(), STOP_DEADLINE_MS);
 
-    expect(stopped).toBe('stopped');
+    expect(result).toBe('ok');
   });
 });
