@@ -3452,3 +3452,73 @@ describe('AgentRunner — writeMenuForward', () => {
     expect(fs.existsSync(tmpPath)).toBe(false);
   });
 });
+
+// ── Idle eviction must not delete history-referenced media ─────────────────────
+//
+// Regression for the "Unavailable" screenshot bug: stopping an api session (idle
+// eviction or the idle cleaner) used to fs.rmSync the whole media/api-<sessionId>
+// dir, deleting files still referenced by rows in history.db. The DB row outlived
+// the file → GET /media 404 → the client rendered "Unavailable". Eviction must
+// only drop the in-memory chat-id mapping; media lives as long as its history.
+
+describe('AgentRunner — idle eviction preserves media', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-evict-media-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    agentConfig = makeAgentConfig(workspace);
+    fs.mkdirSync(workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  function callEvict(r: AgentRunner, sessionId: string, source: string): void {
+    (r as unknown as { evictApiSessionMapping(s: string, src: string): void })
+      .evictApiSessionMapping(sessionId, source);
+  }
+
+  function getApiChatIds(r: AgentRunner): Map<string, string> {
+    return (r as unknown as { apiChatIds: Map<string, string> }).apiChatIds;
+  }
+
+  // EM-01: evicting an api session keeps its media dir on disk
+  it('EM-01: evicting an api session does not delete its media dir', () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+
+    const sessionId = 'evict-1';
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', `api-${sessionId}`, 'shot.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
+    // Simulate a live mapping created during the turn, then evict.
+    getApiChatIds(runner).set(sessionId, 'test-chat');
+    callEvict(runner, sessionId, 'api');
+
+    // Media survives — history rows still reference it.
+    expect(fs.existsSync(mediaAbs)).toBe(true);
+    // In-memory mapping is cleared.
+    expect(getApiChatIds(runner).has(sessionId)).toBe(false);
+  });
+
+  // EM-02: non-api sessions are a safe no-op (mapping cleared, nothing else touched)
+  it('EM-02: evicting a non-api session is a safe no-op', () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+
+    const sessionId = 'chat:telegram-1';
+    getApiChatIds(runner).set(sessionId, 'chat:telegram-1');
+
+    expect(() => callEvict(runner, sessionId, 'telegram')).not.toThrow();
+    expect(getApiChatIds(runner).has(sessionId)).toBe(false);
+  });
+});

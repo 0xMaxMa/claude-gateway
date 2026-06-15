@@ -659,7 +659,7 @@ export class AgentRunner extends EventEmitter {
       if (idleEntry) {
         await idleEntry[1].stop();
         this.sessions.delete(idleEntry[0]);
-        this.cleanupApiSessionMediaDir(idleEntry[0], idleEntry[1].source);
+        this.evictApiSessionMapping(idleEntry[0], idleEntry[1].source);
         this.logger.info('Evicted idle session', { sessionId: idleEntry[0] });
       } else {
         throw new Error(`Session pool full: ${this.maxConcurrent} concurrent sessions`);
@@ -1280,7 +1280,7 @@ export class AgentRunner extends EventEmitter {
           this.logger.info('Stopping idle session', { sessionId: id });
           await proc.stop();
           this.sessions.delete(id);
-          this.cleanupApiSessionMediaDir(id, proc.source);
+          this.evictApiSessionMapping(id, proc.source);
         }
       }
     }, 5 * 60 * 1000);
@@ -1904,16 +1904,18 @@ export class AgentRunner extends EventEmitter {
       .filter((a): a is ApiAttachment => a !== null);
   }
 
-  private cleanupApiSessionMediaDir(sessionId: string, source: string): void {
-    // Always evict the chat-id mapping — safe no-op for non-api sessions.
+  private evictApiSessionMapping(sessionId: string, _source: string): void {
+    // Evict the in-memory chat-id mapping only — safe no-op for non-api sessions.
+    //
+    // IMPORTANT: do NOT delete the session's media dir here. Stopping a session
+    // (idle eviction or the idle cleaner) is a lifecycle event decoupled from
+    // history. The screenshots under media/api-<sessionId>/ are referenced by
+    // rows in history.db that outlive the running process, so removing them
+    // here leaves dangling references → GET /media returns 404 → the client
+    // renders "Unavailable". Media is correctly reclaimed elsewhere, tied to
+    // history lifetime: MediaStore.clearChatMedia (/clear) and the daily
+    // retention sweep (deleteMediaFiles for messages pruned by pruneOlderThan).
     this.apiChatIds.delete(sessionId);
-    if (source !== 'api') return;
-    const mediaDir = path.join(this.agentsBaseDir, this.agentConfig.id, 'media', `api-${sessionId}`);
-    try {
-      fs.rmSync(mediaDir, { recursive: true, force: true });
-    } catch {
-      // best-effort — log nothing, just don't crash the cleaner
-    }
   }
 
   getAgentsBaseDir(): string {
