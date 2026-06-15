@@ -192,5 +192,25 @@ describe('DiscordReceiver', () => {
 
       expect(spawnCalls).toHaveLength(1);
     });
+
+    it('DR14: stop() cancels pending restart timer when called after child exits (SIGINT race)', async () => {
+      // On Ctrl-C the whole process group gets SIGINT — child exits before
+      // stop() is called, so scheduleRestart() enqueues a 5s timer.
+      // stop() must cancel the timer so the event loop drains immediately.
+      const receiver = new DiscordReceiver(makeAgentConfig(), 8080, '/tmp/logs');
+      receiver.start();
+      spawnCalls.length = 0;
+
+      // Child exits first (race with gateway SIGINT handler)
+      lastProcess!.emit('exit', 0, null);
+
+      // Shutdown arrives after — must cancel the pending timer
+      receiver.stop();
+
+      jest.advanceTimersByTime(6000);
+      await Promise.resolve();
+
+      expect(spawnCalls).toHaveLength(0); // no restart
+    });
   });
 });

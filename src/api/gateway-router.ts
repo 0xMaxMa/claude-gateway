@@ -3,6 +3,7 @@ import * as http from 'node:http';
 import { exec } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { Server } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -398,7 +399,7 @@ export class GatewayRouter {
     this.app.get('/processes', (_req: Request, res: Response) => {
       const now = Date.now();
       if (this.processesCache && now - this.processesCache.ts < GatewayRouter.PROCESSES_CACHE_TTL_MS) {
-        res.json({ processes: this.processesCache.data });
+        res.json({ processes: this.processesCache.data, numCpus: os.cpus().length });
         return;
       }
       exec(
@@ -420,7 +421,7 @@ export class GatewayRouter {
             };
           }).filter(Boolean);
           this.processesCache = { data: processes, ts: Date.now() };
-          res.json({ processes });
+          res.json({ processes, numCpus: os.cpus().length });
         },
       );
     });

@@ -10,6 +10,7 @@ export class DiscordReceiver {
   private process: ChildProcess | null = null;
   private stopping = false;
   private restartCount = 0;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly logger: ReturnType<typeof createLogger>;
 
   constructor(
@@ -71,13 +72,18 @@ export class DiscordReceiver {
     this.logger.warn(`Restarting DiscordReceiver in ${AUTO_RESTART_DELAY_MS}ms`, {
       attempt: this.restartCount,
     });
-    setTimeout(() => {
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
       if (!this.stopping) this.spawnProcess();
     }, AUTO_RESTART_DELAY_MS);
   }
 
   stop(): void {
     this.stopping = true;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.process?.kill('SIGTERM');
   }
 

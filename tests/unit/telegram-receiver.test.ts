@@ -179,4 +179,31 @@ describe('TelegramReceiver', () => {
     // so isRunning() → false immediately (killed=true → !killed=false)
     expect(receiver.isRunning()).toBe(false);
   });
+
+  // --------------------------------------------------------------------------
+  // U-TR-07: stop() cancels pending restart timer (shutdown race fix)
+  // --------------------------------------------------------------------------
+  it('U-TR-07: stop() after child exits cancels restart timer (SIGINT race)', () => {
+    // On Ctrl-C the whole process group gets SIGINT, so the child exits
+    // simultaneously with the gateway's shutdown handler — stop() arrives
+    // after scheduleRestart() has already enqueued a 5s timer.
+    // stop() must cancel that timer so the event loop drains immediately.
+    const receiver = new TelegramReceiver(agentConfig, 4321, LOG_DIR);
+    receiver.start();
+
+    const firstProcess = lastProcess!;
+    spawnMock.mockClear();
+
+    // Child exits before stop() is called (race)
+    firstProcess.emit('exit', 0, null);
+    // scheduleRestart() has now set a 5s timer
+
+    // Gateway shutdown calls stop() — must cancel the pending timer
+    receiver.stop();
+
+    // Advance past the timer: no new process should spawn
+    jest.advanceTimersByTime(6_000);
+
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
 });

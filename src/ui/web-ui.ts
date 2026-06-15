@@ -575,13 +575,13 @@ export function generateDashboardHtml(dashToken = ''): string {
         const res = await fetch(apiUrl('/processes'));
         if (!res.ok) return;
         const data = await res.json();
-        renderProcessTree(data.processes || []);
+        renderProcessTree(data.processes || [], data.numCpus || 1);
       } catch(e) {
         document.getElementById('proc-tree').textContent = 'Error: ' + e.message;
       }
     }
 
-    function renderProcessTree(procs) {
+    function renderProcessTree(procs, numCpus) {
       if (!procs.length) {
         document.getElementById('proc-tree').textContent = '— no gateway processes found —';
         return;
@@ -591,14 +591,15 @@ export function generateDashboardHtml(dashToken = ''): string {
       procs.forEach(function(p) { pidMap[p.pid] = p; });
 
       // Aggregate resource usage across the whole gateway process tree.
-      // %CPU is ps's lifetime average per process (summed → total load share);
-      // RSS is summed and may slightly over-count shared pages, but is a good
-      // proxy for "memory used by the gateway".
-      let totalCpu = 0, totalRssKb = 0;
+      // ps %cpu is per-core (100% = 1 core), so divide by numCpus to get
+      // a normalized 0–100% load figure across all available cores.
+      // RSS is summed and may slightly over-count shared pages.
+      let rawCpuSum = 0, totalRssKb = 0;
       procs.forEach(function(p) {
-        totalCpu += Number(p.cpu) || 0;
+        rawCpuSum += Number(p.cpu) || 0;
         totalRssKb += Number(p.rssKb) || 0;
       });
+      const totalCpu = rawCpuSum / (numCpus || 1);
       const totalMemMb = totalRssKb / 1024;
       const memStr = totalMemMb >= 1024
         ? (totalMemMb / 1024).toFixed(2) + ' GB'
