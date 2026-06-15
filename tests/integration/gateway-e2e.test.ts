@@ -53,9 +53,9 @@ function makeAgentConfig(
   };
 }
 
-function makeGatewayConfig(logDir: string): GatewayConfig {
+function makeGatewayConfig(logDir: string, apiKeys: import('../../src/types').ApiKey[] = []): GatewayConfig {
   return {
-    gateway: { logDir, timezone: 'UTC' },
+    gateway: { logDir, timezone: 'UTC', ...(apiKeys.length ? { api: { keys: apiKeys } } : {}) },
     agents: [],
   };
 }
@@ -352,6 +352,112 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
     await runner.stop();
 
     expect(runner.isRunning()).toBe(false);
+  });
+
+  // ─── I-E2E-12: Ephemeral PTY ticket endpoint ─────────────────────────────
+  describe('POST /api/v1/pty-stream-ticket', () => {
+    async function makeRouter(agentId: string) {
+      const workspace = createTempWorkspace(`e2e-ticket-${agentId}-`);
+      const logDir = createTempDir(`e2e-ticket-${agentId}-log-`);
+      const agentCfg = makeAgentConfig(agentId, `token-${agentId}`, workspace);
+      const gatewayCfg = makeGatewayConfig(logDir, [{ key: 'secret-key', agents: '*' }]);
+      const runner = new AgentRunner(agentCfg, gatewayCfg);
+      await runner.start();
+      // Tickets are bound to a session; stub one live session so the endpoint's
+      // session-belongs-to-agent check passes without spawning a real PTY.
+      jest.spyOn(runner, 'getSessionsSummary').mockReturnValue([{ sessionId: 'sess-x' } as any]);
+      const agents = new Map([[agentId, runner]]);
+      const configs = new Map([[agentId, agentCfg]]);
+      const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
+      await router.start(0);
+      return { router, runner };
+    }
+
+    it('T-01: valid API key + known agent → 200 with ticket', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-01');
+      const res = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'ticket-agent-01', sessionId: 'sess-x' });
+      expect(res.status).toBe(200);
+      expect(typeof res.body.ticket).toBe('string');
+      expect(res.body.ticket).toHaveLength(32); // 16 bytes hex
+      expect(typeof res.body.expiresAt).toBe('string');
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-02: invalid API key → 401', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-02');
+      const res = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'wrong-key')
+        .send({ agentId: 'ticket-agent-02' });
+      expect([401, 403]).toContain(res.status); // auth middleware may return 401 or 403
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-03: unknown agent → 404', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-03');
+      const res = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'no-such-agent' });
+      expect(res.status).toBe(404);
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-04: dashboard token (from /dashboard) → 200 with ticket, token is one-time-use', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-04');
+      // Fetch the dashboard page — server issues a short-lived dashToken embedded in HTML.
+      const dashRes = await supertest(router.getApp()).get('/dashboard');
+      expect(dashRes.status).toBe(200);
+      const metaMatch = /name="dash-token" content="([0-9a-f]+)"/.exec(dashRes.text);
+      expect(metaMatch).not.toBeNull();
+      const dashToken = metaMatch![1];
+
+      // First use: should succeed.
+      const first = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Dash-Token', dashToken)
+        .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
+      expect(first.status).toBe(200);
+
+      // Second use with the same token: must be rejected (one-time-use).
+      const second = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Dash-Token', dashToken)
+        .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
+      expect(second.status).toBe(401);
+
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-05: Bearer Authorization header accepted alongside X-Api-Key', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-05');
+      const res = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('Authorization', 'Bearer secret-key')
+        .send({ agentId: 'ticket-agent-05', sessionId: 'sess-x' });
+      expect(res.status).toBe(200);
+      await router.stop(); await runner.stop();
+    });
+
+    it('T-06: known agent but missing/unknown sessionId → 404', async () => {
+      const { router, runner } = await makeRouter('ticket-agent-06');
+      // Missing sessionId.
+      const missing = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'ticket-agent-06' });
+      expect(missing.status).toBe(404);
+      // Unknown sessionId (not one of the agent's sessions).
+      const unknown = await supertest(router.getApp())
+        .post('/api/v1/pty-stream-ticket')
+        .set('X-Api-Key', 'secret-key')
+        .send({ agentId: 'ticket-agent-06', sessionId: 'not-a-real-session' });
+      expect(unknown.status).toBe(404);
+      await router.stop(); await runner.stop();
+    });
   });
 
   // ─── I-E2E-11: Session store works correctly ──────────────────────────────

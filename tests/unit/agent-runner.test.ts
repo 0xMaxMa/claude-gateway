@@ -3319,3 +3319,136 @@ describe('AgentRunner — API attachment buffer', () => {
     expect(attachments[0].relPath).toBe('api-sess/screen.jpg');
   });
 });
+
+// ── getSessionsSummary: dedup respawned sessions ──────────────────────────────
+describe('AgentRunner — getSessionsSummary dedup', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-summary-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    agentConfig = makeAgentConfig(workspace);
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  type HistoryEntry = { chatId: string; sessionId: string; source: string; mode: string; model: string; spawnedAt: number };
+  function internals(runner: AgentRunner) {
+    return runner as unknown as {
+      sessionHistory: HistoryEntry[];
+      sessions: Map<string, SessionProcess>;
+      apiChatIds: Map<string, string>;
+    };
+  }
+  function stubProc(spawnedAt: number, totalTokens: number): SessionProcess {
+    return { spawnedAt, totalTokens } as unknown as SessionProcess;
+  }
+  function entry(over: Partial<HistoryEntry>): HistoryEntry {
+    return { chatId: 'getpod', sessionId: 'sess-A', source: 'api', mode: 'pty-shell', model: 'sonnet-4-6', spawnedAt: 0, ...over };
+  }
+
+  it('collapses a respawned session (same sessionId) into one running row', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const internal = internals(runner);
+    // History is newest-first (unshift): the 10:34 respawn precedes the 10:32 spawn.
+    internal.sessionHistory.push(entry({ spawnedAt: 1_000_034_000 })); // newest = current incarnation
+    internal.sessionHistory.push(entry({ spawnedAt: 1_000_032_000 })); // stale pre-respawn entry
+    internal.sessions.set('getpod', stubProc(1_000_034_000, 47_000));
+
+    const rows = runner.getSessionsSummary();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sessionId).toBe('sess-A');
+    expect(rows[0].isRunning).toBe(true);
+    expect(rows[0].spawnedAt).toBe(1_000_034_000);
+    expect(rows[0].tokens).toBe(47_000);
+  });
+
+  it('a stale pre-respawn entry never borrows the live process running state', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const internal = internals(runner);
+    // Keep ONLY the stale entry in history; the live proc is a newer incarnation.
+    internal.sessionHistory.push(entry({ spawnedAt: 1_000_032_000 }));
+    internal.sessions.set('getpod', stubProc(1_000_034_000, 47_000)); // different spawnedAt
+
+    const rows = runner.getSessionsSummary();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isRunning).toBe(false); // spawnedAt mismatch → not this incarnation
+    expect(rows[0].tokens).toBe(0); // stopped rows report 0 tokens
+  });
+
+  it('keeps genuinely distinct sessions as separate rows', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const internal = internals(runner);
+    internal.sessionHistory.push(entry({ chatId: 'chat:1', sessionId: 'sess-A', source: 'telegram', spawnedAt: 2_000 }));
+    internal.sessionHistory.push(entry({ chatId: 'chat:1', sessionId: 'sess-B', source: 'telegram', spawnedAt: 1_000 }));
+
+    const rows = runner.getSessionsSummary();
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map(r => r.sessionId))).toEqual(new Set(['sess-A', 'sess-B']));
+  });
+
+  it('reports a stopped session (no live process) as not running with 0 tokens', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const internal = internals(runner);
+    internal.sessionHistory.push(entry({ spawnedAt: 1_000_032_000 }));
+    // no proc in sessions map
+
+    const rows = runner.getSessionsSummary();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].isRunning).toBe(false);
+    expect(rows[0].tokens).toBe(0);
+  });
+});
+
+// ── writeMenuForward: atomic .menu file ────────────────────────────────────────
+describe('AgentRunner — writeMenuForward', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-menu-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    agentConfig = makeAgentConfig(workspace);
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function callWriteMenu(runner: AgentRunner, chatId: string, text: string, options: Array<{ label: string }>): void {
+    (runner as unknown as { writeMenuForward(c: string, t: string, o: Array<{ label: string }>): void })
+      .writeMenuForward(chatId, text, options);
+  }
+
+  it('writes a .menu file with correct JSON content', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const chatId = '997170033';
+    callWriteMenu(runner, chatId, 'Pick one:', [{ label: 'Alpha' }, { label: 'Beta' }]);
+
+    const typingDir = (runner as unknown as { getTypingDir(c: string): string }).getTypingDir(chatId);
+    const menuPath = path.join(typingDir, `${chatId}.menu`);
+    expect(fs.existsSync(menuPath)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(menuPath, 'utf8'));
+    expect(parsed.text).toBe('Pick one:');
+    expect(parsed.options).toEqual([{ label: 'Alpha' }, { label: 'Beta' }]);
+  });
+
+  it('leaves no .tmp file after successful write (atomic rename)', () => {
+    const runner = new AgentRunner(agentConfig, gatewayConfig);
+    const chatId = '997170033';
+    callWriteMenu(runner, chatId, 'Q', [{ label: 'X' }]);
+
+    const typingDir = (runner as unknown as { getTypingDir(c: string): string }).getTypingDir(chatId);
+    const tmpPath = path.join(typingDir, `${chatId}.menu.tmp`);
+    expect(fs.existsSync(tmpPath)).toBe(false);
+  });
+});

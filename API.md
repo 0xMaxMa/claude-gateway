@@ -127,6 +127,82 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/media` | Key | Upload a media file (image/* or PDF) — returns `mediaPath` |
 | `GET` | `/api/v1/agents/:agentId/media/*` | Key | Serve a media file by path |
 
+### PTY Shell API
+
+Available only for agents running in wrap-shell (PTY) mode (`gateway.headless: false`).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/sessions/:sessionId/screen` | Key | Read the current visible screen as plain text — ANSI stripped, trailing blanks removed |
+
+**Response:**
+
+```json
+{
+  "text": "plain text content of the screen\ncursor is here",
+  "cursorRow": 12,
+  "cursorCol": 4,
+  "cols": 200,
+  "rows": 50
+}
+```
+
+- `text` — visible screen rows joined by `\n`, trailing blank lines stripped. Suitable for agent consumption (detect menus, prompts, hang states).
+- `cursorRow` / `cursorCol` — zero-based cursor position in the terminal grid.
+- `cols` / `rows` — terminal dimensions (matches server PTY size).
+
+Returns `404` if the session does not exist or is not running in wrap-shell mode.
+
+**Example:**
+
+```bash
+curl -s http://localhost:10850/api/v1/sessions/<sessionId>/screen \
+  -H "X-Api-Key: <key>"
+```
+
+The `sessionId` is the gateway session UUID. Find it from the process list:
+
+```bash
+curl -s http://localhost:10850/processes | grep -o 'sessions/[^/]*' | head -1
+```
+
+#### Live screen stream (WebSocket)
+
+For a real-time mirror of the PTY (instead of a one-shot snapshot), connect to the
+PTY stream WebSocket. Streams are **per session**, so a `session` is always required —
+each session of an agent is an isolated stream.
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST` | `/api/v1/pty-stream-ticket` | Key | Exchange an API key for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
+| `WS` | `/api/v1/agents/:agentId/pty-stream` | Ticket *or* Key | Subscribe to the live PTY stream for one session |
+
+**Auth path 1 — ephemeral ticket (used by the browser viewer):**
+
+```bash
+# 1. Mint a ticket (the ticket is bound to this sessionId)
+curl -s -X POST http://localhost:10850/api/v1/pty-stream-ticket \
+  -H "X-Api-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"agentId":"<agentId>","sessionId":"<sessionId>"}'
+# → { "ticket": "<hex>", "expiresAt": "..." }
+
+# 2. Connect (no API key on the URL — the ticket carries the session binding)
+#    ws://localhost:10850/api/v1/agents/<agentId>/pty-stream?ticket=<hex>
+```
+
+**Auth path 2 — header auth (programmatic clients):** pass the API key as a header
+(`X-Api-Key` or `Authorization: Bearer`) **and** the session as a query param:
+
+```
+ws://localhost:10850/api/v1/agents/<agentId>/pty-stream?session=<sessionId>
+```
+
+> **Required:** the header-auth path returns `400 Bad Request` if `?session=` is
+> omitted (streams are per session — there is no agent-wide stream). The ticket path
+> does not need `?session=` because the ticket is already bound to one session.
+
+Closes with code `4404` if the session is not running in PTY mode.
+
 **Auth levels:** `Key` = any valid API key, `Write` = key with write access to the agent, `Admin` = key with `agents: "*"`.
 
 ---

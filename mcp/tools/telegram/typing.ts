@@ -96,7 +96,7 @@ export interface WorkingState {
 
 export interface BotApi {
   sendChatAction(chatId: string, action: 'typing'): Promise<unknown>
-  sendMessage(chatId: string, text: string, opts?: { parse_mode?: 'MarkdownV2' | 'HTML' | 'Markdown' }): Promise<{ message_id: number }>
+  sendMessage(chatId: string, text: string, opts?: { parse_mode?: 'MarkdownV2' | 'HTML' | 'Markdown'; reply_markup?: unknown }): Promise<{ message_id: number }>
   editMessageText(chatId: string, msgId: number, text: string): Promise<unknown>
   deleteMessage(chatId: string, msgId: number): Promise<unknown>
   setMessageReaction(chatId: string, msgId: number, emoji: string): Promise<unknown>
@@ -212,6 +212,12 @@ export function createWorkingStateManager(
       } catch {}
       fsApi.rmSync(forwardPath, { force: true })
     }
+    // NOTE: interactive-menu (.menu) delivery is handled by an independent poller
+    // in receiver-server.ts (drainMenuFiles), NOT here. A menu can be emitted
+    // after the typing state has already been torn down (reply tool called earlier
+    // in the turn, or the turn ended), in which case this stop() never runs for it
+    // and the .menu file would be orphaned. The standalone poller has no such
+    // coupling, so it reliably delivers every menu. Do not re-add a drain here.
     fsApi.rmSync(repliedPath, { force: true })
     // Read signal file timestamp before deleting — process.ts overwrites it with a newer
     // timestamp when a queued turn is injected; if newer than this turn's startedAt it means

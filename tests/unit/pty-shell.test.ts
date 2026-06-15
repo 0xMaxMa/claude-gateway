@@ -4,8 +4,12 @@ import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
+  parseMenuChoice,
+  formatMenuPrompt,
+  extractChannelContent,
 } from '../../src/shell/screen';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
+import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -128,6 +132,130 @@ describe('ScreenModel raw-chunk busy detection', () => {
     screen.write('hello');
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.quietMs()).toBeGreaterThanOrEqual(40);
+  });
+});
+
+// Feed a screen and let xterm's async write buffer flush before reading text().
+async function renderScreen(lines: string[]): Promise<ScreenModel> {
+  const screen = new ScreenModel();
+  screen.write(lines.join('\r\n'));
+  await new Promise((r) => setTimeout(r, 30));
+  return screen;
+}
+
+const MENU_FOOTER = 'Enter to select · ↑/↓ to navigate · Esc to cancel';
+
+describe('ScreenModel detectMenu', () => {
+  it('parses numbered options (with ❯ highlight + a divider) when the footer is present', async () => {
+    const screen = await renderScreen([
+      'Which option do you want?',
+      '',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '  3. Third choice',
+      '  ─────────────',
+      '  4. Chat about this',
+      '',
+      MENU_FOOTER,
+    ]);
+    const menu = screen.detectMenu();
+    expect(menu).not.toBeNull();
+    expect(menu!.map((o) => o.index)).toEqual([1, 2, 3, 4]);
+    expect(menu![0].label).toBe('First choice');
+    expect(menu![3].label).toBe('Chat about this');
+  });
+
+  it('ignores stale numbered scrollback above the live menu', async () => {
+    // Reproduces the live bug: a prior chat message rendered as "1. … 2. …"
+    // sat in scrollback above an AskUserQuestion menu, so detectMenu swept the
+    // phantom rows in — inflating the option list and shifting every index.
+    const screen = await renderScreen([
+      '1. restart gateway now',
+      '2. restart drops the running session',
+      '',
+      'Which option do you want?',
+      '',
+      '❯ 1. See the buttons',
+      '  2. Type the number',
+      '  3. Nothing showed up',
+      '',
+      MENU_FOOTER,
+    ]);
+    const menu = screen.detectMenu();
+    expect(menu).not.toBeNull();
+    // Only the real 1..3 run nearest the footer — phantom rows excluded.
+    expect(menu!.map((o) => o.index)).toEqual([1, 2, 3]);
+    expect(menu![0].label).toBe('See the buttons');
+    expect(menu!.map((o) => o.label)).not.toContain('restart gateway now');
+  });
+
+  it('returns null without the menu footer', async () => {
+    const screen = await renderScreen([
+      'Here is a numbered list in normal output:',
+      '1. not a menu',
+      '2. still not a menu',
+    ]);
+    expect(screen.detectMenu()).toBeNull();
+  });
+
+  it('returns null with the footer but fewer than two options', async () => {
+    const screen = await renderScreen([
+      'Confirm?',
+      '  1. Only choice',
+      MENU_FOOTER,
+    ]);
+    expect(screen.detectMenu()).toBeNull();
+  });
+});
+
+describe('parseMenuChoice', () => {
+  it('accepts a leading integer within range', () => {
+    expect(parseMenuChoice('1', 4)).toBe(1);
+    expect(parseMenuChoice('2.', 4)).toBe(2);
+    expect(parseMenuChoice('  3 pick this', 4)).toBe(3);
+  });
+
+  it('rejects non-numbers and out-of-range values', () => {
+    expect(parseMenuChoice('abc', 5)).toBeNull();
+    expect(parseMenuChoice('', 5)).toBeNull();
+    expect(parseMenuChoice('0', 5)).toBeNull();
+    expect(parseMenuChoice('9', 5)).toBeNull();
+  });
+});
+
+describe('extractChannelContent', () => {
+  it('unwraps a channel envelope so a menu reply parses as the bare choice', () => {
+    const xml = '<channel source="telegram" chat_id="997170033" message_id="42" user="boss" ts="2026-06-14T00:00:00.000Z">1</channel>';
+    expect(extractChannelContent(xml)).toBe('1');
+    // Regression: the whole reason taps/typed numbers failed — the envelope
+    // starts with "<", so parseMenuChoice on the raw XML returns null.
+    expect(parseMenuChoice(xml, 4)).toBeNull();
+    expect(parseMenuChoice(extractChannelContent(xml), 4)).toBe(1);
+  });
+
+  it('strips a nested <replied> block before the user content', () => {
+    const xml = '<channel source="discord" chat_id="9" message_id="1" user="u" ts="t"><replied message_id="7" user="bot">3. Pick C</replied>2</channel>';
+    expect(extractChannelContent(xml)).toBe('2');
+  });
+
+  it('returns plain text unchanged (raw API / typed reply)', () => {
+    expect(extractChannelContent('2')).toBe('2');
+    expect(extractChannelContent('  3 ')).toBe('  3 ');
+  });
+
+  it('ignores numeric noise in envelope attributes (chat_id, ts)', () => {
+    const xml = '<channel source="telegram" chat_id="997170033" ts="2026-06-14">4</channel>';
+    expect(extractChannelContent(xml)).toBe('4');
+    expect(parseMenuChoice(extractChannelContent(xml), 5)).toBe(4);
+  });
+});
+
+describe('formatMenuPrompt', () => {
+  it('renders a numbered list with the reply instruction', () => {
+    const text = formatMenuPrompt([{ index: 1, label: 'Alpha' }, { index: 2, label: 'Beta' }]);
+    expect(text).toContain('1. Alpha');
+    expect(text).toContain('2. Beta');
+    expect(text.toLowerCase()).toContain('reply with the number');
   });
 });
 
@@ -260,5 +388,154 @@ describe('pty-shell transcript path', () => {
     const uuid = '11111111-2222-3333-4444-555555555555';
     expect(transcriptPath('/tmp/pty-poc', uuid))
       .toBe(`${os.homedir()}/.claude/projects/-tmp-pty-poc/${uuid}.jsonl`);
+  });
+});
+
+describe('pty-shell menu-cancel settle decision', () => {
+  // Models the bug: user types a free-text question while a bridged menu is up.
+  // The wrapper ESCs the menu, then must wait for the TUI to return to an idle
+  // prompt before submitting — submitting into Claude's cancellation redraw is
+  // what caused the 30-min watchdog hang.
+  const T0 = 100_000;
+  const baseState = (): MenuCancelState => ({ since: T0, lastEscAt: T0, escs: 1 });
+
+  it('waits while the TUI is still busy reacting to the ESC cancel', () => {
+    const action = decideMenuCancel(baseState(), {
+      now: T0 + 1000,            // past MIN_WAIT
+      menuVisible: false,        // menu dismissed
+      hasPrompt: false,          // but no idle prompt yet
+      isBusy: true,              // Claude is processing the cancellation
+      quietMs: 50,
+    });
+    expect(action).toBe('wait');
+  });
+
+  it('waits until the minimum delay after ESC has elapsed', () => {
+    const action = decideMenuCancel(baseState(), {
+      now: T0 + 300,             // < MIN_WAIT (800ms)
+      menuVisible: false,
+      hasPrompt: true,
+      isBusy: false,
+      quietMs: 1000,
+    });
+    expect(action).toBe('wait');
+  });
+
+  it('waits until the screen has been quiet long enough', () => {
+    const action = decideMenuCancel(baseState(), {
+      now: T0 + 1000,
+      menuVisible: false,
+      hasPrompt: true,
+      isBusy: false,
+      quietMs: 100,              // < SETTLE_QUIET (600ms)
+    });
+    expect(action).toBe('wait');
+  });
+
+  it('submits once the menu is gone and the prompt is idle and quiet', () => {
+    const action = decideMenuCancel(baseState(), {
+      now: T0 + 1200,
+      menuVisible: false,
+      hasPrompt: true,
+      isBusy: false,
+      quietMs: 700,
+    });
+    expect(action).toBe('submit');
+  });
+
+  it('re-sends ESC when the menu lingers (ESC swallowed) within the retry cap', () => {
+    const action = decideMenuCancel(
+      { since: T0, lastEscAt: T0, escs: 1 },
+      {
+        now: T0 + 2000,          // > ESC_RETRY (1500ms) since last ESC
+        menuVisible: true,       // menu still on screen
+        hasPrompt: false,
+        isBusy: false,
+        quietMs: 800,
+      },
+    );
+    expect(action).toBe('resend-esc');
+  });
+
+  it('stops re-sending ESC after the cap and just waits', () => {
+    const action = decideMenuCancel(
+      { since: T0, lastEscAt: T0, escs: 3 },   // at MAX_ESC
+      {
+        now: T0 + 5000,
+        menuVisible: true,
+        hasPrompt: false,
+        isBusy: false,
+        quietMs: 800,
+      },
+    );
+    expect(action).toBe('wait');
+  });
+
+  it('force-submits after the hard timeout so the session never hangs', () => {
+    const action = decideMenuCancel(baseState(), {
+      now: T0 + 16_000,          // > TIMEOUT (15s)
+      menuVisible: true,         // even if the menu is somehow still up
+      hasPrompt: false,
+      isBusy: true,
+      quietMs: 0,
+    });
+    expect(action).toBe('submit');
+  });
+});
+
+describe('pty-shell /stop interrupt settle decision', () => {
+  // Models the /stop bug: user issues /stop (SIGINT → ESC interrupts the turn),
+  // then sends another message. The interrupted turn writes no turn_duration, so
+  // the wrapper must end it once the TUI returns to an idle prompt before draining
+  // the queued message — otherwise it hangs behind a dead turn until the watchdog.
+  // The interrupt path reuses decideMenuCancel with menuVisible ALWAYS false, so it
+  // must never return 'resend-esc' (an ESC then would cancel something unrelated).
+  const T0 = 200_000;
+  const armed = (): MenuCancelState => ({ since: T0, lastEscAt: T0, escs: 1 });
+
+  it('waits while the TUI is still busy reacting to the ESC interrupt', () => {
+    const action = decideMenuCancel(armed(), {
+      now: T0 + 1000,            // past MIN_WAIT
+      menuVisible: false,        // no menu is involved in /stop
+      hasPrompt: false,          // not back to an idle prompt yet
+      isBusy: true,              // Claude is still cancelling the turn
+      quietMs: 50,
+    });
+    expect(action).toBe('wait');
+  });
+
+  it('ends the interrupted turn once the prompt is idle and quiet', () => {
+    const action = decideMenuCancel(armed(), {
+      now: T0 + 1200,
+      menuVisible: false,
+      hasPrompt: true,
+      isBusy: false,
+      quietMs: 700,
+    });
+    expect(action).toBe('submit');
+  });
+
+  it('never re-sends ESC during a /stop interrupt (no menu on screen)', () => {
+    // Even long after the ESC with the screen quiet but no prompt yet, a /stop
+    // settle must not emit ESC — menuVisible is false so resend-esc is impossible.
+    const action = decideMenuCancel(armed(), {
+      now: T0 + 5000,            // well past ESC_RETRY
+      menuVisible: false,
+      hasPrompt: false,
+      isBusy: false,
+      quietMs: 2000,
+    });
+    expect(action).toBe('wait');
+  });
+
+  it('force-ends after the hard timeout so /stop never wedges the queue', () => {
+    const action = decideMenuCancel(armed(), {
+      now: T0 + 16_000,          // > TIMEOUT (15s)
+      menuVisible: false,
+      hasPrompt: false,          // TUI never settled
+      isBusy: true,
+      quietMs: 0,
+    });
+    expect(action).toBe('submit');
   });
 });

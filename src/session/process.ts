@@ -7,6 +7,7 @@ import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
+import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -29,6 +30,9 @@ export class SessionProcess extends EventEmitter {
   readonly source: 'telegram' | 'discord' | 'api';
   private readonly sessionChannel: 'telegram' | 'discord';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
+  readonly spawnedAt = Date.now();
+  /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
+  backend: 'pty-shell' | 'headless' = 'headless';
   modelOverride?: string; // per-session model override (set by runner from SessionMeta)
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
@@ -45,6 +49,10 @@ export class SessionProcess extends EventEmitter {
   private readonly configPath: string;
   private readonly restartSignalPath: string;
   queryMode = false;
+  // Latest context-window token usage (input context + output) for the most
+  // recent turn. Surfaced read-only for the status dashboard. Best-effort —
+  // reset to 0 until the first tokenUsage event fires.
+  private lastTotalTokens = 0;
   private thinkingRecoveryCount = 0;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
@@ -92,6 +100,16 @@ export class SessionProcess extends EventEmitter {
     return this.source !== 'api'
       ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, msg, this.sessionChannel)
       : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, msg);
+  }
+
+  /** Public accessor for the model this session currently resolves to (for status/UI). */
+  get model(): string {
+    return this.readFreshModel();
+  }
+
+  /** Latest context-window token usage for this session (for status/UI). */
+  get totalTokens(): number {
+    return this.lastTotalTokens;
   }
 
   private readFreshModel(): string {
@@ -369,6 +387,7 @@ export class SessionProcess extends EventEmitter {
     // App-agents always stay headless: the wrapper (node-pty) lives on the
     // host and cannot wrap a binary inside a docker-exec container.
     const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
+    this.backend = usePtyShell ? 'pty-shell' : 'headless';
     let ptyRealBin: string | null = null;
     // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
     // API sessions are excluded: the stalled detector is receiver-side (Telegram/Discord)
@@ -419,6 +438,14 @@ export class SessionProcess extends EventEmitter {
         ]
       : allArgs;
 
+    let ptyStreamSocketPath: string | null = null;
+    if (usePtyShell) {
+      // Key the stream by sessionId, not agentId: one agent may run several
+      // concurrent sessions, each needing its own isolated PTY mirror.
+      ptyStreamSocketPath = ptyStreamRegistry.socketPath(this.sessionId);
+      ptyStreamRegistry.listen(this.sessionId, ptyStreamSocketPath);
+    }
+
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
@@ -427,6 +454,7 @@ export class SessionProcess extends EventEmitter {
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
         ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
+        ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -603,6 +631,7 @@ export class SessionProcess extends EventEmitter {
               const outputTokens = usage?.output_tokens ?? 0;
               const totalTokens = lastMessageStartContext + outputTokens;
               if (lastMessageStartContext > 0) {
+                this.lastTotalTokens = totalTokens;
                 this.emit('tokenUsage', { inputTokens: lastMessageStartContext, outputTokens, totalTokens });
               }
               lastMessageStartContext = 0;
@@ -624,6 +653,7 @@ export class SessionProcess extends EventEmitter {
         signal,
         sessionId: this.sessionId,
       });
+      if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       if (!this.stopping) this.scheduleRestart();
     });

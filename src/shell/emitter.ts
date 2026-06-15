@@ -1,4 +1,5 @@
 import type { AssistantRecord, UsageInfo } from './tailer';
+import type { MenuOption } from './screen';
 
 /**
  * Synthesizes the stream-json events the gateway's SessionProcess stdout
@@ -71,6 +72,23 @@ export class ProtocolEmitter {
       .filter((b) => b.type === 'text')
       .map((b) => String((b as { text?: unknown }).text ?? ''))
       .join('');
+  }
+
+  /**
+   * Signal that the TUI is blocked on an interactive select menu. The gateway
+   * (runner.ts) renders this as channel-native UI — inline buttons on
+   * Telegram/Discord — while the turn's result text carries the same numbered
+   * list as a fallback (and for API, which has no buttons). callback_data /
+   * custom_id only ever carry the 1-based choice index.
+   */
+  emitMenuPrompt(opts: { sessionId: string; prompt: string; options: MenuOption[] }): void {
+    this.writeLine({
+      type: 'system',
+      subtype: 'menu_prompt',
+      session_id: opts.sessionId,
+      prompt: opts.prompt,
+      options: opts.options,
+    });
   }
 
   emitResult(opts: {
