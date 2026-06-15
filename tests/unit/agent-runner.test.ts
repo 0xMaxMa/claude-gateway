@@ -3483,9 +3483,12 @@ describe('AgentRunner — idle eviction preserves media', () => {
     jest.clearAllMocks();
   });
 
-  function callEvict(r: AgentRunner, sessionId: string, source: string): void {
-    (r as unknown as { evictApiSessionMapping(s: string, src: string): void })
-      .evictApiSessionMapping(sessionId, source);
+  function callEvict(r: AgentRunner, sessionId: string): void {
+    const runner = r as unknown as Record<string, unknown>;
+    if (typeof runner['evictApiSessionMapping'] !== 'function') {
+      throw new Error('evictApiSessionMapping not found — method may have been renamed');
+    }
+    (runner['evictApiSessionMapping'] as (s: string) => void)(sessionId);
   }
 
   function getApiChatIds(r: AgentRunner): Map<string, string> {
@@ -3503,7 +3506,7 @@ describe('AgentRunner — idle eviction preserves media', () => {
 
     // Simulate a live mapping created during the turn, then evict.
     getApiChatIds(runner).set(sessionId, 'test-chat');
-    callEvict(runner, sessionId, 'api');
+    callEvict(runner, sessionId);
 
     // Media survives — history rows still reference it.
     expect(fs.existsSync(mediaAbs)).toBe(true);
@@ -3516,9 +3519,15 @@ describe('AgentRunner — idle eviction preserves media', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
 
     const sessionId = 'chat:telegram-1';
+    const mediaAbs = path.join(tmpDir, 'agents', 'alfred', 'media', `api-${sessionId}`, 'shot.jpg');
+    fs.mkdirSync(path.dirname(mediaAbs), { recursive: true });
+    fs.writeFileSync(mediaAbs, 'fake-image');
+
     getApiChatIds(runner).set(sessionId, 'chat:telegram-1');
 
-    expect(() => callEvict(runner, sessionId, 'telegram')).not.toThrow();
+    expect(() => callEvict(runner, sessionId)).not.toThrow();
     expect(getApiChatIds(runner).has(sessionId)).toBe(false);
+    // No files should be deleted — media dir still intact
+    expect(fs.existsSync(mediaAbs)).toBe(true);
   });
 });

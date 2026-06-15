@@ -659,7 +659,7 @@ export class AgentRunner extends EventEmitter {
       if (idleEntry) {
         await idleEntry[1].stop();
         this.sessions.delete(idleEntry[0]);
-        this.evictApiSessionMapping(idleEntry[0], idleEntry[1].source);
+        this.evictApiSessionMapping(idleEntry[0]);
         this.logger.info('Evicted idle session', { sessionId: idleEntry[0] });
       } else {
         throw new Error(`Session pool full: ${this.maxConcurrent} concurrent sessions`);
@@ -1280,7 +1280,7 @@ export class AgentRunner extends EventEmitter {
           this.logger.info('Stopping idle session', { sessionId: id });
           await proc.stop();
           this.sessions.delete(id);
-          this.evictApiSessionMapping(id, proc.source);
+          this.evictApiSessionMapping(id);
         }
       }
     }, 5 * 60 * 1000);
@@ -1904,7 +1904,7 @@ export class AgentRunner extends EventEmitter {
       .filter((a): a is ApiAttachment => a !== null);
   }
 
-  private evictApiSessionMapping(sessionId: string, _source: string): void {
+  private evictApiSessionMapping(sessionId: string): void {
     // Evict the in-memory chat-id mapping only — safe no-op for non-api sessions.
     //
     // IMPORTANT: do NOT delete the session's media dir here. Stopping a session
