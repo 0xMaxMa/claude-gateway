@@ -675,12 +675,25 @@ export class GatewayRouter {
 
   async stop(): Promise<void> {
     if (this.ticketPruner) clearInterval(this.ticketPruner);
-    this.wss?.close();
+    // Terminate live WebSocket clients first. The dashboard PTY viewer holds these
+    // open indefinitely; without an explicit terminate, server.close() below would
+    // wait forever for them to drain (the "Ctrl+C twice" hang).
+    if (this.wss) {
+      for (const client of this.wss.clients) {
+        client.terminate();
+      }
+      this.wss.close();
+    }
     return new Promise((resolve, reject) => {
       if (!this.server) {
         resolve();
         return;
       }
+      // Force-close idle and active keep-alive HTTP connections. The dashboard's
+      // 3s/6s polling keeps connections alive, so server.close() — which only stops
+      // accepting new connections and waits for existing ones — would otherwise hang.
+      // closeAllConnections() is available on Node 18.2+.
+      this.server.closeAllConnections?.();
       this.server.close((err) => {
         if (err) reject(err);
         else resolve();
