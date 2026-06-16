@@ -1153,6 +1153,13 @@ bot.command('clear', async ctx => {
   ).catch(() => {})
 })
 
+// Shared auth check for all callback_query:data handlers.
+// Mirrors the text-reply path: sender must be in allowFrom.
+function isCallbackAuthorized(ctx: Context): boolean {
+  const access = loadAccess()
+  return access.allowFrom.includes(String(ctx.from?.id ?? ''))
+}
+
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -1165,8 +1172,7 @@ bot.on('callback_query:data', async ctx => {
   // text path: the tapper must be in allowFrom.
   const choiceMatch = /^choice:(\d+)$/.exec(data)
   if (choiceMatch) {
-    const access = loadAccess()
-    if (!access.allowFrom.includes(String(ctx.from.id))) {
+    if (!isCallbackAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
@@ -1202,8 +1208,7 @@ bot.on('callback_query:data', async ctx => {
   // any text to the session. Posts a special sentinel that the PTY wrapper
   // translates to ESC, clearing pendingMenu cleanly.
   if (data === 'menu:cancel') {
-    const access = loadAccess()
-    if (!access.allowFrom.includes(String(ctx.from.id))) {
+    if (!isCallbackAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
@@ -1234,8 +1239,7 @@ bot.on('callback_query:data', async ctx => {
   // Handle model selection callback: model:<model_id>
   const modelMatch = /^model:(.+)$/.exec(data)
   if (modelMatch) {
-    const access = loadAccess()
-    if (!access.allowFrom.includes(String(ctx.from.id))) {
+    if (!isCallbackAuthorized(ctx)) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }

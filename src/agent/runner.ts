@@ -21,6 +21,7 @@ import type { HistorySource } from '../history/types';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
+const ANTHROPIC_SOCKET_ERROR = 'socket connection was closed unexpectedly';
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -818,7 +819,7 @@ export class AgentRunner extends EventEmitter {
             // with "API Error: The socket connection was closed unexpectedly". The error
             // bypasses the replyCalled gate so the user always gets notified, even when
             // the agent already called the reply tool earlier in the same turn.
-            const isSocketError = !proc.queryMode && resultText.includes('socket connection was closed unexpectedly');
+            const isSocketError = !proc.queryMode && resultText.includes(ANTHROPIC_SOCKET_ERROR);
             if (isSocketError) {
               this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.');
             }
