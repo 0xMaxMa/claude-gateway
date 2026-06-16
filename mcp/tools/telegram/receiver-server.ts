@@ -1198,6 +1198,39 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Handle interactive-menu cancel: dismiss the pending menu without sending
+  // any text to the session. Posts a special sentinel that the PTY wrapper
+  // translates to ESC, clearing pendingMenu cleanly.
+  if (data === 'menu:cancel') {
+    const access = loadAccess()
+    if (!access.allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const chat_id = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
+    await ctx.answerCallbackQuery({ text: '✓ Cancelled' }).catch(() => {})
+    const callbackUrl = process.env.CLAUDE_CHANNEL_CALLBACK
+    if (callbackUrl) {
+      fetch(callbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: '__MENU_CANCEL__',
+          meta: {
+            chat_id,
+            user: ctx.from.username ?? String(ctx.from.id),
+            user_id: String(ctx.from.id),
+            ts: new Date().toISOString(),
+          },
+        }),
+      }).catch(err => {
+        process.stderr.write(`telegram channel: menu cancel callback POST failed: ${err}\n`)
+      })
+    }
+    return
+  }
+
   // Handle model selection callback: model:<model_id>
   const modelMatch = /^model:(.+)$/.exec(data)
   if (modelMatch) {

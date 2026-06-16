@@ -208,6 +208,11 @@ export class AgentRunner extends EventEmitter {
         }
 
         // Default: /channel — existing channel message handler
+        // Connection: close prevents keep-alive pool reuse: after the OS's
+        // keepAliveTimeout expires the server closes the TCP connection, and the
+        // receiver (Bun) can try to reuse the stale socket → "socket connection
+        // was closed unexpectedly". Closing per-request avoids the race entirely.
+        res.setHeader('Connection', 'close');
         res.writeHead(200);
         res.end('ok');
         try {
@@ -809,9 +814,17 @@ export class AgentRunner extends EventEmitter {
             // so the raw API error must not reach the user's chat or the history DB.
             const isThinkingCorruption =
               obj['is_error'] === true && SessionProcess.isThinkingCorruptionError(resultText);
+            // Detect Anthropic API socket drop — Claude CLI emits this as is_error:false
+            // with "API Error: The socket connection was closed unexpectedly". The error
+            // bypasses the replyCalled gate so the user always gets notified, even when
+            // the agent already called the reply tool earlier in the same turn.
+            const isSocketError = !proc.queryMode && resultText.includes('socket connection was closed unexpectedly');
+            if (isSocketError) {
+              this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.');
+            }
             // Skip when a menu was rendered to buttons this turn — the result
             // text is the same numbered list and would duplicate the menu message.
-            if (resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
+            if (!isSocketError && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
               const text = resultText.trim();
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
@@ -833,7 +846,23 @@ export class AgentRunner extends EventEmitter {
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
             menuSentThisTurn = false;
-            // Delay typing done — agent may continue with more work
+            // In pty-shell mode, a `result` fires after every Claude API sub-turn
+            // (there can be many per user message, separated by tool-call gaps of
+            // arbitrary length). Starting the typing-done timer here would stop
+            // the indicator during those inter-turn gaps. Instead, pty-shell emits
+            // `session_idle` once it is truly done; headless mode only produces
+            // one `result` per message, so the timer pattern still applies there.
+            if (proc.backend !== 'pty-shell') {
+              typingDoneTimer = setTimeout(() => {
+                this.writeTypingDone(mapKey);
+                typingDoneTimer = null;
+              }, TYPING_DONE_DELAY_MS);
+            }
+          }
+          // PTY shell signals "truly idle" (no active turn, empty queue) with this
+          // event. Start the typing-done timer here so the indicator stays alive
+          // through multi-turn tool-call sequences and only stops when all work is done.
+          if (obj['type'] === 'session_idle' && proc.backend === 'pty-shell') {
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
               typingDoneTimer = null;

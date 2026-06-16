@@ -281,6 +281,42 @@ export class DiscordModule implements ChannelModule {
     this.client.on('interactionCreate', async (interaction: ButtonInteraction) => {
       try {
         if (!interaction.isButton?.()) return;
+
+        // Cancel button: send ESC sentinel to dismiss the pending menu cleanly.
+        if ((interaction.customId ?? '') === 'menu:cancel') {
+          const isDM = !interaction.guildId;
+          const isThread = interaction.channel?.isThread?.() ?? false;
+          const context: DiscordMessageContext = {
+            guildId: interaction.guildId ?? null,
+            channelId: interaction.channelId,
+            threadId: isThread ? interaction.channelId : null,
+            userId: interaction.user.id,
+            username: interaction.user.username,
+            messageId: interaction.message?.id ?? '',
+            isDM,
+            isThread,
+          };
+          const access = loadAccessFn();
+          const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));
+          if (result.action !== 'deliver') {
+            await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+            return;
+          }
+          await interaction.update({ components: [] }).catch(() => {});
+          const inbound: InboundMessage = {
+            channel: 'discord',
+            accountId: interaction.client.user?.id ?? 'discord',
+            senderId: interaction.user.id,
+            chatId: interaction.channelId,
+            chatType: isDM ? 'direct' : 'group',
+            text: '__MENU_CANCEL__',
+            messageId: interaction.message?.id ?? '',
+            ts: Date.now(),
+          };
+          await handler(inbound);
+          return;
+        }
+
         const m = /^choice:(\d+)$/.exec(interaction.customId ?? '');
         if (!m) return;
 

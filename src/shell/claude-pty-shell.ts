@@ -285,6 +285,12 @@ class Driver {
     });
     if (isError) logError(`turn failed: ${errMsg ?? '(no detail)'}`);
     this.trySubmit();
+    // If no new turn started and the queue is empty, the session is truly idle.
+    // Emit session_idle so runner.ts can stop the typing indicator cleanly,
+    // without relying on the short per-result timer that fires during tool-call gaps.
+    if (!this.turn && this.queue.length === 0) {
+      this.emitter.emitSessionIdle(this.args.sessionId);
+    }
   }
 
   // ---- turn submission -----------------------------------------------------
@@ -527,6 +533,18 @@ class Driver {
     // Channel turns arrive wrapped in a <channel …>…</channel> envelope, so the
     // bare "1" is buried inside it — unwrap before parsing the selection.
     const choiceText = extractChannelContent(text);
+    // Explicit cancel from a "❌ Cancel" button (Telegram/Discord): send ESC to
+    // dismiss the menu cleanly without queuing any text into Claude's context.
+    // Unlike the "invalid text → ESC + re-queue" path, this leaves the queue
+    // empty so the session just returns to the idle prompt with no side-effects.
+    if (choiceText === '__MENU_CANCEL__') {
+      logWarn('menu cancel received — sending ESC to dismiss');
+      this.host.writeRaw('\x1b');
+      this.pendingMenu = null;
+      // No queue push, no menuCancel needed: ESC dismisses the TUI menu and
+      // Claude resumes normally. The session is simply idle again.
+      return;
+    }
     const n = parseMenuChoice(choiceText, menu.options.length);
     if (n === null) {
       // Not a valid choice — cancel the menu and treat the text as a new prompt

@@ -88,6 +88,11 @@ export function buildChoiceComponents(options: Array<{ label: string }>): unknow
     });
     rows.push({ type: 1, components: buttons }); // ActionRow
   }
+  // Always append a cancel button (Danger style) so the user can dismiss the
+  // menu cleanly. Sends ESC to the PTY without injecting text into Claude's context.
+  if (rows.length > 0 && rows.length < 5) {
+    rows.push({ type: 1, components: [{ type: 2, style: 4, label: '❌ Cancel', custom_id: 'menu:cancel' }] });
+  }
   return rows;
 }
 
