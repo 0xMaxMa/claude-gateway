@@ -88,6 +88,7 @@ export interface GatewayConfig {
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];
+      cors?: { origins: string[] };
     };
     /**
      * true (default) = headless backend (claude --print + stream-json).
