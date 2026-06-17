@@ -237,6 +237,11 @@ class Driver {
           const t = Date.now();
           this.interrupting = { since: t, lastEscAt: t, escs: 1 };
         }
+      } else if (this.queue.length > 0) {
+        // No active turn: the message is still in the queue (not yet pasted into
+        // the PTY input). Drop it so /stop doesn't silently submit it later.
+        logWarn(`SIGINT with no active turn — dropping ${this.queue.length} queued message(s)`);
+        this.queue.length = 0;
       }
     });
     process.on('SIGTERM', () => {
@@ -333,6 +338,13 @@ class Driver {
       await this.host.writeChunked(`\x1b[200~${text}\x1b[201~`);
     }
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
+    // If interrupted while waiting (SIGINT arrived after paste but before Enter),
+    // clear the PTY input line instead of submitting — prevents stuck text in the
+    // prompt that would be prepended to the user's next message.
+    if (this.interrupting || !this.turn) {
+      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
+      return;
+    }
     this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
   }
