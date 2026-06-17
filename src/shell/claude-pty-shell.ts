@@ -341,8 +341,11 @@ class Driver {
     // If interrupted while waiting (SIGINT arrived after paste but before Enter),
     // clear the PTY input line instead of submitting — prevents stuck text in the
     // prompt that would be prepended to the user's next message.
+    // Also clear the queue so any messages queued behind this one don't surface
+    // after the turn is abandoned (matches the SIGINT queue-drop logic above).
     if (this.interrupting || !this.turn) {
       this.host.writeRaw('\x15'); // Ctrl+U: clear input line
+      this.queue.length = 0;
       return;
     }
     this.host.writeRaw('\r');
