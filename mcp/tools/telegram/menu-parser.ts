@@ -33,5 +33,9 @@ export function parseMenuFileContent(raw: string): MenuMessage | null {
     text: `${i + 1}. ${label}`.slice(0, 60),
     callback_data: `choice:${i + 1}`,
   }]);
+  // Always append a cancel button so the user can dismiss the menu without
+  // sending a numbered reply. Tapping it sends ESC to the PTY, clearing
+  // pendingMenu cleanly without injecting spurious text into Claude's context.
+  inline_keyboard.push([{ text: '❌ Cancel', callback_data: 'menu:cancel' }]);
   return { text, inline_keyboard };
 }

@@ -90,24 +90,30 @@ describe('sendMessage', () => {
 });
 
 describe('buildChoiceComponents', () => {
-  it('builds one ActionRow for 3 options', () => {
+  it('builds one ActionRow for 3 options plus cancel row', () => {
     const rows = buildChoiceComponents([{ label: 'Alpha' }, { label: 'Beta' }, { label: 'Gamma' }]);
-    expect(rows).toHaveLength(1);
+    // 1 option row + 1 cancel row
+    expect(rows).toHaveLength(2);
     const row = rows[0] as { type: number; components: Array<{ type: number; style: number; label: string; custom_id: string }> };
     expect(row.type).toBe(1);
     expect(row.components).toHaveLength(3);
     expect(row.components[0]).toMatchObject({ type: 2, style: 2, label: '1. Alpha', custom_id: 'choice:1' });
     expect(row.components[2]).toMatchObject({ custom_id: 'choice:3' });
+    const cancelRow = rows[1] as { type: number; components: Array<{ type: number; style: number; label: string; custom_id: string }> };
+    expect(cancelRow.components[0]).toMatchObject({ type: 2, style: 4, label: '❌ Cancel', custom_id: 'menu:cancel' });
   });
 
   it('splits into multiple ActionRows when >5 options', () => {
     const opts = Array.from({ length: 7 }, (_, i) => ({ label: `Option ${i + 1}` }));
     const rows = buildChoiceComponents(opts);
-    expect(rows).toHaveLength(2);
+    // 2 option rows + 1 cancel row
+    expect(rows).toHaveLength(3);
     const row0 = rows[0] as { components: unknown[] };
     const row1 = rows[1] as { components: unknown[] };
+    const row2 = rows[2] as { components: Array<{ custom_id: string }> };
     expect(row0.components).toHaveLength(5);
     expect(row1.components).toHaveLength(2);
+    expect(row2.components[0].custom_id).toBe('menu:cancel');
   });
 
   it('caps label at 80 characters', () => {

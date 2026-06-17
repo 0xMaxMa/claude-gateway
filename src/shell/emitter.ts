@@ -91,6 +91,16 @@ export class ProtocolEmitter {
     });
   }
 
+  /**
+   * Emitted by the PTY shell when the session returns to truly idle state:
+   * no active turn and the user-message queue is empty. Signals runner.ts
+   * that typing can stop. Contrast with `result` which fires after every
+   * individual Claude API sub-turn (there can be many per user message).
+   */
+  emitSessionIdle(sessionId: string): void {
+    this.writeLine({ type: 'session_idle', session_id: sessionId });
+  }
+
   emitResult(opts: {
     sessionId: string;
     isError: boolean;
