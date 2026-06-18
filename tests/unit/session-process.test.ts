@@ -170,6 +170,29 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-03a: SessionProcess re-emits 'exit' when the child subprocess dies.
+  // The runner's typing/processing teardown (runner.ts) listens for this event;
+  // without it the Telegram typing indicator stays stuck after a session is
+  // stopped/restarted until the 5-min stalled detector fires.
+  // --------------------------------------------------------------------------
+  it("U-SP-03a: re-emits 'exit' to listeners when the child subprocess exits", async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const exitSpy = jest.fn();
+    sp.on('exit', exitSpy);
+
+    // Simulate an external kill (e.g. restartProcess/stop) — the mock child
+    // emits 'exit' on the next tick after kill().
+    await sp.stop();
+    // Allow any queued microtasks/nextTick exit handlers to flush.
+    await new Promise((r) => setImmediate(r));
+
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+    expect(exitSpy).toHaveBeenCalledWith(0, 'SIGTERM');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-04: isIdle() / touch() behaviour
   // --------------------------------------------------------------------------
   it('U-SP-04: isIdle() returns true after idle window, touch() resets it', async () => {

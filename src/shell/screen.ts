@@ -29,6 +29,16 @@ export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
 /**
+ * The recoverable "Request too large (max 32MB)" TUI error overlay. The request
+ * payload (conversation history + attachments) exceeded Anthropic's 32MB API
+ * limit — distinct from the token context window, since it counts raw bytes
+ * (images/files), so it can fire well below 100% context. The TUI footer reads
+ * "Double press esc to go back"; ESC dismisses it. Matched on the stable prefix
+ * so a wording/size change ("max 32MB" → other) still hits.
+ */
+export const TUI_REQUEST_TOO_LARGE = 'Request too large (max';
+
+/**
  * Interactive select-menu footer markers (e.g. AskUserQuestion). The footer reads
  * "Enter to select · ↑/↓ to navigate · Esc to cancel"; we match on the two stable
  * fragments so spacing/middle-dot variations across TUI versions don't break it.
@@ -120,6 +130,11 @@ export class ScreenModel {
   /** Idle input prompt is on screen. */
   hasPrompt(): boolean {
     return TUI_PROMPT_RE.test(this.text());
+  }
+
+  /** The TUI is showing the recoverable "Request too large (max 32MB)" error. */
+  detectRequestTooLarge(): boolean {
+    return this.text().includes(TUI_REQUEST_TOO_LARGE);
   }
 
   detectDialog(): DialogKind | null {

@@ -784,6 +784,21 @@ export class AgentRunner extends EventEmitter {
               });
             }
           }
+          // PTY shell hit the recoverable "Request too large (max 32MB)" error.
+          // The wrapper already dismissed the TUI overlay (double-ESC). Restart the
+          // session so the oversized in-memory context (large images/files) is
+          // dropped — a fresh process reloads the much smaller text-only history
+          // from the store, so the next message isn't doomed to re-hit 32MB. The
+          // proc exit handler clears the typing indicator; tell the user to resend.
+          if (obj['type'] === 'system' && obj['subtype'] === 'request_too_large') {
+            this.logger.warn('Request too large (32MB) — restarting session to clear oversized context', { mapKey });
+            proc.setProcessing(false);
+            this.writeAutoForward(
+              mapKey,
+              '⚠️ Context too large — hit Anthropic\'s 32MB request limit (usually from large images or files in context). Restarting this session with a fresh context. Your last message was not processed — please resend it.',
+            );
+            void this.restartProcess(mapKey);
+          }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
             // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
@@ -823,9 +838,13 @@ export class AgentRunner extends EventEmitter {
             if (isSocketError) {
               this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.');
             }
+            // Suppress the "Request too large (max 32MB)" result: the dedicated
+            // request_too_large event already sent a friendly notice and kicked off
+            // a restart, so the raw TUI error text must not be forwarded as a duplicate.
+            const isRequestTooLarge = obj['is_error'] === true && resultText.includes('Request too large (max');
             // Skip when a menu was rendered to buttons this turn — the result
             // text is the same numbered list and would duplicate the menu message.
-            if (!isSocketError && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
+            if (!isSocketError && !isRequestTooLarge && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
               const text = resultText.trim();
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
@@ -901,8 +920,13 @@ export class AgentRunner extends EventEmitter {
         }, this.channelFor(mapKey)).catch(() => {});
       }
 
-      // Clean up pending typing-done timer when session stops
-      proc.once('exit', () => {
+      // Tear down per-chat typing/processing state whenever the subprocess dies.
+      // Uses `on` (not `once`): a single SessionProcess can auto-restart its child
+      // multiple times over its lifetime, and each death that lacks a final
+      // result/session_idle would otherwise leave the typing indicator stuck until
+      // the 5-min stalled detector fires. writeTypingDone/setProcessing(false) are
+      // idempotent, so firing on every exit is safe.
+      proc.on('exit', () => {
         proc.setProcessing(false);
         if (typingDoneTimer) {
           clearTimeout(typingDoneTimer);

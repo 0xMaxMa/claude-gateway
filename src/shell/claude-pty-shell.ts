@@ -99,6 +99,14 @@ class Driver {
   // a turn that never ends (until the watchdog). Reuses the menu-cancel settle
   // decision (menuVisible is always false here, so it never re-sends ESC).
   private interrupting: { since: number; lastEscAt: number; escs: number } | null = null;
+  // True once session_idle has been emitted for the current idle stretch. Reset on
+  // any new activity (turn start / assistant record). Drives the screen-driven idle
+  // reconciliation in tick() so typing is always torn down even when finishTurn()
+  // never ran (turn-tracking desync, external stop) — fires exactly once per idle.
+  private idleNotified = false;
+  // Guards the recoverable "Request too large (max 32MB)" handler so ESC isn't
+  // re-sent every poll while the error overlay lingers. Reset when a new turn begins.
+  private requestTooLargeHandled = false;
   private lastDialogActionAt = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
@@ -256,6 +264,9 @@ class Driver {
     const usage = record.message.usage;
     if (usage) this.emitter.emitMessageStartShim(usage, this.args.sessionId);
     const text = this.emitter.emitAssistant(record, this.args.sessionId);
+    // New output = activity: re-arm idle reconciliation so a fresh session_idle is
+    // emitted once Claude settles, even if this record arrived outside a tracked turn.
+    this.idleNotified = false;
     if (this.turn) {
       this.turn.sawAssistant = true;
       this.turn.lastProgressAt = Date.now();
@@ -294,6 +305,7 @@ class Driver {
     // Emit session_idle so runner.ts can stop the typing indicator cleanly,
     // without relying on the short per-result timer that fires during tool-call gaps.
     if (!this.turn && this.queue.length === 0) {
+      this.idleNotified = true;
       this.emitter.emitSessionIdle(this.args.sessionId);
     }
   }
@@ -313,6 +325,8 @@ class Driver {
   /** Initialize a fresh active turn (shared by normal submit and menu selection). */
   private beginTurn(): void {
     const now = Date.now();
+    this.idleNotified = false;
+    this.requestTooLargeHandled = false;
     this.turn = {
       startedAt: now,
       submittedAt: 0,
@@ -387,6 +401,56 @@ class Driver {
       return;
     }
 
+    // Heartbeat follows the screen's busy state, NOT turn tracking. During a long
+    // request assembly (the TUI shows "Baked for 6m…"), an interrupt/menu-cancel
+    // settle, or a turn-tracking desync, `this.turn` may be null or unsubmitted
+    // while Claude is genuinely working. Beating whenever the busy spinner is on
+    // screen keeps the receiver's 5-min stalled detector from firing a false
+    // "Claude has not responded" warning while work is actually ongoing.
+    if (this.heartbeatPath
+        && this.screen.isBusy()
+        && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+      this.lastHeartbeatAt = now;
+      try { fs.writeFileSync(this.heartbeatPath, String(now)); } catch {}
+    }
+
+    // Recoverable "Request too large (max 32MB)" TUI error: the request payload
+    // (history + attachments) exceeded Anthropic's 32MB API limit. The TUI shows
+    // "Double press esc to go back". Dismiss it with ESC so the input prompt is
+    // usable again, then signal the gateway to notify the user and restart — the
+    // context is too big, so another message would just re-hit the limit and the
+    // session would be bricked. Gated quiet so we act on a settled error, not a
+    // transient redraw, and once per occurrence via requestTooLargeHandled.
+    if (!this.requestTooLargeHandled
+        && this.screen.quietMs() >= 400
+        && this.screen.detectRequestTooLarge()) {
+      this.requestTooLargeHandled = true;
+      logWarn('Request too large (32MB) detected — dismissing TUI error and signalling restart');
+      this.host.writeRaw('\x1b'); // "Double press esc to go back" — send both.
+      this.host.writeRaw('\x1b');
+      this.emitter.emitRequestTooLarge(this.args.sessionId);
+      if (this.turn) {
+        this.finishTurn(true, 'Request too large (max 32MB) — the conversation exceeded Anthropic\'s 32MB request limit. Restarting with a fresh context.');
+      }
+      return;
+    }
+
+    // Screen-driven idle reconciliation (typing-teardown safety net). If the TUI
+    // is sitting at a quiet idle prompt with no pending work, the session is idle —
+    // emit session_idle so runner.ts tears down the typing indicator. This covers
+    // turn-tracking desyncs where finishTurn() ended `this.turn` early (or never
+    // ran) while Claude kept working: without it the typing bubble + tool-call
+    // status stick forever. Fires once per idle stretch via the idleNotified guard.
+    if (!this.idleNotified
+        && !this.turn && !this.interrupting && !this.menuCancel && !this.pendingMenu
+        && this.queue.length === 0
+        && this.screen.hasPrompt() && !this.screen.isBusy()
+        && this.screen.quietMs() >= FALLBACK_IDLE_QUIET_MS) {
+      logDebug('screen idle with no pending work — emitting session_idle (reconciliation)');
+      this.idleNotified = true;
+      this.emitter.emitSessionIdle(this.args.sessionId);
+    }
+
     // Waiting for the TUI to settle after ESC-cancelling a bridged menu (the user
     // typed a free-text reply instead of a number). Submit the queued prompt only
     // once the menu is gone and the prompt is idle — otherwise the paste races
@@ -440,12 +504,8 @@ class Driver {
     const turn = this.turn;
     if (!turn || turn.submittedAt === 0) return;
 
-    // Touch heartbeat so the receiver's stalled detector doesn't fire during
-    // long sub-agent tasks where the PTY is busy but no JSON lines are emitted.
-    if (this.heartbeatPath && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
-      this.lastHeartbeatAt = now;
-      try { fs.writeFileSync(this.heartbeatPath, String(now)); } catch {}
-    }
+    // (Heartbeat is written above, gated on the busy spinner — covers this active
+    // turn as well as settle/desync states where `this.turn` is null.)
 
     if (this.screen.consumeBusySeen() || this.screen.isBusy()) {
       turn.sawBusy = true;

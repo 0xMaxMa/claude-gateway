@@ -4,10 +4,13 @@ import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
+  TUI_REQUEST_TOO_LARGE,
   parseMenuChoice,
   formatMenuPrompt,
   extractChannelContent,
 } from '../../src/shell/screen';
+import { ProtocolEmitter } from '../../src/shell/emitter';
+import { Writable } from 'stream';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import * as os from 'os';
@@ -99,6 +102,39 @@ describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
     expect(TUI_BYPASS_PERMS).toContain('Yes, I accept');
   });
 
+  it('REQUEST_TOO_LARGE matches the recoverable 32MB error prefix', () => {
+    expect(TUI_REQUEST_TOO_LARGE).toBe('Request too large (max');
+  });
+
+});
+
+describe('ScreenModel detectRequestTooLarge', () => {
+  it('detects the recoverable 32MB error overlay', async () => {
+    const screen = await renderScreen([
+      '  Read 1 file',
+      '',
+      '  Request too large (max 32MB). Double press esc to go back',
+      '',
+    ]);
+    expect(screen.detectRequestTooLarge()).toBe(true);
+  });
+
+  it('is false on a normal idle screen', async () => {
+    const screen = await renderScreen([
+      '❯ ',
+      'ready for input',
+    ]);
+    expect(screen.detectRequestTooLarge()).toBe(false);
+  });
+
+  it('does not false-positive on prose merely discussing the error', async () => {
+    // The matcher keys on the exact "(max" suffix the TUI renders, so an agent
+    // explaining the concept ("a request that is too large") never trips it.
+    const screen = await renderScreen([
+      'If a request is too large the API rejects it.',
+    ]);
+    expect(screen.detectRequestTooLarge()).toBe(false);
+  });
 });
 
 // consumeBusySeen is set synchronously from raw PTY bytes — no xterm async needed.
@@ -537,5 +573,35 @@ describe('pty-shell /stop interrupt settle decision', () => {
       quietMs: 0,
     });
     expect(action).toBe('submit');
+  });
+});
+
+describe('ProtocolEmitter signals', () => {
+  const SID = '11111111-2222-3333-4444-555555555555';
+
+  // Collect each newline-delimited JSON line the emitter writes.
+  function captureEmitter(): { emitter: ProtocolEmitter; lines: () => Record<string, unknown>[] } {
+    const out: string[] = [];
+    const sink = new Writable({
+      write(chunk, _enc, cb) { out.push(chunk.toString()); cb(); },
+    });
+    return {
+      emitter: new ProtocolEmitter(sink),
+      lines: () => out.join('').split('\n').filter(Boolean).map((l) => JSON.parse(l)),
+    };
+  }
+
+  it('emitRequestTooLarge emits a request_too_large system event', () => {
+    const { emitter, lines } = captureEmitter();
+    emitter.emitRequestTooLarge(SID);
+    expect(lines()).toEqual([
+      { type: 'system', subtype: 'request_too_large', session_id: SID },
+    ]);
+  });
+
+  it('emitSessionIdle emits a session_idle event runner uses to stop typing', () => {
+    const { emitter, lines } = captureEmitter();
+    emitter.emitSessionIdle(SID);
+    expect(lines()).toEqual([{ type: 'session_idle', session_id: SID }]);
   });
 });
