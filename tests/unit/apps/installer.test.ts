@@ -436,6 +436,40 @@ services:
       expect(failures).toHaveLength(1);
       expect(failures[0].app).toBe('my-app');
     });
+
+    it('caps concurrency at RESTORE_MAX_CONCURRENCY while starting every app', async () => {
+      // Install 6 running apps — more than the concurrency cap of 4.
+      const names = ['app-a', 'app-b', 'app-c', 'app-d', 'app-e', 'app-f'];
+      for (let i = 0; i < names.length; i++) {
+        const dir = makeAppDir(srcDir, names[i], 5001 + i);
+        const inst = makeInstaller();
+        await waitForJob(inst, inst.install({ localPath: dir }), 5000);
+      }
+
+      // Async spawn that holds each `up` briefly so workers genuinely overlap,
+      // tracking the peak number in flight at once.
+      let inFlight = 0;
+      let maxInFlight = 0;
+      let started = 0;
+      const trackAsyncSpawn = jest.fn(async (_cmd: string, args: string[]) => {
+        if (args.includes('up')) {
+          inFlight++;
+          started++;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, 10));
+          inFlight--;
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer2 = makeInstaller(successSpawn, trackAsyncSpawn);
+
+      const { attempted, failures } = await installer2.restoreRunningApps();
+      expect(attempted).toBe(6);
+      expect(failures).toEqual([]);
+      expect(started).toBe(6); // every app was started
+      expect(maxInFlight).toBeLessThanOrEqual(4); // never exceeded the cap
+      expect(maxInFlight).toBeGreaterThan(1); // and it actually parallelised
+    });
   });
 
   // ─── GitHub URL install — validation ─────────────────────────────────────

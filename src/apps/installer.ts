@@ -87,6 +87,10 @@ const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
 // keeps its child process alive — not the gateway's responsiveness. Shorter than
 // the install path's 600s because restore images are already built (no pull/build).
 const RESTORE_COMPOSE_TIMEOUT_MS = 180_000;
+// Max apps brought up concurrently during boot restore. Bounds the docker/CPU
+// spike when many apps are marked running, while still parallelising the common
+// case. Typical installs have 1-3 apps, so this rarely binds.
+const RESTORE_MAX_CONCURRENCY = 4;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 // Disallow '..' in owner/repo segments — prevents path traversal via edge-case git URL parsing.
@@ -268,11 +272,11 @@ export class AppInstaller {
    * close that gap. It is idempotent: already-healthy containers return fast.
    *
    * Runs fully async and non-blocking: each app is brought up via {@link
-   * composeUpAsync} (a real child process, not spawnSync), and all running apps
-   * are started concurrently. The caller (boot) does NOT await this before
-   * wiring routes, so the gateway stays responsive throughout — at the cost of a
-   * brief ECONNREFUSED window per app until its `--wait` completes, which
-   * self-heals within seconds.
+   * composeUpAsync} (a real child process, not spawnSync), with up to
+   * {@link RESTORE_MAX_CONCURRENCY} apps in flight at once. The caller (boot)
+   * does NOT await this before wiring routes, so the gateway stays responsive
+   * throughout — at the cost of a brief ECONNREFUSED window per app until its
+   * `--wait` completes, which self-heals within seconds.
    *
    * Best-effort and non-fatal — a failure for one app is collected and the rest
    * still proceed, so one broken app cannot block the others or gateway startup.
@@ -281,15 +285,25 @@ export class AppInstaller {
   async restoreRunningApps(): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
     const apps = await this.registry.list();
     const running = apps.filter((e) => e.status === 'running');
-    const results = await Promise.allSettled(
-      running.map((entry) => this.composeUpAsync(entry.name, entry.installPath)),
-    );
     const failures: Array<{ app: string; error: string }> = [];
-    results.forEach((result, i) => {
-      if (result.status === 'rejected') {
-        failures.push({ app: running[i].name, error: (result.reason as Error).message });
+
+    // Bounded-concurrency worker pool: workers pull from a shared cursor until
+    // the list is drained, so at most RESTORE_MAX_CONCURRENCY compose-ups run at
+    // once. push() is safe across workers — JS is single-threaded between awaits.
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < running.length) {
+        const entry = running[cursor++];
+        try {
+          await this.composeUpAsync(entry.name, entry.installPath);
+        } catch (err) {
+          failures.push({ app: entry.name, error: (err as Error).message });
+        }
       }
-    });
+    };
+    const poolSize = Math.min(RESTORE_MAX_CONCURRENCY, running.length);
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
     return { attempted: running.length, failures };
   }
 
@@ -1104,6 +1118,13 @@ function defaultSpawn(
  * Async spawn used by the boot-time restore. Buffers stdout/stderr and resolves
  * with the exit status (never rejects on a non-zero exit — the caller maps that
  * to a failure). On timeout the child is SIGKILLed and the promise rejects.
+ *
+ * NOTE on timeout semantics for `docker compose up --wait`: SIGKILL kills the
+ * `docker compose` CLI process we spawned, NOT the containers. dockerd keeps
+ * bringing them up in the background, so a timeout means "we stopped waiting on
+ * the healthcheck", not "the start was cancelled" — the app may well come up
+ * healthy moments later. That's acceptable for restore: we only abandon the
+ * blocking wait, the container lifecycle is owned by dockerd regardless.
  */
 function defaultAsyncSpawn(
   cmd: string,
@@ -1118,22 +1139,30 @@ function defaultAsyncSpawn(
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const timer = opts?.timeoutMs
-      ? setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          child.kill('SIGKILL');
-          reject(new Error(`Command timed out after ${opts.timeoutMs}ms: ${cmd} ${args[0] ?? ''}`));
-        }, opts.timeoutMs)
-      : null;
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-    child.on('error', (err) => {
+    const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       reject(err);
-    });
+    };
+    const timer = opts?.timeoutMs
+      ? setTimeout(() => {
+          if (settled) return;
+          // SIGKILL the compose CLI; dockerd keeps starting the containers.
+          child.kill('SIGKILL');
+          fail(new Error(`Command timed out after ${opts.timeoutMs}ms: ${cmd} ${args[0] ?? ''}`));
+        }, opts.timeoutMs)
+      : null;
+    // setEncoding uses an internal StringDecoder so multi-byte characters split
+    // across chunk boundaries are decoded correctly. Stream 'error's (rare) are
+    // routed to the same reject path so they never surface as uncaught.
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => { stdout += d; });
+    child.stderr?.on('data', (d: string) => { stderr += d; });
+    child.stdout?.on('error', fail);
+    child.stderr?.on('error', fail);
+    child.on('error', fail);
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
