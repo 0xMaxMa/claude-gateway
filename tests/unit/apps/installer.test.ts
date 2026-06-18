@@ -77,6 +77,25 @@ function failingSpawn(failOn: string) {
   });
 }
 
+/** Async spawn mock (used by the boot-time container restore path). */
+const successAsyncSpawn = jest.fn(
+  async (_cmd: string, _args: string[], _opts?: object) => ({
+    stdout: '',
+    stderr: '',
+    status: 0,
+  }),
+);
+
+/** Async spawn mock that fails on matching command */
+function failingAsyncSpawn(failOn: string) {
+  return jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+    if (args.some((a) => a.includes(failOn))) {
+      return { stdout: '', stderr: `mocked error: ${failOn}`, status: 1 };
+    }
+    return { stdout: '', stderr: '', status: 0 };
+  });
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AppInstaller', () => {
@@ -97,13 +116,15 @@ describe('AppInstaller', () => {
     callbacks = makeCallbacks();
   });
 
-  function makeInstaller(spawnFn = successSpawn) {
+  function makeInstaller(spawnFn = successSpawn, asyncSpawnFn = successAsyncSpawn) {
     return new AppInstaller(
       registry,
       new RegistryClient(),
       callbacks,
       spawnFn,
       appsDir,
+      undefined, // agentManager
+      asyncSpawnFn as unknown as ConstructorParameters<typeof AppInstaller>[6],
     );
   }
 
@@ -365,20 +386,22 @@ services:
   // ─── restoreRunningApps() ─────────────────────────────────────────────────
 
   describe('restoreRunningApps()', () => {
-    it('brings up containers for apps marked running', async () => {
+    it('brings up containers for apps marked running (via the async spawn seam)', async () => {
       const appDir = makeAppDir(srcDir, 'my-app');
       const installer = makeInstaller();
       await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
 
+      // Restore runs through the async (non-blocking) spawn, NOT the sync one.
       const calls: string[][] = [];
-      const trackSpawn = jest.fn((cmd: string, args: string[]) => {
+      const trackAsyncSpawn = jest.fn(async (cmd: string, args: string[]) => {
         calls.push([cmd, ...args]);
         return { stdout: '', stderr: '', status: 0 };
       });
-      const installer2 = makeInstaller(trackSpawn as typeof successSpawn);
+      const installer2 = makeInstaller(successSpawn, trackAsyncSpawn);
 
-      const failures = await installer2.restoreRunningApps();
+      const { attempted, failures } = await installer2.restoreRunningApps();
       expect(failures).toEqual([]);
+      expect(attempted).toBe(1);
       expect(calls.some((c) => c.includes('up'))).toBe(true);
     });
 
@@ -389,14 +412,15 @@ services:
       await installer.startStopRestart('my-app', 'stop');
 
       const calls: string[][] = [];
-      const trackSpawn = jest.fn((cmd: string, args: string[]) => {
+      const trackAsyncSpawn = jest.fn(async (cmd: string, args: string[]) => {
         calls.push([cmd, ...args]);
         return { stdout: '', stderr: '', status: 0 };
       });
-      const installer2 = makeInstaller(trackSpawn as typeof successSpawn);
+      const installer2 = makeInstaller(successSpawn, trackAsyncSpawn);
 
-      const failures = await installer2.restoreRunningApps();
+      const { attempted, failures } = await installer2.restoreRunningApps();
       expect(failures).toEqual([]);
+      expect(attempted).toBe(0);
       expect(calls.some((c) => c.includes('up'))).toBe(false);
     });
 
@@ -405,10 +429,10 @@ services:
       const installer = makeInstaller();
       await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
 
-      const failSpawn = failingSpawn('up');
-      const installer2 = makeInstaller(failSpawn as typeof successSpawn);
+      const installer2 = makeInstaller(successSpawn, failingAsyncSpawn('up'));
 
-      const failures = await installer2.restoreRunningApps();
+      const { attempted, failures } = await installer2.restoreRunningApps();
+      expect(attempted).toBe(1);
       expect(failures).toHaveLength(1);
       expect(failures[0].app).toBe('my-app');
     });

@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
-import { SpawnSyncOptionsWithStringEncoding, spawnSync } from 'node:child_process';
+import { SpawnSyncOptionsWithStringEncoding, spawnSync, spawn } from 'node:child_process';
 import { AppsRegistry, AppEntry, PortEntry } from './registry';
 import { RegistryClient, RegistryVersion } from './registry-client';
 import {
@@ -67,9 +67,26 @@ type SpawnFn = (
   opts?: SpawnSyncOptionsWithStringEncoding,
 ) => { stdout: string; stderr: string; status: number | null };
 
+/**
+ * Async (non-blocking) command runner used by the boot-time container restore.
+ * Unlike {@link SpawnFn} (spawnSync — freezes the event loop for the command's
+ * whole duration), this returns a Promise so a slow `compose up --wait` can run
+ * in the background while the gateway keeps serving Telegram/cron/other apps.
+ */
+type AsyncSpawnFn = (
+  cmd: string,
+  args: string[],
+  opts?: { cwd?: string; timeoutMs?: number },
+) => Promise<{ stdout: string; stderr: string; status: number | null }>;
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
+// Per-app ceiling for the boot-time `compose up --wait` during restore. Runs in
+// the background (non-blocking), so this only bounds how long a hung container
+// keeps its child process alive — not the gateway's responsiveness. Shorter than
+// the install path's 600s because restore images are already built (no pull/build).
+const RESTORE_COMPOSE_TIMEOUT_MS = 180_000;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 // Disallow '..' in owner/repo segments — prevents path traversal via edge-case git URL parsing.
@@ -90,6 +107,7 @@ export class AppInstaller {
     private readonly spawn: SpawnFn = defaultSpawn,
     appsDir?: string,
     private readonly agentManager?: AgentManager,
+    private readonly spawnAsync: AsyncSpawnFn = defaultAsyncSpawn,
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
   }
@@ -249,22 +267,30 @@ export class AppInstaller {
    * (ECONNREFUSED). This re-runs `compose up -d --wait` for each running app to
    * close that gap. It is idempotent: already-healthy containers return fast.
    *
+   * Runs fully async and non-blocking: each app is brought up via {@link
+   * composeUpAsync} (a real child process, not spawnSync), and all running apps
+   * are started concurrently. The caller (boot) does NOT await this before
+   * wiring routes, so the gateway stays responsive throughout — at the cost of a
+   * brief ECONNREFUSED window per app until its `--wait` completes, which
+   * self-heals within seconds.
+   *
    * Best-effort and non-fatal — a failure for one app is collected and the rest
    * still proceed, so one broken app cannot block the others or gateway startup.
-   * Returns the apps that failed to start.
+   * Returns the apps that failed to start (and the count attempted, for logging).
    */
-  async restoreRunningApps(): Promise<Array<{ app: string; error: string }>> {
-    const failures: Array<{ app: string; error: string }> = [];
+  async restoreRunningApps(): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
     const apps = await this.registry.list();
-    for (const entry of apps) {
-      if (entry.status !== 'running') continue;
-      try {
-        this.composeUp(entry.name, entry.installPath);
-      } catch (err) {
-        failures.push({ app: entry.name, error: (err as Error).message });
+    const running = apps.filter((e) => e.status === 'running');
+    const results = await Promise.allSettled(
+      running.map((entry) => this.composeUpAsync(entry.name, entry.installPath)),
+    );
+    const failures: Array<{ app: string; error: string }> = [];
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        failures.push({ app: running[i].name, error: (result.reason as Error).message });
       }
-    }
-    return failures;
+    });
+    return { attempted: running.length, failures };
   }
 
   // ─── Internal install pipeline ────────────────────────────────────────────
@@ -940,6 +966,32 @@ export class AppInstaller {
     }
   }
 
+  /**
+   * Async, non-blocking counterpart of {@link composeUp} for the boot-time
+   * restore. Uses the async spawn seam so a slow `--wait` never freezes the
+   * event loop. Skips {@link stopConflictingContainers} on purpose: that guards
+   * dev-time port clashes during install/update, but after a host reboot nothing
+   * is running (the very reason this restore exists), so there is nothing to
+   * conflict with — and keeping it out avoids extra synchronous docker calls.
+   */
+  private async composeUpAsync(appName: string, dir: string): Promise<void> {
+    await this.runAsync(
+      ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'],
+      dir,
+      RESTORE_COMPOSE_TIMEOUT_MS,
+    );
+  }
+
+  /** Async equivalent of {@link run}: throws on non-zero exit. */
+  private async runAsync(args: string[], cwd?: string, timeoutMs?: number): Promise<{ stdout: string; stderr: string }> {
+    const result = await this.spawnAsync(args[0], args.slice(1), { cwd, timeoutMs });
+    if (result.status !== 0) {
+      const errDetail = (result.stderr.trim() || result.stdout.trim()).slice(-2000);
+      throw new Error(`Command failed: ${args[0]} ${args[1]} — ${errDetail}`);
+    }
+    return { stdout: result.stdout, stderr: result.stderr };
+  }
+
   /** Evict terminal jobs older than 24 hours to bound memory growth. */
   private pruneOldJobs(): void {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
@@ -1046,4 +1098,47 @@ function defaultSpawn(
     stderr: result.stderr ?? '',
     status: result.status,
   };
+}
+
+/**
+ * Async spawn used by the boot-time restore. Buffers stdout/stderr and resolves
+ * with the exit status (never rejects on a non-zero exit — the caller maps that
+ * to a failure). On timeout the child is SIGKILLed and the promise rejects.
+ */
+function defaultAsyncSpawn(
+  cmd: string,
+  args: string[],
+  opts?: { cwd?: string; timeoutMs?: number },
+): Promise<{ stdout: string; stderr: string; status: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = opts?.timeoutMs
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          child.kill('SIGKILL');
+          reject(new Error(`Command timed out after ${opts.timeoutMs}ms: ${cmd} ${args[0] ?? ''}`));
+        }, opts.timeoutMs)
+      : null;
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ stdout, stderr, status: code });
+    });
+  });
 }
