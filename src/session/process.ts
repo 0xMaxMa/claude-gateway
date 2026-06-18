@@ -661,6 +661,14 @@ export class SessionProcess extends EventEmitter {
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
+      // Notify listeners that the underlying subprocess died. The runner relies
+      // on this to tear down per-chat typing/processing state when a session is
+      // stopped or restarted mid-turn (without a final result/session_idle).
+      // Without it the typing indicator stays stuck until the 5-min stalled
+      // detector fires. Idempotent on the listener side (writeTypingDone uses
+      // rmSync(force)), so emitting on every child exit — including auto-restart
+      // — is safe.
+      this.emit('exit', code, signal);
       if (!this.stopping) this.scheduleRestart();
     });
 

@@ -101,6 +101,18 @@ export class ProtocolEmitter {
     this.writeLine({ type: 'session_idle', session_id: sessionId });
   }
 
+  /**
+   * Emitted when the TUI hit the recoverable "Request too large (max 32MB)"
+   * error: the request payload (history + attachments) exceeded Anthropic's
+   * 32MB limit. The wrapper has already dismissed the TUI overlay (double-ESC);
+   * runner.ts handles this by notifying the user and restarting the session so
+   * the oversized in-memory context is dropped — otherwise the next message
+   * re-hits the same limit and the session is effectively bricked.
+   */
+  emitRequestTooLarge(sessionId: string): void {
+    this.writeLine({ type: 'system', subtype: 'request_too_large', session_id: sessionId });
+  }
+
   emitResult(opts: {
     sessionId: string;
     isError: boolean;

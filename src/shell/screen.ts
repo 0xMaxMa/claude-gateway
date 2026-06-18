@@ -29,6 +29,23 @@ export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
 /**
+ * The recoverable "Request too large (max 32MB)" TUI error overlay. The request
+ * payload (conversation history + attachments) exceeded Anthropic's 32MB API
+ * limit — distinct from the token context window, since it counts raw bytes
+ * (images/files), so it can fire well below 100% context.
+ *
+ * Detection requires BOTH the error prefix AND the dismiss-footer marker. The
+ * prefix alone appears in ordinary text too (e.g. the agent explaining this very
+ * error in a reply), and matching it on the live screen would auto-fire the
+ * double-ESC + restart on innocuous prose. The footer "Double press esc to go
+ * back" only renders on the actual dismissable overlay — and is exactly the
+ * affordance our double-ESC relies on, so gating on it keeps detection and the
+ * recovery action consistent: we only auto-dismiss when the dismiss hint is real.
+ */
+export const TUI_REQUEST_TOO_LARGE = 'Request too large (max';
+export const TUI_REQUEST_TOO_LARGE_DISMISS = 'esc to go back';
+
+/**
  * Interactive select-menu footer markers (e.g. AskUserQuestion). The footer reads
  * "Enter to select · ↑/↓ to navigate · Esc to cancel"; we match on the two stable
  * fragments so spacing/middle-dot variations across TUI versions don't break it.
@@ -120,6 +137,16 @@ export class ScreenModel {
   /** Idle input prompt is on screen. */
   hasPrompt(): boolean {
     return TUI_PROMPT_RE.test(this.text());
+  }
+
+  /**
+   * The TUI is showing the recoverable "Request too large (max 32MB)" error.
+   * Requires both the error prefix and the dismiss-footer marker so ordinary
+   * text mentioning the phrase (e.g. an agent reply) never trips the auto-ESC.
+   */
+  detectRequestTooLarge(): boolean {
+    const text = this.text();
+    return text.includes(TUI_REQUEST_TOO_LARGE) && text.includes(TUI_REQUEST_TOO_LARGE_DISMISS);
   }
 
   detectDialog(): DialogKind | null {
