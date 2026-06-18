@@ -208,18 +208,24 @@ export class ScreenModel {
  * Heartbeat liveness predicate (pure). The PTY session counts as actively working
  * — so the receiver's 5-min stalled detector should be held off — when EITHER the
  * busy spinner is on screen (`isBusy`) OR the PTY produced output more recently than
- * `livenessQuietMs` while not parked at an idle prompt (`!hasPrompt`).
+ * `livenessQuietMs` (`quietMs < livenessQuietMs`).
  *
  * The recent-output arm is the robust signal: the exact "esc to interrupt" busy
  * marker can drop off screen for minutes during context compaction, large request
  * assembly, or a long sub-agent run (so `isBusy` reads false), yet those states keep
  * animating a spinner and therefore keep emitting PTY bytes, keeping `quietMs` low.
- * A genuinely hung or idle TUI emits nothing → `quietMs` grows past the window → not
- * alive → the stalled detector fires correctly.
+ *
+ * We deliberately do NOT also gate on "not at an idle prompt": recent Claude Code
+ * keeps the `❯` input caret on screen while a turn is in flight (so the next message
+ * can be queued), so a `hasPrompt` guard would neutralise this arm exactly when it's
+ * needed. The idle prompt is already covered by `quietMs` — a settled idle TUI emits
+ * nothing, so `quietMs` grows past the window and the session reads not-alive. The
+ * only cost is a short tail of beats for up to `livenessQuietMs` after a turn ends,
+ * which is harmless: the turn's result/idle teardown has already stopped typing.
  */
 export function isPtyActivelyWorking(
-  obs: { isBusy: boolean; hasPrompt: boolean; quietMs: number },
+  obs: { isBusy: boolean; quietMs: number },
   livenessQuietMs: number,
 ): boolean {
-  return obs.isBusy || (!obs.hasPrompt && obs.quietMs < livenessQuietMs);
+  return obs.isBusy || obs.quietMs < livenessQuietMs;
 }

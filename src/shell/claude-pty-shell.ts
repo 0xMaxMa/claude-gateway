@@ -415,10 +415,10 @@ class Driver {
     // sub-agent task, an interrupt/menu-cancel settle, or a turn-tracking desync,
     // `this.turn` may be null or unsubmitted while Claude is genuinely working.
     // isPtyActivelyWorking() treats the session as alive when the busy spinner is
-    // on screen OR the PTY emitted output recently while not at an idle prompt —
-    // keeping the receiver's 5-min stalled detector from false-firing mid-work.
+    // on screen OR the PTY emitted output recently — keeping the receiver's 5-min
+    // stalled detector from false-firing mid-work.
     const ptyAlive = isPtyActivelyWorking(
-      { isBusy: this.screen.isBusy(), hasPrompt: this.screen.hasPrompt(), quietMs: this.screen.quietMs() },
+      { isBusy: this.screen.isBusy(), quietMs: this.screen.quietMs() },
       HEARTBEAT_LIVENESS_QUIET_MS,
     );
     if (this.heartbeatPath
