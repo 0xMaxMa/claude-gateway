@@ -9,6 +9,7 @@ import {
   parseMenuChoice,
   formatMenuPrompt,
   extractChannelContent,
+  isPtyActivelyWorking,
 } from '../../src/shell/screen';
 import { ProtocolEmitter } from '../../src/shell/emitter';
 import { Writable } from 'stream';
@@ -184,6 +185,36 @@ describe('ScreenModel raw-chunk busy detection', () => {
     screen.write('hello');
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.quietMs()).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe('isPtyActivelyWorking (heartbeat liveness)', () => {
+  const LIVENESS = 45_000; // mirrors HEARTBEAT_LIVENESS_QUIET_MS in claude-pty-shell.ts
+
+  it('alive when the busy spinner is on screen (fast path)', () => {
+    // Busy marker present → alive regardless of quietMs / prompt state.
+    expect(isPtyActivelyWorking({ isBusy: true, hasPrompt: false, quietMs: 999_999 }, LIVENESS)).toBe(true);
+  });
+
+  it('alive when PTY emitted output recently while not at an idle prompt', () => {
+    // The core fix: compaction / large-request assembly / sub-agent runs drop the
+    // "esc to interrupt" marker (isBusy=false) but keep animating → quietMs stays low.
+    expect(isPtyActivelyWorking({ isBusy: false, hasPrompt: false, quietMs: 1_000 }, LIVENESS)).toBe(true);
+  });
+
+  it('NOT alive when genuinely quiet for longer than the liveness window (hung)', () => {
+    // No spinner, no recent output → let the receiver's stalled detector fire.
+    expect(isPtyActivelyWorking({ isBusy: false, hasPrompt: false, quietMs: 60_000 }, LIVENESS)).toBe(false);
+  });
+
+  it('NOT alive when parked at an idle prompt even with recent output', () => {
+    // Settling to the idle prompt after a turn must not keep the heartbeat beating.
+    expect(isPtyActivelyWorking({ isBusy: false, hasPrompt: true, quietMs: 100 }, LIVENESS)).toBe(false);
+  });
+
+  it('liveness window is a strict bound (quietMs === window is NOT alive)', () => {
+    expect(isPtyActivelyWorking({ isBusy: false, hasPrompt: false, quietMs: LIVENESS }, LIVENESS)).toBe(false);
+    expect(isPtyActivelyWorking({ isBusy: false, hasPrompt: false, quietMs: LIVENESS - 1 }, LIVENESS)).toBe(true);
   });
 });
 
