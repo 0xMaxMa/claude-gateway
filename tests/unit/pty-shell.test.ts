@@ -5,6 +5,7 @@ import {
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
   TUI_REQUEST_TOO_LARGE,
+  TUI_REQUEST_TOO_LARGE_DISMISS,
   parseMenuChoice,
   formatMenuPrompt,
   extractChannelContent,
@@ -106,6 +107,10 @@ describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
     expect(TUI_REQUEST_TOO_LARGE).toBe('Request too large (max');
   });
 
+  it('REQUEST_TOO_LARGE_DISMISS matches the overlay dismiss footer', () => {
+    expect(TUI_REQUEST_TOO_LARGE_DISMISS).toBe('esc to go back');
+  });
+
 });
 
 describe('ScreenModel detectRequestTooLarge', () => {
@@ -132,6 +137,17 @@ describe('ScreenModel detectRequestTooLarge', () => {
     // explaining the concept ("a request that is too large") never trips it.
     const screen = await renderScreen([
       'If a request is too large the API rejects it.',
+    ]);
+    expect(screen.detectRequestTooLarge()).toBe(false);
+  });
+
+  it('does not trip when the agent quotes the exact error text without the dismiss footer', async () => {
+    // Self-trigger guard: the agent's own reply may contain the verbatim error
+    // string (e.g. explaining this very bug). Detection requires the dismiss
+    // footer too, which only the real overlay renders — so quoted prose is inert.
+    const screen = await renderScreen([
+      'When the TUI shows "Request too large (max 32MB)" the session must restart.',
+      '❯ ',
     ]);
     expect(screen.detectRequestTooLarge()).toBe(false);
   });

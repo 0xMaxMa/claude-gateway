@@ -14,6 +14,7 @@ import { DiscordReceiver } from '../discord/receiver';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
@@ -793,6 +794,13 @@ export class AgentRunner extends EventEmitter {
           if (obj['type'] === 'system' && obj['subtype'] === 'request_too_large') {
             this.logger.warn('Request too large (32MB) — restarting session to clear oversized context', { mapKey });
             proc.setProcessing(false);
+            // Ordering matters and makes the notice delivery race-free: writeAutoForward
+            // persists the `.forward` file synchronously HERE, before restartProcess()
+            // begins its async stop/kill. The typing-loop tear-down (stop() in typing.ts)
+            // drains and sends `.forward` synchronously before it removes the typing
+            // signal, so by the time the proc exit fires and the loop stops, the file is
+            // already on disk and is delivered — no dependency on poll timing. Do not
+            // reorder restartProcess() ahead of writeAutoForward().
             this.writeAutoForward(
               mapKey,
               '⚠️ Context too large — hit Anthropic\'s 32MB request limit (usually from large images or files in context). Restarting this session with a fresh context. Your last message was not processed — please resend it.',
@@ -841,7 +849,7 @@ export class AgentRunner extends EventEmitter {
             // Suppress the "Request too large (max 32MB)" result: the dedicated
             // request_too_large event already sent a friendly notice and kicked off
             // a restart, so the raw TUI error text must not be forwarded as a duplicate.
-            const isRequestTooLarge = obj['is_error'] === true && resultText.includes('Request too large (max');
+            const isRequestTooLarge = obj['is_error'] === true && resultText.includes(TUI_REQUEST_TOO_LARGE);
             // Skip when a menu was rendered to buttons this turn — the result
             // text is the same numbered list and would duplicate the menu message.
             if (!isSocketError && !isRequestTooLarge && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
