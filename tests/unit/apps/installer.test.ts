@@ -362,6 +362,58 @@ services:
     });
   });
 
+  // ─── restoreRunningApps() ─────────────────────────────────────────────────
+
+  describe('restoreRunningApps()', () => {
+    it('brings up containers for apps marked running', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const calls: string[][] = [];
+      const trackSpawn = jest.fn((cmd: string, args: string[]) => {
+        calls.push([cmd, ...args]);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer2 = makeInstaller(trackSpawn as typeof successSpawn);
+
+      const failures = await installer2.restoreRunningApps();
+      expect(failures).toEqual([]);
+      expect(calls.some((c) => c.includes('up'))).toBe(true);
+    });
+
+    it('skips apps that are not running', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      await installer.startStopRestart('my-app', 'stop');
+
+      const calls: string[][] = [];
+      const trackSpawn = jest.fn((cmd: string, args: string[]) => {
+        calls.push([cmd, ...args]);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer2 = makeInstaller(trackSpawn as typeof successSpawn);
+
+      const failures = await installer2.restoreRunningApps();
+      expect(failures).toEqual([]);
+      expect(calls.some((c) => c.includes('up'))).toBe(false);
+    });
+
+    it('is non-fatal: collects failures without throwing when compose up fails', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const failSpawn = failingSpawn('up');
+      const installer2 = makeInstaller(failSpawn as typeof successSpawn);
+
+      const failures = await installer2.restoreRunningApps();
+      expect(failures).toHaveLength(1);
+      expect(failures[0].app).toBe('my-app');
+    });
+  });
+
   // ─── GitHub URL install — validation ─────────────────────────────────────
 
   describe('install() — github URL validation', () => {

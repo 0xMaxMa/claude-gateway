@@ -240,6 +240,33 @@ export class AppInstaller {
     }
   }
 
+  /**
+   * Bring up containers for every app marked `running` in the registry.
+   *
+   * Compose has no host-reboot restart policy here, so after the gateway (or
+   * its host) restarts, an app's proxy route is restored but its containers are
+   * not running — leaving the route live while the upstream port is dead
+   * (ECONNREFUSED). This re-runs `compose up -d --wait` for each running app to
+   * close that gap. It is idempotent: already-healthy containers return fast.
+   *
+   * Best-effort and non-fatal — a failure for one app is collected and the rest
+   * still proceed, so one broken app cannot block the others or gateway startup.
+   * Returns the apps that failed to start.
+   */
+  async restoreRunningApps(): Promise<Array<{ app: string; error: string }>> {
+    const failures: Array<{ app: string; error: string }> = [];
+    const apps = await this.registry.list();
+    for (const entry of apps) {
+      if (entry.status !== 'running') continue;
+      try {
+        this.composeUp(entry.name, entry.installPath);
+      } catch (err) {
+        failures.push({ app: entry.name, error: (err as Error).message });
+      }
+    }
+    return failures;
+  }
+
   // ─── Internal install pipeline ────────────────────────────────────────────
 
   private async runInstall(job: JobState, options: InstallOptions): Promise<void> {

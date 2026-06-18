@@ -604,6 +604,13 @@ async function main(): Promise<void> {
 
   // Restore proxy routes, sockets, and agent entries for apps that were running before restart
   try {
+    // Compose has no host-reboot restart policy, so a running app's containers
+    // are down after a restart. Bring them up before wiring routes, otherwise
+    // the restored proxy route points at a dead port (ECONNREFUSED).
+    const startFailures = await appInstaller.restoreRunningApps();
+    for (const f of startFailures) {
+      globalLogger.warn(`App store: failed to start "${f.app}" containers on restore (non-fatal): ${f.error}`);
+    }
     await router.loadProxyRoutes(appsRegistry);
     await restoreSockets(appsRegistry, socketServer);
     const reconcileErrors = await agentManager.reconcileAgents(appsRegistry);
