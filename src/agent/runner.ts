@@ -1210,13 +1210,28 @@ export class AgentRunner extends EventEmitter {
    *
    * Used by the skills hot-reload path so that SKILL.md changes take effect
    * without kicking users out of in-flight turns.
+   *
+   * @param opts.skipBusy When true, busy sessions are left running and NOT
+   *   marked for a deferred restart. Use this when the change came from a file
+   *   the agent writes itself mid-turn (e.g. MEMORY.md): deferring a restart
+   *   there would stop the very session that produced the change the moment its
+   *   turn completes (the self-restart footgun). Idle sessions are still
+   *   restarted so the change reaches them on their next spawn. The recomposed
+   *   CLAUDE.md is already on disk, so a skipped busy session picks up the
+   *   change on its own next natural spawn.
    */
-  async restartOrDefer(): Promise<void> {
+  async restartOrDefer(opts?: { skipBusy?: boolean }): Promise<void> {
+    const skipBusy = opts?.skipBusy ?? false;
     let immediate = 0;
     let deferred = 0;
+    let skipped = 0;
     const toStopNow: string[] = [];
     for (const [id, proc] of this.sessions) {
       if (proc.isProcessing) {
+        if (skipBusy) {
+          skipped++;
+          continue;
+        }
         proc.markPendingRestart();
         deferred++;
       } else {
@@ -1230,7 +1245,7 @@ export class AgentRunner extends EventEmitter {
       this.sessions.delete(id);
       immediate++;
     }
-    this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred });
+    this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred, skipped });
   }
 
   /**

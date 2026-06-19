@@ -434,6 +434,43 @@ describe('AgentRunner — restartOrDefer', () => {
     // Session should now be stopped and removed via deferredRestartReady listener
     expect(getSessions(runner).has('chat:defer')).toBe(false);
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS7: skipBusy — busy session is left running (no deferred restart),
+  //      idle session is still stopped immediately
+  // --------------------------------------------------------------------------
+  it('RS7: skipBusy leaves busy sessions running but still restarts idle ones', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:a', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:b', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sessA = getSessions(runner).get('chat:a')!;
+    const sessB = getSessions(runner).get('chat:b')!;
+    // sessA idle (turn completed), sessB busy (agent wrote MEMORY.md mid-turn)
+    sessA.setProcessing(false);
+    sessB.setProcessing(true);
+    const stopSpyB = jest.spyOn(sessB, 'stop');
+    const pendingSpyB = jest.spyOn(sessB, 'markPendingRestart');
+
+    await runner.restartOrDefer({ skipBusy: true });
+
+    // idle session restarted (stopped + removed)
+    expect(getSessions(runner).has('chat:a')).toBe(false);
+    // busy session untouched: not stopped, not armed for deferred restart
+    expect(getSessions(runner).has('chat:b')).toBe(true);
+    expect(stopSpyB).not.toHaveBeenCalled();
+    expect(pendingSpyB).not.toHaveBeenCalled();
+
+    // And completing its turn must NOT stop it (no footgun)
+    sessB.setProcessing(false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(getSessions(runner).has('chat:b')).toBe(true);
+  }, 15000);
 });
 
 // ── Typing error notification tests ───────────────────────────────────────────

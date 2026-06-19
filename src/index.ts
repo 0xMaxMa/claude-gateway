@@ -24,7 +24,7 @@ import * as os from 'os';
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
-import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, RESTART_EXEMPT_FILES } from './agent/workspace-loader';
+import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, AGENT_WRITABLE_FILES } from './agent/workspace-loader';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -308,22 +308,22 @@ async function startAgent(
       if (updated.skillRegistry) {
         runner.setSkillRegistry(updated.skillRegistry);
       }
-      // Recompose always; restart only when a non-exempt file changed.
-      // A memory-only change (MEMORY.md) must not restart the running session —
-      // the agent writes its own memory mid-turn, so restarting would kill the
-      // session that produced it. The recomposed CLAUDE.md still carries the new
-      // memory into the next spawn.
-      const restartNeeded =
-        changedFiles.length === 0 ||
-        changedFiles.some((f) => !RESTART_EXEMPT_FILES.has(f));
-      if (restartNeeded) {
-        logger.info('Updated CLAUDE.md, restarting sessions', { files: changedFiles });
-        await runner.restartOrDefer();
-      } else {
-        logger.info('Updated CLAUDE.md (memory-only change), keeping sessions alive', {
-          files: changedFiles,
-        });
-      }
+      // Recompose always (above). For the restart, distinguish self-written
+      // files: when ONLY agent-writable files changed (MEMORY/USER/SOUL/AGENTS),
+      // the change most likely came from the running session mid-turn, so skip
+      // restarting busy sessions to avoid the self-restart footgun. Idle
+      // sessions are still restarted; any non-agent-writable file (e.g.
+      // HEARTBEAT.md) restores the normal restart-or-defer behavior.
+      const agentWritableOnly =
+        changedFiles.length > 0 &&
+        changedFiles.every((f) => AGENT_WRITABLE_FILES.has(f));
+      logger.info(
+        agentWritableOnly
+          ? 'Updated CLAUDE.md (agent-writable change), restarting idle sessions only'
+          : 'Updated CLAUDE.md, restarting sessions',
+        { files: changedFiles },
+      );
+      await runner.restartOrDefer({ skipBusy: agentWritableOnly });
       scheduler.load(updated.files.heartbeatMd);
     } catch (err) {
       logger.error('Failed to reload workspace', { error: (err as Error).message });

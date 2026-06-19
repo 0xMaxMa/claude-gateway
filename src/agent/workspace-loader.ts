@@ -170,17 +170,20 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
 const WATCH_DEBOUNCE_MS = 300;
 
 /**
- * Canonical workspace files that, when they are the ONLY thing that changed,
- * must NOT trigger a session restart.
- *
- * MEMORY.md is written by the agent itself during a turn (per the memory rule).
- * The recomposed CLAUDE.md still picks up the new memory for the next spawn, but
- * restarting on a self-written memory file kills the very session that produced
- * it — a deferred restart arms while the session is busy, then stops it the
- * moment the turn completes. Recompose-only avoids that footgun while keeping
- * memory live for future sessions.
+ * Canonical workspace files the agent is authorized to write itself, per the
+ * memory rule (see MEMORY_RULE above). When ONLY these change, a busy session
+ * must not be force-restarted: the change most likely came from that very
+ * session mid-turn, and a deferred restart would stop it the moment the turn
+ * completes (the self-restart footgun). Idle sessions are still restarted so
+ * the change reaches them on their next spawn, and the recomposed CLAUDE.md
+ * carries the change into every future spawn regardless.
  */
-export const RESTART_EXEMPT_FILES = new Set<string>(['MEMORY.md']);
+export const AGENT_WRITABLE_FILES = new Set<string>([
+  'MEMORY.md',
+  'USER.md',
+  'SOUL.md',
+  'AGENTS.md',
+]);
 
 /**
  * Normalize a changed file path to its canonical uppercase basename, resolving

@@ -5,7 +5,7 @@ import {
   loadWorkspace,
   migrateWorkspaceFiles,
   watchWorkspace,
-  RESTART_EXEMPT_FILES,
+  AGENT_WRITABLE_FILES,
   MissingRequiredFileError,
 } from '../../src/agent/workspace-loader';
 
@@ -282,12 +282,18 @@ describe('workspace-loader', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Recompose-vs-restart split (option A): MEMORY.md is restart-exempt
+  // Self-restart footgun guard: agent-writable files skip busy-session restart
   // -------------------------------------------------------------------------
-  it('RESTART_EXEMPT_FILES: contains MEMORY.md but not SOUL.md/AGENTS.md', () => {
-    expect(RESTART_EXEMPT_FILES.has('MEMORY.md')).toBe(true);
-    expect(RESTART_EXEMPT_FILES.has('SOUL.md')).toBe(false);
-    expect(RESTART_EXEMPT_FILES.has('AGENTS.md')).toBe(false);
+  it('AGENT_WRITABLE_FILES: contains all 4 memory-rule files, not HEARTBEAT/IDENTITY/CLAUDE', () => {
+    // Files the memory rule authorizes the agent to write
+    expect(AGENT_WRITABLE_FILES.has('MEMORY.md')).toBe(true);
+    expect(AGENT_WRITABLE_FILES.has('USER.md')).toBe(true);
+    expect(AGENT_WRITABLE_FILES.has('SOUL.md')).toBe(true);
+    expect(AGENT_WRITABLE_FILES.has('AGENTS.md')).toBe(true);
+    // Files NOT self-written → still trigger a normal restart-or-defer
+    expect(AGENT_WRITABLE_FILES.has('HEARTBEAT.md')).toBe(false);
+    expect(AGENT_WRITABLE_FILES.has('IDENTITY.md')).toBe(false);
+    expect(AGENT_WRITABLE_FILES.has('CLAUDE.md')).toBe(false);
   });
 
   it('watchWorkspace: onChange receives canonical changed filename (MEMORY.md)', async () => {
@@ -306,8 +312,8 @@ describe('workspace-loader', () => {
 
         const all = batches.flat();
         expect(all).toContain('MEMORY.md');
-        // memory-only change → no restart-requiring file present
-        expect(all.every((f) => RESTART_EXEMPT_FILES.has(f))).toBe(true);
+        // self-written-only change → every changed file is agent-writable
+        expect(all.every((f) => AGENT_WRITABLE_FILES.has(f))).toBe(true);
       } finally {
         handle.close();
       }
