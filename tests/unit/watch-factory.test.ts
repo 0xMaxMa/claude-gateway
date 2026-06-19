@@ -115,6 +115,26 @@ describe('createWatcher', () => {
     expect(count).toBe(0);
   });
 
+  test('WF7: onChange receives the de-duplicated paths that changed in the window', async () => {
+    const batches: string[][] = [];
+    const handle = createWatcher({
+      paths: [path.join(tmpDir, '*.md')],
+      debounceMs: 200,
+      onChange: (changed) => { batches.push(changed.map(p => path.basename(p))); },
+    });
+
+    await new Promise(r => setTimeout(r, 150));
+    fs.writeFileSync(path.join(tmpDir, 'a.md'), 'x');
+    fs.writeFileSync(path.join(tmpDir, 'b.md'), 'y');
+    await new Promise(r => setTimeout(r, 600));
+
+    await handle.close();
+    expect(batches.length).toBeGreaterThanOrEqual(1);
+    const all = batches.flat();
+    expect(all).toContain('a.md');
+    expect(all).toContain('b.md');
+  });
+
   test('WF6: onAddSync is called synchronously on add with file path', async () => {
     const seen: string[] = [];
     const handle = createWatcher({

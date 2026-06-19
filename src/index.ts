@@ -24,7 +24,7 @@ import * as os from 'os';
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
-import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles } from './agent/workspace-loader';
+import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, RESTART_EXEMPT_FILES } from './agent/workspace-loader';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -291,25 +291,39 @@ async function startAgent(
   schedulers.push(scheduler);
 
   // Watch workspace for changes
-  watchWorkspace(agentConfig.workspace, async () => {
-    logger.info('Workspace changed, reloading');
+  watchWorkspace(agentConfig.workspace, async (changedFiles) => {
+    logger.info('Workspace changed, reloading', { files: changedFiles });
     try {
       const updated = await loadWorkspace(agentConfig.workspace, {
         mcpToolsDir,
         sharedSkillsDir,
         logger,
       });
-      // Rewrite CLAUDE.md with updated system prompt and restart subprocess
+      // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
         path.join(agentConfig.workspace, 'CLAUDE.md'),
         updated.systemPrompt,
         'utf8',
       );
-      logger.info('Updated CLAUDE.md, restarting sessions');
       if (updated.skillRegistry) {
         runner.setSkillRegistry(updated.skillRegistry);
       }
-      await runner.restartOrDefer();
+      // Recompose always; restart only when a non-exempt file changed.
+      // A memory-only change (MEMORY.md) must not restart the running session —
+      // the agent writes its own memory mid-turn, so restarting would kill the
+      // session that produced it. The recomposed CLAUDE.md still carries the new
+      // memory into the next spawn.
+      const restartNeeded =
+        changedFiles.length === 0 ||
+        changedFiles.some((f) => !RESTART_EXEMPT_FILES.has(f));
+      if (restartNeeded) {
+        logger.info('Updated CLAUDE.md, restarting sessions', { files: changedFiles });
+        await runner.restartOrDefer();
+      } else {
+        logger.info('Updated CLAUDE.md (memory-only change), keeping sessions alive', {
+          files: changedFiles,
+        });
+      }
       scheduler.load(updated.files.heartbeatMd);
     } catch (err) {
       logger.error('Failed to reload workspace', { error: (err as Error).message });

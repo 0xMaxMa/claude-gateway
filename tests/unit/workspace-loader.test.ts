@@ -5,6 +5,7 @@ import {
   loadWorkspace,
   migrateWorkspaceFiles,
   watchWorkspace,
+  RESTART_EXEMPT_FILES,
   MissingRequiredFileError,
 } from '../../src/agent/workspace-loader';
 
@@ -272,6 +273,41 @@ describe('workspace-loader', () => {
         expect(fs.existsSync(path.join(tmpDir, 'soul.md'))).toBe(false);
         // SOUL.md should now exist
         expect(fs.existsSync(path.join(tmpDir, 'SOUL.md'))).toBe(true);
+      } finally {
+        handle.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Recompose-vs-restart split (option A): MEMORY.md is restart-exempt
+  // -------------------------------------------------------------------------
+  it('RESTART_EXEMPT_FILES: contains MEMORY.md but not SOUL.md/AGENTS.md', () => {
+    expect(RESTART_EXEMPT_FILES.has('MEMORY.md')).toBe(true);
+    expect(RESTART_EXEMPT_FILES.has('SOUL.md')).toBe(false);
+    expect(RESTART_EXEMPT_FILES.has('AGENTS.md')).toBe(false);
+  });
+
+  it('watchWorkspace: onChange receives canonical changed filename (MEMORY.md)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-watch-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
+      fs.writeFileSync(path.join(tmpDir, 'MEMORY.md'), 'initial');
+
+      const batches: string[][] = [];
+      const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
+
+      try {
+        await new Promise((r) => setTimeout(r, 500));
+        fs.writeFileSync(path.join(tmpDir, 'MEMORY.md'), 'updated by agent');
+        await new Promise((r) => setTimeout(r, 1500));
+
+        const all = batches.flat();
+        expect(all).toContain('MEMORY.md');
+        // memory-only change → no restart-requiring file present
+        expect(all.every((f) => RESTART_EXEMPT_FILES.has(f))).toBe(true);
       } finally {
         handle.close();
       }

@@ -7,8 +7,12 @@ export interface WatcherOptions {
   debounceMs: number;
   /** Additional chokidar options */
   chokidarOpts?: chokidar.WatchOptions;
-  /** Callback invoked (debounced) when any watched path changes */
-  onChange: () => void;
+  /**
+   * Callback invoked (debounced) when any watched path changes.
+   * Receives the de-duplicated list of file paths that changed during the
+   * debounce window (empty-safe). Callers that don't care may ignore it.
+   */
+  onChange: (changedPaths: string[]) => void;
   /**
    * Optional synchronous side-effect called immediately on 'add' events,
    * before the debounced onChange fires (e.g. for file renames).
@@ -35,10 +39,17 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
   });
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Paths that changed during the current debounce window, flushed to onChange.
+  let pendingPaths = new Set<string>();
 
-  const debounced = () => {
+  const debounced = (filePath?: string) => {
+    if (filePath) pendingPaths.add(filePath);
     if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(opts.onChange, opts.debounceMs);
+    debounceTimer = setTimeout(() => {
+      const changed = Array.from(pendingPaths);
+      pendingPaths = new Set();
+      opts.onChange(changed);
+    }, opts.debounceMs);
   };
 
   let resolveReady!: () => void;
@@ -48,10 +59,10 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
     .on('ready', resolveReady)
     .on('add', (filePath: string) => {
       if (opts.onAddSync) opts.onAddSync(filePath);
-      debounced();
+      debounced(filePath);
     })
-    .on('change', debounced)
-    .on('unlink', debounced);
+    .on('change', (filePath: string) => debounced(filePath))
+    .on('unlink', (filePath: string) => debounced(filePath));
 
   return {
     ready,
@@ -60,6 +71,7 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
         clearTimeout(debounceTimer);
         debounceTimer = null;
       }
+      pendingPaths = new Set();
       await watcher.close();
     },
   };
