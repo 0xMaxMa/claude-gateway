@@ -123,6 +123,16 @@ function getIdleCleaner(runner: AgentRunner): ReturnType<typeof setInterval> | u
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+// Shrink the channel-coalescing debounce window file-wide so image POSTs flush
+// almost immediately — existing image tests assume a near-instant spawn. Tests
+// that exercise the debounce timing itself set their own larger value.
+beforeAll(() => {
+  process.env.CHANNEL_COALESCE_WINDOW_MS = '20';
+});
+afterAll(() => {
+  delete process.env.CHANNEL_COALESCE_WINDOW_MS;
+});
+
 describe('AgentRunner (session pool)', () => {
   let tmpDir: string;
   let agentConfig: AgentConfig;
@@ -3567,4 +3577,151 @@ describe('AgentRunner — idle eviction preserves media', () => {
     // No files should be deleted — media dir still intact
     expect(fs.existsSync(mediaAbs)).toBe(true);
   });
+});
+
+// ── Channel message coalescing (image + text → one turn) ───────────────────────
+describe('AgentRunner — channel coalescing (US-IMG-COALESCE)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    // Use a deliberately wide window here so debounce timing is observable.
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '300';
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-coalesce-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '20'; // restore file-wide default
+    jest.clearAllMocks();
+  });
+
+  async function postImage(
+    port: number,
+    chatId: string,
+    imagePath: string,
+    content = '',
+    messageId = '1',
+  ): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        meta: { chat_id: chatId, message_id: messageId, user: 'testuser', ts: new Date().toISOString(), image_path: imagePath },
+      }),
+    });
+  }
+
+  function turnWritesOf(): string[] {
+    const proc = allProcesses.find(p => !p.killed && p.stdin!.write.mock.calls.length > 0);
+    return proc ? proc.stdin!.write.mock.calls.map((c: unknown[]) => String(c[0])) : [];
+  }
+
+  // CL-01: plain text takes the fast path — spawns immediately despite a wide window.
+  it('CL-01: plain text message is injected immediately (no debounce)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:cl01', 'hello there');
+    // Well under the 300ms window — a buffered message would NOT be here yet.
+    await new Promise(r => setTimeout(r, 120));
+
+    expect(getSessions(runner).has('chat:cl01')).toBe(true);
+  }, 15000);
+
+  // CL-02: a message carrying an image is held until the debounce window elapses.
+  it('CL-02: image message is debounced until the window elapses', async () => {
+    const img = path.join(tmpDir, 'cl02.jpg');
+    fs.writeFileSync(img, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postImage(port, 'chat:cl02', img, 'look at this');
+    await new Promise(r => setTimeout(r, 120));
+    // Still inside the window → not flushed yet.
+    expect(getSessions(runner).has('chat:cl02')).toBe(false);
+
+    await new Promise(r => setTimeout(r, 350));
+    // Past the window → flushed and spawned.
+    expect(getSessions(runner).has('chat:cl02')).toBe(true);
+  }, 15000);
+
+  // CL-03: an image followed by a separate text message within the window are
+  // merged into ONE turn (the photo and its instruction land together).
+  it('CL-03: image then follow-up text merge into a single turn', async () => {
+    const img = path.join(tmpDir, 'merge-img.jpg');
+    fs.writeFileSync(img, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postImage(port, 'chat:cl03', img, '', '10');
+    await new Promise(r => setTimeout(r, 80)); // within window
+    await sendChannelPost(port, 'chat:cl03', 'MERGE_MARKER_TEXT');
+
+    await new Promise(r => setTimeout(r, 450)); // let the window flush
+
+    // Exactly one session for the chat.
+    expect(getSessions(runner).has('chat:cl03')).toBe(true);
+
+    // The injected turn carries BOTH the image and the text in a single write.
+    const writes = turnWritesOf();
+    const turn = writes.find(w => w.includes('merge-img.jpg'));
+    expect(turn).toBeDefined();
+    expect(turn).toContain('MERGE_MARKER_TEXT');
+  }, 15000);
+
+  // CL-04: an album burst (two rapid images) coalesces — both image paths in one turn.
+  it('CL-04: rapid image burst coalesces into one turn with both images', async () => {
+    const img1 = path.join(tmpDir, 'album-a.jpg');
+    const img2 = path.join(tmpDir, 'album-b.jpg');
+    fs.writeFileSync(img1, Buffer.alloc(64));
+    fs.writeFileSync(img2, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postImage(port, 'chat:cl04', img1, 'album caption', '20');
+    await postImage(port, 'chat:cl04', img2, '', '21');
+
+    await new Promise(r => setTimeout(r, 450));
+
+    const writes = turnWritesOf();
+    const turn = writes.find(w => w.includes('album-a.jpg'));
+    expect(turn).toBeDefined();
+    expect(turn).toContain('album-b.jpg');
+  }, 15000);
+
+  // CL-05: pending coalesce timers are cleared on stop() (no dangling buffers).
+  it('CL-05: stop() clears any pending coalesce buffer', async () => {
+    const img = path.join(tmpDir, 'cl05.jpg');
+    fs.writeFileSync(img, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postImage(port, 'chat:cl05', img, 'pending');
+    await new Promise(r => setTimeout(r, 80)); // still buffered
+
+    const buffers = (runner as unknown as { channelCoalesce: Map<string, unknown> }).channelCoalesce;
+    expect(buffers.size).toBe(1);
+
+    await runner.stop();
+    expect(buffers.size).toBe(0);
+  }, 15000);
 });
