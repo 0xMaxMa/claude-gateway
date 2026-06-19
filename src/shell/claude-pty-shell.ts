@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
-import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, extractChannelContent } from './screen';
+import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
@@ -26,6 +26,15 @@ const STARTUP_QUIET_MS = 600;
 // How often to touch the heartbeat file during an active turn (PTY mode keepalive).
 // Must be well under the receiver's STALLED_TIMEOUT_MS (300s) to prevent false warnings.
 const HEARTBEAT_INTERVAL_MS = 60_000;
+// Liveness window for the heartbeat: if the PTY produced output more recently than
+// this (and we're not parked at an idle prompt), Claude is considered actively
+// working even when the exact "esc to interrupt" busy marker isn't on screen.
+// Covers states where isBusy() goes false but work continues — context compaction,
+// large request assembly, and long sub-agent tasks whose spinner keeps animating
+// (ticking the elapsed-time counter) and so keeps emitting PTY bytes. Sized well
+// above the ~1s spinner tick and below the 60s beat interval, so a genuinely hung
+// or idle TUI (no output) still goes quiet → no beat → stalled detector fires.
+const HEARTBEAT_LIVENESS_QUIET_MS = 45_000;
 const SUBMIT_ENTER_DELAY_MS = 300;
 const SUBMIT_RETRY_AFTER_MS = 4000;
 const MAX_ENTER_RETRIES = 2;
@@ -401,14 +410,19 @@ class Driver {
       return;
     }
 
-    // Heartbeat follows the screen's busy state, NOT turn tracking. During a long
-    // request assembly (the TUI shows "Baked for 6m…"), an interrupt/menu-cancel
-    // settle, or a turn-tracking desync, `this.turn` may be null or unsubmitted
-    // while Claude is genuinely working. Beating whenever the busy spinner is on
-    // screen keeps the receiver's 5-min stalled detector from firing a false
-    // "Claude has not responded" warning while work is actually ongoing.
+    // Heartbeat follows PTY liveness, NOT turn tracking. During a long request
+    // assembly (the TUI shows "Baked for 6m…"), context compaction, a long
+    // sub-agent task, an interrupt/menu-cancel settle, or a turn-tracking desync,
+    // `this.turn` may be null or unsubmitted while Claude is genuinely working.
+    // isPtyActivelyWorking() treats the session as alive when the busy spinner is
+    // on screen OR the PTY emitted output recently — keeping the receiver's 5-min
+    // stalled detector from false-firing mid-work.
+    const ptyAlive = isPtyActivelyWorking(
+      { isBusy: this.screen.isBusy(), quietMs: this.screen.quietMs() },
+      HEARTBEAT_LIVENESS_QUIET_MS,
+    );
     if (this.heartbeatPath
-        && this.screen.isBusy()
+        && ptyAlive
         && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
       this.lastHeartbeatAt = now;
       try { fs.writeFileSync(this.heartbeatPath, String(now)); } catch {}

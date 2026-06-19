@@ -9,6 +9,7 @@ import {
   parseMenuChoice,
   formatMenuPrompt,
   extractChannelContent,
+  isPtyActivelyWorking,
 } from '../../src/shell/screen';
 import { ProtocolEmitter } from '../../src/shell/emitter';
 import { Writable } from 'stream';
@@ -184,6 +185,34 @@ describe('ScreenModel raw-chunk busy detection', () => {
     screen.write('hello');
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.quietMs()).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe('isPtyActivelyWorking (heartbeat liveness)', () => {
+  const LIVENESS = 45_000; // mirrors HEARTBEAT_LIVENESS_QUIET_MS in claude-pty-shell.ts
+
+  it('alive when the busy spinner is on screen (fast path)', () => {
+    // Busy marker present → alive regardless of quietMs.
+    expect(isPtyActivelyWorking({ isBusy: true, quietMs: 999_999 }, LIVENESS)).toBe(true);
+  });
+
+  it('alive when the PTY emitted output recently (no busy marker)', () => {
+    // The core fix: compaction / large-request assembly / sub-agent runs drop the
+    // "esc to interrupt" marker (isBusy=false) but keep animating → quietMs stays low.
+    // This must hold even though recent Claude Code keeps the ❯ input caret on screen
+    // for queueing during a turn — hence NO hasPrompt gate.
+    expect(isPtyActivelyWorking({ isBusy: false, quietMs: 1_000 }, LIVENESS)).toBe(true);
+  });
+
+  it('NOT alive when genuinely quiet for longer than the liveness window (hung/idle)', () => {
+    // No spinner, no recent output → a settled idle prompt or a genuine hang. Both go
+    // quiet, so quietMs grows past the window and the receiver's stalled detector fires.
+    expect(isPtyActivelyWorking({ isBusy: false, quietMs: 60_000 }, LIVENESS)).toBe(false);
+  });
+
+  it('liveness window is a strict bound (quietMs === window is NOT alive)', () => {
+    expect(isPtyActivelyWorking({ isBusy: false, quietMs: LIVENESS }, LIVENESS)).toBe(false);
+    expect(isPtyActivelyWorking({ isBusy: false, quietMs: LIVENESS - 1 }, LIVENESS)).toBe(true);
   });
 });
 
