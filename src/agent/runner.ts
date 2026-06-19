@@ -41,6 +41,12 @@ const PROTECTED_WORKSPACE_FILES = [
 
 const MAX_API_IMAGES = 5;
 
+// Trailing-edge window for coalescing channel messages that carry an image (or that
+// arrive while an image is already buffered) into a single turn. Reset on every new
+// related update, so an album burst or a client-split photo+caption is gathered
+// whole. Plain text with no pending buffer bypasses this entirely (zero added latency).
+export const CHANNEL_COALESCE_WINDOW_MS = 1200;
+
 /**
  * Move UI-uploaded files from staging (ui-upload/) to permanent per-session storage
  * (media/api-{sessionId}/), matching the same pattern Telegram uses.
@@ -121,6 +127,24 @@ export class AgentRunner extends EventEmitter {
   // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
 
+  // Coalescing buffer: collects channel messages that arrive close together so a
+  // photo and its instruction text (which Telegram may deliver as separate updates
+  // — long caption split, album burst, or photo sent before/after the text) are
+  // injected as ONE turn instead of two. Keyed by chatId. A trailing-edge timer
+  // flushes the buffer once no new related update has arrived for the window.
+  private readonly channelCoalesce = new Map<
+    string,
+    {
+      channelSource: 'telegram' | 'discord';
+      entries: Array<{ content?: string; meta?: Record<string, string> }>;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  // Trailing-edge debounce window for channelCoalesce, resolved once at construction.
+  // Overridable via the CHANNEL_COALESCE_WINDOW_MS env var (tests shrink it for speed).
+  private readonly coalesceWindowMs: number;
+
   // Buffers attachment file paths registered via api_reply tool for the current API session turn.
   private readonly pendingApiAttachments = new Map<string, string[]>();
 
@@ -169,6 +193,8 @@ export class AgentRunner extends EventEmitter {
     this.idleTimeoutMs =
       (agentConfig.session?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES) * 60 * 1000;
     this.maxConcurrent = agentConfig.session?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    this.coalesceWindowMs =
+      Number(process.env.CHANNEL_COALESCE_WINDOW_MS) || CHANNEL_COALESCE_WINDOW_MS;
   }
 
   /**
@@ -242,91 +268,32 @@ export class AgentRunner extends EventEmitter {
             return;
           }
 
-          // Get active session ID and route message to it
-          this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource)
-            .then(async (sessionId) => {
-              // Append user message to the active session
-              const userContent = content || (meta['attachment_file_id'] ? '(photo)' : '');
-              const userTs = Date.now();
-              await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
-                role: 'user',
-                content: userContent,
-                ts: userTs,
-              }, channelSource);
+          // Coalesce messages that carry an image (or that arrive while an image is
+          // already buffered) so a photo and its instruction text are injected as
+          // ONE turn — Telegram can split them across updates (long-caption split,
+          // album burst, or photo sent just before/after the text). Plain text with
+          // nothing buffered takes the fast path and is injected immediately.
+          const hasImage = !!meta['image_path'];
+          const pending = this.channelCoalesce.get(chatId);
+          if (hasImage || pending) {
+            const buf = pending ?? {
+              channelSource,
+              entries: [] as Array<{ content?: string; meta?: Record<string, string> }>,
+              timer: undefined as unknown as ReturnType<typeof setTimeout>,
+            };
+            buf.channelSource = channelSource;
+            buf.entries.push(params);
+            if (buf.timer) clearTimeout(buf.timer);
+            buf.timer = setTimeout(() => {
+              const flushed = this.channelCoalesce.get(chatId);
+              this.channelCoalesce.delete(chatId);
+              if (flushed) this.routeChannelTurn(chatId, flushed.channelSource, flushed.entries);
+            }, this.coalesceWindowMs);
+            this.channelCoalesce.set(chatId, buf);
+            return;
+          }
 
-              // Persist to permanent history DB (separate from session context)
-              const mediaFiles: string[] = [];
-              if (meta['image_path']) {
-                try {
-                  const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['image_path']);
-                  mediaFiles.push(rel);
-                } catch {
-                  // Non-fatal — continue without media
-                }
-              }
-              this.historyDb.insertMessage({
-                chatId: `${channelSource}-${chatId}`,
-                sessionId,
-                source: channelSource as HistorySource,
-                role: 'user',
-                content: userContent,
-                senderName: meta['user'] ?? undefined,
-                senderId: meta['user_id'] ?? meta['chat_id'] ?? undefined,
-                platformMessageId: meta['message_id'] ?? undefined,
-                mediaFiles: mediaFiles.length > 0 ? mediaFiles : undefined,
-                ts: userTs,
-              });
-              // Restart session before this turn if accumulated image size exceeded threshold
-              if (this.pendingRestarts.has(chatId)) {
-                const existingSession = this.sessions.get(chatId);
-                if (existingSession) {
-                  await existingSession.stop();
-                  this.sessions.delete(chatId);
-                }
-                this.pendingRestarts.delete(chatId);
-                this.imageSizePerChat.delete(chatId);
-              }
-
-              // Route to session process (map key = chatId, actual sessionId passed separately)
-              // Channel sessions use agent-level model (not per-session)
-              const session = await this.getOrSpawnSession(chatId, channelSource, sessionId);
-              let channelXml = AgentRunner.buildChannelXml(params);
-
-              // Detect skill commands and inject skill content
-              const skillInvocation = detectSkillCommand(content, this.skillRegistry);
-              if (skillInvocation) {
-                channelXml += formatSkillContext(skillInvocation);
-                this.logger.info('Skill invoked', {
-                  skill: skillInvocation.skillKey,
-                  args: skillInvocation.args,
-                  chatId,
-                });
-              }
-
-              const imagePath = meta['image_path'];
-              if (imagePath) {
-                const queue = this.pendingImagePaths.get(chatId) ?? [];
-                queue.push(imagePath);
-                this.pendingImagePaths.set(chatId, queue);
-              }
-
-              session.setProcessing(true);
-              session.sendMessage(channelXml);
-              session.touch();
-              this.logger.debug('Injected channel turn into session', {
-                chatId,
-                sessionId,
-                user: meta['user'],
-              });
-            })
-            .catch((err) => {
-              this.logger.error('Failed to route message to session', {
-                chatId,
-                error: (err as Error).message,
-              });
-              const code = (err as Error).message.includes('pool full') ? 'POOL_FULL' : 'SPAWN_FAILED';
-              this.writeTypingError(chatId, code);
-            });
+          this.routeChannelTurn(chatId, channelSource, [params]);
         } catch (err) {
           this.logger.warn('Failed to parse channel callback body', {
             error: (err as Error).message,
@@ -560,6 +527,114 @@ export class AgentRunner extends EventEmitter {
       }
     }
     return paths;
+  }
+
+  /**
+   * Inject one or more coalesced channel messages as a SINGLE turn. Each entry is
+   * still recorded individually (session history + permanent history DB), but their
+   * channel XML blocks are concatenated and delivered in one sendMessage() call so
+   * a photo and its instruction text are read together in the same turn.
+   */
+  private routeChannelTurn(
+    chatId: string,
+    channelSource: 'telegram' | 'discord',
+    entries: Array<{ content?: string; meta?: Record<string, string> }>,
+  ): void {
+    if (entries.length === 0) return;
+    this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource)
+      .then(async (sessionId) => {
+        // Record each buffered message individually (history + session context).
+        for (const entry of entries) {
+          const meta = entry.meta ?? {};
+          const content = entry.content ?? '';
+          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : '');
+          const userTs = Date.now();
+          await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
+            role: 'user',
+            content: userContent,
+            ts: userTs,
+          }, channelSource);
+
+          // Persist to permanent history DB (separate from session context)
+          const mediaFiles: string[] = [];
+          if (meta['image_path']) {
+            try {
+              const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['image_path']);
+              mediaFiles.push(rel);
+            } catch {
+              // Non-fatal — continue without media
+            }
+          }
+          this.historyDb.insertMessage({
+            chatId: `${channelSource}-${chatId}`,
+            sessionId,
+            source: channelSource as HistorySource,
+            role: 'user',
+            content: userContent,
+            senderName: meta['user'] ?? undefined,
+            senderId: meta['user_id'] ?? meta['chat_id'] ?? undefined,
+            platformMessageId: meta['message_id'] ?? undefined,
+            mediaFiles: mediaFiles.length > 0 ? mediaFiles : undefined,
+            ts: userTs,
+          });
+        }
+
+        // Restart session before this turn if accumulated image size exceeded threshold
+        if (this.pendingRestarts.has(chatId)) {
+          const existingSession = this.sessions.get(chatId);
+          if (existingSession) {
+            await existingSession.stop();
+            this.sessions.delete(chatId);
+          }
+          this.pendingRestarts.delete(chatId);
+          this.imageSizePerChat.delete(chatId);
+        }
+
+        // Route to session process (map key = chatId, actual sessionId passed separately)
+        // Channel sessions use agent-level model (not per-session)
+        const session = await this.getOrSpawnSession(chatId, channelSource, sessionId);
+
+        // Merge buffered messages into one turn: concat channel XML blocks, append
+        // any skill context, and accumulate image paths for size tracking.
+        const blocks: string[] = [];
+        for (const entry of entries) {
+          let channelXml = AgentRunner.buildChannelXml(entry);
+          const skillInvocation = detectSkillCommand(entry.content ?? '', this.skillRegistry);
+          if (skillInvocation) {
+            channelXml += formatSkillContext(skillInvocation);
+            this.logger.info('Skill invoked', {
+              skill: skillInvocation.skillKey,
+              args: skillInvocation.args,
+              chatId,
+            });
+          }
+          blocks.push(channelXml);
+
+          const imagePath = entry.meta?.['image_path'];
+          if (imagePath) {
+            const queue = this.pendingImagePaths.get(chatId) ?? [];
+            queue.push(imagePath);
+            this.pendingImagePaths.set(chatId, queue);
+          }
+        }
+
+        session.setProcessing(true);
+        session.sendMessage(blocks.join('\n'));
+        session.touch();
+        this.logger.debug('Injected channel turn into session', {
+          chatId,
+          sessionId,
+          messages: entries.length,
+        });
+      })
+      .catch((err) => {
+        this.logger.error('Failed to route message to session', {
+          chatId,
+          error: (err as Error).message,
+        });
+        const code = (err as Error).message.includes('pool full') ? 'POOL_FULL' : 'SPAWN_FAILED';
+        this.writeTypingError(chatId, code);
+      });
   }
 
   private static buildChannelXml(params: {
@@ -1447,6 +1522,10 @@ export class AgentRunner extends EventEmitter {
       srv.closeAllConnections?.();
       await new Promise<void>((resolve) => srv.close(() => resolve()));
     }
+    for (const buf of this.channelCoalesce.values()) {
+      clearTimeout(buf.timer);
+    }
+    this.channelCoalesce.clear();
     this.receiver?.stop();
     this.discordReceiver?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.stop()));
