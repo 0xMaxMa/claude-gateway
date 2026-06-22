@@ -24,6 +24,15 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 const ANTHROPIC_SOCKET_ERROR = 'socket connection was closed unexpectedly';
 
+// History re-injection ladder for request_too_large (32MB) recovery. Index =
+// number of consecutive 32MB recoveries on a session; the value is how many
+// history messages the NEXT spawn re-injects. Each retry shrinks the re-loaded
+// context until it drops under Anthropic's 32MB request ceiling. Index 0 (no
+// recovery) MUST equal MAX_HISTORY_MESSAGES in session/process.ts. Past the last
+// rung (0 history) the context can't shrink further, so the runner stops the
+// escalation and asks the user to /clear instead of looping forever.
+const TOO_LARGE_HISTORY_LADDER = [50, 40, 30, 20, 10, 0] as const;
+
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export const DEFAULT_MODELS: ModelConfig[] = [
@@ -123,6 +132,12 @@ export class AgentRunner extends EventEmitter {
 
   // Serialises concurrent getOrSpawnSession calls for the same key to prevent double-spawn
   private readonly sessionSpawnLocks = new Map<string, Promise<SessionProcess>>();
+
+  // Consecutive request_too_large (32MB) recoveries per mapKey. Survives the
+  // session respawn (SessionProcess is recreated on each restart) so the history
+  // re-injection can escalate-shrink across retries (TOO_LARGE_HISTORY_LADDER).
+  // Reset to 0 on the next successful result; read by spawnSession.
+  private readonly tooLargeRecoveries = new Map<string, number>();
 
   // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
@@ -763,6 +778,18 @@ export class AgentRunner extends EventEmitter {
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
 
+    // request_too_large (32MB) recovery: shrink the re-injected history on each
+    // consecutive retry so a pathological context eventually fits. Counter is 0
+    // for healthy sessions (left at the SessionProcess default = ladder index 0).
+    const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
+    if (recoveryCount > 0) {
+      const idx = Math.min(recoveryCount, TOO_LARGE_HISTORY_LADDER.length - 1);
+      proc.historyLimit = TOO_LARGE_HISTORY_LADDER[idx];
+      this.logger.info('Spawning with reduced history after request_too_large', {
+        mapKey, recoveryCount, historyLimit: proc.historyLimit,
+      });
+    }
+
     await proc.start();
 
     // Forward all session output lines so listeners on AgentRunner (GatewayRouter,
@@ -861,26 +888,11 @@ export class AgentRunner extends EventEmitter {
             }
           }
           // PTY shell hit the recoverable "Request too large (max 32MB)" error.
-          // The wrapper already dismissed the TUI overlay (double-ESC). Restart the
-          // session so the oversized in-memory context (large images/files) is
-          // dropped — a fresh process reloads the much smaller text-only history
-          // from the store, so the next message isn't doomed to re-hit 32MB. The
-          // proc exit handler clears the typing indicator; tell the user to resend.
+          // The transcript tailer emits this from the authoritative <synthetic>
+          // record (Bug A fix). Recovery is unified in handleRequestTooLarge()
+          // so the headless path (Bug B) gets identical treatment.
           if (obj['type'] === 'system' && obj['subtype'] === 'request_too_large') {
-            this.logger.warn('Request too large (32MB) — restarting session to clear oversized context', { mapKey });
-            proc.setProcessing(false);
-            // Ordering matters and makes the notice delivery race-free: writeAutoForward
-            // persists the `.forward` file synchronously HERE, before restartProcess()
-            // begins its async stop/kill. The typing-loop tear-down (stop() in typing.ts)
-            // drains and sends `.forward` synchronously before it removes the typing
-            // signal, so by the time the proc exit fires and the loop stops, the file is
-            // already on disk and is delivered — no dependency on poll timing. Do not
-            // reorder restartProcess() ahead of writeAutoForward().
-            this.writeAutoForward(
-              mapKey,
-              '⚠️ Context too large — hit Anthropic\'s 32MB request limit (usually from large images or files in context). Restarting this session with a fresh context. Your last message was not processed — please resend it.',
-            );
-            void this.restartProcess(mapKey);
+            this.handleRequestTooLarge(mapKey, proc);
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
@@ -921,10 +933,20 @@ export class AgentRunner extends EventEmitter {
             if (isSocketError) {
               this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.');
             }
-            // Suppress the "Request too large (max 32MB)" result: the dedicated
-            // request_too_large event already sent a friendly notice and kicked off
-            // a restart, so the raw TUI error text must not be forwarded as a duplicate.
+            // Bug B: headless (claude --print) reports a too-large request as a
+            // synthetic `result` (is_error + "Request too large (max"), NOT as the
+            // PTY `system/request_too_large` event. Previously this result was only
+            // suppressed — the long-lived process stayed alive and rejected every
+            // turn forever ("typing then silent"). Route it through the SAME unified
+            // recovery (notify + escalate-shrink history + restart) as the PTY path.
             const isRequestTooLarge = obj['is_error'] === true && resultText.includes(TUI_REQUEST_TOO_LARGE);
+            if (isRequestTooLarge) {
+              this.handleRequestTooLarge(mapKey, proc);
+            } else if (obj['is_error'] !== true) {
+              // Genuine successful turn — clear any request_too_large escalation so
+              // the next 32MB (if any) starts fresh at the top of the ladder.
+              this.tooLargeRecoveries.delete(mapKey);
+            }
             // Skip when a menu was rendered to buttons this turn — the result
             // text is the same numbered list and would duplicate the menu message.
             if (!isSocketError && !isRequestTooLarge && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
@@ -1197,6 +1219,10 @@ export class AgentRunner extends EventEmitter {
     // Delete persisted media files for this chat
     MediaStore.clearChatMedia(this.agentsBaseDir, agentId, historyChatId);
 
+    // Reset any request_too_large escalation — the context is now empty, so the
+    // next spawn should start fresh at the top of the history ladder.
+    this.tooLargeRecoveries.delete(chatId);
+
     // Kill old process so next message spawns fresh
     this.restartProcess(chatId).catch(() => {});
   }
@@ -1272,6 +1298,59 @@ export class AgentRunner extends EventEmitter {
       this.sessions.delete(chatId);
     }
     // Process will be re-spawned on next incoming message
+  }
+
+  /**
+   * Unified recovery for the recoverable "Request too large (max 32MB)" error.
+   * Reached from two backends that surface the SAME error differently:
+   *  - PTY shell (headless=false): a `system/request_too_large` event emitted by
+   *    the transcript tailer from the authoritative <synthetic> record (Bug A).
+   *  - Headless (headless=true): claude --print emits a synthetic `result`
+   *    (is_error + "Request too large (max"); the long-lived process otherwise
+   *    stays alive and rejects every subsequent turn forever (Bug B).
+   *
+   * Each consecutive recovery shrinks the history re-injected on the next spawn
+   * (TOO_LARGE_HISTORY_LADDER: 50→40→30→20→10→0) so a pathological context drops
+   * under the 32MB ceiling. The respawn happens on the user's NEXT message (no
+   * auto-loop), and the counter resets on the next successful result. Once even a
+   * zero-history spawn still trips 32MB, stop escalating and ask the user to
+   * /clear rather than climb the ladder again.
+   */
+  private handleRequestTooLarge(mapKey: string, proc: SessionProcess): void {
+    proc.setProcessing(false);
+    const count = (this.tooLargeRecoveries.get(mapKey) ?? 0) + 1;
+    const lastRung = TOO_LARGE_HISTORY_LADDER.length - 1; // index of the 0-history rung
+
+    if (count > lastRung) {
+      // Even the zero-history spawn tripped 32MB — context can't shrink further.
+      // Pin the counter at the last rung so future spawns stay at 0 history,
+      // surface a clear next step, and still restart so the process isn't wedged.
+      this.tooLargeRecoveries.set(mapKey, lastRung);
+      this.logger.error('Request too large persists with zero re-injected history', { mapKey, count });
+      this.writeAutoForward(
+        mapKey,
+        '⚠️ ยังเกิน 32MB แม้จะล้าง context จนว่างแล้ว — พิมพ์ /clear เพื่อเริ่มเซสชันใหม่ หรือ /restart ค่ะ',
+      );
+      void this.restartProcess(mapKey);
+      return;
+    }
+
+    this.tooLargeRecoveries.set(mapKey, count);
+    this.logger.warn('Request too large (32MB) — restarting with reduced history', {
+      mapKey, attempt: count, nextHistoryLimit: TOO_LARGE_HISTORY_LADDER[count],
+    });
+    // Ordering matters and makes the notice delivery race-free: writeAutoForward
+    // persists the `.forward` file synchronously HERE, before restartProcess()
+    // begins its async stop/kill. The typing-loop tear-down (stop() in typing.ts)
+    // drains and sends `.forward` synchronously before it removes the typing
+    // signal, so by the time the proc exit fires and the loop stops, the file is
+    // already on disk and is delivered — no dependency on poll timing. Do not
+    // reorder restartProcess() ahead of writeAutoForward().
+    this.writeAutoForward(
+      mapKey,
+      '⚠️ Context too large — hit Anthropic\'s 32MB request limit (usually from large images or files in context). Restarting this session with a fresh context. Your last message was not processed — please resend it.',
+    );
+    void this.restartProcess(mapKey);
   }
 
   /**

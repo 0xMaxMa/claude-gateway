@@ -571,6 +571,36 @@ describe('AgentRunner — typing error notification', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-01: request_too_large recovery escalates the history ladder
+  //   (50→40→30→20→10→0) and pins at the last rung once 0-history still trips.
+  //   Covers Bug B (headless) + Bug A (PTY) — both route through this handler.
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-01: handleRequestTooLarge escalates then gives up', () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    const r = runner as unknown as {
+      handleRequestTooLarge: (mapKey: string, proc: { setProcessing: (b: boolean) => void }) => void;
+      tooLargeRecoveries: Map<string, number>;
+    };
+    const proc = { setProcessing: jest.fn() };
+    const forwardFile = path.join(getTypingDir(), 'chat:big.forward');
+    const readForward = () => JSON.parse(fs.readFileSync(forwardFile, 'utf8')).text as string;
+
+    // Rungs 1..5 → counter climbs, each emits the "Restarting" resend notice.
+    for (let i = 1; i <= 5; i++) {
+      r.handleRequestTooLarge('chat:big', proc);
+      expect(r.tooLargeRecoveries.get('chat:big')).toBe(i);
+      expect(readForward()).toContain('32MB request limit');
+    }
+    expect(proc.setProcessing).toHaveBeenCalledTimes(5);
+    expect(proc.setProcessing).toHaveBeenLastCalledWith(false);
+
+    // 6th: even 0-history tripped → pin at last rung (5) and tell the user to /clear.
+    r.handleRequestTooLarge('chat:big', proc);
+    expect(r.tooLargeRecoveries.get('chat:big')).toBe(5);
+    expect(readForward()).toContain('/clear');
+  });
+
+  // --------------------------------------------------------------------------
   // U-AR-TYPING-03: spawn error writes SPAWN_FAILED typing error file
   // --------------------------------------------------------------------------
   it('U-AR-TYPING-03: spawn error via callback writes SPAWN_FAILED typing error', async () => {

@@ -429,6 +429,60 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-09e: historyLimit override shrinks the re-injected window (Bug B
+  //           request_too_large escalation: 50→40→30→20→10→0)
+  // --------------------------------------------------------------------------
+  it('U-SP-09e: historyLimit override truncates to the lower rung', async () => {
+    for (let i = 0; i < 60; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Rung ${i}`,
+        ts: Date.now() + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    sp.historyLimit = 10; // escalated rung (e.g. after several 32MB recoveries)
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    // Only the last 10 messages (50–59) survive; 49 and older are dropped.
+    expect(text).toContain('Rung 59');
+    expect(text).toContain('Rung 50');
+    expect(text).not.toContain('Rung 49');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-09f: historyLimit === 0 injects NO history at all (fully fresh).
+  //           Guards against slice(-0) === slice(0) re-injecting everything.
+  // --------------------------------------------------------------------------
+  it('U-SP-09f: historyLimit 0 sends no history prompt', async () => {
+    for (let i = 0; i < 5; i++) {
+      await sessionStore.appendTelegramMessage('alfred', 'chat:111', 'chat:111', {
+        role: 'user',
+        content: `Fresh ${i}`,
+        ts: Date.now() + i,
+      });
+    }
+
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    sp.historyLimit = 0; // ladder's last rung — drop all history
+    await sp.start();
+
+    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
+    const parsed = JSON.parse(firstWrite);
+    const text: string = parsed.message.content[0].text;
+
+    // No prior turns leak in even though slice(-0) would otherwise return all.
+    expect(text).not.toContain('Fresh 0');
+    expect(text).not.toContain('Fresh 4');
+    expect(text).not.toContain('Conversation history with this user');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-10: --strict-mcp-config must NOT be in subprocess args
   // --------------------------------------------------------------------------
   it('U-SP-10: subprocess is spawned without --strict-mcp-config', async () => {
