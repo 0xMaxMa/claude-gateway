@@ -350,6 +350,57 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-CONN: connector injection into mcp-config.json
+  // --------------------------------------------------------------------------
+  describe('connector injection', () => {
+    const TOKEN_ENV = '/tmp/sp-connectors-mcp-token.env';
+    beforeEach(() => {
+      process.env.GATEWAY_MCP_TOKEN_ENV = TOKEN_ENV;
+      try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
+    });
+    afterEach(() => {
+      delete process.env.GATEWAY_MCP_TOKEN_ENV;
+      try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
+    });
+
+    function readMcpConfig(): Record<string, unknown> {
+      const p = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      return JSON.parse(fs.readFileSync(p, 'utf-8')).mcpServers;
+    }
+
+    it('enabled + connected → github http entry injected with bearer header', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'GITHUB_TOKEN=ghp_inject\n', { mode: 0o600 });
+      agentConfig.connectors = { github: { enabled: true } };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const servers = readMcpConfig();
+      expect(servers.github).toEqual({
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_inject' },
+      });
+      // gateway server always still present
+      expect(servers.gateway).toBeDefined();
+    });
+
+    it('enabled but no token → github entry omitted', async () => {
+      agentConfig.connectors = { github: { enabled: true } };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toBeUndefined();
+    });
+
+    it('not enabled → github entry omitted even with token', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'GITHUB_TOKEN=ghp_inject\n', { mode: 0o600 });
+      agentConfig.connectors = {};
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toBeUndefined();
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-06: No MCP config for api source
   // --------------------------------------------------------------------------
   it('U-SP-06: No MCP config written for api source', async () => {

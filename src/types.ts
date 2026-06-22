@@ -156,6 +156,8 @@ export interface AgentConfig {
   knowledge?: GatewayConfig['gateway']['knowledge'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
+  /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */
+  connectors?: Record<string, { enabled: boolean }>;
 }
 
 export interface AgentStats {
@@ -260,7 +262,6 @@ export interface GatewayConfig {
       cleanupHour?: number;      // 0-23, default 0
       cleanupTimezone?: string;  // IANA timezone, default "UTC"
     };
-    /**
     /**
      * App-store Docker housekeeping (issue #302). Best-effort reclaim of the
      * build cache and dangling `<none>` images left behind by every app
@@ -452,6 +453,12 @@ export interface GatewayConfig {
         reviewModel?: string;      // default matches the dreaming reviewer's default
       };
     };
+    /**
+     * Connector wiring/state (non-secret). Keyed by connector id; records which
+     * env-var name (in mcp-token.env) holds each connector's secret. Written by the
+     * connectors connect/disconnect routes. The secret VALUE never lives here.
+     */
+    connectors?: Record<string, { secretEnv: string }>;
   };
   agents: AgentConfig[];
 }

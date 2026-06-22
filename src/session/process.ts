@@ -20,6 +20,7 @@ import {
   extractToolDetail,
   truncateDetail,
 } from '../utils/tool-labels';
+import { resolveEnabledConnectors } from '../connectors/resolve';
 
 export const MAX_HISTORY_MESSAGES = 50;
 
@@ -621,6 +622,14 @@ export class SessionProcess extends EventEmitter {
     const projectServers = this.readProjectScopedMcp();
     const extraServers: Record<string, unknown> = {};
     for (const [name, server] of Object.entries({ ...userServers, ...projectServers })) {
+      if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
+    }
+
+    // Connectors: catalog entries enabled for THIS agent AND connected (secret present
+    // in mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
+    // without a daemon restart. Secrets land only in this 0600 mcp-config.json.
+    const connectorServers = resolveEnabledConnectors(this.agentConfig);
+    for (const [name, server] of Object.entries(connectorServers)) {
       if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
     }
 
