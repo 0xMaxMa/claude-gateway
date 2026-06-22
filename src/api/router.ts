@@ -705,6 +705,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
+        connectors: cfg.connectors ?? {},
         avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
         telegram_connected: !!cfg.telegram?.botToken,
         discord_connected: !!cfg.discord?.botToken,
@@ -1466,8 +1467,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1621,6 +1622,23 @@ export function createApiRouter(
       slack_group_policy !== undefined || slack_group_allowlist !== undefined || slack_require_mention !== undefined ||
       slack_pairing !== undefined;
 
+    // connectors: a partial map of { [connectorId]: { enabled: boolean } } to merge.
+    const connectorPatch: Record<string, { enabled: boolean }> = {};
+    if (connectors !== undefined) {
+      if (typeof connectors !== 'object' || connectors === null || Array.isArray(connectors)) {
+        res.status(400).json({ error: 'connectors must be an object' });
+        return;
+      }
+      for (const [id, val] of Object.entries(connectors as Record<string, unknown>)) {
+        const enabled = (val as { enabled?: unknown })?.enabled;
+        if (typeof enabled !== 'boolean') {
+          res.status(400).json({ error: `connectors.${id}.enabled must be a boolean` });
+          return;
+        }
+        connectorPatch[id] = { enabled };
+      }
+    }
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1735,6 +1753,10 @@ export function createApiRouter(
               else existing.pairing = slack_pairing;
             }
           }
+        }
+        if (connectors !== undefined) {
+          const existing = (agent.connectors as Record<string, { enabled: boolean }>) ?? {};
+          agent.connectors = { ...existing, ...connectorPatch };
         }
       });
     } catch (err) {
@@ -1892,6 +1914,15 @@ export function createApiRouter(
         for (const id of slack_group_allowlist) clearPendingSender('slack', agentId, id);
       }
     }
+    if (connectors !== undefined) {
+      cfg.connectors = { ...(cfg.connectors ?? {}), ...connectorPatch };
+      // Enablement is read at spawn — respawn live sessions so they pick it up.
+      const runner = agentRunners.get(agentId);
+      if (runner) {
+        runner.updateAgentConfig(cfg);
+        await runner.restartOrDefer();
+      }
+    }
 
     res.json({
       agent: {
@@ -1900,6 +1931,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model,
         allow_tools: cfg.allow_tools ?? false,
+        connectors: cfg.connectors ?? {},
         telegram_connected: !!cfg.telegram?.botToken,
         discord_connected: !!cfg.discord?.botToken,
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
