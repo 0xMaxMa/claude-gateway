@@ -307,6 +307,12 @@ class Driver {
    * prompt is usable again, then signal the gateway to notify the user and
    * restart with a fresh context. Once per occurrence via requestTooLargeHandled
    * (reset when a new turn begins).
+   *
+   * No screen-settle gate is needed here (the old screen-scrape path waited for
+   * quietMs to avoid transient redraws): the transcript record is only written
+   * when the error is real and the overlay rendered, so the signal is already
+   * settled by the time the tailer reads it. A stray ESC at a non-overlay prompt
+   * is harmless, and the guard prevents repeats.
    */
   private handleRequestTooLarge(): void {
     if (this.requestTooLargeHandled) return;

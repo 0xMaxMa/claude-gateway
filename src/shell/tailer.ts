@@ -58,9 +58,17 @@ export function isSyntheticRequestTooLarge(message: AssistantRecord['message']):
 /**
  * Tools whose invocation puts the TUI into a blocking interactive select-menu the
  * gateway bridges to chat: AskUserQuestion and the plan-approval ExitPlanMode.
- * (Verified present as `tool_use` records in real transcripts.)
+ *
+ * - `AskUserQuestion` — verified present as a `tool_use` record in real transcripts.
+ * - `ExitPlanMode` / `exit_plan_mode` — the plan-approval tool. Both the PascalCase
+ *   and legacy snake_case names appear in the Claude Code CLI binary, and the tool
+ *   name field varies by model, so both are listed to be safe. (No transcript
+ *   sample was available to confirm which the running model emits.)
+ *
+ * If a future tool raises a bridgeable menu, add it here; an omission only means
+ * that menu isn't bridged (fail-safe), never a crash.
  */
-const MENU_TOOL_NAMES = new Set(['AskUserQuestion', 'ExitPlanMode']);
+const MENU_TOOL_NAMES = new Set(['AskUserQuestion', 'ExitPlanMode', 'exit_plan_mode']);
 
 /**
  * True when an assistant record invokes a tool that raises a blocking menu. This

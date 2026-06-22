@@ -32,6 +32,11 @@ export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as 
  * Rows from the bottom of the screen that detectDialog() scans. A modal dialog is
  * anchored to the bottom; this window comfortably covers a tall dialog box while
  * excluding the upper ~60% of the buffer where conversation/scrollback lives.
+ *
+ * Conservative on purpose: if a future dialog renders taller than this and the
+ * markers fall outside the window, the only effect is the auto-accept doesn't
+ * fire — the operator simply sees the dialog (fail-safe), it never mis-accepts.
+ * Bump this if Claude Code's dialog grows.
  */
 const DIALOG_REGION_ROWS = 20;
 

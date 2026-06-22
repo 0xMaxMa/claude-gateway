@@ -564,6 +564,15 @@ describe('hasInteractiveMenuToolUse (authoritative menu gate)', () => {
     })).toBe(true);
   });
 
+  it('also accepts the legacy snake_case exit_plan_mode name', () => {
+    // Claude Code's binary carries both PascalCase and snake_case; the emitted
+    // tool name varies by model, so both must gate the bridge.
+    expect(hasInteractiveMenuToolUse({
+      role: 'assistant',
+      content: [{ type: 'tool_use', name: 'exit_plan_mode', id: 't2b', input: {} }],
+    })).toBe(true);
+  });
+
   it('false for a normal text reply (even if it mentions the tool name)', () => {
     expect(hasInteractiveMenuToolUse({
       role: 'assistant',
