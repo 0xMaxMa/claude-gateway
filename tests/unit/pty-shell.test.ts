@@ -1,11 +1,12 @@
 import { translateArgs, sanitizeUserText } from '../../src/shell/args';
-import { projectSlug, transcriptPath } from '../../src/shell/tailer';
+import { projectSlug, transcriptPath, isSyntheticRequestTooLarge, hasInteractiveMenuToolUse } from '../../src/shell/tailer';
 import {
   ScreenModel,
   TUI_BUSY_MARKER,
   TUI_BYPASS_PERMS,
   TUI_REQUEST_TOO_LARGE,
   TUI_REQUEST_TOO_LARGE_DISMISS,
+  neutralizeTuiTriggers,
   parseMenuChoice,
   formatMenuPrompt,
   extractChannelContent,
@@ -151,6 +152,50 @@ describe('ScreenModel detectRequestTooLarge', () => {
       '❯ ',
     ]);
     expect(screen.detectRequestTooLarge()).toBe(false);
+  });
+
+  it('DOES trip on a verbatim overlay copy carrying the footer (the false-positive bug)', async () => {
+    // Reproduces the restart loop: the gateway once captured the whole overlay
+    // sentence — prefix AND footer — into a stored assistant message. Re-typed
+    // into the TUI on the next spawn, it renders both fragments → detection fires
+    // on a healthy session. The "require the footer" guard does NOT save us here.
+    const poison = 'Assistant: ...(กัน double-delete):Request too large (max 32MB). Double press esc to go back and try with a smaller file.';
+    const screen = await renderScreen([poison, '❯ ']);
+    expect(screen.detectRequestTooLarge()).toBe(true);
+  });
+});
+
+describe('neutralizeTuiTriggers (history detox)', () => {
+  const POISON =
+    'Assistant: ...(กัน double-delete):Request too large (max 32MB). Double press esc to go back and try with a smaller file.';
+
+  it('breaks both detector fragments in re-injected text', () => {
+    const out = neutralizeTuiTriggers(POISON);
+    expect(out).not.toContain(TUI_REQUEST_TOO_LARGE);        // 'Request too large (max'
+    expect(out).not.toContain(TUI_REQUEST_TOO_LARGE_DISMISS); // 'esc to go back'
+  });
+
+  it('keeps the prose human-readable (only a space is inserted)', () => {
+    const out = neutralizeTuiTriggers(POISON);
+    expect(out).toContain('Request too large ( max 32MB)');
+    expect(out).toContain('esc to go  back');
+    expect(out).toContain('กัน double-delete'); // surrounding content untouched
+  });
+
+  it('neutralized history no longer trips detection after a TUI round-trip', async () => {
+    // The actual fix: the same poisoned message, detoxed, rendered on screen WITH
+    // the idle caret present, must be inert — closing the restart loop at the source.
+    const screen = await renderScreen([neutralizeTuiTriggers(POISON), '❯ ']);
+    expect(screen.detectRequestTooLarge()).toBe(false);
+  });
+
+  it('is a no-op on text without the trigger fragments', () => {
+    const clean = 'User: เปิด PR ให้หน่อย\nAssistant: ได้เลยค่ะ';
+    expect(neutralizeTuiTriggers(clean)).toBe(clean);
+  });
+
+  it('handles empty input', () => {
+    expect(neutralizeTuiTriggers('')).toBe('');
   });
 });
 
@@ -469,6 +514,113 @@ describe('pty-shell transcript path', () => {
     const uuid = '11111111-2222-3333-4444-555555555555';
     expect(transcriptPath('/tmp/pty-poc', uuid))
       .toBe(`${os.homedir()}/.claude/projects/-tmp-pty-poc/${uuid}.jsonl`);
+  });
+});
+
+describe('ScreenModel detectDialog (region-restricted)', () => {
+  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
+
+  it('detects the bypass dialog when it renders at the bottom (real modal)', async () => {
+    const screen = await renderScreen([
+      ...FILLER(44),
+      '  Bypass Permissions mode',
+      '  Yes, I accept',
+    ]);
+    expect(screen.detectDialog()).toBe('bypass-permissions');
+  });
+
+  it('ignores the markers when they sit in the upper scrollback (quoted prose)', async () => {
+    // An agent explaining the dialog, or re-injected history: markers are near the
+    // top, above the bottom region detectDialog scans → no auto-accept keystroke.
+    const screen = await renderScreen([
+      'Assistant: ตอน "Bypass Permissions mode" โผล่ มันจะให้กด "Yes, I accept"',
+      ...FILLER(44),
+      '❯ ',
+    ]);
+    expect(screen.detectDialog()).toBeNull();
+    // Sanity: the markers ARE on screen — only the region guard excludes them.
+    expect(screen.text()).toContain('Bypass Permissions mode');
+    expect(screen.text()).toContain('Yes, I accept');
+  });
+
+  it('requires BOTH markers (one alone never triggers)', async () => {
+    const screen = await renderScreen([...FILLER(45), '  Bypass Permissions mode']);
+    expect(screen.detectDialog()).toBeNull();
+  });
+});
+
+describe('hasInteractiveMenuToolUse (authoritative menu gate)', () => {
+  it('true when the record invokes AskUserQuestion', () => {
+    expect(hasInteractiveMenuToolUse({
+      role: 'assistant',
+      content: [{ type: 'tool_use', name: 'AskUserQuestion', id: 't1', input: { questions: [] } }],
+    })).toBe(true);
+  });
+
+  it('true for the plan-approval ExitPlanMode tool', () => {
+    expect(hasInteractiveMenuToolUse({
+      role: 'assistant',
+      content: [{ type: 'tool_use', name: 'ExitPlanMode', id: 't2', input: {} }],
+    })).toBe(true);
+  });
+
+  it('false for a normal text reply (even if it mentions the tool name)', () => {
+    expect(hasInteractiveMenuToolUse({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'I will use AskUserQuestion to ask you.' }],
+    })).toBe(false);
+  });
+
+  it('false for an unrelated tool', () => {
+    expect(hasInteractiveMenuToolUse({
+      role: 'assistant',
+      content: [{ type: 'tool_use', name: 'Bash', id: 't3', input: { command: 'ls' } }],
+    })).toBe(false);
+  });
+});
+
+describe('isSyntheticRequestTooLarge (authoritative 413 detection)', () => {
+  const overlayText = 'Request too large (max 32MB). Double press esc to go back and try with a smaller file.';
+
+  it('detects the genuine error: <synthetic> model + overlay text', () => {
+    expect(isSyntheticRequestTooLarge({
+      role: 'assistant',
+      model: '<synthetic>',
+      content: [{ type: 'text', text: overlayText }],
+    })).toBe(true);
+  });
+
+  it('ignores a real assistant reply that quotes the error verbatim (real model id)', () => {
+    // The "เนี่ย นายก็เป็น" case: an agent explaining this very bug in a live reply.
+    // Real model id ≠ <synthetic>, so it is never treated as a genuine error.
+    expect(isSyntheticRequestTooLarge({
+      role: 'assistant',
+      model: 'claude-opus-4-8',
+      content: [{ type: 'text', text: `อย่างที่เห็น TUI เด้ง "${overlayText}"` }],
+    })).toBe(false);
+  });
+
+  it('ignores a synthetic record without the overlay text (other API error)', () => {
+    expect(isSyntheticRequestTooLarge({
+      role: 'assistant',
+      model: '<synthetic>',
+      content: [{ type: 'text', text: 'API Error: 500 internal error' }],
+    })).toBe(false);
+  });
+
+  it('ignores a record with no model field', () => {
+    expect(isSyntheticRequestTooLarge({
+      role: 'assistant',
+      content: [{ type: 'text', text: overlayText }],
+    })).toBe(false);
+  });
+
+  it('tolerates content blocks without text (e.g. tool_use)', () => {
+    expect(isSyntheticRequestTooLarge({
+      role: 'assistant',
+      model: '<synthetic>',
+      content: [{ type: 'tool_use', id: 'x' }, { type: 'text', text: overlayText }],
+    })).toBe(true);
   });
 });
 

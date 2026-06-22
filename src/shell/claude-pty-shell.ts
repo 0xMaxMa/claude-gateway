@@ -16,7 +16,7 @@ import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
 import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
 import { PtyHost } from './pty-host';
-import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
+import { TranscriptTailer, AssistantRecord, UsageInfo, hasInteractiveMenuToolUse } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
@@ -87,6 +87,9 @@ interface ActiveTurn {
   dialogEscapes: number;
   /** Snapshot of tailer.seenRecords at turn start — used to detect per-turn output. */
   recordsAtStart: number;
+  /** Set once this turn invoked a menu-raising tool (AskUserQuestion/ExitPlanMode).
+   *  Gates menu bridging so only a transcript-backed menu is bridged to chat. */
+  menuToolSeen: boolean;
 }
 
 class Driver {
@@ -180,6 +183,7 @@ class Driver {
     this.tailer = new TranscriptTailer(process.cwd(), this.args.sessionId, {
       onAssistant: (record) => this.onAssistant(record),
       onTurnEnd: (durationMs) => this.onTurnEnd(durationMs),
+      onRequestTooLarge: () => this.handleRequestTooLarge(),
       onError: (err) => logError(`tailer: ${err.message}`),
     });
     this.tailer.start();
@@ -281,6 +285,9 @@ class Driver {
       this.turn.lastProgressAt = Date.now();
       if (text) this.turn.texts.push(text);
       if (usage) this.turn.usage = usage;
+      // Authoritative menu signal: this turn called a menu-raising tool, so a
+      // menu on screen now is real (not a quoted/rendered look-alike).
+      if (hasInteractiveMenuToolUse(record.message)) this.turn.menuToolSeen = true;
     } else {
       logDebug('assistant record outside an active turn (emitted anyway)');
     }
@@ -289,6 +296,28 @@ class Driver {
   private onTurnEnd(durationMs: number): void {
     logDebug(`turn_duration record (${durationMs}ms)`);
     if (this.turn) this.finishTurn(false);
+  }
+
+  /**
+   * Authoritative recovery for the recoverable 32MB "Request too large" error.
+   * Fired by the transcript tailer when Claude Code writes its `<synthetic>`
+   * error record (NOT by scraping screen text — quoted/re-injected prose can't
+   * forge that record, so this never false-fires). The TUI is showing the
+   * "Double press esc to go back" overlay; dismiss it with ESC so the input
+   * prompt is usable again, then signal the gateway to notify the user and
+   * restart with a fresh context. Once per occurrence via requestTooLargeHandled
+   * (reset when a new turn begins).
+   */
+  private handleRequestTooLarge(): void {
+    if (this.requestTooLargeHandled) return;
+    this.requestTooLargeHandled = true;
+    logWarn('Request too large (32MB) — synthetic-error record in transcript; dismissing overlay and signalling restart');
+    this.host.writeRaw('\x1b'); // "Double press esc to go back" — send both.
+    this.host.writeRaw('\x1b');
+    this.emitter.emitRequestTooLarge(this.args.sessionId);
+    if (this.turn) {
+      this.finishTurn(true, 'Request too large (max 32MB) — the conversation exceeded Anthropic\'s 32MB request limit. Restarting with a fresh context.');
+    }
   }
 
   private finishTurn(isError: boolean, errMsg?: string): void {
@@ -347,6 +376,7 @@ class Driver {
       usage: null,
       dialogEscapes: 0,
       recordsAtStart: this.tailer.seenRecords,
+      menuToolSeen: false,
     };
   }
 
@@ -426,27 +456,6 @@ class Driver {
         && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
       this.lastHeartbeatAt = now;
       try { fs.writeFileSync(this.heartbeatPath, String(now)); } catch {}
-    }
-
-    // Recoverable "Request too large (max 32MB)" TUI error: the request payload
-    // (history + attachments) exceeded Anthropic's 32MB API limit. The TUI shows
-    // "Double press esc to go back". Dismiss it with ESC so the input prompt is
-    // usable again, then signal the gateway to notify the user and restart — the
-    // context is too big, so another message would just re-hit the limit and the
-    // session would be bricked. Gated quiet so we act on a settled error, not a
-    // transient redraw, and once per occurrence via requestTooLargeHandled.
-    if (!this.requestTooLargeHandled
-        && this.screen.quietMs() >= 400
-        && this.screen.detectRequestTooLarge()) {
-      this.requestTooLargeHandled = true;
-      logWarn('Request too large (32MB) detected — dismissing TUI error and signalling restart');
-      this.host.writeRaw('\x1b'); // "Double press esc to go back" — send both.
-      this.host.writeRaw('\x1b');
-      this.emitter.emitRequestTooLarge(this.args.sessionId);
-      if (this.turn) {
-        this.finishTurn(true, 'Request too large (max 32MB) — the conversation exceeded Anthropic\'s 32MB request limit. Restarting with a fresh context.');
-      }
-      return;
     }
 
     // Screen-driven idle reconciliation (typing-teardown safety net). If the TUI
@@ -599,6 +608,12 @@ class Driver {
    */
   private maybeBridgeMenu(turn: ActiveTurn): boolean {
     if (SKIP_MENU_BRIDGE || this.pendingMenu) return false;
+    // Authoritative gate: only bridge when this turn actually invoked a menu tool
+    // (AskUserQuestion/ExitPlanMode). Without it, a reply or re-injected history
+    // that renders a numbered list + the menu footer would spawn a phantom menu.
+    // The transcript tool_use can't be forged by on-screen text. Fails safe: if a
+    // genuine non-tool menu ever exists it simply isn't bridged (no false buttons).
+    if (!turn.menuToolSeen) return false;
     if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return false;
     if (this.screen.detectDialog() === 'bypass-permissions') return false;
     const options = this.screen.detectMenu();

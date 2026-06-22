@@ -29,6 +29,13 @@ export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
 /**
+ * Rows from the bottom of the screen that detectDialog() scans. A modal dialog is
+ * anchored to the bottom; this window comfortably covers a tall dialog box while
+ * excluding the upper ~60% of the buffer where conversation/scrollback lives.
+ */
+const DIALOG_REGION_ROWS = 20;
+
+/**
  * The recoverable "Request too large (max 32MB)" TUI error overlay. The request
  * payload (conversation history + attachments) exceeded Anthropic's 32MB API
  * limit — distinct from the token context window, since it counts raw bytes
@@ -44,6 +51,44 @@ export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as 
  */
 export const TUI_REQUEST_TOO_LARGE = 'Request too large (max';
 export const TUI_REQUEST_TOO_LARGE_DISMISS = 'esc to go back';
+
+/**
+ * Model id Claude Code stamps on the assistant record it injects into the
+ * transcript when an API call fails (e.g. the 32MB "Request too large" error).
+ * This is the AUTHORITATIVE signal: a genuine error produces a `<synthetic>`
+ * assistant record, whereas re-injected history / quoted prose are `user`-type
+ * records or carry a real model id — so keying detection on this never
+ * false-positives on text that merely mentions the error. See TranscriptTailer.
+ */
+export const TUI_SYNTHETIC_MODEL = '<synthetic>';
+
+/**
+ * Defang the two substrings {@link detectRequestTooLarge} scans for, so text we
+ * re-inject into the TUI (the reloaded conversation history) can never reproduce
+ * the verbatim 32MB overlay on screen and trip a false restart.
+ *
+ * Why this is needed: Claude Code's real overlay reads
+ *   "Request too large (max 32MB). Double press esc to go back ..."
+ * and the gateway once captured that whole sentence into a stored assistant
+ * message. buildInitialPrompt() reloads the last N messages verbatim and the PTY
+ * types them back into the TUI — re-rendering BOTH trigger fragments on screen
+ * every spawn, so detectRequestTooLarge() fires on a fresh, healthy session (even
+ * on a bare greeting) → ESC + restart → re-inject the same poison → infinite loop.
+ * The detector's "require the dismiss footer too" guard does not help here because
+ * the captured copy is verbatim and carries the footer.
+ *
+ * We insert a single ASCII space inside each fragment. It is invisible enough in
+ * re-injected prose, and survives {@link normalize} — which only folds NBSP→space
+ * and never collapses runs of spaces, so the broken fragment stays broken after a
+ * round-trip through the screen buffer. Only the re-injected copy is altered;
+ * live detection of a genuine overlay is untouched.
+ */
+export function neutralizeTuiTriggers(text: string): string {
+  if (!text) return text;
+  return text
+    .split(TUI_REQUEST_TOO_LARGE).join('Request too large ( max')
+    .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back');
+}
 
 /**
  * Interactive select-menu footer markers (e.g. AskUserQuestion). The footer reads
@@ -113,9 +158,28 @@ export class ScreenModel {
   }
 
   text(): string {
+    return this.rowsText(0, this.term.rows);
+  }
+
+  /**
+   * The bottom `rows` lines of the visible screen. Active modal UI — permission
+   * dialogs, error overlays, the input box — renders anchored to the bottom,
+   * whereas conversation/scrollback flows in the upper area. Matching a marker
+   * against this region instead of the full buffer keeps a reply (or re-injected
+   * history) that merely quotes a marker from tripping a detector, since that
+   * text sits above the active zone. Reduces false positives sharply but is not
+   * absolute (text can briefly be the bottom-most line), so prefer an
+   * authoritative transcript signal where one exists.
+   */
+  bottomText(rows: number): string {
+    const start = Math.max(0, this.term.rows - rows);
+    return this.rowsText(start, this.term.rows);
+  }
+
+  private rowsText(startRow: number, endRow: number): string {
     const buf = this.term.buffer.active;
     const lines: string[] = [];
-    for (let i = 0; i < this.term.rows; i++) {
+    for (let i = startRow; i < endRow; i++) {
       const line = buf.getLine(buf.viewportY + i);
       lines.push(line ? line.translateToString(true) : '');
     }
@@ -141,8 +205,14 @@ export class ScreenModel {
 
   /**
    * The TUI is showing the recoverable "Request too large (max 32MB)" error.
-   * Requires both the error prefix and the dismiss-footer marker so ordinary
-   * text mentioning the phrase (e.g. an agent reply) never trips the auto-ESC.
+   * Requires both the error prefix and the dismiss-footer marker.
+   *
+   * SUPERSEDED as the trigger: a verbatim copy of the overlay sentence carries
+   * BOTH markers, so re-injected history or an agent quoting the error tripped a
+   * false restart loop. Detection now comes from the transcript's `<synthetic>`
+   * assistant record (see TranscriptTailer.onRequestTooLarge), which text on
+   * screen cannot forge. Kept (and tested) only to document that screen-scraping
+   * this error is unreliable — do NOT re-wire it into the tick() trigger.
    */
   detectRequestTooLarge(): boolean {
     const text = this.text();
@@ -150,7 +220,12 @@ export class ScreenModel {
   }
 
   detectDialog(): DialogKind | null {
-    const text = this.text();
+    // Scan only the bottom region: a real modal dialog renders there, while a
+    // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the
+    // scrollback above and must not trigger the auto-accept keystroke. The dialog
+    // has no transcript signal, so this region guard (plus requiring BOTH markers)
+    // is the available defense.
+    const text = this.bottomText(DIALOG_REGION_ROWS);
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
       return 'bypass-permissions';
     }

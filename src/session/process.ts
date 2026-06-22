@@ -8,6 +8,7 @@ import { AgentConfig, GatewayConfig } from '../types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
+import { neutralizeTuiTriggers } from '../shell/screen';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -210,7 +211,12 @@ export class SessionProcess extends EventEmitter {
       .join('\n');
 
     return {
-      historyPrompt: `[Conversation history with this user:\n${historyText}]`,
+      // Defang any verbatim 32MB-overlay text captured into past messages before it
+      // is re-typed into the TUI — otherwise the PTY screen-scraper (see
+      // detectRequestTooLarge) re-detects it every spawn and the session restart-loops
+      // even on a bare greeting. Headless backend is unaffected, but neutralizing at
+      // the source keeps both backends safe.
+      historyPrompt: `[Conversation history with this user:\n${neutralizeTuiTriggers(historyText)}]`,
       loadedAtSpawn,
       archivedCount,
       messageCountAtSpawn,

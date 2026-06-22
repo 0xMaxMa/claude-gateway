@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { TUI_REQUEST_TOO_LARGE, TUI_SYNTHETIC_MODEL } from './screen';
 
 export interface UsageInfo {
   input_tokens?: number;
@@ -14,6 +15,8 @@ export interface AssistantRecord {
   isSidechain?: boolean;
   message: {
     role: 'assistant';
+    /** Real model id, or '<synthetic>' for records Claude Code injects on an API error. */
+    model?: string;
     content: Array<{ type: string; [k: string]: unknown }>;
     stop_reason?: string | null;
     usage?: UsageInfo;
@@ -27,7 +30,50 @@ export interface TailerEvents {
   onAssistant: (record: AssistantRecord) => void;
   /** Claude finished a turn (system/turn_duration record). */
   onTurnEnd: (durationMs: number) => void;
+  /**
+   * Claude Code hit the recoverable 32MB "Request too large" API error. Detected
+   * authoritatively from the `<synthetic>` assistant record it writes to the
+   * transcript — NOT by scraping screen text — so conversation text quoting the
+   * error can never trigger it. The record is routed here INSTEAD of onAssistant
+   * so its overlay text is never re-emitted as a reply (which is how it used to
+   * leak into the stored history and self-poison future spawns).
+   */
+  onRequestTooLarge?: () => void;
   onError: (err: Error) => void;
+}
+
+/**
+ * True when an assistant record is the synthetic error Claude Code injects for the
+ * 32MB "Request too large" limit. Both conditions are required: the `<synthetic>`
+ * model id AND the overlay text — neither alone is unique to the genuine error.
+ */
+export function isSyntheticRequestTooLarge(message: AssistantRecord['message']): boolean {
+  if (message.model !== TUI_SYNTHETIC_MODEL) return false;
+  const text = message.content
+    .map((b) => (typeof b.text === 'string' ? b.text : ''))
+    .join(' ');
+  return text.includes(TUI_REQUEST_TOO_LARGE);
+}
+
+/**
+ * Tools whose invocation puts the TUI into a blocking interactive select-menu the
+ * gateway bridges to chat: AskUserQuestion and the plan-approval ExitPlanMode.
+ * (Verified present as `tool_use` records in real transcripts.)
+ */
+const MENU_TOOL_NAMES = new Set(['AskUserQuestion', 'ExitPlanMode']);
+
+/**
+ * True when an assistant record invokes a tool that raises a blocking menu. This
+ * is the AUTHORITATIVE signal that a menu is genuinely on screen — used to gate
+ * screen-based menu bridging so a reply/history that merely renders a menu-shaped
+ * numbered list + footer can't spawn a phantom menu in chat.
+ */
+export function hasInteractiveMenuToolUse(message: AssistantRecord['message']): boolean {
+  return message.content.some((b) => {
+    if (b.type !== 'tool_use') return false;
+    const name = (b as { name?: unknown }).name;
+    return typeof name === 'string' && MENU_TOOL_NAMES.has(name);
+  });
 }
 
 /**
@@ -155,6 +201,12 @@ export class TranscriptTailer {
     if (record.type === 'assistant') {
       const message = record.message as AssistantRecord['message'] | undefined;
       if (message && Array.isArray(message.content)) {
+        if (isSyntheticRequestTooLarge(message)) {
+          // Route the genuine 32MB error to recovery; do NOT emit it as assistant
+          // text, or its overlay sentence gets persisted and poisons later spawns.
+          this.events.onRequestTooLarge?.();
+          return;
+        }
         this.events.onAssistant(record as unknown as AssistantRecord);
       }
       return;
