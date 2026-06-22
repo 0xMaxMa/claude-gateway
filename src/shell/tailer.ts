@@ -209,10 +209,13 @@ export class TranscriptTailer {
     if (record.type === 'assistant') {
       const message = record.message as AssistantRecord['message'] | undefined;
       if (message && Array.isArray(message.content)) {
-        if (isSyntheticRequestTooLarge(message)) {
+        if (isSyntheticRequestTooLarge(message) && this.events.onRequestTooLarge) {
           // Route the genuine 32MB error to recovery; do NOT emit it as assistant
           // text, or its overlay sentence gets persisted and poisons later spawns.
-          this.events.onRequestTooLarge?.();
+          // Only divert when a recovery handler is wired — otherwise fall through to
+          // onAssistant so the record is never silently dropped (matches the
+          // pre-recovery behaviour for any consumer that doesn't opt in).
+          this.events.onRequestTooLarge();
           return;
         }
         this.events.onAssistant(record as unknown as AssistantRecord);

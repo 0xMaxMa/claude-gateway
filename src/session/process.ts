@@ -16,7 +16,7 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 
-const MAX_HISTORY_MESSAGES = 50;
+export const MAX_HISTORY_MESSAGES = 50;
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
 // Bound how many times a single session may auto-respawn to recover from a

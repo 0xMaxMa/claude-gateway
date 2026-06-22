@@ -6,7 +6,7 @@ import * as net from 'net';
 import * as path from 'path';
 import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment } from '../types';
 import { createLogger } from '../logger';
-import { SessionProcess } from '../session/process';
+import { SessionProcess, MAX_HISTORY_MESSAGES } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
@@ -26,12 +26,13 @@ const ANTHROPIC_SOCKET_ERROR = 'socket connection was closed unexpectedly';
 
 // History re-injection ladder for request_too_large (32MB) recovery. Index =
 // number of consecutive 32MB recoveries on a session; the value is how many
-// history messages the NEXT spawn re-injects. Each retry shrinks the re-loaded
-// context until it drops under Anthropic's 32MB request ceiling. Index 0 (no
-// recovery) MUST equal MAX_HISTORY_MESSAGES in session/process.ts. Past the last
-// rung (0 history) the context can't shrink further, so the runner stops the
-// escalation and asks the user to /clear instead of looping forever.
-const TOO_LARGE_HISTORY_LADDER = [50, 40, 30, 20, 10, 0] as const;
+// history messages the NEXT spawn re-injects. Index 0 is the healthy default
+// (= MAX_HISTORY_MESSAGES, sourced from it so the two never drift); each retry
+// steps down a rung, shrinking the re-loaded context until it drops under
+// Anthropic's 32MB request ceiling. Past the last rung (0 history) the context
+// can't shrink further, so the runner stops escalating and asks the user to
+// /clear instead of looping forever.
+const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 30, 20, 10, 0];
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -138,6 +139,11 @@ export class AgentRunner extends EventEmitter {
   // re-injection can escalate-shrink across retries (TOO_LARGE_HISTORY_LADDER).
   // Reset to 0 on the next successful result; read by spawnSession.
   private readonly tooLargeRecoveries = new Map<string, number>();
+  // mapKeys that exhausted the ladder (zero-history spawn still tripped 32MB).
+  // Once here, further 32MB events only re-notify "/clear" and do NOT restart —
+  // restarting would just churn a context that cannot shrink. Cleared together
+  // with the counter on a successful result and on /clear.
+  private readonly tooLargeExhausted = new Set<string>();
 
   // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
@@ -779,12 +785,14 @@ export class AgentRunner extends EventEmitter {
     if (modelOverride) proc.modelOverride = modelOverride;
 
     // request_too_large (32MB) recovery: shrink the re-injected history on each
-    // consecutive retry so a pathological context eventually fits. Counter is 0
-    // for healthy sessions (left at the SessionProcess default = ladder index 0).
+    // consecutive retry so a pathological context eventually fits. recoveryCount
+    // is 0 for healthy sessions → ladder rung 0 = MAX_HISTORY_MESSAGES (same as
+    // the SessionProcess default), so applying it unconditionally is a no-op for
+    // healthy sessions and the only path that sets historyLimit for recovering ones.
     const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
+    const ladderIdx = Math.min(recoveryCount, TOO_LARGE_HISTORY_LADDER.length - 1);
+    proc.historyLimit = TOO_LARGE_HISTORY_LADDER[ladderIdx];
     if (recoveryCount > 0) {
-      const idx = Math.min(recoveryCount, TOO_LARGE_HISTORY_LADDER.length - 1);
-      proc.historyLimit = TOO_LARGE_HISTORY_LADDER[idx];
       this.logger.info('Spawning with reduced history after request_too_large', {
         mapKey, recoveryCount, historyLimit: proc.historyLimit,
       });
@@ -946,6 +954,7 @@ export class AgentRunner extends EventEmitter {
               // Genuine successful turn — clear any request_too_large escalation so
               // the next 32MB (if any) starts fresh at the top of the ladder.
               this.tooLargeRecoveries.delete(mapKey);
+              this.tooLargeExhausted.delete(mapKey);
             }
             // Skip when a menu was rendered to buttons this turn — the result
             // text is the same numbered list and would duplicate the menu message.
@@ -1222,6 +1231,7 @@ export class AgentRunner extends EventEmitter {
     // Reset any request_too_large escalation — the context is now empty, so the
     // next spawn should start fresh at the top of the history ladder.
     this.tooLargeRecoveries.delete(chatId);
+    this.tooLargeExhausted.delete(chatId);
 
     // Kill old process so next message spawns fresh
     this.restartProcess(chatId).catch(() => {});
@@ -1323,15 +1333,19 @@ export class AgentRunner extends EventEmitter {
 
     if (count > lastRung) {
       // Even the zero-history spawn tripped 32MB — context can't shrink further.
-      // Pin the counter at the last rung so future spawns stay at 0 history,
-      // surface a clear next step, and still restart so the process isn't wedged.
+      // Pin the counter at the last rung and always surface the /clear next step.
       this.tooLargeRecoveries.set(mapKey, lastRung);
       this.logger.error('Request too large persists with zero re-injected history', { mapKey, count });
       this.writeAutoForward(
         mapKey,
         '⚠️ ยังเกิน 32MB แม้จะล้าง context จนว่างแล้ว — พิมพ์ /clear เพื่อเริ่มเซสชันใหม่ หรือ /restart ค่ะ',
       );
-      void this.restartProcess(mapKey);
+      // Restart ONCE to clear the wedged process the first time the ladder is
+      // exhausted; thereafter stop restarting (no churn) and let the user /clear.
+      if (!this.tooLargeExhausted.has(mapKey)) {
+        this.tooLargeExhausted.add(mapKey);
+        void this.restartProcess(mapKey);
+      }
       return;
     }
 

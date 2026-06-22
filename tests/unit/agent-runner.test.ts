@@ -275,6 +275,55 @@ describe('AgentRunner (session pool)', () => {
 
     expect(getSessions(runner).size).toBe(0);
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-02: the recovery counter is wired into spawn — a session
+  //   spawned while mid-escalation gets the shrunk historyLimit (ladder rung).
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-02: spawn applies the escalated historyLimit from the counter', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    // Simulate two prior 32MB recoveries on this chat (rung 2 = 30 messages).
+    (runner as unknown as { tooLargeRecoveries: Map<string, number> })
+      .tooLargeRecoveries.set('chat:esc', 2);
+
+    await sendChannelPost(port, 'chat:esc', 'hello again');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:esc')!;
+    expect(sess).toBeDefined();
+    expect(sess.historyLimit).toBe(30); // TOO_LARGE_HISTORY_LADDER[2]
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-03: a successful result clears the escalation counter so the
+  //   next 32MB starts fresh at the top of the ladder (full history again).
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-03: a successful result resets the recovery counter', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:reset', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const internal = runner as unknown as {
+      tooLargeRecoveries: Map<string, number>;
+      tooLargeExhausted: Set<string>;
+    };
+    internal.tooLargeRecoveries.set('chat:reset', 3);
+    internal.tooLargeExhausted.add('chat:reset');
+
+    // A genuine successful result on this session must clear the escalation.
+    const sess = getSessions(runner).get('chat:reset')!;
+    sess.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'all good' }));
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(internal.tooLargeRecoveries.has('chat:reset')).toBe(false);
+    expect(internal.tooLargeExhausted.has('chat:reset')).toBe(false);
+  }, 15000);
 });
 
 // ── restartOrDefer (skills hot-reload support) ────────────────────────────────
@@ -575,29 +624,42 @@ describe('AgentRunner — typing error notification', () => {
   //   (50→40→30→20→10→0) and pins at the last rung once 0-history still trips.
   //   Covers Bug B (headless) + Bug A (PTY) — both route through this handler.
   // --------------------------------------------------------------------------
-  it('U-AR-TOOLARGE-01: handleRequestTooLarge escalates then gives up', () => {
+  it('U-AR-TOOLARGE-01: handleRequestTooLarge escalates, gives up, then stops churning', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     const r = runner as unknown as {
       handleRequestTooLarge: (mapKey: string, proc: { setProcessing: (b: boolean) => void }) => void;
       tooLargeRecoveries: Map<string, number>;
+      tooLargeExhausted: Set<string>;
+      restartProcess: (chatId: string) => Promise<void>;
     };
+    // Spy restartProcess to count restarts without touching the (empty) session pool.
+    const restartSpy = jest.spyOn(r, 'restartProcess').mockResolvedValue(undefined);
     const proc = { setProcessing: jest.fn() };
     const forwardFile = path.join(getTypingDir(), 'chat:big.forward');
     const readForward = () => JSON.parse(fs.readFileSync(forwardFile, 'utf8')).text as string;
 
-    // Rungs 1..5 → counter climbs, each emits the "Restarting" resend notice.
+    // Rungs 1..5 → counter climbs, each emits the "Restarting" resend notice + restarts.
     for (let i = 1; i <= 5; i++) {
       r.handleRequestTooLarge('chat:big', proc);
       expect(r.tooLargeRecoveries.get('chat:big')).toBe(i);
       expect(readForward()).toContain('32MB request limit');
     }
-    expect(proc.setProcessing).toHaveBeenCalledTimes(5);
     expect(proc.setProcessing).toHaveBeenLastCalledWith(false);
+    expect(restartSpy).toHaveBeenCalledTimes(5);
 
-    // 6th: even 0-history tripped → pin at last rung (5) and tell the user to /clear.
+    // 6th: even 0-history tripped → pin at last rung (5), tell the user to /clear,
+    // and restart ONCE more to clear the wedged process (6 restarts total).
     r.handleRequestTooLarge('chat:big', proc);
     expect(r.tooLargeRecoveries.get('chat:big')).toBe(5);
+    expect(r.tooLargeExhausted.has('chat:big')).toBe(true);
     expect(readForward()).toContain('/clear');
+    expect(restartSpy).toHaveBeenCalledTimes(6);
+
+    // 7th+: still exhausted → keep re-notifying /clear but NO further restart (no churn).
+    r.handleRequestTooLarge('chat:big', proc);
+    r.handleRequestTooLarge('chat:big', proc);
+    expect(readForward()).toContain('/clear');
+    expect(restartSpy).toHaveBeenCalledTimes(6);
   });
 
   // --------------------------------------------------------------------------
