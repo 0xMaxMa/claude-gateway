@@ -125,7 +125,10 @@ function parseChannelFromStdin(line) {
   try {
     const obj = JSON.parse(line)
     const text = obj?.message?.content?.[0]?.text ?? ''
-    const m = text.match(/<channel([^>]*)>([\s\S]*?)<\/channel>/)
+    // Take the LAST match — the current user turn is always appended last,
+    // so if history happens to contain a <channel> string we skip it.
+    const allMatches = [...text.matchAll(/<channel([^>]*)>([\s\S]*?)<\/channel>/g)]
+    const m = allMatches.length > 0 ? allMatches[allMatches.length - 1] : null
     if (!m) return null
     const attrsStr = m[1]
     const content = m[2].trim()
