@@ -493,11 +493,22 @@ export class SessionProcess extends EventEmitter {
     // first API turn and cause sendApiMessage to resolve with the wrong result.
     // Instead, if there is conversation history to restore (model-switch respawn),
     // stash it in pendingInitialPrompt so sendMessage() prepends it to the first turn.
+    //
+    // Non-API sessions with history also use pendingInitialPrompt to avoid a
+    // double-response bug: if the session died while an interactive menu was pending
+    // (e.g. ExitPlanMode Pre-flight Summary), sending history + activation immediately
+    // makes Claude respond to that context as Turn 1, then the user's reply (e.g. "Y")
+    // becomes Turn 2 — two separate responses forwarded to the channel. Deferring
+    // history to sendMessage() bundles [history + activation + user reply] into a
+    // single turn so Claude produces exactly one response.
     if (this.source !== 'api') {
-      const initialPrompt = historyPrompt
-        ? `${historyPrompt}\n\n${CHANNELS_ACTIVATION_PROMPT}`
-        : CHANNELS_ACTIVATION_PROMPT;
-      proc.stdin?.write(SessionProcess.toStreamJsonTurn(initialPrompt) + '\n');
+      if (historyPrompt) {
+        // Has history: defer to first incoming user message to prevent double-response.
+        this.pendingInitialPrompt = `${historyPrompt}\n\n${CHANNELS_ACTIVATION_PROMPT}`;
+      } else {
+        // No history: send activation-only prompt immediately (fresh session).
+        proc.stdin?.write(SessionProcess.toStreamJsonTurn(CHANNELS_ACTIVATION_PROMPT) + '\n');
+      }
     } else if (historyPrompt) {
       this.pendingInitialPrompt = historyPrompt;
     }

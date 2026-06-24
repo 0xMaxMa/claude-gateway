@@ -255,14 +255,16 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    // The first stdin.write call contains the initial prompt
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // With history, the initial prompt is deferred to pendingInitialPrompt so it
+    // can be bundled with the first user message into a single turn (prevents
+    // double-response when the session restarts mid-menu).
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     expect(text).toContain('Conversation history');
     expect(text).toContain('User: Hello');
     expect(text).toContain('Assistant: Hi there!');
+    // Nothing written to stdin yet (deferred)
+    expect(lastProcess!.stdin!.write.mock.calls.length).toBe(0);
   });
 
   // --------------------------------------------------------------------------
@@ -296,9 +298,8 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     // Should contain Message 59 (last) but NOT Message 0 (first — truncated)
     expect(text).toContain('Message 59');
@@ -328,9 +329,8 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     // Summary and last message must be present
     expect(text).toContain('[Conversation Summary]');
@@ -354,9 +354,8 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     expect(text).toContain('Msg 59');
     expect(text).not.toContain('Msg 0');
@@ -383,9 +382,8 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     expect(text).toContain('[Conversation Summary]');
     expect(text).toContain('Short 1');
@@ -419,9 +417,8 @@ describe('SessionProcess', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     // Last 50 messages = indices 11–60, so 'First normal message' (idx 0) is out
     expect(text).not.toContain('First normal message');
@@ -445,9 +442,8 @@ describe('SessionProcess', () => {
     sp.historyLimit = 10; // escalated rung (e.g. after several 32MB recoveries)
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     // Only the last 10 messages (50–59) survive; 49 and older are dropped.
     expect(text).toContain('Rung 59');
@@ -1473,9 +1469,8 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     expect(text).toContain('System: [Image Context Summary]');
     expect(text).not.toContain('Assistant: [Image Context Summary]');
@@ -1495,9 +1490,8 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
     const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
-    const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
-    const parsed = JSON.parse(firstWrite);
-    const text: string = parsed.message.content[0].text;
+    // History is deferred to pendingInitialPrompt (not written to stdin immediately)
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
 
     expect(text).toContain('User: show me a picture');
     expect(text).toContain('Assistant: Here is the image.');
@@ -1804,10 +1798,9 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     const respawned = lastProcess!;
     expect(respawned).not.toBe(firstProcess);
 
-    // The respawned subprocess gets a fresh prompt rebuilt from text history —
-    // clean, with no corrupted thinking content.
-    const initialWrite = respawned.stdin!.write.mock.calls[0][0] as string;
-    const text: string = JSON.parse(initialWrite).message.content[0].text;
+    // The respawned subprocess defers history to pendingInitialPrompt so it can
+    // be bundled with the next user message — clean, with no corrupted thinking.
+    const text = (sp as unknown as { pendingInitialPrompt?: string }).pendingInitialPrompt ?? '';
     expect(text).toContain('Conversation history');
     expect(text).toContain('clean reply');
     expect(text).not.toContain('cannot be modified');
