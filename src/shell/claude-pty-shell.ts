@@ -409,10 +409,7 @@ class Driver {
     // Also clear the queue so any messages queued behind this one don't surface
     // after the turn is abandoned (matches the SIGINT queue-drop logic above).
     if (this.interrupting || !this.turn) {
-      // Belt-and-suspenders: Ctrl+A (home) + Ctrl+K (kill-to-end) works regardless
-      // of cursor position; Ctrl+U is the readline fallback. Together they cover
-      // Ink TUI implementations that may only handle a subset of these sequences.
-      this.host.writeRaw('\x01\x0b\x15'); // Ctrl+A + Ctrl+K + Ctrl+U
+      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
       this.queue.length = 0;
       return;
     }
@@ -700,7 +697,7 @@ class Driver {
     // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
     // input and get prepended to the user's next message (same pattern as typeAndSubmit).
     if (this.interrupting || !this.turn) {
-      this.host.writeRaw('\x01\x0b\x15'); // Ctrl+A + Ctrl+K + Ctrl+U
+      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
       this.queue.length = 0;
       return;
     }
