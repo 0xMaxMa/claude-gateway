@@ -408,13 +408,18 @@ class Driver {
     // prompt that would be prepended to the user's next message.
     // Also clear the queue so any messages queued behind this one don't surface
     // after the turn is abandoned (matches the SIGINT queue-drop logic above).
-    if (this.interrupting || !this.turn) {
-      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
-      this.queue.length = 0;
-      return;
-    }
+    if (this.abortIfInterrupted()) return;
     this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
+  }
+
+  // Sends Ctrl+U to clear the PTY input line, drains the queue, and returns true.
+  // Call after writing to the PTY when an interrupt may have arrived mid-write.
+  private abortIfInterrupted(): boolean {
+    if (!this.interrupting && this.turn) return false;
+    this.host.writeRaw('\x15'); // Ctrl+U: clear input line
+    this.queue.length = 0;
+    return true;
   }
 
   // ---- periodic liveness poll ----------------------------------------------
@@ -692,15 +697,17 @@ class Driver {
    * confirms on the digit alone or requires Enter.
    */
   private async selectMenuOption(n: number): Promise<void> {
-    this.host.writeRaw(String(n));
-    await new Promise((r) => setTimeout(r, MENU_SELECT_ENTER_DELAY_MS));
-    // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
-    // input and get prepended to the user's next message (same pattern as typeAndSubmit).
+    // Pre-write guard: mirrors typeAndSubmit's pre-paste guard — if SIGINT already fired,
+    // skip the write entirely so no digit lands in the PTY input.
     if (this.interrupting || !this.turn) {
-      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
       this.queue.length = 0;
       return;
     }
+    this.host.writeRaw(String(n));
+    await new Promise((r) => setTimeout(r, MENU_SELECT_ENTER_DELAY_MS));
+    // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
+    // input and get prepended to the user's next message.
+    if (this.abortIfInterrupted()) return;
     if (this.screen.detectMenu()) this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
   }
