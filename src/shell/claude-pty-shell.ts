@@ -387,6 +387,12 @@ class Driver {
   }
 
   private async typeAndSubmit(text: string): Promise<void> {
+    // Pre-paste guard: if SIGINT already fired between beginTurn() and here, skip the
+    // paste entirely — no text lands in the PTY input so no clearing is needed.
+    if (this.interrupting || !this.turn) {
+      this.queue.length = 0;
+      return;
+    }
     if (NO_BRACKETED_PASTE) {
       // Fallback: sanitizeUserText() strips all CR, so '\r' below is the only
       // submit trigger — safe for multiline text without bracketed paste.
@@ -403,7 +409,10 @@ class Driver {
     // Also clear the queue so any messages queued behind this one don't surface
     // after the turn is abandoned (matches the SIGINT queue-drop logic above).
     if (this.interrupting || !this.turn) {
-      this.host.writeRaw('\x15'); // Ctrl+U: clear input line
+      // Belt-and-suspenders: Ctrl+A (home) + Ctrl+K (kill-to-end) works regardless
+      // of cursor position; Ctrl+U is the readline fallback. Together they cover
+      // Ink TUI implementations that may only handle a subset of these sequences.
+      this.host.writeRaw('\x01\x0b\x15'); // Ctrl+A + Ctrl+K + Ctrl+U
       this.queue.length = 0;
       return;
     }
@@ -688,6 +697,13 @@ class Driver {
   private async selectMenuOption(n: number): Promise<void> {
     this.host.writeRaw(String(n));
     await new Promise((r) => setTimeout(r, MENU_SELECT_ENTER_DELAY_MS));
+    // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
+    // input and get prepended to the user's next message (same pattern as typeAndSubmit).
+    if (this.interrupting || !this.turn) {
+      this.host.writeRaw('\x01\x0b\x15'); // Ctrl+A + Ctrl+K + Ctrl+U
+      this.queue.length = 0;
+      return;
+    }
     if (this.screen.detectMenu()) this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
   }
