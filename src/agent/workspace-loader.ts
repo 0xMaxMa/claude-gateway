@@ -210,15 +210,21 @@ export function watchWorkspace(
   return createWatcher({
     paths: [path.join(workspaceDir, '*.md')],
     debounceMs: WATCH_DEBOUNCE_MS,
-    // Only the top-level *.md files matter here. `depth: 0` stops chokidar from
-    // recursing into workspace subdirectories such as .telegram-state /
-    // .discord-state — that accidental recursion fanned out one inotify watcher
-    // per nested dir across every agent and could exhaust the system limit
-    // (ENOSPC), crashing the gateway. The `ignored` fn is defence-in-depth:
-    // skip CLAUDE.md and any dot-prefixed entry under the workspace. It is
-    // computed relative to workspaceDir on purpose — a naive dot-segment match
-    // against the absolute path would also match the parent `.claude-gateway`
-    // dir and silently ignore the entire tree.
+    // Only the top-level *.md files matter here. `depth: 0` and the `ignored`
+    // function do TWO DISTINCT jobs — neither is redundant:
+    //   • depth:0 stops chokidar from recursing into workspace subdirectories
+    //     (.telegram-state / .discord-state / memory / …). That accidental
+    //     recursion fanned out one inotify watcher per nested dir across every
+    //     agent and could exhaust the system limit (ENOSPC), crashing the
+    //     gateway. depth:0 alone does NOT filter top-level entries.
+    //   • ignored filters the top-level entries the *.md glob still matches:
+    //     CLAUDE.md (excluded so its reload-driven rewrite can't self-trigger a
+    //     loop) and dot-prefixed files. NB: chokidar's *.md glob DOES match
+    //     leading-dot files (verified — `.foo.md` fires an add event), so
+    //     without this a top-level dotfile would spuriously trigger reloads.
+    // The dot test is computed relative to workspaceDir on purpose — a naive
+    // dot-segment match against the absolute path would also match the parent
+    // `.claude-gateway` dir and silently ignore the entire tree.
     chokidarOpts: {
       depth: 0,
       ignored: (p: string) => {

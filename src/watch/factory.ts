@@ -33,6 +33,56 @@ export interface WatchHandle {
 }
 
 /**
+ * A degraded watcher recorded for health reporting. One entry per distinct
+ * (error code, watched paths) pair; repeated errors increment `count` rather
+ * than piling up. Surfaced on GET /status so an ENOSPC degrade is observable
+ * in production instead of being a single console line nobody sees.
+ */
+export interface WatcherErrorRecord {
+  paths: string[];
+  code: string | null;
+  message: string;
+  count: number;
+  firstAt: string; // ISO-8601
+  lastAt: string; // ISO-8601
+}
+
+// Bounded by the number of distinct watchers (a few dozen at most), so this
+// never grows unbounded. Keyed by `${code}:${paths}`.
+const watcherErrors = new Map<string, WatcherErrorRecord>();
+
+/** Snapshot of degraded watchers for health reporting. Empty when healthy. */
+export function getWatcherHealth(): WatcherErrorRecord[] {
+  return [...watcherErrors.values()].map((r) => ({ ...r, paths: [...r.paths] }));
+}
+
+/** Test-only: clear the recorded watcher-error registry. */
+export function resetWatcherHealth(): void {
+  watcherErrors.clear();
+}
+
+function recordWatcherError(paths: string[], e: NodeJS.ErrnoException): void {
+  const code = e?.code ?? null;
+  const key = `${code ?? 'ERR'}:${paths.join(',')}`;
+  const now = new Date().toISOString();
+  const existing = watcherErrors.get(key);
+  if (existing) {
+    existing.count += 1;
+    existing.lastAt = now;
+    existing.message = e?.message ?? String(e);
+  } else {
+    watcherErrors.set(key, {
+      paths: [...paths],
+      code,
+      message: e?.message ?? String(e),
+      count: 1,
+      firstAt: now,
+      lastAt: now,
+    });
+  }
+}
+
+/**
  * Shared chokidar watcher factory.
  * Watches the given paths, debounces rapid changes, and calls onChange.
  * Returns a WatchHandle with a close() method to stop watching.
@@ -75,6 +125,9 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
       // unhandledRejection — which the gateway treats as fatal and exits on.
       // Catch, log actionably, and degrade this watcher instead of crashing.
       const e = err as NodeJS.ErrnoException;
+      // Record for /status health reporting so the degrade is observable in
+      // production, not just a single console line.
+      recordWatcherError(opts.paths, e);
       if (e && e.code === 'ENOSPC') {
         console.error(
           `[watch] inotify limit reached (ENOSPC) while watching ${opts.paths.join(', ')}; ` +

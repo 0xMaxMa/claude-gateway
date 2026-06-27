@@ -30,7 +30,7 @@ jest.mock('chokidar', () => {
 });
 
 import chokidar from 'chokidar';
-import { createWatcher } from '../../src/watch/factory';
+import { createWatcher, getWatcherHealth, resetWatcherHealth } from '../../src/watch/factory';
 
 const watchMock = chokidar as unknown as {
   watch: jest.Mock;
@@ -48,6 +48,7 @@ describe('createWatcher error handling', () => {
   beforeEach(() => {
     watchMock.watch.mockClear();
     watchMock.__created.length = 0;
+    resetWatcherHealth();
     errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
@@ -108,5 +109,57 @@ describe('createWatcher error handling', () => {
     // EventEmitter throws on emit('error') only when there is NO listener.
     // A registered listener is what converts a fatal crash into a logged warning.
     expect(lastWatcher().listenerCount('error')).toBeGreaterThanOrEqual(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Health registry: the degrade must be observable (GET /status), not silent.
+  // ---------------------------------------------------------------------------
+  test('WF-ERR5: getWatcherHealth records a degraded watcher with code + paths', () => {
+    expect(getWatcherHealth()).toHaveLength(0);
+
+    createWatcher({ paths: ['/a/*.md'], debounceMs: 50, onChange: () => {} });
+    lastWatcher().emit('error', Object.assign(new Error('no space'), { code: 'ENOSPC' }));
+
+    const health = getWatcherHealth();
+    expect(health).toHaveLength(1);
+    expect(health[0]).toMatchObject({ code: 'ENOSPC', paths: ['/a/*.md'], count: 1 });
+    expect(health[0].message).toBe('no space');
+    expect(typeof health[0].firstAt).toBe('string');
+    expect(typeof health[0].lastAt).toBe('string');
+  });
+
+  test('WF-ERR6: repeated errors on the same watcher increment count, not duplicate', () => {
+    createWatcher({ paths: ['/b'], debounceMs: 50, onChange: () => {} });
+    const w = lastWatcher();
+    const enospc = Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    w.emit('error', enospc);
+    w.emit('error', enospc);
+    w.emit('error', enospc);
+
+    const health = getWatcherHealth();
+    expect(health).toHaveLength(1);
+    expect(health[0].count).toBe(3);
+  });
+
+  test('WF-ERR7: distinct (code, paths) pairs are tracked separately', () => {
+    createWatcher({ paths: ['/c'], debounceMs: 50, onChange: () => {} });
+    lastWatcher().emit('error', Object.assign(new Error('x'), { code: 'ENOSPC' }));
+    createWatcher({ paths: ['/d'], debounceMs: 50, onChange: () => {} });
+    lastWatcher().emit('error', Object.assign(new Error('y'), { code: 'EPERM' }));
+
+    expect(getWatcherHealth()).toHaveLength(2);
+  });
+
+  test('WF-ERR8: getWatcherHealth returns a copy — callers cannot mutate the registry', () => {
+    createWatcher({ paths: ['/e'], debounceMs: 50, onChange: () => {} });
+    lastWatcher().emit('error', Object.assign(new Error('x'), { code: 'ENOSPC' }));
+
+    const snap = getWatcherHealth();
+    snap[0].count = 999;
+    snap[0].paths.push('/injected');
+
+    const fresh = getWatcherHealth();
+    expect(fresh[0].count).toBe(1);
+    expect(fresh[0].paths).toEqual(['/e']);
   });
 });

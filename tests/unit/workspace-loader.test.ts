@@ -361,4 +361,38 @@ describe('workspace-loader', () => {
       fs.rmSync(tmpDir, { recursive: true });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // U-WL-WATCH-DOTFILE: chokidar's `*.md` glob DOES match leading-dot files,
+  // so the `ignored` dot-prefix branch is load-bearing (NOT redundant with
+  // depth:0): without it a top-level `.foo.md` would spuriously trigger a
+  // workspace reload. Guards against anyone "simplifying" the branch away.
+  // -------------------------------------------------------------------------
+  it('watchWorkspace: top-level dot-prefixed .md is ignored (no spurious reload)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-dotfile-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
+
+      const batches: string[][] = [];
+      const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
+
+      try {
+        await new Promise((r) => setTimeout(r, 600));
+
+        // A top-level dotfile that the *.md glob matches — must be ignored.
+        fs.writeFileSync(path.join(tmpDir, '.scratch.md'), 'noise');
+        await new Promise((r) => setTimeout(r, 1000));
+        expect(batches.flat()).toHaveLength(0);
+
+        // Sanity: a normal top-level *.md still fires.
+        fs.writeFileSync(path.join(tmpDir, 'USER.md'), 'real change');
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(batches.flat()).toContain('USER.md');
+      } finally {
+        handle.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
 });
