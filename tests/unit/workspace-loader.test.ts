@@ -321,4 +321,78 @@ describe('workspace-loader', () => {
       fs.rmSync(tmpDir, { recursive: true });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // U-WL-WATCH-DEPTH: watcher must NOT recurse into workspace subdirectories.
+  // Regression guard for the inotify ENOSPC fan-out: chokidar with no depth
+  // limit descended into .telegram-state/.discord-state and spawned one
+  // watcher per nested dir across every agent, exhausting fs.inotify limits
+  // and crashing the gateway. depth:0 means only top-level *.md is watched.
+  // -------------------------------------------------------------------------
+  it('watchWorkspace: does NOT fire for changes inside subdirectories (depth:0, no fan-out)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-depth-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
+      // Mirror the real layout that caused the ENOSPC fan-out.
+      const typingDir = path.join(tmpDir, '.telegram-state', 'typing');
+      fs.mkdirSync(typingDir, { recursive: true });
+      fs.writeFileSync(path.join(typingDir, 'chat.json'), 'initial');
+
+      const batches: string[][] = [];
+      const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
+
+      try {
+        await new Promise((r) => setTimeout(r, 600));
+
+        // Churn deep inside .telegram-state — must be invisible to the watcher.
+        fs.writeFileSync(path.join(typingDir, 'chat.json'), 'updated');
+        fs.writeFileSync(path.join(typingDir, 'new.json'), 'new');
+        await new Promise((r) => setTimeout(r, 1200));
+        expect(batches.flat()).toHaveLength(0);
+
+        // Sanity: top-level *.md still fires, so the watcher is alive.
+        fs.writeFileSync(path.join(tmpDir, 'MEMORY.md'), 'top-level change');
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(batches.flat()).toContain('MEMORY.md');
+      } finally {
+        handle.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // U-WL-WATCH-DOTFILE: chokidar's `*.md` glob DOES match leading-dot files,
+  // so the `ignored` dot-prefix branch is load-bearing (NOT redundant with
+  // depth:0): without it a top-level `.foo.md` would spuriously trigger a
+  // workspace reload. Guards against anyone "simplifying" the branch away.
+  // -------------------------------------------------------------------------
+  it('watchWorkspace: top-level dot-prefixed .md is ignored (no spurious reload)', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-dotfile-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
+
+      const batches: string[][] = [];
+      const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
+
+      try {
+        await new Promise((r) => setTimeout(r, 600));
+
+        // A top-level dotfile that the *.md glob matches — must be ignored.
+        fs.writeFileSync(path.join(tmpDir, '.scratch.md'), 'noise');
+        await new Promise((r) => setTimeout(r, 1000));
+        expect(batches.flat()).toHaveLength(0);
+
+        // Sanity: a normal top-level *.md still fires.
+        fs.writeFileSync(path.join(tmpDir, 'USER.md'), 'real change');
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(batches.flat()).toContain('USER.md');
+      } finally {
+        handle.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
 });
