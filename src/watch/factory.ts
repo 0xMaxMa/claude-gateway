@@ -18,6 +18,12 @@ export interface WatcherOptions {
    * before the debounced onChange fires (e.g. for file renames).
    */
   onAddSync?: (filePath: string) => void;
+  /**
+   * Optional handler for watcher-level errors (e.g. inotify ENOSPC). When
+   * omitted, errors are logged and swallowed so a single failing watcher
+   * never escalates to an unhandledRejection that crashes the whole gateway.
+   */
+  onError?: (err: NodeJS.ErrnoException) => void;
 }
 
 export interface WatchHandle {
@@ -62,7 +68,24 @@ export function createWatcher(opts: WatcherOptions): WatchHandle {
       debounced(filePath);
     })
     .on('change', (filePath: string) => debounced(filePath))
-    .on('unlink', (filePath: string) => debounced(filePath));
+    .on('unlink', (filePath: string) => debounced(filePath))
+    .on('error', (err: unknown) => {
+      // chokidar surfaces watcher failures (e.g. inotify ENOSPC) via the
+      // 'error' event. Without a listener these bubble up as an
+      // unhandledRejection — which the gateway treats as fatal and exits on.
+      // Catch, log actionably, and degrade this watcher instead of crashing.
+      const e = err as NodeJS.ErrnoException;
+      if (e && e.code === 'ENOSPC') {
+        console.error(
+          `[watch] inotify limit reached (ENOSPC) while watching ${opts.paths.join(', ')}; ` +
+            'this watcher is degraded. Raise fs.inotify.max_user_instances / ' +
+            'fs.inotify.max_user_watches, or reduce the number of watched paths.',
+        );
+      } else {
+        console.error(`[watch] watcher error for ${opts.paths.join(', ')}:`, e?.message ?? e);
+      }
+      if (opts.onError) opts.onError(e);
+    });
 
   return {
     ready,

@@ -206,10 +206,27 @@ export function watchWorkspace(
   workspaceDir: string,
   onChange: (changedFiles: string[]) => void,
 ): WatchHandle {
+  const claudeMdPath = path.join(workspaceDir, 'CLAUDE.md');
   return createWatcher({
     paths: [path.join(workspaceDir, '*.md')],
     debounceMs: WATCH_DEBOUNCE_MS,
-    chokidarOpts: { ignored: path.join(workspaceDir, 'CLAUDE.md') },
+    // Only the top-level *.md files matter here. `depth: 0` stops chokidar from
+    // recursing into workspace subdirectories such as .telegram-state /
+    // .discord-state — that accidental recursion fanned out one inotify watcher
+    // per nested dir across every agent and could exhaust the system limit
+    // (ENOSPC), crashing the gateway. The `ignored` fn is defence-in-depth:
+    // skip CLAUDE.md and any dot-prefixed entry under the workspace. It is
+    // computed relative to workspaceDir on purpose — a naive dot-segment match
+    // against the absolute path would also match the parent `.claude-gateway`
+    // dir and silently ignore the entire tree.
+    chokidarOpts: {
+      depth: 0,
+      ignored: (p: string) => {
+        if (p === claudeMdPath) return true;
+        const rel = path.relative(workspaceDir, p);
+        return rel !== '' && rel.startsWith('.');
+      },
+    },
     onAddSync: (filePath: string) => {
       const filename = path.basename(filePath);
       const upperName = LOWERCASE_TO_UPPERCASE[filename];
