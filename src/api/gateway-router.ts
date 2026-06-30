@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
+import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml } from '../ui/web-ui';
@@ -530,6 +531,8 @@ export class GatewayRouter {
         uptime: Math.floor(uptimeMs / 1000),
         startedAt: this.startedAt.toISOString(),
         version: GATEWAY_VERSION,
+        // Degraded file watchers (e.g. inotify ENOSPC). Empty array when healthy.
+        watchers: getWatcherHealth(),
       });
     });
   }
