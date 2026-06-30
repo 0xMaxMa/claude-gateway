@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
-import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
+import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo, hasInteractiveMenuToolUse } from './tailer';
 import { ProtocolEmitter } from './emitter';
@@ -498,7 +498,7 @@ class Driver {
     if (this.menuCancel) {
       const action = decideMenuCancel(this.menuCancel, {
         now,
-        menuVisible: this.screen.detectMenu() !== null,
+        menuVisible: this.screen.detectMenu() !== null || this.screen.detectPermissionPrompt() !== null,
         hasPrompt: this.screen.hasPrompt(),
         isBusy: this.screen.isBusy(),
         quietMs: this.screen.quietMs(),
@@ -560,6 +560,12 @@ class Driver {
     // Blocked on an interactive select menu → bridge it to chat and end the turn
     // so the session goes idle (no watchdog kill) until the user picks an option.
     if (this.maybeBridgeMenu(turn)) return;
+
+    // Blocked on a tool-permission prompt (e.g. the dangerous-rm circuit breaker
+    // that fires even under --dangerously-skip-permissions). Bridge the Yes/No to
+    // chat for a human to decide — never auto-accept — and end the turn so the
+    // session goes idle instead of wedging until the watchdog.
+    if (this.maybeBridgePermissionPrompt(turn)) return;
 
     if (!turn.sawBusy
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
@@ -647,6 +653,44 @@ class Driver {
     return true;
   }
 
+  /**
+   * If the TUI is blocked on a tool-permission prompt, bridge it to chat as a
+   * Yes/No choice (reusing the menu machinery: emit → buttons → handleMenuReply)
+   * and end the turn so the session goes idle while awaiting the human's decision.
+   * Returns true if it bridged.
+   *
+   * This is the fix for the wedge: Claude Code keeps a few catastrophe guards
+   * (dangerous rm, root/home deletes) that prompt EVEN under
+   * --dangerously-skip-permissions, which the wrapper otherwise assumes never
+   * happens. Such a prompt is neither the startup bypass dialog nor an
+   * AskUserQuestion menu, so without this it is never surfaced and the PTY hangs
+   * at the Yes/No until the 30-min watchdog kills the session.
+   *
+   * NEVER auto-selects — a guarded/destructive operation must be a human decision.
+   * Unlike maybeBridgeMenu there is no transcript tool_use to gate on (the circuit
+   * breaker is CLI-internal UI, not written to the transcript), so detection rests
+   * on detectPermissionPrompt()'s region + multi-marker guard plus the settle
+   * gate. That is the same defense detectDialog() relies on, and bridging to a
+   * human is strictly safer than detectDialog()'s auto-keypress.
+   */
+  private maybeBridgePermissionPrompt(turn: ActiveTurn): boolean {
+    if (SKIP_MENU_BRIDGE || this.pendingMenu) return false;
+    if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return false;
+    // The bypass-permissions startup dialog is auto-accepted by maybeHandleDialog().
+    if (this.screen.detectDialog() === 'bypass-permissions') return false;
+    const prompt = this.screen.detectPermissionPrompt();
+    if (!prompt) return false;
+
+    const text = formatPermissionPrompt(prompt.context, prompt.options);
+    logWarn(`permission prompt detected (${prompt.options.length} options) — bridging to chat (never auto-accepted)`);
+    this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt: text, options: prompt.options });
+    // Carry the prompt as the turn's result text too (API fallback + chat history).
+    turn.texts.push((turn.texts.length ? '\n\n' : '') + text);
+    this.pendingMenu = { options: prompt.options };
+    this.finishTurn(false);
+    return true;
+  }
+
   /** Route a user's menu reply (typed number or button tap) to a selection. */
   private handleMenuReply(text: string): void {
     const menu = this.pendingMenu;
@@ -708,7 +752,10 @@ class Driver {
     // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
     // input and get prepended to the user's next message.
     if (this.abortIfInterrupted()) return;
-    if (this.screen.detectMenu()) this.host.writeRaw('\r');
+    // Send Enter only if a selectable prompt is still on screen — covers both the
+    // AskUserQuestion menu and the permission prompt, and self-corrects when the
+    // digit alone already confirmed (prompt gone → no stray Enter).
+    if (this.screen.detectMenu() || this.screen.detectPermissionPrompt()) this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
   }
 

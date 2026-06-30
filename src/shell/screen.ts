@@ -105,6 +105,67 @@ export const TUI_MENU_FOOTER = ['to navigate', 'to cancel'] as const;
 export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
 
 /**
+ * A tool-permission prompt blocking on keyboard input. Distinct from the
+ * AskUserQuestion select menu: Claude Code raises this for guarded operations
+ * (e.g. a "Dangerous rm operation on possibly-empty variable path" circuit
+ * breaker) that prompt EVEN under --dangerously-skip-permissions, since
+ * bypassPermissions deliberately keeps a few catastrophe guards (rm against
+ * root/home, possibly-empty globs). The wrapper otherwise assumes no permission
+ * prompt ever appears, so without this detector the PTY wedges at the Yes/No
+ * forever — nobody can answer it from chat and the typing indicator never clears.
+ *
+ * Matched by the universal question line plus a footer token unique to permission
+ * prompts: the select-menu footer carries "↑/↓ to navigate" and the 32MB overlay
+ * carries "esc to go back", so "to amend" / "to explain" disambiguate cleanly.
+ * Region-restricted (bottom rows) + multi-marker so quoted prose in scrollback
+ * cannot trip it — the same defense detectDialog() uses. Detection only ever
+ * BRIDGES the choice to a human; it never presses a key on its own (a destructive
+ * guard must not be auto-accepted), making it strictly safer than detectDialog.
+ */
+export const TUI_PERMISSION_PROMPT = 'Do you want to proceed?';
+export const TUI_PERMISSION_FOOTER_TOKENS = ['to amend', 'to explain'] as const;
+
+/** A blocking interactive prompt parsed off the screen: the selectable options
+ *  plus any context text shown above the question (warning + command). */
+export interface PermissionPrompt {
+  options: MenuOption[];
+  /** Human-readable lines above the question (e.g. the dangerous command) — '' if none. */
+  context: string;
+}
+
+/**
+ * Parse the numbered option rows out of a block of screen lines and return the
+ * live run as 1..N options. Scrollback above a prompt can contain stale numbered
+ * lines (a prior chat message rendered as "1. … 2. …"), so we take the LAST run
+ * that starts at "1." and increments by one — that is the live prompt nearest the
+ * footer, not history. Returns null for fewer than two options. Shared by
+ * detectMenu() and detectPermissionPrompt() so both number options identically.
+ */
+function parseOptionRun(lines: string[]): MenuOption[] | null {
+  const matches: MenuOption[] = [];
+  for (const raw of lines) {
+    // Strip a left box border ("│ ") if the prompt renders inside a dialog box —
+    // a strict superset of the bare-indent case, so unboxed menus parse unchanged.
+    const line = raw.replace(/^\s*│\s?/, '');
+    const m = TUI_MENU_OPTION_RE.exec(line);
+    if (m) matches.push({ index: Number(m[1]), label: m[2].trim() });
+  }
+  if (matches.length < 2) return null;
+  let start = -1;
+  for (let i = 0; i < matches.length; i++) {
+    if (matches[i].index === 1) start = i;
+  }
+  if (start === -1) return null;
+  const run: MenuOption[] = [];
+  let expected = 1;
+  for (let i = start; i < matches.length && matches[i].index === expected; i++) {
+    run.push(matches[i]);
+    expected++;
+  }
+  return run.length >= 2 ? run : null;
+}
+
+/**
  * Parse a user's menu reply (typed number or a button's choice payload) into a
  * 1-based option index. Returns null for anything that isn't a leading integer
  * within [1, count] — never trust chat input to be a valid selection.
@@ -134,6 +195,19 @@ export function extractChannelContent(text: string): string {
 export function formatMenuPrompt(options: MenuOption[]): string {
   const lines = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
   return `🔢 Choose an option — tap a button below, or reply with the number:\n\n${lines}`;
+}
+
+/**
+ * Build the chat-facing prompt for a tool-permission request. Leads with a clear
+ * warning (this is a guarded/destructive operation Claude Code refused to run
+ * unattended), echoes the context lines (e.g. the exact command) so the human can
+ * judge, and lists the options 1..N — the same numbering selectMenuOption() types
+ * back into the TUI. Also the API/no-button fallback text.
+ */
+export function formatPermissionPrompt(context: string, options: MenuOption[]): string {
+  const opts = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
+  const ctx = context.trim() ? `\n\n${context.trim()}` : '';
+  return `⚠️ Claude Code is asking permission for a guarded operation — a human must decide:${ctx}\n\nTap a button below, or reply with the number:\n\n${opts}`;
 }
 
 /**
@@ -255,32 +329,59 @@ export class ScreenModel {
     const lines = text.split('\n');
     const footerIdx = lines.findIndex((l) => TUI_MENU_FOOTER.some((s) => l.includes(s)));
     const region = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
+    // parseOptionRun() takes the live 1..N run nearest the footer, so stale
+    // numbered scrollback above the menu can't inflate or shift the option list.
+    return parseOptionRun(region);
+  }
 
-    const matches: MenuOption[] = [];
-    for (const line of region) {
-      const m = TUI_MENU_OPTION_RE.exec(line);
-      if (m) matches.push({ index: Number(m[1]), label: m[2].trim() });
-    }
-    if (matches.length < 2) return null;
+  /**
+   * Detect a tool-permission prompt blocking on input (e.g. the dangerous-rm
+   * circuit breaker that fires even under --dangerously-skip-permissions) and
+   * parse its options + context. Returns null when no such prompt is on screen.
+   *
+   * Region-restricted to the bottom rows and gated on BOTH the question line and
+   * a permission-only footer token, so a reply/history that merely quotes the
+   * prompt (sitting in scrollback above) never trips it. The bypass-permissions
+   * startup dialog is handled by detectDialog()/auto-accept and is excluded here.
+   * Callers must only ever BRIDGE this to a human — never auto-select an option.
+   */
+  detectPermissionPrompt(): PermissionPrompt | null {
+    const text = this.bottomText(DIALOG_REGION_ROWS);
+    if (!text.includes(TUI_PERMISSION_PROMPT)) return null;
+    if (!TUI_PERMISSION_FOOTER_TOKENS.some((t) => text.includes(t))) return null;
+    // The "Bypass Permissions mode … Yes, I accept" startup dialog is a separate
+    // case with its own auto-accept — don't double-handle it here.
+    if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) return null;
 
-    // Scrollback above the menu can contain stale numbered lines (e.g. a prior
-    // chat message rendered as "1. … 2. …"). The real select menu always numbers
-    // its options 1..N in order, so take the LAST run that starts at "1." and
-    // increments by one — that is the live menu nearest the footer, not history.
-    // This run's position is what selectMenuOption() types into the TUI, so it
-    // MUST mirror the on-screen numbering exactly.
-    let start = -1;
-    for (let i = 0; i < matches.length; i++) {
-      if (matches[i].index === 1) start = i;
+    const lines = text.split('\n');
+    const qIdx = lines.findIndex((l) => l.includes(TUI_PERMISSION_PROMPT));
+    const footerIdx = lines.findIndex(
+      (l, i) => i > qIdx && TUI_PERMISSION_FOOTER_TOKENS.some((t) => l.includes(t)),
+    );
+    // Options live strictly between the question and the footer.
+    const optionRegion = footerIdx >= 0 ? lines.slice(qIdx + 1, footerIdx) : lines.slice(qIdx + 1);
+    const options = parseOptionRun(optionRegion);
+    if (!options) return null;
+
+    // Context = the warning + command shown above the question. Bound it to the
+    // dialog box (scan up for the rounded top border ╭) so conversation lines that
+    // merely share the bottom region aren't swept in; fall back to the few lines
+    // immediately above the question when the prompt isn't boxed.
+    const isBorderOnly = (l: string) => /^[\s│╭╮╰╯─]*$/.test(l);
+    const stripBorder = (l: string) => l.replace(/^[\s│]+/, '').replace(/[\s│]+$/, '');
+    const aboveQ = lines.slice(0, qIdx);
+    let boxTop = -1;
+    for (let i = aboveQ.length - 1; i >= 0; i--) {
+      if (/[╭╮]/.test(aboveQ[i])) { boxTop = i; break; }
     }
-    if (start === -1) return null;
-    const run: MenuOption[] = [];
-    let expected = 1;
-    for (let i = start; i < matches.length && matches[i].index === expected; i++) {
-      run.push(matches[i]);
-      expected++;
-    }
-    return run.length >= 2 ? run : null;
+    const contextLines = boxTop >= 0 ? aboveQ.slice(boxTop + 1) : aboveQ.slice(-4);
+    const context = contextLines
+      .filter((l) => !isBorderOnly(l))
+      .map(stripBorder)
+      .filter((l) => l.length > 0)
+      .join('\n');
+
+    return { options, context };
   }
 }
 

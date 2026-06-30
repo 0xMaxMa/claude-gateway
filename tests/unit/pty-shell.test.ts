@@ -9,6 +9,7 @@ import {
   neutralizeTuiTriggers,
   parseMenuChoice,
   formatMenuPrompt,
+  formatPermissionPrompt,
   extractChannelContent,
   isPtyActivelyWorking,
 } from '../../src/shell/screen';
@@ -546,6 +547,101 @@ describe('ScreenModel detectDialog (region-restricted)', () => {
   it('requires BOTH markers (one alone never triggers)', async () => {
     const screen = await renderScreen([...FILLER(45), '  Bypass Permissions mode']);
     expect(screen.detectDialog()).toBeNull();
+  });
+});
+
+describe('ScreenModel detectPermissionPrompt (region-restricted, never auto-accepts)', () => {
+  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
+  // Claude Code's tool-permission footer — note "Tab to amend"/"to explain", which
+  // the select-menu footer ("↑/↓ to navigate") and the 32MB overlay never carry.
+  const PERM_FOOTER = 'Esc to cancel · Tab to amend · ctrl+e to explain';
+
+  it('detects the dangerous-rm circuit-breaker prompt (boxed) and parses Yes/No', async () => {
+    const screen = await renderScreen([
+      ...FILLER(38),
+      '╭──────────────────────────────────────────────────────────────╮',
+      '│ Dangerous rm operation on possibly-empty variable path: "$OLD"/*.sql',
+      '│',
+      '│ Do you want to proceed?',
+      '│ ❯ 1. Yes',
+      '│   2. No',
+      '╰──────────────────────────────────────────────────────────────╯',
+      PERM_FOOTER,
+    ]);
+    const prompt = screen.detectPermissionPrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.options.map((o) => o.label)).toEqual(['Yes', 'No']);
+    // Context echoes the guarded command (box borders stripped), not the filler.
+    expect(prompt!.context).toContain('Dangerous rm operation');
+    expect(prompt!.context).not.toContain('conversation line');
+  });
+
+  it('also parses an unboxed prompt (options indented, no box border)', async () => {
+    const screen = await renderScreen([
+      ...FILLER(42),
+      'Do you want to proceed?',
+      '  ❯ 1. Yes',
+      '    2. No',
+      PERM_FOOTER,
+    ]);
+    const prompt = screen.detectPermissionPrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.options.map((o) => o.label)).toEqual(['Yes', 'No']);
+  });
+
+  it('ignores the prompt when it sits in upper scrollback (quoted prose)', async () => {
+    // An agent explaining the wedge, or re-injected history: the question +
+    // footer tokens are near the top, above the bottom region → no false bridge.
+    const screen = await renderScreen([
+      'Assistant: it showed "Do you want to proceed?" 1. Yes 2. No (Tab to amend)',
+      ...FILLER(44),
+      '❯ ',
+    ]);
+    expect(screen.detectPermissionPrompt()).toBeNull();
+  });
+
+  it('requires a permission footer token (a plain numbered question never trips it)', async () => {
+    const screen = await renderScreen([
+      ...FILLER(43),
+      'Do you want to proceed?',
+      '❯ 1. Yes',
+      '  2. No',
+    ]);
+    // No "to amend"/"to explain" footer present → not a permission prompt.
+    expect(screen.detectPermissionPrompt()).toBeNull();
+  });
+
+  it('excludes the bypass-permissions startup dialog (handled by detectDialog)', async () => {
+    const screen = await renderScreen([
+      ...FILLER(40),
+      'Bypass Permissions mode',
+      'Do you want to proceed?',
+      '❯ 1. Yes, I accept',
+      '  2. No, exit',
+      PERM_FOOTER,
+    ]);
+    expect(screen.detectPermissionPrompt()).toBeNull();
+    expect(screen.detectDialog()).toBe('bypass-permissions');
+  });
+});
+
+describe('formatPermissionPrompt', () => {
+  it('leads with a warning, echoes context, and numbers the options', () => {
+    const text = formatPermissionPrompt(
+      'Dangerous rm operation on possibly-empty variable path: "$OLD"/*.sql',
+      [{ index: 1, label: 'Yes' }, { index: 2, label: 'No' }],
+    );
+    expect(text.toLowerCase()).toContain('permission');
+    expect(text).toContain('Dangerous rm operation');
+    expect(text).toContain('1. Yes');
+    expect(text).toContain('2. No');
+    expect(text.toLowerCase()).toContain('reply with the number');
+  });
+
+  it('omits the context block when there is none (no stray blank lines)', () => {
+    const text = formatPermissionPrompt('', [{ index: 1, label: 'Yes' }, { index: 2, label: 'No' }]);
+    expect(text).toContain('1. Yes');
+    expect(text).not.toContain('\n\n\n');
   });
 });
 
