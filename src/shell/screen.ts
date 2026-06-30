@@ -116,14 +116,18 @@ export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
  *
  * Matched by the universal question line plus a footer token unique to permission
  * prompts: the select-menu footer carries "↑/↓ to navigate" and the 32MB overlay
- * carries "esc to go back", so "to amend" / "to explain" disambiguate cleanly.
- * Region-restricted (bottom rows) + multi-marker so quoted prose in scrollback
- * cannot trip it — the same defense detectDialog() uses. Detection only ever
- * BRIDGES the choice to a human; it never presses a key on its own (a destructive
- * guard must not be auto-accepted), making it strictly safer than detectDialog.
+ * carries "esc to go back", so "Tab to amend" / "ctrl+e to explain" disambiguate
+ * cleanly. The tokens are the fuller phrases (not bare "to amend" / "to explain")
+ * so a chat reply that merely contains those words can't satisfy the footer gate.
+ * Region-restricted (bottom rows) + multi-marker + a required ❯/> selection caret
+ * so quoted prose in scrollback (a numbered list with none of the live-prompt
+ * chrome) cannot trip it — the same defense detectDialog() uses, plus more.
+ * Detection only ever BRIDGES the choice to a human; it never presses a key on its
+ * own (a destructive guard must not be auto-accepted), making it strictly safer
+ * than detectDialog.
  */
 export const TUI_PERMISSION_PROMPT = 'Do you want to proceed?';
-export const TUI_PERMISSION_FOOTER_TOKENS = ['to amend', 'to explain'] as const;
+export const TUI_PERMISSION_FOOTER_TOKENS = ['Tab to amend', 'ctrl+e to explain'] as const;
 
 /** A blocking interactive prompt parsed off the screen: the selectable options
  *  plus any context text shown above the question (warning + command). */
@@ -140,13 +144,17 @@ export interface PermissionPrompt {
  * that starts at "1." and increments by one — that is the live prompt nearest the
  * footer, not history. Returns null for fewer than two options. Shared by
  * detectMenu() and detectPermissionPrompt() so both number options identically.
+ *
+ * `stripBorder` strips a left box border ("│ ") before matching, for prompts that
+ * render inside a rounded dialog box (the permission prompt). detectMenu() leaves
+ * it off so its full-buffer scan stays byte-identical to before — stripping the
+ * border there would let "│ 1. …" lines in dialog-bordered scrollback newly parse
+ * as options and shift the live run it picks.
  */
-function parseOptionRun(lines: string[]): MenuOption[] | null {
+function parseOptionRun(lines: string[], stripBorder = false): MenuOption[] | null {
   const matches: MenuOption[] = [];
   for (const raw of lines) {
-    // Strip a left box border ("│ ") if the prompt renders inside a dialog box —
-    // a strict superset of the bare-indent case, so unboxed menus parse unchanged.
-    const line = raw.replace(/^\s*│\s?/, '');
+    const line = stripBorder ? raw.replace(/^\s*│\s?/, '') : raw;
     const m = TUI_MENU_OPTION_RE.exec(line);
     if (m) matches.push({ index: Number(m[1]), label: m[2].trim() });
   }
@@ -354,13 +362,25 @@ export class ScreenModel {
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) return null;
 
     const lines = text.split('\n');
-    const qIdx = lines.findIndex((l) => l.includes(TUI_PERMISSION_PROMPT));
+    // Use the LAST occurrence of the question — the live prompt sits nearest the
+    // footer, so a reply/history that quotes "Do you want to proceed?" higher in
+    // the bottom region can't capture the question index and empty the context.
+    let qIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].includes(TUI_PERMISSION_PROMPT)) { qIdx = i; break; }
+    }
     const footerIdx = lines.findIndex(
       (l, i) => i > qIdx && TUI_PERMISSION_FOOTER_TOKENS.some((t) => l.includes(t)),
     );
     // Options live strictly between the question and the footer.
     const optionRegion = footerIdx >= 0 ? lines.slice(qIdx + 1, footerIdx) : lines.slice(qIdx + 1);
-    const options = parseOptionRun(optionRegion);
+    // A live select prompt always highlights one option with the ❯/> caret (kept
+    // even inside a box border). Quoted prose numbered lists never carry it, so
+    // requiring it closes the false-positive where conversational text pairs a
+    // numbered list with the question + a footer-ish phrase.
+    const hasCaret = optionRegion.some((l) => /^\s*│?\s*[❯>]\s*\d+\./.test(l));
+    if (!hasCaret) return null;
+    const options = parseOptionRun(optionRegion, true);
     if (!options) return null;
 
     // Context = the warning + command shown above the question. Bound it to the
@@ -382,6 +402,21 @@ export class ScreenModel {
       .join('\n');
 
     return { options, context };
+  }
+
+  /**
+   * True if a select menu or permission prompt is still blocking on input at the
+   * BOTTOM of the screen. Used to decide whether the confirming Enter after a typed
+   * selection is still needed: scoping to the bottom region means stale footer /
+   * numbered rows left in scrollback by an already-answered prompt can't keep a
+   * stray Enter alive (which would submit an empty line at the idle caret).
+   * detectMenu() deliberately scans the full buffer to parse a tall menu's options,
+   * so it's the wrong signal for this liveness check — hence the dedicated method.
+   */
+  interactivePromptBlocking(): boolean {
+    const text = this.bottomText(DIALOG_REGION_ROWS);
+    if (TUI_MENU_FOOTER.every((s) => text.includes(s))) return true;
+    return this.detectPermissionPrompt() !== null;
   }
 }
 

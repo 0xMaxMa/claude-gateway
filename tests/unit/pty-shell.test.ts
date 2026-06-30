@@ -623,6 +623,43 @@ describe('ScreenModel detectPermissionPrompt (region-restricted, never auto-acce
     expect(screen.detectPermissionPrompt()).toBeNull();
     expect(screen.detectDialog()).toBe('bypass-permissions');
   });
+
+  it('requires a ❯/> selection caret — a numbered list in prose never trips it', async () => {
+    // Worst case for the footer gate: conversational text that happens to pair the
+    // question with a numbered list AND the verbatim footer phrase. With no live
+    // select caret on an option row it is still not a real prompt → no bridge.
+    const screen = await renderScreen([
+      ...FILLER(40),
+      'Do you want to proceed? Here is the plan I would run:',
+      '1. Back up the directory first',
+      '2. Then remove the old files',
+      PERM_FOOTER,
+    ]);
+    expect(screen.detectPermissionPrompt()).toBeNull();
+  });
+
+  it('binds context to the question NEAREST the options when an earlier one is quoted', async () => {
+    // A line higher in the bottom region quotes the question; the live boxed prompt
+    // sits below it. Using the LAST occurrence keeps the context anchored to the
+    // real dialog box (the guarded command), not emptied by the quote above.
+    const screen = await renderScreen([
+      ...FILLER(36),
+      'Note: earlier I asked "Do you want to proceed?" before — here is the real one:',
+      '╭──────────────────────────────────────────────────────────────╮',
+      '│ Dangerous rm operation on possibly-empty variable path: "$OLD"/*.sql',
+      '│ Do you want to proceed?',
+      '│ ❯ 1. Yes',
+      '│   2. No',
+      '╰──────────────────────────────────────────────────────────────╯',
+      PERM_FOOTER,
+    ]);
+    const prompt = screen.detectPermissionPrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.options.map((o) => o.label)).toEqual(['Yes', 'No']);
+    expect(prompt!.context).toContain('Dangerous rm operation');
+    expect(prompt!.context).not.toContain('conversation line');
+    expect(prompt!.context).not.toContain('earlier I asked');
+  });
 });
 
 describe('formatPermissionPrompt', () => {

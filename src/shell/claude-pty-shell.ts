@@ -498,7 +498,7 @@ class Driver {
     if (this.menuCancel) {
       const action = decideMenuCancel(this.menuCancel, {
         now,
-        menuVisible: this.screen.detectMenu() !== null || this.screen.detectPermissionPrompt() !== null,
+        menuVisible: this.screen.interactivePromptBlocking(),
         hasPrompt: this.screen.hasPrompt(),
         isBusy: this.screen.isBusy(),
         quietMs: this.screen.quietMs(),
@@ -644,13 +644,22 @@ class Driver {
 
     const prompt = formatMenuPrompt(options);
     logWarn(`interactive menu detected (${options.length} options) — bridging to chat`);
-    this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt, options });
-    // Carry the numbered list as the turn's result text too: this is the API
-    // fallback (no buttons) and what gets persisted to chat history.
-    turn.texts.push((turn.texts.length ? '\n\n' : '') + prompt);
+    this.bridgeChoiceToChat(turn, options, prompt);
+    return true;
+  }
+
+  /**
+   * Shared tail of maybeBridgeMenu / maybeBridgePermissionPrompt: emit the
+   * channel-native choice UI, carry the same text as the turn's result (API/no-
+   * button fallback + chat history), record the pending menu so the reply routes
+   * back to a selection, and end the turn so the session goes idle while awaiting
+   * the human's choice.
+   */
+  private bridgeChoiceToChat(turn: ActiveTurn, options: MenuOption[], text: string): void {
+    this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt: text, options });
+    turn.texts.push((turn.texts.length ? '\n\n' : '') + text);
     this.pendingMenu = { options };
     this.finishTurn(false);
-    return true;
   }
 
   /**
@@ -683,11 +692,7 @@ class Driver {
 
     const text = formatPermissionPrompt(prompt.context, prompt.options);
     logWarn(`permission prompt detected (${prompt.options.length} options) — bridging to chat (never auto-accepted)`);
-    this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt: text, options: prompt.options });
-    // Carry the prompt as the turn's result text too (API fallback + chat history).
-    turn.texts.push((turn.texts.length ? '\n\n' : '') + text);
-    this.pendingMenu = { options: prompt.options };
-    this.finishTurn(false);
+    this.bridgeChoiceToChat(turn, prompt.options, text);
     return true;
   }
 
@@ -752,10 +757,12 @@ class Driver {
     // If interrupted while waiting, erase the digit so it doesn't linger in the PTY
     // input and get prepended to the user's next message.
     if (this.abortIfInterrupted()) return;
-    // Send Enter only if a selectable prompt is still on screen — covers both the
-    // AskUserQuestion menu and the permission prompt, and self-corrects when the
-    // digit alone already confirmed (prompt gone → no stray Enter).
-    if (this.screen.detectMenu() || this.screen.detectPermissionPrompt()) this.host.writeRaw('\r');
+    // Send Enter only if a selectable prompt is still blocking at the bottom of the
+    // screen — covers both the AskUserQuestion menu and the permission prompt, and
+    // self-corrects when the digit alone already confirmed (prompt gone → no stray
+    // Enter). Bottom-region scoped so stale footer/option text left in scrollback by
+    // the just-answered prompt can't submit an empty line at the idle caret.
+    if (this.screen.interactivePromptBlocking()) this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
   }
 
