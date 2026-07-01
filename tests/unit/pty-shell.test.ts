@@ -271,6 +271,9 @@ async function renderScreen(lines: string[]): Promise<ScreenModel> {
 }
 
 const MENU_FOOTER = 'Enter to select · ↑/↓ to navigate · Esc to cancel';
+// Pushes real content above the bottom-region window (DIALOG_REGION_ROWS) so tests
+// can assert region-restricted behavior against realistic scrollback.
+const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
 
 describe('ScreenModel detectMenu', () => {
   it('parses numbered options (with ❯ highlight + a divider) when the footer is present', async () => {
@@ -344,9 +347,8 @@ describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)
   // interactivePromptBlocking() so a live wizard step (no new tailer record yet,
   // because the tool_use hasn't returned) is never mistaken for a genuinely stuck
   // idle prompt.
-  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
 
-  it('a highlighted menu option row also satisfies hasPrompt() (documents the collision)', async () => {
+  it('a highlighted menu option row satisfies hasPrompt() (documents the collision), and interactivePromptBlocking() is also true on the same screen (so the retry gate is excluded)', async () => {
     const screen = await renderScreen([
       ...FILLER(44),
       'Which option do you want?',
@@ -357,18 +359,6 @@ describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)
       MENU_FOOTER,
     ]);
     expect(screen.hasPrompt()).toBe(true);
-  });
-
-  it('interactivePromptBlocking() is also true on that same screen, so the retry gate is excluded', async () => {
-    const screen = await renderScreen([
-      ...FILLER(44),
-      'Which option do you want?',
-      '',
-      '❯ 1. First choice',
-      '  2. Second choice',
-      '',
-      MENU_FOOTER,
-    ]);
     expect(screen.interactivePromptBlocking()).toBe(true);
   });
 
@@ -567,8 +557,6 @@ describe('pty-shell transcript path', () => {
 });
 
 describe('ScreenModel detectDialog (region-restricted)', () => {
-  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
-
   it('detects the bypass dialog when it renders at the bottom (real modal)', async () => {
     const screen = await renderScreen([
       ...FILLER(44),
@@ -599,7 +587,6 @@ describe('ScreenModel detectDialog (region-restricted)', () => {
 });
 
 describe('ScreenModel detectPermissionPrompt (region-restricted, never auto-accepts)', () => {
-  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
   // Claude Code's tool-permission footer — note "Tab to amend"/"to explain", which
   // the select-menu footer ("↑/↓ to navigate") and the 32MB overlay never carry.
   const PERM_FOOTER = 'Esc to cancel · Tab to amend · ctrl+e to explain';
