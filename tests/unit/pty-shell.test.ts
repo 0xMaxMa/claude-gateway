@@ -335,6 +335,54 @@ describe('ScreenModel detectMenu', () => {
   });
 });
 
+describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)', () => {
+  // Root cause of the "failed to submit turn to the TUI input" false report during a
+  // multi-question AskUserQuestion wizard: hasPrompt()'s idle-prompt regex (`/^❯ /m`)
+  // scans the whole visible screen and cannot tell the real idle bash caret apart from
+  // a highlighted menu option row, which uses the exact same `❯` marker flush at
+  // column 0. tick()'s "Enter appears swallowed" retry-and-give-up gate must exclude
+  // interactivePromptBlocking() so a live wizard step (no new tailer record yet,
+  // because the tool_use hasn't returned) is never mistaken for a genuinely stuck
+  // idle prompt.
+  const FILLER = (n: number) => Array.from({ length: n }, (_, i) => `conversation line ${i}`);
+
+  it('a highlighted menu option row also satisfies hasPrompt() (documents the collision)', async () => {
+    const screen = await renderScreen([
+      ...FILLER(44),
+      'Which option do you want?',
+      '',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      MENU_FOOTER,
+    ]);
+    expect(screen.hasPrompt()).toBe(true);
+  });
+
+  it('interactivePromptBlocking() is also true on that same screen, so the retry gate is excluded', async () => {
+    const screen = await renderScreen([
+      ...FILLER(44),
+      'Which option do you want?',
+      '',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      MENU_FOOTER,
+    ]);
+    expect(screen.interactivePromptBlocking()).toBe(true);
+  });
+
+  it('a genuinely idle bash prompt has hasPrompt() true and interactivePromptBlocking() false', async () => {
+    const screen = await renderScreen([
+      ...FILLER(44),
+      'Done.',
+      '❯ ',
+    ]);
+    expect(screen.hasPrompt()).toBe(true);
+    expect(screen.interactivePromptBlocking()).toBe(false);
+  });
+});
+
 describe('parseMenuChoice', () => {
   it('accepts a leading integer within range', () => {
     expect(parseMenuChoice('1', 4)).toBe(1);

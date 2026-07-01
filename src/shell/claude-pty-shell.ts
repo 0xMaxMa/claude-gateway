@@ -570,10 +570,22 @@ class Driver {
     if (!turn.sawBusy
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
         && this.screen.hasPrompt()
+        && !this.screen.interactivePromptBlocking()
         && this.screen.quietMs() > 1500
         && this.tailer.seenRecords === turn.recordsAtStart) {
       // Only retry if no new records have appeared since this turn started —
       // a delta > 0 means claude already started writing output.
+      //
+      // interactivePromptBlocking() excludes the case where the TUI is still on
+      // a live menu/wizard screen (e.g. a multi-question AskUserQuestion that
+      // advances internally between sub-questions without the tool_use ever
+      // returning — so no new tailer record appears). hasPrompt()'s idle-prompt
+      // regex (`/^❯ /m`) can't tell that caret apart from a highlighted menu
+      // option row using the same `❯` marker, so without this guard a live
+      // wizard step reads as "Enter got swallowed": the code blindly re-sends
+      // Enter into the menu (selecting whatever option happens to be
+      // highlighted) and eventually reports a false 'failed to submit' even
+      // though the wizard was progressing normally the whole time.
       if (turn.enterRetries < MAX_ENTER_RETRIES) {
         turn.enterRetries++;
         turn.submittedAt = now;
