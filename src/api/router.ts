@@ -5,7 +5,7 @@ import * as fsp from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
-import { AgentRunner, DEFAULT_MODELS } from '../agent/runner';
+import { AgentRunner } from '../agent/runner';
 import { AgentConfig, ApiKey, ModelConfig, SessionMeta } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
@@ -902,8 +902,7 @@ export function createApiRouter(
       }
     }
 
-    const defaultModel = (models ?? DEFAULT_MODELS).find((m) => m.alias === 'sonnet')?.id
-      ?? DEFAULT_MODELS[2].id;
+    const defaultModel = 'claude-sonnet-4-6';
     const newAgent: Record<string, unknown> = {
       id: agentId,
       description: wizard.prompt.slice(0, 200).trim(),
