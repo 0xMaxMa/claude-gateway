@@ -163,28 +163,28 @@ export class SessionStore {
   /**
    * Resolve the directory for a chat's multi-session data.
    */
-  private resolveTelegramDir(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): string {
+  private resolveTelegramDir(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): string {
     return path.join(this.agentsBaseDir, agentId, 'sessions', `${channel}-${chatId}`);
   }
 
   /**
    * Resolve the path to the session index file for a chat.
    */
-  private resolveTelegramIndexPath(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): string {
+  private resolveTelegramIndexPath(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): string {
     return path.join(this.resolveTelegramDir(agentId, chatId, channel), 'index.json');
   }
 
   /**
    * Resolve the path to a specific session's message file.
    */
-  private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): string {
+  private resolveTelegramSessionPath(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): string {
     return path.join(this.resolveTelegramDir(agentId, chatId, channel), `${sessionId}.json`);
   }
 
   /**
    * Read index.json for a chat. Returns null if file doesn't exist.
    */
-  async loadIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<SessionIndex | null> {
+  async loadIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<SessionIndex | null> {
     const indexPath = this.resolveTelegramIndexPath(agentId, chatId, channel);
     if (!fs.existsSync(indexPath)) {
       return null;
@@ -200,7 +200,7 @@ export class SessionStore {
   /**
    * Write index.json atomically (tmp + rename).
    */
-  async saveIndex(agentId: string, chatId: string, index: SessionIndex, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<void> {
+  async saveIndex(agentId: string, chatId: string, index: SessionIndex, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<void> {
     const indexPath = this.resolveTelegramIndexPath(agentId, chatId, channel);
     const dir = path.dirname(indexPath);
     fs.mkdirSync(dir, { recursive: true });
@@ -223,7 +223,7 @@ export class SessionStore {
    * Internal (unlocked) version — call this only from WITHIN a getTelegramQueue task
    * to avoid deadlock. The public getOrCreateIndex wraps this in the queue.
    */
-  private async loadOrCreateIndexUnlocked(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<SessionIndex> {
+  private async loadOrCreateIndexUnlocked(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<SessionIndex> {
     // 1. Check for existing index
     const existingIndex = await this.loadIndex(agentId, chatId, channel);
     if (existingIndex !== null) {
@@ -292,7 +292,7 @@ export class SessionStore {
     return index;
   }
 
-  async getOrCreateIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<SessionIndex> {
+  async getOrCreateIndex(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<SessionIndex> {
     const queue = this.getTelegramQueue(agentId, chatId);
     return queue.add(() => this.loadOrCreateIndexUnlocked(agentId, chatId, channel)) as Promise<SessionIndex>;
   }
@@ -301,7 +301,7 @@ export class SessionStore {
    * Create a new session for a chat, add it to the index, and return the SessionMeta.
    * If name is not provided, auto-generates "Session N" based on current session count.
    */
-  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<SessionMeta> {
+  async createTelegramSession(agentId: string, chatId: string, name?: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<SessionMeta> {
     const queue = this.getTelegramQueue(agentId, chatId);
     return queue.add(async () => {
       const index = await this.loadOrCreateIndexUnlocked(agentId, chatId, channel);
@@ -332,16 +332,16 @@ export class SessionStore {
     }) as Promise<SessionMeta>;
   }
 
-  async listSessions(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<SessionIndex> {
+  async listSessions(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<SessionIndex> {
     return this.getOrCreateIndex(agentId, chatId, channel);
   }
 
-  async getActiveSessionId(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<string> {
+  async getActiveSessionId(agentId: string, chatId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<string> {
     const index = await this.getOrCreateIndex(agentId, chatId, channel);
     return index.activeSessionId;
   }
 
-  async setActiveSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<void> {
+  async setActiveSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
       const index = await this.loadIndex(agentId, chatId, channel);
@@ -357,7 +357,7 @@ export class SessionStore {
     });
   }
 
-  async deleteTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<void> {
+  async deleteTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
       const index = await this.loadIndex(agentId, chatId, channel);
@@ -393,7 +393,7 @@ export class SessionStore {
     });
   }
 
-  async clearTelegramSessionHistory(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<void> {
+  async clearTelegramSessionHistory(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<void> {
     // api sessions keep their context in the flat sessions/{sessionId}.jsonl store (keyed by
     // sessionId, loaded at spawn via loadSession) — not the structured per-chat store. Clearing
     // the structured store would leave the real context untouched, so truncate the flat file.
@@ -440,7 +440,7 @@ export class SessionStore {
     chatId: string,
     sessionId: string,
     meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn'>>,
-    channel: 'telegram' | 'discord' | 'api' = 'telegram',
+    channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
@@ -458,7 +458,7 @@ export class SessionStore {
     });
   }
 
-  async loadTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' = 'telegram'): Promise<Message[]> {
+  async loadTelegramSession(agentId: string, chatId: string, sessionId: string, channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram'): Promise<Message[]> {
     // api context lives in the flat sessions/{sessionId}.jsonl store, consistent with how api
     // messages are appended (appendMessage keyed by sessionId) and how buildInitialPrompt loads
     // them at spawn (loadSession). Read from there so /compact sees the real conversation.
@@ -483,7 +483,7 @@ export class SessionStore {
     chatId: string,
     sessionId: string,
     messages: Message[],
-    channel: 'telegram' | 'discord' | 'api' = 'telegram',
+    channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram',
   ): Promise<void> {
     // api: overwrite the flat sessions/{sessionId}.jsonl store (newline-delimited, keyed by
     // sessionId, serialized on the same queue as appendMessage) so /compact's result is exactly
@@ -519,7 +519,7 @@ export class SessionStore {
     chatId: string,
     sessionId: string,
     message: Message,
-    channel: 'telegram' | 'discord' | 'api' = 'telegram',
+    channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
     await queue.add(async () => {
@@ -555,7 +555,7 @@ export class SessionStore {
     chatId: string,
     sessionId: string,
     count: number,
-    channel: 'telegram' | 'discord' | 'api' = 'telegram',
+    channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram',
   ): Promise<void> {
     const index = await this.loadIndex(agentId, chatId, channel);
     if (index) {

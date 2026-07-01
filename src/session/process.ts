@@ -28,8 +28,8 @@ const CHANNELS_ACTIVATION_PROMPT =
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
   readonly chatId: string;
-  readonly source: 'telegram' | 'discord' | 'api';
-  private readonly sessionChannel: 'telegram' | 'discord';
+  readonly source: 'telegram' | 'discord' | 'line' | 'api';
+  private readonly sessionChannel: 'telegram' | 'discord' | 'line';
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
@@ -70,7 +70,7 @@ export class SessionProcess extends EventEmitter {
 
   constructor(
     sessionId: string,
-    source: 'telegram' | 'discord' | 'api',
+    source: 'telegram' | 'discord' | 'line' | 'api',
     agentConfig: AgentConfig,
     gatewayConfig: GatewayConfig,
     sessionStore: SessionStore,
@@ -80,7 +80,8 @@ export class SessionProcess extends EventEmitter {
     this.sessionId = sessionId;
     this.source = source;
     this.chatId = chatId ?? sessionId;
-    this.sessionChannel = source === 'discord' ? 'discord' : 'telegram';
+    this.sessionChannel =
+      source === 'discord' ? 'discord' : source === 'line' ? 'line' : 'telegram';
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
     this.sessionStore = sessionStore;
@@ -90,7 +91,7 @@ export class SessionProcess extends EventEmitter {
     );
     // config.json lives 3 levels above workspace: <base>/<agentId>/workspace → <base>/config.json
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
-    const stateSubDir = source === 'discord' ? '.discord-state' : '.telegram-state';
+    const stateSubDir = source === 'discord' ? '.discord-state' : source === 'line' ? '.line-state' : '.telegram-state';
     this.restartSignalPath = path.join(agentConfig.workspace, stateSubDir, `restart-${sessionId}`);
   }
 
@@ -99,7 +100,7 @@ export class SessionProcess extends EventEmitter {
    * Priority: per-session override > config.json on disk > cached agentConfig.
    */
   private get typingDir(): string {
-    const sub = this.source === 'discord' ? '.discord-state' : '.telegram-state';
+    const sub = this.source === 'discord' ? '.discord-state' : this.source === 'line' ? '.line-state' : '.telegram-state';
     return path.join(this.agentConfig.workspace, sub, 'typing');
   }
 
@@ -301,6 +302,17 @@ export class SessionProcess extends EventEmitter {
             DISCORD_CHANNEL_ALLOWLIST: (this.agentConfig.discord?.channelAllowlist ?? []).join(','),
             DISCORD_DM_POLICY: this.agentConfig.discord?.dmPolicy ?? 'disabled',
             DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
+            // LINE outbound: line_reply pushes via the Messaging API. The MCP
+            // subprocess only sees the env we hand it, so the token must be
+            // forwarded explicitly. The SDK targets api.line.me by default.
+            LINE_CHANNEL_ACCESS_TOKEN: this.agentConfig.line?.channelAccessToken ?? '',
+            // Refresh mode (slow-LLM postback button): when on, the gateway is the
+            // sole LINE sender, so line_reply must NOT send from the subprocess.
+            // Mirrors the runner's `slowResponseThreshold > 0` gate.
+            LINE_REPLY_REFRESH:
+              this.agentConfig.line && (this.agentConfig.line.slowResponseThreshold ?? 45) > 0
+                ? '1'
+                : '',
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.

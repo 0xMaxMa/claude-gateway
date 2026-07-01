@@ -14,6 +14,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { TelegramModule } from './tools/telegram/module';
 import { DiscordModule } from './tools/discord/module';
+import { LineModule } from './tools/line/module';
 import { CronModule } from './tools/cron/module';
 import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
@@ -33,6 +34,7 @@ function isChannelModule(mod: AnyModule): mod is ChannelModule {
 const modules: AnyModule[] = [
   new TelegramModule(),
   new DiscordModule(),
+  new LineModule(),
   new CronModule(),
   new SkillsModule(),
   new AgentModule(),

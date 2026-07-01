@@ -1,4 +1,4 @@
-export type HistorySource = 'telegram' | 'discord' | 'api' | 'ui';
+export type HistorySource = 'telegram' | 'discord' | 'line' | 'api' | 'ui';
 export type MessageRole = 'user' | 'assistant' | 'system';
 
 export interface HistoryMessage {

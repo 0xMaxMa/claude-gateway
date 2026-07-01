@@ -39,6 +39,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@line/bot-sdk": "^11.0.2",
     "@xterm/headless": "^6.0.0",
     "chokidar": "^3.5.0",
     "cron-parser": "^5.5.0",

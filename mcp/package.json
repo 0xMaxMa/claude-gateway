@@ -7,6 +7,7 @@
     "start": "bun install --no-summary && bun server.ts"
   },
   "dependencies": {
+    "@line/bot-sdk": "^11.0.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "discord.js": "^14.16.0",
     "grammy": "^1.21.0",

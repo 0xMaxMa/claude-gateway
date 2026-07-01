@@ -29,6 +29,66 @@ export interface AgentConfig {
     dmAllowlist?: string[];
     autoThread?: boolean;
   };
+  line?: {
+    channelAccessToken: string;
+    channelSecret: string;
+    /** default true when the block is present */
+    enabled?: boolean;
+    /** default "/line/webhook" */
+    webhookPath?: string;
+    /**
+     * Slow-LLM postback button (ported from hermes-agent). Seconds to wait for
+     * the agent's answer before burning the reply token to send a tappable
+     * "Get answer" button; tapping yields a fresh (free) reply token. Default
+     * 45 (leaves margin under LINE's ~60s token TTL). Set 0 to disable — the
+     * agent then uses the plain reply-token-first → push-fallback path.
+     */
+    slowResponseThreshold?: number;
+    /** Button label (default "Get answer", max 20 chars on LINE). */
+    slowButtonLabel?: string;
+    /** Bubble text shown with the button (default a "still thinking" notice). */
+    slowPendingText?: string;
+    /**
+     * DM access policy (mirrors `discord.dmPolicy`). Closed by default: when
+     * absent, only senders in `dmAllowlist` may reach the agent (same posture as
+     * hermes/openclaw). 'open' replies to any 1:1 sender; 'allowlist' replies
+     * only to `dmAllowlist`; 'disabled' ignores all DMs.
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** LINE userIds allowed under allowlist / closed-default (case-sensitive "U"+32hex). */
+    dmAllowlist?: string[];
+    /**
+     * Group/room access policy (the group analogue of `dmPolicy`). Closed by
+     * default: when absent, only conversations whose groupId/roomId is in
+     * `groupAllowlist` are answered. 'open' answers in any group/room the bot is
+     * invited to; 'allowlist' answers only listed ones; 'disabled' ignores all
+     * group/room traffic. Applies to both `group` and `room` sources.
+     */
+    groupPolicy?: 'open' | 'allowlist' | 'disabled';
+    /**
+     * Allowed conversation ids for groups and rooms — groupIds ("C"+32hex) and
+     * roomIds ("R"+32hex) share one list (the webhook tells us which). Used under
+     * allowlist / closed-default.
+     */
+    groupAllowlist?: string[];
+    /**
+     * In groups/rooms, only respond when the bot is @mentioned (native LINE
+     * mention or its name). Default true (absent ⇒ true). No effect on DMs.
+     * Set false to make the bot answer every allowed group message.
+     */
+    requireMention?: boolean;
+    /**
+     * Pairing aid for the allowlist (orthogonal to dm/groupPolicy — not a policy
+     * value). When on, an un-allowlisted sender (DM or group/room) gets a one-time
+     * pairing code replied to them via the free reply token, and the same code
+     * shows in the UI "pending" row so an admin can visually match it
+     * before clicking "+ Add". Default true (absent ⇒ on). Only has an effect
+     * under `allowlist` (closed-default) — `open` never denies and `disabled`
+     * is hard-off, so neither sends a code. Set false to restore the silent
+     * closed-allowlist behavior.
+     */
+    pairing?: boolean;
+  };
   claude: {
     model: string;
     /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */

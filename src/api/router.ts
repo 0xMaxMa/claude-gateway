@@ -12,6 +12,7 @@ import { MediaStore } from '../history/media-store';
 import { HistoryDB } from '../history/db';
 import type { AgentSessionSummary } from '../history/types';
 import { wizardStore } from './wizard-state';
+import { getPendingSenders, clearPendingSender } from './line-pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
 
 const MAX_MESSAGE_LENGTH = 10_000;
@@ -523,6 +524,24 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
+        line_connected: !!cfg.line?.channelSecret,
+        line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
+        line_webhook_path: cfg.line?.channelSecret ? `/line/webhook/${id}` : null,
+        // DM access (Tier 1). Stored directly in the line config (no separate
+        // access file like Telegram). `dmPolicy` absent ⇒ closed/allowlist
+        // semantics at runtime; surface the raw value (null when unset) so the
+        // UI can render the effective state.
+        line_dm_policy: cfg.line?.channelSecret ? (cfg.line?.dmPolicy ?? null) : null,
+        line_dm_allowlist: cfg.line?.channelSecret ? (cfg.line?.dmAllowlist ?? []) : null,
+        // Group/room access (Tier 3). Same storage + semantics as DM, keyed on
+        // group/room ids. `requireMention` absent ⇒ true (only answer when the
+        // bot is @mentioned in a group).
+        line_group_policy: cfg.line?.channelSecret ? (cfg.line?.groupPolicy ?? null) : null,
+        line_group_allowlist: cfg.line?.channelSecret ? (cfg.line?.groupAllowlist ?? []) : null,
+        line_require_mention: cfg.line?.channelSecret ? (cfg.line?.requireMention ?? null) : null,
+        // Pairing toggle (orthogonal to dm/groupPolicy). Absent ⇒ on; surface a
+        // concrete boolean so the UI toggle reflects the effective default.
+        line_pairing: cfg.line?.channelSecret ? (cfg.line?.pairing ?? true) : null,
       }));
     res.json({ agents });
   });
@@ -1120,8 +1139,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown };
-    const { description, model, allow_tools, telegram_bot_token, discord_bot_token } = body;
+    const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown };
+    const { description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing } = body;
     if (description !== undefined && (typeof description !== 'string' || !description.trim())) {
       res.status(400).json({ error: 'description must be a non-empty string' });
       return;
@@ -1142,6 +1161,63 @@ export function createApiRouter(
       res.status(400).json({ error: 'discord_bot_token must be a string or null' });
       return;
     }
+    if (line_channel_access_token !== undefined && line_channel_access_token !== null && typeof line_channel_access_token !== 'string') {
+      res.status(400).json({ error: 'line_channel_access_token must be a string or null' });
+      return;
+    }
+    if (line_channel_secret !== undefined && line_channel_secret !== null && typeof line_channel_secret !== 'string') {
+      res.status(400).json({ error: 'line_channel_secret must be a string or null' });
+      return;
+    }
+    // LINE needs BOTH credentials together. Reject a half-set (one without the other),
+    // unless both are being cleared (disconnect).
+    const lineTouched = line_channel_access_token !== undefined || line_channel_secret !== undefined;
+    if (lineTouched) {
+      const at = typeof line_channel_access_token === 'string' ? line_channel_access_token.trim() : '';
+      const sec = typeof line_channel_secret === 'string' ? line_channel_secret.trim() : '';
+      const bothSet = at !== '' && sec !== '';
+      const bothClear = at === '' && sec === '';
+      if (!bothSet && !bothClear) {
+        res.status(400).json({ error: 'line_channel_access_token and line_channel_secret must be provided together' });
+        return;
+      }
+    }
+    // LINE DM access control (Tier 1). Validated independently of the credentials so
+    // policy/allowlist can be changed without re-sending the tokens.
+    if (line_dm_policy !== undefined && line_dm_policy !== null &&
+        !(typeof line_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(line_dm_policy))) {
+      res.status(400).json({ error: "line_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (line_dm_allowlist !== undefined && line_dm_allowlist !== null &&
+        !(Array.isArray(line_dm_allowlist) && line_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'line_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    // LINE group/room access control (Tier 3). Same independence as DM access.
+    if (line_group_policy !== undefined && line_group_policy !== null &&
+        !(typeof line_group_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(line_group_policy))) {
+      res.status(400).json({ error: "line_group_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (line_group_allowlist !== undefined && line_group_allowlist !== null &&
+        !(Array.isArray(line_group_allowlist) && line_group_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'line_group_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (line_require_mention !== undefined && line_require_mention !== null &&
+        typeof line_require_mention !== 'boolean') {
+      res.status(400).json({ error: 'line_require_mention must be a boolean or null' });
+      return;
+    }
+    if (line_pairing !== undefined && line_pairing !== null &&
+        typeof line_pairing !== 'boolean') {
+      res.status(400).json({ error: 'line_pairing must be a boolean or null' });
+      return;
+    }
+    const lineAccessTouched = line_dm_policy !== undefined || line_dm_allowlist !== undefined ||
+      line_group_policy !== undefined || line_group_allowlist !== undefined || line_require_mention !== undefined ||
+      line_pairing !== undefined;
 
     try {
       await writeAgentsToConfig(configPath, (agents) => {
@@ -1166,6 +1242,48 @@ export function createApiRouter(
           } else {
             const existing = agent.discord as Record<string, unknown> | undefined;
             agent.discord = { ...(existing ?? {}), botToken: (discord_bot_token as string).trim() };
+          }
+        }
+        if (lineTouched) {
+          const at = typeof line_channel_access_token === 'string' ? line_channel_access_token.trim() : '';
+          const sec = typeof line_channel_secret === 'string' ? line_channel_secret.trim() : '';
+          if (at === '' && sec === '') {
+            delete (agent as Record<string, unknown>).line;
+          } else {
+            const existing = agent.line as Record<string, unknown> | undefined;
+            agent.line = { ...(existing ?? {}), channelAccessToken: at, channelSecret: sec };
+          }
+        }
+        // DM access — merge into the existing line block (re-read after the token
+        // block above, which may have just created or deleted it). Skip silently
+        // when no line channel exists; policy without credentials is meaningless.
+        if (lineAccessTouched) {
+          const existing = agent.line as Record<string, unknown> | undefined;
+          if (existing) {
+            if (line_dm_policy !== undefined) {
+              if (line_dm_policy === null) delete existing.dmPolicy;
+              else existing.dmPolicy = line_dm_policy;
+            }
+            if (line_dm_allowlist !== undefined) {
+              if (line_dm_allowlist === null) delete existing.dmAllowlist;
+              else existing.dmAllowlist = line_dm_allowlist;
+            }
+            if (line_group_policy !== undefined) {
+              if (line_group_policy === null) delete existing.groupPolicy;
+              else existing.groupPolicy = line_group_policy;
+            }
+            if (line_group_allowlist !== undefined) {
+              if (line_group_allowlist === null) delete existing.groupAllowlist;
+              else existing.groupAllowlist = line_group_allowlist;
+            }
+            if (line_require_mention !== undefined) {
+              if (line_require_mention === null) delete existing.requireMention;
+              else existing.requireMention = line_require_mention;
+            }
+            if (line_pairing !== undefined) {
+              if (line_pairing === null) delete existing.pairing;
+              else existing.pairing = line_pairing;
+            }
           }
         }
       });
@@ -1209,6 +1327,53 @@ export function createApiRouter(
         agentRunners.get(agentId)?.stopDiscordReceiver();
       }
     }
+    if (lineTouched) {
+      const at = typeof line_channel_access_token === 'string' ? line_channel_access_token.trim() : '';
+      const sec = typeof line_channel_secret === 'string' ? line_channel_secret.trim() : '';
+      if (at && sec) {
+        cfg.line = { ...(cfg.line ?? {}), channelAccessToken: at, channelSecret: sec };
+      } else {
+        delete cfg.line;
+      }
+      // LINE is webhook-based — no receiver to start/stop. The webhook router reads
+      // config live via runner.getAgentConfig(); just keep the runner's copy in sync.
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+    }
+    if (lineAccessTouched && cfg.line) {
+      if (line_dm_policy !== undefined) {
+        if (line_dm_policy === null) delete cfg.line.dmPolicy;
+        else cfg.line.dmPolicy = line_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (line_dm_allowlist !== undefined) {
+        if (line_dm_allowlist === null) delete cfg.line.dmAllowlist;
+        else cfg.line.dmAllowlist = line_dm_allowlist as string[];
+      }
+      if (line_group_policy !== undefined) {
+        if (line_group_policy === null) delete cfg.line.groupPolicy;
+        else cfg.line.groupPolicy = line_group_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (line_group_allowlist !== undefined) {
+        if (line_group_allowlist === null) delete cfg.line.groupAllowlist;
+        else cfg.line.groupAllowlist = line_group_allowlist as string[];
+      }
+      if (line_require_mention !== undefined) {
+        if (line_require_mention === null) delete cfg.line.requireMention;
+        else cfg.line.requireMention = line_require_mention as boolean;
+      }
+      if (line_pairing !== undefined) {
+        if (line_pairing === null) delete cfg.line.pairing;
+        else cfg.line.pairing = line_pairing as boolean;
+      }
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Anyone just added to an allowlist is now allowed — drop them from the
+      // in-memory knock list so the discovery UI stops surfacing them.
+      if (Array.isArray(line_dm_allowlist)) {
+        for (const userId of line_dm_allowlist) clearPendingSender(agentId, userId);
+      }
+      if (Array.isArray(line_group_allowlist)) {
+        for (const id of line_group_allowlist) clearPendingSender(agentId, id);
+      }
+    }
 
     res.json({
       agent: {
@@ -1221,6 +1386,9 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null,
+        line_connected: !!cfg.line?.channelSecret,
+        line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
+        line_webhook_path: cfg.line?.channelSecret ? `/line/webhook/${agentId}` : null,
       },
     });
   });
@@ -1374,6 +1542,36 @@ export function createApiRouter(
   });
 
   /**
+   * GET /api/v1/agents/:agentId/line/pending
+   * Recently denied LINE senders (Tier 1 allowlist discovery aid). Admin only.
+   * In-memory + ephemeral — populated by the webhook gate when it drops a sender.
+   */
+  router.get('/v1/agents/:agentId/line/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders(agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/line/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). Used
+   * by the UI "Delete" action — distinct from "+ Add" (which allowlists). The
+   * id is a LINE userId/groupId/roomId (U/C/R + hex), so no numeric validation.
+   * Idempotent: clearing an unknown id is a no-op. Ephemeral — a later message
+   * from the same sender re-adds it (and, under pairing, re-mints a code).
+   */
+  router.delete('/v1/agents/:agentId/line/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender(agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
    * DELETE /api/v1/agents/:agentId/telegram/allow/:userId
    * Remove a user from the allowFrom list. Admin only.
    */
@@ -1477,12 +1675,12 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord') {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord chats' });
+    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line chats' });
       return;
     }
     try {
-      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord');
+      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord' | 'line');
       res.json(index);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -1565,8 +1763,8 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord') {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord chats' });
+    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line chats' });
       return;
     }
 
@@ -1614,7 +1812,7 @@ export function createApiRouter(
 
       cleanup = await runner.sendMessageToSession(
         rawChatId,
-        source as 'telegram' | 'discord',
+        source as 'telegram' | 'discord' | 'line',
         sessionId,
         content.trim(),
         senderName,
@@ -2327,5 +2525,6 @@ export function createApiRouter(
 function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: string } {
   if (fullChatId.startsWith('telegram-')) return { source: 'telegram', rawChatId: fullChatId.slice(9) };
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
+  if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
   return { source: 'api', rawChatId: fullChatId };
 }

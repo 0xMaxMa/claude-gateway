@@ -78,6 +78,10 @@
       "telegram": {
         "botToken": "${BAERBEL_BOT_TOKEN}"
       },
+      "line": {
+        "channelAccessToken": "${BAERBEL_LINE_CHANNEL_ACCESS_TOKEN}",
+        "channelSecret": "${BAERBEL_LINE_CHANNEL_SECRET}"
+      },
       "claude": {
         "model": "claude-sonnet-4-6",
         "extraFlags": []

@@ -128,4 +128,23 @@ describe('isBuiltinCommand', () => {
       }
     });
   });
+
+  // ── LINE — regression for the empty-regex blocker (fixed 2026-06-23) ───────
+  // No BUILTIN_COMMANDS entry lists 'line', so buildRegex('line') had no parts.
+  // `new RegExp('')` matches EVERY string, which misrouted ALL LINE messages
+  // into the command handler — they never reached the agent. The guard returns
+  // /(?!)/ (matches nothing) instead. A channel with zero registered commands
+  // must treat ordinary text (and even slash-looking text) as NOT a command.
+  describe('line (no registered commands)', () => {
+    it('never treats a normal message as a command', () => {
+      expect(isBuiltinCommand('hi', 'line')).toBe(false);
+      expect(isBuiltinCommand('สวัสดี', 'line')).toBe(false);
+      expect(isBuiltinCommand('', 'line')).toBe(false);
+    });
+
+    it('does not match even telegram command syntax on the line channel', () => {
+      expect(isBuiltinCommand('/session', 'line')).toBe(false);
+      expect(isBuiltinCommand('/help', 'line')).toBe(false);
+    });
+  });
 });

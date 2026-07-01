@@ -11,6 +11,7 @@ import { SessionStore, SessionNotInIndexError } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
+import { LineReplyManager } from './line-reply-manager';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -117,15 +118,17 @@ export class AgentRunner extends EventEmitter {
   imageSize(chatId: string): number { return this.imageSizePerChat.get(chatId) ?? 0; }
   restartPending(chatId: string): boolean { return this.pendingRestarts.has(chatId); }
 
-  private channelFor(chatId: string): 'telegram' | 'discord' {
+  private channelFor(chatId: string): 'telegram' | 'discord' | 'line' {
     return this.channelSourceMap.get(chatId) ?? 'telegram';
   }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
-  private readonly channelSourceMap = new Map<string, 'telegram' | 'discord'>();
+  private readonly channelSourceMap = new Map<string, 'telegram' | 'discord' | 'line'>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
+  // LINE slow-LLM postback button manager (null when LINE disabled or threshold=0).
+  private lineReply: LineReplyManager | null = null;
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -159,7 +162,7 @@ export class AgentRunner extends EventEmitter {
   private readonly channelCoalesce = new Map<
     string,
     {
-      channelSource: 'telegram' | 'discord';
+      channelSource: 'telegram' | 'discord' | 'line';
       entries: Array<{ content?: string; meta?: Record<string, string> }>;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -277,8 +280,23 @@ export class AgentRunner extends EventEmitter {
           const content = params.content ?? '';
 
           // Set channel early so all handlers (including session commands) have it
-          const channelSource = (meta['source'] === 'discord' ? 'discord' : 'telegram') as 'telegram' | 'discord';
+          const channelSource = (meta['source'] === 'discord'
+            ? 'discord'
+            : meta['source'] === 'line'
+              ? 'line'
+              : 'telegram') as 'telegram' | 'discord' | 'line';
           this.channelSourceMap.set(chatId, channelSource);
+
+          // LINE slow-LLM postback: stash this turn's reply token + arm the
+          // button timer before the token expires. In groups/rooms the shared
+          // button is disabled (armButton:false) — the token is still stashed so
+          // onAnswer delivers (reply→push), just without a button.
+          if (channelSource === 'line' && this.lineReply && meta['reply_token']) {
+            const chatType = meta['line_chat_type'];
+            this.lineReply.onInbound(chatId, meta['reply_token'], {
+              armButton: chatType === undefined || chatType === 'user',
+            });
+          }
 
           // Check if this is a built-in channel command
           const trimmedContent = content.trim();
@@ -561,7 +579,7 @@ export class AgentRunner extends EventEmitter {
    */
   private routeChannelTurn(
     chatId: string,
-    channelSource: 'telegram' | 'discord',
+    channelSource: 'telegram' | 'discord' | 'line',
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     if (entries.length === 0) return;
@@ -672,6 +690,8 @@ export class AgentRunner extends EventEmitter {
       'attachment_kind',
       'attachment_mime',
       'attachment_name',
+      'user_id',     // LINE: the userId the session passes back to line_reply
+      'reply_token', // LINE: single-use reply token (push is preferred; surfaced for completeness)
     ]
       .filter(k => meta[k])
       .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
@@ -703,7 +723,7 @@ export class AgentRunner extends EventEmitter {
 
   private async getOrSpawnSession(
     mapKey: string,              // Map lookup key (chatId for telegram/discord, sessionId for API)
-    source: 'telegram' | 'discord' | 'api',
+    source: 'telegram' | 'discord' | 'line' | 'api',
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
   ): Promise<SessionProcess> {
@@ -751,7 +771,7 @@ export class AgentRunner extends EventEmitter {
 
   private async spawnSession(
     mapKey: string,
-    source: 'telegram' | 'discord' | 'api',
+    source: 'telegram' | 'discord' | 'line' | 'api',
     sessionId?: string,
     modelOverride?: string,
   ): Promise<SessionProcess> {
@@ -812,6 +832,9 @@ export class AgentRunner extends EventEmitter {
       proc.once('failed', () => {
         this.writeTypingError(mapKey, 'PROCESS_FAILED');
         this.sessions.delete(mapKey);
+        // LINE: surface an error for any outstanding postback button so a tap
+        // returns the interrupted notice instead of a stale "still thinking".
+        if (!proc.queryMode) this.lineReply?.markInterrupted(mapKey);
       });
       // Stop typing loop when Claude's turn truly ends.
       // Typing done is delayed 3s after result event — if new output arrives within
@@ -824,7 +847,12 @@ export class AgentRunner extends EventEmitter {
       let menuSentThisTurn = false;
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
-      const replyToolName = source === 'discord' ? 'mcp__gateway__discord_reply' : 'mcp__gateway__telegram_reply';
+      const replyToolName =
+        source === 'discord'
+          ? 'mcp__gateway__discord_reply'
+          : source === 'line'
+            ? 'mcp__gateway__line_reply'
+            : 'mcp__gateway__telegram_reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -856,6 +884,12 @@ export class AgentRunner extends EventEmitter {
                       content: replyText,
                       ts: Date.now(),
                     });
+                    // LINE: the MCP line_reply tool's send is suppressed in
+                    // refresh mode; the gateway delivers (free reply, or cache +
+                    // postback button when slow). See LineReplyManager.
+                    if (channelSrc === 'line' && this.lineReply) {
+                      void this.lineReply.onAnswer(mapKey, replyText);
+                    }
                   }
                 }
               }
@@ -973,8 +1007,12 @@ export class AgentRunner extends EventEmitter {
                 content: text,
                 ts: Date.now(),
               });
-              // Forward to channel
-              if (channelSrcForResult !== 'discord' && hasMarkdown(text)) {
+              // Forward to channel. LINE has no .forward consumer — the gateway
+              // delivers via LineReplyManager (free reply, or cache + postback
+              // button when slow) instead of writeAutoForward.
+              if (channelSrcForResult === 'line' && this.lineReply) {
+                void this.lineReply.onAnswer(mapKey, text);
+              } else if (channelSrcForResult !== 'discord' && hasMarkdown(text)) {
                 this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
               } else {
                 this.writeAutoForward(mapKey, text);
@@ -1050,6 +1088,15 @@ export class AgentRunner extends EventEmitter {
           typingDoneTimer = null;
         }
         this.writeTypingDone(mapKey);
+        // LINE: a process exit with a button whose answer never arrived (crash /
+        // teardown mid-turn) → surface the interrupted notice so a tap returns it
+        // instead of a stale "still thinking". markInterrupted no-ops on a READY
+        // entry, so an already-answered, untapped button stays deliverable. Then
+        // clear the armed timer + stashed reply token for this chat.
+        if (!proc.queryMode) {
+          this.lineReply?.markInterrupted(mapKey);
+          this.lineReply?.disposeChat(mapKey);
+        }
       });
 
       // Deferred restart: stop session after its current turn completes
@@ -1491,6 +1538,11 @@ export class AgentRunner extends EventEmitter {
   }
 
   private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {
+    // LINE has no .forward consumer — route through LineReplyManager's push path.
+    if (this.channelFor(chatId) === 'line') {
+      if (this.lineReply) void this.lineReply.onAnswer(chatId, text);
+      return;
+    }
     const typingDir = this.getTypingDir(chatId);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
@@ -1553,6 +1605,10 @@ export class AgentRunner extends EventEmitter {
       );
       this.discordReceiver.start();
     }
+    // LINE slow-LLM postback button: gateway-side token lifecycle + cache.
+    // Enabled for any LINE agent unless its threshold is 0 (then the MCP
+    // line_reply tool keeps the plain reply-first → push-fallback path).
+    this.startLineReply();
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
@@ -1560,6 +1616,32 @@ export class AgentRunner extends EventEmitter {
 
   updateAgentConfig(newConfig: AgentConfig): void {
     this.agentConfig = newConfig;
+    // Restart LineReplyManager if the LINE config changed so the live instance
+    // picks up a new access token, threshold, or labels without a full restart.
+    this.stopLineReply();
+    this.startLineReply();
+  }
+
+  startLineReply(): void {
+    const lineThreshold = this.agentConfig.line?.slowResponseThreshold ?? 45;
+    if (!this.agentConfig.line?.channelSecret || !this.agentConfig.line?.channelAccessToken || lineThreshold <= 0) return;
+    if (this.lineReply) return; // already running
+    this.lineReply = new LineReplyManager({
+      agentId: this.agentConfig.id,
+      logDir: this.gatewayConfig.gateway.logDir,
+      accessToken: this.agentConfig.line.channelAccessToken,
+      thresholdSeconds: lineThreshold,
+      buttonLabel: this.agentConfig.line.slowButtonLabel,
+      pendingText: this.agentConfig.line.slowPendingText,
+    });
+    this.logger.info('LineReplyManager hot-started', { agentId: this.agentConfig.id });
+  }
+
+  stopLineReply(): void {
+    if (!this.lineReply) return;
+    this.lineReply.disposeAll();
+    this.lineReply = null;
+    this.logger.info('LineReplyManager stopped', { agentId: this.agentConfig.id });
   }
 
   getAgentConfig(): AgentConfig {
@@ -1624,8 +1706,19 @@ export class AgentRunner extends EventEmitter {
     this.channelCoalesce.clear();
     this.receiver?.stop();
     this.discordReceiver?.stop();
+    this.stopLineReply();
     await Promise.all([...this.sessions.values()].map((s) => s.stop()));
     this.sessions.clear();
+  }
+
+  /**
+   * Deliver a tapped LINE postback (the slow-LLM "Get answer" button).
+   * Returns true when it was our refresh button (caller must NOT forward it to
+   * the agent); false for any other postback.
+   */
+  async handleLinePostback(chatId: string, replyToken: string, data: string): Promise<boolean> {
+    if (!this.lineReply) return false;
+    return this.lineReply.handlePostback(chatId, replyToken, data);
   }
 
   private _startCleanupScheduler(): void {
@@ -2186,7 +2279,7 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 
-  async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord'): Promise<import('../types').SessionIndex> {
+  async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord' | 'line'): Promise<import('../types').SessionIndex> {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
   }
 
@@ -2458,7 +2551,7 @@ export class AgentRunner extends EventEmitter {
    */
   async sendMessageToSession(
     rawChatId: string,
-    channel: 'telegram' | 'discord',
+    channel: 'telegram' | 'discord' | 'line',
     sessionId: string,
     message: string,
     senderName: string | undefined,

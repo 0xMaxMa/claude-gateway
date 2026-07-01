@@ -1,4 +1,4 @@
-export type CommandChannel = 'telegram' | 'discord' | 'api';
+export type CommandChannel = 'telegram' | 'discord' | 'line' | 'api';
 
 interface CommandDef {
   channels: CommandChannel[];
@@ -30,6 +30,10 @@ function buildRegex(channel: CommandChannel): RegExp {
     .map(([cmd, def]) =>
       def.wordBoundary === false ? `^\/${cmd}(\\s|$)` : `^\/${cmd}\\b`
     );
+  // No commands registered for this channel (e.g. 'line') → match nothing.
+  // `new RegExp('')` matches EVERY string, which would misroute all messages
+  // into the command handler so they'd never reach the agent.
+  if (parts.length === 0) return /(?!)/;
   return new RegExp(parts.join('|'));
 }
 
