@@ -227,9 +227,8 @@ export class SessionProcess extends EventEmitter {
       // Defense-in-depth: defang any verbatim 32MB-overlay text captured into past
       // messages before it is re-typed into the TUI. The primary fix routes the real
       // error off the screen-scraper to the transcript's `<synthetic>` record (see
-      // TranscriptTailer.onRequestTooLarge), so detectRequestTooLarge() is no longer
-      // wired into the trigger — but neutralizing the re-injected copy keeps the
-      // poisoned overlay text off the screen entirely and out of any future scraper.
+      // TranscriptTailer.onRequestTooLarge) — but neutralizing the re-injected copy
+      // keeps the poisoned overlay text off the screen entirely and out of any future scraper.
       historyPrompt: `[Conversation history with this user:\n${neutralizeTuiTriggers(historyText)}]`,
       loadedAtSpawn,
       archivedCount,

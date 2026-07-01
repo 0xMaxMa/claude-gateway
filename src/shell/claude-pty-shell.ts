@@ -16,10 +16,11 @@ import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
 import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
 import { PtyHost } from './pty-host';
-import { TranscriptTailer, AssistantRecord, UsageInfo, hasInteractiveMenuToolUse } from './tailer';
+import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
+import { decideProbeAttempt, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -87,9 +88,10 @@ interface ActiveTurn {
   dialogEscapes: number;
   /** Snapshot of tailer.seenRecords at turn start — used to detect per-turn output. */
   recordsAtStart: number;
-  /** Set once this turn invoked a menu-raising tool (AskUserQuestion/ExitPlanMode).
-   *  Gates menu bridging so only a transcript-backed menu is bridged to chat. */
-  menuToolSeen: boolean;
+  /** Behavioral-probe bookkeeping for this turn's current stall, or null before
+   *  the first probe round. Replaces the old transcript-gated menuToolSeen —
+   *  see maybeProbeAndBridge()/runProbe() below and planning-61. */
+  probe: ProbeState | null;
 }
 
 class Driver {
@@ -120,6 +122,11 @@ class Driver {
   // re-sent every poll while the error overlay lingers. Reset when a new turn begins.
   private requestTooLargeHandled = false;
   private lastDialogActionAt = 0;
+  // True while a behavioral probe round (runProbe()) is awaiting its settle
+  // timer. Mutual exclusion so at most one round is ever in flight, and a
+  // signal for tick() to skip Enter-retry/fallback-idle logic for the tick(s)
+  // spanned by the round (bounded to <= 2 x PROBE_SETTLE_MS).
+  private probing = false;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private host!: PtyHost;
   private tailer!: TranscriptTailer;
@@ -285,9 +292,6 @@ class Driver {
       this.turn.lastProgressAt = Date.now();
       if (text) this.turn.texts.push(text);
       if (usage) this.turn.usage = usage;
-      // Authoritative menu signal: this turn called a menu-raising tool, so a
-      // menu on screen now is real (not a quoted/rendered look-alike).
-      if (hasInteractiveMenuToolUse(record.message)) this.turn.menuToolSeen = true;
     } else {
       logDebug('assistant record outside an active turn (emitted anyway)');
     }
@@ -382,7 +386,7 @@ class Driver {
       usage: null,
       dialogEscapes: 0,
       recordsAtStart: this.tailer.seenRecords,
-      menuToolSeen: false,
+      probe: null,
     };
   }
 
@@ -550,6 +554,9 @@ class Driver {
     if (this.screen.consumeBusySeen() || this.screen.isBusy()) {
       turn.sawBusy = true;
       turn.lastProgressAt = now;
+      // Real activity resumed — a probe that ran out of rounds during this
+      // stall gets a fresh budget if the turn genuinely stalls again later.
+      if (turn.probe) turn.probe.rounds = 0;
       return;
     }
 
@@ -557,15 +564,15 @@ class Driver {
     // (turn_duration normally ends the turn before we get here).
     this.maybeHandleDialog();
 
-    // Blocked on an interactive select menu → bridge it to chat and end the turn
-    // so the session goes idle (no watchdog kill) until the user picks an option.
-    if (this.maybeBridgeMenu(turn)) return;
-
-    // Blocked on a tool-permission prompt (e.g. the dangerous-rm circuit breaker
-    // that fires even under --dangerously-skip-permissions). Bridge the Yes/No to
-    // chat for a human to decide — never auto-accept — and end the turn so the
-    // session goes idle instead of wedging until the watchdog.
-    if (this.maybeBridgePermissionPrompt(turn)) return;
+    // Blocked on a live interactive overlay (AskUserQuestion menu, plan
+    // approval, or a tool-permission Yes/No prompt) → probe behaviorally and
+    // bridge it to chat if confirmed, so the session goes idle (no watchdog
+    // kill) until the user picks an option. runProbe() ends the turn itself
+    // once a round confirms a live overlay; while a round is outstanding,
+    // skip the Enter-retry/fallback-idle checks below so they can't race a
+    // probe keystroke.
+    this.maybeProbeAndBridge(turn);
+    if (this.probing) return;
 
     if (!turn.sawBusy
         && now - turn.submittedAt > SUBMIT_RETRY_AFTER_MS
@@ -630,82 +637,93 @@ class Driver {
     }
   }
 
-  // ---- interactive menu bridging ------------------------------------------
+  // ---- interactive-prompt behavioral probe --------------------------------
 
   /**
-   * If the TUI is blocked on an interactive select menu, emit it to the gateway
-   * (rendered as chat buttons / numbered text) and end the turn so the session
-   * goes idle while we await the user's choice. Returns true if it bridged.
+   * Behavioral gate replacing the old screen-regex detectors + transcript
+   * menuToolSeen gate (planning-61). While the turn looks stalled (settled
+   * quiet, not busy, not already mid-selection), spend one probe round: send
+   * an arrow keystroke and check whether the screen actually reacts. Rounds
+   * are budgeted (PROBE_MAX_ROUNDS) and cooldown-spaced (decideProbeAttempt())
+   * so a genuinely non-menu stall falls through to the existing Enter-retry /
+   * fallback-idle-detection / watchdog path exactly as it does today.
    *
-   * Never auto-selects — a destructive option must be a human decision. The
-   * bypass-permissions dialog also shows the menu footer, so it's excluded here
-   * and left to maybeHandleDialog()'s auto-accept.
+   * Fires the round and returns immediately — runProbe() ends the turn itself
+   * (via bridgeChoiceToChat()) only if a round confirms a live overlay.
    */
-  private maybeBridgeMenu(turn: ActiveTurn): boolean {
-    if (SKIP_MENU_BRIDGE || this.pendingMenu) return false;
-    // Authoritative gate: only bridge when this turn actually invoked a menu tool
-    // (AskUserQuestion/ExitPlanMode). Without it, a reply or re-injected history
-    // that renders a numbered list + the menu footer would spawn a phantom menu.
-    // The transcript tool_use can't be forged by on-screen text. Fails safe: if a
-    // genuine non-tool menu ever exists it simply isn't bridged (no false buttons).
-    if (!turn.menuToolSeen) return false;
-    if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return false;
-    if (this.screen.detectDialog() === 'bypass-permissions') return false;
-    const options = this.screen.detectMenu();
-    if (!options) return false;
-
-    const prompt = formatMenuPrompt(options);
-    logWarn(`interactive menu detected (${options.length} options) — bridging to chat`);
-    this.bridgeChoiceToChat(turn, options, prompt);
-    return true;
+  private maybeProbeAndBridge(turn: ActiveTurn): void {
+    if (SKIP_MENU_BRIDGE || this.pendingMenu) return;
+    if (this.screen.detectDialog() === 'bypass-permissions') return;
+    if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return;
+    if (this.probing) return; // a round is already in flight
+    const probe = (turn.probe ??= { lastAttemptAt: 0, rounds: 0 });
+    const action = decideProbeAttempt(probe, { now: Date.now() });
+    if (action !== 'send') return;
+    probe.lastAttemptAt = Date.now();
+    probe.rounds++;
+    this.probing = true;
+    void this.runProbe(turn).finally(() => { this.probing = false; });
   }
 
   /**
-   * Shared tail of maybeBridgeMenu / maybeBridgePermissionPrompt: emit the
-   * channel-native choice UI, carry the same text as the turn's result (API/no-
-   * button fallback + chat history), record the pending menu so the reply routes
-   * back to a selection, and end the turn so the session goes idle while awaiting
-   * the human's choice.
+   * One probe round: send Down, settle, check for a screen change. If Down
+   * produced nothing, retry once with Up (covers the "already at the last
+   * option, no wraparound" boundary case). A confirmed change is read via
+   * readInteractivePrompt() and bridged to chat; anything that doesn't parse
+   * cleanly is left alone (fail-safe — no bridge rather than a garbled one).
+   */
+  private async runProbe(turn: ActiveTurn): Promise<void> {
+    const before = this.screen.text();
+    this.host.writeRaw(PROBE_KEY_DOWN);
+    await new Promise((r) => setTimeout(r, PROBE_SETTLE_MS));
+    if (this.turn !== turn) return; // turn ended/changed while waiting — abandon
+
+    // A screen change while busy means real work resumed in the interim (a
+    // reply started streaming) — not a menu reacting to our keystroke, so
+    // bail rather than mis-bridge a phantom menu.
+    let changed = this.screen.text() !== before && !this.screen.isBusy();
+    let sentUp = false;
+    if (!changed) {
+      sentUp = true;
+      this.host.writeRaw(PROBE_KEY_UP);
+      await new Promise((r) => setTimeout(r, PROBE_SETTLE_MS));
+      if (this.turn !== turn) return;
+      changed = this.screen.text() !== before && !this.screen.isBusy();
+    }
+    if (!changed) return; // nothing reacted — not interactive, do nothing this round
+
+    const parsed = this.screen.readInteractivePrompt();
+    if (!parsed) {
+      // The Up fallback may have recalled input-line history on a genuinely
+      // idle (non-menu) input box; restore with a Down so the next real turn
+      // never starts pre-populated with stale recalled text. Unconditional
+      // and harmless even when Up did NOT recall anything (idle Down is a
+      // confirmed no-op) — never reached after a confirmed menu below, since
+      // that would move the live selection instead of restoring anything.
+      if (sentUp) this.host.writeRaw(PROBE_KEY_DOWN);
+      return;
+    }
+
+    const text = parsed.isPermission
+      ? formatPermissionPrompt(parsed.context, parsed.options)
+      : formatMenuPrompt(parsed.options);
+    logWarn(`interactive ${parsed.isPermission ? 'permission prompt' : 'menu'} confirmed (${parsed.options.length} options) — bridging to chat`);
+    this.bridgeChoiceToChat(turn, parsed.options, text);
+  }
+
+  /**
+   * Shared tail of a confirmed probe: emit the channel-native choice UI, carry
+   * the same text as the turn's result (API/no-button fallback + chat
+   * history), record the pending menu so the reply routes back to a
+   * selection, and end the turn so the session goes idle while awaiting the
+   * human's choice. Never auto-selects — a destructive/guarded option must
+   * always be a human decision.
    */
   private bridgeChoiceToChat(turn: ActiveTurn, options: MenuOption[], text: string): void {
     this.emitter.emitMenuPrompt({ sessionId: this.args.sessionId, prompt: text, options });
     turn.texts.push((turn.texts.length ? '\n\n' : '') + text);
     this.pendingMenu = { options };
     this.finishTurn(false);
-  }
-
-  /**
-   * If the TUI is blocked on a tool-permission prompt, bridge it to chat as a
-   * Yes/No choice (reusing the menu machinery: emit → buttons → handleMenuReply)
-   * and end the turn so the session goes idle while awaiting the human's decision.
-   * Returns true if it bridged.
-   *
-   * This is the fix for the wedge: Claude Code keeps a few catastrophe guards
-   * (dangerous rm, root/home deletes) that prompt EVEN under
-   * --dangerously-skip-permissions, which the wrapper otherwise assumes never
-   * happens. Such a prompt is neither the startup bypass dialog nor an
-   * AskUserQuestion menu, so without this it is never surfaced and the PTY hangs
-   * at the Yes/No until the 30-min watchdog kills the session.
-   *
-   * NEVER auto-selects — a guarded/destructive operation must be a human decision.
-   * Unlike maybeBridgeMenu there is no transcript tool_use to gate on (the circuit
-   * breaker is CLI-internal UI, not written to the transcript), so detection rests
-   * on detectPermissionPrompt()'s region + multi-marker guard plus the settle
-   * gate. That is the same defense detectDialog() relies on, and bridging to a
-   * human is strictly safer than detectDialog()'s auto-keypress.
-   */
-  private maybeBridgePermissionPrompt(turn: ActiveTurn): boolean {
-    if (SKIP_MENU_BRIDGE || this.pendingMenu) return false;
-    if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return false;
-    // The bypass-permissions startup dialog is auto-accepted by maybeHandleDialog().
-    if (this.screen.detectDialog() === 'bypass-permissions') return false;
-    const prompt = this.screen.detectPermissionPrompt();
-    if (!prompt) return false;
-
-    const text = formatPermissionPrompt(prompt.context, prompt.options);
-    logWarn(`permission prompt detected (${prompt.options.length} options) — bridging to chat (never auto-accepted)`);
-    this.bridgeChoiceToChat(turn, prompt.options, text);
-    return true;
   }
 
   /** Route a user's menu reply (typed number or button tap) to a selection. */

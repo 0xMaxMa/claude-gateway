@@ -95,63 +95,46 @@ export function neutralizeTuiTriggers(text: string): string {
     .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back');
 }
 
-/**
- * Interactive select-menu footer markers (e.g. AskUserQuestion). The footer reads
- * "Enter to select · ↑/↓ to navigate · Esc to cancel"; we match on the two stable
- * fragments so spacing/middle-dot variations across TUI versions don't break it.
- */
-export const TUI_MENU_FOOTER = ['to navigate', 'to cancel'] as const;
 /** A numbered option row, with an optional leading ❯/> highlight marker. */
 export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
 
 /**
- * A tool-permission prompt blocking on keyboard input. Distinct from the
- * AskUserQuestion select menu: Claude Code raises this for guarded operations
- * (e.g. a "Dangerous rm operation on possibly-empty variable path" circuit
- * breaker) that prompt EVEN under --dangerously-skip-permissions, since
- * bypassPermissions deliberately keeps a few catastrophe guards (rm against
- * root/home, possibly-empty globs). The wrapper otherwise assumes no permission
- * prompt ever appears, so without this detector the PTY wedges at the Yes/No
- * forever — nobody can answer it from chat and the typing indicator never clears.
- *
- * Matched by the universal question line plus a footer token unique to permission
- * prompts: the select-menu footer carries "↑/↓ to navigate" and the 32MB overlay
- * carries "esc to go back", so "Tab to amend" / "ctrl+e to explain" disambiguate
- * cleanly. The tokens are the fuller phrases (not bare "to amend" / "to explain")
- * so a chat reply that merely contains those words can't satisfy the footer gate.
- * Region-restricted (bottom rows) + multi-marker + a required ❯/> selection caret
- * so quoted prose in scrollback (a numbered list with none of the live-prompt
- * chrome) cannot trip it — the same defense detectDialog() uses, plus more.
- * Detection only ever BRIDGES the choice to a human; it never presses a key on its
- * own (a destructive guard must not be auto-accepted), making it strictly safer
- * than detectDialog.
+ * The universal question line Claude Code's tool-permission prompt (e.g. the
+ * dangerous-rm circuit breaker that fires even under
+ * --dangerously-skip-permissions) always renders. Used only as a cosmetic
+ * classifier in readInteractivePrompt() — never a gate: liveness itself is
+ * established behaviorally (see Driver.runProbe() in claude-pty-shell.ts)
+ * before this is ever consulted.
  */
-export const TUI_PERMISSION_PROMPT = 'Do you want to proceed?';
-export const TUI_PERMISSION_FOOTER_TOKENS = ['Tab to amend', 'ctrl+e to explain'] as const;
+const PERMISSION_QUESTION = 'Do you want to proceed?';
 
-/** A blocking interactive prompt parsed off the screen: the selectable options
- *  plus any context text shown above the question (warning + command). */
-export interface PermissionPrompt {
+/** A live select prompt always highlights one option with a leading ❯/> caret
+ *  (kept even inside a box border) — used by readInteractivePrompt() to tell
+ *  a real option row apart from a numbered list in ordinary prose. */
+const CARET_OPTION_RE = /^\s*│?\s*[❯>]\s*\d+\./;
+
+/** A blocking interactive prompt parsed off the screen: the selectable options,
+ *  any context text shown above a permission question (warning + command), and
+ *  whether it's a permission-style prompt (vs a plain AskUserQuestion menu). */
+export interface InteractivePrompt {
   options: MenuOption[];
   /** Human-readable lines above the question (e.g. the dangerous command) — '' if none. */
   context: string;
+  /** Cosmetic only — chooses warning-style vs plain-menu-style chat formatting. */
+  isPermission: boolean;
 }
 
 /**
  * Parse the numbered option rows out of a block of screen lines and return the
  * live run as 1..N options. Scrollback above a prompt can contain stale numbered
  * lines (a prior chat message rendered as "1. … 2. …"), so we take the LAST run
- * that starts at "1." and increments by one — that is the live prompt nearest the
- * footer, not history. Returns null for fewer than two options. Shared by
- * detectMenu() and detectPermissionPrompt() so both number options identically.
+ * that starts at "1." and increments by one — that is the live prompt, not
+ * history. Returns null for fewer than two options.
  *
  * `stripBorder` strips a left box border ("│ ") before matching, for prompts that
- * render inside a rounded dialog box (the permission prompt). detectMenu() leaves
- * it off so its full-buffer scan stays byte-identical to before — stripping the
- * border there would let "│ 1. …" lines in dialog-bordered scrollback newly parse
- * as options and shift the live run it picks.
+ * render inside a rounded dialog box (the permission prompt).
  */
-function parseOptionRun(lines: string[], stripBorder = false): MenuOption[] | null {
+function parseLiveOptionRun(lines: string[], stripBorder = false): MenuOption[] | null {
   const matches: MenuOption[] = [];
   for (const raw of lines) {
     const line = stripBorder ? raw.replace(/^\s*│\s?/, '') : raw;
@@ -290,22 +273,6 @@ export class ScreenModel {
     return TUI_PROMPT_RE.test(this.text());
   }
 
-  /**
-   * The TUI is showing the recoverable "Request too large (max 32MB)" error.
-   * Requires both the error prefix and the dismiss-footer marker.
-   *
-   * SUPERSEDED as the trigger: a verbatim copy of the overlay sentence carries
-   * BOTH markers, so re-injected history or an agent quoting the error tripped a
-   * false restart loop. Detection now comes from the transcript's `<synthetic>`
-   * assistant record (see TranscriptTailer.onRequestTooLarge), which text on
-   * screen cannot forge. Kept (and tested) only to document that screen-scraping
-   * this error is unreliable — do NOT re-wire it into the tick() trigger.
-   */
-  detectRequestTooLarge(): boolean {
-    const text = this.text();
-    return text.includes(TUI_REQUEST_TOO_LARGE) && text.includes(TUI_REQUEST_TOO_LARGE_DISMISS);
-  }
-
   detectDialog(): DialogKind | null {
     // Scan only the bottom region: a real modal dialog renders there, while a
     // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the
@@ -320,73 +287,60 @@ export class ScreenModel {
   }
 
   /**
-   * Detect an interactive select menu blocking on keyboard input (e.g. the
-   * AskUserQuestion / plan-approval prompt) and parse its numbered options.
-   * Returns the options in display order, or null when no menu is on screen.
+   * Extract the option labels (and, for a permission prompt, the warning/command
+   * context) from a live interactive overlay — an AskUserQuestion-style menu or
+   * a tool-permission Yes/No prompt (e.g. the dangerous-rm circuit breaker that
+   * fires even under --dangerously-skip-permissions). This is a PURE READER: it
+   * never decides whether a prompt exists. Callers must already have proven
+   * liveness behaviorally — see Driver.runProbe() in claude-pty-shell.ts, which
+   * sends an arrow-key probe and only calls this once the screen visibly reacted.
    *
-   * Requires the select-menu footer AND at least two numbered rows — ordinary
-   * numbered lists in assistant output never carry the footer, so this won't
-   * false-positive on them. The bypass-permissions dialog also matches the
-   * footer; callers must check detectDialog() first and let it auto-accept.
-   */
-  detectMenu(): MenuOption[] | null {
-    const text = this.text();
-    if (!TUI_MENU_FOOTER.every((s) => text.includes(s))) return null;
-    // Scan only the region ABOVE the footer — the live menu's options always
-    // sit between the question and the "to navigate · to cancel" footer.
-    const lines = text.split('\n');
-    const footerIdx = lines.findIndex((l) => TUI_MENU_FOOTER.some((s) => l.includes(s)));
-    const region = footerIdx >= 0 ? lines.slice(0, footerIdx) : lines;
-    // parseOptionRun() takes the live 1..N run nearest the footer, so stale
-    // numbered scrollback above the menu can't inflate or shift the option list.
-    return parseOptionRun(region);
-  }
-
-  /**
-   * Detect a tool-permission prompt blocking on input (e.g. the dangerous-rm
-   * circuit breaker that fires even under --dangerously-skip-permissions) and
-   * parse its options + context. Returns null when no such prompt is on screen.
+   * Returns null when the region doesn't parse into a clean 1..N option run
+   * (fail-safe: no bridge rather than a garbled one) even though the probe
+   * proved something reacted — e.g. some other arrow-responsive UI with no
+   * formatter here.
    *
-   * Region-restricted to the bottom rows and gated on BOTH the question line and
-   * a permission-only footer token, so a reply/history that merely quotes the
-   * prompt (sitting in scrollback above) never trips it. The bypass-permissions
-   * startup dialog is handled by detectDialog()/auto-accept and is excluded here.
-   * Callers must only ever BRIDGE this to a human — never auto-select an option.
+   * isPermission is decided by whether "Do you want to proceed?" appears in the
+   * bottom region — a COSMETIC classification (chooses warning-style vs
+   * plain-menu-style chat formatting) that defaults to a plain menu when
+   * ambiguous; it never gates whether to bridge.
    */
-  detectPermissionPrompt(): PermissionPrompt | null {
-    const text = this.bottomText(DIALOG_REGION_ROWS);
-    if (!text.includes(TUI_PERMISSION_PROMPT)) return null;
-    if (!TUI_PERMISSION_FOOTER_TOKENS.some((t) => text.includes(t))) return null;
-    // The "Bypass Permissions mode … Yes, I accept" startup dialog is a separate
-    // case with its own auto-accept — don't double-handle it here.
-    if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) return null;
+  readInteractivePrompt(): InteractivePrompt | null {
+    const bottom = this.bottomText(DIALOG_REGION_ROWS);
+    const isPermission = bottom.includes(PERMISSION_QUESTION);
 
-    const lines = text.split('\n');
-    // Use the LAST occurrence of the question — the live prompt sits nearest the
-    // footer, so a reply/history that quotes "Do you want to proceed?" higher in
-    // the bottom region can't capture the question index and empty the context.
+    if (!isPermission) {
+      // A tall AskUserQuestion menu can render more options than fit in the
+      // bottom-region window, so scan the whole buffer. parseLiveOptionRun()
+      // already isolates the live 1..N run nearest the end of the buffer, so
+      // stale numbered scrollback above it can't inflate or shift the list.
+      // A live select prompt always highlights one option with the ❯/> caret;
+      // plain prose that merely happens to look like a numbered list never
+      // carries one, so requiring it keeps this reader from hallucinating an
+      // options list out of unrelated text.
+      const lines = this.text().split('\n');
+      if (!lines.some((l) => CARET_OPTION_RE.test(l))) return null;
+      const options = parseLiveOptionRun(lines);
+      return options ? { options, context: '', isPermission: false } : null;
+    }
+
+    const lines = bottom.split('\n');
+    // Use the LAST occurrence of the question — the live prompt sits nearest
+    // the bottom, so a reply/history that quotes the question higher in the
+    // bottom region can't capture the question index and empty the context.
     let qIdx = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].includes(TUI_PERMISSION_PROMPT)) { qIdx = i; break; }
+      if (lines[i].includes(PERMISSION_QUESTION)) { qIdx = i; break; }
     }
-    const footerIdx = lines.findIndex(
-      (l, i) => i > qIdx && TUI_PERMISSION_FOOTER_TOKENS.some((t) => l.includes(t)),
-    );
-    // Options live strictly between the question and the footer.
-    const optionRegion = footerIdx >= 0 ? lines.slice(qIdx + 1, footerIdx) : lines.slice(qIdx + 1);
-    // A live select prompt always highlights one option with the ❯/> caret (kept
-    // even inside a box border). Quoted prose numbered lists never carry it, so
-    // requiring it closes the false-positive where conversational text pairs a
-    // numbered list with the question + a footer-ish phrase.
-    const hasCaret = optionRegion.some((l) => /^\s*│?\s*[❯>]\s*\d+\./.test(l));
-    if (!hasCaret) return null;
-    const options = parseOptionRun(optionRegion, true);
+    const optionRegion = lines.slice(qIdx + 1);
+    if (!optionRegion.some((l) => CARET_OPTION_RE.test(l))) return null;
+    const options = parseLiveOptionRun(optionRegion, true);
     if (!options) return null;
 
     // Context = the warning + command shown above the question. Bound it to the
-    // dialog box (scan up for the rounded top border ╭) so conversation lines that
-    // merely share the bottom region aren't swept in; fall back to the few lines
-    // immediately above the question when the prompt isn't boxed.
+    // dialog box (scan up for the rounded top border ╭) so conversation lines
+    // that merely share the bottom region aren't swept in; fall back to the
+    // few lines immediately above the question when the prompt isn't boxed.
     const isBorderOnly = (l: string) => /^[\s│╭╮╰╯─]*$/.test(l);
     const stripBorder = (l: string) => l.replace(/^[\s│]+/, '').replace(/[\s│]+$/, '');
     const aboveQ = lines.slice(0, qIdx);
@@ -401,22 +355,23 @@ export class ScreenModel {
       .filter((l) => l.length > 0)
       .join('\n');
 
-    return { options, context };
+    return { options, context, isPermission: true };
   }
 
   /**
-   * True if a select menu or permission prompt is still blocking on input at the
-   * BOTTOM of the screen. Used to decide whether the confirming Enter after a typed
-   * selection is still needed: scoping to the bottom region means stale footer /
-   * numbered rows left in scrollback by an already-answered prompt can't keep a
-   * stray Enter alive (which would submit an empty line at the idle caret).
-   * detectMenu() deliberately scans the full buffer to parse a tall menu's options,
-   * so it's the wrong signal for this liveness check — hence the dedicated method.
+   * True if a selectable prompt (menu row or permission Yes/No) still visibly
+   * occupies the bottom of the screen — a live caret (❯/>) beside a numbered
+   * option. This is a NARROW, POST-confirmation liveness check only: whether a
+   * prompt is still blocking right now, used to decide if the confirming Enter
+   * after a typed selection is still needed, or to exclude a live wizard step
+   * from the Enter-swallowed retry heuristic. It is never used to decide
+   * whether a prompt exists in the first place — that's the behavioral probe's
+   * job (Driver.runProbe()) — so it carries none of the detection gate's
+   * false-positive risk: callers only ever invoke it when they already know
+   * they're mid-selection or a probe just confirmed a live overlay.
    */
   interactivePromptBlocking(): boolean {
-    const text = this.bottomText(DIALOG_REGION_ROWS);
-    if (TUI_MENU_FOOTER.every((s) => text.includes(s))) return true;
-    return this.detectPermissionPrompt() !== null;
+    return /^\s*│?\s*[❯>]\s*\d+\./m.test(this.bottomText(DIALOG_REGION_ROWS));
   }
 }
 

@@ -56,35 +56,6 @@ export function isSyntheticRequestTooLarge(message: AssistantRecord['message']):
 }
 
 /**
- * Tools whose invocation puts the TUI into a blocking interactive select-menu the
- * gateway bridges to chat: AskUserQuestion and the plan-approval ExitPlanMode.
- *
- * - `AskUserQuestion` — verified present as a `tool_use` record in real transcripts.
- * - `ExitPlanMode` / `exit_plan_mode` — the plan-approval tool. Both the PascalCase
- *   and legacy snake_case names appear in the Claude Code CLI binary, and the tool
- *   name field varies by model, so both are listed to be safe. (No transcript
- *   sample was available to confirm which the running model emits.)
- *
- * If a future tool raises a bridgeable menu, add it here; an omission only means
- * that menu isn't bridged (fail-safe), never a crash.
- */
-const MENU_TOOL_NAMES = new Set(['AskUserQuestion', 'ExitPlanMode', 'exit_plan_mode']);
-
-/**
- * True when an assistant record invokes a tool that raises a blocking menu. This
- * is the AUTHORITATIVE signal that a menu is genuinely on screen — used to gate
- * screen-based menu bridging so a reply/history that merely renders a menu-shaped
- * numbered list + footer can't spawn a phantom menu in chat.
- */
-export function hasInteractiveMenuToolUse(message: AssistantRecord['message']): boolean {
-  return message.content.some((b) => {
-    if (b.type !== 'tool_use') return false;
-    const name = (b as { name?: unknown }).name;
-    return typeof name === 'string' && MENU_TOOL_NAMES.has(name);
-  });
-}
-
-/**
  * cwd → Claude Code project-dir slug (verified against v2.1.x: `/` and `.` both become `-`).
  * If Claude Code ever changes this scheme, findFile()'s fallback UUID scan will still
  * locate the transcript — the primary path is just an optimistic fast path.
