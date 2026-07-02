@@ -38,9 +38,10 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
 export const DEFAULT_MODELS: ModelConfig[] = [
-  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable',       contextWindow: 1000000 },
+  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable[1m]',   contextWindow: 1000000 },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus[1m]',    contextWindow: 1000000 },
   { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]',  contextWindow: 1000000 },
+  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable',       contextWindow: 200000 },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus',        contextWindow: 200000 },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet',      contextWindow: 200000 },
