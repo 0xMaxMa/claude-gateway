@@ -311,19 +311,73 @@ describe('ScreenModel readInteractivePrompt (plain AskUserQuestion-style menu)',
     ]);
     expect(screen.readInteractivePrompt()).toBeNull();
   });
+
+  it('reads the highlight from the run\'s own rows — a caret-bearing input line cannot supply it (round-2 finding 2)', async () => {
+    // The recall-forgery hole: a static quoted menu sits in scrollback and the
+    // probe's Up fallback recalls a history entry beginning "2." — the input
+    // line renders as "❯ 2. …", a perfectly caret-shaped option row. A
+    // whole-screen caret scan read the highlight from that bottom-most row
+    // (1→2 = "moved") and bridged a fabricated menu. The highlight must come
+    // from the selected 1..N run itself, where the caret is still on row 1.
+    const screen = await renderScreen([
+      'Earlier the assistant quoted a menu verbatim:',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      '❯ 2. remove the old files',
+    ]);
+    const prompt = screen.readInteractivePrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.options.map((o) => o.index)).toEqual([1, 2]);
+    expect(prompt!.highlighted).toBe(1); // NOT 2 from the input line
+  });
+
+  it('the recall-forgery screen pair never satisfies confirmProbeReaction (highlight did not move)', async () => {
+    // End-to-end shape of the round-2 finding-2 exploit: before = quoted menu
+    // + idle input, after = same menu + recalled "2. …" in the input line.
+    // Both parse, both highlight row 1 → no move → no bridge.
+    const before = await renderScreen([
+      'Earlier the assistant quoted a menu verbatim:',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      '❯ ',
+    ]);
+    const after = await renderScreen([
+      'Earlier the assistant quoted a menu verbatim:',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      '❯ 2. remove the old files',
+    ]);
+    expect(confirmProbeReaction(before.readInteractivePrompt(), after.readInteractivePrompt())).toBe(false);
+  });
+
+  it('returns null when the run carries two highlights (a caret line joined the run)', async () => {
+    // A recalled entry beginning "3." EXTENDS a static [1,2] run into [1,2,3]
+    // and brings a second caret with it — a live menu highlights exactly one
+    // of its rows, so anything else is not a live menu.
+    const screen = await renderScreen([
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '❯ 3. do the third thing',
+    ]);
+    expect(screen.readInteractivePrompt()).toBeNull();
+  });
 });
 
 describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)', () => {
-  // Root cause of the "failed to submit turn to the TUI input" false report during a
-  // multi-question AskUserQuestion wizard: hasPrompt()'s idle-prompt regex (`/^❯ /m`)
-  // scans the whole visible screen and cannot tell the real idle bash caret apart from
-  // a highlighted menu option row, which uses the exact same `❯` marker flush at
-  // column 0. tick()'s "Enter appears swallowed" retry-and-give-up gate must exclude
-  // interactivePromptBlocking() so a live wizard step (no new tailer record yet,
-  // because the tool_use hasn't returned) is never mistaken for a genuinely stuck
-  // idle prompt.
+  // hasPrompt()'s idle-prompt regex (`/^❯ /m`) scans the whole visible screen
+  // and cannot tell the real idle caret apart from a highlighted menu option
+  // row, which uses the exact same `❯` marker flush at column 0.
+  // interactivePromptBlocking() is the DELIBERATELY PERMISSIVE companion scan
+  // (see its doc): it gates only actions where a false positive is cheap —
+  // the confirming Enter after a typed selection, decideMenuCancel's
+  // menuVisible, and the Enter-swallowed retry of a MENU-SELECTION turn. An
+  // ordinary turn's retry is NOT gated on it (the unsubmitted draft itself
+  // renders "❯ <text>" and would suppress the retry — round-2 finding 1).
 
-  it('a highlighted menu option row satisfies hasPrompt() (documents the collision), and interactivePromptBlocking() is also true on the same screen (so the retry gate is excluded)', async () => {
+  it('a highlighted menu option row satisfies hasPrompt() (documents the collision), and interactivePromptBlocking() is also true on the same screen', async () => {
     const screen = await renderScreen([
       ...FILLER(44),
       'Which option do you want?',

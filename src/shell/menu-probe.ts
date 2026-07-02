@@ -8,7 +8,7 @@
  * navigable overlay (AskUserQuestion menu, plan approval, or a permission
  * Yes/No prompt) visibly moves its highlighted row; idle scrollback that
  * merely *contains* menu-shaped text cannot react to a keypress, because it
- * isn't a live UI element. See Driver.maybeProbeAndBridge()/runProbe() in
+ * isn't a live UI element. See Driver.maybeProbeAndBridge()/advanceProbe() in
  * claude-pty-shell.ts for where this is wired in.
  *
  * This module is the pure per-round bookkeeping decision only (round budget +
@@ -85,9 +85,10 @@ export interface ProbeReadout {
  * option count) and the ❯-highlighted index CHANGED. This is what static
  * menu-shaped text (a markdown "> 1." blockquote, a quoted earlier menu)
  * can never satisfy: surrounding text may change (e.g. Up recalled input
- * history), but a caret row in dead scrollback cannot move. A raw
- * screen-text diff — the first implementation — counted any change and
- * bridged fabricated menus in exactly that case.
+ * history), but a caret row in dead scrollback cannot move — and since
+ * parseLiveOptionRun() reads the highlight from the run's OWN rows, a
+ * caret-bearing line elsewhere on screen (the input line after a recall)
+ * can't supply the "moved" index either (review round 2, finding 2).
  *
  * Rejecting when `before` is null is deliberate: the probe only fires after
  * the screen has been quiet for MENU_STABLE_QUIET_MS, so a real overlay was

@@ -15,61 +15,21 @@
  * the PTY + sets this.interrupting, then clears the PTY input via Ctrl+U.
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+  makeTurnJson,
+  spawnWrapper as spawnHarnessWrapper,
+  waitForLogEntries,
+  waitMs,
+} from '../helpers/pty-harness';
 
-const PTY_SHELL_BIN = path.resolve(__dirname, '../../dist/shell/claude-pty-shell.js');
 const MOCK_TUI_BIN = path.resolve(__dirname, '../helpers/mock-claude-tui.js');
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-function makeTurnJson(text: string): string {
-  return (
-    JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
-    }) + '\n'
-  );
-}
-
 function spawnWrapper(inputLog: string): ChildProcess {
-  return spawn('node', [PTY_SHELL_BIN, '--model', 'claude-test', '--dangerously-skip-permissions'], {
-    env: {
-      ...process.env,
-      // Use path directly (not "node path") so checkAuthStatus(realBinParts[0]) works
-      CLAUDE_REAL_BIN: MOCK_TUI_BIN,
-      FAKE_TUI_INPUT_LOG: inputLog,
-      PTY_SHELL_DEBUG: '0',
-    },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-}
-
-function waitMs(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-/** Read lines submitted to the fake TUI (one per turn). */
-function readInputLog(logPath: string): string[] {
-  if (!fs.existsSync(logPath)) return [];
-  return fs
-    .readFileSync(logPath, 'utf-8')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-}
-
-/** Wait until the input log has at least `n` entries, or timeout. */
-async function waitForLogEntries(logPath: string, n: number, timeoutMs = 5000): Promise<string[]> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const lines = readInputLog(logPath);
-    if (lines.length >= n) return lines;
-    await waitMs(100);
-  }
-  return readInputLog(logPath);
+  return spawnHarnessWrapper(MOCK_TUI_BIN, { FAKE_TUI_INPUT_LOG: inputLog });
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────

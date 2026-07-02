@@ -103,7 +103,7 @@ export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
  * dangerous-rm circuit breaker that fires even under
  * --dangerously-skip-permissions) always renders. Used only as a cosmetic
  * classifier in readInteractivePrompt() — never a gate: liveness itself is
- * established behaviorally (see Driver.runProbe() in claude-pty-shell.ts)
+ * established behaviorally (see Driver.advanceProbe() in claude-pty-shell.ts)
  * before this is ever consulted.
  */
 const PERMISSION_QUESTION = 'Do you want to proceed?';
@@ -136,20 +136,35 @@ export interface InteractivePrompt {
 
 /**
  * Parse the numbered option rows out of a block of screen lines and return the
- * live run as 1..N options. Scrollback above a prompt can contain stale numbered
- * lines (a prior chat message rendered as "1. … 2. …"), so we take the LAST run
- * that starts at "1." and increments by one — that is the live prompt, not
- * history. Returns null for fewer than two options.
+ * live run as 1..N options plus the 1-based index of its ❯-highlighted row.
+ * Scrollback above a prompt can contain stale numbered lines (a prior chat
+ * message rendered as "1. … 2. …"), so we take the LAST run that starts at
+ * "1." and increments by one — that is the live prompt, not history.
+ *
+ * The highlight is read from the run's OWN rows, never from elsewhere on
+ * screen: a separate whole-screen caret scan once let the input line — which
+ * renders "❯ <recalled text>" after the probe's Up fallback recalls input
+ * history — supply a "moved" highlight for static menu-shaped scrollback and
+ * bridge a fabricated menu (PR #181 review round 2, finding 2). A live select
+ * prompt highlights exactly one of its rows, so anything else (zero carets =
+ * prose that merely looks numbered; two+ = a run polluted by a caret-bearing
+ * non-menu line) returns null (fail-safe: no bridge rather than a forged one).
+ *
+ * Returns null for fewer than two options.
  *
  * `stripBorder` strips a left box border ("│ ") before matching, for prompts that
  * render inside a rounded dialog box (the permission prompt).
  */
-function parseLiveOptionRun(lines: string[], stripBorder = false): MenuOption[] | null {
-  const matches: MenuOption[] = [];
+function parseLiveOptionRun(
+  lines: string[],
+  stripBorder = false,
+): { options: MenuOption[]; highlighted: number } | null {
+  const matches: Array<MenuOption & { caret: boolean }> = [];
   for (const raw of lines) {
     const line = stripBorder ? raw.replace(/^\s*│\s?/, '') : raw;
     const m = TUI_MENU_OPTION_RE.exec(line);
-    if (m) matches.push({ index: Number(m[1]), label: m[2].trim() });
+    // CARET_OPTION_RE tolerates the box border itself, so test the raw line.
+    if (m) matches.push({ index: Number(m[1]), label: m[2].trim(), caret: CARET_OPTION_RE.test(raw) });
   }
   if (matches.length < 2) return null;
   let start = -1;
@@ -157,29 +172,19 @@ function parseLiveOptionRun(lines: string[], stripBorder = false): MenuOption[] 
     if (matches[i].index === 1) start = i;
   }
   if (start === -1) return null;
-  const run: MenuOption[] = [];
+  const run: Array<MenuOption & { caret: boolean }> = [];
   let expected = 1;
   for (let i = start; i < matches.length && matches[i].index === expected; i++) {
     run.push(matches[i]);
     expected++;
   }
-  return run.length >= 2 ? run : null;
-}
-
-/**
- * 1-based option number of the ❯-highlighted row nearest the bottom of the
- * given lines, or null when no caret row is present. Scans bottom-up so a
- * stale caret row in scrollback (e.g. an earlier menu frame) can't shadow the
- * live one, mirroring parseLiveOptionRun()'s last-run-wins rule.
- */
-function caretOptionIndex(lines: string[]): number | null {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (CARET_OPTION_RE.test(lines[i])) {
-      const m = /(\d+)\./.exec(lines[i]);
-      if (m) return Number(m[1]);
-    }
-  }
-  return null;
+  if (run.length < 2) return null;
+  const caretRows = run.filter((r) => r.caret);
+  if (caretRows.length !== 1) return null;
+  return {
+    options: run.map(({ index, label }) => ({ index, label })),
+    highlighted: caretRows[0].index,
+  };
 }
 
 /**
@@ -188,7 +193,7 @@ function caretOptionIndex(lines: string[]): number | null {
  * function over screen text (as produced by ScreenModel.text()) so the
  * behavioral probe can parse its BEFORE snapshot and the live screen with
  * identical logic and compare the highlighted row across the two
- * (Driver.runProbe() in claude-pty-shell.ts).
+ * (Driver.advanceProbe() in claude-pty-shell.ts).
  *
  * This is a PURE READER: it never decides whether a prompt exists. Callers
  * must already have proven liveness behaviorally — the probe only bridges
@@ -212,17 +217,13 @@ export function parseInteractivePrompt(screenText: string): InteractivePrompt | 
     // A menu can render tall (more options than fit a bottom-region window)
     // or sit high on a sparse screen (fresh session, short scrollback), so
     // scan the whole viewport. parseLiveOptionRun() already isolates the
-    // live 1..N run nearest the end of the buffer, so stale numbered
-    // scrollback above it can't inflate or shift the list. A live select
-    // prompt always highlights one option with the ❯ caret; plain prose
-    // that merely happens to look like a numbered list never carries one,
-    // so requiring it keeps this reader from hallucinating an options list
-    // out of unrelated text.
-    if (!allLines.some((l) => CARET_OPTION_RE.test(l))) return null;
-    const options = parseLiveOptionRun(allLines);
-    const highlighted = caretOptionIndex(allLines);
-    return options && highlighted !== null
-      ? { options, context: '', isPermission: false, highlighted }
+    // live 1..N run nearest the end of the buffer — with its ❯ highlight
+    // read from the run's own rows — so stale numbered scrollback above it
+    // can't inflate or shift the list, and plain prose that merely happens
+    // to look like a numbered list never parses (no highlight row).
+    const run = parseLiveOptionRun(allLines);
+    return run
+      ? { options: run.options, context: '', isPermission: false, highlighted: run.highlighted }
       : null;
   }
 
@@ -234,10 +235,8 @@ export function parseInteractivePrompt(screenText: string): InteractivePrompt | 
     if (bottomLines[i].includes(PERMISSION_QUESTION)) { qIdx = i; break; }
   }
   const optionRegion = bottomLines.slice(qIdx + 1);
-  if (!optionRegion.some((l) => CARET_OPTION_RE.test(l))) return null;
-  const options = parseLiveOptionRun(optionRegion, true);
-  const highlighted = caretOptionIndex(optionRegion);
-  if (!options || highlighted === null) return null;
+  const run = parseLiveOptionRun(optionRegion, true);
+  if (!run) return null;
 
   // Context = the warning + command shown above the question. Bound it to the
   // dialog box (scan up for the rounded top border ╭) so conversation lines
@@ -257,7 +256,7 @@ export function parseInteractivePrompt(screenText: string): InteractivePrompt | 
     .filter((l) => l.length > 0)
     .join('\n');
 
-  return { options, context, isPermission: true, highlighted };
+  return { options: run.options, context, isPermission: true, highlighted: run.highlighted };
 }
 
 /**
@@ -403,21 +402,27 @@ export class ScreenModel {
 
   /**
    * True if a selectable prompt (menu row or permission Yes/No) still visibly
-   * occupies the screen — a live caret (❯) beside a numbered option. This is
-   * a NARROW, POST-confirmation liveness check only: whether a prompt is
-   * still blocking right now, used to decide if the confirming Enter after a
-   * typed selection is still needed, or to exclude a live wizard step from
-   * the Enter-swallowed retry heuristic. It is never used to decide whether
-   * a prompt exists in the first place — that's the behavioral probe's job
-   * (Driver.runProbe()).
+   * occupies the screen — a live caret (❯) beside a numbered option, scanned
+   * over the FULL viewport (a bottom-region window once let a bridged menu
+   * sit outside the check's view and skip its confirming Enter — PR #181
+   * review, F4).
    *
-   * Scans the FULL viewport, matching parseInteractivePrompt()'s menu scan —
-   * a bottom-region window here once let a menu the reader had bridged sit
-   * outside the check's view, skipping the confirming Enter and hanging the
-   * selection (PR #181 review, F4). A false-positive stray Enter at an idle
-   * empty caret is a no-op, so the wider scan is the safer direction; the
-   * ❯-only CARET_OPTION_RE keeps prose (markdown "> 1." quotes) from
-   * qualifying anywhere in the viewport.
+   * DELIBERATELY PERMISSIVE — only safe where a false positive is cheap.
+   * The input line renders "❯ <text>", so a user draft or recalled history
+   * entry whose text starts with "N." matches CARET_OPTION_RE exactly like a
+   * menu row; quoted menu text in visible scrollback matches too. Static text
+   * can never prove liveness (that's the behavioral probe's job), so this
+   * check must only gate actions that are harmless when it's wrong:
+   *
+   *   - selectMenuOption()'s confirming Enter — a stray Enter at an idle
+   *     empty caret is a no-op;
+   *   - decideMenuCancel()'s menuVisible — worst case a bounded ESC re-send
+   *     and a delayed submit (hard timeout caps it);
+   *   - the Enter-swallowed retry, but ONLY for a menu-selection turn where
+   *     a live menu genuinely can be on screen. Gating the retry of an
+   *     ordinary turn on this check suppressed the retry whenever the
+   *     unsubmitted draft itself started with "N." — wedging the turn into
+   *     the 30-min watchdog (PR #181 review round 2, finding 1).
    */
   interactivePromptBlocking(): boolean {
     return this.text().split('\n').some((l) => CARET_OPTION_RE.test(l));
