@@ -108,10 +108,15 @@ export const TUI_MENU_OPTION_RE = /^\s*[❯>]?\s*(\d+)\.\s+(.+?)\s*$/;
  */
 const PERMISSION_QUESTION = 'Do you want to proceed?';
 
-/** A live select prompt always highlights one option with a leading ❯/> caret
- *  (kept even inside a box border) — used by readInteractivePrompt() to tell
- *  a real option row apart from a numbered list in ordinary prose. */
-const CARET_OPTION_RE = /^\s*│?\s*[❯>]\s*\d+\./;
+/** A live select prompt always highlights one option with a leading ❯ caret
+ *  (kept even inside a box border) — used by parseInteractivePrompt() and
+ *  interactivePromptBlocking() to tell a real option row apart from a numbered
+ *  list in ordinary prose. Deliberately U+276F only, NOT the `[❯>]`
+ *  alternation TUI_MENU_OPTION_RE uses for row content: the real TUI never
+ *  renders an ASCII `>` caret, but prose does constantly (markdown blockquotes
+ *  like "> 1. …"), and accepting `>` here is what let static quoted text
+ *  qualify as a live highlight (PR #181 review, finding F1). */
+const CARET_OPTION_RE = /^\s*│?\s*❯\s*\d+\./;
 
 /** A blocking interactive prompt parsed off the screen: the selectable options,
  *  any context text shown above a permission question (warning + command), and
@@ -122,6 +127,11 @@ export interface InteractivePrompt {
   context: string;
   /** Cosmetic only — chooses warning-style vs plain-menu-style chat formatting. */
   isPermission: boolean;
+  /** 1-based option index the ❯ caret currently highlights. The probe compares
+   *  this across its before/after snapshots: a live menu's caret MOVES in
+   *  response to an arrow key, static menu-shaped text cannot (planning-61
+   *  post-review hardening, F1). */
+  highlighted: number;
 }
 
 /**
@@ -154,6 +164,100 @@ function parseLiveOptionRun(lines: string[], stripBorder = false): MenuOption[] 
     expected++;
   }
   return run.length >= 2 ? run : null;
+}
+
+/**
+ * 1-based option number of the ❯-highlighted row nearest the bottom of the
+ * given lines, or null when no caret row is present. Scans bottom-up so a
+ * stale caret row in scrollback (e.g. an earlier menu frame) can't shadow the
+ * live one, mirroring parseLiveOptionRun()'s last-run-wins rule.
+ */
+function caretOptionIndex(lines: string[]): number | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CARET_OPTION_RE.test(lines[i])) {
+      const m = /(\d+)\./.exec(lines[i]);
+      if (m) return Number(m[1]);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse a live interactive overlay out of a full screen snapshot — an
+ * AskUserQuestion-style menu or a tool-permission Yes/No prompt. Pure
+ * function over screen text (as produced by ScreenModel.text()) so the
+ * behavioral probe can parse its BEFORE snapshot and the live screen with
+ * identical logic and compare the highlighted row across the two
+ * (Driver.runProbe() in claude-pty-shell.ts).
+ *
+ * This is a PURE READER: it never decides whether a prompt exists. Callers
+ * must already have proven liveness behaviorally — the probe only bridges
+ * when the ❯ highlight MOVED between snapshots (confirmProbeReaction() in
+ * menu-probe.ts), which static menu-shaped text in prose/scrollback cannot do.
+ *
+ * Returns null when the region doesn't parse into a clean 1..N option run
+ * with a ❯-highlighted row (fail-safe: no bridge rather than a garbled one).
+ *
+ * isPermission is decided by whether "Do you want to proceed?" appears in the
+ * bottom region — a COSMETIC classification (chooses warning-style vs
+ * plain-menu-style chat formatting) that defaults to a plain menu when
+ * ambiguous; it never gates whether to bridge.
+ */
+export function parseInteractivePrompt(screenText: string): InteractivePrompt | null {
+  const allLines = screenText.split('\n');
+  const bottomLines = allLines.slice(-DIALOG_REGION_ROWS);
+  const isPermission = bottomLines.some((l) => l.includes(PERMISSION_QUESTION));
+
+  if (!isPermission) {
+    // A menu can render tall (more options than fit a bottom-region window)
+    // or sit high on a sparse screen (fresh session, short scrollback), so
+    // scan the whole viewport. parseLiveOptionRun() already isolates the
+    // live 1..N run nearest the end of the buffer, so stale numbered
+    // scrollback above it can't inflate or shift the list. A live select
+    // prompt always highlights one option with the ❯ caret; plain prose
+    // that merely happens to look like a numbered list never carries one,
+    // so requiring it keeps this reader from hallucinating an options list
+    // out of unrelated text.
+    if (!allLines.some((l) => CARET_OPTION_RE.test(l))) return null;
+    const options = parseLiveOptionRun(allLines);
+    const highlighted = caretOptionIndex(allLines);
+    return options && highlighted !== null
+      ? { options, context: '', isPermission: false, highlighted }
+      : null;
+  }
+
+  // Use the LAST occurrence of the question — the live prompt sits nearest
+  // the bottom, so a reply/history that quotes the question higher in the
+  // bottom region can't capture the question index and empty the context.
+  let qIdx = -1;
+  for (let i = bottomLines.length - 1; i >= 0; i--) {
+    if (bottomLines[i].includes(PERMISSION_QUESTION)) { qIdx = i; break; }
+  }
+  const optionRegion = bottomLines.slice(qIdx + 1);
+  if (!optionRegion.some((l) => CARET_OPTION_RE.test(l))) return null;
+  const options = parseLiveOptionRun(optionRegion, true);
+  const highlighted = caretOptionIndex(optionRegion);
+  if (!options || highlighted === null) return null;
+
+  // Context = the warning + command shown above the question. Bound it to the
+  // dialog box (scan up for the rounded top border ╭) so conversation lines
+  // that merely share the bottom region aren't swept in; fall back to the
+  // few lines immediately above the question when the prompt isn't boxed.
+  const isBorderOnly = (l: string) => /^[\s│╭╮╰╯─]*$/.test(l);
+  const stripBorder = (l: string) => l.replace(/^[\s│]+/, '').replace(/[\s│]+$/, '');
+  const aboveQ = bottomLines.slice(0, qIdx);
+  let boxTop = -1;
+  for (let i = aboveQ.length - 1; i >= 0; i--) {
+    if (/[╭╮]/.test(aboveQ[i])) { boxTop = i; break; }
+  }
+  const contextLines = boxTop >= 0 ? aboveQ.slice(boxTop + 1) : aboveQ.slice(-4);
+  const context = contextLines
+    .filter((l) => !isBorderOnly(l))
+    .map(stripBorder)
+    .filter((l) => l.length > 0)
+    .join('\n');
+
+  return { options, context, isPermission: true, highlighted };
 }
 
 /**
@@ -288,90 +392,35 @@ export class ScreenModel {
 
   /**
    * Extract the option labels (and, for a permission prompt, the warning/command
-   * context) from a live interactive overlay — an AskUserQuestion-style menu or
-   * a tool-permission Yes/No prompt (e.g. the dangerous-rm circuit breaker that
-   * fires even under --dangerously-skip-permissions). This is a PURE READER: it
-   * never decides whether a prompt exists. Callers must already have proven
-   * liveness behaviorally — see Driver.runProbe() in claude-pty-shell.ts, which
-   * sends an arrow-key probe and only calls this once the screen visibly reacted.
-   *
-   * Returns null when the region doesn't parse into a clean 1..N option run
-   * (fail-safe: no bridge rather than a garbled one) even though the probe
-   * proved something reacted — e.g. some other arrow-responsive UI with no
-   * formatter here.
-   *
-   * isPermission is decided by whether "Do you want to proceed?" appears in the
-   * bottom region — a COSMETIC classification (chooses warning-style vs
-   * plain-menu-style chat formatting) that defaults to a plain menu when
-   * ambiguous; it never gates whether to bridge.
+   * context) from a live interactive overlay on the current screen. Thin
+   * wrapper over {@link parseInteractivePrompt} — see its doc for semantics
+   * (pure reader, never a gate; probe callers compare `highlighted` across
+   * before/after snapshots to prove liveness).
    */
   readInteractivePrompt(): InteractivePrompt | null {
-    const bottom = this.bottomText(DIALOG_REGION_ROWS);
-    const isPermission = bottom.includes(PERMISSION_QUESTION);
-
-    if (!isPermission) {
-      // A tall AskUserQuestion menu can render more options than fit in the
-      // bottom-region window, so scan the whole buffer. parseLiveOptionRun()
-      // already isolates the live 1..N run nearest the end of the buffer, so
-      // stale numbered scrollback above it can't inflate or shift the list.
-      // A live select prompt always highlights one option with the ❯/> caret;
-      // plain prose that merely happens to look like a numbered list never
-      // carries one, so requiring it keeps this reader from hallucinating an
-      // options list out of unrelated text.
-      const lines = this.text().split('\n');
-      if (!lines.some((l) => CARET_OPTION_RE.test(l))) return null;
-      const options = parseLiveOptionRun(lines);
-      return options ? { options, context: '', isPermission: false } : null;
-    }
-
-    const lines = bottom.split('\n');
-    // Use the LAST occurrence of the question — the live prompt sits nearest
-    // the bottom, so a reply/history that quotes the question higher in the
-    // bottom region can't capture the question index and empty the context.
-    let qIdx = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].includes(PERMISSION_QUESTION)) { qIdx = i; break; }
-    }
-    const optionRegion = lines.slice(qIdx + 1);
-    if (!optionRegion.some((l) => CARET_OPTION_RE.test(l))) return null;
-    const options = parseLiveOptionRun(optionRegion, true);
-    if (!options) return null;
-
-    // Context = the warning + command shown above the question. Bound it to the
-    // dialog box (scan up for the rounded top border ╭) so conversation lines
-    // that merely share the bottom region aren't swept in; fall back to the
-    // few lines immediately above the question when the prompt isn't boxed.
-    const isBorderOnly = (l: string) => /^[\s│╭╮╰╯─]*$/.test(l);
-    const stripBorder = (l: string) => l.replace(/^[\s│]+/, '').replace(/[\s│]+$/, '');
-    const aboveQ = lines.slice(0, qIdx);
-    let boxTop = -1;
-    for (let i = aboveQ.length - 1; i >= 0; i--) {
-      if (/[╭╮]/.test(aboveQ[i])) { boxTop = i; break; }
-    }
-    const contextLines = boxTop >= 0 ? aboveQ.slice(boxTop + 1) : aboveQ.slice(-4);
-    const context = contextLines
-      .filter((l) => !isBorderOnly(l))
-      .map(stripBorder)
-      .filter((l) => l.length > 0)
-      .join('\n');
-
-    return { options, context, isPermission: true };
+    return parseInteractivePrompt(this.text());
   }
 
   /**
    * True if a selectable prompt (menu row or permission Yes/No) still visibly
-   * occupies the bottom of the screen — a live caret (❯/>) beside a numbered
-   * option. This is a NARROW, POST-confirmation liveness check only: whether a
-   * prompt is still blocking right now, used to decide if the confirming Enter
-   * after a typed selection is still needed, or to exclude a live wizard step
-   * from the Enter-swallowed retry heuristic. It is never used to decide
-   * whether a prompt exists in the first place — that's the behavioral probe's
-   * job (Driver.runProbe()) — so it carries none of the detection gate's
-   * false-positive risk: callers only ever invoke it when they already know
-   * they're mid-selection or a probe just confirmed a live overlay.
+   * occupies the screen — a live caret (❯) beside a numbered option. This is
+   * a NARROW, POST-confirmation liveness check only: whether a prompt is
+   * still blocking right now, used to decide if the confirming Enter after a
+   * typed selection is still needed, or to exclude a live wizard step from
+   * the Enter-swallowed retry heuristic. It is never used to decide whether
+   * a prompt exists in the first place — that's the behavioral probe's job
+   * (Driver.runProbe()).
+   *
+   * Scans the FULL viewport, matching parseInteractivePrompt()'s menu scan —
+   * a bottom-region window here once let a menu the reader had bridged sit
+   * outside the check's view, skipping the confirming Enter and hanging the
+   * selection (PR #181 review, F4). A false-positive stray Enter at an idle
+   * empty caret is a no-op, so the wider scan is the safer direction; the
+   * ❯-only CARET_OPTION_RE keeps prose (markdown "> 1." quotes) from
+   * qualifying anywhere in the viewport.
    */
   interactivePromptBlocking(): boolean {
-    return /^\s*│?\s*[❯>]\s*\d+\./m.test(this.bottomText(DIALOG_REGION_ROWS));
+    return this.text().split('\n').some((l) => CARET_OPTION_RE.test(l));
   }
 }
 

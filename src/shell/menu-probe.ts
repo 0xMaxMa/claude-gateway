@@ -67,3 +67,41 @@ export function decideProbeAttempt(state: ProbeState, obs: ProbeAttemptObs): Pro
   if (obs.now - state.lastAttemptAt < PROBE_RETRY_COOLDOWN_MS) return 'wait';
   return 'send';
 }
+
+/** The slice of a parsed InteractivePrompt (screen.ts) the confirmation
+ *  compares — structural, so this module stays free of screen imports. */
+export interface ProbeReadout {
+  options: readonly unknown[];
+  /** 1-based option index the ❯ caret highlights. */
+  highlighted: number;
+}
+
+/**
+ * Decide whether a probe keystroke genuinely moved a live overlay's
+ * highlight — the plan's "before/after comparison of the highlighted row"
+ * (planning-61, Agreed Direction point 2; post-review hardening F1).
+ *
+ * Confirmed only when BOTH snapshots parse as the same-shaped prompt (equal
+ * option count) and the ❯-highlighted index CHANGED. This is what static
+ * menu-shaped text (a markdown "> 1." blockquote, a quoted earlier menu)
+ * can never satisfy: surrounding text may change (e.g. Up recalled input
+ * history), but a caret row in dead scrollback cannot move. A raw
+ * screen-text diff — the first implementation — counted any change and
+ * bridged fabricated menus in exactly that case.
+ *
+ * Rejecting when `before` is null is deliberate: the probe only fires after
+ * the screen has been quiet for MENU_STABLE_QUIET_MS, so a real overlay was
+ * already fully rendered in the before snapshot. An overlay that only
+ * parses AFTER the keystroke means the screen changed for some other reason
+ * (work resuming, a fresh render mid-settle) — the next probe round will
+ * confirm it cleanly if it is real (fail-safe: a missed bridge is
+ * recoverable, a false bridge is not).
+ */
+export function confirmProbeReaction(
+  before: ProbeReadout | null,
+  after: ProbeReadout | null,
+): boolean {
+  if (!before || !after) return false;
+  if (before.options.length !== after.options.length) return false;
+  return before.highlighted !== after.highlighted;
+}

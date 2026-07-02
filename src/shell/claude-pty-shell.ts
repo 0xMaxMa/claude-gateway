@@ -14,13 +14,13 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
-import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking } from './screen';
+import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking, parseInteractivePrompt } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
-import { decideProbeAttempt, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
+import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -556,21 +556,28 @@ class Driver {
       turn.lastProgressAt = now;
       // Real activity resumed — a probe that ran out of rounds during this
       // stall gets a fresh budget if the turn genuinely stalls again later.
-      if (turn.probe) turn.probe.rounds = 0;
+      // Not while a round is in flight: a busy flicker mid-round must not
+      // hand that same stall a fresh budget (post-review hardening F5).
+      if (turn.probe && !this.probing) turn.probe.rounds = 0;
       return;
     }
 
     // Not busy. Possible: still rendering, swallowed Enter, dialog, menu, or done
     // (turn_duration normally ends the turn before we get here).
+    //
+    // While a probe round is outstanding, do nothing else at all — the dialog
+    // auto-accept '2' (post-review hardening F2) and the Enter-retry /
+    // fallback-idle keystrokes below must never interleave with the round's
+    // arrow keys; whatever they would handle is still there one tick later
+    // (a round is bounded to ≤ 2 × PROBE_SETTLE_MS).
+    if (this.probing) return;
     this.maybeHandleDialog();
 
     // Blocked on a live interactive overlay (AskUserQuestion menu, plan
     // approval, or a tool-permission Yes/No prompt) → probe behaviorally and
     // bridge it to chat if confirmed, so the session goes idle (no watchdog
     // kill) until the user picks an option. runProbe() ends the turn itself
-    // once a round confirms a live overlay; while a round is outstanding,
-    // skip the Enter-retry/fallback-idle checks below so they can't race a
-    // probe keystroke.
+    // once a round confirms a live overlay.
     this.maybeProbeAndBridge(turn);
     if (this.probing) return;
 
@@ -652,7 +659,7 @@ class Driver {
    * (via bridgeChoiceToChat()) only if a round confirms a live overlay.
    */
   private maybeProbeAndBridge(turn: ActiveTurn): void {
-    if (SKIP_MENU_BRIDGE || this.pendingMenu) return;
+    if (SKIP_MENU_BRIDGE || this.pendingMenu || this.interrupting) return;
     if (this.screen.detectDialog() === 'bypass-permissions') return;
     if (this.screen.quietMs() < MENU_STABLE_QUIET_MS) return;
     if (this.probing) return; // a round is already in flight
@@ -668,15 +675,25 @@ class Driver {
   /**
    * One probe round: send Down, settle, check for a screen change. If Down
    * produced nothing, retry once with Up (covers the "already at the last
-   * option, no wraparound" boundary case). A confirmed change is read via
-   * readInteractivePrompt() and bridged to chat; anything that doesn't parse
-   * cleanly is left alone (fail-safe — no bridge rather than a garbled one).
+   * option, no wraparound" boundary case). A change alone is NOT enough to
+   * bridge: the before/after snapshots must both parse as the same-shaped
+   * prompt whose ❯-highlighted row MOVED (confirmProbeReaction() — the
+   * plan's point-2 comparison; post-review hardening F1). Anything else —
+   * unparseable, or menu-shaped text whose caret didn't move (static
+   * blockquote prose, a quoted old menu) — is left alone and, if the Up
+   * fallback caused the change, restored with one Down (fail-safe: no
+   * bridge rather than a fabricated one).
    */
   private async runProbe(turn: ActiveTurn): Promise<void> {
     const before = this.screen.text();
+    const beforeParsed = parseInteractivePrompt(before);
     this.host.writeRaw(PROBE_KEY_DOWN);
     await new Promise((r) => setTimeout(r, PROBE_SETTLE_MS));
-    if (this.turn !== turn) return; // turn ended/changed while waiting — abandon
+    // Abandon on turn teardown AND on an in-flight /stop (SIGINT → ESC): the
+    // interrupted turn is still `this.turn` while its ESC settles, so the
+    // turn-identity check alone would let the round keep typing arrows over
+    // the interrupt (post-review hardening F3).
+    if (this.turn !== turn || this.interrupting) return;
 
     // A screen change while busy means real work resumed in the interim (a
     // reply started streaming) — not a menu reacting to our keystroke, so
@@ -687,19 +704,22 @@ class Driver {
       sentUp = true;
       this.host.writeRaw(PROBE_KEY_UP);
       await new Promise((r) => setTimeout(r, PROBE_SETTLE_MS));
-      if (this.turn !== turn) return;
+      if (this.turn !== turn || this.interrupting) return;
       changed = this.screen.text() !== before && !this.screen.isBusy();
     }
     if (!changed) return; // nothing reacted — not interactive, do nothing this round
 
-    const parsed = this.screen.readInteractivePrompt();
-    if (!parsed) {
-      // The Up fallback may have recalled input-line history on a genuinely
-      // idle (non-menu) input box; restore with a Down so the next real turn
-      // never starts pre-populated with stale recalled text. Unconditional
-      // and harmless even when Up did NOT recall anything (idle Down is a
-      // confirmed no-op) — never reached after a confirmed menu below, since
-      // that would move the live selection instead of restoring anything.
+    const parsed = parseInteractivePrompt(this.screen.text());
+    if (!beforeParsed || !parsed || !confirmProbeReaction(beforeParsed, parsed)) {
+      // Not a live overlay reacting to us — either nothing parses, or
+      // menu-shaped text is on screen but its highlight didn't move (static
+      // prose can't move; only a live menu can). The Up fallback may have
+      // recalled input-line history on a genuinely idle (non-menu) input
+      // box; restore with a Down so the next real turn never starts
+      // pre-populated with stale recalled text. Unconditional and harmless
+      // even when Up did NOT recall anything (idle Down is a confirmed
+      // no-op) — never reached after a confirmed menu below, since that
+      // would move the live selection instead of restoring anything.
       if (sentUp) this.host.writeRaw(PROBE_KEY_DOWN);
       return;
     }
@@ -707,7 +727,7 @@ class Driver {
     const text = parsed.isPermission
       ? formatPermissionPrompt(parsed.context, parsed.options)
       : formatMenuPrompt(parsed.options);
-    logWarn(`interactive ${parsed.isPermission ? 'permission prompt' : 'menu'} confirmed (${parsed.options.length} options) — bridging to chat`);
+    logWarn(`interactive ${parsed.isPermission ? 'permission prompt' : 'menu'} confirmed (${parsed.options.length} options, highlight ${beforeParsed.highlighted}→${parsed.highlighted}) — bridging to chat`);
     this.bridgeChoiceToChat(turn, parsed.options, text);
   }
 

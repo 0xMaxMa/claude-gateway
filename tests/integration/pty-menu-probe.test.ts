@@ -215,6 +215,39 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
   }, 20000);
 
   /**
+   * I-PTY-MENU-07: the fake-menu regression from the PR #181 review (F1).
+   * The quiet screen shows STATIC menu-shaped text with a real ❯ caret row
+   * (a quoted earlier menu in scrollback) above a genuinely idle input box.
+   * Down no-ops; Up recalls text — the screen CHANGES, and the static rows
+   * still parse as a menu, but the highlight did not move. The wrapper must
+   * refuse to bridge (highlight-move confirmation), send the restorative
+   * Down, and let the turn complete normally. Before the hardening this
+   * exact sequence bridged a fabricated menu to chat.
+   */
+  it('I-PTY-MENU-07: never bridges static menu-shaped text whose highlight cannot move', async () => {
+    wrapper = spawnWrapper(inputLog, eventLog);
+    collector.attach(wrapper);
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('RECALL_FAKEMENU'));
+
+    const completed = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      8000,
+    );
+    expect(completed).toBe(true);
+    expect(collector.find((e) => e.type === 'system' && e.subtype === 'menu_prompt')).toBeUndefined();
+
+    // Same restorative shape as RECALL_NONMENU: down (no-op) → up (recall,
+    // screen changed but the static caret row didn't move) → down (restore).
+    const dirs = readLines(eventLog).map((l) => (l.includes('arrow:down') ? 'down' : 'up'));
+    const upIdx = dirs.indexOf('up');
+    expect(upIdx).toBeGreaterThan(-1);
+    expect(dirs[upIdx - 1]).toBe('down');
+    expect(dirs.slice(upIdx + 1)).toContain('down');
+  }, 20000);
+
+  /**
    * I-PTY-MENU-05: no interactive overlay ever appears and nothing reacts to
    * either arrow key. The probe must exhaust its round budget and give up
    * cleanly — the turn still completes normally via the transcript, exactly

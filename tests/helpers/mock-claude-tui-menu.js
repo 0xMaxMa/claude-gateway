@@ -19,6 +19,15 @@
  *                      that doesn't parse as a menu — the wrapper must send a
  *                      restorative Down so the line ends up empty again, and
  *                      must never bridge anything.
+ *   RECALL_FAKEMENU — like RECALL_NONMENU, but the quiet screen also shows
+ *                      STATIC menu-shaped text with a real ❯ caret row (a
+ *                      quoted earlier menu sitting in scrollback). Down is a
+ *                      no-op; Up recalls text (screen changes) while the
+ *                      static rows stay put. The wrapper must see that the
+ *                      highlight did NOT move, refuse to bridge, and send the
+ *                      restorative Down. This exact sequence bridged a
+ *                      fabricated menu before the highlight-move confirmation
+ *                      (PR #181 review, finding F1).
  *   NO_REACT        — the screen goes quiet and NEVER reacts to any arrow key
  *                      (genuinely non-interactive scrollback); the probe must
  *                      exhaust its round budget and give up cleanly, and the
@@ -102,6 +111,19 @@ function renderMenu() {
   render(lines.join('\r\n'));
 }
 
+// Static menu-shaped scrollback for RECALL_FAKEMENU: a real ❯ caret row that
+// parses as a menu but belongs to dead text — it can never move in response
+// to an arrow key. Only the input line below it varies.
+function renderFakeMenu(inputLine) {
+  render([
+    'Earlier the assistant quoted a menu verbatim:',
+    '❯ 1. First choice',
+    '  2. Second choice',
+    '',
+    inputLine,
+  ].join('\r\n'));
+}
+
 function finishScenario(text) {
   writeTranscript(text);
   idle();
@@ -122,14 +144,14 @@ function submit(text) {
     setTimeout(renderMenu, 300);
     return;
   }
-  if (trimmed === 'BUSY_RACE' || trimmed === 'RECALL_NONMENU' || trimmed === 'NO_REACT') {
+  if (trimmed === 'BUSY_RACE' || trimmed === 'RECALL_NONMENU' || trimmed === 'RECALL_FAKEMENU' || trimmed === 'NO_REACT') {
     scenario = trimmed;
     recallUpSent = false;
     render('esc to interrupt\r\n❯ ');
     // Go quiet (idle-looking, but the turn is NOT finished — no transcript
     // yet) long enough to clear the busy marker and cross the probe's outer
     // quiet gate (MENU_STABLE_QUIET_MS).
-    setTimeout(idle, 300);
+    setTimeout(trimmed === 'RECALL_FAKEMENU' ? () => renderFakeMenu('❯ ') : idle, 300);
     if (trimmed === 'NO_REACT') {
       // Never reacts to a probe keystroke; complete normally after the probe
       // would have exhausted its round budget, so the turn still ends.
@@ -163,20 +185,23 @@ function handleArrow(dir) {
     setTimeout(() => finishScenario('busy-race-result'), 300);
     return;
   }
-  if (scenario === 'RECALL_NONMENU') {
+  if (scenario === 'RECALL_NONMENU' || scenario === 'RECALL_FAKEMENU') {
+    const paint = scenario === 'RECALL_FAKEMENU'
+      ? renderFakeMenu
+      : (inputLine) => render(inputLine);
     if (dir === 'up') {
       recallUpSent = true;
-      render('❯ some-recalled-history-text');
+      paint('❯ some-recalled-history-text');
     } else {
       // Down: either the initial no-op probe, or the wrapper's restorative
       // Down after Up recalled text — either way, empty input is correct.
-      idle();
+      paint('❯ ');
       if (recallUpSent) {
         // This was the restorative Down after Up recalled text — the round
         // is done; complete the turn shortly after, as a real turn
         // eventually would regardless of our probe keystrokes.
         scenario = null;
-        setTimeout(() => finishScenario('recall-nonmenu-result'), 300);
+        setTimeout(() => finishScenario('recall-result'), 300);
       }
     }
     return;

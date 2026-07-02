@@ -17,7 +17,7 @@ import { ProtocolEmitter } from '../../src/shell/emitter';
 import { Writable } from 'stream';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
-import { decideProbeAttempt, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
+import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -238,6 +238,7 @@ describe('ScreenModel readInteractivePrompt (plain AskUserQuestion-style menu)',
     expect(prompt!.options.map((o) => o.index)).toEqual([1, 2, 3, 4]);
     expect(prompt!.options[0].label).toBe('First choice');
     expect(prompt!.options[3].label).toBe('Chat about this');
+    expect(prompt!.highlighted).toBe(1);
   });
 
   it('ignores stale numbered scrollback above the live menu', async () => {
@@ -272,6 +273,34 @@ describe('ScreenModel readInteractivePrompt (plain AskUserQuestion-style menu)',
       '2. still not a menu',
     ]);
     expect(screen.readInteractivePrompt()).toBeNull();
+  });
+
+  it('returns null for a markdown blockquote numbered list — ASCII ">" is not a selection caret', async () => {
+    // The fake-menu bug from the PR #181 review (F1): quoted prose like
+    // "> 1. …" satisfied the old [❯>] caret alternation, so an Up-recall
+    // screen change plus this static text bridged a fabricated menu. The
+    // caret gate is now U+276F only — the real TUI never renders ">".
+    const screen = await renderScreen([
+      'The user asked earlier:',
+      '> 1. First choice',
+      '> 2. Second choice',
+      '',
+      '❯ ',
+    ]);
+    expect(screen.readInteractivePrompt()).toBeNull();
+  });
+
+  it('reports which option the caret highlights (probe compares this across snapshots)', async () => {
+    const screen = await renderScreen([
+      'Which option do you want?',
+      '',
+      '  1. First choice',
+      '❯ 2. Second choice',
+      '  3. Third choice',
+      '',
+      MENU_FOOTER,
+    ]);
+    expect(screen.readInteractivePrompt()!.highlighted).toBe(2);
   });
 
   it('returns null with fewer than two options', async () => {
@@ -315,6 +344,34 @@ describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)
       '❯ ',
     ]);
     expect(screen.hasPrompt()).toBe(true);
+    expect(screen.interactivePromptBlocking()).toBe(false);
+  });
+
+  it('sees a menu sitting HIGH on a sparse screen (full-viewport scan — F4)', async () => {
+    // A fresh session renders the menu near the top of the viewport. The old
+    // bottom-20-rows window missed it, so selectMenuOption() skipped the
+    // confirming Enter and the selection hung.
+    const screen = await renderScreen([
+      'Which option do you want?',
+      '❯ 1. First choice',
+      '  2. Second choice',
+      '',
+      MENU_FOOTER,
+    ]);
+    expect(screen.interactivePromptBlocking()).toBe(true);
+  });
+
+  it('markdown blockquote prose ("> 1.") anywhere on screen is not a blocking prompt', async () => {
+    // The full-viewport scan is only safe because ASCII ">" no longer counts
+    // as a caret — otherwise every quoted numbered list would suppress the
+    // Enter-swallowed retry and inject stray Enters after menu selections.
+    const screen = await renderScreen([
+      'The user asked:',
+      '> 1. First choice',
+      '> 2. Second choice',
+      ...FILLER(40),
+      '❯ ',
+    ]);
     expect(screen.interactivePromptBlocking()).toBe(false);
   });
 });
@@ -554,6 +611,7 @@ describe('ScreenModel readInteractivePrompt (permission-style Yes/No prompt)', (
     expect(prompt).not.toBeNull();
     expect(prompt!.isPermission).toBe(true);
     expect(prompt!.options.map((o) => o.label)).toEqual(['Yes', 'No']);
+    expect(prompt!.highlighted).toBe(1);
     // Context echoes the guarded command (box borders stripped), not the filler.
     expect(prompt!.context).toContain('Dangerous rm operation');
     expect(prompt!.context).not.toContain('conversation line');
@@ -598,7 +656,7 @@ describe('ScreenModel readInteractivePrompt (permission-style Yes/No prompt)', (
     expect(screen.readInteractivePrompt()).toBeNull();
   });
 
-  it('requires a ❯/> selection caret — a numbered list in prose never trips it', async () => {
+  it('requires a ❯ selection caret — a numbered list in prose never trips it', async () => {
     // Conversational text that happens to pair the question with a numbered
     // list. With no live select caret on an option row it is still not a
     // real prompt → no bridge.
@@ -607,6 +665,17 @@ describe('ScreenModel readInteractivePrompt (permission-style Yes/No prompt)', (
       'Do you want to proceed? Here is the plan I would run:',
       '1. Back up the directory first',
       '2. Then remove the old files',
+      PERM_FOOTER,
+    ]);
+    expect(screen.readInteractivePrompt()).toBeNull();
+  });
+
+  it('a markdown blockquote "> 1." beside the question is not a caret either', async () => {
+    const screen = await renderScreen([
+      ...FILLER(40),
+      'Do you want to proceed? The choices were quoted as:',
+      '> 1. Yes',
+      '> 2. No',
       PERM_FOOTER,
     ]);
     expect(screen.readInteractivePrompt()).toBeNull();
@@ -691,6 +760,37 @@ describe('menu-probe decideProbeAttempt (behavioral probe round budget)', () => 
       { now: T0 }, // also within cooldown
     );
     expect(action).toBe('give-up');
+  });
+});
+
+describe('menu-probe confirmProbeReaction (highlight-move confirmation)', () => {
+  // The plan's point-2 "before/after comparison of the highlighted row"
+  // (post-review hardening F1): a probe keystroke only counts as a menu
+  // reaction when the SAME-shaped prompt parses in both snapshots and the
+  // ❯-highlighted index moved. A raw screen-text diff bridged fabricated
+  // menus when Up-recall changed the screen around static menu-shaped text.
+  const readout = (highlighted: number, count = 3) => ({
+    options: Array.from({ length: count }, (_, i) => ({ index: i + 1, label: `opt ${i + 1}` })),
+    highlighted,
+  });
+
+  it('confirms when the highlight moved (Down: 1→2, and the Up fallback: 3→2)', () => {
+    expect(confirmProbeReaction(readout(1), readout(2))).toBe(true);
+    expect(confirmProbeReaction(readout(3), readout(2))).toBe(true);
+  });
+
+  it('rejects when the highlight did not move — static menu-shaped text cannot react', () => {
+    expect(confirmProbeReaction(readout(1), readout(1))).toBe(false);
+  });
+
+  it('rejects when either snapshot has no parseable prompt', () => {
+    expect(confirmProbeReaction(null, readout(2))).toBe(false);
+    expect(confirmProbeReaction(readout(1), null)).toBe(false);
+    expect(confirmProbeReaction(null, null)).toBe(false);
+  });
+
+  it('rejects when the option count changed (different prompt, not a reaction)', () => {
+    expect(confirmProbeReaction(readout(1, 3), readout(2, 4))).toBe(false);
   });
 });
 
