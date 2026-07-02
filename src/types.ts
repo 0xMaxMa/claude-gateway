@@ -32,10 +32,6 @@ export interface AgentConfig {
   line?: {
     channelAccessToken: string;
     channelSecret: string;
-    /** default true when the block is present */
-    enabled?: boolean;
-    /** default "/line/webhook" */
-    webhookPath?: string;
     /**
      * Slow-LLM postback button (ported from hermes-agent). Seconds to wait for
      * the agent's answer before burning the reply token to send a tappable
