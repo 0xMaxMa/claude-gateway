@@ -526,7 +526,7 @@ export function createApiRouter(
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
-        line_webhook_path: cfg.line?.channelSecret ? `/line/webhook/${id}` : null,
+        line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${id}` : null,
         // DM access (Tier 1). Stored directly in the line config (no separate
         // access file like Telegram). `dmPolicy` absent ⇒ closed/allowlist
         // semantics at runtime; surface the raw value (null when unset) so the
@@ -1387,7 +1387,7 @@ export function createApiRouter(
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null,
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
-        line_webhook_path: cfg.line?.channelSecret ? `/line/webhook/${agentId}` : null,
+        line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${agentId}` : null,
       },
     });
   });

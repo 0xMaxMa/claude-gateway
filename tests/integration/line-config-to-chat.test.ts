@@ -6,7 +6,7 @@
  *   1. PATCH /api/v1/agents/:id with line_channel_access_token + line_channel_secret
  *      (exactly what getpod's LINE card sends) writes AgentConfig.line and syncs
  *      the runner via updateAgentConfig().
- *   2. A signed LINE webhook to /line/webhook/:id is then accepted using THOSE
+ *   2. A signed LINE webhook to /webhooks/line/:id is then accepted using THOSE
  *      just-configured credentials and the message is forwarded to the agent's
  *      /channel intake.
  *   3. Clearing the credentials via PATCH makes the same webhook fail (404 — no
@@ -24,10 +24,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createApiRouter } from '../../src/api/router';
-import {
-  createLineWebhookRouter,
-  type LineWebhookOptions,
-} from '../../src/api/line-webhook-router';
+import { type LineWebhookOptions } from '../../src/api/line-webhook-router';
+import { createWebhooksRouter } from '../../src/api/webhooks-router';
 import { getPendingSenders, _resetPendingSenders } from '../../src/api/line-pending-senders';
 import { AgentConfig, ApiKey } from '../../src/types';
 import type { AgentRunner } from '../../src/agent/runner';
@@ -103,7 +101,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
   function buildApp(lineOpts: LineWebhookOptions = {}): express.Express {
     const app = express();
     // LINE webhook must be mounted before express.json() (raw body for signature).
-    app.use(createLineWebhookRouter(runners, tmpDir, lineOpts));
+    app.use('/webhooks', createWebhooksRouter(runners, tmpDir, lineOpts));
     app.use(express.json());
     const apiKeys: ApiKey[] = [{ key: 'sk-admin', agents: '*', admin: true }];
     app.use('/api', createApiRouter(runners, configs, apiKeys, configPath));
@@ -126,7 +124,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
     const sig = crypto.createHmac('sha256', SECRET).update(raw).digest('base64');
     return supertest
       .default(app)
-      .post(`/line/webhook/${AGENT_ID}`)
+      .post(`/webhooks/line/${AGENT_ID}`)
       .set('Content-Type', 'application/json')
       .set('x-line-signature', sig)
       .send(raw);
@@ -153,7 +151,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
       });
     expect(patch.status).toBe(200);
     expect(patch.body.agent.line_connected).toBe(true);
-    expect(patch.body.agent.line_webhook_path).toBe(`/line/webhook/${AGENT_ID}`);
+    expect(patch.body.agent.line_webhook_path).toBe(`/webhooks/line/${AGENT_ID}`);
 
     // Now the same signed webhook is accepted with the configured secret.
     const ok = await signedWebhook(app, 'สวัสดีจาก LINE');
@@ -180,7 +178,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
     const raw = JSON.stringify({ events: [] });
     const res = await supertest
       .default(app)
-      .post(`/line/webhook/${AGENT_ID}`)
+      .post(`/webhooks/line/${AGENT_ID}`)
       .set('Content-Type', 'application/json')
       .set('x-line-signature', 'not-a-valid-signature')
       .send(raw);
@@ -227,7 +225,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
       const sig = crypto.createHmac('sha256', SECRET).update(raw).digest('base64');
       const res = await supertest
         .default(app)
-        .post(`/line/webhook/${AGENT_ID}`)
+        .post(`/webhooks/line/${AGENT_ID}`)
         .set('Content-Type', 'application/json')
         .set('x-line-signature', sig)
         .send(raw);

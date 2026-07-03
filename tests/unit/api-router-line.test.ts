@@ -87,7 +87,7 @@ describe('LINE channel management API', () => {
     });
     expect(res.status).toBe(200);
     expect(res.body.agent.line_connected).toBe(true);
-    expect(res.body.agent.line_webhook_path).toBe(`/line/webhook/${AGENT_ID}`);
+    expect(res.body.agent.line_webhook_path).toBe(`/webhooks/line/${AGENT_ID}`);
     expect(res.body.agent.line_token_preview).toBeTruthy();
     expect(res.body.agent.line_token_preview).not.toContain(VALID_AT); // masked
 
@@ -137,7 +137,7 @@ describe('LINE channel management API', () => {
     expect(res.status).toBe(200);
     const agent = res.body.agents.find((a: { id: string }) => a.id === AGENT_ID);
     expect(agent.line_connected).toBe(true);
-    expect(agent.line_webhook_path).toBe(`/line/webhook/${AGENT_ID}`);
+    expect(agent.line_webhook_path).toBe(`/webhooks/line/${AGENT_ID}`);
     expect(agent.line_token_preview).toBeTruthy();
   });
 

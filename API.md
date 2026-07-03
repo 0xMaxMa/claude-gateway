@@ -68,6 +68,15 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/telegram/allowlist` | Admin | List allowlisted users |
 | `DELETE` | `/api/v1/agents/:agentId/telegram/allow/:userId` | Admin | Remove a user from the allowlist |
 
+### Public Webhook Ingress
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/webhooks/:app` | None (self-authenticating) | Provider URL-verification probe |
+| `GET` | `/webhooks/:app/:agentId` | None (self-authenticating) | Provider URL-verification probe, agent-scoped |
+| `POST` | `/webhooks/:app` | None (self-authenticating) | Inbound webhook delivery — first agent with `:app` configured |
+| `POST` | `/webhooks/:app/:agentId` | None (self-authenticating) | Inbound webhook delivery — specific agent |
+
 ### Skill API
 
 | Method | Path | Auth | Description |
@@ -963,6 +972,81 @@ curl -X POST \
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
 > - Error 409 = session is currently processing a request — wait and retry
+
+---
+
+## Public Webhook Ingress
+
+All external, unauthenticated webhooks (LINE today; more apps can be added later) enter
+through a single dispatcher route `/webhooks/:app/:agentId?`, routed to a per-app handler
+by the `:app` path segment.
+
+**This zone bypasses the gateway's API-key auth entirely** — it is mounted outside the
+`/api` routers, before `express.json()`, so each handler gets the raw request bytes it
+needs for its own signature validation. There is no ambient auth: every app handler
+(e.g. LINE's `x-line-signature` HMAC check) **must authenticate its own requests** as its
+first step.
+
+Request bodies on this route are capped at 256KB (pre-auth cap, applies to every app).
+An unknown `:app` returns `404`:
+
+```bash
+curl http://localhost:10850/webhooks/nope
+```
+
+```json
+{ "error": "unknown webhook app: nope" }
+```
+
+### LINE (`app: "line"`)
+
+**Setup:** configure `line.channelSecret` + `line.channelAccessToken` for an agent via
+`PATCH /api/v1/agents/:agentId` (see Agent API above), then point the LINE Developer
+Console's webhook URL at:
+
+```
+https://<your-gateway-host>/webhooks/line/<agentId>
+```
+
+`<agentId>` may be omitted — the dispatcher then falls back to the first agent with
+`line.channelSecret` set — but an explicit ID is recommended once more than one agent has
+LINE configured.
+
+**Verification (`GET`):** LINE's Console "Verify" button sends a GET (or empty POST); the
+handler answers unconditionally:
+
+```json
+{ "ok": true }
+```
+
+**Inbound delivery (`POST`):** the request must carry a valid `x-line-signature` header
+(HMAC-SHA256 of the raw body, keyed by `channelSecret`, base64-encoded).
+
+```bash
+BODY='{"events":[{"type":"message","message":{"type":"text","id":"1","text":"hi"},"source":{"type":"user","userId":"Uxxxx"},"replyToken":"xxx","timestamp":1234567890}]}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "<CHANNEL_SECRET>" -binary | base64)
+curl -X POST http://localhost:10850/webhooks/line/<agentId> \
+  -H "Content-Type: application/json" \
+  -H "x-line-signature: $SIG" \
+  -d "$BODY"
+```
+
+Text and image messages from allowed 1:1/group/room sources are normalized and forwarded
+to the agent's `/channel` intake (the same path Telegram uses). The request is
+acknowledged (`200 {"ok":true}`) **before** event processing, so LINE never sees a slow
+response.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 401 | Missing or invalid `x-line-signature` (the resolved agent always has `channelSecret` set — see the 404 row below) |
+| 404 | No LINE-enabled agent found — no agent has `line.channelSecret` set, or the given `:agentId` doesn't |
+
+**Access control:** DMs and groups/rooms are closed by default (`dmPolicy` /
+`groupPolicy` allowlist, per agent config); a denied sender receives a one-time pairing
+code (via LINE reply) to share with the admin, who approves it the same way as Telegram
+pairing.
 
 ---
 

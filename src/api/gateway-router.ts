@@ -19,7 +19,7 @@ import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
-import { createLineWebhookRouter } from './line-webhook-router';
+import { createWebhooksRouter } from './webhooks-router';
 import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
@@ -200,10 +200,13 @@ export class GatewayRouter {
     if (process.env.DEV_MODE) {
       process.stderr.write('[gateway] DEV_MODE=1 active — module cache busted on every /dashboard request. Never enable in production.\n');
     }
-    // LINE webhook MUST be mounted before express.json() — it needs the raw
-    // request bytes for x-line-signature validation (it uses its own express.raw).
+    // Public webhook ingress (LINE + future apps) MUST be mounted before
+    // express.json() — each app handler needs the raw request bytes for its own
+    // signature validation. This whole /webhooks zone bypasses API-key auth;
+    // every app authenticates itself (see webhooks-router.ts).
     this.app.use(
-      createLineWebhookRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
+      '/webhooks',
+      createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
 
     this.app.use(express.json());

@@ -1,15 +1,17 @@
 /**
- * LINE inbound webhook route (openclaw-style: LINE is webhook-only, no polling).
+ * LINE inbound webhook handler (openclaw-style: LINE is webhook-only, no polling).
  *
- * Mounted on the gateway's Express app BEFORE express.json() so the raw request
- * bytes are available for signature validation (LINE signs the raw body; a
- * re-serialized parsed body would not match).
+ * Exposed as a WebhookAppHandler ({ verify, handlePost }) wired into the unified
+ * `/webhooks/:app` dispatcher (see webhooks-router.ts) under app "line". The
+ * dispatcher mounts BEFORE express.json() and applies express.raw, so the raw
+ * request bytes are available for signature validation (LINE signs the raw body;
+ * a re-serialized parsed body would not match).
  *
  * Flow: verify x-line-signature → 200 → for each text message from a 1:1 user,
  * show a loading animation and forward a normalized {content, meta} to the
  * target agent's existing /channel callback (the same intake Telegram uses).
  */
-import express, { Router, type Request, type Response } from 'express';
+import { type Request, type Response } from 'express';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -28,9 +30,8 @@ import {
   generatePairingCode,
 } from './line-pending-senders';
 import { wasBotMentioned, type LineMessageLike } from './line-mention';
+import type { WebhookAppHandler } from './webhooks-router';
 
-const DEFAULT_WEBHOOK_PATH = '/line/webhook';
-const MAX_BODY_BYTES = 256 * 1024; // pre-auth body cap
 const LOADING_SECONDS = 20; // 5..60, multiple of 5; 1:1 chats only
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // matches MediaStore.maxUploadBytes
 
@@ -204,14 +205,12 @@ export interface LineWebhookOptions {
   dataApiBase?: string;
 }
 
-export function createLineWebhookRouter(
+export function createLineWebhookHandler(
   agents: Map<string, AgentRunner>,
   logDir: string,
   opts: LineWebhookOptions = {},
-): Router {
-  const router = Router();
+): WebhookAppHandler {
   const logger = createLogger('line-webhook', logDir);
-  const rawBody = express.raw({ type: '*/*', limit: MAX_BODY_BYTES });
 
   // LINE webhook URL verification (Console "Verify" sends a GET / empty POST).
   const handleGet = (_req: Request, res: Response): void => {
@@ -413,10 +412,5 @@ export function createLineWebhookRouter(
     }
   };
 
-  router.get(DEFAULT_WEBHOOK_PATH, handleGet);
-  router.get(`${DEFAULT_WEBHOOK_PATH}/:agentId`, handleGet);
-  router.post(DEFAULT_WEBHOOK_PATH, rawBody, (req, res) => void handlePost(req, res));
-  router.post(`${DEFAULT_WEBHOOK_PATH}/:agentId`, rawBody, (req, res) => void handlePost(req, res));
-
-  return router;
+  return { verify: handleGet, handlePost };
 }

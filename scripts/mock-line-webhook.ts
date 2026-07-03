@@ -8,14 +8,14 @@
  *
  * Env overrides:
  *   LINE_CHANNEL_SECRET   (required) the agent's channel secret used to sign
- *   LINE_WEBHOOK_URL      target route (default http://localhost:3021/line/webhook)
+ *   LINE_WEBHOOK_URL      target route (default http://localhost:3021/webhooks/line)
  *   LINE_MOCK_USER_ID     sender userId (default Umock00000000000000000000000000)
  */
 import { createHmac } from 'node:crypto';
 
 const text = process.argv.slice(2).join(' ') || 'hello from mock-line-webhook';
 const secret = process.env.LINE_CHANNEL_SECRET ?? '';
-const url = process.env.LINE_WEBHOOK_URL ?? 'http://localhost:3021/line/webhook';
+const url = process.env.LINE_WEBHOOK_URL ?? 'http://localhost:3021/webhooks/line';
 const userId = process.env.LINE_MOCK_USER_ID ?? 'Umock00000000000000000000000000';
 
 if (!secret) {
