@@ -25,11 +25,34 @@ export interface AssistantRecord {
   timestamp?: string;
 }
 
+/** A tool_result content block on a `user` record (main-chain tool completion). */
+export interface ToolResultBlock {
+  type: string;
+  tool_use_id?: string;
+}
+
+/** A `user` transcript record. Only the tool_result content blocks are read. */
+export interface UserRecord {
+  type: 'user';
+  isSidechain?: boolean;
+  message?: {
+    content?: Array<ToolResultBlock>;
+  };
+}
+
 export interface TailerEvents {
   /** A new (non-sidechain) assistant record was appended. */
   onAssistant: (record: AssistantRecord) => void;
   /** Claude finished a turn (system/turn_duration record). */
   onTurnEnd: (durationMs: number) => void;
+  /**
+   * A `tool_use` block appeared in a (non-sidechain) assistant record.
+   * `toolName` is the block's `name` (e.g. 'Task'). Emitted so consumers can
+   * track outstanding tool calls without re-walking `message.content`
+   * themselves — the mirror of onToolResult. Sidechain records (a sub-agent's
+   * own internal tool_use) are filtered out before this fires.
+   */
+  onToolUse?: (toolUseId: string, toolName: string) => void;
   /**
    * A non-sidechain tool_result landed for `toolUseId`. Fired for a 'user'
    * record's tool_result content blocks — the main-chain signal that a tool
@@ -198,6 +221,14 @@ export class TranscriptTailer {
           return;
         }
         this.events.onAssistant(record as unknown as AssistantRecord);
+        if (this.events.onToolUse) {
+          for (const block of message.content) {
+            if (block.type === 'tool_use' && typeof block.id === 'string') {
+              const name = typeof block.name === 'string' ? block.name : '';
+              this.events.onToolUse(block.id, name);
+            }
+          }
+        }
       }
       return;
     }
@@ -207,7 +238,7 @@ export class TranscriptTailer {
       return;
     }
     if (record.type === 'user' && this.events.onToolResult) {
-      const message = record.message as { content?: Array<{ type: string; tool_use_id?: string }> } | undefined;
+      const message = (record as unknown as UserRecord).message;
       if (message && Array.isArray(message.content)) {
         for (const block of message.content) {
           if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {

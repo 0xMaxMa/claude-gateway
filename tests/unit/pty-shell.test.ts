@@ -675,6 +675,68 @@ describe('TranscriptTailer onToolResult (main-chain tool_result only)', () => {
   });
 });
 
+describe('TranscriptTailer onToolUse (main-chain tool_use, with name)', () => {
+  let sessionId: string;
+  let file: string;
+  let tailer: TranscriptTailer | null;
+
+  beforeEach(() => {
+    sessionId = '99999999-8888-7777-5555-' + Date.now().toString().padStart(12, '0');
+    file = transcriptPath(process.cwd(), sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tailer = null;
+  });
+
+  afterEach(() => {
+    tailer?.stop();
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  });
+
+  function makeTailer(onToolUse: (id: string, name: string) => void): TranscriptTailer {
+    tailer = new TranscriptTailer(process.cwd(), sessionId, {
+      onAssistant: () => {},
+      onTurnEnd: () => {},
+      onToolUse,
+      onError: (err) => { throw err; },
+    });
+    return tailer;
+  }
+
+  it('fires with (id, name) for a non-sidechain assistant tool_use block', () => {
+    const seen: Array<[string, string]> = [];
+    const t = makeTailer((id, name) => seen.push([id, name]));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'task-1', name: 'Task', input: {} }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual([['task-1', 'Task']]);
+  });
+
+  it('does not fire for a sidechain assistant tool_use (sub-agent internal call)', () => {
+    const seen: Array<[string, string]> = [];
+    const t = makeTailer((id, name) => seen.push([id, name]));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'assistant',
+      isSidechain: true,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'inner-1', name: 'Bash', input: {} }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual([]);
+  });
+
+  it('reports the real tool name so non-Task tools can be distinguished', () => {
+    const seen: Array<[string, string]> = [];
+    const t = makeTailer((id, name) => seen.push([id, name]));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b-1', name: 'Bash', input: {} }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual([['b-1', 'Bash']]);
+  });
+});
+
 describe('ScreenModel detectDialog (region-restricted)', () => {
   it('detects the bypass dialog when it renders at the bottom (real modal)', async () => {
     const screen = await renderScreen([

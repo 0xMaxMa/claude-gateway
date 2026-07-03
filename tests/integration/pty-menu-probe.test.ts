@@ -51,10 +51,11 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     if (fs.existsSync(eventLog)) fs.unlinkSync(eventLog);
   });
 
-  function start(): void {
+  function start(extraEnv: Record<string, string> = {}): void {
     wrapper = spawnWrapper(MOCK_TUI_BIN, {
       FAKE_TUI_INPUT_LOG: inputLog,
       FAKE_TUI_EVENT_LOG: eventLog,
+      ...extraEnv,
     });
     collector.attach(wrapper);
   }
@@ -331,11 +332,75 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     // real text — not an early, truncated one.
     const completed = await waitFor(
       () => !!collector.find((e) => e.type === 'result'),
-      4000,
+      5000,
     );
     expect(completed).toBe(true);
     const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; result?: string };
     expect(result.subtype).toBe('success');
     expect(result.result).toContain('task-wait-final-result');
   }, 20000);
+
+  /**
+   * I-PTY-MENU-12: a SIDECHAIN tool_result must NOT clear the pending gate.
+   * During a Task wait, a sub-agent's own internal tool_result (sidechain) for
+   * the same id lands first; the tailer filters it, so the turn stays open. It
+   * completes only when the real, main-chain tool_result arrives. Guards the
+   * core correctness property of the fix — that the gate keys off main-chain
+   * results only — which the unit test proves at the tailer boundary but which
+   * had no end-to-end coverage through the Driver.
+   */
+  it('I-PTY-MENU-12: a sidechain tool_result does not end the turn; only the main-chain one does', async () => {
+    start();
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('TASK_WAIT_SIDECHAIN'));
+
+    // Sidechain result lands at ~2600ms and the screen is quiet — if it wrongly
+    // cleared the gate, the fallback would end the turn here. It must not.
+    await waitMs(3200);
+    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+
+    // The real main-chain result (~4500ms) completes the turn with real text.
+    const completed = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      4000,
+    );
+    expect(completed).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; result?: string };
+    expect(result.subtype).toBe('success');
+    expect(result.result).toContain('task-sidechain-final-result');
+  }, 20000);
+
+  /**
+   * I-PTY-MENU-13: an orphaned Task tool_use (no tool_result, no turn_duration
+   * ever) must NOT hang forever or kill the session. With a shortened watchdog,
+   * the turn ends with an error and the wrapper stays alive to take the next
+   * turn — the fix's "session preserved" branch of the watchdog.
+   */
+  it('I-PTY-MENU-13: an orphaned Task tool_use ends via the watchdog with an error, session survives', async () => {
+    start({ PTY_SHELL_WATCHDOG_MS: '1500' });
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('TASK_ORPHAN'));
+
+    // No tool_result ever comes; the shortened watchdog (1500ms after the last
+    // progress) must end the turn with an error rather than hang.
+    const ended = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      6000,
+    );
+    expect(ended).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; is_error?: boolean };
+    expect(result.is_error).toBe(true);
+
+    // Session must still be alive (watchdog did NOT shutdown) — a fresh turn
+    // still completes, producing a second result event.
+    expect(wrapper.exitCode).toBeNull();
+    wrapper.stdin!.write(makeTurnJson('hello again'));
+    const second = await waitFor(
+      () => collector.events.filter((e) => e.type === 'result').length >= 2,
+      6000,
+    );
+    expect(second).toBe(true);
+  }, 25000);
 });

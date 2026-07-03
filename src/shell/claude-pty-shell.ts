@@ -100,13 +100,17 @@ interface ActiveTurn {
    *  menuToolSeen — see maybeProbeAndBridge()/advanceProbe() below and
    *  planning-61. */
   probe: ProbeState | null;
-  /** tool_use ids from this turn's own (non-sidechain) assistant records that
-   *  have no matching tool_result yet. A Task tool call runs an invisible
-   *  sub-agent whose own work writes only sidechain transcript records — the
-   *  screen can look idle (no busy marker, quiet ≥ FALLBACK_IDLE_QUIET_MS)
-   *  for stretches while it's genuinely still running. Non-empty blocks the
-   *  fallback end-of-turn heuristic so it can never end the turn out from
-   *  under a pending tool call. */
+  /** tool_use ids for **Task** calls from this turn's own (non-sidechain)
+   *  assistant records that have no matching tool_result yet. A Task tool call
+   *  runs an invisible sub-agent whose own work writes only sidechain
+   *  transcript records — the screen can look idle (no busy marker, quiet ≥
+   *  FALLBACK_IDLE_QUIET_MS) for stretches while it's genuinely still running.
+   *  Non-empty blocks the fallback end-of-turn heuristic so it can never end
+   *  the turn out from under a pending sub-agent. Only Task is tracked:
+   *  ordinary foreground tools (Bash/Read/Edit…) keep the TUI busy, so they
+   *  never reach the fallback anyway, and tracking them would let an
+   *  interrupted-mid-tool turn (no tool_result ever lands) block the fallback
+   *  forever. */
   pendingToolUseIds: Set<string>;
 }
 
@@ -223,6 +227,7 @@ class Driver {
       onAssistant: (record) => this.onAssistant(record),
       onTurnEnd: (durationMs) => this.onTurnEnd(durationMs),
       onRequestTooLarge: () => this.handleRequestTooLarge(),
+      onToolUse: (toolUseId, toolName) => this.onToolUse(toolUseId, toolName),
       onToolResult: (toolUseId) => this.onToolResult(toolUseId),
       onError: (err) => logError(`tailer: ${err.message}`),
     });
@@ -325,20 +330,28 @@ class Driver {
       this.turn.lastProgressAt = Date.now();
       if (text) this.turn.texts.push(text);
       if (usage) this.turn.usage = usage;
-      for (const block of record.message.content) {
-        if (block.type === 'tool_use' && typeof block.id === 'string') {
-          this.turn.pendingToolUseIds.add(block.id);
-        }
-      }
     } else {
       logDebug('assistant record outside an active turn (emitted anyway)');
     }
   }
 
-  /** A non-sidechain tool_result landed — clears the pending Task/tool gate
-   *  on the fallback end-of-turn heuristic (see ActiveTurn.pendingToolUseIds). */
+  /** A tool_use block appeared in this turn's transcript. Only **Task** calls
+   *  are tracked (see ActiveTurn.pendingToolUseIds) — they run an invisible
+   *  sub-agent that can leave the screen idle-quiet while still in flight. */
+  private onToolUse(toolUseId: string, toolName: string): void {
+    if (this.turn && toolName === 'Task') {
+      this.turn.pendingToolUseIds.add(toolUseId);
+    }
+  }
+
+  /** A non-sidechain tool_result landed — clears the pending Task gate on the
+   *  fallback end-of-turn heuristic (see ActiveTurn.pendingToolUseIds) and
+   *  counts as progress so the watchdog's clock resets. */
   private onToolResult(toolUseId: string): void {
-    if (this.turn) this.turn.pendingToolUseIds.delete(toolUseId);
+    if (this.turn) {
+      this.turn.pendingToolUseIds.delete(toolUseId);
+      this.turn.lastProgressAt = Date.now();
+    }
   }
 
   private onTurnEnd(durationMs: number): void {
@@ -522,7 +535,12 @@ class Driver {
     const ptyAlive = isPtyActivelyWorking(
       { isBusy: this.screen.isBusy(), quietMs: this.screen.quietMs() },
       HEARTBEAT_LIVENESS_QUIET_MS,
-    );
+    )
+      // A pending Task sub-agent runs invisibly (sidechain records, quiet
+      // screen) — keep writing the heartbeat so the receiver's stalled
+      // detector doesn't tear the session down in exactly the window the
+      // pendingToolUseIds gate is holding the turn open for.
+      || (this.turn ? this.turn.pendingToolUseIds.size > 0 : false);
     if (this.heartbeatPath
         && ptyAlive
         && now - this.lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
@@ -685,6 +703,18 @@ class Driver {
     }
 
     if (now - turn.lastProgressAt > WATCHDOG_MS) {
+      if (turn.pendingToolUseIds.size > 0) {
+        // A pending Task held the turn past the watchdog: either a genuinely
+        // long sub-agent that stayed screen-quiet the whole time, or an
+        // orphaned tool_use whose result never landed. End the turn with an
+        // error but keep the PTY session alive — killing it would drop queued
+        // messages and is unrecoverable, whereas a stuck/slow sub-agent is
+        // turn-local. (Distinct from the no-progress kill below, which means
+        // the whole TUI has wedged.)
+        logWarn(`pending Task exceeded ${WATCHDOG_MS}ms without a result — ending turn, session preserved`);
+        this.finishTurn(true, `sub-agent did not complete within ${WATCHDOG_MS}ms`);
+        return;
+      }
       this.finishTurn(true, `no progress for ${WATCHDOG_MS}ms — giving up`);
       this.shutdown(1);
     }
