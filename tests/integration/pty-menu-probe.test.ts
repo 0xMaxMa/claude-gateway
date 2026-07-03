@@ -304,4 +304,38 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     expect(collector.find((e) => e.type === 'system' && e.subtype === 'menu_prompt')).toBeUndefined();
     expect(keyEvents().filter((k) => k === 'up' || k === 'down')).toHaveLength(0); // no arrow keys were ever sent
   }, 20000);
+
+  /**
+   * I-PTY-MENU-11: a Task-tool sub-agent run. A non-sidechain tool_use lands,
+   * then the screen goes idle-looking (no busy marker, ❯ prompt visible) for
+   * longer than FALLBACK_IDLE_QUIET_MS (2000ms) while the sub-agent works
+   * invisibly (its own transcript records would be sidechain — never written
+   * here, since the fix must not depend on seeing them). Before the fix, the
+   * fallback idle-detection heuristic ended the turn at ~2s of screen quiet,
+   * orphaning the real final answer that arrives once the matching
+   * tool_result lands.
+   */
+  it('I-PTY-MENU-11: a pending Task tool_use blocks the fallback idle finish until its tool_result lands', async () => {
+    start();
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('TASK_WAIT'));
+
+    // The sub-agent is still "running" (screen quiet, no busy marker, no
+    // tool_result yet) — the pre-fix fallback would already have ended the
+    // turn by ~2s. It must still be open.
+    await waitMs(2600);
+    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+
+    // Once the tool_result + final answer land, the turn completes with the
+    // real text — not an early, truncated one.
+    const completed = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      4000,
+    );
+    expect(completed).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; result?: string };
+    expect(result.subtype).toBe('success');
+    expect(result.result).toContain('task-wait-final-result');
+  }, 20000);
 });

@@ -1,5 +1,5 @@
 import { translateArgs, sanitizeUserText } from '../../src/shell/args';
-import { projectSlug, transcriptPath, isSyntheticRequestTooLarge } from '../../src/shell/tailer';
+import { projectSlug, transcriptPath, isSyntheticRequestTooLarge, TranscriptTailer } from '../../src/shell/tailer';
 import {
   ScreenModel,
   TUI_BUSY_MARKER,
@@ -610,6 +610,68 @@ describe('pty-shell transcript path', () => {
     const uuid = '11111111-2222-3333-4444-555555555555';
     expect(transcriptPath('/tmp/pty-poc', uuid))
       .toBe(`${os.homedir()}/.claude/projects/-tmp-pty-poc/${uuid}.jsonl`);
+  });
+});
+
+describe('TranscriptTailer onToolResult (main-chain tool_result only)', () => {
+  let sessionId: string;
+  let file: string;
+  let tailer: TranscriptTailer | null;
+
+  beforeEach(() => {
+    sessionId = '99999999-8888-7777-6666-' + Date.now().toString().padStart(12, '0');
+    file = transcriptPath(process.cwd(), sessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tailer = null;
+  });
+
+  afterEach(() => {
+    tailer?.stop();
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  });
+
+  function makeTailer(onToolResult: (id: string) => void): TranscriptTailer {
+    tailer = new TranscriptTailer(process.cwd(), sessionId, {
+      onAssistant: () => {},
+      onTurnEnd: () => {},
+      onToolResult,
+      onError: (err) => { throw err; },
+    });
+    return tailer;
+  }
+
+  it('fires for a non-sidechain tool_result block (main-chain tool resolved)', () => {
+    const seen: string[] = [];
+    const t = makeTailer((id) => seen.push(id));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'abc-123' }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual(['abc-123']);
+  });
+
+  it('does not fire for a sidechain tool_result (a sub-agent\'s own tool call)', () => {
+    const seen: string[] = [];
+    const t = makeTailer((id) => seen.push(id));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'user',
+      isSidechain: true,
+      message: { content: [{ type: 'tool_result', tool_use_id: 'sub-456' }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual([]);
+  });
+
+  it('ignores plain user text records (no tool_result content)', () => {
+    const seen: string[] = [];
+    const t = makeTailer((id) => seen.push(id));
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'user',
+      message: { content: [{ type: 'text', text: 'hello' }] },
+    }) + '\n');
+    t.flush();
+    expect(seen).toEqual([]);
   });
 });
 

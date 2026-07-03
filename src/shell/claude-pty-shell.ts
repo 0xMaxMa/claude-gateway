@@ -100,6 +100,14 @@ interface ActiveTurn {
    *  menuToolSeen — see maybeProbeAndBridge()/advanceProbe() below and
    *  planning-61. */
   probe: ProbeState | null;
+  /** tool_use ids from this turn's own (non-sidechain) assistant records that
+   *  have no matching tool_result yet. A Task tool call runs an invisible
+   *  sub-agent whose own work writes only sidechain transcript records — the
+   *  screen can look idle (no busy marker, quiet ≥ FALLBACK_IDLE_QUIET_MS)
+   *  for stretches while it's genuinely still running. Non-empty blocks the
+   *  fallback end-of-turn heuristic so it can never end the turn out from
+   *  under a pending tool call. */
+  pendingToolUseIds: Set<string>;
 }
 
 /** An in-flight behavioral probe round, advanced by tick() (see Driver.probe). */
@@ -215,6 +223,7 @@ class Driver {
       onAssistant: (record) => this.onAssistant(record),
       onTurnEnd: (durationMs) => this.onTurnEnd(durationMs),
       onRequestTooLarge: () => this.handleRequestTooLarge(),
+      onToolResult: (toolUseId) => this.onToolResult(toolUseId),
       onError: (err) => logError(`tailer: ${err.message}`),
     });
     this.tailer.start();
@@ -316,9 +325,20 @@ class Driver {
       this.turn.lastProgressAt = Date.now();
       if (text) this.turn.texts.push(text);
       if (usage) this.turn.usage = usage;
+      for (const block of record.message.content) {
+        if (block.type === 'tool_use' && typeof block.id === 'string') {
+          this.turn.pendingToolUseIds.add(block.id);
+        }
+      }
     } else {
       logDebug('assistant record outside an active turn (emitted anyway)');
     }
+  }
+
+  /** A non-sidechain tool_result landed — clears the pending Task/tool gate
+   *  on the fallback end-of-turn heuristic (see ActiveTurn.pendingToolUseIds). */
+  private onToolResult(toolUseId: string): void {
+    if (this.turn) this.turn.pendingToolUseIds.delete(toolUseId);
   }
 
   private onTurnEnd(durationMs: number): void {
@@ -412,6 +432,7 @@ class Driver {
       recordsAtStart: this.tailer.seenRecords,
       fromMenuSelection,
       probe: null,
+      pendingToolUseIds: new Set(),
     };
   }
 
@@ -650,7 +671,12 @@ class Driver {
 
     // Fallback end-of-turn (e.g. interrupted turn never writes turn_duration):
     // ran → idle prompt → quiet, and we already streamed assistant output.
+    // pendingToolUseIds must be empty too — a Task tool call's sub-agent runs
+    // invisibly (its own transcript records are sidechain and filtered out),
+    // so the screen can look idle-quiet for stretches while the turn is
+    // genuinely still in flight (see onToolResult()/pendingToolUseIds above).
     if (turn.sawBusy && turn.sawAssistant
+        && turn.pendingToolUseIds.size === 0
         && this.screen.hasPrompt()
         && this.screen.quietMs() >= FALLBACK_IDLE_QUIET_MS) {
       logDebug('fallback idle detection ended the turn');

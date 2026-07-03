@@ -42,6 +42,13 @@
  *                          arrow key; the probe must exhaust its round budget
  *                          and give up cleanly, the turn completing normally
  *                          via the transcript.
+ *   TASK_WAIT           — a non-sidechain tool_use (Task) lands, then the
+ *                          screen goes idle-looking (no busy marker, ❯
+ *                          prompt) for LONGER than FALLBACK_IDLE_QUIET_MS
+ *                          while the sub-agent works invisibly. The wrapper
+ *                          must NOT end the turn until the matching
+ *                          tool_result lands, even though the screen alone
+ *                          looks done the whole time.
  *   …SWALLOW_ONCE…      — (substring anywhere in the text) the first Enter
  *                          is swallowed: the draft stays in the input line
  *                          ("❯ <text>"), never busy, no transcript. The
@@ -62,6 +69,7 @@ const {
   handleAuthShim,
   parseSessionId,
   makeTranscriptWriter,
+  makeRawTranscriptAppender,
   makeFileLogger,
   startStdinMachine,
 } = require('./mock-tui-core');
@@ -70,6 +78,7 @@ const args = process.argv.slice(2);
 handleAuthShim(args);
 
 const writeTranscript = makeTranscriptWriter(parseSessionId(args));
+const appendRecord = makeRawTranscriptAppender(parseSessionId(args));
 const logInput = makeFileLogger('FAKE_TUI_INPUT_LOG');
 const logEvent = makeFileLogger('FAKE_TUI_EVENT_LOG');
 
@@ -158,6 +167,32 @@ function submit(text) {
       // would have exhausted its round budget, so the turn still ends.
       setTimeout(() => finishScenario('no-react-result'), 4000);
     }
+    return;
+  }
+  if (trimmed === 'TASK_WAIT') {
+    // Simulates a Task-tool sub-agent run: a non-sidechain tool_use lands,
+    // then the screen goes idle-looking (busy marker gone, ❯ prompt visible)
+    // for LONGER than FALLBACK_IDLE_QUIET_MS (2000ms) while the sub-agent
+    // works invisibly (its own records would be sidechain — not written
+    // here, since claude-pty-shell.ts must never depend on seeing them).
+    // Pre-fix, the fallback idle-detection heuristic would end the turn
+    // right here, at ~2s, orphaning the real final answer written below.
+    scenario = null;
+    render('esc to interrupt\r\n❯ ');
+    setTimeout(() => {
+      appendRecord({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'task-1', name: 'Task', input: {} }] },
+      });
+      idle(); // busy marker gone — screen looks done, but the tool_use is still pending
+    }, 150);
+    setTimeout(() => {
+      appendRecord({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'task-1', content: 'sub-agent done' }] },
+      });
+      writeTranscript('task-wait-final-result');
+    }, 3350);
     return;
   }
 

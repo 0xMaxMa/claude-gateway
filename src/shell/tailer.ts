@@ -31,6 +31,14 @@ export interface TailerEvents {
   /** Claude finished a turn (system/turn_duration record). */
   onTurnEnd: (durationMs: number) => void;
   /**
+   * A non-sidechain tool_result landed for `toolUseId`. Fired for a 'user'
+   * record's tool_result content blocks — the main-chain signal that a tool
+   * call (e.g. Task, which runs an invisible sub-agent) has actually
+   * resolved. Sidechain tool_results (a sub-agent's own internal tool calls)
+   * are filtered out before this fires, same as onAssistant.
+   */
+  onToolResult?: (toolUseId: string) => void;
+  /**
    * Claude Code hit the recoverable 32MB "Request too large" API error. Detected
    * authoritatively from the `<synthetic>` assistant record it writes to the
    * transcript — NOT by scraping screen text — so conversation text quoting the
@@ -196,6 +204,17 @@ export class TranscriptTailer {
     if (record.type === 'system' && record.subtype === 'turn_duration') {
       const durationMs = typeof record.durationMs === 'number' ? record.durationMs : 0;
       this.events.onTurnEnd(durationMs);
+      return;
+    }
+    if (record.type === 'user' && this.events.onToolResult) {
+      const message = record.message as { content?: Array<{ type: string; tool_use_id?: string }> } | undefined;
+      if (message && Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            this.events.onToolResult(block.tool_use_id);
+          }
+        }
+      }
     }
   }
 }

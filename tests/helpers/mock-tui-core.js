@@ -172,10 +172,25 @@ function startStdinMachine(handlers) {
   process.on('SIGTERM', () => process.exit(0));
 }
 
+/**
+ * Returns an appendRecord(obj) that writes one raw JSONL line to the Claude
+ * Code transcript — for scenarios that need fine-grained control over
+ * individual record shapes/timing (tool_use, tool_result, sidechain) instead
+ * of the combined assistant+turn_duration writeTranscript() helper.
+ */
+function makeRawTranscriptAppender(sessionId) {
+  return function appendRecord(obj) {
+    const txPath = getTranscriptPath(sessionId);
+    if (!txPath) return;
+    fs.appendFileSync(txPath, JSON.stringify(obj) + '\n');
+  };
+}
+
 module.exports = {
   handleAuthShim,
   parseSessionId,
   makeTranscriptWriter,
+  makeRawTranscriptAppender,
   makeFileLogger,
   startStdinMachine,
 };
