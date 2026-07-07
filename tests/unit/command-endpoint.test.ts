@@ -2,13 +2,11 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { waitFor } from '../helpers/wait-for';
 
 async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 8000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
+  const ok = await waitFor(condition, timeoutMs, intervalMs);
+  if (!ok) throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
 }
 
 // ── Mock child_process ────────────────────────────────────────────────────────
@@ -203,7 +201,7 @@ describe('AgentRunner /command endpoint', () => {
 
     // Create a session first
     await sendChannelPost(port, 'chat123', 'hello');
-    await new Promise(r => setTimeout(r, 100));
+    await pollUntil(() => getSessions(runner).has('chat123'));
 
     const { data } = await sendCommand(port, {
       command: 'set_model',
@@ -255,7 +253,7 @@ describe('AgentRunner /command endpoint', () => {
 
     // Create a session by sending a message
     await sendChannelPost(port, 'chat123', 'hello');
-    await new Promise(r => setTimeout(r, 100));
+    await pollUntil(() => getSessions(runner).has('chat123'));
 
     const sessions = getSessions(runner);
     expect(sessions.size).toBeGreaterThanOrEqual(1);
@@ -288,7 +286,7 @@ describe('AgentRunner /command endpoint', () => {
 
     // Create a session by sending a message, then let it stop
     await sendChannelPost(port, 'chat123', 'hello');
-    await new Promise(r => setTimeout(r, 100));
+    await pollUntil(() => getSessions(runner).has('chat123'));
 
     const { data } = await sendCommand(port, {
       command: 'set_model',
@@ -319,7 +317,7 @@ describe('AgentRunner /command endpoint', () => {
 
     // Create a session
     await sendChannelPost(port, 'chat123', 'hello');
-    await new Promise(r => setTimeout(r, 100));
+    await pollUntil(() => getSessions(runner).has('chat123'));
 
     const sessions = getSessions(runner);
     expect(sessions.has('chat123')).toBe(true);
@@ -418,8 +416,11 @@ describe('SessionProcess restart watcher notify payload', () => {
     currentSp = sp;
     await sp.start();
 
-    // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 1000));
+    // Give chokidar time to initialize the watcher (SessionProcess uses a raw
+    // chokidar.watch() with no .ready-equivalent exposed to tests, so this is
+    // a plain timeout bump, not a poll — same fixed-delay-arm-race caveat as
+    // the fs-watcher tests, just without an observable "ready" signal here).
+    await new Promise(r => setTimeout(r, 2500));
 
     // Write restart signal with notify payload
     const signalPath = path.join(stateDir, 'restart-chat123');
@@ -468,8 +469,11 @@ describe('SessionProcess restart watcher notify payload', () => {
     currentSp = sp;
     await sp.start();
 
-    // Give chokidar time to initialize the watcher
-    await new Promise(r => setTimeout(r, 1000));
+    // Give chokidar time to initialize the watcher (SessionProcess uses a raw
+    // chokidar.watch() with no .ready-equivalent exposed to tests, so this is
+    // a plain timeout bump, not a poll — same fixed-delay-arm-race caveat as
+    // the fs-watcher tests, just without an observable "ready" signal here).
+    await new Promise(r => setTimeout(r, 2500));
 
     // Write empty restart signal (self-restart)
     const signalPath = path.join(stateDir, 'restart-chat456');

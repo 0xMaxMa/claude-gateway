@@ -10,6 +10,7 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { waitFor } from '../helpers/wait-for';
 
 // ── Mock child_process ────────────────────────────────────────────────────────
 
@@ -135,6 +136,10 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
     return content.text as string;
   }
 
+  async function waitForForward(): Promise<void> {
+    await waitFor(() => fs.existsSync(getForwardFile()), 8000);
+  }
+
   async function setupSession(lastInputTokens: number): Promise<void> {
     // Manually write the session index and set lastInputTokens (used for context % display)
     const agentsBaseDir = path.resolve(agentConfig.workspace, '..', '..');
@@ -180,7 +185,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Context: 40%');
@@ -195,7 +200,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Context: 0%');
@@ -213,7 +218,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Near limit');
@@ -229,7 +234,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Near limit');
@@ -244,7 +249,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Context: 65%');
@@ -262,7 +267,7 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/session');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const text = getForwardText();
     expect(text).toContain('Test Session');
@@ -311,6 +316,21 @@ describe('AgentRunner — /stop command', () => {
     return session!.process!;
   }
 
+  async function waitForForward(): Promise<void> {
+    await waitFor(() => fs.existsSync(getForwardFile()), 8000);
+  }
+
+  async function waitForSubprocess(): Promise<void> {
+    await waitFor(() => !!getActiveSession()?.process, 8000);
+  }
+
+  async function waitForStdinWrite(): Promise<void> {
+    await waitFor(() => {
+      const proc = getActiveSession()?.process;
+      return !!proc?.stdin && (proc.stdin.write as jest.Mock).mock.calls.length > 0;
+    }, 8000);
+  }
+
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-stop-'));
     const workspace = path.join(tmpDir, 'agents', 'test-agent', 'workspace');
@@ -334,7 +354,7 @@ describe('AgentRunner — /stop command', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/stop');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     expect(getForwardText()).toBe('No turn in progress.');
   }, 15000);
@@ -348,14 +368,14 @@ describe('AgentRunner — /stop command', () => {
     // Spawn a session with a regular message — handler sets processing=true,
     // but we manually clear it to simulate an idle session.
     await postChannelMessage(port, chatId, 'hello');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForSubprocess();
     const subprocess = getSessionSubprocess();
     getActiveSession()!.setProcessing(false);
 
     try { fs.rmSync(getForwardFile(), { force: true }); } catch {}
 
     await postChannelMessage(port, chatId, '/stop');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     expect(getForwardText()).toBe('No turn in progress.');
     expect(subprocess.kill).not.toHaveBeenCalledWith('SIGINT');
@@ -368,7 +388,7 @@ describe('AgentRunner — /stop command', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, 'long task');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForSubprocess();
     const subprocess = getSessionSubprocess();
     // Simulate an in-flight turn
     getActiveSession()!.setProcessing(true);
@@ -376,7 +396,7 @@ describe('AgentRunner — /stop command', () => {
     try { fs.rmSync(getForwardFile(), { force: true }); } catch {}
 
     await postChannelMessage(port, chatId, '/stop');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     expect(getForwardText()).toBe('Stopped.');
     expect(subprocess.kill).toHaveBeenCalledWith('SIGINT');
@@ -389,14 +409,14 @@ describe('AgentRunner — /stop command', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, 'hello');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForSubprocess();
     const subprocess = getSessionSubprocess();
     getActiveSession()!.setProcessing(true);
 
     const writesBefore = (subprocess.stdin!.write as jest.Mock).mock.calls.length;
 
     await postChannelMessage(port, chatId, '/stop');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForForward();
 
     const writesAfter = (subprocess.stdin!.write as jest.Mock).mock.calls.length;
     expect(writesAfter).toBe(writesBefore);
@@ -409,7 +429,7 @@ describe('AgentRunner — /stop command', () => {
 
     const port = getCallbackPort(runner);
     await postChannelMessage(port, chatId, '/stopwatch');
-    await new Promise(r => setTimeout(r, 300));
+    await waitForStdinWrite();
 
     const subprocess = getSessionSubprocess();
     const stdinWrites = (subprocess.stdin!.write as jest.Mock).mock.calls;
