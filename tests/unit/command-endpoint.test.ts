@@ -2,13 +2,11 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { waitFor } from '../helpers/wait-for';
 
 async function pollUntil(condition: () => boolean, intervalMs = 50, timeoutMs = 8000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
+  const ok = await waitFor(condition, timeoutMs, intervalMs);
+  if (!ok) throw new Error(`pollUntil timed out after ${timeoutMs}ms`);
 }
 
 // ── Mock child_process ────────────────────────────────────────────────────────
