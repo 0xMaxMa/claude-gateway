@@ -1120,8 +1120,8 @@ export function createApiRouter(
   /**
    * PATCH /api/v1/agents/:agentId
    *
-   * Update agent description and/or model. Requires write access to the agent.
-   * Body: { description?, model? }
+   * Update agent name, description, and/or model. Requires write access to the agent.
+   * Body: { name?, description?, model? }
    */
   router.patch('/v1/agents/:agentId', auth, async (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;

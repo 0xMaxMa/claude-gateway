@@ -23,7 +23,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 |--------|------|------|-------------|
 | `GET` | `/api/v1/agents` | Key | List agents accessible by the provided key |
 | `POST` | `/api/v1/agents` | Admin | Create a new agent |
-| `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent description, model, or allow_tools |
+| `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent name, description, model, or allow_tools |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
 | `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
@@ -353,10 +353,12 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "agents": [
-    { "id": "alfred", "description": "Personal assistant", "model": "claude-sonnet-4-6", "allow_tools": false }
+    { "id": "alfred", "name": null, "description": "Personal assistant", "model": "claude-sonnet-4-6", "allow_tools": false }
   ]
 }
 ```
+
+`name` is an optional display name (`null` when unset); the UI falls back to `id` in that case.
 
 ---
 
@@ -397,12 +399,13 @@ curl -X POST \
 
 ### PATCH /api/v1/agents/:agentId
 
-Update an agent's description, model, or allow_tools flag. Requires write access to the agent. Only fields provided are updated.
+Update an agent's display name, description, model, or allow_tools flag. Requires write access to the agent. Only fields provided are updated.
 
 **Request body (all optional):**
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `name` | string \| null | Display name shown in the UI instead of `id`. Empty string or `null` clears it (falls back to `id`) |
 | `description` | string | New description |
 | `model` | string | New Claude model ID |
 | `allow_tools` | boolean | Override tool access for this agent |
@@ -416,7 +419,7 @@ curl -X PATCH \
 ```
 
 ```json
-{ "agent": { "id": "alfred", "description": "Personal assistant", "model": "claude-opus-4-8", "allow_tools": false } }
+{ "agent": { "id": "alfred", "name": null, "description": "Personal assistant", "model": "claude-opus-4-8", "allow_tools": false } }
 ```
 
 ---
