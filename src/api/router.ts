@@ -515,6 +515,7 @@ export function createApiRouter(
       .filter(([id]) => canAccessAgent(apiKey, id))
       .map(([id, cfg]) => ({
         id,
+        name: cfg.name ?? null,
         description: cfg.description,
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
@@ -1138,8 +1139,12 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown };
-    const { description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing } = body;
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      res.status(400).json({ error: 'name must be a string or null' });
+      return;
+    }
     if (description !== undefined && (typeof description !== 'string' || !description.trim())) {
       res.status(400).json({ error: 'description must be a non-empty string' });
       return;
@@ -1222,6 +1227,11 @@ export function createApiRouter(
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
         if (!agent) return;
+        if (name !== undefined) {
+          const trimmed = typeof name === 'string' ? name.trim() : '';
+          if (trimmed === '') delete (agent as Record<string, unknown>).name;
+          else agent.name = trimmed;
+        }
         if (description !== undefined) agent.description = (description as string).trim();
         if (model !== undefined) {
           const claude = agent.claude as Record<string, unknown> | undefined;
@@ -1293,6 +1303,10 @@ export function createApiRouter(
 
     // Sync in-memory map with what was written to disk
     const cfg = agentConfigs.get(agentId)!;
+    if (name !== undefined) {
+      const trimmed = typeof name === 'string' ? name.trim() : '';
+      cfg.name = trimmed === '' ? null : trimmed;
+    }
     if (description !== undefined) cfg.description = (description as string).trim();
     if (model !== undefined && cfg.claude) cfg.claude.model = (model as string).trim();
     if (allow_tools !== undefined) cfg.allow_tools = allow_tools;
@@ -1377,6 +1391,7 @@ export function createApiRouter(
     res.json({
       agent: {
         id: agentId,
+        name: cfg.name ?? null,
         description: cfg.description,
         model: cfg.claude?.model,
         allow_tools: cfg.allow_tools ?? false,

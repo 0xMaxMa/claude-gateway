@@ -10,6 +10,8 @@ export interface HistoryConfig {
 export interface AgentConfig {
   id: string;
   description: string;
+  /** Editable display name shown in the UI instead of `id`. null/absent falls back to `id`. */
+  name?: string | null;
   workspace: string;
   env: string;
   /** 'app-agent' = docker-exec based agent installed from an app store app */
