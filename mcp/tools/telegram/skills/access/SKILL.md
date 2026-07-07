@@ -63,7 +63,8 @@ APPROVED_DIR = {STATE_DIR}/approved
 
 ```json
 {
-  "dmPolicy": "pairing",
+  "dmPolicy": "allowlist",
+  "pairing": true,
   "allowFrom": ["<senderId>", ...],
   "groups": {
     "<groupId>": { "requireMention": true, "allowFrom": [] }
@@ -78,7 +79,13 @@ APPROVED_DIR = {STATE_DIR}/approved
 }
 ```
 
-Missing file = `{dmPolicy:"pairing", allowFrom:[], groups:{}, pending:{}}`.
+`dmPolicy` is the base access policy: `open` | `allowlist` | `disabled`.
+`pairing` is an **orthogonal on/off toggle** (mirrors LINE), only meaningful
+when `dmPolicy` is `allowlist`: `true` ⇒ an unknown sender gets a one-time
+6-char code that lands in `pending` for the admin to approve; `false` ⇒
+unknown senders are silently dropped (pure allowlist).
+
+Missing file = `{dmPolicy:"allowlist", pairing:true, allowFrom:[], groups:{}, pending:{}}`.
 
 ---
 
@@ -89,8 +96,8 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 ### No args — status
 
 1. Read `{STATE_DIR}/access.json` (handle missing file).
-2. Show: dmPolicy, allowFrom count and list, pending count with codes +
-   sender IDs + age, groups count.
+2. Show: dmPolicy, the pairing toggle (on/off), allowFrom count and list,
+   pending count with codes + sender IDs + age, groups count.
 
 ### `pair <code>`
 
@@ -123,8 +130,20 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 
 ### `policy <mode>`
 
-1. Validate `<mode>` is one of `pairing`, `allowlist`, `disabled`.
+1. Validate `<mode>` is one of `open`, `allowlist`, `disabled`.
+   (Pairing is no longer a policy value — it's the separate `pairing` toggle
+   below. `allowlist` + `pairing on` is the capture-unknown-users mode.)
 2. Read (create default if missing), set `dmPolicy`, write.
+
+### `pairing <on|off>`
+
+Toggle the orthogonal pairing code layer (only affects `dmPolicy: "allowlist"`).
+
+1. Validate `<value>` is `on` or `off`.
+2. Read (create default if missing), set `pairing` to `true`/`false`, write.
+3. Confirm. When `on`: unknown senders receive a one-time code and appear in
+   `pending` for you to `pair`. When `off`: unknown senders are dropped
+   silently (pure allowlist).
 
 ### `group add <groupId>` (optional: `--no-mention`, `--allow id1,id2`)
 

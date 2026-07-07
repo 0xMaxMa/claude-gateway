@@ -4,7 +4,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { readAccessFile, saveAccess, pruneExpired, defaultAccess, Access } from '../../../mcp/tools/telegram/pure'
+import { readAccessFile, saveAccess, pruneExpired, defaultAccess, migrateAccess, Access } from '../../../mcp/tools/telegram/pure'
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tg-access-test-'))
@@ -31,6 +31,7 @@ describe('readAccessFile()', () => {
     const accessFile = path.join(tmpDir, 'access.json')
     const data: Access = {
       dmPolicy: 'allowlist',
+      pairing: false,
       allowFrom: ['123', '456'],
       groups: { '-100123': { requireMention: true, allowFrom: [] } },
       pending: {},
@@ -67,6 +68,44 @@ describe('readAccessFile()', () => {
   })
 })
 
+describe('migrateAccess() — legacy 4-value dmPolicy → split model', () => {
+  test("legacy 'pairing' → allowlist + pairing:true (mint codes preserved)", () => {
+    const result = migrateAccess({ dmPolicy: 'pairing', allowFrom: ['1'] })
+    expect(result.dmPolicy).toBe('allowlist')
+    expect(result.pairing).toBe(true)
+    expect(result.allowFrom).toEqual(['1'])
+  })
+
+  test("SECURITY: legacy 'allowlist' with no pairing field → pairing:false (stays locked down)", () => {
+    const result = migrateAccess({ dmPolicy: 'allowlist', allowFrom: ['1'] })
+    expect(result.dmPolicy).toBe('allowlist')
+    expect(result.pairing).toBe(false)
+  })
+
+  test("legacy 'open' → open + pairing:false (pairing ignored for open)", () => {
+    expect(migrateAccess({ dmPolicy: 'open' })).toMatchObject({ dmPolicy: 'open', pairing: false })
+  })
+
+  test("legacy 'disabled' → disabled + pairing:false", () => {
+    expect(migrateAccess({ dmPolicy: 'disabled' })).toMatchObject({ dmPolicy: 'disabled', pairing: false })
+  })
+
+  test('new-format file (explicit pairing) is preserved as-is', () => {
+    expect(migrateAccess({ dmPolicy: 'allowlist', pairing: true })).toMatchObject({ dmPolicy: 'allowlist', pairing: true })
+    expect(migrateAccess({ dmPolicy: 'allowlist', pairing: false })).toMatchObject({ dmPolicy: 'allowlist', pairing: false })
+  })
+
+  test('empty object → allowlist + pairing:false (locked, no accidental minting)', () => {
+    expect(migrateAccess({})).toMatchObject({ dmPolicy: 'allowlist', pairing: false })
+  })
+
+  test('brand-new agent (ENOENT default) → allowlist + pairing:true (capture owner id)', () => {
+    // defaultAccess is the ENOENT/new-agent path, distinct from migrating an
+    // existing file — it opts pairing ON so onboarding works.
+    expect(defaultAccess()).toMatchObject({ dmPolicy: 'allowlist', pairing: true })
+  })
+})
+
 describe('saveAccess()', () => {
   let tmpDir: string
 
@@ -96,7 +135,8 @@ describe('saveAccess()', () => {
 
   test('output is valid JSON with correct shape', () => {
     const access: Access = {
-      dmPolicy: 'pairing',
+      dmPolicy: 'allowlist',
+      pairing: true,
       allowFrom: ['111'],
       groups: {},
       pending: {
@@ -112,7 +152,8 @@ describe('saveAccess()', () => {
     saveAccess(tmpDir, access)
     const raw = fs.readFileSync(path.join(tmpDir, 'access.json'), 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.dmPolicy).toBe('pairing')
+    expect(parsed.dmPolicy).toBe('allowlist')
+    expect(parsed.pairing).toBe(true)
     expect(parsed.allowFrom).toEqual(['111'])
     expect(Object.keys(parsed.pending)).toContain('abc123')
     // Should be pretty-printed (has newlines)

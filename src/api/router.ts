@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { randomUUID, createHash, randomBytes } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as os from 'os';
@@ -116,44 +116,6 @@ async function verifyTelegramToken(token: string): Promise<string | null> {
     const json = await res.json() as { ok: boolean; result?: { username?: string } };
     return (json.ok && json.result?.username) ? json.result.username : null;
   } catch {
-    return null;
-  }
-}
-
-/**
- * Non-blocking Telegram getUpdates check.
- * Returns match details + nextOffset on code match, { nextOffset } on no match, null on error.
- * Always advancing the offset ensures we never re-process seen messages across poll calls.
- */
-async function checkTelegramCode(
-  token: string,
-  expectedCode: string,
-  offset: number,
-): Promise<{ found: true; chatId: string; senderId: string; nextOffset: number } | { found: false; nextOffset: number } | null> {
-  try {
-    interface TgUpdate {
-      update_id: number;
-      message?: { from?: { id: number }; chat: { id: number; type: string }; text?: string };
-    }
-    const url = `${TELEGRAM_API_BASE}/bot${token}/getUpdates?offset=${offset}&timeout=0&limit=100`;
-    const res = await fetch(url);
-    const data = await res.json() as { ok: boolean; result: TgUpdate[] };
-    if (!data.ok) return null;
-    let nextOffset = offset;
-    for (const upd of data.result) {
-      nextOffset = upd.update_id + 1;
-      if (
-        upd.message?.chat.type === 'private' &&
-        upd.message.text?.trim().toUpperCase() === expectedCode.toUpperCase()
-      ) {
-        const chatId = String(upd.message.chat.id);
-        const senderId = upd.message.from ? String(upd.message.from.id) : chatId;
-        return { found: true, chatId, senderId, nextOffset };
-      }
-    }
-    return { found: false, nextOffset };
-  } catch (err) {
-    console.error('[wizard/verify] getUpdates failed:', (err as Error).message);
     return null;
   }
 }
@@ -525,6 +487,8 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
+        // Orthogonal pairing toggle (mirrors line_pairing below). Absent ⇒ on.
+        telegram_pairing: cfg.telegram?.botToken ? readTelegramAccess(id).pairing : null,
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
         line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${id}` : null,
@@ -694,7 +658,11 @@ export function createApiRouter(
   }
 
   type TelegramAccess = {
-    dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+    dmPolicy: 'open' | 'allowlist' | 'disabled';
+    // Orthogonal pairing toggle (mirrors LINE). Meaningful only when
+    // dmPolicy === 'allowlist'. Kept in sync with the runtime shape in
+    // mcp/tools/telegram/pure.ts (migrateAccess).
+    pairing: boolean;
     allowFrom: string[];
     groups: Record<string, unknown>;
     pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }>;
@@ -704,15 +672,37 @@ export function createApiRouter(
     const accessFile = path.join(getTelegramStateDir(agentId), 'access.json');
     try {
       const raw = fs.readFileSync(accessFile, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<TelegramAccess>;
+      const parsed = JSON.parse(raw) as {
+        dmPolicy?: string;
+        pairing?: boolean;
+        allowFrom?: string[];
+        groups?: Record<string, unknown>;
+        pending?: TelegramAccess['pending'];
+      };
+      // Migrate the legacy 4-value dmPolicy (pairing folded in) to the split
+      // model. SECURITY: a legacy 'allowlist' file was locked down → pairing:false
+      // (an absent pairing on an existing file means pre-split); 'pairing' → mint on.
+      // Mirrors migrateAccess() in mcp/tools/telegram/pure.ts — keep in sync.
+      const legacy = parsed.dmPolicy;
+      let dmPolicy: TelegramAccess['dmPolicy'];
+      let pairing: boolean;
+      if (legacy === 'pairing') {
+        dmPolicy = 'allowlist';
+        pairing = true;
+      } else {
+        dmPolicy = (legacy as TelegramAccess['dmPolicy']) ?? 'allowlist';
+        pairing = parsed.pairing ?? false;
+      }
       return {
-        dmPolicy: parsed.dmPolicy ?? 'pairing',
+        dmPolicy,
+        pairing,
         allowFrom: parsed.allowFrom ?? [],
         groups: parsed.groups ?? {},
         pending: parsed.pending ?? {},
       };
     } catch {
-      return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} };
+      // Brand-new agent (no file): closed base + pairing on (capture owner id).
+      return { dmPolicy: 'allowlist', pairing: true, allowFrom: [], groups: {}, pending: {} };
     }
   }
 
@@ -996,104 +986,46 @@ export function createApiRouter(
       }
     }
 
-    const pairingCode = randomBytes(3).toString('hex').toUpperCase();
-    wizardStore.update(wizardId, {
-      step: 'pairing',
-      channel: channel as 'telegram' | 'discord',
-      botToken,
-      pairingCode,
-      updateOffset: 0,
-    });
-
-    res.json({
-      channel,
-      botName,
-      pairingCode,
-      instruction: `Send this code as a DM to ${botName} to complete pairing`,
-    });
-  });
-
-  /**
-   * POST /api/v1/agents/wizard/:wizardId/channel/verify
-   * Poll for pairing code. Client polls this endpoint until { success: true }.
-   */
-  router.post('/v1/agents/wizard/:wizardId/channel/verify', auth, async (req: Request, res: Response) => {
-    const apiKey = (req as AuthedRequest).apiKey;
-    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    // Token-only connect: persist the bot token to the agent config now. The
+    // wizard no longer mints/relays a pairing code — pairing is incoming-first
+    // and happens later on the edit-page Channels card (user DMs the bot → code
+    // lands in Pending → admin approves). This mirrors the LINE flow.
     if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
-
-    const { wizardId } = req.params as { wizardId: string };
-    const wizard = wizardStore.get(wizardId);
-    if (!wizard) { res.status(404).json({ error: 'Wizard not found or expired' }); return; }
-    if (wizard.step !== 'pairing') { res.status(409).json({ error: `Expected step 'pairing', got '${wizard.step}'` }); return; }
-
-    if (wizard.channel !== 'telegram') {
-      res.status(501).json({ error: 'Discord pairing verification via API is not yet supported' });
-      return;
-    }
-
-    const result = await checkTelegramCode(
-      wizard.botToken!,
-      wizard.pairingCode!,
-      wizard.updateOffset ?? 0,
-    );
-
-    // Always advance offset on non-error responses to avoid re-processing seen messages
-    if (!result) {
-      // Network/API error — keep current offset; client may retry
-      res.json({ success: false, pending: true });
-      return;
-    }
-    if (!result.found) {
-      wizardStore.update(wizardId, { updateOffset: result.nextOffset });
-      res.json({ success: false, pending: true });
-      return;
-    }
-
-    // Code matched — commit config first, then advance offset so a retry can still succeed
-    // if the config write failed mid-way
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === wizard.agentId);
-        if (agent) agent.telegram = { botToken: wizard.botToken };
+        if (agent) {
+          if (channel === 'telegram') agent.telegram = { botToken };
+          else agent.discord = { botToken };
+        }
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to update config: ${(err as Error).message}` });
       return;
     }
 
-    wizardStore.update(wizardId, { updateOffset: result.nextOffset, step: 'complete' });
+    wizardStore.update(wizardId, {
+      step: 'complete',
+      channel: channel as 'telegram' | 'discord',
+      botToken,
+    });
 
-    const agentsBase = getAgentsBaseDir();
-    const telegramStateDir = path.join(agentsBase, wizard.agentId, 'workspace', '.telegram-state');
-    try {
-      fs.mkdirSync(telegramStateDir, { recursive: true });
-      const access = JSON.stringify(
-        { dmPolicy: 'allowlist', allowFrom: [result.senderId], groups: {}, pending: {} },
-        null, 2,
-      );
-      await fsp.writeFile(path.join(telegramStateDir, 'access.json'), access, { mode: 0o600 });
-    } catch (err) {
-      console.error(`[wizard] access.json write failed for '${wizard.agentId}': ${(err as Error).message}`);
-    }
-
-    try {
-      await fetch(`${TELEGRAM_API_BASE}/bot${wizard.botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: result.chatId, text: "You're connected! Send me a message to get started." }),
-      });
-    } catch { /* non-fatal */ }
-
-    // Hot-start the receiver so the agent responds immediately without a gateway restart
+    // Hot-start the receiver so the bot comes online immediately without a
+    // gateway restart. The first DM from the owner then produces a pairing code
+    // they approve on the edit-page Channels card.
     const runner = agentRunners.get(wizard.agentId!);
     if (runner) {
-      runner.updateAgentConfig({ ...runner.getAgentConfig(), telegram: { botToken: wizard.botToken! } });
-      runner.startTelegramReceiver();
+      const base = runner.getAgentConfig();
+      if (channel === 'telegram') {
+        runner.updateAgentConfig({ ...base, telegram: { botToken } });
+        runner.startTelegramReceiver();
+      } else {
+        runner.updateAgentConfig({ ...base, discord: { botToken } });
+        runner.startDiscordReceiver();
+      }
     }
 
-    wizardStore.delete(wizardId);
-    res.json({ success: true, agentId: wizard.agentId });
+    res.json({ channel, botName, connected: true });
   });
 
   /**
@@ -1521,25 +1453,36 @@ export function createApiRouter(
 
   /**
    * PATCH /api/v1/agents/:agentId/telegram/policy
-   * Update the Telegram DM policy for an agent.
+   * Update the Telegram DM policy and/or the orthogonal pairing toggle.
+   * Body: { dmPolicy?: 'open'|'allowlist'|'disabled', pairing?: boolean }.
+   * At least one field must be present; each is applied only if provided.
    */
   router.patch('/v1/agents/:agentId/telegram/policy', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    const { dmPolicy } = req.body as { dmPolicy?: string };
-    const valid = ['open', 'pairing', 'allowlist', 'disabled'];
-    if (!dmPolicy || !valid.includes(dmPolicy)) { res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return; }
+    const { dmPolicy, pairing } = req.body as { dmPolicy?: string; pairing?: boolean };
+    const valid = ['open', 'allowlist', 'disabled'];
+    if (dmPolicy !== undefined && !valid.includes(dmPolicy)) {
+      res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return;
+    }
+    if (pairing !== undefined && typeof pairing !== 'boolean') {
+      res.status(400).json({ error: 'pairing must be a boolean' }); return;
+    }
+    if (dmPolicy === undefined && pairing === undefined) {
+      res.status(400).json({ error: 'provide dmPolicy and/or pairing' }); return;
+    }
     const access = readTelegramAccess(agentId);
-    access.dmPolicy = dmPolicy as TelegramAccess['dmPolicy'];
+    if (dmPolicy !== undefined) access.dmPolicy = dmPolicy as TelegramAccess['dmPolicy'];
+    if (pairing !== undefined) access.pairing = pairing;
     try {
       writeTelegramAccess(agentId, access);
     } catch (err) {
       res.status(500).json({ error: `Failed to update policy: ${(err as Error).message}` });
       return;
     }
-    res.json({ ok: true, dmPolicy });
+    res.json({ ok: true, dmPolicy: access.dmPolicy, pairing: access.pairing });
   });
 
   /**

@@ -26,8 +26,8 @@ function makeAgentState(baseDir: string, agentId: string) {
   fs.mkdirSync(stateDir, { recursive: true })
   fs.mkdirSync(approvedDir, { recursive: true })
 
+  // defaultAccess() is already pairing mode (dmPolicy:'allowlist' + pairing:true).
   const initialAccess = defaultAccess()
-  initialAccess.dmPolicy = 'pairing'
   saveAccess(stateDir, initialAccess)
 
   const loadAccess = () => readAccessFile(accessFile)

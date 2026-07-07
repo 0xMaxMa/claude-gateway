@@ -30,7 +30,7 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager } from './typing'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { hasMarkdown, toTelegramHtml } from './pure'
+import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -134,7 +134,11 @@ type GroupPolicy = {
 }
 
 type Access = {
-  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled'
+  dmPolicy: 'open' | 'allowlist' | 'disabled'
+  // Orthogonal pairing toggle (mirrors LINE). Only meaningful when
+  // dmPolicy === 'allowlist': true ⇒ unknown senders get a one-time code and
+  // land in pending; false ⇒ silently dropped (pure allowlist).
+  pairing: boolean
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
@@ -152,7 +156,8 @@ type Access = {
 
 function defaultAccess(): Access {
   return {
-    dmPolicy: 'pairing',
+    dmPolicy: 'allowlist',
+    pairing: true,
     allowFrom: [],
     groups: {},
     pending: {},
@@ -181,18 +186,8 @@ function assertSendable(f: string): void {
 function readAccessFile(): Access {
   try {
     const raw = readFileSync(ACCESS_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-    }
+    const parsed = JSON.parse(raw) as Partial<Access> & { dmPolicy?: string }
+    return migrateAccess(parsed) as Access
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
     try {
@@ -287,7 +282,9 @@ function gate(ctx: Context): GateResult {
       return { action: 'deliver', access }
     }
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    // Base policy is 'allowlist' ('open'/'disabled' handled above). Pairing is
+    // the orthogonal toggle: off ⇒ pure allowlist (drop strangers, no code).
+    if (!access.pairing) return { action: 'drop' }
 
     // pairing mode — check for existing non-expired code for this sender
     for (const [code, p] of Object.entries(access.pending)) {
@@ -767,9 +764,15 @@ async function handleInbound(
   if (result.action === 'drop') return
 
   if (result.action === 'pair') {
-    const lead = result.isResend ? 'Still pending' : 'Pairing required'
+    // LINE-style: hand the user their code and let the admin approve it from
+    // the web UI. The user does NOT run any command (they may not have Claude
+    // Code at all) — they just report the code to the admin, who verifies it
+    // matches what's shown in Pending and clicks Approve.
+    const lead = result.isResend
+      ? 'Still waiting for approval.'
+      : 'This bot is private.'
     await ctx.reply(
-      `${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`,
+      `${lead}\n\nYour pairing code: ${result.code}\n\nShare this code with the admin to get access.`,
     )
     return
   }
@@ -921,11 +924,11 @@ bot.command('start', async ctx => {
     return
   }
   await ctx.reply(
-    `This bot bridges Telegram to a Claude Code session.\n\n` +
-    `To pair:\n` +
-    `1. DM me anything — you'll get a 6-char code\n` +
-    `2. In Claude Code: /telegram:access pair <code>\n\n` +
-    `After that, DMs here reach that session.`
+    `This bot is private.\n\n` +
+    `To get access:\n` +
+    `1. DM me anything — you'll get a 6-char pairing code\n` +
+    `2. Share that code with the admin, who approves you\n\n` +
+    `After that, your DMs here reach the assistant.`
   )
 })
 
@@ -969,7 +972,7 @@ bot.command('status', async ctx => {
   for (const [code, p] of Object.entries(access.pending)) {
     if (p.senderId === senderId) {
       await ctx.reply(
-        `Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`
+        `Pending approval.\n\nYour pairing code: ${code}\n\nShare it with the admin to get access.`
       )
       return
     }

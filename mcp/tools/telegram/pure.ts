@@ -17,7 +17,12 @@ export type GroupPolicy = {
 }
 
 export type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
+  dmPolicy: 'open' | 'allowlist' | 'disabled'
+  // Orthogonal to dmPolicy (mirrors LINE): when the base policy is 'allowlist',
+  // `pairing: true` means an unknown sender gets a one-time code and lands in
+  // pending for the admin to approve; `pairing: false` means they're silently
+  // dropped (pure allowlist). Ignored when dmPolicy is 'open'/'disabled'.
+  pairing: boolean
   allowFrom: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
@@ -28,12 +33,62 @@ export type Access = {
   chunkMode?: 'length' | 'newline'
 }
 
+// Default for a brand-new agent (no access.json yet): closed base + pairing on,
+// so the owner can DM the bot and capture their own id via a code. This matches
+// the pre-split behavior where a missing file defaulted to dmPolicy:'pairing'.
 export function defaultAccess(): Access {
   return {
-    dmPolicy: 'pairing',
+    dmPolicy: 'allowlist',
+    pairing: true,
     allowFrom: [],
     groups: {},
     pending: {},
+  }
+}
+
+/**
+ * Normalize a parsed access.json into the current shape, migrating the legacy
+ * 4-value dmPolicy (which folded pairing in) to the split model.
+ *
+ * SECURITY: a legacy `allowlist` file was deliberately locked down — it must
+ * migrate to `pairing:false`, NOT true, or it would start minting codes for
+ * strangers. `pairing ?? true` is only correct for the brand-new/ENOENT path
+ * (see defaultAccess). Here an absent `pairing` on an existing file means a
+ * pre-split file → pairing off.
+ */
+export function migrateAccess(parsed: {
+  dmPolicy?: string
+  pairing?: boolean
+  allowFrom?: string[]
+  groups?: Record<string, GroupPolicy>
+  pending?: Record<string, PendingEntry>
+  mentionPatterns?: string[]
+  ackReaction?: string
+  replyToMode?: 'off' | 'first' | 'all'
+  textChunkLimit?: number
+  chunkMode?: 'length' | 'newline'
+}): Access {
+  const legacy = parsed.dmPolicy
+  let dmPolicy: Access['dmPolicy']
+  let pairing: boolean
+  if (legacy === 'pairing') {
+    dmPolicy = 'allowlist'
+    pairing = true
+  } else {
+    dmPolicy = (legacy as Access['dmPolicy']) ?? 'allowlist'
+    pairing = parsed.pairing ?? false
+  }
+  return {
+    dmPolicy,
+    pairing,
+    allowFrom: parsed.allowFrom ?? [],
+    groups: parsed.groups ?? {},
+    pending: parsed.pending ?? {},
+    mentionPatterns: parsed.mentionPatterns,
+    ackReaction: parsed.ackReaction,
+    replyToMode: parsed.replyToMode,
+    textChunkLimit: parsed.textChunkLimit,
+    chunkMode: parsed.chunkMode,
   }
 }
 
@@ -81,18 +136,8 @@ import { join } from 'path'
 export function readAccessFile(accessFile: string): Access {
   try {
     const raw = readFileSync(accessFile, 'utf8')
-    const parsed = JSON.parse(raw) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-    }
+    const parsed = JSON.parse(raw) as Partial<Access> & { dmPolicy?: string }
+    return migrateAccess(parsed)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
     try {
@@ -149,8 +194,17 @@ export function gateLogic(
   const chatType = input.chatType
 
   if (chatType === 'private') {
+    if (access.dmPolicy === 'open') {
+      if (!access.allowFrom.includes(senderId)) {
+        access.allowFrom.push(senderId)
+        saveAccessFn(access)
+      }
+      return { action: 'deliver', access }
+    }
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    // Base policy is 'allowlist' ('disabled' already dropped above). Pairing is
+    // the orthogonal toggle: off ⇒ pure allowlist (drop strangers, no code).
+    if (!access.pairing) return { action: 'drop' }
 
     // pairing mode
     for (const [code, p] of Object.entries(access.pending)) {

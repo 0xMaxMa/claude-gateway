@@ -26,8 +26,8 @@ describe('gate() — DM (private chat)', () => {
     expect(result.action).toBe('drop')
   })
 
-  test('drop — dmPolicy: allowlist, sender not in allowFrom', () => {
-    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ dmPolicy: 'allowlist', allowFrom: ['999'] })
+  test('drop — dmPolicy: allowlist + pairing off, sender not in allowFrom', () => {
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ dmPolicy: 'allowlist', pairing: false, allowFrom: ['999'] })
     const input: GateInput = { fromId: '123', chatType: 'private', chatId: '123' }
     const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
     expect(result.action).toBe('drop')
@@ -40,15 +40,15 @@ describe('gate() — DM (private chat)', () => {
     expect(result.action).toBe('deliver')
   })
 
-  test('deliver — sender in allowFrom (pairing policy)', () => {
-    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ dmPolicy: 'pairing', allowFrom: ['123'] })
+  test('deliver — sender in allowFrom (pairing on)', () => {
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ dmPolicy: 'allowlist', pairing: true, allowFrom: ['123'] })
     const input: GateInput = { fromId: '123', chatType: 'private', chatId: '123' }
     const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
     expect(result.action).toBe('deliver')
   })
 
-  test('pair — new sender, dmPolicy: pairing → code generated + saved to pending', () => {
-    const { loadAccess, saveAccessFn, generateCode, getAccess } = makeGateHelpers({ dmPolicy: 'pairing' })
+  test('pair — new sender, allowlist + pairing on → code generated + saved to pending', () => {
+    const { loadAccess, saveAccessFn, generateCode, getAccess } = makeGateHelpers({ dmPolicy: 'allowlist', pairing: true })
     const input: GateInput = { fromId: '123', chatType: 'private', chatId: '123' }
     const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
     expect(result.action).toBe('pair')
@@ -65,7 +65,8 @@ describe('gate() — DM (private chat)', () => {
   test('pair — isResend: true when sender has existing pending code', () => {
     const now = Date.now()
     const initial: Partial<Access> = {
-      dmPolicy: 'pairing',
+      dmPolicy: 'allowlist',
+      pairing: true,
       pending: {
         existingCode: {
           senderId: '123',
@@ -89,7 +90,8 @@ describe('gate() — DM (private chat)', () => {
   test('drop — replies >= 2 (silent cap after 2 reminders)', () => {
     const now = Date.now()
     const initial: Partial<Access> = {
-      dmPolicy: 'pairing',
+      dmPolicy: 'allowlist',
+      pairing: true,
       pending: {
         someCode: {
           senderId: '123',
@@ -109,7 +111,8 @@ describe('gate() — DM (private chat)', () => {
   test('drop — pending count >= 3 (anti-spam cap)', () => {
     const now = Date.now()
     const initial: Partial<Access> = {
-      dmPolicy: 'pairing',
+      dmPolicy: 'allowlist',
+      pairing: true,
       pending: {
         c1: { senderId: '1', chatId: '1', createdAt: now, expiresAt: now + 3600000, replies: 1 },
         c2: { senderId: '2', chatId: '2', createdAt: now, expiresAt: now + 3600000, replies: 1 },
@@ -126,7 +129,8 @@ describe('gate() — DM (private chat)', () => {
   test('pruneExpired — removes expired pending entries before gate check', () => {
     const now = Date.now()
     const initial: Partial<Access> = {
-      dmPolicy: 'pairing',
+      dmPolicy: 'allowlist',
+      pairing: true,
       pending: {
         expired1: { senderId: '1', chatId: '1', createdAt: now - 9999, expiresAt: now - 1, replies: 2 },
         expired2: { senderId: '2', chatId: '2', createdAt: now - 9999, expiresAt: now - 1, replies: 2 },

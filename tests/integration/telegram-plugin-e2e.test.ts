@@ -58,7 +58,7 @@ describe('Plugin E2E', () => {
 
   describe('Pairing flow', () => {
     test('new user sends message → gate produces pair result with code', () => {
-      const { loadAccess, saveAccessFn, generateCode, accessFile } = makeGateHelpers(tmpDir, { dmPolicy: 'pairing' })
+      const { loadAccess, saveAccessFn, generateCode, accessFile } = makeGateHelpers(tmpDir, { dmPolicy: 'allowlist', pairing: true })
       const result = gateLogic(
         { fromId: '111', chatType: 'private', chatId: '111' },
         loadAccess, saveAccessFn, generateCode
@@ -76,7 +76,8 @@ describe('Plugin E2E', () => {
     test('isResend: second message from same pending user → pair with isResend=true', () => {
       const now = Date.now()
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
-        dmPolicy: 'pairing',
+        dmPolicy: 'allowlist',
+        pairing: true,
         pending: {
           code01: { senderId: '111', chatId: '111', createdAt: now - 1000, expiresAt: now + 3600000, replies: 1 },
         },
@@ -94,7 +95,8 @@ describe('Plugin E2E', () => {
     test('third+ message from pending user → silent drop (replies cap)', () => {
       const now = Date.now()
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
-        dmPolicy: 'pairing',
+        dmPolicy: 'allowlist',
+        pairing: true,
         pending: {
           code01: { senderId: '111', chatId: '111', createdAt: now - 1000, expiresAt: now + 3600000, replies: 2 },
         },
@@ -109,7 +111,8 @@ describe('Plugin E2E', () => {
     test('max 3 pending: 4th new user → silent drop', () => {
       const now = Date.now()
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
-        dmPolicy: 'pairing',
+        dmPolicy: 'allowlist',
+        pairing: true,
         pending: {
           c1: { senderId: '1', chatId: '1', createdAt: now, expiresAt: now + 3600000, replies: 1 },
           c2: { senderId: '2', chatId: '2', createdAt: now, expiresAt: now + 3600000, replies: 1 },
@@ -176,6 +179,7 @@ describe('Plugin E2E', () => {
     test('non-allowlisted sender → no deliver (drop)', () => {
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
         dmPolicy: 'allowlist',
+        pairing: false,
         allowFrom: ['user1'],
       })
       const result = gateLogic(
@@ -185,9 +189,10 @@ describe('Plugin E2E', () => {
       expect(result.action).toBe('drop')
     })
 
-    test('dmPolicy: allowlist → non-allowlisted dropped silently', () => {
+    test('dmPolicy: allowlist + pairing off → non-allowlisted dropped silently', () => {
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
         dmPolicy: 'allowlist',
+        pairing: false,
       })
       const result = gateLogic(
         { fromId: 'anyone', chatType: 'private', chatId: 'anyone' },
