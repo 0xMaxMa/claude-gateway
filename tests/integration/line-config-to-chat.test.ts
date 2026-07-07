@@ -29,6 +29,7 @@ import { createWebhooksRouter } from '../../src/api/webhooks-router';
 import { getPendingSenders, _resetPendingSenders } from '../../src/api/line-pending-senders';
 import { AgentConfig, ApiKey } from '../../src/types';
 import type { AgentRunner } from '../../src/agent/runner';
+import { waitFor } from '../helpers/wait-for';
 
 const AGENT_ID = 'baerbel';
 const ADMIN = { Authorization: 'Bearer sk-admin' };
@@ -158,7 +159,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
     expect(ok.status).toBe(200);
 
     // Intake forwarded to the agent's /channel (async after ack).
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => intake.length >= 1, 5000);
     expect(intake).toHaveLength(1);
     const post = intake[0] as { content: string; meta: Record<string, string> };
     expect(post.content).toBe('สวัสดีจาก LINE');
@@ -232,7 +233,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
       expect(res.status).toBe(200); // webhook is always ack'd
 
       // Async gate work settles: not forwarded, but recorded on the knock list.
-      await new Promise((r) => setTimeout(r, 300));
+      await waitFor(() => getPendingSenders(AGENT_ID).some((s) => s.userId === KNOCKER_ID), 5000);
       expect(intake).toHaveLength(0);
       expect(getPendingSenders(AGENT_ID).map((s) => s.userId)).toContain(KNOCKER_ID);
     } finally {

@@ -8,6 +8,7 @@ import {
   AGENT_WRITABLE_FILES,
   MissingRequiredFileError,
 } from '../../src/agent/workspace-loader';
+import { waitFor } from '../helpers/wait-for';
 
 const FIXTURES = path.join(__dirname, '../fixtures/workspaces');
 
@@ -259,13 +260,15 @@ describe('workspace-loader', () => {
 
       try {
         // Wait for watcher to initialize
-        await new Promise((r) => setTimeout(r, 500));
+        await handle.ready;
 
         // Write a lowercase soul.md — watcher should auto-rename it
         fs.writeFileSync(path.join(tmpDir, 'soul.md'), '# Soul\nContent');
 
-        // Wait for debounce + rename (300ms debounce + generous buffer for loaded CI)
-        await new Promise((r) => setTimeout(r, 3000));
+        // The rename happens synchronously in onAddSync (before the debounce),
+        // but onChange/changeCount only fires after the debounce timer — poll
+        // on changeCount, not on SOUL.md's existence, or this resolves too early.
+        await waitFor(() => changeCount > 0, 5000);
 
         // onChange should have fired
         expect(changeCount).toBeGreaterThan(0);
@@ -306,9 +309,9 @@ describe('workspace-loader', () => {
       const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
 
       try {
-        await new Promise((r) => setTimeout(r, 500));
+        await handle.ready;
         fs.writeFileSync(path.join(tmpDir, 'MEMORY.md'), 'updated by agent');
-        await new Promise((r) => setTimeout(r, 1500));
+        await waitFor(() => batches.flat().includes('MEMORY.md'), 5000);
 
         const all = batches.flat();
         expect(all).toContain('MEMORY.md');
@@ -342,17 +345,19 @@ describe('workspace-loader', () => {
       const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
 
       try {
-        await new Promise((r) => setTimeout(r, 600));
+        await handle.ready;
 
         // Churn deep inside .telegram-state — must be invisible to the watcher.
         fs.writeFileSync(path.join(typingDir, 'chat.json'), 'updated');
         fs.writeFileSync(path.join(typingDir, 'new.json'), 'new');
+        // Absence assertion — no observable positive condition to poll for,
+        // so this stays a fixed wait (safe direction: only risk is a false pass).
         await new Promise((r) => setTimeout(r, 1200));
         expect(batches.flat()).toHaveLength(0);
 
         // Sanity: top-level *.md still fires, so the watcher is alive.
         fs.writeFileSync(path.join(tmpDir, 'MEMORY.md'), 'top-level change');
-        await new Promise((r) => setTimeout(r, 1500));
+        await waitFor(() => batches.flat().includes('MEMORY.md'), 5000);
         expect(batches.flat()).toContain('MEMORY.md');
       } finally {
         handle.close();
@@ -377,16 +382,18 @@ describe('workspace-loader', () => {
       const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
 
       try {
-        await new Promise((r) => setTimeout(r, 600));
+        await handle.ready;
 
         // A top-level dotfile that the *.md glob matches — must be ignored.
         fs.writeFileSync(path.join(tmpDir, '.scratch.md'), 'noise');
+        // Absence assertion — no observable positive condition to poll for,
+        // so this stays a fixed wait (safe direction: only risk is a false pass).
         await new Promise((r) => setTimeout(r, 1000));
         expect(batches.flat()).toHaveLength(0);
 
         // Sanity: a normal top-level *.md still fires.
         fs.writeFileSync(path.join(tmpDir, 'USER.md'), 'real change');
-        await new Promise((r) => setTimeout(r, 1500));
+        await waitFor(() => batches.flat().includes('USER.md'), 5000);
         expect(batches.flat()).toContain('USER.md');
       } finally {
         handle.close();

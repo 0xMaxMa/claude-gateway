@@ -264,7 +264,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     // MCP handshake
     const initResponse = mcp.wait<any>(
       m => (m as any).id === 1 && (m as any).result?.serverInfo !== undefined,
-      10000,
+      20000,
     )
     writeMcp(proc, {
       jsonrpc: '2.0',
@@ -280,8 +280,8 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     writeMcp(proc, { jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
 
     // Wait for bot to start polling (getMe is a reliable signal)
-    await mock.waitForCall('getMe', 0, 10000)
-  }, 30000)
+    await mock.waitForCall('getMe', 0, 20000)
+  }, 45000)
 
   afterAll(async () => {
     try { proc?.kill('SIGTERM') } catch {}
@@ -293,7 +293,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
 
   test('tools/list returns reply, react, download_attachment, edit_message', async () => {
     const id = nextId()
-    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result?.tools, 5000)
+    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result?.tools, 15000)
     writeMcp(proc, { jsonrpc: '2.0', id, method: 'tools/list', params: {} })
     const result = await res
     const names: string[] = result.result.tools.map((t: any) => t.name)
@@ -301,7 +301,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     expect(names).toContain('react')
     expect(names).toContain('download_attachment')
     expect(names).toContain('edit_message')
-  }, 10000)
+  }, 20000)
 
   // ── test 2 ──────────────────────────────────────────────────────────────
 
@@ -321,7 +321,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     })
 
     // Typing indicator must arrive on Telegram API
-    const typingCall = await mock.waitForCall('sendChatAction', t0, 10000)
+    const typingCall = await mock.waitForCall('sendChatAction', t0, 20000)
     expect(typingCall.body['action']).toBe('typing')
     expect(String(typingCall.body['chat_id'])).toBe(USER_ID)
 
@@ -329,12 +329,12 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const notification = await mcp.wait<any>(
       m => (m as any).method === 'notifications/claude/channel' &&
            (m as any).params?.meta?.chat_id === USER_ID,
-      10000,
+      20000,
     )
     expect(notification.params.content).toBe('hello plugin')
     expect(notification.params.meta.user).toBe('tester')
     expect(notification.params.meta.message_id).toBe('42')
-  }, 15000)
+  }, 30000)
 
   // ── test 3 ──────────────────────────────────────────────────────────────
 
@@ -342,7 +342,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const t0 = Date.now()
     const id = nextId()
 
-    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result, 8000)
+    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result, 20000)
     writeMcp(proc, {
       jsonrpc: '2.0',
       id,
@@ -357,10 +357,10 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     expect(result.result.isError).toBeFalsy()
     expect(result.result.content[0].text).toMatch(/sent/)
 
-    const sendCall = await mock.waitForCall('sendMessage', t0, 5000)
+    const sendCall = await mock.waitForCall('sendMessage', t0, 20000)
     expect(String(sendCall.body['chat_id'])).toBe(USER_ID)
     expect(sendCall.body['text']).toBe('hello from jest test')
-  }, 15000)
+  }, 30000)
 
   // ── test 4 ──────────────────────────────────────────────────────────────
 
@@ -368,7 +368,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const t0 = Date.now()
     const id = nextId()
 
-    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result, 5000)
+    const res = mcp.wait<any>(m => (m as any).id === id && (m as any).result, 20000)
     writeMcp(proc, {
       jsonrpc: '2.0',
       id,
@@ -388,7 +388,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const stray = mock.calls.find(c => c.method === 'sendMessage' && c.ts >= t0 &&
       String(c.body['chat_id']) === '999888777')
     expect(stray).toBeUndefined()
-  }, 10000)
+  }, 30000)
 
   // ── test 5 ──────────────────────────────────────────────────────────────
 
@@ -422,5 +422,5 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
                   m.params?.meta?.chat_id === String(unknownId)
     )
     expect(notifForStranger).toBeUndefined()
-  }, 10000)
+  }, 15000)
 })

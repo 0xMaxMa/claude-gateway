@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createWatcher } from '../../src/watch/factory';
+import { waitFor } from '../helpers/wait-for';
 
 let tmpDir: string;
 
@@ -32,9 +33,9 @@ describe('createWatcher', () => {
       onChange: () => { count++; },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     fs.writeFileSync(path.join(tmpDir, 'new.md'), 'hello');
-    await new Promise(r => setTimeout(r, 300));
+    await waitFor(() => count >= 1, 5000);
 
     await handle.close();
     expect(count).toBeGreaterThanOrEqual(1);
@@ -51,9 +52,9 @@ describe('createWatcher', () => {
       onChange: () => { count++; },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     fs.writeFileSync(filePath, 'updated');
-    await new Promise(r => setTimeout(r, 300));
+    await waitFor(() => count >= 1, 5000);
 
     await handle.close();
     expect(count).toBeGreaterThanOrEqual(1);
@@ -70,9 +71,9 @@ describe('createWatcher', () => {
       onChange: () => { count++; },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     fs.rmSync(filePath);
-    await new Promise(r => setTimeout(r, 300));
+    await waitFor(() => count >= 1, 5000);
 
     await handle.close();
     expect(count).toBeGreaterThanOrEqual(1);
@@ -80,17 +81,21 @@ describe('createWatcher', () => {
 
   test('WF4: debounces rapid changes into fewer calls', async () => {
     let count = 0;
+    const debounceMs = 200;
     const handle = createWatcher({
       paths: [path.join(tmpDir, '*.md')],
-      debounceMs: 200,
+      debounceMs,
       onChange: () => { count++; },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     for (let i = 0; i < 5; i++) {
       fs.writeFileSync(path.join(tmpDir, `rapid-${i}.md`), 'x');
     }
-    await new Promise(r => setTimeout(r, 800));
+    await waitFor(() => count >= 1, 5000);
+    // Let the debounce window fully settle before asserting the upper bound —
+    // scaled off the configured debounceMs rather than a hardcoded constant.
+    await new Promise(r => setTimeout(r, debounceMs * 4));
 
     await handle.close();
     expect(count).toBeGreaterThanOrEqual(1);
@@ -105,7 +110,7 @@ describe('createWatcher', () => {
       onChange: () => { count++; },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     await handle.close();
 
     // Write after close — should NOT trigger onChange
@@ -123,10 +128,10 @@ describe('createWatcher', () => {
       onChange: (changed) => { batches.push(changed.map(p => path.basename(p))); },
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     fs.writeFileSync(path.join(tmpDir, 'a.md'), 'x');
     fs.writeFileSync(path.join(tmpDir, 'b.md'), 'y');
-    await new Promise(r => setTimeout(r, 600));
+    await waitFor(() => batches.length >= 1, 5000);
 
     await handle.close();
     expect(batches.length).toBeGreaterThanOrEqual(1);
@@ -144,9 +149,9 @@ describe('createWatcher', () => {
       onChange: () => {},
     });
 
-    await new Promise(r => setTimeout(r, 150));
+    await handle.ready;
     fs.writeFileSync(path.join(tmpDir, 'hello.md'), 'x');
-    await new Promise(r => setTimeout(r, 300));
+    await waitFor(() => seen.includes('hello.md'), 5000);
 
     await handle.close();
     expect(seen).toContain('hello.md');

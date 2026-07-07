@@ -895,13 +895,21 @@ const noopLogger = {
  * - extends EventEmitter so `on('output', cb)` and `removeListener` work
  * - exposes `isRunning()` returning true
  */
-function makeMockRunner(): EventEmitter & { sendMessage: jest.Mock; isRunning: () => boolean } {
+function makeMockRunner(): EventEmitter & {
+  sendMessage: jest.Mock;
+  isRunning: () => boolean;
+  getSessionsSummary: () => ReturnType<AgentRunner['getSessionsSummary']>;
+} {
   const emitter = new EventEmitter() as EventEmitter & {
     sendMessage: jest.Mock;
     isRunning: () => boolean;
+    getSessionsSummary: () => ReturnType<AgentRunner['getSessionsSummary']>;
   };
   emitter.sendMessage = jest.fn();
   emitter.isRunning = () => true;
+  // GET /status (gateway-router.ts) calls this unconditionally to build the
+  // per-agent sessions list — without it the route throws and returns 500.
+  emitter.getSessionsSummary = () => [];
   return emitter;
 }
 
@@ -1629,7 +1637,7 @@ describe('Phase 4: watchWorkspace', () => {
 
     try {
       // Give the watcher time to initialise
-      await new Promise((r) => setTimeout(r, 100));
+      await handle.ready;
 
       // Modify a file in the workspace
       fs.writeFileSync(path.join(ws, 'agent.md'), '# Agent\nUpdated content.', 'utf-8');
@@ -1653,7 +1661,7 @@ describe('Phase 4: watchWorkspace', () => {
     });
 
     // Give watcher time to initialise then immediately close it
-    await new Promise((r) => setTimeout(r, 100));
+    await handle.ready;
     handle.close();
 
     // Give close time to take effect

@@ -469,7 +469,7 @@ services:
       expect(started).toBe(6); // every app was started
       expect(maxInFlight).toBeLessThanOrEqual(4); // never exceeded the cap
       expect(maxInFlight).toBeGreaterThan(1); // and it actually parallelised
-    });
+    }, 60000);
   });
 
   // ─── GitHub URL install — validation ─────────────────────────────────────

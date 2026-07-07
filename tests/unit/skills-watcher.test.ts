@@ -117,10 +117,11 @@ describe('Skill File Watcher', () => {
 
   test('W4: debounces multiple rapid changes into fewer calls', async () => {
     let callCount = 0;
+    const debounceMs = 200;
     const watcher = watchSkills({
       dirs: [skillsDir],
       onChange: () => { callCount++; },
-      debounceMs: 200,
+      debounceMs,
       chokidarOpts: TEST_CHOKIDAR_OPTS,
     });
 
@@ -130,9 +131,11 @@ describe('Skill File Watcher', () => {
       writeSkillFile(`rapid-${i}`);
     }
 
-    // Wait for at least one call, then let debounce settle before asserting max
+    // Wait for at least one call, then let the debounce window fully settle
+    // before asserting the upper bound — scaled off debounceMs rather than a
+    // hardcoded constant, so it doesn't go stale if debounceMs changes.
     await pollUntil(() => callCount >= 1);
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, debounceMs * 2));
 
     await watcher.close();
     expect(callCount).toBeGreaterThanOrEqual(1);

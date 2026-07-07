@@ -7,6 +7,7 @@ module.exports = {
   testPathIgnorePatterns: ['/node_modules/', '<rootDir>/tests/e2e/'],
   forceExit: true,
   testTimeout: 30000,
+  maxWorkers: '50%',
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       tsconfig: {
