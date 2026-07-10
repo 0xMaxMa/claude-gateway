@@ -28,7 +28,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
-import { createWorkingStateManager } from './typing'
+import { createWorkingStateManager, drainOrphanForwards } from './typing'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml } from './pure'
 
@@ -1756,6 +1756,21 @@ if (RECEIVER_MODE) {
     }
   }
   setInterval(drainMenuFiles, 1000).unref()
+
+  // Orphan auto-forward delivery: an autonomous wake writes .forward with no
+  // typing loop running, so stop() never drains it. The Discord receiver
+  // already drains .forward from a standalone poller; this mirrors it.
+  // Core logic (skip typing-active chats, remove-before-send, .replied dedup)
+  // lives in typing.ts drainOrphanForwards — unit-tested there.
+  function drainForwardFiles(): void {
+    drainOrphanForwards(
+      TYPING_DIR,
+      typingManager.states,
+      { sendMessage: (cid, t, opts) => bot.api.sendMessage(cid, t, opts) },
+      { existsSync, rmSync, readFileSync, readdirSync },
+    )
+  }
+  setInterval(drainForwardFiles, 1000).unref()
 
   void (async () => {
     for (let attempt = 1; ; attempt++) {

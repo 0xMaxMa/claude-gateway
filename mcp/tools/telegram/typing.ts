@@ -16,27 +16,112 @@
 export const TELEGRAM_MAX_CHARS = 4096
 
 /**
+ * Telegram rejects a message whose HTML entities are unbalanced, so a chunk cut
+ * that falls inside a <pre><code>…</code></pre> block must close the open tags
+ * at the end of the chunk and reopen them at the start of the next one.
+ * Reserve room for that worst-case suffix (</a></code></pre></b></i>) plus the
+ * mirrored reopening prefix so balancing never pushes a chunk past the limit.
+ */
+const HTML_BALANCE_HEADROOM = 64
+
+/** Tags toTelegramHtml() emits — the only ones balancing needs to understand. */
+const BALANCED_TAGS = ['b', 'i', 'code', 'pre', 'a'] as const
+
+/**
+ * Scan an HTML fragment (as produced by toTelegramHtml — no attributes except
+ * <a href>, no self-closing forms) and return the stack of tags still open at
+ * the end, as full opening-tag strings in opening order.
+ */
+export function openTagStack(html: string): string[] {
+  const stack: string[] = []
+  // Attribute part tolerates '>' inside quoted values (<a href="a>b">).
+  const re = /<(\/?)([a-z]+)((?:\s(?:"[^"]*"|[^>])*)?)>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null) {
+    const closing = m[1] === '/'
+    const name = m[2]
+    if (!(BALANCED_TAGS as readonly string[]).includes(name)) continue
+    if (closing) {
+      // toTelegramHtml emits well-nested pairs, so the match is always the top.
+      const top = stack.length - 1
+      if (top >= 0 && /^<([a-z]+)/.exec(stack[top])?.[1] === name) stack.pop()
+    } else {
+      stack.push(`<${name}${m[3] ?? ''}>`)
+    }
+  }
+  return stack
+}
+
+/** Strip Telegram-HTML tags and unescape entities → plain-text equivalent. */
+export function htmlToPlain(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+}
+
+/**
  * Split text into chunks that fit within Telegram's message size limit.
  * Prefers paragraph → line → space boundaries over hard cuts.
- * When htmlSafe=true, avoids cutting inside an HTML tag (e.g. <code>, <b>).
+ * When htmlSafe=true, avoids cutting inside an HTML tag (e.g. <code>, <b>) AND
+ * keeps every chunk entity-balanced: tags left open at a cut are closed at the
+ * chunk's end and reopened at the next chunk's start, so no chunk is ever
+ * rejected by Telegram's HTML parser for an unclosed <pre>/<code>/<b>.
  */
 export function chunkText(text: string, limit = TELEGRAM_MAX_CHARS, htmlSafe = false): string[] {
   if (text.length <= limit) return [text]
   const out: string[] = []
   let rest = text
-  while (rest.length > limit) {
-    const para = rest.lastIndexOf('\n\n', limit)
-    const line = rest.lastIndexOf('\n', limit)
-    const space = rest.lastIndexOf(' ', limit)
-    let cut = para > limit / 2 ? para : line > limit / 2 ? line : space > 0 ? space : limit
+  const effLimit = htmlSafe ? limit - HTML_BALANCE_HEADROOM : limit
+  // If cut lands inside an open tag (<...>), move cut to before the '<'
+  const avoidMidTag = (cut: number): number => {
+    const tagStart = rest.lastIndexOf('<', cut)
+    const tagEnd = rest.lastIndexOf('>', cut)
+    return tagStart > tagEnd ? tagStart : cut
+  }
+  const closersFor = (open: string[]): string =>
+    open.map((t) => `</${/^<([a-z]+)/.exec(t)![1]}>`).reverse().join('')
+  // Cut at `cut`, balancing tags across the boundary when htmlSafe.
+  const splitAt = (cut: number): { head: string; tail: string } => {
+    let head = rest.slice(0, cut)
+    let tail = rest.slice(cut).replace(/^\n+/, '')
     if (htmlSafe) {
-      // If cut lands inside an open tag (<...>), move cut to before the '<'
-      const tagStart = rest.lastIndexOf('<', cut)
-      const tagEnd = rest.lastIndexOf('>', cut)
-      if (tagStart > tagEnd) cut = tagStart
+      const open = openTagStack(head)
+      if (open.length) {
+        head += closersFor(open)
+        tail = open.join('') + tail
+      }
     }
-    out.push(rest.slice(0, cut))
-    rest = rest.slice(cut).replace(/^\n+/, '')
+    return { head, tail }
+  }
+  while (rest.length > effLimit) {
+    const para = rest.lastIndexOf('\n\n', effLimit)
+    const line = rest.lastIndexOf('\n', effLimit)
+    const space = rest.lastIndexOf(' ', effLimit)
+    let cut = para > effLimit / 2 ? para : line > effLimit / 2 ? line : space > 0 ? space : effLimit
+    if (htmlSafe) cut = avoidMidTag(cut)
+    let { head, tail } = splitAt(cut)
+    // Forward-progress guard: when the chosen boundary sits right after an
+    // opening tag (e.g. "<b> " + one unbroken >limit token), the reopened tag
+    // prefix can re-add as much as the cut removed and `rest` never shrinks —
+    // an infinite loop that would hang the whole receiver. Retry with a hard
+    // cut at effLimit; if even that cannot shrink (degenerate tag-heavy input,
+    // e.g. a single huge <a href>), emit the remainder as one oversized chunk
+    // and stop — Telegram rejects it and the plain-text retry rescues the
+    // content, which beats hanging the process.
+    if (tail.length >= rest.length) {
+      cut = htmlSafe ? avoidMidTag(effLimit) : effLimit
+      ;({ head, tail } = splitAt(cut))
+      if (tail.length >= rest.length) {
+        out.push(rest)
+        rest = ''
+        break
+      }
+    }
+    out.push(head)
+    rest = tail
   }
   if (rest) out.push(rest)
   return out
@@ -109,6 +194,101 @@ export interface FsApi {
   rmSync(path: string, opts: { force: boolean }): void
   readFileSync(path: string, enc: BufferEncoding): string
   statSync(path: string): { mtimeMs: number }
+}
+
+/**
+ * Deliver auto-forwarded turn text to a chat, never silently dropping content.
+ * Each chunk that fails as HTML (e.g. Telegram rejects an entity the balancer
+ * didn't anticipate) is retried as plain text — the user always gets the words,
+ * worst case without formatting. The generic "could not be delivered" notice is
+ * a last resort reserved for chunks that fail even as plain text (network/API
+ * outage), and is sent at most once.
+ */
+export async function deliverForwardText(
+  botApi: Pick<BotApi, 'sendMessage'>,
+  chatId: string,
+  forwardText: string,
+  parseMode: 'HTML' | undefined,
+): Promise<void> {
+  const msgOpts = parseMode ? { parse_mode: parseMode } : {}
+  const chunks = chunkText(forwardText, TELEGRAM_MAX_CHARS, parseMode === 'HTML')
+  let deliveryFailed = false
+  for (const part of chunks) {
+    try {
+      await botApi.sendMessage(chatId, part, msgOpts)
+    } catch {
+      const plain = parseMode === 'HTML' ? htmlToPlain(part) : part
+      try {
+        await botApi.sendMessage(chatId, plain)
+      } catch {
+        deliveryFailed = true
+        break
+      }
+    }
+  }
+  if (deliveryFailed) {
+    await botApi.sendMessage(
+      chatId,
+      '⚠️ Claude responded but the message could not be delivered. Please try asking again.',
+    ).catch(() => {})
+  }
+}
+
+/**
+ * Orphan auto-forward delivery (one poll pass). The typing-loop teardown
+ * (stop()) normally drains `<chatId>.forward`, but a forward can be written
+ * with NO typing loop running at all: an autonomous wake (a background Task
+ * finished and Claude continued on its own — e.g. writing up a plan) has no
+ * inbound message, so nothing ever started typing and stop() never runs.
+ * Without this drain that text sits on disk forever and the user sees a
+ * silent chat. Chats with a live typing state are skipped — stop() owns
+ * their delivery (including the .replied dedup) and draining them here
+ * would double-send.
+ */
+export function drainOrphanForwards(
+  typingDir: string,
+  activeChatIds: { has(chatId: string): boolean },
+  botApi: Pick<BotApi, 'sendMessage'>,
+  fsApi: Pick<FsApi, 'existsSync' | 'rmSync' | 'readFileSync'> & { readdirSync(path: string): string[] },
+): void {
+  let files: string[]
+  try {
+    files = fsApi.readdirSync(typingDir)
+  } catch {
+    return
+  }
+  for (const name of files) {
+    if (!name.endsWith('.forward')) continue
+    const chatId = name.slice(0, -'.forward'.length)
+    if (activeChatIds.has(chatId)) continue
+    const forwardPath = `${typingDir}/${name}`
+    let raw: string
+    try {
+      raw = fsApi.readFileSync(forwardPath, 'utf8').trim()
+    } catch {
+      fsApi.rmSync(forwardPath, { force: true })
+      continue
+    }
+    // Remove BEFORE sending so a slow/failing send can't double-deliver.
+    fsApi.rmSync(forwardPath, { force: true })
+    // Mirror stop()'s dedup: a lingering .replied with no typing state means
+    // the agent already sent this turn's text via the reply tool.
+    const repliedPath = `${typingDir}/${chatId}.replied`
+    if (fsApi.existsSync(repliedPath)) {
+      fsApi.rmSync(repliedPath, { force: true })
+      continue
+    }
+    let text = raw
+    let parseMode: 'HTML' | undefined
+    try {
+      const parsed = JSON.parse(raw) as { text: string; format: string }
+      text = parsed.text
+      parseMode = parsed.format === 'html' ? 'HTML' : undefined
+    } catch {
+      // Old format: plain text
+    }
+    if (text) void deliverForwardText(botApi, chatId, text, parseMode)
+  }
 }
 
 export function createWorkingStateManager(
@@ -191,23 +371,7 @@ export function createWorkingStateManager(
         // Skip if the reply tool already sent a message (agent already replied)
         const alreadyReplied = fsApi.existsSync(repliedPath)
         if (!alreadyReplied && forwardText) {
-          const msgOpts = parseMode ? { parse_mode: parseMode } : {}
-          const chunks = chunkText(forwardText, TELEGRAM_MAX_CHARS, parseMode === 'HTML')
-          let deliveryFailed = false
-          for (const part of chunks) {
-            try {
-              await botApi.sendMessage(chatId, part, msgOpts)
-            } catch {
-              deliveryFailed = true
-              break
-            }
-          }
-          if (deliveryFailed) {
-            await botApi.sendMessage(
-              chatId,
-              '⚠️ Claude responded but the message could not be delivered. Please try asking again.',
-            ).catch(() => {})
-          }
+          await deliverForwardText(botApi, chatId, forwardText, parseMode)
         }
       } catch {}
       fsApi.rmSync(forwardPath, { force: true })

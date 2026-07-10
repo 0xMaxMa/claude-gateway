@@ -2125,6 +2125,99 @@ describe('AgentRunner — session command routing', () => {
     // spawn should NOT have been called for a session command
     expect(spawnCountAfter).toBe(spawnCountBefore);
   }, 15000);
+
+  // -------------------------------------------------------------------------
+  // U14: menu_prompt + result — prose preceding the menu is forwarded, the
+  // duplicated menu text suffix is stripped (previously the whole result was
+  // dropped, losing plan/analysis text the user needed to answer the menu).
+  // -------------------------------------------------------------------------
+  it('U14: result prose before a bridged menu is forwarded with the menu suffix stripped', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    const chatId = 'chat:menu-strip';
+    await postChannelMessage(port, chatId, 'plan something');
+    await waitForSession(runner, chatId);
+    const session = getSessions(runner).get(chatId)!;
+
+    const menuText = '🔢 Choose an option — tap a button below.\n1. Yes\n2. No';
+    session.emit('output', JSON.stringify({
+      type: 'system',
+      subtype: 'menu_prompt',
+      prompt: menuText,
+      options: [{ label: 'Yes' }, { label: 'No' }],
+    }));
+    // Menu bridged to buttons via the .menu file
+    const menuFile = path.join(getTypingDir(), `${chatId}.menu`);
+    expect(fs.existsSync(menuFile)).toBe(true);
+    const menu = JSON.parse(fs.readFileSync(menuFile, 'utf8'));
+    expect(menu.text).toBe(menuText);
+    expect(menu.options).toHaveLength(2);
+
+    const prose = 'Here is the detailed plan.\nStep 1 does X, step 2 does Y.';
+    session.emit('output', JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: `${prose}\n\n${menuText}`,
+    }));
+    await new Promise(r => setTimeout(r, 100));
+
+    const forwardFile = path.join(getTypingDir(), `${chatId}.forward`);
+    expect(fs.existsSync(forwardFile)).toBe(true);
+    const forward = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(forward.text).toContain('Here is the detailed plan.');
+    expect(forward.text).not.toContain('Choose an option');
+  }, 15000);
+
+  it('U14b: result that is only the menu text produces no forward (no duplicate)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    const chatId = 'chat:menu-only';
+    await postChannelMessage(port, chatId, 'ask me');
+    await waitForSession(runner, chatId);
+    const session = getSessions(runner).get(chatId)!;
+
+    const menuText = '🔢 Choose an option\n1. A\n2. B';
+    session.emit('output', JSON.stringify({
+      type: 'system',
+      subtype: 'menu_prompt',
+      prompt: menuText,
+      options: [{ label: 'A' }, { label: 'B' }],
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: menuText }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(fs.existsSync(path.join(getTypingDir(), `${chatId}.forward`))).toBe(false);
+  }, 15000);
+
+  it('U14c: menu text not embedded verbatim in result — forward suppressed (no double post)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    const chatId = 'chat:menu-reworded';
+    await postChannelMessage(port, chatId, 'ask me');
+    await waitForSession(runner, chatId);
+    const session = getSessions(runner).get(chatId)!;
+
+    session.emit('output', JSON.stringify({
+      type: 'system',
+      subtype: 'menu_prompt',
+      prompt: '🔢 Choose an option\n1. A\n2. B',
+      options: [{ label: 'A' }, { label: 'B' }],
+    }));
+    session.emit('output', JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: 'Reworded output listing 1. A and 2. B differently',
+    }));
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(fs.existsSync(path.join(getTypingDir(), `${chatId}.forward`))).toBe(false);
+  }, 15000);
 });
 
 // ── Restart-before-turn tests (US-003) ───────────────────────────────────────
