@@ -13,6 +13,18 @@ jest.mock('os', () => {
   };
 });
 
+// ── claude-bin mock (override the resolved binary per-test) ───────────────────
+// Default 'claude' mirrors PATH resolution, so existing specs are unaffected;
+// the app-agent guard specs raise it to a host-only path to prove the guard.
+let mockResolvedBin = 'claude';
+jest.mock('../../src/session/claude-bin', () => {
+  const real = jest.requireActual('../../src/session/claude-bin');
+  return {
+    ...real,
+    resolveClaudeBin: () => ({ bin: mockResolvedBin, source: 'native-bin', searched: [] }),
+  };
+});
+
 // ── Minimal mock types ────────────────────────────────────────────────────────
 
 interface MockStdin {
@@ -72,7 +84,7 @@ jest.mock('child_process', () => ({
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
-import { SessionProcess, resolveClaudeBin } from '../../src/session/process';
+import { SessionProcess } from '../../src/session/process';
 import { SessionStore } from '../../src/session/store';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
@@ -119,6 +131,8 @@ describe('SessionProcess', () => {
     sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
     lastProcess = null;
     mockHomeDir = null;
+    mockResolvedBin = 'claude';
+    delete process.env.CLAUDE_BIN; // keep binary-resolution specs deterministic
     spawnMock = require('child_process').spawn as jest.Mock;
     spawnMock.mockClear();
   });
@@ -1959,99 +1973,41 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
     await sp.stop();
   });
-});
 
-// ── resolveClaudeBin ──────────────────────────────────────────────────────────
-// Pure binary-resolution probe used when CLAUDE_BIN is unset. Exercised against
-// real temp dirs so the executable-file checks run for real (fs is not mocked).
-describe('resolveClaudeBin', () => {
-  let dir: string;
+  // --------------------------------------------------------------------------
+  // U-SP-BIN3: a non-app-agent session spawns the host-resolved binary directly.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN3: host session spawns the resolved binary path', async () => {
+    mockResolvedBin = '/home/u/.local/bin/claude';
+    const sp = new SessionProcess('chat:bin3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
 
-  const mkExec = (p: string): void => {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, '#!/bin/sh\n');
-    fs.chmodSync(p, 0o755);
-  };
+    expect(spawnMock.mock.calls[0][0]).toBe('/home/u/.local/bin/claude');
 
-  beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rcb-'));
+    await sp.stop();
   });
 
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  // --------------------------------------------------------------------------
+  // U-SP-BIN4: app-agents run claude INSIDE the container, so host-side
+  // resolution must NOT leak a host path into the container — the in-container
+  // binary stays bare `claude` (resolved by the container PATH). Regression guard.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN4: app-agent does not leak the host-resolved path into the container', async () => {
+    mockResolvedBin = '/home/u/.local/bin/claude'; // a host-only path
+    const appAgent = makeAgentConfig({
+      workspace: agentConfig.workspace,
+      type: 'app-agent',
+      container: 'my-app-container',
+    });
+    const sp = new SessionProcess('chat:bin4', 'telegram', appAgent, gatewayConfig, sessionStore);
+    await sp.start();
 
-  it('resolves bare `claude` from PATH when present', () => {
-    const binDir = path.join(dir, 'pathbin');
-    mkExec(path.join(binDir, 'claude'));
-    const home = path.join(dir, 'home');
-    fs.mkdirSync(home);
+    const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(spawnBin).toBe('docker');
+    // The in-container binary is bare `claude`, never the host-resolved path.
+    expect(spawnArgs).toContain('claude');
+    expect(spawnArgs).not.toContain('/home/u/.local/bin/claude');
 
-    const r = resolveClaudeBin({ PATH: binDir }, home);
-    expect(r.bin).toBe('claude');
-    expect(r.source).toBe('PATH');
-  });
-
-  it('falls back to the native ~/.local/bin/claude symlink when not on PATH', () => {
-    const home = path.join(dir, 'home');
-    const nativeBin = path.join(home, '.local', 'bin', 'claude');
-    mkExec(nativeBin);
-
-    const r = resolveClaudeBin({ PATH: path.join(dir, 'empty') }, home);
-    expect(r.bin).toBe(nativeBin);
-    expect(r.source).toBe('native-bin');
-  });
-
-  it('falls back to the newest native version dir (numeric-aware)', () => {
-    const home = path.join(dir, 'home');
-    const versions = path.join(home, '.local', 'share', 'claude', 'versions');
-    mkExec(path.join(versions, '2.1.99', 'claude'));
-    mkExec(path.join(versions, '2.1.206', 'claude'));
-
-    const r = resolveClaudeBin({ PATH: '' }, home);
-    expect(r.source).toBe('native-versions');
-    expect(r.bin).toBe(path.join(versions, '2.1.206', 'claude'));
-  });
-
-  it('resolves a native version stored as a bare file (versions/<ver>)', () => {
-    const home = path.join(dir, 'home');
-    const versions = path.join(home, '.local', 'share', 'claude', 'versions');
-    mkExec(path.join(versions, '2.1.206'));
-
-    const r = resolveClaudeBin({ PATH: '' }, home);
-    expect(r.source).toBe('native-versions');
-    expect(r.bin).toBe(path.join(versions, '2.1.206'));
-  });
-
-  it('falls back to the legacy npm-under-nvm path', () => {
-    const home = path.join(dir, 'home');
-    const legacy = path.join(home, '.nvm', 'versions', 'node', 'v22.22.3', 'bin', 'claude');
-    mkExec(legacy);
-
-    const r = resolveClaudeBin({ PATH: '' }, home);
-    expect(r.source).toBe('legacy-npm');
-    expect(r.bin).toBe(legacy);
-  });
-
-  it('returns fallback `claude` with the searched paths when nothing resolves', () => {
-    const home = path.join(dir, 'home');
-    fs.mkdirSync(home);
-
-    const r = resolveClaudeBin({ PATH: path.join(dir, 'nope') }, home);
-    expect(r.bin).toBe('claude');
-    expect(r.source).toBe('fallback');
-    expect(r.searched).toContain('claude (PATH)');
-    expect(r.searched.length).toBeGreaterThanOrEqual(4);
-  });
-
-  it('ignores a non-executable `claude` on PATH', () => {
-    const binDir = path.join(dir, 'pathbin');
-    fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(path.join(binDir, 'claude'), 'plain'); // no +x bit
-    const home = path.join(dir, 'home');
-    fs.mkdirSync(home);
-
-    const r = resolveClaudeBin({ PATH: binDir }, home);
-    expect(r.source).toBe('fallback');
+    await sp.stop();
   });
 });

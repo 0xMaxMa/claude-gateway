@@ -119,6 +119,61 @@ describe('SessionCompactor', () => {
   });
 
   // -------------------------------------------------------------------------
+  // U-CB1: the summary call honors CLAUDE_BIN (which may carry args) and always
+  // appends --print. Prevents the `claude --print` site from regressing to a
+  // hardcoded bare `claude` that a native-installer migration would break.
+  // -------------------------------------------------------------------------
+  it('U-CB1: honors CLAUDE_BIN (with args) and passes --print', async () => {
+    const index = await sessionStore.getOrCreateIndex(agentId, chatId);
+    const sessionId = index.activeSessionId;
+    for (let i = 0; i < 6; i++) {
+      const role = i % 2 === 0 ? 'user' : 'assistant';
+      await sessionStore.appendTelegramMessage(agentId, chatId, sessionId, makeMsg(role, `m${i}`));
+    }
+    mockSpawnSync.mockReturnValueOnce(makeSpawnSuccess('summary'));
+
+    const prev = process.env.CLAUDE_BIN;
+    process.env.CLAUDE_BIN = 'node /opt/claude/cli.js';
+    try {
+      await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_BIN;
+      else process.env.CLAUDE_BIN = prev;
+    }
+
+    const [bin, args] = mockSpawnSync.mock.calls[0] as [string, string[]];
+    expect(bin).toBe('node');
+    expect(args).toEqual(['/opt/claude/cli.js', '--print']);
+  });
+
+  // -------------------------------------------------------------------------
+  // U-CB2: with CLAUDE_BIN unset the binary is resolved (non-empty) and --print
+  // is still the final arg.
+  // -------------------------------------------------------------------------
+  it('U-CB2: resolves a binary and passes --print when CLAUDE_BIN is unset', async () => {
+    const index = await sessionStore.getOrCreateIndex(agentId, chatId);
+    const sessionId = index.activeSessionId;
+    for (let i = 0; i < 6; i++) {
+      const role = i % 2 === 0 ? 'user' : 'assistant';
+      await sessionStore.appendTelegramMessage(agentId, chatId, sessionId, makeMsg(role, `m${i}`));
+    }
+    mockSpawnSync.mockReturnValueOnce(makeSpawnSuccess('summary'));
+
+    const prev = process.env.CLAUDE_BIN;
+    delete process.env.CLAUDE_BIN;
+    try {
+      await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
+    } finally {
+      if (prev !== undefined) process.env.CLAUDE_BIN = prev;
+    }
+
+    const [bin, args] = mockSpawnSync.mock.calls[0] as [string, string[]];
+    expect(typeof bin).toBe('string');
+    expect(bin.length).toBeGreaterThan(0);
+    expect(args[args.length - 1]).toBe('--print');
+  });
+
+  // -------------------------------------------------------------------------
   // U20: compacted history has summary system message + last 40 verbatim
   // -------------------------------------------------------------------------
   it('U20: compacted history has summary system message as first entry plus last 40 verbatim messages', async () => {

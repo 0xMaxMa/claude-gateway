@@ -9,6 +9,7 @@ import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { neutralizeTuiTriggers } from '../shell/screen';
+import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -24,120 +25,6 @@ const MAX_RESTARTS = 3;
 const MAX_THINKING_RECOVERIES = 2;
 const CHANNELS_ACTIVATION_PROMPT =
   'Channels mode is active. Wait for incoming messages from your channels and respond to them.';
-
-/** Directory holding the native-installer stable `claude` symlink (`~/.local/bin`). */
-function nativeClaudeBinDir(homeDir: string): string {
-  return path.join(homeDir, '.local', 'bin');
-}
-
-/** True if `p` is an existing, executable regular file. */
-function isExecutableFile(p: string): boolean {
-  try {
-    if (!fs.statSync(p).isFile()) return false;
-    fs.accessSync(p, fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Resolve `cmd` against a PATH string, returning the first executable hit. */
-function findOnPath(cmd: string, pathEnv: string | undefined): string | null {
-  if (!pathEnv) return null;
-  for (const dir of pathEnv.split(path.delimiter)) {
-    if (!dir) continue;
-    const candidate = path.join(dir, cmd);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
-}
-
-/**
- * Return the newest executable `claude` under a native-installer versions dir.
- * Each version may be the binary itself (`versions/<ver>`) or a directory
- * containing it (`versions/<ver>/claude`). Newest is decided by numeric-aware
- * descending name sort so `2.1.206` beats `2.1.99`.
- */
-function newestNativeVersion(versionsDir: string): string | null {
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(versionsDir);
-  } catch {
-    return null;
-  }
-  const sorted = entries.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-  for (const name of sorted) {
-    const base = path.join(versionsDir, name);
-    if (isExecutableFile(base)) return base;
-    const nested = path.join(base, 'claude');
-    if (isExecutableFile(nested)) return nested;
-  }
-  return null;
-}
-
-export type ClaudeBinSource = 'PATH' | 'native-bin' | 'native-versions' | 'legacy-npm' | 'fallback';
-
-export interface ClaudeBinResolution {
-  /** Binary to spawn — a resolved absolute path, or bare `claude` as a last resort. */
-  bin: string;
-  /** Which probe resolved it (`fallback` = nothing found, spawning bare `claude`). */
-  source: ClaudeBinSource;
-  /** Ordered list of locations probed, for actionable error logging. */
-  searched: string[];
-}
-
-/**
- * Resolve the `claude` executable when `CLAUDE_BIN` is not set.
- *
- * The Claude Code native-installer migration (2026-07) moved the binary out of
- * the legacy npm/nvm layout into `~/.local/...`, so a gateway started with a
- * minimal PATH can no longer find `claude` on PATH alone. Probe order:
- *   1. bare `claude` on PATH — respects the operator's environment when present
- *   2. native stable symlink `~/.local/bin/claude`
- *   3. newest native version under `~/.local/share/claude/versions/`
- *   4. legacy npm-under-nvm `~/.nvm/versions/node/<v>/bin/claude`
- * If every probe misses, fall back to bare `claude` so spawn still runs (and the
- * failure surfaces through the retry logger with the searched paths).
- */
-export function resolveClaudeBin(
-  env: NodeJS.ProcessEnv = process.env,
-  homeDir: string = os.homedir(),
-): ClaudeBinResolution {
-  const searched: string[] = [];
-
-  searched.push('claude (PATH)');
-  if (findOnPath('claude', env.PATH)) {
-    return { bin: 'claude', source: 'PATH', searched };
-  }
-
-  const nativeBin = path.join(nativeClaudeBinDir(homeDir), 'claude');
-  searched.push(nativeBin);
-  if (isExecutableFile(nativeBin)) {
-    return { bin: nativeBin, source: 'native-bin', searched };
-  }
-
-  const versionsDir = path.join(homeDir, '.local', 'share', 'claude', 'versions');
-  searched.push(path.join(versionsDir, '*'));
-  const nativeVersion = newestNativeVersion(versionsDir);
-  if (nativeVersion) {
-    return { bin: nativeVersion, source: 'native-versions', searched };
-  }
-
-  const nvmDir = path.join(homeDir, '.nvm', 'versions', 'node');
-  searched.push(path.join(nvmDir, '*', 'bin', 'claude'));
-  try {
-    for (const node of fs.readdirSync(nvmDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
-      const candidate = path.join(nvmDir, node, 'bin', 'claude');
-      if (isExecutableFile(candidate)) {
-        return { bin: candidate, source: 'legacy-npm', searched };
-      }
-    }
-  } catch {
-    /* no nvm layout */
-  }
-
-  return { bin: 'claude', source: 'fallback', searched };
-}
 
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
@@ -532,6 +419,12 @@ export class SessionProcess extends EventEmitter {
     let claudeBinRaw: string;
     if (process.env.CLAUDE_BIN) {
       claudeBinRaw = process.env.CLAUDE_BIN;
+    } else if (isAppAgent) {
+      // App-agents run claude INSIDE the container; host-side resolution would
+      // point at a host path that need not exist in the container. Keep bare
+      // `claude` so the container's own PATH resolves it (agentConfig.claudeBin
+      // overrides below when the image installs claude elsewhere).
+      claudeBinRaw = 'claude';
     } else {
       const resolution = resolveClaudeBin();
       claudeBinRaw = resolution.bin;
@@ -629,10 +522,7 @@ export class SessionProcess extends EventEmitter {
     // Ensure the native-installer bin dir is on the child's PATH when it exists,
     // so a bare `claude` resolves even if the gateway itself was launched with a
     // minimal PATH that predates the native-installer migration.
-    const nativeBinDir = nativeClaudeBinDir(os.homedir());
-    const hardenedPath = isExecutableFile(path.join(nativeBinDir, 'claude'))
-      ? `${nativeBinDir}${path.delimiter}${process.env.PATH ?? ''}`
-      : process.env.PATH;
+    const hardenedPath = pathWithNativeBin();
 
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
