@@ -34,7 +34,8 @@ const BALANCED_TAGS = ['b', 'i', 'code', 'pre', 'a'] as const
  */
 export function openTagStack(html: string): string[] {
   const stack: string[] = []
-  const re = /<(\/?)([a-z]+)((?:\s[^>]*)?)>/g
+  // Attribute part tolerates '>' inside quoted values (<a href="a>b">).
+  const re = /<(\/?)([a-z]+)((?:\s(?:"[^"]*"|[^>])*)?)>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null) {
     const closing = m[1] === '/'
@@ -74,27 +75,53 @@ export function chunkText(text: string, limit = TELEGRAM_MAX_CHARS, htmlSafe = f
   const out: string[] = []
   let rest = text
   const effLimit = htmlSafe ? limit - HTML_BALANCE_HEADROOM : limit
+  // If cut lands inside an open tag (<...>), move cut to before the '<'
+  const avoidMidTag = (cut: number): number => {
+    const tagStart = rest.lastIndexOf('<', cut)
+    const tagEnd = rest.lastIndexOf('>', cut)
+    return tagStart > tagEnd ? tagStart : cut
+  }
+  const closersFor = (open: string[]): string =>
+    open.map((t) => `</${/^<([a-z]+)/.exec(t)![1]}>`).reverse().join('')
+  // Cut at `cut`, balancing tags across the boundary when htmlSafe.
+  const splitAt = (cut: number): { head: string; tail: string } => {
+    let head = rest.slice(0, cut)
+    let tail = rest.slice(cut).replace(/^\n+/, '')
+    if (htmlSafe) {
+      const open = openTagStack(head)
+      if (open.length) {
+        head += closersFor(open)
+        tail = open.join('') + tail
+      }
+    }
+    return { head, tail }
+  }
   while (rest.length > effLimit) {
     const para = rest.lastIndexOf('\n\n', effLimit)
     const line = rest.lastIndexOf('\n', effLimit)
     const space = rest.lastIndexOf(' ', effLimit)
     let cut = para > effLimit / 2 ? para : line > effLimit / 2 ? line : space > 0 ? space : effLimit
-    if (htmlSafe) {
-      // If cut lands inside an open tag (<...>), move cut to before the '<'
-      const tagStart = rest.lastIndexOf('<', cut)
-      const tagEnd = rest.lastIndexOf('>', cut)
-      if (tagStart > tagEnd) cut = tagStart
-    }
-    let head = rest.slice(0, cut)
-    rest = rest.slice(cut).replace(/^\n+/, '')
-    if (htmlSafe) {
-      const open = openTagStack(head)
-      if (open.length) {
-        head += open.map((t) => `</${/^<([a-z]+)/.exec(t)![1]}>`).reverse().join('')
-        rest = open.join('') + rest
+    if (htmlSafe) cut = avoidMidTag(cut)
+    let { head, tail } = splitAt(cut)
+    // Forward-progress guard: when the chosen boundary sits right after an
+    // opening tag (e.g. "<b> " + one unbroken >limit token), the reopened tag
+    // prefix can re-add as much as the cut removed and `rest` never shrinks —
+    // an infinite loop that would hang the whole receiver. Retry with a hard
+    // cut at effLimit; if even that cannot shrink (degenerate tag-heavy input,
+    // e.g. a single huge <a href>), emit the remainder as one oversized chunk
+    // and stop — Telegram rejects it and the plain-text retry rescues the
+    // content, which beats hanging the process.
+    if (tail.length >= rest.length) {
+      cut = htmlSafe ? avoidMidTag(effLimit) : effLimit
+      ;({ head, tail } = splitAt(cut))
+      if (tail.length >= rest.length) {
+        out.push(rest)
+        rest = ''
+        break
       }
     }
     out.push(head)
+    rest = tail
   }
   if (rest) out.push(rest)
   return out

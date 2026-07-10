@@ -342,7 +342,7 @@ class Driver {
     })) {
       logWarn('assistant record with no active turn and a working screen — adopting autonomous wake as a turn');
       this.beginTurn();
-      const turn = this.turn as unknown as ActiveTurn;
+      const turn = this.turn!;
       // Mark as already-submitted, already-busy: the Enter-retry path must
       // never type into a turn we didn't submit, and the probe/fallback-idle
       // paths require sawBusy to engage.

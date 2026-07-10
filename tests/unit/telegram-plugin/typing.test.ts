@@ -1062,6 +1062,31 @@ describe('createWorkingStateManager', () => {
     it('U-TY-20: htmlToPlain strips tags and unescapes entities', () => {
       expect(htmlToPlain('<b>bold</b> <code>x &lt; y &amp;&amp; z &gt; w</code>')).toBe('bold x < y && z > w')
     })
+
+    it('U-TY-21: tag + space + unbroken over-limit token terminates (no infinite loop)', () => {
+      // Regression: the cut used to land on the space right after the opening
+      // tag, the balancer reopened the tag at the head of the remainder, and
+      // `rest` never shrank — hanging the whole receiver event loop.
+      const input = '<b> ' + 'x'.repeat(9000)
+      const chunks = chunkText(input, 4096, true)
+      expect(chunks.length).toBeGreaterThan(1)
+      const combined = chunks.map(c => c.replace(/<[^>]+>/g, '')).join('')
+      expect((combined.match(/x/g) ?? []).length).toBe(9000)
+      for (const c of chunks) expect(c.length).toBeLessThanOrEqual(4096)
+    })
+
+    it('U-TY-21b: degenerate single huge tag falls back to one oversized chunk instead of hanging', () => {
+      // A giant <a href> spanning past the limit can never be cut cleanly —
+      // emitting the remainder oversized (plain retry rescues it) beats looping.
+      const input = `<a href="https://example.com/${'q'.repeat(9000)}">link</a>`
+      const chunks = chunkText(input, 4096, true)
+      expect(chunks.length).toBeGreaterThanOrEqual(1)
+      expect(chunks.join('')).toContain('link')
+    })
+
+    it('U-TY-22: openTagStack tolerates ">" inside a quoted href', () => {
+      expect(openTagStack('<a href="https://x.y/a>b">link')).toEqual(['<a href="https://x.y/a>b">'])
+    })
   })
 })
 
