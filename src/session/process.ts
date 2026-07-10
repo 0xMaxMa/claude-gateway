@@ -64,9 +64,14 @@ export class SessionProcess extends EventEmitter {
   private thinkingRecoveryCount = 0;
   // Binary path last spawned and the last non-empty stderr line, retained so a
   // fatal `Session max restarts reached` names what actually failed (e.g. an
-  // unresolvable `claude` binary) instead of ending in silence.
+  // unresolvable `claude` binary) instead of ending in silence. `stderrBuffer`
+  // holds an unterminated trailing fragment so a line split across two `data`
+  // chunks is not captured as two partial lines.
   private lastClaudeBin = 'claude';
   private lastStderrLine: string | null = null;
+  private stderrBuffer = '';
+  // Log the resolved-binary source once per instance, not on every restart spawn.
+  private resolvedBinLogged = false;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
   private _queryTimer?: ReturnType<typeof setTimeout>;
@@ -434,7 +439,10 @@ export class SessionProcess extends EventEmitter {
           searched: resolution.searched,
           hint: 'set CLAUDE_BIN to the claude executable path (native install: ~/.local/bin/claude)',
         });
-      } else if (resolution.source !== 'PATH') {
+      } else if (resolution.source !== 'PATH' && !this.resolvedBinLogged) {
+        // Log the non-PATH resolution once per instance; auto-restarts re-resolve
+        // the same location and would otherwise repeat this line on every spawn.
+        this.resolvedBinLogged = true;
         this.logger.info('Resolved claude binary from an install location', {
           sessionId: this.sessionId,
           bin: resolution.bin,
@@ -735,12 +743,22 @@ export class SessionProcess extends EventEmitter {
 
     proc.stderr?.on('data', (data: Buffer) => {
       const text = data.toString();
-      const lastLine = text.split('\n').map(l => l.trim()).filter(Boolean).pop();
+      // Buffer across chunks: split into complete lines and retain any unterminated
+      // trailing fragment so a line split on a chunk boundary is not seen as two.
+      this.stderrBuffer += text;
+      const lines = this.stderrBuffer.split('\n');
+      this.stderrBuffer = lines.pop() ?? '';
+      const lastLine = lines.map(l => l.trim()).filter(Boolean).pop();
       if (lastLine) this.lastStderrLine = lastLine;
       this.logger.warn('session stderr', { stderr: text });
     });
 
     proc.on('exit', (code, signal) => {
+      // Flush any unterminated trailing stderr fragment (a process that dies
+      // mid-line writes no final newline) so it can still surface as lastStderr.
+      const trailing = this.stderrBuffer.trim();
+      if (trailing) this.lastStderrLine = trailing;
+      this.stderrBuffer = '';
       this.logger.info('session subprocess exited', {
         code,
         signal,
@@ -760,6 +778,11 @@ export class SessionProcess extends EventEmitter {
     });
 
     proc.on('error', (err) => {
+      // A missing/unresolvable binary surfaces here as an ENOENT `error` event
+      // (e.g. `spawn /path/claude ENOENT`), NOT on stderr — capture it so the
+      // fatal max-restarts log can name the real cause and fire the CLAUDE_BIN
+      // hint. This is the exact failure the binary-resolution work targets.
+      this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
     });
   }
@@ -772,7 +795,9 @@ export class SessionProcess extends EventEmitter {
       this.restartCount = 0;
     }
     if (this.restartCount >= MAX_RESTARTS) {
-      const binNotFound = this.lastStderrLine?.includes('binary not found');
+      // Match both the CLI's own "binary not found" text and Node's spawn ENOENT
+      // (the shape a genuinely unresolvable claude binary produces).
+      const binNotFound = /binary not found|ENOENT/i.test(this.lastStderrLine ?? '');
       this.logger.error('Session max restarts reached', {
         sessionId: this.sessionId,
         claudeBin: this.lastClaudeBin,

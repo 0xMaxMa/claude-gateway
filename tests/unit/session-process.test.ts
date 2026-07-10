@@ -2010,4 +2010,60 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
     await sp.stop();
   });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`
+  // event (NOT on stderr). It must still be captured into lastStderrLine so the
+  // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN5: captures a spawn ENOENT error into lastStderrLine', async () => {
+    const sp = new SessionProcess('chat:bin5', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.emit('error', new Error('spawn /home/u/.local/bin/claude ENOENT'));
+
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    expect(priv.lastStderrLine).toBe('spawn /home/u/.local/bin/claude ENOENT');
+    // The fatal-log hint keys off this via /binary not found|ENOENT/i.
+    expect(/binary not found|ENOENT/i.test(priv.lastStderrLine ?? '')).toBe(true);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN6: a stderr line split across two `data` chunks is reassembled into
+  // one line, not captured as two partials.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN6: reassembles a stderr line split across chunks', async () => {
+    const sp = new SessionProcess('chat:bin6', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not '));
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    // Nothing complete yet — the fragment stays buffered.
+    expect(priv.lastStderrLine).toBeNull();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('found\n'));
+    expect(priv.lastStderrLine).toBe('claude: binary not found');
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN7: an unterminated final stderr line (process dies mid-line, no
+  // trailing newline) is flushed into lastStderrLine on exit.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN7: flushes an unterminated trailing stderr line on exit', async () => {
+    const sp = new SessionProcess('chat:bin7', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('fatal: claude crashed mid-line'));
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    expect(priv.lastStderrLine).toBeNull(); // still buffered, no newline yet
+
+    lastProcess!.emit('exit', 1, null);
+    expect(priv.lastStderrLine).toBe('fatal: claude crashed mid-line');
+
+    await sp.stop();
+  });
 });
