@@ -72,7 +72,7 @@ jest.mock('child_process', () => ({
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
-import { SessionProcess } from '../../src/session/process';
+import { SessionProcess, resolveClaudeBin } from '../../src/session/process';
 import { SessionStore } from '../../src/session/store';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
@@ -1919,5 +1919,139 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
 
     await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN1: the last non-empty stderr line is retained so a fatal restart
+  // failure can name what actually died (e.g. an unresolvable claude binary).
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN1: retains the last stderr line and the spawned binary', async () => {
+    const sp = new SessionProcess('chat:bin1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('some warning\nclaude: binary not found\n'));
+
+    const priv = sp as unknown as { lastStderrLine: string | null; lastClaudeBin: string };
+    expect(priv.lastStderrLine).toBe('claude: binary not found');
+    expect(typeof priv.lastClaudeBin).toBe('string');
+    expect(priv.lastClaudeBin.length).toBeGreaterThan(0);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN2: once MAX_RESTARTS is hit the session emits 'failed' rather than
+  // looping silently — the fatal branch that logs the actionable error.
+  // --------------------------------------------------------------------------
+  it("U-SP-BIN2: emits 'failed' after MAX_RESTARTS is reached", async () => {
+    const sp = new SessionProcess('chat:bin2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not found\n'));
+
+    let failed = false;
+    sp.on('failed', () => { failed = true; });
+
+    const priv = sp as unknown as { restartCount: number; scheduleRestart: () => void };
+    priv.restartCount = 3; // at the MAX_RESTARTS cap
+    priv.scheduleRestart();
+
+    expect(failed).toBe(true);
+
+    await sp.stop();
+  });
+});
+
+// ── resolveClaudeBin ──────────────────────────────────────────────────────────
+// Pure binary-resolution probe used when CLAUDE_BIN is unset. Exercised against
+// real temp dirs so the executable-file checks run for real (fs is not mocked).
+describe('resolveClaudeBin', () => {
+  let dir: string;
+
+  const mkExec = (p: string): void => {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, '#!/bin/sh\n');
+    fs.chmodSync(p, 0o755);
+  };
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rcb-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves bare `claude` from PATH when present', () => {
+    const binDir = path.join(dir, 'pathbin');
+    mkExec(path.join(binDir, 'claude'));
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(home);
+
+    const r = resolveClaudeBin({ PATH: binDir }, home);
+    expect(r.bin).toBe('claude');
+    expect(r.source).toBe('PATH');
+  });
+
+  it('falls back to the native ~/.local/bin/claude symlink when not on PATH', () => {
+    const home = path.join(dir, 'home');
+    const nativeBin = path.join(home, '.local', 'bin', 'claude');
+    mkExec(nativeBin);
+
+    const r = resolveClaudeBin({ PATH: path.join(dir, 'empty') }, home);
+    expect(r.bin).toBe(nativeBin);
+    expect(r.source).toBe('native-bin');
+  });
+
+  it('falls back to the newest native version dir (numeric-aware)', () => {
+    const home = path.join(dir, 'home');
+    const versions = path.join(home, '.local', 'share', 'claude', 'versions');
+    mkExec(path.join(versions, '2.1.99', 'claude'));
+    mkExec(path.join(versions, '2.1.206', 'claude'));
+
+    const r = resolveClaudeBin({ PATH: '' }, home);
+    expect(r.source).toBe('native-versions');
+    expect(r.bin).toBe(path.join(versions, '2.1.206', 'claude'));
+  });
+
+  it('resolves a native version stored as a bare file (versions/<ver>)', () => {
+    const home = path.join(dir, 'home');
+    const versions = path.join(home, '.local', 'share', 'claude', 'versions');
+    mkExec(path.join(versions, '2.1.206'));
+
+    const r = resolveClaudeBin({ PATH: '' }, home);
+    expect(r.source).toBe('native-versions');
+    expect(r.bin).toBe(path.join(versions, '2.1.206'));
+  });
+
+  it('falls back to the legacy npm-under-nvm path', () => {
+    const home = path.join(dir, 'home');
+    const legacy = path.join(home, '.nvm', 'versions', 'node', 'v22.22.3', 'bin', 'claude');
+    mkExec(legacy);
+
+    const r = resolveClaudeBin({ PATH: '' }, home);
+    expect(r.source).toBe('legacy-npm');
+    expect(r.bin).toBe(legacy);
+  });
+
+  it('returns fallback `claude` with the searched paths when nothing resolves', () => {
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(home);
+
+    const r = resolveClaudeBin({ PATH: path.join(dir, 'nope') }, home);
+    expect(r.bin).toBe('claude');
+    expect(r.source).toBe('fallback');
+    expect(r.searched).toContain('claude (PATH)');
+    expect(r.searched.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('ignores a non-executable `claude` on PATH', () => {
+    const binDir = path.join(dir, 'pathbin');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, 'claude'), 'plain'); // no +x bit
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(home);
+
+    const r = resolveClaudeBin({ PATH: binDir }, home);
+    expect(r.source).toBe('fallback');
   });
 });

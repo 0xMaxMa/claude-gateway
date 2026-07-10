@@ -25,6 +25,120 @@ const MAX_THINKING_RECOVERIES = 2;
 const CHANNELS_ACTIVATION_PROMPT =
   'Channels mode is active. Wait for incoming messages from your channels and respond to them.';
 
+/** Directory holding the native-installer stable `claude` symlink (`~/.local/bin`). */
+function nativeClaudeBinDir(homeDir: string): string {
+  return path.join(homeDir, '.local', 'bin');
+}
+
+/** True if `p` is an existing, executable regular file. */
+function isExecutableFile(p: string): boolean {
+  try {
+    if (!fs.statSync(p).isFile()) return false;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve `cmd` against a PATH string, returning the first executable hit. */
+function findOnPath(cmd: string, pathEnv: string | undefined): string | null {
+  if (!pathEnv) return null;
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, cmd);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Return the newest executable `claude` under a native-installer versions dir.
+ * Each version may be the binary itself (`versions/<ver>`) or a directory
+ * containing it (`versions/<ver>/claude`). Newest is decided by numeric-aware
+ * descending name sort so `2.1.206` beats `2.1.99`.
+ */
+function newestNativeVersion(versionsDir: string): string | null {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(versionsDir);
+  } catch {
+    return null;
+  }
+  const sorted = entries.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  for (const name of sorted) {
+    const base = path.join(versionsDir, name);
+    if (isExecutableFile(base)) return base;
+    const nested = path.join(base, 'claude');
+    if (isExecutableFile(nested)) return nested;
+  }
+  return null;
+}
+
+export type ClaudeBinSource = 'PATH' | 'native-bin' | 'native-versions' | 'legacy-npm' | 'fallback';
+
+export interface ClaudeBinResolution {
+  /** Binary to spawn — a resolved absolute path, or bare `claude` as a last resort. */
+  bin: string;
+  /** Which probe resolved it (`fallback` = nothing found, spawning bare `claude`). */
+  source: ClaudeBinSource;
+  /** Ordered list of locations probed, for actionable error logging. */
+  searched: string[];
+}
+
+/**
+ * Resolve the `claude` executable when `CLAUDE_BIN` is not set.
+ *
+ * The Claude Code native-installer migration (2026-07) moved the binary out of
+ * the legacy npm/nvm layout into `~/.local/...`, so a gateway started with a
+ * minimal PATH can no longer find `claude` on PATH alone. Probe order:
+ *   1. bare `claude` on PATH — respects the operator's environment when present
+ *   2. native stable symlink `~/.local/bin/claude`
+ *   3. newest native version under `~/.local/share/claude/versions/`
+ *   4. legacy npm-under-nvm `~/.nvm/versions/node/<v>/bin/claude`
+ * If every probe misses, fall back to bare `claude` so spawn still runs (and the
+ * failure surfaces through the retry logger with the searched paths).
+ */
+export function resolveClaudeBin(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): ClaudeBinResolution {
+  const searched: string[] = [];
+
+  searched.push('claude (PATH)');
+  if (findOnPath('claude', env.PATH)) {
+    return { bin: 'claude', source: 'PATH', searched };
+  }
+
+  const nativeBin = path.join(nativeClaudeBinDir(homeDir), 'claude');
+  searched.push(nativeBin);
+  if (isExecutableFile(nativeBin)) {
+    return { bin: nativeBin, source: 'native-bin', searched };
+  }
+
+  const versionsDir = path.join(homeDir, '.local', 'share', 'claude', 'versions');
+  searched.push(path.join(versionsDir, '*'));
+  const nativeVersion = newestNativeVersion(versionsDir);
+  if (nativeVersion) {
+    return { bin: nativeVersion, source: 'native-versions', searched };
+  }
+
+  const nvmDir = path.join(homeDir, '.nvm', 'versions', 'node');
+  searched.push(path.join(nvmDir, '*', 'bin', 'claude'));
+  try {
+    for (const node of fs.readdirSync(nvmDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
+      const candidate = path.join(nvmDir, node, 'bin', 'claude');
+      if (isExecutableFile(candidate)) {
+        return { bin: candidate, source: 'legacy-npm', searched };
+      }
+    }
+  } catch {
+    /* no nvm layout */
+  }
+
+  return { bin: 'claude', source: 'fallback', searched };
+}
+
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
   readonly chatId: string;
@@ -61,6 +175,11 @@ export class SessionProcess extends EventEmitter {
   // reset to 0 until the first tokenUsage event fires.
   private lastTotalTokens = 0;
   private thinkingRecoveryCount = 0;
+  // Binary path last spawned and the last non-empty stderr line, retained so a
+  // fatal `Session max restarts reached` names what actually failed (e.g. an
+  // unresolvable `claude` binary) instead of ending in silence.
+  private lastClaudeBin = 'claude';
+  private lastStderrLine: string | null = null;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
   private _queryTimer?: ReturnType<typeof setTimeout>;
@@ -407,7 +526,29 @@ export class SessionProcess extends EventEmitter {
     const freshModel = this.readFreshModel();
     const args = this.buildArgs(effectiveMcpPath, freshModel);
 
-    const claudeBinRaw = process.env.CLAUDE_BIN ?? 'claude';
+    // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
+    // trusted verbatim; otherwise probe PATH and the native-installer / legacy
+    // install locations so a gateway launched with a minimal PATH still finds it.
+    let claudeBinRaw: string;
+    if (process.env.CLAUDE_BIN) {
+      claudeBinRaw = process.env.CLAUDE_BIN;
+    } else {
+      const resolution = resolveClaudeBin();
+      claudeBinRaw = resolution.bin;
+      if (resolution.source === 'fallback') {
+        this.logger.warn('Could not resolve the claude binary — spawning bare "claude" as a last resort', {
+          sessionId: this.sessionId,
+          searched: resolution.searched,
+          hint: 'set CLAUDE_BIN to the claude executable path (native install: ~/.local/bin/claude)',
+        });
+      } else if (resolution.source !== 'PATH') {
+        this.logger.info('Resolved claude binary from an install location', {
+          sessionId: this.sessionId,
+          bin: resolution.bin,
+          source: resolution.source,
+        });
+      }
+    }
     const claudeBinParts = claudeBinRaw.split(' ');
     let claudeBin = claudeBinParts[0];
     let allArgs = [...claudeBinParts.slice(1), ...args];
@@ -450,6 +591,9 @@ export class SessionProcess extends EventEmitter {
     });
 
     const spawnBin = isAppAgent ? 'docker' : claudeBin;
+    // Record the claude binary targeted this spawn so a fatal restart failure
+    // can name it (app-agents run claude inside the container).
+    this.lastClaudeBin = isAppAgent ? (this.agentConfig.claudeBin ?? claudeBinRaw) : claudeBinRaw;
 
     // env vars that must be forwarded into the container via `docker exec -e`
     let containerUid = 1000;
@@ -482,9 +626,18 @@ export class SessionProcess extends EventEmitter {
       ptyStreamRegistry.listen(this.sessionId, ptyStreamSocketPath);
     }
 
+    // Ensure the native-installer bin dir is on the child's PATH when it exists,
+    // so a bare `claude` resolves even if the gateway itself was launched with a
+    // minimal PATH that predates the native-installer migration.
+    const nativeBinDir = nativeClaudeBinDir(os.homedir());
+    const hardenedPath = isExecutableFile(path.join(nativeBinDir, 'claude'))
+      ? `${nativeBinDir}${path.delimiter}${process.env.PATH ?? ''}`
+      : process.env.PATH;
+
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
+        ...(hardenedPath ? { PATH: hardenedPath } : {}),
         CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
@@ -691,7 +844,10 @@ export class SessionProcess extends EventEmitter {
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
-      this.logger.warn('session stderr', { stderr: data.toString() });
+      const text = data.toString();
+      const lastLine = text.split('\n').map(l => l.trim()).filter(Boolean).pop();
+      if (lastLine) this.lastStderrLine = lastLine;
+      this.logger.warn('session stderr', { stderr: text });
     });
 
     proc.on('exit', (code, signal) => {
@@ -726,7 +882,15 @@ export class SessionProcess extends EventEmitter {
       this.restartCount = 0;
     }
     if (this.restartCount >= MAX_RESTARTS) {
-      this.logger.error('Session max restarts reached', { sessionId: this.sessionId });
+      const binNotFound = this.lastStderrLine?.includes('binary not found');
+      this.logger.error('Session max restarts reached', {
+        sessionId: this.sessionId,
+        claudeBin: this.lastClaudeBin,
+        lastStderr: this.lastStderrLine ?? null,
+        ...(binNotFound
+          ? { hint: 'claude executable is not resolvable — set CLAUDE_BIN to the claude path (native install: ~/.local/bin/claude)' }
+          : {}),
+      });
       this.emit('failed');
       return;
     }
