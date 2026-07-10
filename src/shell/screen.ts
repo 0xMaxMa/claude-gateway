@@ -158,13 +158,14 @@ export interface InteractivePrompt {
 function parseLiveOptionRun(
   lines: string[],
   stripBorder = false,
-): { options: MenuOption[]; highlighted: number } | null {
-  const matches: Array<MenuOption & { caret: boolean }> = [];
-  for (const raw of lines) {
+): { options: MenuOption[]; highlighted: number; startLine: number } | null {
+  const matches: Array<MenuOption & { caret: boolean; lineIdx: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const line = stripBorder ? raw.replace(/^\s*│\s?/, '') : raw;
     const m = TUI_MENU_OPTION_RE.exec(line);
     // CARET_OPTION_RE tolerates the box border itself, so test the raw line.
-    if (m) matches.push({ index: Number(m[1]), label: m[2].trim(), caret: CARET_OPTION_RE.test(raw) });
+    if (m) matches.push({ index: Number(m[1]), label: m[2].trim(), caret: CARET_OPTION_RE.test(raw), lineIdx: i });
   }
   if (matches.length < 2) return null;
   let start = -1;
@@ -172,7 +173,7 @@ function parseLiveOptionRun(
     if (matches[i].index === 1) start = i;
   }
   if (start === -1) return null;
-  const run: Array<MenuOption & { caret: boolean }> = [];
+  const run: Array<MenuOption & { caret: boolean; lineIdx: number }> = [];
   let expected = 1;
   for (let i = start; i < matches.length && matches[i].index === expected; i++) {
     run.push(matches[i]);
@@ -184,7 +185,47 @@ function parseLiveOptionRun(
   return {
     options: run.map(({ index, label }) => ({ index, label })),
     highlighted: caretRows[0].index,
+    startLine: run[0].lineIdx,
   };
+}
+
+/**
+ * Bounds for the question/context text captured above a plain (non-permission)
+ * menu's option run. The question the user must answer sits directly above the
+ * options (AskUserQuestion header + question, or plan approval's "Would you
+ * like to proceed?" + plan tail), so we scan upward a bounded number of lines
+ * and keep the tail nearest the options when the cap trims anything.
+ */
+const MENU_CONTEXT_MAX_LINES = 12;
+const MENU_CONTEXT_MAX_CHARS = 1200;
+
+/**
+ * Collect the human-readable lines above a menu's option run — the question
+ * being asked. Scans upward from the run, stops at the question box's top
+ * border (╭/╮) when the menu renders boxed, and is line/char-capped so an
+ * unboxed menu (plan approval) carries the nearest prose (the proceed question
+ * plus the plan's tail) without dumping the whole screen into chat.
+ */
+function extractMenuContext(lines: string[], runStart: number): string {
+  const isBorderOnly = (l: string) => /^[\s│╭╮╰╯─]*$/.test(l);
+  const stripBorder = (l: string) => l.replace(/^[\s│]+/, '').replace(/[\s│]+$/, '');
+  const collected: string[] = [];
+  for (let i = runStart - 1; i >= 0 && collected.length < MENU_CONTEXT_MAX_LINES; i--) {
+    const raw = lines[i];
+    if (/[╭╮]/.test(raw)) break; // top border of the question box
+    if (isBorderOnly(raw)) {
+      // Preserve one blank as a paragraph separator, never leading blanks.
+      if (collected.length > 0 && collected[0] !== '') collected.unshift('');
+      continue;
+    }
+    collected.unshift(stripBorder(raw));
+  }
+  let context = collected.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (context.length > MENU_CONTEXT_MAX_CHARS) {
+    // Keep the tail — the lines nearest the options are the question itself.
+    context = '…' + context.slice(-MENU_CONTEXT_MAX_CHARS);
+  }
+  return context;
 }
 
 /**
@@ -223,7 +264,12 @@ export function parseInteractivePrompt(screenText: string): InteractivePrompt | 
     // to look like a numbered list never parses (no highlight row).
     const run = parseLiveOptionRun(allLines);
     return run
-      ? { options: run.options, context: '', isPermission: false, highlighted: run.highlighted }
+      ? {
+          options: run.options,
+          context: extractMenuContext(allLines, run.startLine),
+          isPermission: false,
+          highlighted: run.highlighted,
+        }
       : null;
   }
 
@@ -285,10 +331,13 @@ export function extractChannelContent(text: string): string {
   return m[1].replace(/<replied\b[^>]*>[\s\S]*?<\/replied>/g, '').trim();
 }
 
-/** Build the chat-facing menu prompt (also the API/number fallback text). */
-export function formatMenuPrompt(options: MenuOption[]): string {
+/** Build the chat-facing menu prompt (also the API/number fallback text).
+ *  `context` is the question text captured above the option run — without it
+ *  the user sees a bare option list with no idea what is being asked. */
+export function formatMenuPrompt(options: MenuOption[], context = ''): string {
   const lines = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
-  return `🔢 Choose an option — tap a button below, or reply with the number:\n\n${lines}`;
+  const ctx = context.trim() ? `❓ ${context.trim()}\n\n` : '';
+  return `${ctx}🔢 Choose an option — tap a button below, or reply with the number:\n\n${lines}`;
 }
 
 /**

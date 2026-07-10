@@ -7,6 +7,9 @@ import {
   createWorkingStateManager,
   parseStatusFile,
   chunkText,
+  openTagStack,
+  htmlToPlain,
+  drainOrphanForwards,
   TELEGRAM_MAX_CHARS,
   STATUS_MESSAGES,
   ERROR_MESSAGES,
@@ -822,10 +825,11 @@ describe('createWorkingStateManager', () => {
       expect(forwardCalls).toHaveLength(1)
     })
 
-    it('U-TY-11b: sends delivery-failure warning when sendMessage throws during auto-forward', async () => {
+    it('U-TY-11b: retries a failed chunk as plain text — content delivered, no generic warning', async () => {
       const bot = makeBotApi()
       const fsApi = makeFsApi()
-      // First call (the actual forward) throws; second call (the warning) succeeds
+      // First call (the forward) throws; the plain-text retry succeeds — the
+      // user gets the actual content, so the generic warning must NOT be sent.
       bot.sendMessage
         .mockRejectedValueOnce(new Error('network error'))
         .mockResolvedValue({ message_id: 200 })
@@ -839,21 +843,80 @@ describe('createWorkingStateManager', () => {
 
       await mgr.stop(CHAT_ID)
 
-      // Warning message must be sent to the same chatId
+      const contentCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && c[1] === 'Hello from agent',
+      )
+      expect(contentCalls).toHaveLength(2) // failed attempt + successful retry
+
+      const warnCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
+      )
+      expect(warnCalls).toHaveLength(0)
+    })
+
+    it('U-TY-11b2: sends delivery-failure warning only when the plain-text retry also fails', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      // Forward attempt AND its plain retry both throw (real outage); the
+      // warning send succeeds.
+      bot.sendMessage
+        .mockRejectedValueOnce(new Error('network error'))
+        .mockRejectedValueOnce(new Error('network error'))
+        .mockResolvedValue({ message_id: 200 })
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'Hello from agent', format: 'text' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
       const warnCalls = bot.sendMessage.mock.calls.filter(
         c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
       )
       expect(warnCalls).toHaveLength(1)
     })
 
-    it('U-TY-11c: stops sending chunks and warns after first chunk fails (multi-chunk delivery)', async () => {
+    it('U-TY-11b3: HTML chunk rejected by Telegram falls back to stripped plain text', async () => {
       const bot = makeBotApi()
       const fsApi = makeFsApi()
-      // sendMessage: first forward chunk succeeds, second throws, warning succeeds
+      // HTML parse rejection on the formatted send; plain retry succeeds.
+      bot.sendMessage
+        .mockRejectedValueOnce(new Error("Bad Request: can't parse entities"))
+        .mockResolvedValue({ message_id: 200 })
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: '<b>bold</b> and <code>x &lt; y</code>', format: 'html' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      // Plain retry: tags stripped, entities unescaped, no parse_mode.
+      const plainCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && c[1] === 'bold and x < y',
+      )
+      expect(plainCalls).toHaveLength(1)
+      expect(plainCalls[0][2]).toBeUndefined()
+
+      const warnCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
+      )
+      expect(warnCalls).toHaveLength(0)
+    })
+
+    it('U-TY-11c: a mid-delivery chunk failure is retried as plain and later chunks still send', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      // chunk1 OK, chunk2 fails once (plain retry succeeds), no warning.
       bot.sendMessage
         .mockResolvedValueOnce({ message_id: 100 })   // first chunk OK
         .mockRejectedValueOnce(new Error('rate limit')) // second chunk fails
-        .mockResolvedValue({ message_id: 200 })         // warning fallback
+        .mockResolvedValue({ message_id: 200 })         // plain retry succeeds
 
       const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
       mgr.start(CHAT_ID)
@@ -868,16 +931,21 @@ describe('createWorkingStateManager', () => {
 
       await mgr.stop(CHAT_ID)
 
-      // Only 2 sendMessage calls: chunk1 + warning (chunk2 was aborted)
-      const forwardCalls = bot.sendMessage.mock.calls.filter(
+      const aCalls = bot.sendMessage.mock.calls.filter(
         c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).startsWith('A'),
       )
-      expect(forwardCalls).toHaveLength(1)
+      expect(aCalls).toHaveLength(1)
+
+      // chunk2: the failed attempt + the successful plain retry
+      const bCalls = bot.sendMessage.mock.calls.filter(
+        c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).startsWith('B'),
+      )
+      expect(bCalls).toHaveLength(2)
 
       const warnCalls = bot.sendMessage.mock.calls.filter(
         c => c[0] === CHAT_ID && typeof c[1] === 'string' && (c[1] as string).includes('could not be delivered'),
       )
-      expect(warnCalls).toHaveLength(1)
+      expect(warnCalls).toHaveLength(0)
     })
 
     it('U-TY-11d: does NOT send delivery-failure warning when sendMessage succeeds', async () => {
@@ -958,5 +1026,160 @@ describe('createWorkingStateManager', () => {
       const closeInFirst = (chunks[0].match(/>/g) ?? []).length
       expect(openInFirst).toBeGreaterThan(closeInFirst)
     })
+
+    it('U-TY-18: htmlSafe=true keeps every chunk entity-balanced across a <pre><code> block', () => {
+      // A code block far larger than the limit: the cut MUST land inside it,
+      // and each chunk must close what it opened and reopen in the next —
+      // this exact shape (long analysis + big code block) is what Telegram
+      // rejected with 400 and surfaced as "could not be delivered".
+      const code = 'line of code\n'.repeat(600) // ~7800 chars
+      const text = `<b>Analysis</b>\n<pre><code>${code}</code></pre>\ntail`
+      const chunks = chunkText(text, 4096, true)
+      expect(chunks.length).toBeGreaterThan(1)
+      for (const c of chunks) {
+        expect(c.length).toBeLessThanOrEqual(4096)
+        // Balanced per tag type: every <pre>/<code>/<b> has its close in-chunk.
+        for (const tag of ['pre', 'code', 'b']) {
+          const open = (c.match(new RegExp(`<${tag}>`, 'g')) ?? []).length
+          const close = (c.match(new RegExp(`</${tag}>`, 'g')) ?? []).length
+          expect(open).toBe(close)
+        }
+      }
+      // No content lost: stripping tags from all chunks reproduces the code body.
+      const combined = chunks.map(c => c.replace(/<[^>]+>/g, '')).join('')
+      expect(combined).toContain('line of code')
+      expect(combined.match(/line of code/g)).toHaveLength(600)
+    })
+
+    it('U-TY-19: openTagStack returns tags still open, in order', () => {
+      expect(openTagStack('<b>x</b>')).toEqual([])
+      expect(openTagStack('<pre><code>abc')).toEqual(['<pre>', '<code>'])
+      expect(openTagStack('<a href="https://x.y">link')).toEqual(['<a href="https://x.y">'])
+      // Escaped entities are not tags
+      expect(openTagStack('a &lt;b&gt; c')).toEqual([])
+    })
+
+    it('U-TY-20: htmlToPlain strips tags and unescapes entities', () => {
+      expect(htmlToPlain('<b>bold</b> <code>x &lt; y &amp;&amp; z &gt; w</code>')).toBe('bold x < y && z > w')
+    })
+  })
+})
+
+// ── drainOrphanForwards (autonomous-wake .forward delivery) ──────────────────
+
+describe('drainOrphanForwards', () => {
+  // Bug 3: an autonomous wake writes `<chatId>.forward` with no typing loop
+  // running, so stop() never drains it — without this poller the text sits on
+  // disk forever and the chat stays silent.
+
+  function makeDrainFsApi(files: Map<string, string>) {
+    return {
+      existsSync: jest.fn((path: string) => files.has(path)),
+      rmSync: jest.fn((path: string) => { files.delete(path) }),
+      readFileSync: jest.fn((path: string) => {
+        const content = files.get(path)
+        if (content === undefined) throw new Error('ENOENT')
+        return content
+      }),
+      readdirSync: jest.fn(() => {
+        const names: string[] = []
+        for (const key of files.keys()) {
+          if (key.startsWith(`${TYPING_DIR}/`)) names.push(key.slice(TYPING_DIR.length + 1))
+        }
+        return names
+      }),
+      _files: files,
+    }
+  }
+
+  it('U-TY-DR-01: delivers an orphan JSON forward with HTML format and removes the file', async () => {
+    const files = new Map([[`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: '<b>plan</b> ready', format: 'html' })]])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+    await Promise.resolve()
+
+    expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+    expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, '<b>plan</b> ready', { parse_mode: 'HTML' })
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
+  })
+
+  it('U-TY-DR-02: skips chats with a live typing state (stop() owns their delivery)', () => {
+    const files = new Map([[`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'hi', format: 'text' })]])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set([CHAT_ID]), bot, fsApi)
+
+    expect(bot.sendMessage).not.toHaveBeenCalled()
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(true)
+  })
+
+  it('U-TY-DR-03: lingering .replied means the reply tool already sent — removes both, no send', () => {
+    const files = new Map([
+      [`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'dup', format: 'text' })],
+      [`${TYPING_DIR}/${CHAT_ID}.replied`, '1'],
+    ])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+
+    expect(bot.sendMessage).not.toHaveBeenCalled()
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
+  })
+
+  it('U-TY-DR-04: legacy plain-text forward (non-JSON) is delivered without parse_mode', async () => {
+    const files = new Map([[`${TYPING_DIR}/${CHAT_ID}.forward`, 'plain old text']])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+    await Promise.resolve()
+
+    expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, 'plain old text', {})
+  })
+
+  it('U-TY-DR-05: file is removed BEFORE sending so a slow send cannot double-deliver', async () => {
+    const files = new Map([[`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'once', format: 'text' })]])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+
+    const rmOrder = fsApi.rmSync.mock.invocationCallOrder[0]
+    const sendOrder = bot.sendMessage.mock.invocationCallOrder[0]
+    expect(rmOrder).toBeLessThan(sendOrder)
+
+    // A second pass sees no file — nothing is re-sent.
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+    await Promise.resolve()
+    expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('U-TY-DR-06: unreadable typing dir is a no-op', () => {
+    const bot = makeBotApi()
+    const fsApi = makeDrainFsApi(new Map())
+    fsApi.readdirSync.mockImplementation(() => { throw new Error('ENOENT') })
+
+    expect(() => drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)).not.toThrow()
+    expect(bot.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('U-TY-DR-07: ignores non-forward files in the typing dir', () => {
+    const files = new Map([
+      [`${TYPING_DIR}/${CHAT_ID}`, '1'],
+      [`${TYPING_DIR}/${CHAT_ID}.heartbeat`, '1'],
+      [`${TYPING_DIR}/${CHAT_ID}.menu`, '{}'],
+    ])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+
+    expect(bot.sendMessage).not.toHaveBeenCalled()
+    expect(files.size).toBe(3)
   })
 })

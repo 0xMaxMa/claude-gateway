@@ -20,6 +20,7 @@ import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
+import { shouldAdoptOrphanWake } from './orphan-wake';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
 
 const POLL_MS = 200;
@@ -325,6 +326,29 @@ class Driver {
     // New output = activity: re-arm idle reconciliation so a fresh session_idle is
     // emitted once Claude settles, even if this record arrived outside a tracked turn.
     this.idleNotified = false;
+    // Claude can start a turn on its own — a background Task's completion
+    // notification re-invokes it with no user message and thus no ActiveTurn.
+    // Adopt the wake as a synthetic turn so the existing machinery (result
+    // forwarding, probe → menu bridge, watchdog) all applies. Gate reasoning
+    // lives with the pure function in orphan-wake.ts.
+    if (shouldAdoptOrphanWake({
+      hasTurn: this.turn !== null,
+      exiting: this.exiting,
+      interrupting: this.interrupting !== null,
+      menuCancelActive: this.menuCancel !== null,
+      pendingMenu: this.pendingMenu !== null,
+      screenBusy: this.screen.isBusy(),
+      screenHasPrompt: this.screen.hasPrompt(),
+    })) {
+      logWarn('assistant record with no active turn and a working screen — adopting autonomous wake as a turn');
+      this.beginTurn();
+      const turn = this.turn as unknown as ActiveTurn;
+      // Mark as already-submitted, already-busy: the Enter-retry path must
+      // never type into a turn we didn't submit, and the probe/fallback-idle
+      // paths require sawBusy to engage.
+      turn.submittedAt = Date.now();
+      turn.sawBusy = true;
+    }
     if (this.turn) {
       this.turn.sawAssistant = true;
       this.turn.lastProgressAt = Date.now();
@@ -835,7 +859,7 @@ class Driver {
     this.probe = null;
     const text = afterParsed.isPermission
       ? formatPermissionPrompt(afterParsed.context, afterParsed.options)
-      : formatMenuPrompt(afterParsed.options);
+      : formatMenuPrompt(afterParsed.options, afterParsed.context);
     logWarn(`interactive ${afterParsed.isPermission ? 'permission prompt' : 'menu'} confirmed (${afterParsed.options.length} options, highlight ${beforeParsed.highlighted}→${afterParsed.highlighted}) — bridging to chat`);
     this.bridgeChoiceToChat(turn, afterParsed.options, text);
   }

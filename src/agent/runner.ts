@@ -846,6 +846,7 @@ export class AgentRunner extends EventEmitter {
       // Set when an interactive-menu prompt was rendered to the channel this turn,
       // so the result's plain-text auto-forward is skipped (no duplicate message).
       let menuSentThisTurn = false;
+      let menuPromptTextThisTurn = '';
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
       const replyToolName =
@@ -921,6 +922,7 @@ export class AgentRunner extends EventEmitter {
             if (promptText && options.length) {
               this.writeMenuForward(mapKey, promptText, options);
               menuSentThisTurn = true;
+              menuPromptTextThisTurn = promptText;
               // Persist the question to chat history so it's visible in the transcript.
               const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
               this.historyDb.insertMessage({
@@ -994,10 +996,24 @@ export class AgentRunner extends EventEmitter {
               this.tooLargeRecoveries.delete(mapKey);
               this.tooLargeExhausted.delete(mapKey);
             }
-            // Skip when a menu was rendered to buttons this turn — the result
-            // text is the same numbered list and would duplicate the menu message.
-            if (!isSocketError && !isRequestTooLarge && resultText.trim() && !proc.queryMode && !replyCalled && !isThinkingCorruption && !menuSentThisTurn) {
-              const text = resultText.trim();
+            // When a menu was rendered to buttons this turn, the wrapper appends
+            // the same menu text to the turn's result — strip that suffix so it
+            // isn't duplicated, but DO forward any assistant prose that preceded
+            // the menu (a plan write-up or analysis the user needs in order to
+            // answer the question; previously the whole result was dropped).
+            let forwardableText = resultText.trim();
+            if (menuSentThisTurn && menuPromptTextThisTurn) {
+              const menuIdx = forwardableText.lastIndexOf(menuPromptTextThisTurn.trim());
+              if (menuIdx !== -1) {
+                forwardableText = forwardableText.slice(0, menuIdx).trim();
+              } else {
+                // Menu text not embedded verbatim — keep the old suppression
+                // rather than risk double-posting the option list.
+                forwardableText = '';
+              }
+            }
+            if (!isSocketError && !isRequestTooLarge && forwardableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
+              const text = forwardableText;
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
               this.historyDb.insertMessage({
@@ -1022,6 +1038,7 @@ export class AgentRunner extends EventEmitter {
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
             menuSentThisTurn = false;
+            menuPromptTextThisTurn = '';
             // In pty-shell mode, a `result` fires after every Claude API sub-turn
             // (there can be many per user message, separated by tool-call gaps of
             // arbitrary length). Starting the typing-done timer here would stop

@@ -18,6 +18,7 @@ import { Writable } from 'stream';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
+import { shouldAdoptOrphanWake, OrphanWakeObs } from '../../src/shell/orphan-wake';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -364,6 +365,84 @@ describe('ScreenModel readInteractivePrompt (plain AskUserQuestion-style menu)',
     ]);
     expect(screen.readInteractivePrompt()).toBeNull();
   });
+
+  it('captures the question text above the options as context (bug: bare "Choose an option" in chat)', async () => {
+    // Without the context, the bridged Telegram message is an option list
+    // with no question — the user cannot tell what is being asked.
+    const screen = await renderScreen([
+      'Scope of the PR',
+      '',
+      'Should the fix cover only the 3 failing suites, or the whole repo?',
+      '',
+      '❯ 1. Only the 3 suites',
+      '  2. Whole-repo sweep',
+      '  3. Chat about this',
+      '',
+      MENU_FOOTER,
+    ]);
+    const prompt = screen.readInteractivePrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.context).toContain('Scope of the PR');
+    expect(prompt!.context).toContain('whole repo?');
+    // The footer/options themselves are not part of the context.
+    expect(prompt!.context).not.toContain('1. Only the 3 suites');
+  });
+
+  it('bounds the context at the question box top border', async () => {
+    // The question header can render inside a rounded box above the option
+    // rows — the border marks where the question starts, so scrollback above
+    // it must not leak into the context.
+    const screen = await renderScreen([
+      'unrelated earlier conversation output',
+      '╭──────────────────────────────╮',
+      '│ Pick a database              │',
+      '╰──────────────────────────────╯',
+      '❯ 1. Postgres',
+      '  2. SQLite',
+      '',
+      MENU_FOOTER,
+    ]);
+    const prompt = screen.readInteractivePrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.context).toContain('Pick a database');
+    expect(prompt!.context).not.toContain('unrelated earlier conversation');
+  });
+
+  it('plan-approval shape: proceed question and plan tail become the context', async () => {
+    // The plan-mode approval prompt is unboxed: prose (the plan) ends with
+    // "Would you like to proceed?" directly above the option run.
+    const screen = await renderScreen([
+      'Here is Claude\'s plan:',
+      'Fix the flaky sleeps in the three failing suites.',
+      '',
+      'Would you like to proceed?',
+      '',
+      '❯ 1. Yes, and bypass permissions',
+      '  2. Yes, manually approve edits',
+      '  3. Tell Claude what to change',
+      '',
+      MENU_FOOTER,
+    ]);
+    const prompt = screen.readInteractivePrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.context).toContain('Would you like to proceed?');
+    expect(prompt!.context).toContain('flaky sleeps');
+  });
+
+  it('caps oversized context, keeping the tail nearest the options', async () => {
+    const longLines = Array.from({ length: 12 }, (_, i) => `plan detail line ${i} ${'x'.repeat(150)}`);
+    const screen = await renderScreen([
+      ...longLines,
+      'Would you like to proceed?',
+      '❯ 1. Yes',
+      '  2. No',
+      MENU_FOOTER,
+    ]);
+    const prompt = screen.readInteractivePrompt();
+    expect(prompt).not.toBeNull();
+    expect(prompt!.context.length).toBeLessThanOrEqual(1201); // cap + leading ellipsis
+    expect(prompt!.context).toContain('Would you like to proceed?'); // tail survives
+  });
 });
 
 describe('hasPrompt() vs interactivePromptBlocking() (menu-caret false-positive)', () => {
@@ -478,6 +557,21 @@ describe('formatMenuPrompt', () => {
     expect(text).toContain('1. Alpha');
     expect(text).toContain('2. Beta');
     expect(text.toLowerCase()).toContain('reply with the number');
+  });
+
+  it('leads with the question context when provided', () => {
+    const text = formatMenuPrompt(
+      [{ index: 1, label: 'Alpha' }, { index: 2, label: 'Beta' }],
+      'Scope of the PR\n\nWhich scope should the fix cover?',
+    );
+    expect(text.indexOf('Scope of the PR')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('Scope of the PR')).toBeLessThan(text.indexOf('1. Alpha'));
+    expect(text).toContain('Which scope should the fix cover?');
+  });
+
+  it('omits the context block when empty (unchanged legacy shape)', () => {
+    const text = formatMenuPrompt([{ index: 1, label: 'Alpha' }, { index: 2, label: 'Beta' }], '');
+    expect(text.startsWith('🔢')).toBe(true);
   });
 });
 
@@ -1014,6 +1108,48 @@ describe('isSyntheticRequestTooLarge (authoritative 413 detection)', () => {
       model: '<synthetic>',
       content: [{ type: 'tool_use', id: 'x' }, { type: 'text', text: overlayText }],
     })).toBe(true);
+  });
+});
+
+describe('shouldAdoptOrphanWake (autonomous-wake turn adoption)', () => {
+  // Models Bug 3: a background Task's completion notification re-invokes
+  // Claude with no user message → assistant records stream in with no
+  // ActiveTurn → tick() skips result forwarding and menu bridging, so a plan
+  // approval / AskUserQuestion the wake ends on blocks the session silently.
+  const baseObs = (over: Partial<OrphanWakeObs> = {}): OrphanWakeObs => ({
+    hasTurn: false,
+    exiting: false,
+    interrupting: false,
+    menuCancelActive: false,
+    pendingMenu: false,
+    screenBusy: true,
+    screenHasPrompt: false,
+    ...over,
+  });
+
+  it('adopts the wake when there is no turn and the screen is busy', () => {
+    expect(shouldAdoptOrphanWake(baseObs())).toBe(true);
+  });
+
+  it('adopts the wake when not busy yet but the idle prompt is gone (turn just starting)', () => {
+    expect(shouldAdoptOrphanWake(baseObs({ screenBusy: false, screenHasPrompt: false }))).toBe(true);
+  });
+
+  it('does NOT adopt a straggler record flushed after finishTurn (idle prompt on screen)', () => {
+    // The safety gate: idle prompt back on screen means the turn already
+    // ended — fabricating a turn here would re-forward stale text.
+    expect(shouldAdoptOrphanWake(baseObs({ screenBusy: false, screenHasPrompt: true }))).toBe(false);
+  });
+
+  it('does NOT adopt when a turn already exists (normal flow)', () => {
+    expect(shouldAdoptOrphanWake(baseObs({ hasTurn: true }))).toBe(false);
+  });
+
+  it('does NOT adopt while exiting, interrupting, menu-cancelling, or a menu is pending', () => {
+    expect(shouldAdoptOrphanWake(baseObs({ exiting: true }))).toBe(false);
+    expect(shouldAdoptOrphanWake(baseObs({ interrupting: true }))).toBe(false);
+    expect(shouldAdoptOrphanWake(baseObs({ menuCancelActive: true }))).toBe(false);
+    expect(shouldAdoptOrphanWake(baseObs({ pendingMenu: true }))).toBe(false);
   });
 });
 
