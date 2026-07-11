@@ -9,6 +9,7 @@ import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { neutralizeTuiTriggers } from '../shell/screen';
+import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -61,6 +62,16 @@ export class SessionProcess extends EventEmitter {
   // reset to 0 until the first tokenUsage event fires.
   private lastTotalTokens = 0;
   private thinkingRecoveryCount = 0;
+  // Binary path last spawned and the last non-empty stderr line, retained so a
+  // fatal `Session max restarts reached` names what actually failed (e.g. an
+  // unresolvable `claude` binary) instead of ending in silence. `stderrBuffer`
+  // holds an unterminated trailing fragment so a line split across two `data`
+  // chunks is not captured as two partial lines.
+  private lastClaudeBin = 'claude';
+  private lastStderrLine: string | null = null;
+  private stderrBuffer = '';
+  // Log the resolved-binary source once per instance, not on every restart spawn.
+  private resolvedBinLogged = false;
   private _queryResolve?: (text: string) => void;
   private _queryBuffer = '';
   private _queryTimer?: ReturnType<typeof setTimeout>;
@@ -407,7 +418,38 @@ export class SessionProcess extends EventEmitter {
     const freshModel = this.readFreshModel();
     const args = this.buildArgs(effectiveMcpPath, freshModel);
 
-    const claudeBinRaw = process.env.CLAUDE_BIN ?? 'claude';
+    // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
+    // trusted verbatim; otherwise probe PATH and the native-installer / legacy
+    // install locations so a gateway launched with a minimal PATH still finds it.
+    let claudeBinRaw: string;
+    if (process.env.CLAUDE_BIN) {
+      claudeBinRaw = process.env.CLAUDE_BIN;
+    } else if (isAppAgent) {
+      // App-agents run claude INSIDE the container; host-side resolution would
+      // point at a host path that need not exist in the container. Keep bare
+      // `claude` so the container's own PATH resolves it (agentConfig.claudeBin
+      // overrides below when the image installs claude elsewhere).
+      claudeBinRaw = 'claude';
+    } else {
+      const resolution = resolveClaudeBin();
+      claudeBinRaw = resolution.bin;
+      if (resolution.source === 'fallback') {
+        this.logger.warn('Could not resolve the claude binary — spawning bare "claude" as a last resort', {
+          sessionId: this.sessionId,
+          searched: resolution.searched,
+          hint: 'set CLAUDE_BIN to the claude executable path (native install: ~/.local/bin/claude)',
+        });
+      } else if (resolution.source !== 'PATH' && !this.resolvedBinLogged) {
+        // Log the non-PATH resolution once per instance; auto-restarts re-resolve
+        // the same location and would otherwise repeat this line on every spawn.
+        this.resolvedBinLogged = true;
+        this.logger.info('Resolved claude binary from an install location', {
+          sessionId: this.sessionId,
+          bin: resolution.bin,
+          source: resolution.source,
+        });
+      }
+    }
     const claudeBinParts = claudeBinRaw.split(' ');
     let claudeBin = claudeBinParts[0];
     let allArgs = [...claudeBinParts.slice(1), ...args];
@@ -450,6 +492,9 @@ export class SessionProcess extends EventEmitter {
     });
 
     const spawnBin = isAppAgent ? 'docker' : claudeBin;
+    // Record the claude binary targeted this spawn so a fatal restart failure
+    // can name it (app-agents run claude inside the container).
+    this.lastClaudeBin = isAppAgent ? (this.agentConfig.claudeBin ?? claudeBinRaw) : claudeBinRaw;
 
     // env vars that must be forwarded into the container via `docker exec -e`
     let containerUid = 1000;
@@ -482,9 +527,15 @@ export class SessionProcess extends EventEmitter {
       ptyStreamRegistry.listen(this.sessionId, ptyStreamSocketPath);
     }
 
+    // Ensure the native-installer bin dir is on the child's PATH when it exists,
+    // so a bare `claude` resolves even if the gateway itself was launched with a
+    // minimal PATH that predates the native-installer migration.
+    const hardenedPath = pathWithNativeBin();
+
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
+        ...(hardenedPath ? { PATH: hardenedPath } : {}),
         CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
@@ -691,10 +742,23 @@ export class SessionProcess extends EventEmitter {
     });
 
     proc.stderr?.on('data', (data: Buffer) => {
-      this.logger.warn('session stderr', { stderr: data.toString() });
+      const text = data.toString();
+      // Buffer across chunks: split into complete lines and retain any unterminated
+      // trailing fragment so a line split on a chunk boundary is not seen as two.
+      this.stderrBuffer += text;
+      const lines = this.stderrBuffer.split('\n');
+      this.stderrBuffer = lines.pop() ?? '';
+      const lastLine = lines.map(l => l.trim()).filter(Boolean).pop();
+      if (lastLine) this.lastStderrLine = lastLine;
+      this.logger.warn('session stderr', { stderr: text });
     });
 
     proc.on('exit', (code, signal) => {
+      // Flush any unterminated trailing stderr fragment (a process that dies
+      // mid-line writes no final newline) so it can still surface as lastStderr.
+      const trailing = this.stderrBuffer.trim();
+      if (trailing) this.lastStderrLine = trailing;
+      this.stderrBuffer = '';
       this.logger.info('session subprocess exited', {
         code,
         signal,
@@ -714,6 +778,11 @@ export class SessionProcess extends EventEmitter {
     });
 
     proc.on('error', (err) => {
+      // A missing/unresolvable binary surfaces here as an ENOENT `error` event
+      // (e.g. `spawn /path/claude ENOENT`), NOT on stderr — capture it so the
+      // fatal max-restarts log can name the real cause and fire the CLAUDE_BIN
+      // hint. This is the exact failure the binary-resolution work targets.
+      this.lastStderrLine = err.message;
       this.logger.error('session subprocess error', { error: err.message });
     });
   }
@@ -726,7 +795,17 @@ export class SessionProcess extends EventEmitter {
       this.restartCount = 0;
     }
     if (this.restartCount >= MAX_RESTARTS) {
-      this.logger.error('Session max restarts reached', { sessionId: this.sessionId });
+      // Match both the CLI's own "binary not found" text and Node's spawn ENOENT
+      // (the shape a genuinely unresolvable claude binary produces).
+      const binNotFound = /binary not found|ENOENT/i.test(this.lastStderrLine ?? '');
+      this.logger.error('Session max restarts reached', {
+        sessionId: this.sessionId,
+        claudeBin: this.lastClaudeBin,
+        lastStderr: this.lastStderrLine ?? null,
+        ...(binNotFound
+          ? { hint: 'claude executable is not resolvable — set CLAUDE_BIN to the claude path (native install: ~/.local/bin/claude)' }
+          : {}),
+      });
       this.emit('failed');
       return;
     }

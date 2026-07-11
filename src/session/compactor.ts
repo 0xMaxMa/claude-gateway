@@ -3,6 +3,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { Message } from '../types';
 import { SessionStore } from './store';
+import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
 
 export interface CompactionResult {
   beforeMessages: number;
@@ -144,11 +145,19 @@ export class SessionCompactor {
     // Wrap content in XML tags so claude treats it as data to analyze, not an active conversation
     const prompt = `${COMPACTOR_SYSTEM_PROMPT}\n\n${instruction}\n\n<transcript>\n${text}\n</transcript>\n\nWrite a concise summary of the above transcript now:`;
 
-    const result = spawnSync('claude', ['--print'], {
+    // Resolve claude the same way the session subprocess does: honor CLAUDE_BIN
+    // (which may carry args), else probe PATH and the native/legacy install
+    // locations. This runs in the gateway's own (possibly minimal) PATH, so
+    // without resolution `claude --print` would fail identically to a session
+    // spawn after the native-installer migration.
+    const claudeBinRaw = process.env.CLAUDE_BIN ?? resolveClaudeBin().bin;
+    const [claudeBin, ...claudeBinArgs] = claudeBinRaw.split(' ');
+
+    const result = spawnSync(claudeBin, [...claudeBinArgs, '--print'], {
       input: prompt,
       encoding: 'utf-8',
       timeout: 300_000,
-      env: process.env,
+      env: { ...process.env, PATH: pathWithNativeBin() },
     });
 
     if (result.error) {

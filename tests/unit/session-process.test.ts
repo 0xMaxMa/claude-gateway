@@ -13,6 +13,18 @@ jest.mock('os', () => {
   };
 });
 
+// ── claude-bin mock (override the resolved binary per-test) ───────────────────
+// Default 'claude' mirrors PATH resolution, so existing specs are unaffected;
+// the app-agent guard specs raise it to a host-only path to prove the guard.
+let mockResolvedBin = 'claude';
+jest.mock('../../src/session/claude-bin', () => {
+  const real = jest.requireActual('../../src/session/claude-bin');
+  return {
+    ...real,
+    resolveClaudeBin: () => ({ bin: mockResolvedBin, source: 'native-bin', searched: [] }),
+  };
+});
+
 // ── Minimal mock types ────────────────────────────────────────────────────────
 
 interface MockStdin {
@@ -119,6 +131,8 @@ describe('SessionProcess', () => {
     sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
     lastProcess = null;
     mockHomeDir = null;
+    mockResolvedBin = 'claude';
+    delete process.env.CLAUDE_BIN; // keep binary-resolution specs deterministic
     spawnMock = require('child_process').spawn as jest.Mock;
     spawnMock.mockClear();
   });
@@ -1917,6 +1931,138 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
     expect(lastProcess!.kill).not.toHaveBeenCalled();
     expect((sp as unknown as { restartRequested: boolean }).restartRequested).toBe(false);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN1: the last non-empty stderr line is retained so a fatal restart
+  // failure can name what actually died (e.g. an unresolvable claude binary).
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN1: retains the last stderr line and the spawned binary', async () => {
+    const sp = new SessionProcess('chat:bin1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('some warning\nclaude: binary not found\n'));
+
+    const priv = sp as unknown as { lastStderrLine: string | null; lastClaudeBin: string };
+    expect(priv.lastStderrLine).toBe('claude: binary not found');
+    expect(typeof priv.lastClaudeBin).toBe('string');
+    expect(priv.lastClaudeBin.length).toBeGreaterThan(0);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN2: once MAX_RESTARTS is hit the session emits 'failed' rather than
+  // looping silently — the fatal branch that logs the actionable error.
+  // --------------------------------------------------------------------------
+  it("U-SP-BIN2: emits 'failed' after MAX_RESTARTS is reached", async () => {
+    const sp = new SessionProcess('chat:bin2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not found\n'));
+
+    let failed = false;
+    sp.on('failed', () => { failed = true; });
+
+    const priv = sp as unknown as { restartCount: number; scheduleRestart: () => void };
+    priv.restartCount = 3; // at the MAX_RESTARTS cap
+    priv.scheduleRestart();
+
+    expect(failed).toBe(true);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN3: a non-app-agent session spawns the host-resolved binary directly.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN3: host session spawns the resolved binary path', async () => {
+    mockResolvedBin = '/home/u/.local/bin/claude';
+    const sp = new SessionProcess('chat:bin3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    expect(spawnMock.mock.calls[0][0]).toBe('/home/u/.local/bin/claude');
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN4: app-agents run claude INSIDE the container, so host-side
+  // resolution must NOT leak a host path into the container — the in-container
+  // binary stays bare `claude` (resolved by the container PATH). Regression guard.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN4: app-agent does not leak the host-resolved path into the container', async () => {
+    mockResolvedBin = '/home/u/.local/bin/claude'; // a host-only path
+    const appAgent = makeAgentConfig({
+      workspace: agentConfig.workspace,
+      type: 'app-agent',
+      container: 'my-app-container',
+    });
+    const sp = new SessionProcess('chat:bin4', 'telegram', appAgent, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(spawnBin).toBe('docker');
+    // The in-container binary is bare `claude`, never the host-resolved path.
+    expect(spawnArgs).toContain('claude');
+    expect(spawnArgs).not.toContain('/home/u/.local/bin/claude');
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`
+  // event (NOT on stderr). It must still be captured into lastStderrLine so the
+  // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN5: captures a spawn ENOENT error into lastStderrLine', async () => {
+    const sp = new SessionProcess('chat:bin5', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.emit('error', new Error('spawn /home/u/.local/bin/claude ENOENT'));
+
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    expect(priv.lastStderrLine).toBe('spawn /home/u/.local/bin/claude ENOENT');
+    // The fatal-log hint keys off this via /binary not found|ENOENT/i.
+    expect(/binary not found|ENOENT/i.test(priv.lastStderrLine ?? '')).toBe(true);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN6: a stderr line split across two `data` chunks is reassembled into
+  // one line, not captured as two partials.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN6: reassembles a stderr line split across chunks', async () => {
+    const sp = new SessionProcess('chat:bin6', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not '));
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    // Nothing complete yet — the fragment stays buffered.
+    expect(priv.lastStderrLine).toBeNull();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('found\n'));
+    expect(priv.lastStderrLine).toBe('claude: binary not found');
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN7: an unterminated final stderr line (process dies mid-line, no
+  // trailing newline) is flushed into lastStderrLine on exit.
+  // --------------------------------------------------------------------------
+  it('U-SP-BIN7: flushes an unterminated trailing stderr line on exit', async () => {
+    const sp = new SessionProcess('chat:bin7', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stderr!.emit('data', Buffer.from('fatal: claude crashed mid-line'));
+    const priv = sp as unknown as { lastStderrLine: string | null };
+    expect(priv.lastStderrLine).toBeNull(); // still buffered, no newline yet
+
+    lastProcess!.emit('exit', 1, null);
+    expect(priv.lastStderrLine).toBe('fatal: claude crashed mid-line');
 
     await sp.stop();
   });
