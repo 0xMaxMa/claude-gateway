@@ -8,11 +8,27 @@ export interface DiscordPending {
   createdAt: number;
   expiresAt: number;
   replies: number;
+  // Absent ⇒ 'dm'. A 'guild' entry is a guild knock: guildId holds the server
+  // id and approval pushes it into guildAllowlist (mirrors LINE group pairing).
+  kind?: 'dm' | 'guild';
+  guildId?: string;
 }
 
 export interface DiscordAccess {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled';
+  dmPolicy: 'open' | 'allowlist' | 'disabled';
+  // Orthogonal to dmPolicy (mirrors Telegram): when the base policy is
+  // 'allowlist', `pairing: true` means an unknown sender gets a one-time code
+  // and lands in pending for the admin to approve; `pairing: false` means
+  // they're silently dropped (pure allowlist). Ignored when dmPolicy is
+  // 'open'/'disabled'.
+  pairing: boolean;
   allowFrom: string[];
+  // Guild access tier (mirrors LINE): base policy for guilds + a single
+  // requireMention gate. `guildAllowlist` IS the group allowlist. `pairing`
+  // governs guild code-minting too. channelAllowlist/roleAllowlist stay
+  // backend-only filters.
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  requireMention: boolean;
   guildAllowlist: string[];
   channelAllowlist: string[];
   roleAllowlist: string[];
@@ -22,7 +38,7 @@ export interface DiscordAccess {
 export type DiscordGateResult =
   | { action: 'deliver' }
   | { action: 'drop' }
-  | { action: 'pair'; code: string; isResend: boolean };
+  | { action: 'pair'; code: string; isResend: boolean; isGuild?: boolean };
 
 export type DiscordConfig = {
   botToken: string;
@@ -45,6 +61,9 @@ export type DiscordMessageContext = {
   messageId: string;
   isDM: boolean;
   isThread: boolean;
+  // Whether the bot was @mentioned / replied-to. Computed in module.ts so gate()
+  // stays discord.js-free. Absent ⇒ treated as not mentioned.
+  mentionsBot?: boolean;
 };
 
 export type DiscordAccessConfig = {

@@ -7,7 +7,13 @@ function makeGateHelpers(initial?: Partial<Access>) {
   let access: Access = { ...defaultAccess(), ...initial }
   const saved: Access[] = []
 
-  const loadAccess = () => ({ ...access, pending: { ...access.pending }, allowFrom: [...access.allowFrom], groups: { ...access.groups } })
+  const loadAccess = () => ({
+    ...access,
+    pending: { ...access.pending },
+    allowFrom: [...access.allowFrom],
+    groupAllowlist: [...access.groupAllowlist],
+    legacyGroupAllowFrom: access.legacyGroupAllowFrom ? { ...access.legacyGroupAllowFrom } : undefined,
+  })
   const saveAccessFn = (a: Access) => {
     access = { ...a, pending: { ...a.pending }, allowFrom: [...a.allowFrom] }
     saved.push({ ...a })
@@ -158,16 +164,59 @@ describe('gate() — DM (private chat)', () => {
 })
 
 describe('gate() — group chat', () => {
-  test('group — drop if groupId not in access.groups', () => {
-    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers()
+  test('group — pair (mint code) when unknown group + groupPolicy allowlist + pairing on', () => {
+    const { loadAccess, saveAccessFn, generateCode, getAccess } = makeGateHelpers({ groupPolicy: 'allowlist', pairing: true })
+    const input: GateInput = { fromId: '123', chatType: 'group', chatId: '-100999' }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
+    expect(result.action).toBe('pair')
+    if (result.action === 'pair') {
+      expect(result.isGroup).toBe(true)
+      expect(result.isResend).toBe(false)
+      expect(result.code).toBe('code1')
+    }
+    const access = getAccess()
+    expect(access.pending['code1'].kind).toBe('group')
+    expect(access.pending['code1'].chatId).toBe('-100999')
+  })
+
+  test('group — pair isResend + bumps replies when a group knock already pending', () => {
+    const now = Date.now()
+    const initial: Partial<Access> = {
+      groupPolicy: 'allowlist',
+      pairing: true,
+      pending: {
+        gcode: { senderId: '5', chatId: '-100999', createdAt: now - 1000, expiresAt: now + 3600000, replies: 1, kind: 'group' },
+      },
+    }
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
+    const input: GateInput = { fromId: '123', chatType: 'group', chatId: '-100999' }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode, now)
+    expect(result.action).toBe('pair')
+    if (result.action === 'pair') {
+      expect(result.isResend).toBe(true)
+      expect(result.code).toBe('gcode')
+    }
+  })
+
+  test('group — drop unknown group when pairing off (pure allowlist)', () => {
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ groupPolicy: 'allowlist', pairing: false })
     const input: GateInput = { fromId: '123', chatType: 'group', chatId: '-100999' }
     const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
     expect(result.action).toBe('drop')
   })
 
-  test('group — drop if requireMention=true and no mention', () => {
+  test('group — drop when groupPolicy disabled', () => {
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers({ groupPolicy: 'disabled', pairing: true, groupAllowlist: ['-100123'] })
+    const input: GateInput = { fromId: '123', chatType: 'group', chatId: '-100123' }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
+    expect(result.action).toBe('drop')
+  })
+
+  test('group — drop if allowlisted but requireMention=true and no mention', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: true, allowFrom: [] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: true,
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const input: GateInput = {
@@ -182,9 +231,11 @@ describe('gate() — group chat', () => {
     expect(result.action).toBe('drop')
   })
 
-  test('group — deliver if bot is @mentioned', () => {
+  test('group — deliver if allowlisted and bot is @mentioned', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: true, allowFrom: [] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: true,
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const text = '@mybot hello'
@@ -202,7 +253,9 @@ describe('gate() — group chat', () => {
 
   test('group — deliver via reply_to a bot message (implicit mention)', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: true, allowFrom: [] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: true,
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const input: GateInput = {
@@ -218,9 +271,25 @@ describe('gate() — group chat', () => {
     expect(result.action).toBe('deliver')
   })
 
-  test('group — drop if sender not in group.allowFrom', () => {
+  test('group — legacyGroupAllowFrom: deliver when sender is in the legacy per-group list', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: false, allowFrom: ['999'] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: false,
+      legacyGroupAllowFrom: { '-100123': ['9'] },
+    }
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
+    const input: GateInput = { fromId: '9', chatType: 'group', chatId: '-100123' }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
+    expect(result.action).toBe('deliver')
+  })
+
+  test('group — legacyGroupAllowFrom: drop a non-listed sender even when correctly @mentioned', () => {
+    const initial: Partial<Access> = {
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: true,
+      legacyGroupAllowFrom: { '-100123': ['9'] },
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const input: GateInput = {
@@ -228,15 +297,31 @@ describe('gate() — group chat', () => {
       chatType: 'group',
       chatId: '-100123',
       botUsername: 'mybot',
-      messageText: 'hello',
+      messageText: '@mybot hello',
+      messageEntities: [{ type: 'mention', offset: 0, length: 6 }],
     }
     const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
     expect(result.action).toBe('drop')
   })
 
-  test('group — deliver if no requireMention and sender in group.allowFrom', () => {
+  test('group — legacyGroupAllowFrom: a group with no entry is unaffected (regression guard)', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: false, allowFrom: ['123'] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123', '-100456'],
+      requireMention: false,
+      legacyGroupAllowFrom: { '-100456': ['9'] },
+    }
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
+    const input: GateInput = { fromId: '123', chatType: 'group', chatId: '-100123' }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
+    expect(result.action).toBe('deliver')
+  })
+
+  test('group — deliver when allowlisted and requireMention=false (no mention needed)', () => {
+    const initial: Partial<Access> = {
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: false,
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const input: GateInput = {
@@ -249,9 +334,26 @@ describe('gate() — group chat', () => {
     expect(result.action).toBe('deliver')
   })
 
+  test('group — groupPolicy open still applies the mention gate', () => {
+    const initial: Partial<Access> = { groupPolicy: 'open', requireMention: true }
+    const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
+    const input: GateInput = {
+      fromId: '123',
+      chatType: 'group',
+      chatId: '-100999',
+      botUsername: 'mybot',
+      messageText: 'hi',
+      messageEntities: [],
+    }
+    const result = gateLogic(input, loadAccess, saveAccessFn, generateCode)
+    expect(result.action).toBe('drop')
+  })
+
   test('supergroup — treated same as group', () => {
     const initial: Partial<Access> = {
-      groups: { '-100123': { requireMention: false, allowFrom: [] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: false,
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
     const input: GateInput = {

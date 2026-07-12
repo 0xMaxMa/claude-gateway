@@ -125,11 +125,9 @@ type PendingEntry = {
   createdAt: number
   expiresAt: number
   replies: number
-}
-
-type GroupPolicy = {
-  requireMention: boolean
-  allowFrom: string[]
+  // Absent ⇒ 'dm'. 'group' entries hold a group id in chatId; approval pushes
+  // it into groupAllowlist (mirrors LINE).
+  kind?: 'dm' | 'group'
 }
 
 type Access = {
@@ -139,7 +137,15 @@ type Access = {
   // land in pending; false ⇒ silently dropped (pure allowlist).
   pairing: boolean
   allowFrom: string[]
-  groups: Record<string, GroupPolicy>
+  // Group access tier (mirrors LINE): base policy, allowlisted group ids, and a
+  // single requireMention gate. `pairing` governs group code-minting too.
+  groupPolicy: 'open' | 'allowlist' | 'disabled'
+  groupAllowlist: string[]
+  requireMention: boolean
+  // Migration-only artifact — mirrors pure.ts Access — keep in sync. Enforced
+  // in gate() below so migrating a pre-split file can't silently widen a
+  // group that was previously restricted to specific senders.
+  legacyGroupAllowFrom?: Record<string, string[]>
   pending: Record<string, PendingEntry>
   mentionPatterns?: string[]
   // delivery/UX config — optional, defaults live in the reply handler
@@ -158,7 +164,9 @@ function defaultAccess(): Access {
     dmPolicy: 'allowlist',
     pairing: true,
     allowFrom: [],
-    groups: {},
+    groupPolicy: 'allowlist',
+    groupAllowlist: [],
+    requireMention: true,
     pending: {},
     ackReaction: '👀',
   }
@@ -206,7 +214,7 @@ function loadAccess(): Access {
 function assertAllowedChat(chat_id: string): void {
   const access = loadAccess()
   if (access.allowFrom.includes(chat_id)) return
-  if (chat_id in access.groups) return
+  if (access.groupAllowlist.includes(chat_id)) return
   throw new Error(`chat ${chat_id} is not allowlisted — add via /telegram:access`)
 }
 
@@ -232,7 +240,7 @@ function pruneExpired(a: Access, now?: number): boolean {
 type GateResult =
   | { action: 'deliver'; access: Access }
   | { action: 'drop' }
-  | { action: 'pair'; code: string; isResend: boolean }
+  | { action: 'pair'; code: string; isResend: boolean; isGroup?: boolean }
 
 function gate(ctx: Context): GateResult {
   const access = loadAccess()
@@ -261,7 +269,7 @@ function gate(ctx: Context): GateResult {
 
     // pairing mode — check for existing non-expired code for this sender
     for (const [code, p] of Object.entries(access.pending)) {
-      if (p.senderId === senderId) {
+      if ((p.kind ?? 'dm') === 'dm' && p.senderId === senderId) {
         // Reply twice max (initial + one reminder), then go silent.
         if ((p.replies ?? 1) >= 2) return { action: 'drop' }
         p.replies = (p.replies ?? 1) + 1
@@ -269,8 +277,8 @@ function gate(ctx: Context): GateResult {
         return { action: 'pair', code, isResend: true }
       }
     }
-    // Cap pending at 3. Extra attempts are silently dropped.
-    if (Object.keys(access.pending).length >= 3) return { action: 'drop' }
+    // Cap pending per-kind at 3. Extra attempts are silently dropped.
+    if (countPending(access, 'dm') >= 3) return { action: 'drop' }
 
     const code = randomBytes(3).toString('hex') // 6 hex chars
     const now = Date.now()
@@ -280,6 +288,7 @@ function gate(ctx: Context): GateResult {
       createdAt: now,
       expiresAt: now + 60 * 60 * 1000, // 1h
       replies: 1,
+      kind: 'dm',
     }
     saveAccess(access)
     return { action: 'pair', code, isResend: false }
@@ -287,20 +296,57 @@ function gate(ctx: Context): GateResult {
 
   if (chatType === 'group' || chatType === 'supergroup') {
     const groupId = String(ctx.chat!.id)
-    const policy = access.groups[groupId]
-    if (!policy) return { action: 'drop' }
-    const groupAllowFrom = policy.allowFrom ?? []
-    const requireMention = policy.requireMention ?? true
-    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+    if (access.groupPolicy === 'disabled') return { action: 'drop' }
+
+    if (access.groupPolicy === 'allowlist' && !access.groupAllowlist.includes(groupId)) {
+      // Unknown group. Pairing off ⇒ silent drop. On ⇒ mint a code keyed on the
+      // group id and post it here; a member relays it to the admin (mirrors LINE).
+      if (!access.pairing) return { action: 'drop' }
+      for (const [code, p] of Object.entries(access.pending)) {
+        if (p.kind === 'group' && p.chatId === groupId) {
+          if ((p.replies ?? 1) >= 2) return { action: 'drop' }
+          p.replies = (p.replies ?? 1) + 1
+          saveAccess(access)
+          return { action: 'pair', code, isResend: true, isGroup: true }
+        }
+      }
+      if (countPending(access, 'group') >= 3) return { action: 'drop' }
+      const code = randomBytes(3).toString('hex') // 6 hex chars
+      const now = Date.now()
+      access.pending[code] = {
+        senderId,
+        chatId: groupId,
+        createdAt: now,
+        expiresAt: now + 60 * 60 * 1000, // 1h
+        replies: 1,
+        kind: 'group',
+      }
+      saveAccess(access)
+      return { action: 'pair', code, isResend: false, isGroup: true }
+    }
+
+    // Allowlisted (or open policy) → enforce any legacy per-sender restriction
+    // that survived migration, then the single mention gate.
+    const legacyAllowed = access.legacyGroupAllowFrom?.[groupId]
+    if (legacyAllowed && legacyAllowed.length > 0 && !legacyAllowed.includes(senderId)) {
       return { action: 'drop' }
     }
-    if (requireMention && !isMentioned(ctx, access.mentionPatterns)) {
+    if (access.requireMention !== false && !isMentioned(ctx, access.mentionPatterns)) {
       return { action: 'drop' }
     }
     return { action: 'deliver', access }
   }
 
   return { action: 'drop' }
+}
+
+/** Count pending entries of a given kind (absent kind ⇒ 'dm'). */
+function countPending(access: Access, kind: 'dm' | 'group'): number {
+  let n = 0
+  for (const p of Object.values(access.pending)) {
+    if ((p.kind ?? 'dm') === kind) n++
+  }
+  return n
 }
 
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
@@ -723,9 +769,12 @@ type AttachmentMeta = {
 // Pairing reply shown to an un-allowlisted sender: their one-time code plus
 // the instruction to report it to the admin. Shared by handleInbound (normal
 // message) and the /start command so both hand the code out identically.
-function pairingReplyText(code: string, isResend: boolean): string {
+function pairingReplyText(code: string, isResend: boolean, isGroup = false): string {
   const lead = isResend ? 'Still waiting for approval.' : 'This bot is private.'
-  return `${lead}\n\nYour pairing code: ${code}\n\nShare this code with the admin to get access.`
+  const share = isGroup
+    ? 'Share this code with an admin to enable me in this group.'
+    : 'Share this code with the admin to get access.'
+  return `${lead}\n\nPairing code: ${code}\n\n${share}`
 }
 
 async function handleInbound(
@@ -749,7 +798,7 @@ async function handleInbound(
     // the web UI. The user does NOT run any command (they may not have Claude
     // Code at all) — they just report the code to the admin, who verifies it
     // matches what's shown in Pending and clicks Approve.
-    await ctx.reply(pairingReplyText(result.code, result.isResend))
+    await ctx.reply(pairingReplyText(result.code, result.isResend, result.isGroup))
     return
   }
 

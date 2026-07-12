@@ -732,20 +732,28 @@ When the config schema changes (new fields added in `config.template.json`), the
 
 ## Pairing New Users
 
-1. Set `dmPolicy` to `pairing` in `access.json`:
-   ```json
-   { "dmPolicy": "pairing" }
-   ```
-2. Ask the user to DM the bot — they receive a 6-character pairing code
-3. Approve it:
+New agents default to `dmPolicy: "allowlist"` with the orthogonal `pairing`
+toggle **on**, so pairing works out of the box — no setup needed.
+
+1. Ask the user to DM the bot — they receive a 6-character pairing code
+2. Approve it:
    ```bash
-   npm run pair -- --agent=alfred --code=abc123
+   npm run pair -- --agent=alfred --code=abc123 --channel=discord
    ```
-4. The bot confirms pairing within 5 seconds
-5. Lock down after everyone is paired:
-   ```bash
-   npm run pair -- --agent=alfred --policy=allowlist
+   (omit `--channel` or use `--channel=telegram` for Telegram)
+3. The bot confirms pairing within 5 seconds
+4. Lock down after everyone is paired (optional) — turn the pairing toggle off
+   so unknown senders are dropped silently (the base policy is already
+   `allowlist`):
    ```
+   /gateway:discord-access dm-pairing off     # Discord
+   /telegram:access pairing off               # Telegram
+   ```
+
+`pairing` is an **orthogonal on/off toggle**, not a `dmPolicy` value: the base
+policy stays `open` | `allowlist` | `disabled`, and pairing layers on top of
+`allowlist`. A legacy `access.json` with `"dmPolicy": "pairing"` is migrated
+automatically on read to `{ dmPolicy: "allowlist", pairing: true }`.
 
 To manage channels (add/remove Telegram or Discord) on an existing agent:
 ```bash

@@ -66,13 +66,15 @@ APPROVED_DIR = {STATE_DIR}/approved
   "dmPolicy": "allowlist",
   "pairing": true,
   "allowFrom": ["<senderId>", ...],
-  "groups": {
-    "<groupId>": { "requireMention": true, "allowFrom": [] }
-  },
+  "groupPolicy": "allowlist",
+  "groupAllowlist": ["<groupId>", ...],
+  "requireMention": true,
+  "legacyGroupAllowFrom": { "<groupId>": ["<senderId>", ...] },
   "pending": {
     "<6-char-code>": {
       "senderId": "...", "chatId": "...",
-      "createdAt": <ms>, "expiresAt": <ms>
+      "createdAt": <ms>, "expiresAt": <ms>,
+      "kind": "dm"
     }
   },
   "mentionPatterns": ["@mybot"]
@@ -81,11 +83,26 @@ APPROVED_DIR = {STATE_DIR}/approved
 
 `dmPolicy` is the base access policy: `open` | `allowlist` | `disabled`.
 `pairing` is an **orthogonal on/off toggle** (mirrors LINE), only meaningful
-when `dmPolicy` is `allowlist`: `true` ⇒ an unknown sender gets a one-time
-6-char code that lands in `pending` for the admin to approve; `false` ⇒
-unknown senders are silently dropped (pure allowlist).
+when `dmPolicy`/`groupPolicy` is `allowlist`: `true` ⇒ an unknown sender or
+group gets a one-time 6-char code that lands in `pending` for the admin to
+approve; `false` ⇒ silently dropped (pure allowlist).
 
-Missing file = `{dmPolicy:"allowlist", pairing:true, allowFrom:[], groups:{}, pending:{}}`.
+The **group tier** mirrors LINE: `groupPolicy` (`open` | `allowlist` |
+`disabled`) is the base policy for groups, `groupAllowlist` holds the approved
+group ids (negative numbers, e.g. `-1001234567890`), and `requireMention` (a
+single boolean) gates whether the bot answers in an allowlisted group only when
+@mentioned. A `pending` entry with `"kind": "group"` is a group knock — its
+`chatId` is the group id and `pair`-ing it adds that id to `groupAllowlist`
+(not `allowFrom`). Entries with no `kind` (or `"kind": "dm"`) are DM knocks.
+
+`legacyGroupAllowFrom` is a **migration-only artifact**, not a live feature —
+it's how a pre-split file's per-group sender restriction survives migration
+(the old schema could lock a group to specific senders; the current model has
+no per-user group tier). If present, it's enforced silently in addition to
+`requireMention`. Preserve this key as-is whenever you read/rewrite the file —
+never invent, edit, or add entries to it; there is no command for that.
+
+Missing file = `{dmPolicy:"allowlist", pairing:true, allowFrom:[], groupPolicy:"allowlist", groupAllowlist:[], requireMention:true, pending:{}}`.
 
 ---
 
@@ -97,21 +114,26 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 
 1. Read `{STATE_DIR}/access.json` (handle missing file).
 2. Show: dmPolicy, the pairing toggle (on/off), allowFrom count and list,
-   pending count with codes + sender IDs + age, groups count.
+   pending count with codes + sender IDs + kind (dm/group) + age, groupPolicy,
+   requireMention, and the groupAllowlist count and list.
 
 ### `pair <code>`
 
 1. Read `{STATE_DIR}/access.json`.
 2. Look up `pending[<code>]`. If not found or `expiresAt < Date.now()`,
    tell the user and stop.
-3. Extract `senderId` and `chatId` from the pending entry.
-4. Add `senderId` to `allowFrom` (dedupe).
-5. Delete `pending[<code>]`.
-6. Write the updated access.json.
-7. `mkdir -p {STATE_DIR}/approved` then write
-   `{STATE_DIR}/approved/<senderId>` with `chatId` as the
-   file contents. The channel server polls this dir and sends "you're in".
-8. Confirm: who was approved (senderId).
+3. **Kind-aware.** If the entry's `kind` is `"group"`:
+   - Add its `chatId` (the group id) to `groupAllowlist` (dedupe).
+   - Delete `pending[<code>]`, write access.json. **No** `approved/` file (a
+     group has no single recipient — the bot silently starts answering there).
+   - Confirm which group id was allowed.
+   Otherwise (DM knock, `kind` absent or `"dm"`):
+   - Add `senderId` to `allowFrom` (dedupe).
+   - Delete `pending[<code>]`, write access.json.
+   - `mkdir -p {STATE_DIR}/approved` then write
+     `{STATE_DIR}/approved/<senderId>` with `chatId` as the file contents. The
+     channel server polls this dir and sends "you're in".
+   - Confirm who was approved (senderId).
 
 ### `deny <code>`
 
@@ -145,16 +167,33 @@ Toggle the orthogonal pairing code layer (only affects `dmPolicy: "allowlist"`).
    `pending` for you to `pair`. When `off`: unknown senders are dropped
    silently (pure allowlist).
 
-### `group add <groupId>` (optional: `--no-mention`, `--allow id1,id2`)
+### `group policy <mode>`
+
+1. Validate `<mode>` is one of `open`, `allowlist`, `disabled`.
+2. Read (create default if missing), set `groupPolicy`, write.
+   (`allowlist` + `pairing on` is the capture-unknown-groups mode: an unknown
+   group gets a pairing code posted in it.)
+
+### `group allow <groupId>`
 
 1. Read (create default if missing).
-2. Set `groups[<groupId>] = { requireMention: !hasFlag("--no-mention"),
-   allowFrom: parsedAllowList }`.
-3. Write.
+2. Add `<groupId>` to `groupAllowlist` (dedupe). Write.
+   (Group ids are negative numbers, e.g. `-1001234567890`.)
 
-### `group rm <groupId>`
+### `group deny <groupId>`
 
-1. Read, `delete groups[<groupId>]`, write.
+1. Read, filter `groupAllowlist` to exclude `<groupId>`, also delete
+   `legacyGroupAllowFrom[<groupId>]` if present (so a later re-add doesn't
+   resurrect a stale restriction), write.
+
+### `group mention <on|off>`
+
+Toggle the single group mention gate (`requireMention`).
+
+1. Validate `<value>` is `on` or `off`.
+2. Read (create default if missing), set `requireMention` to `true`/`false`, write.
+3. Confirm. When `on`: the bot answers in an allowlisted group only when
+   @mentioned (or replied to). When `off`: it answers every message there.
 
 ### `set <key> <value>`
 

@@ -269,7 +269,7 @@ export class TelegramModule implements ChannelModule {
   private assertAllowedChat(chat_id: string): void {
     const access = this.readAccessFile();
     if (access.allowFrom.includes(chat_id)) return;
-    if (chat_id in access.groups) return;
+    if (access.groupAllowlist.includes(chat_id)) return;
     throw new Error(`chat ${chat_id} is not allowlisted`);
   }
 

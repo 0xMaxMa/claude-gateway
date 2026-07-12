@@ -35,7 +35,7 @@ export function generatePairingCode(): string {
 }
 
 /** Max distinct senders retained per agent (oldest evicted first). */
-export const MAX_PENDING_PER_AGENT = 20;
+export const MAX_PENDING_PER_AGENT = 5;
 
 // agentId -> (id -> entry)  (id = userId | groupId | roomId)
 const store = new Map<string, Map<string, PendingSender>>();

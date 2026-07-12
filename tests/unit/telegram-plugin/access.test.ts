@@ -4,7 +4,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { readAccessFile, saveAccess, pruneExpired, defaultAccess, migrateAccess, Access } from '../../../mcp/tools/telegram/pure'
+import { readAccessFile, saveAccess, pruneExpired, defaultAccess, migrateAccess, deriveLegacyGroupAllowFrom, Access } from '../../../mcp/tools/telegram/pure'
 
 function makeTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tg-access-test-'))
@@ -33,7 +33,9 @@ describe('readAccessFile()', () => {
       dmPolicy: 'allowlist',
       pairing: false,
       allowFrom: ['123', '456'],
-      groups: { '-100123': { requireMention: true, allowFrom: [] } },
+      groupPolicy: 'allowlist',
+      groupAllowlist: ['-100123'],
+      requireMention: true,
       pending: {},
       ackReaction: '👍',
     }
@@ -41,7 +43,9 @@ describe('readAccessFile()', () => {
     const result = readAccessFile(accessFile)
     expect(result.dmPolicy).toBe('allowlist')
     expect(result.allowFrom).toEqual(['123', '456'])
-    expect(result.groups).toEqual({ '-100123': { requireMention: true, allowFrom: [] } })
+    expect(result.groupAllowlist).toEqual(['-100123'])
+    expect(result.groupPolicy).toBe('allowlist')
+    expect(result.requireMention).toBe(true)
     expect(result.ackReaction).toBe('👍')
   })
 
@@ -63,7 +67,9 @@ describe('readAccessFile()', () => {
     const result = readAccessFile(accessFile)
     expect(result.dmPolicy).toBe('disabled')
     expect(result.allowFrom).toEqual([])
-    expect(result.groups).toEqual({})
+    expect(result.groupAllowlist).toEqual([])
+    expect(result.groupPolicy).toBe('allowlist')
+    expect(result.requireMention).toBe(true)
     expect(result.pending).toEqual({})
   })
 })
@@ -104,6 +110,64 @@ describe('migrateAccess() — legacy 4-value dmPolicy → split model', () => {
     // existing file — it opts pairing ON so onboarding works.
     expect(defaultAccess()).toMatchObject({ dmPolicy: 'allowlist', pairing: true })
   })
+
+  test('group tier: legacy `groups` map flattens to groupAllowlist, non-empty allowFrom preserved as legacyGroupAllowFrom', () => {
+    const result = migrateAccess({
+      dmPolicy: 'allowlist',
+      groups: { '-100123': { requireMention: true, allowFrom: [] }, '-100456': { requireMention: false, allowFrom: ['9'] } },
+    })
+    expect(result.groupAllowlist.sort()).toEqual(['-100123', '-100456'])
+    expect(result.groupPolicy).toBe('allowlist')
+    expect(result.requireMention).toBe(true)
+    // Only the group with a non-empty allowFrom carries a restriction forward —
+    // an empty allowFrom meant "unrestricted" under the old schema too.
+    expect(result.legacyGroupAllowFrom).toEqual({ '-100456': ['9'] })
+  })
+
+  test('group tier: legacy `groups` with no non-empty allowFrom → legacyGroupAllowFrom stays undefined', () => {
+    const result = migrateAccess({
+      dmPolicy: 'allowlist',
+      groups: { '-100123': { requireMention: true, allowFrom: [] } },
+    })
+    expect(result.legacyGroupAllowFrom).toBeUndefined()
+  })
+
+  test('group tier: explicit legacyGroupAllowFrom is passed through unchanged (idempotent re-migration)', () => {
+    const result = migrateAccess({
+      dmPolicy: 'allowlist',
+      groupAllowlist: ['-100456'],
+      legacyGroupAllowFrom: { '-100456': ['9'] },
+      groups: { '-100456': { allowFrom: ['should-be-ignored'] } },
+    })
+    expect(result.legacyGroupAllowFrom).toEqual({ '-100456': ['9'] })
+  })
+
+  test('deriveLegacyGroupAllowFrom(): undefined groups → undefined; empty allowFrom excluded; non-empty preserved', () => {
+    expect(deriveLegacyGroupAllowFrom(undefined)).toBeUndefined()
+    expect(deriveLegacyGroupAllowFrom({})).toBeUndefined()
+    expect(deriveLegacyGroupAllowFrom({ '-1': { allowFrom: [] } })).toBeUndefined()
+    expect(deriveLegacyGroupAllowFrom({ '-1': { allowFrom: ['9'] }, '-2': { allowFrom: [] } })).toEqual({ '-1': ['9'] })
+  })
+
+  test('group tier: absent group fields → allowlist + requireMention:true (secure default)', () => {
+    const result = migrateAccess({ dmPolicy: 'allowlist' })
+    expect(result.groupAllowlist).toEqual([])
+    expect(result.groupPolicy).toBe('allowlist')
+    expect(result.requireMention).toBe(true)
+  })
+
+  test('group tier: explicit new fields are preserved over legacy `groups`', () => {
+    const result = migrateAccess({
+      dmPolicy: 'allowlist',
+      groups: { '-1': { requireMention: true, allowFrom: [] } },
+      groupPolicy: 'open',
+      groupAllowlist: ['-999'],
+      requireMention: false,
+    })
+    expect(result.groupPolicy).toBe('open')
+    expect(result.groupAllowlist).toEqual(['-999'])
+    expect(result.requireMention).toBe(false)
+  })
 })
 
 describe('saveAccess()', () => {
@@ -138,7 +202,9 @@ describe('saveAccess()', () => {
       dmPolicy: 'allowlist',
       pairing: true,
       allowFrom: ['111'],
-      groups: {},
+      groupPolicy: 'allowlist',
+      groupAllowlist: [],
+      requireMention: true,
       pending: {
         abc123: {
           senderId: '111',

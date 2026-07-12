@@ -489,6 +489,16 @@ export function createApiRouter(
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(id).dmPolicy : null,
         // Orthogonal pairing toggle (mirrors line_pairing below). Absent ⇒ on.
         telegram_pairing: cfg.telegram?.botToken ? readTelegramAccess(id).pairing : null,
+        // Group tier (mirrors line_group_* below). Null when Telegram not connected.
+        telegram_group_policy: cfg.telegram?.botToken ? readTelegramAccess(id).groupPolicy : null,
+        telegram_group_allowlist: cfg.telegram?.botToken ? readTelegramAccess(id).groupAllowlist : null,
+        telegram_require_mention: cfg.telegram?.botToken ? readTelegramAccess(id).requireMention : null,
+        discord_dm_policy: cfg.discord?.botToken ? readDiscordAccess(id).dmPolicy : null,
+        discord_pairing: cfg.discord?.botToken ? readDiscordAccess(id).pairing : null,
+        // Discord approves at guild level — guildAllowlist IS the group allowlist.
+        discord_group_policy: cfg.discord?.botToken ? readDiscordAccess(id).groupPolicy : null,
+        discord_guild_allowlist: cfg.discord?.botToken ? readDiscordAccess(id).guildAllowlist : null,
+        discord_require_mention: cfg.discord?.botToken ? readDiscordAccess(id).requireMention : null,
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
         line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${id}` : null,
@@ -664,8 +674,15 @@ export function createApiRouter(
     // mcp/tools/telegram/pure.ts (migrateAccess).
     pairing: boolean;
     allowFrom: string[];
-    groups: Record<string, unknown>;
-    pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }>;
+    // Group tier (mirrors LINE): flat allowlist + single mention gate.
+    groupPolicy: 'open' | 'allowlist' | 'disabled';
+    groupAllowlist: string[];
+    requireMention: boolean;
+    // Migration-only artifact — mirrors pure.ts Access — keep in sync. Never
+    // written by any endpoint; only preserved so a pre-split group's per-user
+    // restriction survives being read+written back through this API.
+    legacyGroupAllowFrom?: Record<string, string[]>;
+    pending: Record<string, { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number; kind?: 'dm' | 'group' }>;
   };
 
   function readTelegramAccess(agentId: string): TelegramAccess {
@@ -676,7 +693,11 @@ export function createApiRouter(
         dmPolicy?: string;
         pairing?: boolean;
         allowFrom?: string[];
-        groups?: Record<string, unknown>;
+        groups?: Record<string, { requireMention?: boolean; allowFrom?: string[] }>;
+        groupPolicy?: string;
+        groupAllowlist?: string[];
+        requireMention?: boolean;
+        legacyGroupAllowFrom?: Record<string, string[]>;
         pending?: TelegramAccess['pending'];
       };
       // Migrate the legacy 4-value dmPolicy (pairing folded in) to the split
@@ -693,16 +714,36 @@ export function createApiRouter(
         dmPolicy = (legacy as TelegramAccess['dmPolicy']) ?? 'allowlist';
         pairing = parsed.pairing ?? false;
       }
+      // Group tier: flatten legacy per-group `groups` map to a flat allowlist,
+      // behavior-preserving (groups were closed-by-default). Mirrors pure.ts.
+      // A group's per-user `allowFrom` override has no flat-model equivalent,
+      // but it's a real restriction — preserve it (mirrors
+      // deriveLegacyGroupAllowFrom in pure.ts, keep in sync) rather than
+      // silently dropping it and widening the group to every member.
+      const groupAllowlist = parsed.groupAllowlist ?? Object.keys(parsed.groups ?? {});
+      const groupPolicy = (parsed.groupPolicy as TelegramAccess['groupPolicy']) ?? 'allowlist';
+      const requireMention = parsed.requireMention ?? true;
+      let legacyGroupAllowFrom = parsed.legacyGroupAllowFrom;
+      if (!legacyGroupAllowFrom && parsed.groups) {
+        const derived: Record<string, string[]> = {};
+        for (const [groupId, g] of Object.entries(parsed.groups)) {
+          if (g.allowFrom && g.allowFrom.length > 0) derived[groupId] = [...g.allowFrom];
+        }
+        if (Object.keys(derived).length > 0) legacyGroupAllowFrom = derived;
+      }
       return {
         dmPolicy,
         pairing,
         allowFrom: parsed.allowFrom ?? [],
-        groups: parsed.groups ?? {},
+        groupPolicy,
+        groupAllowlist,
+        requireMention,
+        legacyGroupAllowFrom,
         pending: parsed.pending ?? {},
       };
     } catch {
       // Brand-new agent (no file): closed base + pairing on (capture owner id).
-      return { dmPolicy: 'allowlist', pairing: true, allowFrom: [], groups: {}, pending: {} };
+      return { dmPolicy: 'allowlist', pairing: true, allowFrom: [], groupPolicy: 'allowlist', groupAllowlist: [], requireMention: true, pending: {} };
     }
   }
 
@@ -713,6 +754,96 @@ export function createApiRouter(
       fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2));
     } catch (err) {
       throw new Error(`Failed to write Telegram access config: ${(err as Error).message}`);
+    }
+  }
+
+  function getDiscordStateDir(agentId: string): string {
+    const agentsBase = getAgentsBaseDir();
+    const cfg = agentConfigs.get(agentId);
+    const workspace = cfg?.workspace
+      ? (cfg.workspace.startsWith('~') ? path.join(os.homedir(), cfg.workspace.slice(1)) : cfg.workspace)
+      : path.join(agentsBase, agentId, 'workspace');
+    return path.join(workspace, '.discord-state');
+  }
+
+  type DiscordAccessShape = {
+    dmPolicy: 'open' | 'allowlist' | 'disabled';
+    // Orthogonal pairing toggle (mirrors Telegram). Meaningful only when
+    // dmPolicy === 'allowlist'. Kept in sync with the runtime shape in
+    // mcp/tools/discord/access.ts (migrateAccess).
+    pairing: boolean;
+    allowFrom: string[];
+    // Guild tier (mirrors LINE): guildAllowlist IS the group allowlist.
+    groupPolicy: 'open' | 'allowlist' | 'disabled';
+    requireMention: boolean;
+    guildAllowlist: string[];
+    channelAllowlist: string[];
+    roleAllowlist: string[];
+    pending: Record<string, { senderId: string; channelId: string; createdAt: number; expiresAt: number; replies: number; kind?: 'dm' | 'guild'; guildId?: string }>;
+  };
+
+  function readDiscordAccess(agentId: string): DiscordAccessShape {
+    const accessFile = path.join(getDiscordStateDir(agentId), 'access.json');
+    try {
+      const raw = fs.readFileSync(accessFile, 'utf8');
+      const parsed = JSON.parse(raw) as {
+        dmPolicy?: string;
+        pairing?: boolean;
+        allowFrom?: string[];
+        groupPolicy?: string;
+        requireMention?: boolean;
+        guildAllowlist?: string[];
+        channelAllowlist?: string[];
+        roleAllowlist?: string[];
+        pending?: DiscordAccessShape['pending'];
+      };
+      // Migrate the legacy fused dmPolicy ('pairing' folded pairing in) to the
+      // split model. SECURITY: a legacy 'allowlist' file was locked down →
+      // pairing:false (an absent pairing on an existing file means pre-split);
+      // 'pairing' → mint on. Mirrors migrateAccess() in
+      // mcp/tools/discord/access.ts — keep in sync.
+      const legacy = parsed.dmPolicy;
+      let dmPolicy: DiscordAccessShape['dmPolicy'];
+      let pairing: boolean;
+      if (legacy === 'pairing') {
+        dmPolicy = 'allowlist';
+        pairing = true;
+      } else {
+        dmPolicy = (legacy as DiscordAccessShape['dmPolicy']) ?? 'allowlist';
+        pairing = parsed.pairing ?? false;
+      }
+      // Guild tier migration is behavior-preserving: today an empty
+      // guildAllowlist means "deliver to all guilds" → derive 'open' when empty,
+      // 'allowlist' when non-empty; requireMention defaults false for existing
+      // files (no prior mention gate). Mirrors discord/access.ts migrateAccess.
+      const guildAllowlist = parsed.guildAllowlist ?? [];
+      const groupPolicy = (parsed.groupPolicy as DiscordAccessShape['groupPolicy'])
+        ?? (guildAllowlist.length > 0 ? 'allowlist' : 'open');
+      const requireMention = parsed.requireMention ?? false;
+      return {
+        dmPolicy,
+        pairing,
+        allowFrom: parsed.allowFrom ?? [],
+        groupPolicy,
+        requireMention,
+        guildAllowlist,
+        channelAllowlist: parsed.channelAllowlist ?? [],
+        roleAllowlist: parsed.roleAllowlist ?? [],
+        pending: parsed.pending ?? {},
+      };
+    } catch {
+      // Brand-new agent (no file): secure defaults (mirrors defaultAccess()).
+      return { dmPolicy: 'allowlist', pairing: true, allowFrom: [], groupPolicy: 'allowlist', requireMention: true, guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {} };
+    }
+  }
+
+  function writeDiscordAccess(agentId: string, access: DiscordAccessShape): void {
+    const stateDir = getDiscordStateDir(agentId);
+    try {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'access.json'), JSON.stringify(access, null, 2));
+    } catch (err) {
+      throw new Error(`Failed to write Discord access config: ${(err as Error).message}`);
     }
   }
 
@@ -1004,6 +1135,24 @@ export function createApiRouter(
       return;
     }
 
+    // Seed a secure access.json immediately for a brand-new Discord connection.
+    // Without this, the receiver's env-derived fallback (DISCORD_GUILD_ALLOWLIST
+    // empty ⇒ groupPolicy 'open') answers in any server with no pairing/approval —
+    // only DMs were ever gated. Skip if a file already exists (don't clobber a
+    // prior connect/reconnect).
+    if (channel === 'discord') {
+      const accessFile = path.join(getDiscordStateDir(wizard.agentId!), 'access.json');
+      if (!fs.existsSync(accessFile)) {
+        try {
+          writeDiscordAccess(wizard.agentId!, {
+            dmPolicy: 'allowlist', pairing: true, allowFrom: [],
+            groupPolicy: 'allowlist', requireMention: true,
+            guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {},
+          });
+        } catch { /* non-fatal — receiver still has a (less safe) env fallback */ }
+      }
+    }
+
     wizardStore.update(wizardId, {
       step: 'complete',
       channel: channel as 'telegram' | 'discord',
@@ -1260,7 +1409,23 @@ export function createApiRouter(
     if (discord_bot_token !== undefined) {
       const token = typeof discord_bot_token === 'string' ? discord_bot_token.trim() : null;
       if (token) {
+        const isNewConnection = !cfg.discord?.botToken;
         cfg.discord = { ...(cfg.discord ?? {}), botToken: token };
+        // Seed a secure access.json for a brand-new connection — see matching
+        // comment on the wizard /channel handler for why this can't be left to
+        // the receiver's env-derived fallback.
+        if (isNewConnection) {
+          const accessFile = path.join(getDiscordStateDir(agentId), 'access.json');
+          if (!fs.existsSync(accessFile)) {
+            try {
+              writeDiscordAccess(agentId, {
+                dmPolicy: 'allowlist', pairing: true, allowFrom: [],
+                groupPolicy: 'allowlist', requireMention: true,
+                guildAllowlist: [], channelAllowlist: [], roleAllowlist: [], pending: {},
+              });
+            } catch { /* non-fatal — receiver still has a (less safe) env fallback */ }
+          }
+        }
         // Hot-start receiver if not already running
         const runner = agentRunners.get(agentId);
         if (runner) {
@@ -1332,6 +1497,15 @@ export function createApiRouter(
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,
         discord_token_preview: cfg.discord?.botToken ? maskToken(cfg.discord.botToken) : null,
         telegram_dm_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).dmPolicy : null,
+        telegram_pairing: cfg.telegram?.botToken ? readTelegramAccess(agentId).pairing : null,
+        telegram_group_policy: cfg.telegram?.botToken ? readTelegramAccess(agentId).groupPolicy : null,
+        telegram_group_allowlist: cfg.telegram?.botToken ? readTelegramAccess(agentId).groupAllowlist : null,
+        telegram_require_mention: cfg.telegram?.botToken ? readTelegramAccess(agentId).requireMention : null,
+        discord_dm_policy: cfg.discord?.botToken ? readDiscordAccess(agentId).dmPolicy : null,
+        discord_pairing: cfg.discord?.botToken ? readDiscordAccess(agentId).pairing : null,
+        discord_group_policy: cfg.discord?.botToken ? readDiscordAccess(agentId).groupPolicy : null,
+        discord_guild_allowlist: cfg.discord?.botToken ? readDiscordAccess(agentId).guildAllowlist : null,
+        discord_require_mention: cfg.discord?.botToken ? readDiscordAccess(agentId).requireMention : null,
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
         line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${agentId}` : null,
@@ -1356,13 +1530,16 @@ export function createApiRouter(
       try { writeTelegramAccess(agentId, access); } catch { /* non-fatal cleanup */ }
     }
     const pending = Object.entries(access.pending)
-      .map(([code, p]) => ({ code, senderId: p.senderId, chatId: p.chatId, createdAt: p.createdAt, expiresAt: p.expiresAt }));
+      .map(([code, p]) => ({ code, senderId: p.senderId, chatId: p.chatId, createdAt: p.createdAt, expiresAt: p.expiresAt, kind: p.kind ?? 'dm' }));
     res.json({ pending });
   });
 
   /**
    * POST /api/v1/agents/:agentId/telegram/approve
-   * Approve a pending Telegram pairing by code.
+   * Approve a pending Telegram pairing by code. Kind-aware (mirrors LINE): a
+   * 'group' knock moves its chatId into groupAllowlist (no approved/ handshake —
+   * a group has no single recipient); a 'dm' knock allowlists the sender and
+   * drops the approved/<senderId> file so the receiver sends a confirmation.
    */
   router.post('/v1/agents/:agentId/telegram/approve', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
@@ -1374,18 +1551,25 @@ export function createApiRouter(
     const access = readTelegramAccess(agentId);
     const entry = access.pending[code];
     if (!entry || entry.expiresAt < Date.now()) { res.status(404).json({ error: 'Pairing code not found or expired' }); return; }
-    if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId);
+    const isGroup = entry.kind === 'group';
+    if (isGroup) {
+      if (!access.groupAllowlist.includes(entry.chatId)) access.groupAllowlist.push(entry.chatId);
+    } else {
+      if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId);
+    }
     delete access.pending[code];
     try {
       writeTelegramAccess(agentId, access);
-      const approvedDir = path.join(getTelegramStateDir(agentId), 'approved');
-      fs.mkdirSync(approvedDir, { recursive: true });
-      fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.chatId);
+      if (!isGroup) {
+        const approvedDir = path.join(getTelegramStateDir(agentId), 'approved');
+        fs.mkdirSync(approvedDir, { recursive: true });
+        fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.chatId);
+      }
     } catch (err) {
       res.status(500).json({ error: `Failed to approve pairing: ${(err as Error).message}` });
       return;
     }
-    res.json({ ok: true, senderId: entry.senderId });
+    res.json({ ok: true, senderId: entry.senderId, groupId: isGroup ? entry.chatId : undefined });
   });
 
   /**
@@ -1413,8 +1597,9 @@ export function createApiRouter(
 
   /**
    * PATCH /api/v1/agents/:agentId/telegram/policy
-   * Update the Telegram DM policy and/or the orthogonal pairing toggle.
-   * Body: { dmPolicy?: 'open'|'allowlist'|'disabled', pairing?: boolean }.
+   * Update the Telegram DM policy, the orthogonal pairing toggle, the group
+   * policy, and/or the group mention gate.
+   * Body: { dmPolicy?, pairing?, groupPolicy?: 'open'|'allowlist'|'disabled', requireMention?: boolean }.
    * At least one field must be present; each is applied only if provided.
    */
   router.patch('/v1/agents/:agentId/telegram/policy', auth, (req: Request, res: Response) => {
@@ -1422,7 +1607,7 @@ export function createApiRouter(
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    const { dmPolicy, pairing } = req.body as { dmPolicy?: string; pairing?: boolean };
+    const { dmPolicy, pairing, groupPolicy, requireMention } = req.body as { dmPolicy?: string; pairing?: boolean; groupPolicy?: string; requireMention?: boolean };
     const valid = ['open', 'allowlist', 'disabled'];
     if (dmPolicy !== undefined && !valid.includes(dmPolicy)) {
       res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return;
@@ -1430,19 +1615,27 @@ export function createApiRouter(
     if (pairing !== undefined && typeof pairing !== 'boolean') {
       res.status(400).json({ error: 'pairing must be a boolean' }); return;
     }
-    if (dmPolicy === undefined && pairing === undefined) {
-      res.status(400).json({ error: 'provide dmPolicy and/or pairing' }); return;
+    if (groupPolicy !== undefined && !valid.includes(groupPolicy)) {
+      res.status(400).json({ error: `groupPolicy must be one of: ${valid.join(', ')}` }); return;
+    }
+    if (requireMention !== undefined && typeof requireMention !== 'boolean') {
+      res.status(400).json({ error: 'requireMention must be a boolean' }); return;
+    }
+    if (dmPolicy === undefined && pairing === undefined && groupPolicy === undefined && requireMention === undefined) {
+      res.status(400).json({ error: 'provide dmPolicy, pairing, groupPolicy and/or requireMention' }); return;
     }
     const access = readTelegramAccess(agentId);
     if (dmPolicy !== undefined) access.dmPolicy = dmPolicy as TelegramAccess['dmPolicy'];
     if (pairing !== undefined) access.pairing = pairing;
+    if (groupPolicy !== undefined) access.groupPolicy = groupPolicy as TelegramAccess['groupPolicy'];
+    if (requireMention !== undefined) access.requireMention = requireMention;
     try {
       writeTelegramAccess(agentId, access);
     } catch (err) {
       res.status(500).json({ error: `Failed to update policy: ${(err as Error).message}` });
       return;
     }
-    res.json({ ok: true, dmPolicy: access.dmPolicy, pairing: access.pairing });
+    res.json({ ok: true, dmPolicy: access.dmPolicy, pairing: access.pairing, groupPolicy: access.groupPolicy, requireMention: access.requireMention });
   });
 
   /**
@@ -1504,6 +1697,240 @@ export function createApiRouter(
       writeTelegramAccess(agentId, access);
     } catch (err) {
       res.status(500).json({ error: `Failed to update allowlist: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/telegram/group/allowlist
+   * Return the allowlisted group ids for an agent's Telegram channel. Admin only.
+   */
+  router.get('/v1/agents/:agentId/telegram/group/allowlist', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readTelegramAccess(agentId);
+    res.json({ groupAllowlist: access.groupAllowlist });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/telegram/group/allow/:groupId
+   * Remove a group from the group allowlist. Admin only. Telegram group ids are
+   * negative (e.g. -1001234567890) so the validation allows a leading minus.
+   */
+  router.delete('/v1/agents/:agentId/telegram/group/allow/:groupId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, groupId } = req.params as { agentId: string; groupId: string };
+    if (!/^-?\d+$/.test(groupId)) { res.status(400).json({ error: 'Invalid groupId: must be a numeric Telegram chat ID' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readTelegramAccess(agentId);
+    access.groupAllowlist = access.groupAllowlist.filter((id) => id !== groupId);
+    // Also drop any legacy per-sender restriction for this group so a later
+    // re-add (via a fresh pairing knock) doesn't resurrect a stale allowlist.
+    if (access.legacyGroupAllowFrom) delete access.legacyGroupAllowFrom[groupId];
+    try {
+      writeTelegramAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update group allowlist: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/discord/pending
+   * List pending Discord pairing requests (non-expired).
+   */
+  router.get('/v1/agents/:agentId/discord/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readDiscordAccess(agentId);
+    const now = Date.now();
+    const expired = Object.keys(access.pending).filter((code) => access.pending[code].expiresAt <= now);
+    if (expired.length > 0) {
+      expired.forEach((code) => { delete access.pending[code]; });
+      try { writeDiscordAccess(agentId, access); } catch { /* non-fatal cleanup */ }
+    }
+    const pending = Object.entries(access.pending)
+      .map(([code, p]) => ({ code, senderId: p.senderId, channelId: p.channelId, createdAt: p.createdAt, expiresAt: p.expiresAt, kind: p.kind ?? 'dm', guildId: p.guildId }));
+    res.json({ pending });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/discord/approve
+   * Approve a pending Discord pairing by code. Kind-aware (mirrors LINE): a
+   * 'guild' knock moves its guildId into guildAllowlist (no approved/ handshake
+   * — a guild has no single recipient); a 'dm' knock allowlists the sender and
+   * drops the approved/<senderId> file for the "You're connected!" reply.
+   */
+  router.post('/v1/agents/:agentId/discord/approve', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code required' }); return; }
+    const access = readDiscordAccess(agentId);
+    const entry = access.pending[code];
+    if (!entry || entry.expiresAt < Date.now()) { res.status(404).json({ error: 'Pairing code not found or expired' }); return; }
+    const isGuild = entry.kind === 'guild';
+    if (isGuild) {
+      if (entry.guildId && !access.guildAllowlist.includes(entry.guildId)) access.guildAllowlist.push(entry.guildId);
+    } else {
+      if (!access.allowFrom.includes(entry.senderId)) access.allowFrom.push(entry.senderId);
+    }
+    delete access.pending[code];
+    try {
+      writeDiscordAccess(agentId, access);
+      if (!isGuild) {
+        // Handshake consumed by module.ts:checkApprovals() — file name is the
+        // senderId, content is the channelId to DM "You're connected!".
+        const approvedDir = path.join(getDiscordStateDir(agentId), 'approved');
+        fs.mkdirSync(approvedDir, { recursive: true });
+        fs.writeFileSync(path.join(approvedDir, entry.senderId), entry.channelId);
+      }
+    } catch (err) {
+      res.status(500).json({ error: `Failed to approve pairing: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true, senderId: entry.senderId, guildId: isGuild ? entry.guildId : undefined });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/discord/deny
+   * Deny and remove a pending Discord pairing by code.
+   */
+  router.post('/v1/agents/:agentId/discord/deny', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { code } = req.body as { code?: string };
+    if (!code) { res.status(400).json({ error: 'code required' }); return; }
+    const access = readDiscordAccess(agentId);
+    if (!access.pending[code]) { res.status(404).json({ error: 'Pairing code not found' }); return; }
+    delete access.pending[code];
+    try {
+      writeDiscordAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to deny pairing: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  /**
+   * PATCH /api/v1/agents/:agentId/discord/policy
+   * Update the Discord DM policy, the orthogonal pairing toggle, the guild
+   * policy, and/or the guild mention gate.
+   * Body: { dmPolicy?, pairing?, groupPolicy?: 'open'|'allowlist'|'disabled', requireMention?: boolean }.
+   * At least one field must be present; each is applied only if provided.
+   */
+  router.patch('/v1/agents/:agentId/discord/policy', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { dmPolicy, pairing, groupPolicy, requireMention } = req.body as { dmPolicy?: string; pairing?: boolean; groupPolicy?: string; requireMention?: boolean };
+    const valid = ['open', 'allowlist', 'disabled'];
+    if (dmPolicy !== undefined && !valid.includes(dmPolicy)) {
+      res.status(400).json({ error: `dmPolicy must be one of: ${valid.join(', ')}` }); return;
+    }
+    if (pairing !== undefined && typeof pairing !== 'boolean') {
+      res.status(400).json({ error: 'pairing must be a boolean' }); return;
+    }
+    if (groupPolicy !== undefined && !valid.includes(groupPolicy)) {
+      res.status(400).json({ error: `groupPolicy must be one of: ${valid.join(', ')}` }); return;
+    }
+    if (requireMention !== undefined && typeof requireMention !== 'boolean') {
+      res.status(400).json({ error: 'requireMention must be a boolean' }); return;
+    }
+    if (dmPolicy === undefined && pairing === undefined && groupPolicy === undefined && requireMention === undefined) {
+      res.status(400).json({ error: 'provide dmPolicy, pairing, groupPolicy and/or requireMention' }); return;
+    }
+    const access = readDiscordAccess(agentId);
+    if (dmPolicy !== undefined) access.dmPolicy = dmPolicy as DiscordAccessShape['dmPolicy'];
+    if (pairing !== undefined) access.pairing = pairing;
+    if (groupPolicy !== undefined) access.groupPolicy = groupPolicy as DiscordAccessShape['groupPolicy'];
+    if (requireMention !== undefined) access.requireMention = requireMention;
+    try {
+      writeDiscordAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update policy: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true, dmPolicy: access.dmPolicy, pairing: access.pairing, groupPolicy: access.groupPolicy, requireMention: access.requireMention });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/discord/allowlist
+   * Return all users in allowFrom for an agent's Discord channel.
+   */
+  router.get('/v1/agents/:agentId/discord/allowlist', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readDiscordAccess(agentId);
+    res.json({ allowFrom: access.allowFrom });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/discord/allow/:userId
+   * Remove a user from the allowFrom list. Admin only.
+   */
+  router.delete('/v1/agents/:agentId/discord/allow/:userId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, userId } = req.params as { agentId: string; userId: string };
+    if (!/^\d+$/.test(userId)) { res.status(400).json({ error: 'Invalid userId: must be a numeric Discord user ID' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readDiscordAccess(agentId);
+    access.allowFrom = access.allowFrom.filter((id) => id !== userId);
+    try {
+      writeDiscordAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update allowlist: ${(err as Error).message}` });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/discord/guild/allowlist
+   * Return the allowlisted guild ids for an agent's Discord channel. Admin only.
+   */
+  router.get('/v1/agents/:agentId/discord/guild/allowlist', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readDiscordAccess(agentId);
+    res.json({ guildAllowlist: access.guildAllowlist });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/discord/guild/allow/:guildId
+   * Remove a guild from the guild allowlist. Admin only. Discord guild ids are
+   * numeric snowflakes (no leading minus).
+   */
+  router.delete('/v1/agents/:agentId/discord/guild/allow/:guildId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, guildId } = req.params as { agentId: string; guildId: string };
+    if (!/^\d+$/.test(guildId)) { res.status(400).json({ error: 'Invalid guildId: must be a numeric Discord guild ID' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const access = readDiscordAccess(agentId);
+    access.guildAllowlist = access.guildAllowlist.filter((id) => id !== guildId);
+    try {
+      writeDiscordAccess(agentId, access);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to update guild allowlist: ${(err as Error).message}` });
       return;
     }
     res.json({ ok: true });
