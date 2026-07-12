@@ -5,6 +5,11 @@ import { createLogger } from '../logger';
 
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
+// After MAX_RESTARTS fast attempts, fall back to a slow indefinite retry
+// instead of giving up permanently — self-heals if the admin fixes the
+// underlying cause later (e.g. a Discord Developer Portal intent toggle)
+// without needing to notice and manually reconnect.
+const SLOW_RESTART_DELAY_MS = 5 * 60_000;
 
 export class DiscordReceiver {
   private process: ChildProcess | null = null;
@@ -36,6 +41,10 @@ export class DiscordReceiver {
         ...process.env,
         DISCORD_BOT_TOKEN: this.agentConfig.discord?.botToken ?? '',
         DISCORD_STATE_DIR: stateDir,
+        // Legacy seed value: when no explicit dmPolicy is configured (the common
+        // token-only case), 'pairing' flows through access.ts:migrateAccess to
+        // { dmPolicy:'allowlist', pairing:true } — i.e. a new agent comes up with
+        // pairing ON so the owner can DM the bot and self-approve via a code.
         DISCORD_DM_POLICY: this.agentConfig.discord?.dmPolicy ?? 'pairing',
         DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
         DISCORD_GUILD_ALLOWLIST: (this.agentConfig.discord?.guildAllowlist ?? []).join(','),
@@ -64,18 +73,17 @@ export class DiscordReceiver {
   }
 
   private scheduleRestart(): void {
-    if (this.restartCount >= MAX_RESTARTS) {
-      this.logger.error('DiscordReceiver max restarts reached');
-      return;
-    }
-    this.restartCount++;
-    this.logger.warn(`Restarting DiscordReceiver in ${AUTO_RESTART_DELAY_MS}ms`, {
+    const slowPhase = this.restartCount >= MAX_RESTARTS;
+    const delay = slowPhase ? SLOW_RESTART_DELAY_MS : AUTO_RESTART_DELAY_MS;
+    if (!slowPhase) this.restartCount++;
+    this.logger.warn(`Restarting DiscordReceiver in ${delay}ms`, {
       attempt: this.restartCount,
+      slowPhase,
     });
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (!this.stopping) this.spawnProcess();
-    }, AUTO_RESTART_DELAY_MS);
+    }, delay);
   }
 
   stop(): void {

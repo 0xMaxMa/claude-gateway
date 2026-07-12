@@ -5,6 +5,9 @@ import { createLogger } from '../logger';
 
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
+// After MAX_RESTARTS fast attempts, fall back to a slow indefinite retry
+// instead of giving up permanently — mirrors discord/receiver.ts.
+const SLOW_RESTART_DELAY_MS = 5 * 60_000;
 
 export class TelegramReceiver {
   private process: ChildProcess | null = null;
@@ -60,18 +63,17 @@ export class TelegramReceiver {
   }
 
   private scheduleRestart(): void {
-    if (this.restartCount >= MAX_RESTARTS) {
-      this.logger.error('TelegramReceiver max restarts reached');
-      return;
-    }
-    this.restartCount++;
-    this.logger.warn(`Restarting TelegramReceiver in ${AUTO_RESTART_DELAY_MS}ms`, {
+    const slowPhase = this.restartCount >= MAX_RESTARTS;
+    const delay = slowPhase ? SLOW_RESTART_DELAY_MS : AUTO_RESTART_DELAY_MS;
+    if (!slowPhase) this.restartCount++;
+    this.logger.warn(`Restarting TelegramReceiver in ${delay}ms`, {
       attempt: this.restartCount,
+      slowPhase,
     });
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (!this.stopping) this.spawnProcess();
-    }, AUTO_RESTART_DELAY_MS);
+    }, delay);
   }
 
   stop(): void {
