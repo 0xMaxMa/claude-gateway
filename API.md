@@ -59,14 +59,27 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/api/v1/agents/:agentId/telegram/pending` | Admin | List pending pairing requests |
-| `POST` | `/api/v1/agents/:agentId/telegram/approve` | Admin | Approve a pending pairing by code |
+| `GET` | `/api/v1/agents/:agentId/telegram/pending` | Admin | List pending pairing requests (DM + group knocks) |
+| `POST` | `/api/v1/agents/:agentId/telegram/approve` | Admin | Approve a pending pairing by code (kind-aware) |
 | `POST` | `/api/v1/agents/:agentId/telegram/deny` | Admin | Deny a pending pairing by code |
-| `POST` | `/api/v1/agents/:agentId/telegram/init-pairing` | Admin | Write sentinel — next DM auto-approves as owner |
-| `GET` | `/api/v1/agents/:agentId/telegram/pairing-status` | Admin | Check sentinel status + current allowlist |
-| `PATCH` | `/api/v1/agents/:agentId/telegram/policy` | Admin | Update DM policy |
+| `PATCH` | `/api/v1/agents/:agentId/telegram/policy` | Admin | Update DM policy, pairing toggle, group policy and/or mention gate |
 | `GET` | `/api/v1/agents/:agentId/telegram/allowlist` | Admin | List allowlisted users |
 | `DELETE` | `/api/v1/agents/:agentId/telegram/allow/:userId` | Admin | Remove a user from the allowlist |
+| `GET` | `/api/v1/agents/:agentId/telegram/group/allowlist` | Admin | List allowlisted group ids |
+| `DELETE` | `/api/v1/agents/:agentId/telegram/group/allow/:groupId` | Admin | Remove a group from the group allowlist |
+
+### Discord Channel API
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/discord/pending` | Admin | List pending pairing requests (DM + guild knocks) |
+| `POST` | `/api/v1/agents/:agentId/discord/approve` | Admin | Approve a pending pairing by code (kind-aware) |
+| `POST` | `/api/v1/agents/:agentId/discord/deny` | Admin | Deny a pending pairing by code |
+| `PATCH` | `/api/v1/agents/:agentId/discord/policy` | Admin | Update DM policy, pairing toggle, guild policy and/or mention gate |
+| `GET` | `/api/v1/agents/:agentId/discord/allowlist` | Admin | List allowlisted users |
+| `DELETE` | `/api/v1/agents/:agentId/discord/allow/:userId` | Admin | Remove a user from the allowlist |
+| `GET` | `/api/v1/agents/:agentId/discord/guild/allowlist` | Admin | List allowlisted guild ids |
+| `DELETE` | `/api/v1/agents/:agentId/discord/guild/allow/:guildId` | Admin | Remove a guild from the guild allowlist |
 
 ### Public Webhook Ingress
 
@@ -594,7 +607,13 @@ curl -X POST \
 
 **Auth:** admin key. Optional step after `/confirm`.
 
-Verify a Telegram or Discord bot token and generate a 6-character pairing code that the user must DM to the bot.
+**Token-only connect.** Verify a Telegram or Discord bot token, persist it to the
+agent config, seed a secure `access.json`, and hot-start the receiver so the bot
+comes online immediately. **No pairing code is minted here** — pairing is
+incoming-first and happens later: the owner (or a group member) DMs the bot, a
+one-time code lands in Pending, and an admin approves it from the agent's
+Channels card (see the Telegram/Discord Channel APIs below). This mirrors the
+LINE flow.
 
 **Request body:**
 
@@ -603,36 +622,19 @@ Verify a Telegram or Discord bot token and generate a 6-character pairing code t
 | `channel` | Yes | `"telegram"` or `"discord"` |
 | `botToken` | Yes | Bot token from BotFather / Discord Developer Portal |
 
+**Response:**
+
 ```json
 {
   "channel": "telegram",
   "botName": "@my_crypto_bot",
-  "pairingCode": "A3F9C1",
-  "instruction": "Send this code as a DM to @my_crypto_bot to complete pairing"
+  "connected": true
 }
 ```
 
----
-
-#### POST /api/v1/agents/wizard/:wizardId/channel/verify
-
-**Auth:** admin key.
-
-Poll for pairing confirmation. The client should call this endpoint repeatedly until `success: true`. Each call does a non-blocking Telegram `getUpdates` check for the pairing code.
-
-On success, the bot token is written to `config.json` and `access.json` is created so the DM sender is in the allowlist. A welcome message is sent automatically.
-
-> **Note:** Discord pairing verification via this endpoint is not yet supported (`501`).
-
-```json
-{ "success": true, "agentId": "cryptobot" }
-```
-
-or while waiting:
-
-```json
-{ "success": false, "pending": true }
-```
+The wizard advances to step `complete`. A brand-new connection is seeded with a
+closed-but-pairing-on `access.json` (`dmPolicy: "allowlist"`, `pairing: true`),
+so the owner can DM the bot and self-approve via a code.
 
 ---
 
@@ -640,7 +642,10 @@ or while waiting:
 
 **Auth:** admin key.
 
-Finalise the wizard and clean up state. Can be called after `/confirm` to skip channel setup entirely, or after `/channel` to abandon pairing (the agent will be created without a Telegram/Discord channel). Requires step `confirmed` or `pairing` (calling from `pending` returns `409`).
+Finalise the wizard and clean up state. Can be called after `/confirm` to skip
+channel setup entirely, or after `/channel` (the agent keeps whatever channel was
+connected). Rejected with `409` only while the wizard is still in step `pending`
+(the workspace must be confirmed first).
 
 ```json
 { "agentId": "cryptobot" }
@@ -673,13 +678,13 @@ Manage Telegram access control per agent — pending pairings, allowlist, and DM
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/v1/agents/:agentId/telegram/pending` | Admin | List pending (non-expired) pairing requests |
-| `POST` | `/api/v1/agents/:agentId/telegram/approve` | Admin | Approve a pending pairing by code |
+| `POST` | `/api/v1/agents/:agentId/telegram/approve` | Admin | Approve a pending pairing by code (kind-aware) |
 | `POST` | `/api/v1/agents/:agentId/telegram/deny` | Admin | Deny and remove a pending pairing by code |
-| `POST` | `/api/v1/agents/:agentId/telegram/init-pairing` | Admin | Write sentinel so next DM auto-approves as owner |
-| `GET` | `/api/v1/agents/:agentId/telegram/pairing-status` | Admin | Check whether init-pairing sentinel is active |
-| `PATCH` | `/api/v1/agents/:agentId/telegram/policy` | Admin | Update the DM policy |
+| `PATCH` | `/api/v1/agents/:agentId/telegram/policy` | Admin | Update DM policy, pairing toggle, group policy and/or mention gate |
 | `GET` | `/api/v1/agents/:agentId/telegram/allowlist` | Admin | List all users in the allowlist |
 | `DELETE` | `/api/v1/agents/:agentId/telegram/allow/:userId` | Admin | Remove a user from the allowlist |
+| `GET` | `/api/v1/agents/:agentId/telegram/group/allowlist` | Admin | List allowlisted group ids |
+| `DELETE` | `/api/v1/agents/:agentId/telegram/group/allow/:groupId` | Admin | Remove a group from the group allowlist |
 
 ---
 
@@ -700,17 +705,24 @@ curl -H "X-Api-Key: admin-key-456" \
       "senderId": "123456789",
       "chatId": "123456789",
       "createdAt": 1775737709000,
-      "expiresAt": 1775738309000
+      "expiresAt": 1775738309000,
+      "kind": "dm"
     }
   ]
 }
 ```
 
+`kind` is `"dm"` for a direct-message knock or `"group"` for a group knock (for a
+group knock, `chatId` holds the group id).
+
 ---
 
 ### POST /api/v1/agents/:agentId/telegram/approve
 
-Approve a pending pairing by its 6-character code. The sender's `chatId` is added to `allowFrom` in `access.json`.
+Approve a pending pairing by its 6-character code. **Kind-aware:** a `"dm"` knock
+adds the sender to `allowFrom` and drops an `approved/<senderId>` handshake file
+so the receiver sends a confirmation; a `"group"` knock adds its `chatId` to
+`groupAllowlist` (no handshake — a group has no single recipient).
 
 **Request body:**
 
@@ -728,6 +740,12 @@ curl -X POST \
 
 ```json
 { "ok": true, "senderId": "123456789" }
+```
+
+For a group knock the response also carries `"groupId"`:
+
+```json
+{ "ok": true, "senderId": "123456789", "groupId": "-1001234567890" }
 ```
 
 **Error responses:**
@@ -770,75 +788,50 @@ curl -X POST \
 
 ---
 
-### POST /api/v1/agents/:agentId/telegram/init-pairing
-
-Write a sentinel file so the **next** private message to the bot is auto-approved as the owner. Sentinel expires after 10 minutes.
-
-```bash
-curl -X POST \
-  -H "X-Api-Key: admin-key-456" \
-  http://localhost:10850/api/v1/agents/alfred/telegram/init-pairing | jq
-```
-
-```json
-{ "ok": true }
-```
-
----
-
-### GET /api/v1/agents/:agentId/telegram/pairing-status
-
-Check whether the init-pairing sentinel is still active (i.e. waiting for the first DM). Also returns the current allowlist.
-
-```bash
-curl -H "X-Api-Key: admin-key-456" \
-  http://localhost:10850/api/v1/agents/alfred/telegram/pairing-status | jq
-```
-
-```json
-{ "waiting": true, "allowFrom": [] }
-```
-
-`waiting` is `false` if the sentinel has expired or does not exist.
-
----
-
 ### PATCH /api/v1/agents/:agentId/telegram/policy
 
-Update the DM policy for the agent's Telegram channel.
+Update the DM policy, the orthogonal pairing toggle, the group policy and/or the
+group mention gate. **At least one field must be present**; each is applied only
+if provided.
 
 **Request body:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `dmPolicy` | Yes | One of `open`, `pairing`, `allowlist`, `disabled` |
+| `dmPolicy` | No | One of `open`, `allowlist`, `disabled` |
+| `pairing` | No | Boolean. When `dmPolicy` is `allowlist`: `true` mints a one-time code for an unknown sender; `false` silently drops (pure allowlist). Ignored for `open`/`disabled` |
+| `groupPolicy` | No | One of `open`, `allowlist`, `disabled` — base policy for groups |
+| `requireMention` | No | Boolean. When `true`, group messages are delivered only when the bot is @mentioned |
 
 ```bash
 curl -X PATCH \
   -H "X-Api-Key: admin-key-456" \
   -H "Content-Type: application/json" \
-  -d '{"dmPolicy": "allowlist"}' \
+  -d '{"dmPolicy": "allowlist", "pairing": true, "groupPolicy": "allowlist", "requireMention": true}' \
   http://localhost:10850/api/v1/agents/alfred/telegram/policy | jq
 ```
 
 ```json
-{ "ok": true, "dmPolicy": "allowlist" }
+{ "ok": true, "dmPolicy": "allowlist", "pairing": true, "groupPolicy": "allowlist", "requireMention": true }
 ```
 
-**Policy values:**
+> **Note:** `pairing` is now a separate boolean, **not** a `dmPolicy` value. A
+> legacy `dmPolicy: "pairing"` file migrates automatically to
+> `dmPolicy: "allowlist"` + `pairing: true`.
+
+**Policy values (`dmPolicy` / `groupPolicy`):**
 
 | Value | Behaviour |
 |-------|-----------|
-| `open` | Any Telegram user can message the bot |
-| `pairing` | Users must complete a pairing flow first |
-| `allowlist` | Only users in `allowFrom` can message the bot |
+| `open` | Any user / any group can message the bot (senders/groups are captured into the allowlist) |
+| `allowlist` | Only allowlisted users / groups can message; unknown senders get a pairing code when `pairing: true`, else are dropped |
 | `disabled` | No messages accepted |
 
 **Error responses:**
 
 | Status | When |
 |--------|------|
-| 400 | `dmPolicy` missing or invalid value |
+| 400 | Invalid value, non-boolean `pairing`/`requireMention`, or no field provided |
 
 ---
 
@@ -876,6 +869,239 @@ curl -X DELETE \
 | Status | When |
 |--------|------|
 | 400 | `userId` is not numeric |
+| 404 | Agent not found |
+
+---
+
+### GET /api/v1/agents/:agentId/telegram/group/allowlist
+
+Return the allowlisted group ids for the agent's Telegram channel.
+
+```bash
+curl -H "X-Api-Key: admin-key-456" \
+  http://localhost:10850/api/v1/agents/alfred/telegram/group/allowlist | jq
+```
+
+```json
+{ "groupAllowlist": ["-1001234567890"] }
+```
+
+---
+
+### DELETE /api/v1/agents/:agentId/telegram/group/allow/:groupId
+
+Remove a group from the `groupAllowlist`. Telegram group ids are negative, so a
+leading minus is allowed (e.g. `-1001234567890`). Also drops any legacy per-sender
+restriction retained for that group.
+
+```bash
+curl -X DELETE \
+  -H "X-Api-Key: admin-key-456" \
+  http://localhost:10850/api/v1/agents/alfred/telegram/group/allow/-1001234567890 | jq
+```
+
+```json
+{ "ok": true }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `groupId` is not a numeric Telegram chat ID |
+| 404 | Agent not found |
+
+---
+
+## Discord Channel Management
+
+Incoming-first pairing for Discord, mirroring the Telegram model. DMs use
+`dmPolicy` + the `pairing` toggle; guilds (servers) use `groupPolicy` +
+`guildAllowlist` + a single `requireMention` gate. `channelAllowlist` and
+`roleAllowlist` remain backend-only filters. Guild ids are numeric snowflakes
+(no leading minus).
+
+### Endpoints Overview
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/agents/:agentId/discord/pending` | Admin | List pending (non-expired) pairing requests |
+| `POST` | `/api/v1/agents/:agentId/discord/approve` | Admin | Approve a pending pairing by code (kind-aware) |
+| `POST` | `/api/v1/agents/:agentId/discord/deny` | Admin | Deny and remove a pending pairing by code |
+| `PATCH` | `/api/v1/agents/:agentId/discord/policy` | Admin | Update DM policy, pairing toggle, guild policy and/or mention gate |
+| `GET` | `/api/v1/agents/:agentId/discord/allowlist` | Admin | List all users in the allowlist |
+| `DELETE` | `/api/v1/agents/:agentId/discord/allow/:userId` | Admin | Remove a user from the allowlist |
+| `GET` | `/api/v1/agents/:agentId/discord/guild/allowlist` | Admin | List allowlisted guild ids |
+| `DELETE` | `/api/v1/agents/:agentId/discord/guild/allow/:guildId` | Admin | Remove a guild from the guild allowlist |
+
+---
+
+### GET /api/v1/agents/:agentId/discord/pending
+
+List all pending (non-expired) Discord pairing requests. Expired entries are
+cleaned up automatically on this call.
+
+```json
+{
+  "pending": [
+    {
+      "code": "A3F9C1",
+      "senderId": "111111111111111111",
+      "channelId": "222222222222222222",
+      "createdAt": 1775737709000,
+      "expiresAt": 1775738309000,
+      "kind": "dm",
+      "guildId": null
+    }
+  ]
+}
+```
+
+`kind` is `"dm"` or `"guild"`; for a guild knock, `guildId` holds the server id.
+
+---
+
+### POST /api/v1/agents/:agentId/discord/approve
+
+Approve a pending pairing by code. **Kind-aware:** a `"dm"` knock adds the sender
+to `allowFrom` and drops an `approved/<senderId>` handshake file (content is the
+`channelId` to DM the "You're connected!" reply); a `"guild"` knock adds its
+`guildId` to `guildAllowlist` (no handshake).
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `code` | Yes | 6-character pairing code |
+
+```json
+{ "ok": true, "senderId": "111111111111111111" }
+```
+
+For a guild knock the response also carries `"guildId"`:
+
+```json
+{ "ok": true, "senderId": "111111111111111111", "guildId": "333333333333333333" }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `code` missing |
+| 404 | Code not found or expired |
+
+---
+
+### POST /api/v1/agents/:agentId/discord/deny
+
+Deny and remove a pending pairing request by code.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `code` | Yes | 6-character pairing code |
+
+```json
+{ "ok": true }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `code` missing |
+| 404 | Code not found |
+
+---
+
+### PATCH /api/v1/agents/:agentId/discord/policy
+
+Update the DM policy, the pairing toggle, the guild policy and/or the guild
+mention gate. **At least one field must be present**; each is applied only if
+provided.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `dmPolicy` | No | One of `open`, `allowlist`, `disabled` |
+| `pairing` | No | Boolean — same semantics as Telegram (mint code vs pure allowlist) |
+| `groupPolicy` | No | One of `open`, `allowlist`, `disabled` — base policy for guilds |
+| `requireMention` | No | Boolean. When `true`, guild messages are delivered only when the bot is @mentioned or replied-to |
+
+```bash
+curl -X PATCH \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"dmPolicy": "allowlist", "pairing": true, "groupPolicy": "allowlist", "requireMention": true}' \
+  http://localhost:10850/api/v1/agents/alfred/discord/policy | jq
+```
+
+```json
+{ "ok": true, "dmPolicy": "allowlist", "pairing": true, "groupPolicy": "allowlist", "requireMention": true }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Invalid value, non-boolean `pairing`/`requireMention`, or no field provided |
+
+---
+
+### GET /api/v1/agents/:agentId/discord/allowlist
+
+Return all users in the `allowFrom` list for the agent's Discord channel.
+
+```json
+{ "allowFrom": ["111111111111111111"] }
+```
+
+---
+
+### DELETE /api/v1/agents/:agentId/discord/allow/:userId
+
+Remove a user from the `allowFrom` list. `:userId` must be a numeric Discord user ID.
+
+```json
+{ "ok": true }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `userId` is not numeric |
+| 404 | Agent not found |
+
+---
+
+### GET /api/v1/agents/:agentId/discord/guild/allowlist
+
+Return the allowlisted guild ids for the agent's Discord channel.
+
+```json
+{ "guildAllowlist": ["333333333333333333"] }
+```
+
+---
+
+### DELETE /api/v1/agents/:agentId/discord/guild/allow/:guildId
+
+Remove a guild from the `guildAllowlist`. `:guildId` must be a numeric Discord
+guild snowflake.
+
+```json
+{ "ok": true }
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `guildId` is not numeric |
 | 404 | Agent not found |
 
 ---

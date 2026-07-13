@@ -34,7 +34,12 @@ export function generatePairingCode(): string {
   return randomBytes(3).toString('hex').toUpperCase();
 }
 
-/** Max distinct senders retained per agent (oldest evicted first). */
+/**
+ * Max distinct senders retained per agent (oldest evicted first). Kept at 5 to
+ * match the per-kind pending cap in the Telegram/Discord gate (countPending ⇒ 5
+ * for each of DM and group), so every channel bounds unapproved knocks the same
+ * way and a flood can't exhaust memory.
+ */
 export const MAX_PENDING_PER_AGENT = 5;
 
 // agentId -> (id -> entry)  (id = userId | groupId | roomId)

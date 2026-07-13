@@ -10,12 +10,9 @@ export interface WizardState {
   avatarData?: Buffer;
   avatarMime?: string;
   files: Record<string, string>;
-  step: 'pending' | 'confirmed' | 'pairing' | 'complete';
-  pairingCode?: string;
+  step: 'pending' | 'confirmed' | 'complete';
   channel?: 'telegram' | 'discord';
   botToken?: string;
-  /** Telegram getUpdates offset for pairing poll */
-  updateOffset?: number;
   /** Emoji extracted from Claude's generated output */
   signatureEmoji?: string;
   createdAt: number;
