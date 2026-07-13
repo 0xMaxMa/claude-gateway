@@ -894,6 +894,32 @@ export class SessionProcess extends EventEmitter {
     this.process.stdin.write(SessionProcess.toStreamJsonTurn(fullText) + '\n');
   }
 
+  /**
+   * Send a control keystroke to the PTY wrapper (Epic #195, Phase 3b). Only
+   * meaningful on the interactive (pty-shell) backend — the headless backend has
+   * no TUI to press keys into, so this is a no-op there. `key` and `option` are
+   * validated again by the wrapper against its closed control vocabulary; a bad
+   * value is rejected there rather than reaching the PTY.
+   */
+  sendControl(key: string, option?: number): void {
+    if (this.backend !== 'pty-shell') {
+      this.logger.debug('Ignoring control keystroke on headless backend', {
+        sessionId: this.sessionId,
+        key,
+      });
+      return;
+    }
+    if (!this.process?.stdin?.writable) {
+      this.logger.warn('Cannot send control: subprocess not running', {
+        sessionId: this.sessionId,
+      });
+      return;
+    }
+    const msg: Record<string, unknown> = { type: 'control', key };
+    if (typeof option === 'number') msg['option'] = option;
+    this.process.stdin.write(JSON.stringify(msg) + '\n');
+  }
+
   query(prompt: string, timeoutMs = 60_000): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!this.process?.stdin?.writable) {

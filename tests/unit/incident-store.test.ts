@@ -270,6 +270,24 @@ describe('createIncidentStore mutators + digest', () => {
     expect(store.get(r.id)!.githubIssue).toBe(195)
   })
 
+  test('U-IS-12b: appendRecovery records outcomes (Phase 3b), capped like samples', () => {
+    const store = makeStore(() => T0, { maxSamples: 2 })
+    const r = store.record(incident())
+    expect(store.get(r.id)!.recovery).toEqual([])
+    store.appendRecovery(r.id, { action: 'esc-esc', at: T0, ok: true, detail: 'first' })
+    store.appendRecovery(r.id, { action: 'restart-session', at: T0 + 1, ok: false, detail: 'second' })
+    store.appendRecovery(r.id, { action: 'select-option:2', at: T0 + 2, ok: true, detail: 'third' })
+    const rec = store.get(r.id)!.recovery
+    // Capped at maxSamples (2), keeping the most recent.
+    expect(rec.length).toBe(2)
+    expect(rec[rec.length - 1].action).toBe('select-option:2')
+  })
+
+  test('U-IS-12c: appendRecovery on an unknown id is a no-op (no throw)', () => {
+    const store = makeStore(() => T0)
+    expect(() => store.appendRecovery('nope', { action: 'esc', at: T0, ok: true })).not.toThrow()
+  })
+
   test('U-IS-13: digest summarises incidents in the window', () => {
     let clock = T0
     const store = makeStore(() => clock)

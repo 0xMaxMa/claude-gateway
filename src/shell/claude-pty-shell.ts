@@ -21,6 +21,7 @@ import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
 import { shouldAdoptOrphanWake } from './orphan-wake';
+import { parseControlCommand, keystrokesFor, KEY_ENTER } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
 
 const POLL_MS = 200;
@@ -252,6 +253,14 @@ class Driver {
         logWarn(`ignoring non-JSON stdin line (${line.length} bytes)`);
         return;
       }
+      // Control channel (Epic #195, Phase 3b): the gateway's recovery executor
+      // may ask us to press a specific key into the TUI (esc / enter / arrow /
+      // menu digit). Kept distinct from a message turn so a keystroke is never
+      // parsed as prompt text. The vocabulary is closed + validated.
+      if (obj.type === 'control') {
+        this.handleControl(obj);
+        return;
+      }
       if (obj.type !== 'user') {
         logDebug(`ignoring stdin message type=${String(obj.type)}`);
         return;
@@ -289,6 +298,31 @@ class Driver {
       logWarn('stdin closed — shutting down');
       this.shutdown(0);
     });
+  }
+
+  /**
+   * Handle a gateway control keystroke (Epic #195, Phase 3b). Validates against
+   * the closed control vocabulary and presses the corresponding key(s) into the
+   * PTY. For select-option the digit is sent, then Enter only if a selectable
+   * prompt still blocks the screen — mirroring selectMenuOption so a TUI that
+   * confirms on the digit alone doesn't get a stray Enter.
+   */
+  private handleControl(obj: Record<string, unknown>): void {
+    const cmd = parseControlCommand(obj);
+    if (!cmd) {
+      logWarn(`ignoring invalid control message: ${JSON.stringify(obj).slice(0, 120)}`);
+      return;
+    }
+    logDebug(`control: ${cmd.key}${cmd.option !== undefined ? ` option=${cmd.option}` : ''}`);
+    const keys = keystrokesFor(cmd);
+    for (const k of keys) this.host.writeRaw(k);
+    if (cmd.key === 'select-option') {
+      // Screen-gated Enter, same as selectMenuOption: only confirm if a prompt
+      // is still visibly blocking after a short settle.
+      setTimeout(() => {
+        if (this.screen.interactivePromptBlocking()) this.host.writeRaw(KEY_ENTER);
+      }, MENU_SELECT_ENTER_DELAY_MS);
+    }
   }
 
   private attachSignals(): void {

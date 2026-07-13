@@ -30,6 +30,7 @@ import {
   type IncidentManifest,
   type IncidentSample,
   type DigestSummary,
+  type RecoveryOutcome,
 } from './incident'
 
 /** Minimal filesystem surface the store needs. Node's `fs` satisfies it. */
@@ -86,6 +87,13 @@ export interface IncidentStore {
   get(id: string): IncidentManifest | null
   /** Record that the user was notified at a level (dedupes re-notifying). */
   markNotified(id: string, level: EscalationLevel, at?: number): void
+  /**
+   * Append a recovery outcome to an incident bundle (Phase 3b). The runner
+   * executes recovery and returns the outcome; the receiver persists it here so
+   * the bundle records what was attempted and whether it worked. Capped like
+   * samples so a flapping stall cannot grow the manifest unbounded.
+   */
+  appendRecovery(id: string, outcome: RecoveryOutcome): void
   /** Link a filed GitHub issue to an incident fingerprint. */
   linkIssue(id: string, issueNumber: number): void
   /** Mark an incident resolved (stops it folding new occurrences). */
@@ -311,6 +319,13 @@ export function createIncidentStore(deps: IncidentStoreDeps): IncidentStore {
     writeManifest(m)
   }
 
+  function appendRecovery(id: string, outcome: RecoveryOutcome): void {
+    const m = readManifest(id)
+    if (!m) return
+    m.recovery = pushCapped(m.recovery ?? [], outcome, maxSamples)
+    writeManifest(m)
+  }
+
   function linkIssue(id: string, issueNumber: number): void {
     const m = readManifest(id)
     if (!m) return
@@ -384,7 +399,7 @@ export function createIncidentStore(deps: IncidentStoreDeps): IncidentStore {
     return summarizeIncidents(list(), sinceMs, now())
   }
 
-  return { record, get, markNotified, linkIssue, resolve, prune, digest, list }
+  return { record, get, markNotified, appendRecovery, linkIssue, resolve, prune, digest, list }
 }
 
 /** Path join without importing `path` (keeps the module dependency-light). */

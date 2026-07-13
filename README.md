@@ -293,6 +293,27 @@ Controls the Claude subprocess backend for all non-app agents.
 
 This setting is hot-reloadable — new sessions pick it up without a restart.
 
+### `gateway.selfHealing.autoRecover`
+
+Opt-in self-healing for the turn-trace watchdog (Epic #195). When a turn stalls, the gateway always detects it, logs a scrubbed incident, and notifies the affected chat. This flag additionally controls whether the gateway may *act* on a stall.
+
+| Value | Behaviour |
+|-------|-----------|
+| `false` *(default)* | Detection + incident logging + notification only — no automatic action |
+| `true` | The watchdog may run a whitelisted recovery for a stalled turn: a keystroke into the TUI (esc / enter / arrow / menu selection), a session restart, a reversible safe-mode fallback to the headless backend, and — after a successful unblock — a guarded resend of the last message (only if the turn produced no output, so it is never double-submitted) |
+
+Recovery actions are clamped to a per-stage whitelist and a per-turn budget, and any local triage treats the on-screen text as untrusted data validated against a closed schema. Safe-mode auto-fallback on a hard PTY failure is independent of this flag (it is always reversible and never presses keys). In-memory only — a gateway restart re-reads your real config.
+
+```json
+{
+  "gateway": {
+    "selfHealing": {
+      "autoRecover": true
+    }
+  }
+}
+```
+
 ### `gateway.api.keys`
 
 Each key has a `key` string (supports `${ENV_VAR}` interpolation), an optional `description`, and an `agents` field — either an array of agent IDs or `"*"` for full access. Keys support both `Authorization: Bearer` and `X-Api-Key` headers.

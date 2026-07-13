@@ -30,8 +30,9 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
-import { formatTurnIncident } from '../../../src/agent/turn-trace'
+import { formatTurnIncident, type TurnIncident } from '../../../src/agent/turn-trace'
 import { createIncidentStore } from '../../../src/agent/incident-store'
+import type { RecoveryOutcome } from '../../../src/agent/incident'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
@@ -196,6 +197,11 @@ const typingManager = createWorkingStateManager(
         void notifyIncident(incident.chatId, result)
         incidentStore.markNotified(result.id, result.escalation.level)
       }
+      // Cross-process recovery bridge (Epic #195, Phase 3b): for stages whose
+      // recovery lives in the runner (session/CLI), ask it to attempt recovery
+      // and persist the outcome. Fire-and-forget — recovery must never block the
+      // channel, and it is a no-op unless the operator enabled autoRecover.
+      void attemptRecover(incident, result.id)
     } catch (err) {
       process.stderr.write(
         `telegram channel: incident persist failed: ${String(err)}\n`,
@@ -203,6 +209,47 @@ const typingManager = createWorkingStateManager(
     }
   },
 )
+
+// Stages whose recovery must run in the runner process (live session control):
+// session injection, CLI startup, and no-output progress wedges. Inbound
+// (channel ingress) and delivery/dispatch (transport) are receiver-side and are
+// not bridged here.
+const RUNNER_RECOVERABLE_STAGES: ReadonlySet<string> = new Set(['inject', 'startup', 'progress'])
+
+// A stable-per-turn key for the runner's intervention budget. Uses the stalled
+// stage's start second (at − sinceMs), so repeated detections of the SAME wedged
+// turn share a budget while a genuinely new turn gets a fresh one.
+function recoveryTurnKey(incident: TurnIncident): string {
+  const startSec = Math.round((incident.at - incident.sinceMs) / 1000)
+  return `${incident.chatId}:${startSec}`
+}
+
+// Ask the runner to attempt recovery for a session/CLI-stage stall, then persist
+// the returned outcome to the incident bundle. Best-effort and non-blocking.
+async function attemptRecover(incident: TurnIncident, incidentId: string): Promise<void> {
+  if (!CALLBACK_URL_BASE) return
+  if (!RUNNER_RECOVERABLE_STAGES.has(incident.stage)) return
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/recover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        incidentId,
+        chatId: incident.chatId,
+        stage: incident.stage,
+        failureClass: incident.failureClass,
+        turnKey: recoveryTurnKey(incident),
+      }),
+    })
+    if (!res.ok) return
+    const data = (await res.json()) as { ok?: boolean; outcome?: RecoveryOutcome }
+    if (data.ok && data.outcome) {
+      incidentStore.appendRecovery(incidentId, data.outcome)
+    }
+  } catch (err) {
+    process.stderr.write(`telegram channel: recover POST failed: ${String(err)}\n`)
+  }
+}
 
 // Short, content-free notice for a stalled turn. No message text or chat id is
 // echoed back — only the pipeline stage and (on repeat) the occurrence count.

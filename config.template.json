@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.11",
+  "configVersion": "1.0.12",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -44,7 +44,10 @@
       "cleanupHour": 0,
       "cleanupTimezone": "UTC"
     },
-    "headless": true
+    "headless": true,
+    "selfHealing": {
+      "autoRecover": false
+    }
   },
   "agents": [
     {
