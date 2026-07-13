@@ -2780,7 +2780,7 @@ Endpoints for checking and installing newer versions of `@0xmaxma/claude-gateway
 
 Returns the current and latest version for both packages. Result is cached for 5 minutes to avoid hammering the npm registry.
 
-`latest` is read from the npm registry for both packages. `current` is resolved per package: `claude-gateway` (an npm global) via `npm list -g`, and `claude-code` (native installer) from the installed binary (`claude --version`). If Claude Code is not installed, its `current` is `null` and the UI renders `—`.
+`latest` is read from the npm registry for both packages. `current` is resolved per package: `claude-gateway` (an npm global) via `npm list -g`, and `claude-code` (native installer) from the installed binary (`claude --version`). If Claude Code is not installed, its `current` is `null` and the UI renders `—`. `hasUpdate` is `true` only when `latest` is strictly newer than `current` by semver ordering, so a binary that is *ahead* of the registry `latest` does not report a spurious update.
 
 ```bash
 curl -H "X-Api-Key: admin-secret" \

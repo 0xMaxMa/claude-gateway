@@ -27,6 +27,9 @@
  * T22: claude-code update runs the native updater (`claude update`), not npm install
  * T23: claude-code native update failure → 500 with stderr
  * T24: claude-code already on latest → updated:false, native updater not invoked
+ * T25: GET — current newer than registry latest → hasUpdate:false (no false positive)
+ * T26: update when current is ahead of latest → updated:false, native updater not invoked
+ * T27: native updater runs but version unchanged (no-op) → updated:false (honest)
  */
 
 import express from 'express';
@@ -714,5 +717,91 @@ describe('T20-T24: claude-code native detection & update', () => {
       warning: null,
     });
     expect(ranNativeUpdate).toBe(false);
+  });
+
+  it('T25: current newer than registry latest → hasUpdate:false (no false positive)', async () => {
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm list') && cmdStr.includes('@0xmaxma/claude-gateway')) {
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.2.0' } } });
+      }
+      // Native binary is ahead of the npm-registry latest below
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.210 (Claude Code)';
+      }
+      return '{}';
+    });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.2.0', '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .get('/api/v1/packages')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    const cc = res.body.packages.find((p: { package: string }) => p.package === '@anthropic-ai/claude-code');
+    expect(cc).toMatchObject({ current: '2.1.210', latest: '2.1.207', hasUpdate: false });
+  });
+
+  it('T26: update when current is ahead of latest → updated:false, native updater not invoked', async () => {
+    let ranNativeUpdate = false;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.210 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        ranNativeUpdate = true;
+        return '';
+      }
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      package: '@anthropic-ai/claude-code',
+      from: '2.1.210',
+      to: '2.1.210',
+      updated: false,
+      warning: null,
+    });
+    expect(ranNativeUpdate).toBe(false);
+  });
+
+  it('T27: native updater runs but version unchanged → updated:false (honest)', async () => {
+    let ranNativeUpdate = false;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      // Binary reports the same version before and after `claude update`
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.200 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        ranNativeUpdate = true;
+        return '';
+      }
+      return '';
+    });
+    // Registry advertises a newer version, so the update path is entered...
+    mockFetch({ '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    // ...but the binary did not move, so report updated:false honestly
+    expect(res.body).toMatchObject({
+      package: '@anthropic-ai/claude-code',
+      from: '2.1.200',
+      to: '2.1.200',
+      updated: false,
+      warning: null,
+    });
+    expect(ranNativeUpdate).toBe(true);
   });
 });

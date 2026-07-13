@@ -4,6 +4,7 @@ import { readdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
+import { compareSemver } from '../config/migrator';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -93,7 +94,10 @@ function getBinaryVersion(bin: string): string | null {
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 10_000,
     });
-    const match = output.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+    // `claude --version` prints the version first (e.g. "2.1.207 (Claude Code)").
+    // Anchor to the start of the trimmed output so a version-like token later in
+    // the line can never be mistaken for the installed version.
+    const match = output.trim().match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
     return match ? match[1] : null;
   } catch {
     return null;
@@ -106,6 +110,14 @@ function resolveCurrent(config: PackageConfig): string | null {
     return getBinaryVersion(config.bin);
   }
   return getNpmListVersion(config.npm);
+}
+
+// An update is available only when `latest` is strictly newer than `current`.
+// Using semver ordering (not `current !== latest`) avoids a false "update
+// available" when the installed version is *ahead* of the npm-registry latest
+// — e.g. a native-installer channel that leads the npm dist-tag.
+function updateAvailable(current: string | null, latest: string | null): boolean {
+  return !!(current && latest && compareSemver(latest, current) > 0);
 }
 
 async function getLatestVersion(packageName: string): Promise<string | null> {
@@ -128,7 +140,7 @@ async function fetchAllPackageVersions(): Promise<PackageInfo[]> {
         package: config.npm,
         current,
         latest,
-        hasUpdate: !!(current && latest && current !== latest),
+        hasUpdate: updateAvailable(current, latest),
       };
     }),
   );
@@ -245,8 +257,8 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       return;
     }
 
-    // Already on latest — no install needed
-    if (from === latest) {
+    // Already on latest (or ahead of it) — no install needed
+    if (from && !updateAvailable(from, latest)) {
       res.json({ package: packageName, from, to: from, updated: false, warning: null });
       return;
     }
@@ -282,10 +294,12 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
           return;
         }
 
-        // Invalidate version cache and re-read the actual binary version
+        // Invalidate version cache and re-read the actual binary version.
+        // The native updater may legitimately be a no-op (already newest on its
+        // own channel), so report `updated` from whether the version changed.
         versionCache = null;
         const to = resolveCurrent(config);
-        res.json({ package: packageName, from, to, updated: true, warning: null });
+        res.json({ package: packageName, from, to, updated: to !== from, warning: null });
         return;
       }
 
