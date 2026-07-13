@@ -42,6 +42,12 @@ export class SessionProcess extends EventEmitter {
   // re-loads less context until it drops under Anthropic's request ceiling.
   // 0 = inject no history at all (fully fresh context).
   historyLimit: number = MAX_HISTORY_MESSAGES;
+  // Safe-mode override (Epic #195, Phase 3): when true, this session is forced
+  // to the headless backend even if gateway.headless===false. The runner sets
+  // it from SafeModeManager before start() so a repeatedly-wedged PTY agent
+  // keeps serving via headless without a gateway restart. Reversible: cleared
+  // on the next spawn once safe mode exits.
+  forceHeadless: boolean = false;
   spawnContext: { loadedAtSpawn: number; archivedCount: number; messageCountAtSpawn: number } | null = null;
   private process: ChildProcess | null = null;
   private stopping = false;
@@ -458,7 +464,10 @@ export class SessionProcess extends EventEmitter {
     // claude-pty-shell PTY wrapper (same stream-json protocol on stdio).
     // App-agents always stay headless: the wrapper (node-pty) lives on the
     // host and cannot wrap a binary inside a docker-exec container.
-    const usePtyShell = this.gatewayConfig.gateway.headless === false && !isAppAgent;
+    // Safe mode (forceHeadless) overrides the configured PTY backend so a
+    // repeatedly-failing wrapper degrades to headless instead of re-wedging.
+    const usePtyShell =
+      this.gatewayConfig.gateway.headless === false && !isAppAgent && !this.forceHeadless;
     this.backend = usePtyShell ? 'pty-shell' : 'headless';
     let ptyRealBin: string | null = null;
     // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.

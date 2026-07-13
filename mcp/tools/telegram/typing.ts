@@ -153,6 +153,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PROCESS_FAILED: '❌ Claude stopped unexpectedly. Please try sending a new message.',
   POOL_FULL: '⚠️ Too many concurrent sessions. Please try again in a moment.',
   SPAWN_FAILED: '❌ Failed to start Claude session. Please try again.',
+  // Epic #195, Phase 3: the interactive backend failed repeatedly, so the agent
+  // temporarily fell back to the headless backend to keep serving.
+  SAFE_MODE_ENABLED:
+    '⚠️ The interactive backend kept failing, so I switched to safe mode (headless) for now. Please resend your message — it should go through.',
 }
 
 export const STATUS_EMOJI: Record<string, string> = {

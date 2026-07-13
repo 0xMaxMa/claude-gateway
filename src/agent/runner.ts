@@ -15,6 +15,7 @@ import { LineReplyManager } from './line-reply-manager';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { SafeModeManager } from './safe-mode';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -151,6 +152,21 @@ export class AgentRunner extends EventEmitter {
   // restarting would just churn a context that cannot shrink. Cleared together
   // with the counter on a successful result and on /clear.
   private readonly tooLargeExhausted = new Set<string>();
+
+  // Safe-mode manager (Epic #195, Phase 3): tracks repeated PTY-backend failures
+  // and, past a threshold, forces this agent to the headless backend so it keeps
+  // serving turns without a gateway restart. In-memory only — a restart clears it
+  // and re-reads the user's real config. spawnSession reads isActive() to set
+  // SessionProcess.forceHeadless.
+  private readonly safeMode = new SafeModeManager({
+    audit: (e) =>
+      this.logger.info('Safe-mode transition', {
+        agentId: e.agentId,
+        action: e.action,
+        reason: e.reason,
+        failures: e.failures,
+      }),
+  });
 
   // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
@@ -822,6 +838,16 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
+    // Safe mode (Epic #195, Phase 3): if the PTY backend has repeatedly failed
+    // for this agent, force the headless backend for this spawn. Cleared
+    // automatically once safe mode exits (a later healthy turn / user restore).
+    if (this.safeMode.isActive(this.agentConfig.id)) {
+      proc.forceHeadless = true;
+      this.logger.info('Spawning in safe mode (headless backend forced)', {
+        mapKey, agentId: this.agentConfig.id,
+      });
+    }
+
     await proc.start();
 
     // Forward all session output lines so listeners on AgentRunner (GatewayRouter,
@@ -831,7 +857,17 @@ export class AgentRunner extends EventEmitter {
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source !== 'api') {
       proc.once('failed', () => {
-        this.writeTypingError(mapKey, 'PROCESS_FAILED');
+        // Safe mode (Epic #195, Phase 3): a hard failure of the PTY (interactive
+        // TUI) backend counts toward the safe-mode threshold. Once crossed, the
+        // agent auto-flips to headless on the next spawn so the user's next
+        // message is served instead of re-wedging. Headless failures don't count
+        // (there is no PTY wrapper to blame / fall back from). When we just
+        // entered safe mode, tell the user that specifically instead of the
+        // generic "stopped" notice (one .error file, so pick the better code).
+        const enteredSafeMode =
+          proc.backend === 'pty-shell' &&
+          this.safeMode.recordPtyFailure(this.agentConfig.id);
+        this.writeTypingError(mapKey, enteredSafeMode ? 'SAFE_MODE_ENABLED' : 'PROCESS_FAILED');
         this.sessions.delete(mapKey);
         // LINE: surface an error for any outstanding postback button so a tap
         // returns the interrupted notice instead of a stale "still thinking".
@@ -995,6 +1031,13 @@ export class AgentRunner extends EventEmitter {
               // the next 32MB (if any) starts fresh at the top of the ladder.
               this.tooLargeRecoveries.delete(mapKey);
               this.tooLargeExhausted.delete(mapKey);
+              // Safe mode (Epic #195, Phase 3): a healthy PTY turn resets the
+              // consecutive-failure counter and lifts safe mode if it was active
+              // (the interactive backend recovered). Headless successes don't
+              // touch it — that's the fallback doing its job, not the PTY healing.
+              if (proc.backend === 'pty-shell') {
+                this.safeMode.recordSuccess(this.agentConfig.id);
+              }
             }
             // When a menu was rendered to buttons this turn, the wrapper appends
             // the same menu text to the turn's result — strip that suffix so it
