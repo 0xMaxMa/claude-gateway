@@ -13,6 +13,13 @@
  *   STATE_DIR/typing/{chatId}.error     — written by AgentRunner on session failure
  */
 
+import {
+  classifyTurn,
+  type TurnObservation,
+  type TurnStage,
+  type TurnIncidentSink,
+} from '../../../src/agent/turn-trace'
+
 export const TELEGRAM_MAX_CHARS = 4096
 
 /**
@@ -177,6 +184,10 @@ export interface WorkingState {
   currentReaction: string | null
   lastDetail: string | null
   recentDetails: string[]
+  /** Last stage an incident was raised for — dedupes the turn-trace watchdog
+   *  so one contiguous stalled episode emits a single incident, not one per
+   *  15s tick. Reset to null once the turn is no longer stalled. */
+  lastIncidentStage: TurnStage | null
 }
 
 export interface BotApi {
@@ -295,6 +306,7 @@ export function createWorkingStateManager(
   typingDir: string,
   botApi: BotApi,
   fsApi: FsApi,
+  onIncident?: TurnIncidentSink,
 ) {
   const states = new Map<string, WorkingState>()
 
@@ -328,6 +340,74 @@ export function createWorkingStateManager(
 
   function repliedFilePath(chatId: string): string {
     return `${typingDir}/${chatId}.replied`
+  }
+
+  function menuFilePath(chatId: string): string {
+    return `${typingDir}/${chatId}.menu`
+  }
+
+  // ─── Turn-trace watchdog (Epic #195, Phase 1) ──────────────────────────────
+  // Read-only: builds an observation of this turn's on-disk artifacts, classifies
+  // the current pipeline stage, and emits a (silent) incident when a stage stalls.
+  // It never mutates state or messages the user — the existing heartbeat warn/stop
+  // below remains the sole user-facing stalled behaviour.
+
+  function statMtime(path: string): number | null {
+    try {
+      return fsApi.existsSync(path) ? fsApi.statSync(path).mtimeMs : null
+    } catch {
+      return null
+    }
+  }
+
+  function readTurnObservation(chatId: string, startedAt: number): TurnObservation {
+    let statusLabel: string | null = null
+    const statusPath = statusFilePath(chatId)
+    if (fsApi.existsSync(statusPath)) {
+      try {
+        statusLabel = parseStatusFile(fsApi.readFileSync(statusPath, 'utf8')).status
+      } catch {}
+    }
+    return {
+      now: Date.now(),
+      // A live WorkingState means the signal file was written at startedAt.
+      signalAt: fsApi.existsSync(typingFilePath(chatId)) ? startedAt : null,
+      statusLabel,
+      heartbeatAt: statMtime(heartbeatFilePath(chatId)),
+      processingAt: statMtime(processingFilePath(chatId)),
+      forwardAt: statMtime(forwardFilePath(chatId)),
+      menuAt: statMtime(menuFilePath(chatId)),
+      repliedPresent: fsApi.existsSync(repliedFilePath(chatId)),
+      errorPresent: fsApi.existsSync(errorFilePath(chatId)),
+    }
+  }
+
+  function checkTurnTrace(chatId: string, startedAt: number): void {
+    const state = states.get(chatId)
+    if (!state) return
+    const obs = readTurnObservation(chatId, startedAt)
+    const trace = classifyTurn(obs)
+    if (!trace.stalled) {
+      state.lastIncidentStage = null
+      return
+    }
+    // Dedupe: one incident per contiguous stalled-stage episode.
+    if (state.lastIncidentStage === trace.stage) return
+    state.lastIncidentStage = trace.stage
+    if (onIncident) {
+      // A fresh .processing sentinel (mtime >= startedAt) means the turn is
+      // genuinely mid-work (e.g. a long sub-agent), not silently wedged.
+      const midTurn = obs.processingAt !== null && obs.processingAt >= startedAt
+      onIncident({
+        chatId,
+        stage: trace.stage,
+        failureClass: trace.failureClass,
+        sinceMs: trace.sinceMs,
+        budgetMs: trace.budgetMs,
+        midTurn,
+        at: Date.now(),
+      })
+    }
   }
 
   async function stop(chatId: string): Promise<void> {
@@ -430,6 +510,7 @@ export function createWorkingStateManager(
       currentReaction: null,
       lastDetail: null,
       recentDetails: [],
+      lastIncidentStage: null,
     }
     states.set(chatId, state)
 
@@ -530,6 +611,9 @@ export function createWorkingStateManager(
     // Heartbeat file is written by SessionProcess on every Claude stdout line.
     state.stalledInterval = setInterval(async () => {
       if (!states.has(chatId)) return
+      // Turn-trace watchdog: staged classification + incident telemetry. Silent
+      // and side-effect-free — the heartbeat warn/stop below is unchanged.
+      checkTurnTrace(chatId, startedAt)
       const hbPath = heartbeatFilePath(chatId)
       let lastActivity = startedAt
       if (fsApi.existsSync(hbPath)) {

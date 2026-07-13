@@ -373,6 +373,111 @@ describe('createWorkingStateManager', () => {
     })
   })
 
+  describe('turn-trace watchdog integration (Epic #195, Phase 1)', () => {
+    test('U-TY-TT-01: emits a progress incident when heartbeat goes stale, alongside the existing warn/stop', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const onIncident = jest.fn()
+      const hbPath = `${TYPING_DIR}/${CHAT_ID}.heartbeat`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, onIncident)
+      mgr.start(CHAT_ID)
+      // Claude produced output once at t=0, then went silent → progress stage.
+      fsApi.writeFileSync(hbPath, String(Date.now()))
+
+      jest.advanceTimersByTime(STALLED_TIMEOUT_MS)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      // New telemetry: a single 'progress' incident (headless default class).
+      expect(onIncident).toHaveBeenCalledTimes(1)
+      expect(onIncident.mock.calls[0][0]).toMatchObject({
+        chatId: CHAT_ID,
+        stage: 'progress',
+        failureClass: 'claude-cli',
+      })
+      // Existing user-facing behaviour is unchanged: warn + stop.
+      expect(bot.sendMessage).toHaveBeenCalledWith(
+        CHAT_ID,
+        expect.stringContaining('Claude has not responded in 5 minutes'),
+      )
+      expect(mgr.states.has(CHAT_ID)).toBe(false)
+    })
+
+    test('U-TY-TT-02: raises a startup incident before the 5-minute user warning (finer telemetry, decoupled)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const onIncident = jest.fn()
+      const statusPath = `${TYPING_DIR}/${CHAT_ID}.status`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, onIncident)
+      mgr.start(CHAT_ID)
+      // Turn injected (status written) but Claude never produced output → startup.
+      fsApi.writeFileSync(statusPath, 'queued')
+
+      // Advance to the startup budget (120s) — well before the 300s user warn.
+      jest.advanceTimersByTime(120_000)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(onIncident).toHaveBeenCalledTimes(1)
+      expect(onIncident.mock.calls[0][0]).toMatchObject({
+        stage: 'startup',
+        failureClass: 'session-process',
+      })
+      // No user-facing 5-minute message yet — telemetry fires earlier.
+      expect(bot.sendMessage).not.toHaveBeenCalledWith(
+        CHAT_ID,
+        expect.stringContaining('5 minutes'),
+      )
+      expect(mgr.states.has(CHAT_ID)).toBe(true)
+
+      await mgr.stop(CHAT_ID)
+    })
+
+    test('U-TY-TT-03: dedupes — one incident per contiguous stalled stage', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const onIncident = jest.fn()
+      const statusPath = `${TYPING_DIR}/${CHAT_ID}.status`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, onIncident)
+      mgr.start(CHAT_ID)
+      fsApi.writeFileSync(statusPath, 'queued')
+
+      // Cross several check ticks while still in the same (startup) stalled stage.
+      jest.advanceTimersByTime(120_000 + STALLED_CHECK_INTERVAL_MS * 4)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      // Still a single emission despite multiple stalled ticks.
+      const startupCalls = onIncident.mock.calls.filter(c => c[0].stage === 'startup')
+      expect(startupCalls).toHaveLength(1)
+
+      await mgr.stop(CHAT_ID)
+    })
+
+    test('U-TY-TT-04: no incident while heartbeat stays fresh', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const onIncident = jest.fn()
+      const hbPath = `${TYPING_DIR}/${CHAT_ID}.heartbeat`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, onIncident)
+      mgr.start(CHAT_ID)
+      // Heartbeat present from the start (progress stage), refreshed before the
+      // stalled boundary → the turn never sits past a stage budget.
+      fsApi.writeFileSync(hbPath, String(Date.now()))
+
+      jest.advanceTimersByTime(STALLED_TIMEOUT_MS - STALLED_CHECK_INTERVAL_MS)
+      fsApi.writeFileSync(hbPath, String(Date.now()))  // fresh heartbeat
+      jest.advanceTimersByTime(STALLED_CHECK_INTERVAL_MS * 3)
+      for (let k = 0; k < 10; k++) await Promise.resolve()
+
+      expect(onIncident).not.toHaveBeenCalled()
+      expect(mgr.states.has(CHAT_ID)).toBe(true)
+
+      await mgr.stop(CHAT_ID)
+    })
+  })
+
   describe('notifyError()', () => {
     test.each(Object.entries(ERROR_MESSAGES))('sends correct message for code %s', async (code, expected) => {
       const bot = makeBotApi()

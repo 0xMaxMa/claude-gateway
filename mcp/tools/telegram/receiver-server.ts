@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
+import { formatTurnIncident } from '../../../src/agent/turn-trace'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
@@ -117,6 +118,11 @@ const typingManager = createWorkingStateManager(
       ]),
   },
   { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync },
+  // Turn-trace watchdog sink (Epic #195, Phase 1): log staged stall incidents.
+  // Phase 2 replaces this with the persistent incident store.
+  (incident) => {
+    process.stderr.write(`telegram channel: ${formatTurnIncident(incident)}\n`)
+  },
 )
 
 type PendingEntry = {
