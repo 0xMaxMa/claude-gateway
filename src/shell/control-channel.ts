@@ -35,8 +35,12 @@ export const KEY_ENTER = '\r'
 export const KEY_UP = '\x1b[A'
 export const KEY_DOWN = '\x1b[B'
 
-/** Upper bound for a select-option index (defensive; menus are short). */
-export const MAX_CONTROL_OPTION = 20
+/**
+ * Upper bound for a select-option index. Capped at 9 to match the triage schema:
+ * the wrapper selects by typing the digit, which is only unambiguous single-char,
+ * so a two-digit index could type a wrong immediate selection. Menus are short.
+ */
+export const MAX_CONTROL_OPTION = 9
 
 const KEY_SET: ReadonlySet<string> = new Set(CONTROL_KEYS)
 

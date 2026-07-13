@@ -299,4 +299,17 @@ describe('toRecoveryOutcome — persisted schema', () => {
     })
     expect(toRecoveryOutcome(r).ok).toBe(false)
   })
+
+  test('U-RX-18: a skipped (autoRecover off) outcome is ok:true, not a failed recovery', async () => {
+    // A benign non-action must not be miscounted as a failed recovery in the
+    // incident digest — ok means "no failure occurred", not "an effect ran".
+    const r = await runRecovery(baseReq(), {
+      autoRecover: false,
+      effects: {},
+      now: () => T0,
+      budget: makeBudget(),
+    })
+    expect(r.executed).toBe(false)
+    expect(toRecoveryOutcome(r).ok).toBe(true)
+  })
 })

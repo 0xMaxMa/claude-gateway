@@ -59,8 +59,14 @@ export const TRIAGE_ACTIONS = [
 ] as const
 export type TriageAction = (typeof TRIAGE_ACTIONS)[number]
 
-/** Upper bound for a `select-option` index (defensive; menus are short). */
-export const MAX_OPTION_INDEX = 20
+/**
+ * Upper bound for a `select-option` index. Capped at 9 because the executor
+ * selects a menu entry by typing its digit, which is only unambiguous for a
+ * single character — a two-digit "12" would type '1' first and a digit-immediate
+ * TUI would act on that wrong entry. Menus in practice are short (≤4); a verdict
+ * proposing a larger index is rejected (→ notify-only) rather than mis-selected.
+ */
+export const MAX_OPTION_INDEX = 9
 
 /** A validated triage verdict. Only these fields ever survive validation. */
 export interface TriageVerdict {

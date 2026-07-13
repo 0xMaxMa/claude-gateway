@@ -63,6 +63,11 @@ const MAX_API_IMAGES = 5;
 // Hard timeout for the one-shot local `claude -p` triage during recovery
 // (Epic #195, Phase 3b). A slow/hung triage collapses to a safe notify-only.
 const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
+// TTL after which a per-turn recovery budget entry is evicted. A turn's budget
+// only matters during its active stall window (a few interventions spaced by a
+// 30s cooldown), so anything older is a finished turn — pruned to keep the
+// budget map from growing unbounded over a long-lived runner (Epic #195, 3b).
+const RECOVERY_BUDGET_TTL_MS = 10 * 60_000;
 
 // Trailing-edge window for coalescing channel messages that carry an image (or that
 // arrive while an image is already buffered) into a single turn. Reset on every new
@@ -447,6 +452,7 @@ export class AgentRunner extends EventEmitter {
           get: (turnKey) => this.recoveryBudgets.get(turnKey) ?? initialBudget(turnKey),
           set: (s) => {
             this.recoveryBudgets.set(s.turnKey, s);
+            this.pruneRecoveryBudgets(s.lastAt);
           },
         },
         // Live triage is the most sensitive surface — only ever run when the
@@ -494,8 +500,6 @@ export class AgentRunner extends EventEmitter {
       esc: () => control('esc'),
       escEsc: () => control('esc-esc'),
       enter: () => control('enter'),
-      up: () => control('up'),
-      down: () => control('down'),
       selectOption: (option: number) => control('select-option', option),
       restartSession: () => this.restartProcess(chatId),
       fallbackHeadless: async () => {
@@ -518,6 +522,19 @@ export class AgentRunner extends EventEmitter {
         return true;
       },
     };
+  }
+
+  /**
+   * Evict finished-turn budget entries (Epic #195, Phase 3b). Called on each
+   * budget write so the per-turn map cannot grow without bound on a long-lived
+   * runner. `nowMs` is the timestamp of the write just made; any entry whose last
+   * attempt predates the TTL belongs to a turn that is no longer being recovered.
+   */
+  private pruneRecoveryBudgets(nowMs: number): void {
+    const cutoff = nowMs - RECOVERY_BUDGET_TTL_MS;
+    for (const [key, state] of this.recoveryBudgets) {
+      if (state.lastAt < cutoff) this.recoveryBudgets.delete(key);
+    }
   }
 
   /**

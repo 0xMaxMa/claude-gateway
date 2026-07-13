@@ -265,9 +265,11 @@ async function notifyIncident(
       `(${result.occurrences}× recently). This looks like a persistent issue — ` +
       `it has been logged for investigation.`
   } else {
+    // Neutral wording: automatic recovery only runs when the operator has
+    // enabled gateway.selfHealing.autoRecover (off by default), and the receiver
+    // cannot see that runner-side flag — so do not promise it here.
     text =
-      `⚠️ A turn stalled at the "${stage}" stage and has been logged. ` +
-      `No action needed — recovery will be attempted automatically.`
+      `⚠️ A turn stalled at the "${stage}" stage and has been logged.`
   }
   try {
     await bot.api.sendMessage(chatId, text)

@@ -43,8 +43,6 @@ export interface RecoveryEffects {
   esc?(): Promise<void> | void
   escEsc?(): Promise<void> | void
   enter?(): Promise<void> | void
-  up?(): Promise<void> | void
-  down?(): Promise<void> | void
   selectOption?(option: number): Promise<void> | void
   bridgeMenu?(): Promise<void> | void
   redeliverForward?(): Promise<void> | void
@@ -261,7 +259,12 @@ export function toRecoveryOutcome(r: RecoveryResult): RecoveryOutcome {
   return {
     action: r.option !== undefined ? `${r.action}:${r.option}` : r.action,
     at: r.at,
-    ok: r.ok && r.executed,
+    // `ok` means "no failure occurred" — true for a successful execution AND for
+    // a benign non-action (skipped / notify-only / budget-clamp), false only when
+    // an effect was attempted and threw or was unsupported. Using r.ok directly
+    // (which is already false only on those failure paths) keeps notify-only
+    // decisions from being miscounted as failed recoveries in the digest.
+    ok: r.ok,
     detail: bits.join('; '),
   }
 }
