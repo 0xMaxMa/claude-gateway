@@ -23,6 +23,12 @@ import { sendMessage, buildChoiceComponents } from './outbound';
 import { loadAccess, saveAccess, gate } from './access';
 import { maybeCreateThread } from './threading';
 import { createMessageHandler } from './inbound';
+// Cross-process message dedup (shared with Telegram): when more than one
+// receiver instance is connected on the same bot token — Discord's gateway
+// delivers every event to all sessions, unlike Telegram's single-consumer
+// getUpdates — the first instance to claim (channelId, messageId) processes it;
+// the others see the O_EXCL marker and drop, so a stranger's DM is handled once.
+import { initDedupDir, isDuplicate, pruneDedup } from '../telegram/dedup';
 import type { DiscordMessageContext } from './types';
 
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
@@ -185,6 +191,14 @@ export class DiscordModule implements ChannelModule {
     const loadAccessFn = () => loadAccess(stateDir);
     const saveAccessFn = (a: ReturnType<typeof loadAccess>) => saveAccess(stateDir, a);
 
+    // Dedup dir shared by every receiver instance on this bot token (same
+    // DISCORD_STATE_DIR). Init once here, prune stale markers on a timer —
+    // mirrors the Telegram receiver's setup.
+    const dedupDir = path.join(stateDir, 'dedup');
+    initDedupDir(dedupDir);
+    pruneDedup(dedupDir);
+    setInterval(() => pruneDedup(dedupDir), 60_000).unref();
+
     // Permissive config — gate() already handled access, inbound.ts skips re-check
     const permissiveConfig = {
       botToken: this.getToken()!,
@@ -208,14 +222,24 @@ export class DiscordModule implements ChannelModule {
 
     const msgHandler = createMessageHandler(agentId, handler, permissiveConfig, permissiveAccessConfig);
 
-    this.client.on('messageCreate', async (msg: any) => {
+    const handleDiscordMessage = async (msg: any): Promise<void> => {
       if (msg.author?.bot) return;
       if (msg.system) return;
+
+      // Drop if another receiver instance already claimed this message. Must run
+      // before gate() so a duplicate never mints a pairing code or replies twice.
+      if (isDuplicate(dedupDir, msg.channelId, msg.id)) return;
 
       this.lastMessageAt = Date.now();
 
       const isDM = !msg.guild;
       const isThread = msg.channel?.isThread?.() ?? false;
+      // Did this message @mention the bot (or reply to one of its messages)?
+      // Computed here so gate() stays discord.js-free. Works regardless of the
+      // MessageContent intent — mention entities are always delivered.
+      const botUser = this.client.user;
+      const mentionsBot = Boolean(botUser && msg.mentions?.has?.(botUser))
+        || (!!botUser && msg.mentions?.repliedUser?.id === botUser.id);
 
       const context: DiscordMessageContext = {
         guildId: msg.guildId ?? null,
@@ -226,6 +250,7 @@ export class DiscordModule implements ChannelModule {
         messageId: msg.id,
         isDM,
         isThread,
+        mentionsBot,
       };
 
       const access = loadAccessFn();
@@ -235,9 +260,18 @@ export class DiscordModule implements ChannelModule {
 
       if (result.action === 'pair') {
         try {
-          await msg.channel.send(
-            `Pairing required — run in Claude Code:\n\n/discord:access pair ${result.code}`,
-          );
+          if (result.isGuild) {
+            // LINE-style guild knock: post the code in the channel so a member
+            // can relay it to the admin, who approves it from the web UI. The
+            // user runs no command — a guild has no single owner to run one.
+            await msg.channel.send(
+              `This bot is private in this server.\n\nPairing code: ${result.code}\n\nShare this code with an admin to enable me here.`,
+            );
+          } else {
+            await msg.channel.send(
+              `Pairing required — run in Claude Code:\n\n/discord:access pair ${result.code}`,
+            );
+          }
         } catch {}
         return;
       }
@@ -258,6 +292,39 @@ export class DiscordModule implements ChannelModule {
       await msgHandler(msg);
       if (autoThread) {
         await maybeCreateThread(msg, autoThread, autoArchive).catch(() => {});
+      }
+    };
+
+    this.client.on('messageCreate', handleDiscordMessage);
+
+    // discord.js's own MESSAGE_CREATE handling resolves msg.channel from its
+    // in-memory cache; DM channels are never included in the initial
+    // GUILD_CREATE/READY payload, so the *first* DM after every process
+    // restart hits an uncached channel. MessageCreateAction's partial-channel
+    // fallback constructs the stub without a `type` field (it only forwards
+    // {id, author, guild_id}), so ChannelManager#_add can't pick a Channel
+    // subclass, logs "Failed to find guild, or unknown type for channel ...
+    // undefined", and silently drops the event — messageCreate never fires,
+    // no error, no pairing code. Every subsequent DM in that channel fails
+    // the same way since the failed resolution never populates the cache.
+    // Work around it: on the raw MESSAGE_CREATE dispatch, if it's a DM whose
+    // channel isn't cached yet, fetch the channel (and the message) via REST
+    // — a real API response includes `type`, so this caches it properly —
+    // then hand the fully-formed Message object to the same handler used by
+    // the normal path. isDuplicate() above ensures no double-processing if
+    // discord.js's own path ever does resolve it first.
+    this.client.on('raw', async (packet: { t?: string; d?: any }) => {
+      if (packet.t !== 'MESSAGE_CREATE') return;
+      const d = packet.d;
+      if (!d || d.guild_id || d.author?.bot) return;
+      if (this.client.channels.cache.has(d.channel_id)) return;
+      try {
+        const channel = await this.client.channels.fetch(d.channel_id);
+        if (!channel) return;
+        const msg = await channel.messages.fetch(d.id);
+        await handleDiscordMessage(msg);
+      } catch (err) {
+        process.stderr.write(`discord: raw DM fallback failed: ${err}\n`);
       }
     });
 
@@ -295,6 +362,8 @@ export class DiscordModule implements ChannelModule {
             messageId: interaction.message?.id ?? '',
             isDM,
             isThread,
+            // A button click is an explicit interaction — never mention-gated.
+            mentionsBot: true,
           };
           const access = loadAccessFn();
           const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));
@@ -331,6 +400,8 @@ export class DiscordModule implements ChannelModule {
           messageId: interaction.message?.id ?? '',
           isDM,
           isThread,
+          // A button click is an explicit interaction — never mention-gated.
+          mentionsBot: true,
         };
         const access = loadAccessFn();
         const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));

@@ -32,8 +32,12 @@ DISCORD_USE_EMBEDS=false          # use embeds for long responses
 
 1. Go to https://discord.com/developers/applications
 2. Select your application → Bot settings
-3. Enable **MESSAGE CONTENT INTENT** (privileged intent)
+3. Enable **MESSAGE CONTENT INTENT** (privileged intent) — **required**: without
+   it the bot still receives message events but with **empty content**, so it can
+   neither respond nor pair. This is the #1 cause of a bot that joins a server but
+   stays silent.
 4. Required bot permissions:
+   - View Channel *(and Read Message History — without these the bot never sees messages in the channel)*
    - Send Messages
    - Read Message History
    - Create Public Threads
@@ -42,6 +46,12 @@ DISCORD_USE_EMBEDS=false          # use embeds for long responses
    - Embed Links
    - Add Reactions
    - Use Application Commands
+
+> **Scope note.** DMs and guilds are gated separately: DMs by `dmPolicy` +
+> `pairing`, guilds by `groupPolicy` + `guildAllowlist` + `requireMention` (see
+> `/gateway:discord-access`). The intent and permissions above are the
+> platform-level prerequisites — the access lists only matter once messages
+> actually reach the bot.
 
 ## Implementation
 

@@ -733,20 +733,28 @@ When the config schema changes (new fields added in `config.template.json`), the
 
 ## Pairing New Users
 
-1. Set `dmPolicy` to `pairing` in `access.json`:
-   ```json
-   { "dmPolicy": "pairing" }
-   ```
-2. Ask the user to DM the bot — they receive a 6-character pairing code
-3. Approve it:
+New agents default to `dmPolicy: "allowlist"` with the orthogonal `pairing`
+toggle **on**, so pairing works out of the box — no setup needed.
+
+1. Ask the user to DM the bot — they receive a 6-character pairing code
+2. Approve it:
    ```bash
-   npm run pair -- --agent=alfred --code=abc123
+   npm run pair -- --agent=alfred --code=abc123 --channel=discord
    ```
-4. The bot confirms pairing within 5 seconds
-5. Lock down after everyone is paired:
-   ```bash
-   npm run pair -- --agent=alfred --policy=allowlist
+   (omit `--channel` or use `--channel=telegram` for Telegram)
+3. The bot confirms pairing within 5 seconds
+4. Lock down after everyone is paired (optional) — turn the pairing toggle off
+   so unknown senders are dropped silently (the base policy is already
+   `allowlist`):
    ```
+   /gateway:discord-access dm-pairing off     # Discord
+   /telegram:access pairing off               # Telegram
+   ```
+
+`pairing` is an **orthogonal on/off toggle**, not a `dmPolicy` value: the base
+policy stays `open` | `allowlist` | `disabled`, and pairing layers on top of
+`allowlist`. A legacy `access.json` with `"dmPolicy": "pairing"` is migrated
+automatically on read to `{ dmPolicy: "allowlist", pairing: true }`.
 
 To manage channels (add/remove Telegram or Discord) on an existing agent:
 ```bash
@@ -755,78 +763,135 @@ make update-agent   # choose "Manage channels"
 
 ---
 
+## Channel Conditions & Limitations
+
+Each channel gates inbound messages in two tiers — **DM/1:1** and **group** — and
+each has platform-level conditions that must be met *before* the gateway ever
+sees a message. If those aren't met the bot looks online but stays silent.
+
+| Channel | Scope | Message reaches the bot when… | Access gate | Answers in group when… |
+|---------|-------|-------------------------------|-------------|------------------------|
+| **Telegram** | DM | always (long-polling) | `dmPolicy` + `pairing` → `allowFrom` | — |
+| | Group | bot is **Admin**, or **Privacy Mode is OFF** + re-added; otherwise only `/cmd`, @mentions, replies | `groupPolicy` + `groupAllowlist` | `requireMention` false, or @mentioned/replied |
+| **Discord** | DM | **Message Content Intent** enabled | `dmPolicy` + `pairing` → `allowFrom` | — |
+| | Guild | **Message Content Intent** + **View Channel** + **Read Message History** | `groupPolicy` + `guildAllowlist` (+ optional `channelAllowlist`/`roleAllowlist`) | `requireMention` false, or @mentioned/replied |
+| **LINE** | 1:1 | webhook delivered (valid signature) | `dmPolicy` | — |
+| | Group/Room | webhook delivered + bot is a member | `groupPolicy` + `groupAllowlist` | `requireMention` false, or **native** @mention |
+
+**Telegram limits**
+- Exactly one process may poll a bot token — a second poller causes `409 Conflict`.
+- Bot **commands are DM-only**; in groups they're silently dropped.
+- Group **Privacy Mode is ON by default** — see [Telegram Groups](#telegram-groups). Admin status bypasses it; a Privacy-Mode change only applies after the bot is removed and re-added.
+- Pairing codes: DM knocks reply the code privately; group knocks post the code in the group (needs a message that actually reaches the bot, i.e. Admin/Privacy-off).
+
+**Discord limits**
+- **MESSAGE CONTENT INTENT** is a privileged intent — without it message text arrives empty, so the bot can neither answer nor pair. Enable it in the Developer Portal.
+- The bot needs channel permissions **View Channel**, **Read Message History**, **Send Messages** (+ **Create Public Threads** / **Send Messages in Threads** if `DISCORD_AUTO_THREAD=true`).
+- `channelAllowlist` / `roleAllowlist` are backend-only filters (no web UI) applied after the guild gate.
+
+**LINE limits**
+- Inbound arrives via the Express **webhook**, not polling; the signature is verified over the **exact raw bytes**. Front it with the bun CORS proxy (see `/tunnel`) — never point cloudflared straight at the gateway, or chunked bodies break the signature and webhooks are dropped.
+- Group/room `requireMention` uses LINE's **native mention** only (`mention.mentionees[].isSelf`). Typing the bot's name as plain text does **not** count, and `@All` does **not** count as a bot mention.
+- Delivery is **reply-token-first (free) → push fallback (metered)**. The single-use reply token lives only ~1 min; after that, replies consume the OA's monthly push quota.
+- Max **5 message objects** per reply/push request (the gateway auto-chunks to fit).
+
+---
+
 ## Telegram Groups
 
-The bot can respond in Telegram groups and supergroups. Groups must be registered before the bot will respond.
+The bot can respond in Telegram groups and supergroups. A group must be in the
+agent's `groupAllowlist` before the bot will answer there.
 
-**Step 1 — Add the bot to the group as Admin**
+### Delivery gotcha: Privacy Mode (read this first)
 
-Add your bot to the group and **promote it to Admin**. Without admin rights, Telegram does not deliver group messages to the bot — it will appear online but never respond.
+Telegram bots ship with **Privacy Mode ON** (`getMe` returns
+`can_read_all_group_messages: false`). A privacy-mode bot only *receives*, inside
+a group:
 
-Minimum required admin permission: **"Read Messages"** (or any admin role — even the most restricted works).
+- messages that start with `/` (commands),
+- messages that @mention the bot's username, and
+- replies to the bot's own messages.
 
-**Step 2 — Get the group ID**
+Everything else is filtered by Telegram **before it reaches the gateway** — the
+bot looks online but never sees the message, so it can neither answer nor mint a
+pairing code. On top of that, bot commands (`/start`, `/status`, …) are
+**DM-only**: the receiver silently drops them in groups so pairing codes can't
+leak to other members. Net effect in a default-privacy group: a plain message is
+invisible and a command is dropped, so nothing happens.
 
-Forward any message from the group to [@userinfobot](https://t.me/userinfobot). It will reply with the chat ID — a negative number like `-1001234567890`.
+Do one of these so the bot actually receives group messages:
 
-Alternatively, send a message in the group and visit:
+- **Promote the bot to Admin in the group (easiest).** An admin bot receives
+  every message regardless of Privacy Mode — no BotFather change, no re-add. Any
+  admin role works, even the most restricted.
+- **Disable Privacy Mode**, then **remove and re-add the bot** to the group (the
+  new setting only applies on re-join): [@BotFather](https://t.me/BotFather) →
+  `/setprivacy` → pick the bot → **Disable**.
+
+### Register the group
+
+Once the bot can receive group messages, add the group to `groupAllowlist` one of
+two ways.
+
+**Option A — pairing code (recommended).** With `groupPolicy: "allowlist"` and
+`pairing: true` (both defaults), send any message in the group. The bot replies
+with a 6-character code. Approve it from a gateway agent session:
+
 ```
-https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+/telegram:access pair <code>
 ```
-Look for `"chat":{"id": ...}` in the result.
 
-**Step 3 — Register the group**
+That adds the group id to `groupAllowlist` (the code also lands in the agent's
+`pending` as a `"kind": "group"` entry).
 
-Edit the agent's `access.json` directly:
+**Option B — edit `access.json` directly.** Get the group id by forwarding any
+group message to [@userinfobot](https://t.me/userinfobot) — a negative number
+like `-1001234567890` — then edit:
 
 ```
 ~/.claude-gateway/agents/<your-agent-id>/workspace/.telegram-state/access.json
 ```
 
-Add the group under `"groups"`:
-
 ```json
 {
   "dmPolicy": "allowlist",
+  "pairing": true,
   "allowFrom": ["..."],
-  "groups": {
-    "-1001234567890": {
-      "requireMention": true,
-      "allowFrom": []
-    }
-  }
+  "groupPolicy": "allowlist",
+  "groupAllowlist": ["-1001234567890"],
+  "requireMention": true
 }
 ```
 
-Set `"requireMention": false` if you want the bot to respond to all messages without needing an @mention.
-To restrict to specific members only, add their Telegram user IDs to `"allowFrom"`.
+`access.json` is re-read on every inbound message — changes take effect
+immediately, no restart.
 
-**Step 4 — Start chatting**
+### Mention gate
 
-@mention the bot in the group (or reply to one of its messages). Changes to `access.json` take effect immediately — no restart needed.
+`requireMention` is a single top-level boolean (default `true`):
 
-**Managing groups**
+- `true` — the bot answers in an allowlisted group only when @mentioned or
+  replied to. This relies on Telegram delivering the @mention; if the bot ignores
+  mentions, make it an Admin (see above).
+- `false` — the bot answers **every** message in an allowlisted group. This only
+  does anything if the bot can *see* every message, i.e. you also promoted it to
+  Admin or disabled Privacy Mode.
 
-Edit `access.json` to add or remove entries from the `"groups"` object. The gateway re-reads the file on every inbound message.
+Toggle it with `/telegram:access group mention <on|off>`.
 
-> **Note:** `/telegram:access` skill is available when running inside a gateway agent session (TELEGRAM_STATE_DIR is set automatically). For standalone terminal use, edit `access.json` directly as shown above.
-
-**Optional — Let the bot read all messages (disable Privacy Mode)**
-
-By default, Telegram bots in groups only receive messages that start with `/` or directly @mention the bot. If you want the bot to respond to every message without an @mention (and have set `"requireMention": false` in `access.json`), you also need to disable Privacy Mode at the bot level:
-
-1. Open [@BotFather](https://t.me/BotFather)
-2. Send `/setprivacy`
-3. Select your bot
-4. Choose **Disable**
-
-This is a bot-level setting — it applies to all groups the bot joins. If @mention-only is fine, skip this step and keep `"requireMention": true`.
+> **Legacy schema note:** older docs showed a per-group `"groups": { "<id>": {…} }`
+> map. That form is still accepted and auto-migrated on read to the flat
+> `groupAllowlist` + top-level `requireMention` shown above, but new setups should
+> use the flat schema. A per-group member restriction from the old schema is
+> preserved under `legacyGroupAllowFrom`; there is no command to edit it.
 
 ---
 
 ## Telegram Commands
 
-Once paired, the following bot commands are available in a private chat:
+Bot commands are **DM-only** — sent in a group they are silently ignored (this
+keeps pairing codes and session state from leaking to other members). Once
+paired, the following commands are available in a private chat:
 
 **Session management**
 
@@ -904,6 +969,17 @@ npm run typecheck
 - Verify `dmPolicy` in `access.json` — if `allowlist`, check the user's ID is in `allowFrom`
 - Ensure no other process is polling the same bot token (causes 409 Conflict)
 - Only `TelegramReceiver` polls Telegram — MCP session subprocesses run in `SEND_ONLY` mode (no polling)
+
+**Bot silent in a Telegram group**
+- The group must be in `groupAllowlist` — see [Telegram Groups](#telegram-groups). An empty `pending` after messaging usually means the message never reached the bot.
+- Most common cause: **Privacy Mode** (default ON). A non-admin bot only receives commands, @mentions, and replies in groups — a plain message needed to mint the pairing code is filtered by Telegram. Promote the bot to Admin, or disable Privacy Mode in BotFather and re-add it.
+- `/start` and other commands are dropped in groups by design — use a normal message (or an @mention) to trigger the pairing code.
+- If `requireMention: true`, the bot only answers when @mentioned or replied to.
+
+**Bot silent in a Discord server (guild)**
+- Enable the **MESSAGE CONTENT INTENT** in the Discord Developer Portal (Bot settings) — without it the bot receives events but empty message text, so it can't respond or pair.
+- The guild must be in `guildAllowlist` (`groupPolicy: allowlist`), and the bot needs **View Channel** + **Read Message History** in that channel.
+- If `requireMention: true`, the bot only answers when @mentioned or replied to.
 
 **Session loses memory after restart**
 - History is persisted in `~/.claude-gateway/agents/<id>/sessions/<chat_id>.jsonl`

@@ -22,7 +22,9 @@ export async function createDiscordClient(token: string): Promise<any> {
   });
 
   await new Promise<void>((resolve, reject) => {
-    client.once('ready', () => resolve());
+    // 'clientReady' is the renamed 'ready' event (discord.js v14 emits both;
+    // 'ready' is deprecated and becomes clientReady-only in v15).
+    client.once('clientReady', () => resolve());
     client.once('error', reject);
     client.login(token).catch(reject);
   });

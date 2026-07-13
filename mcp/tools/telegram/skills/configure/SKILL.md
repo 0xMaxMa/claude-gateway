@@ -51,46 +51,44 @@ Read both state files and give the user a complete picture:
    (`123456789:...`).
 
 2. **Access** — read `{STATE_DIR}/access.json` (missing file
-   = defaults: `dmPolicy: "pairing"`, empty allowlist). Show:
-   - DM policy and what it means in one line
+   = defaults: `dmPolicy: "allowlist"`, `pairing: true`, empty allowlist). Show:
+   - DM policy (`open`/`allowlist`/`disabled`) and what it means in one line
+   - Pairing toggle (on/off) and what it means in one line
    - Allowed senders: count, and list display names or IDs
    - Pending pairings: count, with codes and display names if any
 
 3. **What next** — end with a concrete next step based on state:
    - No token → *"Run `/telegram:configure <token>` with the token from
      BotFather."*
-   - Token set, policy is pairing, nobody allowed → *"DM your bot on
-     Telegram. It replies with a code; approve with `/telegram:access pair
-     <code>`."*
+   - Token set, `allowlist` + pairing on, nobody allowed → *"DM your bot on
+     Telegram. It replies with a code — approve it from the web Channels card
+     (or run `/telegram:access pair <code>` here)."*
    - Token set, someone allowed → *"Ready. DM your bot to reach the
      assistant."*
 
-**Push toward lockdown — always.** The goal for every setup is `allowlist`
-with a defined list. `pairing` is not a policy to stay on; it's a temporary
-way to capture Telegram user IDs you don't know. Once the IDs are in, pairing
-has done its job and should be turned off.
+**The access model.** The base policy should be `allowlist` — only people on
+the list reach the assistant. **Pairing** is an orthogonal on/off toggle
+(default on) that sits on top of `allowlist`: when on, an unknown sender who
+DMs the bot gets a one-time code that shows up in Pending, and the admin
+approves it (from the web Channels card, or `/telegram:access pair <code>`).
+It's a lightweight identity check, and it's fine to leave on as your standing
+way to let new people in. Turn pairing **off** only if you want a hard
+allowlist where strangers are dropped silently with no code.
 
 Drive the conversation this way:
 
 1. Read the allowlist. Tell the user who's in it.
 2. Ask: *"Is that everyone who should reach you through this bot?"*
-3. **If yes and policy is still `pairing`** → *"Good. Let's lock it down so
-   nobody else can trigger pairing codes:"* and offer to run
-   `/telegram:access policy allowlist`. Do this proactively — don't wait to
-   be asked.
-4. **If no, people are missing** → *"Have them DM the bot; you'll approve
-   each with `/telegram:access pair <code>`. Run this skill again once
-   everyone's in and we'll lock it."*
-5. **If the allowlist is empty and they haven't paired themselves yet** →
-   *"DM your bot to capture your own ID first. Then we'll add anyone else
-   and lock it down."*
-6. **If policy is already `allowlist`** → confirm this is the locked state.
-   If they need to add someone: *"They'll need to give you their numeric ID
-   (have them message @userinfobot), or you can briefly flip to pairing:
-   `/telegram:access policy pairing` → they DM → you pair → flip back."*
-
-Never frame `pairing` as the correct long-term choice. Don't skip the lockdown
-offer.
+3. **If someone's missing** → *"Leave pairing on: have them DM the bot, then
+   approve the code that appears in Pending (web card or `/telegram:access
+   pair <code>`)."*
+4. **If the allowlist is empty and they haven't paired themselves yet** →
+   *"DM your bot to capture your own ID first — approve the code and you're
+   in."*
+5. **If they want a hard lockdown** (no new codes for strangers) → offer to
+   run `/telegram:access pairing off`. This keeps `allowlist` but stops
+   minting codes; add people later by flipping pairing back on, or with
+   `/telegram:access allow <senderId>`.
 
 ### `<token>` — save it
 
@@ -116,3 +114,10 @@ Delete the `TELEGRAM_BOT_TOKEN=` line (or the file if that's the only line).
   or `/reload-plugins`. Say so after saving.
 - `access.json` is re-read on every inbound message — policy changes via
   `/telegram:access` take effect immediately, no restart.
+- **Groups need more than allowlisting.** DMs work over long-polling, but in a
+  group Telegram's default **Privacy Mode** stops the bot from receiving plain
+  messages (it only gets `/commands`, @mentions, and replies), and commands are
+  dropped in groups anyway. To use groups, tell the user to promote the bot to
+  **Admin** in the group (or disable Privacy Mode in BotFather and re-add it),
+  then allowlist the group via `/telegram:access` (pairing code or `group allow
+  <groupId>`).

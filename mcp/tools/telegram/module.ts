@@ -6,6 +6,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { migrateAccess, defaultAccess } from './pure';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -256,29 +257,19 @@ export class TelegramModule implements ChannelModule {
     try {
       const raw = fs.readFileSync(accessFile, 'utf8');
       const parsed = JSON.parse(raw);
-      return {
-        dmPolicy: parsed.dmPolicy ?? 'pairing',
-        allowFrom: parsed.allowFrom ?? [],
-        groups: parsed.groups ?? {},
-        pending: parsed.pending ?? {},
-        mentionPatterns: parsed.mentionPatterns,
-        ackReaction: parsed.ackReaction,
-        replyToMode: parsed.replyToMode,
-        textChunkLimit: parsed.textChunkLimit,
-        chunkMode: parsed.chunkMode,
-      };
+      return migrateAccess(parsed);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} };
+        return defaultAccess();
       }
-      return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} };
+      return defaultAccess();
     }
   }
 
   private assertAllowedChat(chat_id: string): void {
     const access = this.readAccessFile();
     if (access.allowFrom.includes(chat_id)) return;
-    if (chat_id in access.groups) return;
+    if (access.groupAllowlist.includes(chat_id)) return;
     throw new Error(`chat ${chat_id} is not allowlisted`);
   }
 

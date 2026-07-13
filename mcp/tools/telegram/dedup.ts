@@ -16,8 +16,11 @@ export function initDedupDir(dedupDir: string): void {
  * Atomic check-and-mark using O_EXCL (create-or-fail).
  * Returns true if this (chatId, msgId) was already claimed by any receiver instance.
  * Safe across multiple bun processes sharing the same filesystem.
+ *
+ * msgId accepts a string too, for channels whose message ids are snowflakes
+ * (Discord) rather than numbers (Telegram) — the marker filename stringifies it.
  */
-export function isDuplicate(dedupDir: string, chatId: string, msgId: number): boolean {
+export function isDuplicate(dedupDir: string, chatId: string, msgId: number | string): boolean {
   const file = join(dedupDir, `${chatId}-${msgId}`)
   try {
     const fd = openSync(file, 'wx') // O_CREAT | O_EXCL — fails with EEXIST if file exists

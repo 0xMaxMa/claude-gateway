@@ -30,7 +30,7 @@ describe('Discord pairing integration', () => {
 
   beforeEach(() => {
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'discord-pairing-'));
-    const access = { ...defaultAccess(), dmPolicy: 'pairing' as const };
+    const access = { ...defaultAccess(), dmPolicy: 'allowlist' as const, pairing: true };
     saveAccess(stateDir, access);
   });
 

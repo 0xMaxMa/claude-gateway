@@ -5,11 +5,15 @@ import { createLogger } from '../logger';
 
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
+// After MAX_RESTARTS fast attempts, fall back to a slow indefinite retry
+// instead of giving up permanently — mirrors discord/receiver.ts.
+const SLOW_RESTART_DELAY_MS = 5 * 60_000;
 
 export class TelegramReceiver {
   private process: ChildProcess | null = null;
   private stopping = false;
   private restartCount = 0;
+  private slowPhaseAnnounced = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly logger: ReturnType<typeof createLogger>;
 
@@ -24,6 +28,7 @@ export class TelegramReceiver {
   start(): void {
     this.stopping = false;
     this.restartCount = 0;
+    this.slowPhaseAnnounced = false;
     this.spawnProcess();
   }
 
@@ -60,18 +65,26 @@ export class TelegramReceiver {
   }
 
   private scheduleRestart(): void {
-    if (this.restartCount >= MAX_RESTARTS) {
-      this.logger.error('TelegramReceiver max restarts reached');
-      return;
+    const slowPhase = this.restartCount >= MAX_RESTARTS;
+    const delay = slowPhase ? SLOW_RESTART_DELAY_MS : AUTO_RESTART_DELAY_MS;
+    if (!slowPhase) this.restartCount++;
+    // Surface the transition into indefinite slow-retry once at error level so a
+    // permanently-broken config (bad/revoked token) is visible instead of hiding
+    // behind a steady stream of warn-level retry lines.
+    if (slowPhase && !this.slowPhaseAnnounced) {
+      this.slowPhaseAnnounced = true;
+      this.logger.error(
+        `TelegramReceiver failed ${MAX_RESTARTS} fast restarts; switching to slow retry every ${SLOW_RESTART_DELAY_MS}ms — check the bot token`,
+      );
     }
-    this.restartCount++;
-    this.logger.warn(`Restarting TelegramReceiver in ${AUTO_RESTART_DELAY_MS}ms`, {
+    this.logger.warn(`Restarting TelegramReceiver in ${delay}ms`, {
       attempt: this.restartCount,
+      slowPhase,
     });
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (!this.stopping) this.spawnProcess();
-    }, AUTO_RESTART_DELAY_MS);
+    }, delay);
   }
 
   stop(): void {
