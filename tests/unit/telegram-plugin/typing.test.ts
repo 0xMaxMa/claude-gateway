@@ -476,6 +476,28 @@ describe('createWorkingStateManager', () => {
 
       await mgr.stop(CHAT_ID)
     })
+
+    test('U-TY-TT-05: passes an evidence bundle (artifacts + status text) to the sink (Phase 2)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const onIncident = jest.fn()
+      const statusPath = `${TYPING_DIR}/${CHAT_ID}.status`
+
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, onIncident)
+      mgr.start(CHAT_ID)
+      fsApi.writeFileSync(statusPath, 'queued')
+
+      jest.advanceTimersByTime(120_000)
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+
+      expect(onIncident).toHaveBeenCalledTimes(1)
+      const evidence = onIncident.mock.calls[0][1]
+      expect(evidence).toBeDefined()
+      expect(evidence.artifacts).toEqual(expect.arrayContaining(['signal', 'status=queued']))
+      expect(evidence.statusText).toBe('queued')
+
+      await mgr.stop(CHAT_ID)
+    })
   })
 
   describe('notifyError()', () => {

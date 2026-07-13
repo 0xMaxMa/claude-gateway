@@ -18,6 +18,7 @@ import {
   type TurnObservation,
   type TurnStage,
   type TurnIncidentSink,
+  type TurnIncidentEvidence,
 } from '../../../src/agent/turn-trace'
 
 export const TELEGRAM_MAX_CHARS = 4096
@@ -382,6 +383,35 @@ export function createWorkingStateManager(
     }
   }
 
+  function readFileSafe(path: string): string | null {
+    try {
+      return fsApi.existsSync(path) ? fsApi.readFileSync(path, 'utf8') : null
+    } catch {
+      return null
+    }
+  }
+
+  // Build the diagnostic evidence bundle for an incident from the same
+  // observation the classifier used, plus the raw status/error file contents.
+  // Cheap and read-only — no listing of the whole typing dir, just this turn's
+  // known artifacts. The store scrubs everything before it is persisted.
+  function readTurnEvidence(chatId: string, obs: TurnObservation): TurnIncidentEvidence {
+    const artifacts: string[] = []
+    if (obs.signalAt !== null) artifacts.push('signal')
+    if (obs.statusLabel !== null) artifacts.push(`status=${obs.statusLabel}`)
+    if (obs.heartbeatAt !== null) artifacts.push('heartbeat')
+    if (obs.processingAt !== null) artifacts.push('processing')
+    if (obs.forwardAt !== null) artifacts.push('forward')
+    if (obs.menuAt !== null) artifacts.push('menu')
+    if (obs.repliedPresent) artifacts.push('replied')
+    if (obs.errorPresent) artifacts.push('error')
+    return {
+      artifacts,
+      statusText: readFileSafe(statusFilePath(chatId)),
+      errorText: readFileSafe(errorFilePath(chatId)),
+    }
+  }
+
   function checkTurnTrace(chatId: string, startedAt: number): void {
     const state = states.get(chatId)
     if (!state) return
@@ -398,15 +428,18 @@ export function createWorkingStateManager(
       // A fresh .processing sentinel (mtime >= startedAt) means the turn is
       // genuinely mid-work (e.g. a long sub-agent), not silently wedged.
       const midTurn = obs.processingAt !== null && obs.processingAt >= startedAt
-      onIncident({
-        chatId,
-        stage: trace.stage,
-        failureClass: trace.failureClass,
-        sinceMs: trace.sinceMs,
-        budgetMs: trace.budgetMs,
-        midTurn,
-        at: Date.now(),
-      })
+      onIncident(
+        {
+          chatId,
+          stage: trace.stage,
+          failureClass: trace.failureClass,
+          sinceMs: trace.sinceMs,
+          budgetMs: trace.budgetMs,
+          midTurn,
+          at: Date.now(),
+        },
+        readTurnEvidence(chatId, obs),
+      )
     }
   }
 

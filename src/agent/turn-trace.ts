@@ -205,8 +205,30 @@ export interface TurnIncident {
   at: number
 }
 
-/** Consumer of watchdog incidents. Phase 1 logs; Phase 2 persists + dedupes. */
-export type TurnIncidentSink = (incident: TurnIncident) => void
+/**
+ * Evidence captured alongside an incident, for the Phase 2 store to persist
+ * (scrubbed) into the incident bundle. All fields are optional — the observer
+ * supplies whatever is cheaply available at the point of detection. Nothing
+ * here is trusted or interpreted; it is opaque diagnostic text.
+ */
+export interface TurnIncidentEvidence {
+  /** Which typing-dir artifacts were present for this turn (labels, not paths). */
+  artifacts?: string[]
+  /** Raw `.status` file contents, if any. */
+  statusText?: string | null
+  /** Raw `.error` file contents, if any. */
+  errorText?: string | null
+}
+
+/**
+ * Consumer of watchdog incidents. Phase 1 logs; Phase 2 persists + dedupes.
+ * The optional `evidence` arg lets the observer hand over diagnostic artifacts
+ * captured at detection time; sinks that don't need it simply ignore it.
+ */
+export type TurnIncidentSink = (
+  incident: TurnIncident,
+  evidence?: TurnIncidentEvidence,
+) => void
 
 /** One-line, log-friendly rendering of an incident. */
 export function formatTurnIncident(incident: TurnIncident): string {
