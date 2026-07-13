@@ -14,12 +14,19 @@
  * T11: POST /api/v1/packages/claude-gateway/update — success, systemd warning
  * T12: POST /api/v1/packages/claude-gateway/update — npm install fails → 500
  * T13: POST /api/v1/packages/claude-gateway/update — registry unavailable → 503
- * T14: POST /api/v1/packages/claude-code/update — success, warning: null
+ * T14: POST /api/v1/packages/claude-code/update — native updater, warning: null
  * T15: POST /api/v1/packages/claude-gateway/update — 403 when non-admin key
  * T16: stale npm temp dir exists → pre-clean removes it, update succeeds
  * T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds
  * T18: concurrent update request → 409 while first is in flight
  * T19: non-ENOTEMPTY install failure → 500, no retry
+ *
+ * Native-installer (claude-code) coverage:
+ * T20: GET — claude-code current resolved from `claude --version` (native binary)
+ * T21: GET — claude-code binary missing → current null, no crash (UI renders "—")
+ * T22: claude-code update runs the native updater (`claude update`), not npm install
+ * T23: claude-code native update failure → 500 with stderr
+ * T24: claude-code already on latest → updated:false, native updater not invoked
  */
 
 import express from 'express';
@@ -104,11 +111,13 @@ describe('T1-T6: GET /api/v1/packages', () => {
   it('T1: returns version info for both packages', async () => {
     mockExecSync.mockImplementation((cmd: unknown) => {
       const cmdStr = cmd as string;
-      if (cmdStr.includes('@0xmaxma/claude-gateway')) {
+      // claude-gateway is an npm global → detected via `npm list -g`
+      if (cmdStr.includes('npm list') && cmdStr.includes('@0xmaxma/claude-gateway')) {
         return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.2.0' } } });
       }
-      if (cmdStr.includes('@anthropic-ai/claude-code')) {
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version: '1.0.5' } } });
+      // claude-code ships native → detected from the `claude` binary
+      if (cmdStr.includes('claude --version')) {
+        return '1.0.5 (Claude Code)';
       }
       return '{}';
     });
@@ -332,14 +341,19 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
     expect(res.body.error).toBe('registry unavailable');
   });
 
-  it('T14: claude-code updated — warning is null, no process exit', async () => {
-    let callCount = 0;
+  it('T14: claude-code updated via native updater — warning is null, no process exit', async () => {
+    let versionCall = 0;
+    let ranNativeUpdate = false;
     mockExecSync.mockImplementation((cmd: unknown) => {
       const cmdStr = cmd as string;
-      if (cmdStr.includes('npm list')) {
-        callCount++;
-        const version = callCount === 1 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+      if (cmdStr.includes('claude --version')) {
+        versionCall++;
+        // First read: current (from); after `claude update`: new version (to)
+        return versionCall === 1 ? '1.0.5 (Claude Code)' : '1.1.0 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        ranNativeUpdate = true;
+        return '';
       }
       return '';
     });
@@ -357,6 +371,13 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
       updated: true,
       warning: null,
     });
+
+    // Native updater used, npm install never invoked for claude-code
+    expect(ranNativeUpdate).toBe(true);
+    expect(mockExecSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('npm install -g'),
+      expect.anything(),
+    );
 
     jest.runAllTimers();
     expect(killSpy).not.toHaveBeenCalled();
@@ -389,19 +410,19 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       if (cmdStr.includes('npm list')) {
         listCount++;
         const version = listCount === 1 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version } } });
       }
       // npm install — succeed
       return '';
     });
-    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
 
     // Simulate stale temp dir alongside the real package dir
-    mockReaddirSync.mockReturnValue(['claude-code', '.claude-code-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
+    mockReaddirSync.mockReturnValue(['claude-gateway', '.claude-gateway-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
     mockRmSync.mockImplementation(() => undefined);
 
     const res = await request(makeApp())
-      .post('/api/v1/packages/claude-code/update')
+      .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
 
     expect(res.status).toBe(200);
@@ -409,8 +430,8 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
 
     // rmSync called for the stale temp entry only (not the real package dir in pre-clean)
     const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
-    expect(rmCalls.some((p) => p.includes('.claude-code-O5kzWOwo'))).toBe(true);
-    expect(rmCalls.every((p) => !p.endsWith('/claude-code'))).toBe(true);
+    expect(rmCalls.some((p) => p.includes('.claude-gateway-O5kzWOwo'))).toBe(true);
+    expect(rmCalls.every((p) => !p.endsWith('/claude-gateway'))).toBe(true);
   });
 
   it('T17: ENOTEMPTY on first install → temp + package dirs removed, retry succeeds', async () => {
@@ -422,14 +443,14 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       if (cmdStr.includes('npm list')) {
         listCount++;
         const version = listCount === 1 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version } } });
       }
       if (cmdStr.includes('npm install')) {
         installAttempt++;
         if (installAttempt === 1) {
           const err = Object.assign(new Error('ENOTEMPTY'), {
             stderr: Buffer.from(
-              'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /fake/npm/root/@anthropic-ai/claude-code',
+              'npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error path /fake/npm/root/@0xmaxma/claude-gateway',
             ),
           });
           throw err;
@@ -439,13 +460,13 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       }
       return '{}';
     });
-    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
 
-    mockReaddirSync.mockReturnValue(['.claude-code-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
+    mockReaddirSync.mockReturnValue(['.claude-gateway-O5kzWOwo'] as unknown as ReturnType<typeof readdirSync>);
     mockRmSync.mockImplementation(() => undefined);
 
     const res = await request(makeApp())
-      .post('/api/v1/packages/claude-code/update')
+      .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
 
     expect(res.status).toBe(200);
@@ -454,8 +475,8 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
 
     // Stale temp dir and package dir both removed before retry
     const rmCalls = mockRmSync.mock.calls.map((c) => c[0] as string);
-    expect(rmCalls.some((p) => p.includes('.claude-code-O5kzWOwo'))).toBe(true);
-    expect(rmCalls.some((p) => p.endsWith('/claude-code'))).toBe(true);
+    expect(rmCalls.some((p) => p.includes('.claude-gateway-O5kzWOwo'))).toBe(true);
+    expect(rmCalls.some((p) => p.endsWith('/claude-gateway'))).toBe(true);
   });
 
   it('T18: concurrent update request → 409 while first is in flight', async () => {
@@ -463,18 +484,18 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
     mockExecSync.mockImplementation((cmd: unknown) => {
       const cmdStr = cmd as string;
       if (cmdStr.includes('npm list'))
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version: '1.0.5' } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.0.5' } } });
       if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
       return '';
     });
-    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
     mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
 
     // Simulate another update already in progress
     _setLock();
 
     const res = await request(makeApp())
-      .post('/api/v1/packages/claude-code/update')
+      .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
 
     expect(res.status).toBe(409);
@@ -493,24 +514,24 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       if (cmdStr.includes('npm list')) {
         listCount++;
         const version = listCount <= 2 ? '1.0.5' : '1.1.0';
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version } } });
       }
       return '';
     });
-    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
     mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
 
     const app = makeApp();
 
     const res1 = await request(app)
-      .post('/api/v1/packages/claude-code/update')
+      .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
     expect(res1.status).toBe(200);
 
     // Reset fetch version so second request also sees an update available
     listCount = 0;
     const res2 = await request(app)
-      .post('/api/v1/packages/claude-code/update')
+      .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
     expect(res2.status).not.toBe(409);
   });
@@ -521,25 +542,177 @@ describe('T16-T19: ENOTEMPTY recovery & concurrency lock', () => {
       const cmdStr = cmd as string;
       if (cmdStr.includes('npm root -g')) return `${NPM_ROOT}\n`;
       if (cmdStr.includes('npm list')) {
-        return JSON.stringify({ dependencies: { '@anthropic-ai/claude-code': { version: '1.0.5' } } });
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.0.5' } } });
       }
       if (cmdStr.includes('npm install')) {
         installAttempt++;
         throw Object.assign(new Error('npm ERR! 404 Not Found'), {
-          stderr: Buffer.from('npm ERR! 404 Not Found — @anthropic-ai/claude-code@9.9.9'),
+          stderr: Buffer.from('npm ERR! 404 Not Found — @0xmaxma/claude-gateway@9.9.9'),
         });
       }
       return '{}';
     });
-    mockFetch({ '@anthropic-ai/claude-code': '1.1.0' });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.1.0' });
     mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-gateway/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toContain('npm ERR!');
+    expect(installAttempt).toBe(1);
+  });
+});
+
+// ─── T20-T24: native-installer (claude-code) detection & update ──────────────
+
+describe('T20-T24: claude-code native detection & update', () => {
+  it('T20: claude-code current resolved from `claude --version` (native binary)', async () => {
+    let ranNpmListForClaudeCode = false;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm list') && cmdStr.includes('@anthropic-ai/claude-code')) {
+        ranNpmListForClaudeCode = true;
+      }
+      if (cmdStr.includes('npm list') && cmdStr.includes('@0xmaxma/claude-gateway')) {
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.2.0' } } });
+      }
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.207 (Claude Code)';
+      }
+      return '{}';
+    });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.2.0', '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .get('/api/v1/packages')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    const cc = res.body.packages.find((p: { package: string }) => p.package === '@anthropic-ai/claude-code');
+    expect(cc).toMatchObject({ current: '2.1.207', latest: '2.1.207', hasUpdate: false });
+    // Detection must not fall back to npm list for the native package
+    expect(ranNpmListForClaudeCode).toBe(false);
+  });
+
+  it('T21: claude-code binary missing → current null, no crash (UI renders "—")', async () => {
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('npm list') && cmdStr.includes('@0xmaxma/claude-gateway')) {
+        return JSON.stringify({ dependencies: { '@0xmaxma/claude-gateway': { version: '1.2.0' } } });
+      }
+      if (cmdStr.includes('claude --version')) {
+        // Binary not installed → command fails
+        throw Object.assign(new Error('command not found: claude'), {
+          stderr: Buffer.from('command not found'),
+        });
+      }
+      return '{}';
+    });
+    mockFetch({ '@0xmaxma/claude-gateway': '1.2.0', '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .get('/api/v1/packages')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    const cc = res.body.packages.find((p: { package: string }) => p.package === '@anthropic-ai/claude-code');
+    expect(cc).toMatchObject({ current: null, latest: '2.1.207', hasUpdate: false });
+  });
+
+  it('T22: claude-code update runs the native updater, not npm install', async () => {
+    let versionCall = 0;
+    let ranNativeUpdate = false;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('claude --version')) {
+        versionCall++;
+        return versionCall === 1 ? '2.1.200 (Claude Code)' : '2.1.207 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        ranNativeUpdate = true;
+        return '';
+      }
+      if (cmdStr.includes('npm install')) {
+        throw new Error('npm install must not be called for native package');
+      }
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      package: '@anthropic-ai/claude-code',
+      from: '2.1.200',
+      to: '2.1.207',
+      updated: true,
+      warning: null,
+    });
+    expect(ranNativeUpdate).toBe(true);
+    expect(mockExecSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('npm install -g'),
+      expect.anything(),
+    );
+
+    jest.runAllTimers();
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it('T23: claude-code native update failure → 500 with stderr', async () => {
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.200 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        throw Object.assign(new Error('update failed'), {
+          stderr: Buffer.from('native update error: disk full'),
+        });
+      }
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '2.1.207' });
 
     const res = await request(makeApp())
       .post('/api/v1/packages/claude-code/update')
       .set('X-Api-Key', ADMIN_KEY);
 
     expect(res.status).toBe(500);
-    expect(res.body.error).toContain('npm ERR!');
-    expect(installAttempt).toBe(1);
+    expect(res.body.error).toContain('native update error');
+  });
+
+  it('T24: claude-code already on latest → updated:false, native updater not invoked', async () => {
+    let ranNativeUpdate = false;
+    mockExecSync.mockImplementation((cmd: unknown) => {
+      const cmdStr = cmd as string;
+      if (cmdStr.includes('claude --version')) {
+        return '2.1.207 (Claude Code)';
+      }
+      if (cmdStr.includes('claude update')) {
+        ranNativeUpdate = true;
+        return '';
+      }
+      return '';
+    });
+    mockFetch({ '@anthropic-ai/claude-code': '2.1.207' });
+
+    const res = await request(makeApp())
+      .post('/api/v1/packages/claude-code/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      package: '@anthropic-ai/claude-code',
+      from: '2.1.207',
+      to: '2.1.207',
+      updated: false,
+      warning: null,
+    });
+    expect(ranNativeUpdate).toBe(false);
   });
 });
