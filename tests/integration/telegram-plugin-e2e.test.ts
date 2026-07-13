@@ -108,7 +108,7 @@ describe('Plugin E2E', () => {
       expect(result.action).toBe('drop')
     })
 
-    test('max 3 pending: 4th new user → silent drop', () => {
+    test('max 5 DM pending: 6th new DM user → silent drop', () => {
       const now = Date.now()
       const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
         dmPolicy: 'allowlist',
@@ -117,6 +117,8 @@ describe('Plugin E2E', () => {
           c1: { senderId: '1', chatId: '1', createdAt: now, expiresAt: now + 3600000, replies: 1 },
           c2: { senderId: '2', chatId: '2', createdAt: now, expiresAt: now + 3600000, replies: 1 },
           c3: { senderId: '3', chatId: '3', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c4: { senderId: '4', chatId: '4', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c5: { senderId: '5', chatId: '5', createdAt: now, expiresAt: now + 3600000, replies: 1 },
         },
       })
       const result = gateLogic(
@@ -124,6 +126,32 @@ describe('Plugin E2E', () => {
         loadAccess, saveAccessFn, generateCode, now
       )
       expect(result.action).toBe('drop')
+    })
+
+    test('per-kind cap: 5 DM pending still lets a new group knock pair', () => {
+      const now = Date.now()
+      const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(tmpDir, {
+        dmPolicy: 'allowlist',
+        pairing: true,
+        groupPolicy: 'allowlist',
+        pending: {
+          c1: { senderId: '1', chatId: '1', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c2: { senderId: '2', chatId: '2', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c3: { senderId: '3', chatId: '3', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c4: { senderId: '4', chatId: '4', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+          c5: { senderId: '5', chatId: '5', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+        },
+      })
+      // DM kind is at its cap of 5, but the group kind is empty — a group knock
+      // must still mint a code (per-kind caps don't starve each other).
+      const result = gateLogic(
+        { fromId: '999', chatType: 'group', chatId: '-100123' },
+        loadAccess, saveAccessFn, generateCode, now
+      )
+      expect(result.action).toBe('pair')
+      if (result.action === 'pair') {
+        expect(result.isGroup).toBe(true)
+      }
     })
 
     test('checkApprovals simulation: write approved/<senderId> → user is paired', () => {

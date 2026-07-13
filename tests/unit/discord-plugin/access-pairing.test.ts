@@ -97,7 +97,7 @@ describe('gate() — DM messages', () => {
     expect(result.action).toBe('drop');
   });
 
-  it('DP6: drop when pending cap (3) reached for different users', () => {
+  it('DP6: drop when DM pending cap (5) reached for different users', () => {
     const access: DiscordAccess = {
       ...defaultAccess(),
       dmPolicy: 'allowlist',
@@ -106,6 +106,8 @@ describe('gate() — DM messages', () => {
         code1: { senderId: 'other-1', channelId: 'ch1', createdAt: Date.now(), expiresAt: Date.now() + 3600_000, replies: 1 },
         code2: { senderId: 'other-2', channelId: 'ch2', createdAt: Date.now(), expiresAt: Date.now() + 3600_000, replies: 1 },
         code3: { senderId: 'other-3', channelId: 'ch3', createdAt: Date.now(), expiresAt: Date.now() + 3600_000, replies: 1 },
+        code4: { senderId: 'other-4', channelId: 'ch4', createdAt: Date.now(), expiresAt: Date.now() + 3600_000, replies: 1 },
+        code5: { senderId: 'other-5', channelId: 'ch5', createdAt: Date.now(), expiresAt: Date.now() + 3600_000, replies: 1 },
       },
     };
     const result = gate(access, baseDMContext, noopSave, fixedCode);

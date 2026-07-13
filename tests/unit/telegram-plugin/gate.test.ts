@@ -114,7 +114,7 @@ describe('gate() — DM (private chat)', () => {
     expect(result.action).toBe('drop')
   })
 
-  test('drop — pending count >= 3 (anti-spam cap)', () => {
+  test('drop — DM pending count >= 5 (per-kind anti-spam cap)', () => {
     const now = Date.now()
     const initial: Partial<Access> = {
       dmPolicy: 'allowlist',
@@ -123,6 +123,8 @@ describe('gate() — DM (private chat)', () => {
         c1: { senderId: '1', chatId: '1', createdAt: now, expiresAt: now + 3600000, replies: 1 },
         c2: { senderId: '2', chatId: '2', createdAt: now, expiresAt: now + 3600000, replies: 1 },
         c3: { senderId: '3', chatId: '3', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+        c4: { senderId: '4', chatId: '4', createdAt: now, expiresAt: now + 3600000, replies: 1 },
+        c5: { senderId: '5', chatId: '5', createdAt: now, expiresAt: now + 3600000, replies: 1 },
       },
     }
     const { loadAccess, saveAccessFn, generateCode } = makeGateHelpers(initial)
