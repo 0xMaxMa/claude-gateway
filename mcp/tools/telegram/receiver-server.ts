@@ -28,7 +28,11 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
+import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
+import { formatTurnIncident, type TurnIncident } from '../../../src/agent/turn-trace'
+import { createIncidentStore } from '../../../src/agent/incident-store'
+import type { RecoveryOutcome } from '../../../src/agent/incident'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
@@ -104,6 +108,70 @@ let botUsername = ''
 
 const TYPING_DIR = join(STATE_DIR, 'typing')
 
+// ─── Incident store (Epic #195, Phase 2) ────────────────────────────────────
+// Persist turn-trace stalls as scrubbed on-disk bundles, deduped by fingerprint
+// (stage + failure class + CLI version) with escalation. The store owns all
+// disk IO; the pure decision logic lives in src/agent/incident.ts.
+const INCIDENTS_DIR = join(homedir(), '.claude-gateway', 'incidents')
+
+// The Claude CLI version is part of the fingerprint. Resolve it once and cache
+// it — a new version is a new fingerprint, and the receiver is restarted when
+// the CLI is updated, so a per-process cache is safe.
+let cachedCliVersion: string | null = null
+function getCliVersion(): string {
+  if (cachedCliVersion !== null) return cachedCliVersion
+  try {
+    const out = execFileSync('claude', ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const m = out.trim().match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)
+    cachedCliVersion = m ? m[1] : 'unknown'
+  } catch {
+    cachedCliVersion = 'unknown'
+  }
+  return cachedCliVersion
+}
+
+// Gateway version, best-effort, for manifest context only (not fingerprinted).
+function readGatewayVersion(): string {
+  for (const rel of ['../../../package.json', '../../package.json']) {
+    try {
+      const raw = readFileSync(join(__dirname, rel), 'utf8')
+      const v = (JSON.parse(raw) as { version?: string }).version
+      if (typeof v === 'string' && v.length > 0) return v
+    } catch {
+      // try next candidate
+    }
+  }
+  return 'unknown'
+}
+
+const incidentStore = createIncidentStore({
+  dir: INCIDENTS_DIR,
+  fs: { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync },
+  now: () => Date.now(),
+  channel: 'telegram',
+  gatewayVersion: readGatewayVersion(),
+  getCliVersion,
+})
+
+// Prune old bundles at startup and daily thereafter (retention is enforced in
+// the store; this just triggers it periodically).
+try {
+  incidentStore.prune()
+} catch {
+  // Non-fatal: a prune failure must not stop the receiver from serving.
+}
+setInterval(() => {
+  try {
+    incidentStore.prune()
+  } catch {
+    /* non-fatal */
+  }
+}, 24 * 60 * 60 * 1000).unref()
+
 const typingManager = createWorkingStateManager(
   TYPING_DIR,
   {
@@ -117,7 +185,98 @@ const typingManager = createWorkingStateManager(
       ]),
   },
   { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync },
+  // Turn-trace watchdog sink (Epic #195, Phase 2): persist a scrubbed incident
+  // bundle, then notify the affected chat only when the escalation rules say so
+  // (quiet on the first stall, louder once a fingerprint repeats). Any failure
+  // here is swallowed — incident bookkeeping must never break the live channel.
+  (incident, evidence) => {
+    process.stderr.write(`telegram channel: ${formatTurnIncident(incident)}\n`)
+    try {
+      const result = incidentStore.record(incident, evidence)
+      if (result.escalation.notify) {
+        void notifyIncident(incident.chatId, result)
+        incidentStore.markNotified(result.id, result.escalation.level)
+      }
+      // Cross-process recovery bridge (Epic #195, Phase 3b): for stages whose
+      // recovery lives in the runner (session/CLI), ask it to attempt recovery
+      // and persist the outcome. Fire-and-forget — recovery must never block the
+      // channel, and it is a no-op unless the operator enabled autoRecover.
+      void attemptRecover(incident, result.id)
+    } catch (err) {
+      process.stderr.write(
+        `telegram channel: incident persist failed: ${String(err)}\n`,
+      )
+    }
+  },
 )
+
+// Stages whose recovery must run in the runner process (live session control):
+// session injection, CLI startup, and no-output progress wedges. Inbound
+// (channel ingress) and delivery/dispatch (transport) are receiver-side and are
+// not bridged here.
+const RUNNER_RECOVERABLE_STAGES: ReadonlySet<string> = new Set(['inject', 'startup', 'progress'])
+
+// A stable-per-turn key for the runner's intervention budget. Uses the stalled
+// stage's start second (at − sinceMs), so repeated detections of the SAME wedged
+// turn share a budget while a genuinely new turn gets a fresh one.
+function recoveryTurnKey(incident: TurnIncident): string {
+  const startSec = Math.round((incident.at - incident.sinceMs) / 1000)
+  return `${incident.chatId}:${startSec}`
+}
+
+// Ask the runner to attempt recovery for a session/CLI-stage stall, then persist
+// the returned outcome to the incident bundle. Best-effort and non-blocking.
+async function attemptRecover(incident: TurnIncident, incidentId: string): Promise<void> {
+  if (!CALLBACK_URL_BASE) return
+  if (!RUNNER_RECOVERABLE_STAGES.has(incident.stage)) return
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/recover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        incidentId,
+        chatId: incident.chatId,
+        stage: incident.stage,
+        failureClass: incident.failureClass,
+        turnKey: recoveryTurnKey(incident),
+      }),
+    })
+    if (!res.ok) return
+    const data = (await res.json()) as { ok?: boolean; outcome?: RecoveryOutcome }
+    if (data.ok && data.outcome) {
+      incidentStore.appendRecovery(incidentId, data.outcome)
+    }
+  } catch (err) {
+    process.stderr.write(`telegram channel: recover POST failed: ${String(err)}\n`)
+  }
+}
+
+// Short, content-free notice for a stalled turn. No message text or chat id is
+// echoed back — only the pipeline stage and (on repeat) the occurrence count.
+async function notifyIncident(
+  chatId: string,
+  result: { escalation: { level: string }; occurrences: number; manifest: { stage: string } },
+): Promise<void> {
+  const stage = result.manifest.stage
+  let text: string
+  if (result.escalation.level === 'investigate') {
+    text =
+      `⚠️ Recurring stall detected at the "${stage}" stage ` +
+      `(${result.occurrences}× recently). This looks like a persistent issue — ` +
+      `it has been logged for investigation.`
+  } else {
+    // Neutral wording: automatic recovery only runs when the operator has
+    // enabled gateway.selfHealing.autoRecover (off by default), and the receiver
+    // cannot see that runner-side flag — so do not promise it here.
+    text =
+      `⚠️ A turn stalled at the "${stage}" stage and has been logged.`
+  }
+  try {
+    await bot.api.sendMessage(chatId, text)
+  } catch {
+    // Best-effort notify; the incident is already persisted regardless.
+  }
+}
 
 type PendingEntry = {
   senderId: string

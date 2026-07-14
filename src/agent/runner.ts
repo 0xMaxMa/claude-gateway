@@ -15,6 +15,11 @@ import { LineReplyManager } from './line-reply-manager';
 import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { SafeModeManager } from './safe-mode';
+import { runRecovery, toRecoveryOutcome, type RecoveryEffects, type RecoveryRequest } from './recovery-executor';
+import { initialBudget, type BudgetState } from './recovery-policy';
+import { scrubText } from './incident';
+import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -55,6 +60,14 @@ const PROTECTED_WORKSPACE_FILES = [
 ];
 
 const MAX_API_IMAGES = 5;
+// Hard timeout for the one-shot local `claude -p` triage during recovery
+// (Epic #195, Phase 3b). A slow/hung triage collapses to a safe notify-only.
+const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
+// TTL after which a per-turn recovery budget entry is evicted. A turn's budget
+// only matters during its active stall window (a few interventions spaced by a
+// 30s cooldown), so anything older is a finished turn — pruned to keep the
+// budget map from growing unbounded over a long-lived runner (Epic #195, 3b).
+const RECOVERY_BUDGET_TTL_MS = 10 * 60_000;
 
 // Trailing-edge window for coalescing channel messages that carry an image (or that
 // arrive while an image is already buffered) into a single turn. Reset on every new
@@ -151,6 +164,30 @@ export class AgentRunner extends EventEmitter {
   // restarting would just churn a context that cannot shrink. Cleared together
   // with the counter on a successful result and on /clear.
   private readonly tooLargeExhausted = new Set<string>();
+
+  // Safe-mode manager (Epic #195, Phase 3): tracks repeated PTY-backend failures
+  // and, past a threshold, forces this agent to the headless backend so it keeps
+  // serving turns without a gateway restart. In-memory only — a restart clears it
+  // and re-reads the user's real config. spawnSession reads isActive() to set
+  // SessionProcess.forceHeadless.
+  private readonly safeMode = new SafeModeManager({
+    audit: (e) =>
+      this.logger.info('Safe-mode transition', {
+        agentId: e.agentId,
+        action: e.action,
+        reason: e.reason,
+        failures: e.failures,
+      }),
+  });
+
+  // Recovery executor state (Epic #195, Phase 3b). Per-turn intervention budget,
+  // keyed by turnKey so it resets each turn. In-memory only.
+  private readonly recoveryBudgets = new Map<string, BudgetState>();
+  // Last injected turn per chat, for the C1 guarded resend: `delivered` flips
+  // true once assistant output reaches the channel, so a resend after recovery
+  // only fires when the stalled turn produced nothing (no double-submit). `resent`
+  // guards against resending more than once per turn.
+  private readonly lastTurn = new Map<string, { text: string; delivered: boolean; resent: boolean }>();
 
   // Tracks pending Telegram image paths per chatId (queue) for size accumulation after each turn.
   private readonly pendingImagePaths = new Map<string, string[]>();
@@ -263,6 +300,14 @@ export class AgentRunner extends EventEmitter {
           return;
         }
 
+        if (url.pathname === '/recover') {
+          // Cross-process recovery bridge (Epic #195, Phase 3b): the receiver
+          // process detects a stall but recovery must run here, where the live
+          // control surfaces (session stdin, restart, safe-mode) live.
+          this.handleRecoverRequest(raw, res);
+          return;
+        }
+
         // Default: /channel — existing channel message handler
         // Connection: close prevents keep-alive pool reuse: after the OS's
         // keepAliveTimeout expires the server closes the TCP connection, and the
@@ -355,6 +400,180 @@ export class AgentRunner extends EventEmitter {
     });
     this.logger.info('Channel callback server listening', { port: this.callbackPort });
   }
+
+  /**
+   * Handle POST /recover from the receiver process (Epic #195, Phase 3b).
+   * The watchdog detects a stall in the receiver, but recovery must run here in
+   * the runner, where the live control surfaces live. Runs the pure executor
+   * with effects bound to the affected session and returns the outcome so the
+   * receiver can persist it to the incident bundle.
+   */
+  private async handleRecoverRequest(raw: string, res: http.ServerResponse): Promise<void> {
+    const respond = (data: Record<string, unknown>, status = 200): void => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    };
+
+    let body: Partial<RecoveryRequest>;
+    try {
+      body = JSON.parse(raw) as Partial<RecoveryRequest>;
+    } catch {
+      respond({ ok: false, error: 'Invalid JSON' }, 400);
+      return;
+    }
+
+    const chatId = body.chatId ?? '';
+    const stage = body.stage ?? '';
+    if (!chatId || !stage) {
+      respond({ ok: false, error: 'missing chatId/stage' }, 400);
+      return;
+    }
+
+    const session = this.sessions.get(chatId);
+    const autoRecover = this.gatewayConfig.gateway.selfHealing?.autoRecover === true;
+
+    const req: RecoveryRequest = {
+      incidentId: body.incidentId ?? '',
+      agentId: this.agentConfig.id,
+      chatId,
+      // Prefer the live session's id (survives a request that names a stale one).
+      sessionId: session?.sessionId ?? body.sessionId ?? '',
+      stage,
+      failureClass: body.failureClass ?? null,
+      turnKey: body.turnKey ?? chatId,
+    };
+
+    try {
+      const result = await runRecovery(req, {
+        autoRecover,
+        effects: this.buildRecoveryEffects(chatId),
+        now: () => Date.now(),
+        budget: {
+          get: (turnKey) => this.recoveryBudgets.get(turnKey) ?? initialBudget(turnKey),
+          set: (s) => {
+            this.recoveryBudgets.set(s.turnKey, s);
+            this.pruneRecoveryBudgets(s.lastAt);
+          },
+        },
+        // Live triage is the most sensitive surface — only ever run when the
+        // operator has opted in. When off, the executor uses the deterministic
+        // per-stage default action (still whitelist-clamped).
+        triageSpawn: autoRecover ? this.recoveryTriageSpawn : undefined,
+        gatherEvidence: async () => {
+          const s = this.sessions.get(chatId);
+          if (!s) return null;
+          try {
+            const snap = await ptyStreamRegistry.screenText(s.sessionId);
+            if (!snap) return null;
+            // Scrub the untrusted screen before it leaves the process / reaches
+            // the triage model. Redact the chat id explicitly on top of the
+            // pattern-based secret scrub.
+            return { screenText: scrubText(snap.text, [chatId]) };
+          } catch {
+            return null;
+          }
+        },
+        resendAfterRecover: autoRecover,
+        log: (msg, meta) => this.logger.info(msg, meta),
+      });
+      respond({ ok: true, outcome: toRecoveryOutcome(result), result });
+    } catch (err) {
+      this.logger.error('Recovery attempt failed', { chatId, stage, error: (err as Error).message });
+      respond({ ok: false, error: (err as Error).message }, 500);
+    }
+  }
+
+  /**
+   * Build the recovery effects bound to one chat's session (Phase 3b). Each
+   * effect resolves the session fresh so it survives a restart mid-recovery.
+   * Keystroke effects go through the wrapper control channel; restart/backend
+   * effects act on the session and safe-mode manager. Effects intentionally
+   * omitted (redeliver-forward, restart-receiver, bridge-menu) are transport /
+   * wrapper concerns not bridged to the runner — the executor reports them as
+   * unsupported rather than guessing.
+   */
+  private buildRecoveryEffects(chatId: string): RecoveryEffects {
+    const control = (key: string, option?: number): void => {
+      this.sessions.get(chatId)?.sendControl(key, option);
+    };
+    return {
+      esc: () => control('esc'),
+      escEsc: () => control('esc-esc'),
+      enter: () => control('enter'),
+      selectOption: (option: number) => control('select-option', option),
+      restartSession: () => this.restartProcess(chatId),
+      fallbackHeadless: async () => {
+        // Flip to the headless backend, then restart so the new session respawns
+        // headless (spawnSession reads safeMode.isActive → forceHeadless).
+        this.safeMode.enter(this.agentConfig.id, 'recovery: fallback-headless');
+        await this.restartProcess(chatId);
+      },
+      resendLast: () => {
+        const lt = this.lastTurn.get(chatId);
+        // Guard: only resend a turn that produced no output and was not already
+        // resent — never double-submit.
+        if (!lt || lt.delivered || lt.resent) return false;
+        const s = this.sessions.get(chatId);
+        if (!s) return false;
+        lt.resent = true;
+        s.setProcessing(true);
+        s.sendMessage(lt.text);
+        s.touch();
+        return true;
+      },
+    };
+  }
+
+  /**
+   * Evict finished-turn budget entries (Epic #195, Phase 3b). Called on each
+   * budget write so the per-turn map cannot grow without bound on a long-lived
+   * runner. `nowMs` is the timestamp of the write just made; any entry whose last
+   * attempt predates the TTL belongs to a turn that is no longer being recovered.
+   */
+  private pruneRecoveryBudgets(nowMs: number): void {
+    const cutoff = nowMs - RECOVERY_BUDGET_TTL_MS;
+    for (const [key, state] of this.recoveryBudgets) {
+      if (state.lastAt < cutoff) this.recoveryBudgets.delete(key);
+    }
+  }
+
+  /**
+   * One-shot local `claude -p` triage runner (Phase 3b). Feeds the closed
+   * classification prompt on stdin and returns raw stdout. Hard timeout →
+   * timedOut, which the executor collapses to a safe notify-only verdict. Only
+   * invoked when autoRecover is enabled.
+   */
+  private recoveryTriageSpawn = async (
+    prompt: string,
+  ): Promise<{ stdout: string; timedOut?: boolean }> => {
+    const { spawn } = await import('child_process');
+    return new Promise((resolve) => {
+      let done = false;
+      let out = '';
+      const finish = (r: { stdout: string; timedOut?: boolean }): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(r);
+      };
+      const timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        finish({ stdout: '', timedOut: true });
+      }, RECOVERY_TRIAGE_TIMEOUT_MS);
+      const child = spawn('claude', ['-p', '--output-format', 'text'], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
+      child.stdout?.on('data', (d) => { out += String(d); });
+      child.on('error', () => finish({ stdout: '', timedOut: true }));
+      child.on('close', () => finish({ stdout: out }));
+      try {
+        child.stdin?.write(prompt);
+        child.stdin?.end();
+      } catch {
+        finish({ stdout: '', timedOut: true });
+      }
+    });
+  };
 
   /**
    * Handle POST /command requests from the receiver process.
@@ -662,7 +881,12 @@ export class AgentRunner extends EventEmitter {
         }
 
         session.setProcessing(true);
-        session.sendMessage(blocks.join('\n'));
+        const turnText = blocks.join('\n');
+        session.sendMessage(turnText);
+        // Remember this turn for the C1 guarded resend (Phase 3b): reset the
+        // delivered/resent flags so a resend can only fire if this turn stalls
+        // before producing output.
+        this.lastTurn.set(chatId, { text: turnText, delivered: false, resent: false });
         session.touch();
         this.logger.debug('Injected channel turn into session', {
           chatId,
@@ -822,6 +1046,16 @@ export class AgentRunner extends EventEmitter {
       });
     }
 
+    // Safe mode (Epic #195, Phase 3): if the PTY backend has repeatedly failed
+    // for this agent, force the headless backend for this spawn. Cleared
+    // automatically once safe mode exits (a later healthy turn / user restore).
+    if (this.safeMode.isActive(this.agentConfig.id)) {
+      proc.forceHeadless = true;
+      this.logger.info('Spawning in safe mode (headless backend forced)', {
+        mapKey, agentId: this.agentConfig.id,
+      });
+    }
+
     await proc.start();
 
     // Forward all session output lines so listeners on AgentRunner (GatewayRouter,
@@ -831,7 +1065,17 @@ export class AgentRunner extends EventEmitter {
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source !== 'api') {
       proc.once('failed', () => {
-        this.writeTypingError(mapKey, 'PROCESS_FAILED');
+        // Safe mode (Epic #195, Phase 3): a hard failure of the PTY (interactive
+        // TUI) backend counts toward the safe-mode threshold. Once crossed, the
+        // agent auto-flips to headless on the next spawn so the user's next
+        // message is served instead of re-wedging. Headless failures don't count
+        // (there is no PTY wrapper to blame / fall back from). When we just
+        // entered safe mode, tell the user that specifically instead of the
+        // generic "stopped" notice (one .error file, so pick the better code).
+        const enteredSafeMode =
+          proc.backend === 'pty-shell' &&
+          this.safeMode.recordPtyFailure(this.agentConfig.id);
+        this.writeTypingError(mapKey, enteredSafeMode ? 'SAFE_MODE_ENABLED' : 'PROCESS_FAILED');
         this.sessions.delete(mapKey);
         // LINE: surface an error for any outstanding postback button so a tap
         // returns the interrupted notice instead of a stale "still thinking".
@@ -995,6 +1239,13 @@ export class AgentRunner extends EventEmitter {
               // the next 32MB (if any) starts fresh at the top of the ladder.
               this.tooLargeRecoveries.delete(mapKey);
               this.tooLargeExhausted.delete(mapKey);
+              // Safe mode (Epic #195, Phase 3): a healthy PTY turn resets the
+              // consecutive-failure counter and lifts safe mode if it was active
+              // (the interactive backend recovered). Headless successes don't
+              // touch it — that's the fallback doing its job, not the PTY healing.
+              if (proc.backend === 'pty-shell') {
+                this.safeMode.recordSuccess(this.agentConfig.id);
+              }
             }
             // When a menu was rendered to buttons this turn, the wrapper appends
             // the same menu text to the turn's result — strip that suffix so it
@@ -1034,6 +1285,10 @@ export class AgentRunner extends EventEmitter {
               } else {
                 this.writeAutoForward(mapKey, text);
               }
+              // Assistant output reached the channel — mark the turn delivered so
+              // a later recovery does not resend a message that was answered (C1).
+              const lt = this.lastTurn.get(mapKey);
+              if (lt) lt.delivered = true;
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;

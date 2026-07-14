@@ -152,6 +152,19 @@ export interface GatewayConfig {
      * false = interactive backend: claude TUI under the claude-pty-shell PTY wrapper.
      */
     headless?: boolean;
+    /**
+     * Self-healing recovery (Epic #195, Phase 3). When `autoRecover` is true the
+     * turn-trace watchdog may auto-execute a whitelisted recovery action
+     * (keystroke, session/receiver restart, safe-mode fallback, guarded resend)
+     * for a stalled turn. Default false — detection, incident logging, and
+     * notification still run when disabled; only live action execution is gated,
+     * so the feature ships dark and the operator opts in when ready. Safe-mode
+     * auto-fallback on hard PTY failure is independent of this flag (it is always
+     * reversible and never presses keys).
+     */
+    selfHealing?: {
+      autoRecover?: boolean;
+    };
     /** Global history retention/cleanup defaults */
     history?: HistoryConfig & {
       cleanupHour?: number;      // 0-23, default 0
