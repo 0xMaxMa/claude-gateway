@@ -21,7 +21,7 @@ import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
 import { shouldAdoptOrphanWake } from './orphan-wake';
-import { parseControlCommand, keystrokesFor, KEY_ENTER } from './control-channel';
+import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
 
 const POLL_MS = 200;
@@ -261,6 +261,16 @@ class Driver {
         this.handleControl(obj);
         return;
       }
+      // Interactive input (Issue #201): the dashboard's Terminal Viewer in
+      // input mode streams raw keystroke bytes to type into the live TUI, like a
+      // real terminal. Unlike the closed `control` vocabulary this is arbitrary
+      // bytes, so access is deliberately gated at the gateway (auth + the
+      // localhost-default `gateway.bind`) before ever reaching this wrapper; here
+      // we only bound its size and write it straight to the PTY.
+      if (obj.type === 'input') {
+        this.handleInput(obj);
+        return;
+      }
       if (obj.type !== 'user') {
         logDebug(`ignoring stdin message type=${String(obj.type)}`);
         return;
@@ -323,6 +333,21 @@ class Driver {
         if (this.screen.interactivePromptBlocking()) this.host.writeRaw(KEY_ENTER);
       }, MENU_SELECT_ENTER_DELAY_MS);
     }
+  }
+
+  /**
+   * Handle interactive-terminal input (Issue #201). `data` is raw keystroke
+   * bytes from an authenticated dashboard viewer in input mode. It is written
+   * straight to the PTY so every key behaves like a real terminal. The size is
+   * bounded (defense in depth — the gateway already bounds it) and a non-string
+   * / oversized / empty payload is dropped rather than written.
+   */
+  private handleInput(obj: Record<string, unknown>): void {
+    if (!isAcceptablePtyInput(obj.data)) {
+      logWarn(`ignoring invalid/oversized input message (max ${MAX_PTY_INPUT_BYTES} bytes)`);
+      return;
+    }
+    this.host.writeRaw(obj.data);
   }
 
   private attachSignals(): void {

@@ -13,6 +13,9 @@ import {
   KEY_ENTER,
   KEY_UP,
   KEY_DOWN,
+  isAcceptablePtyInput,
+  shouldRoutePtyInput,
+  MAX_PTY_INPUT_BYTES,
 } from '../../src/shell/control-channel'
 
 describe('parseControlCommand — closed vocabulary', () => {
@@ -70,5 +73,31 @@ describe('keystrokesFor — VT100 mapping', () => {
 
   test('U-CC-08: select-option maps to the digit only (Enter is screen-gated by the caller)', () => {
     expect(keystrokesFor({ key: 'select-option', option: 3 })).toEqual(['3'])
+  })
+})
+
+describe('interactive input gate (Issue #201)', () => {
+  test('U-CC-09: isAcceptablePtyInput accepts a non-empty bounded string', () => {
+    expect(isAcceptablePtyInput('a')).toBe(true)
+    expect(isAcceptablePtyInput('\x03')).toBe(true) // Ctrl-C is valid input
+    expect(isAcceptablePtyInput('x'.repeat(MAX_PTY_INPUT_BYTES))).toBe(true)
+  })
+
+  test('U-CC-10: isAcceptablePtyInput rejects empty, oversized, and non-string', () => {
+    expect(isAcceptablePtyInput('')).toBe(false)
+    expect(isAcceptablePtyInput('x'.repeat(MAX_PTY_INPUT_BYTES + 1))).toBe(false)
+    expect(isAcceptablePtyInput(123 as unknown)).toBe(false)
+    expect(isAcceptablePtyInput(null)).toBe(false)
+    expect(isAcceptablePtyInput(undefined)).toBe(false)
+    expect(isAcceptablePtyInput({ toString: () => 'x' } as unknown)).toBe(false)
+  })
+
+  test('U-CC-11: shouldRoutePtyInput requires a text frame + acceptable payload', () => {
+    expect(shouldRoutePtyInput(false, 'ls\r')).toBe(true)
+    // binary frame → dropped
+    expect(shouldRoutePtyInput(true, 'ls\r')).toBe(false)
+    // empty / oversized → dropped
+    expect(shouldRoutePtyInput(false, '')).toBe(false)
+    expect(shouldRoutePtyInput(false, 'x'.repeat(MAX_PTY_INPUT_BYTES + 1))).toBe(false)
   })
 })

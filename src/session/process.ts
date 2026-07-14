@@ -920,6 +920,32 @@ export class SessionProcess extends EventEmitter {
     this.process.stdin.write(JSON.stringify(msg) + '\n');
   }
 
+  /**
+   * Send raw interactive-terminal input to the PTY wrapper (Issue #201). Used by
+   * the dashboard's Terminal Viewer input mode to type any key into the
+   * live TUI. Only meaningful on the interactive (pty-shell) backend — the
+   * headless backend has no TUI, so this is a no-op there. The wrapper bounds
+   * the size again before writing to the PTY. Returns true when the bytes were
+   * handed to the subprocess stdin.
+   */
+  sendInput(data: string): boolean {
+    if (this.backend !== 'pty-shell') {
+      this.logger.debug('Ignoring interactive input on headless backend', {
+        sessionId: this.sessionId,
+      });
+      return false;
+    }
+    if (typeof data !== 'string' || data.length === 0) return false;
+    if (!this.process?.stdin?.writable) {
+      this.logger.warn('Cannot send input: subprocess not running', {
+        sessionId: this.sessionId,
+      });
+      return false;
+    }
+    this.process.stdin.write(JSON.stringify({ type: 'input', data }) + '\n');
+    return true;
+  }
+
   query(prompt: string, timeoutMs = 60_000): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!this.process?.stdin?.writable) {

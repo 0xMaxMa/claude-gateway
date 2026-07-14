@@ -143,6 +143,14 @@ export interface GatewayConfig {
   gateway: {
     logDir: string;
     timezone: string;
+    /**
+     * Network interface the HTTP/WebSocket server binds to. Defaults to
+     * "127.0.0.1" (localhost-only) so the dashboard and API are not exposed to
+     * the local network out of the box. Set to "0.0.0.0" to expose all
+     * interfaces (e.g. behind a trusted reverse proxy). The `GATEWAY_BIND` env
+     * var, when set, takes precedence over this field.
+     */
+    bind?: string;
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];

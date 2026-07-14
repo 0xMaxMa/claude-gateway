@@ -6,10 +6,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Server } from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
+import { shouldRoutePtyInput } from '../shell/control-channel';
 import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
@@ -39,6 +40,22 @@ function getGatewayVersion(): string {
 }
 
 const GATEWAY_VERSION = getGatewayVersion();
+
+/**
+ * Resolve the network interface the server binds to (Issue #201). Precedence:
+ * GATEWAY_BIND env → gateway.bind config → localhost-only default. Empty/blank
+ * values fall through, so an unset or whitespace override never accidentally
+ * binds all interfaces. The localhost default keeps the dashboard/API off the
+ * local network out of the box.
+ */
+export function resolveBindHost(
+  envBind: string | undefined,
+  configuredBind: string | undefined,
+): string {
+  const env = envBind?.trim();
+  const configured = configuredBind?.trim();
+  return env || configured || '127.0.0.1';
+}
 
 // ─── Proxy types ──────────────────────────────────────────────────────────────
 
@@ -548,7 +565,11 @@ export class GatewayRouter {
   }
 
   async start(port: number): Promise<void> {
-    const host = process.env.GATEWAY_BIND ?? '0.0.0.0';
+    // Bind resolution precedence: GATEWAY_BIND env → gateway.bind config →
+    // localhost-only default. The default is "127.0.0.1" so the dashboard/API
+    // are not exposed to the local network out of the box; operators opt into
+    // wider exposure via config or the env var (e.g. "0.0.0.0" behind a proxy).
+    const host = resolveBindHost(process.env.GATEWAY_BIND, this.gatewayConfig?.gateway?.bind);
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
         resolve();
@@ -606,14 +627,7 @@ export class GatewayRouter {
             return;
           }
           this.wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-            // Subscribe by sessionId — each session is its own isolated stream.
-            if (!ptyStreamRegistry.hasSockets(sessionId)) {
-              ws.close(4404, 'session not running in PTY mode');
-              return;
-            }
-            ptyStreamRegistry.subscribe(sessionId, ws);
-            ws.on('close', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
-            ws.on('error', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+            this.attachPtyStreamSocket(ws, agentId, sessionId);
           });
           return;
         }
@@ -645,15 +659,40 @@ export class GatewayRouter {
         }
 
         this.wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-          if (!ptyStreamRegistry.hasSockets(sessionId)) {
-            ws.close(4404, 'session not running in PTY mode');
-            return;
-          }
-          ptyStreamRegistry.subscribe(sessionId, ws);
-          ws.on('close', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
-          ws.on('error', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+          this.attachPtyStreamSocket(ws, agentId, sessionId);
         });
       });
+    });
+  }
+
+  /**
+   * Subscribe an authenticated WebSocket to a session's PTY output stream and
+   * route inbound frames back into the live PTY (Issue #201). Output is one-way
+   * (server → browser); inbound keystrokes are opt-in per browser via the Shell
+   * Process Viewer's mode toggle (client-side UX), so a viewer only sends bytes
+   * while in input mode. Access to this socket is protected upstream: the caller
+   * has already authenticated (ticket or API key) and the gateway binds to
+   * localhost by default (`gateway.bind`) — set a non-loopback bind only behind
+   * a trusted proxy. Bytes are bounded (text-only, size-capped) and routed to
+   * the owning session; a headless session (no PTY) silently drops them
+   * (sendInputToSession → false).
+   */
+  private attachPtyStreamSocket(ws: WebSocket, agentId: string, sessionId: string): void {
+    if (!ptyStreamRegistry.hasSockets(sessionId)) {
+      ws.close(4404, 'session not running in PTY mode');
+      return;
+    }
+    ptyStreamRegistry.subscribe(sessionId, ws);
+    ws.on('close', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+    ws.on('error', () => ptyStreamRegistry.unsubscribe(sessionId, ws));
+
+    ws.on('message', (data: RawData, isBinary: boolean) => {
+      // Text frames carry raw keystroke bytes from xterm's onData; binary frames
+      // and oversized/empty payloads are dropped rather than routed into the PTY
+      // (shared gate with the wrapper).
+      const text = isBinary ? '' : data.toString('utf8');
+      if (!shouldRoutePtyInput(isBinary, text)) return;
+      this.agents.get(agentId)?.sendInputToSession(sessionId, text);
     });
   }
 

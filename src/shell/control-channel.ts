@@ -89,3 +89,36 @@ export function keystrokesFor(cmd: ControlCommand): string[] {
       return [String(cmd.option)]
   }
 }
+
+/**
+ * Interactive terminal input (Issue #201). Unlike the closed control vocabulary,
+ * input-mode carries arbitrary raw keystroke bytes so a viewer can type any key.
+ * Access is gated at the gateway (auth + the localhost-default `gateway.bind`);
+ * these pure helpers bound and validate a single frame, and are reused on both
+ * sides of the pipe (the gateway WS handler and the PTY wrapper) so the two never
+ * drift on what counts as an acceptable frame.
+ */
+export const MAX_PTY_INPUT_BYTES = 8192
+
+/** True when `data` is a non-empty string within the per-frame byte bound. */
+export function isAcceptablePtyInput(
+  data: unknown,
+  maxBytes: number = MAX_PTY_INPUT_BYTES,
+): data is string {
+  return typeof data === 'string' && data.length > 0 && data.length <= maxBytes
+}
+
+/**
+ * Whether one inbound WebSocket frame should be routed into the live PTY.
+ * Requires a text (non-binary) frame and an acceptable payload; binary frames
+ * and oversized/empty payloads are dropped. Pure — no IO. (Whether a browser
+ * sends input at all is a client-side choice via the viewer's mode toggle;
+ * access to the socket is gated upstream by auth + `gateway.bind`.)
+ */
+export function shouldRoutePtyInput(
+  isBinary: boolean,
+  data: unknown,
+  maxBytes: number = MAX_PTY_INPUT_BYTES,
+): data is string {
+  return !isBinary && isAcceptablePtyInput(data, maxBytes)
+}
