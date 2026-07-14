@@ -30,9 +30,15 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
-import { formatTurnIncident, type TurnIncident } from '../../../src/agent/turn-trace'
-import { createIncidentStore } from '../../../src/agent/incident-store'
-import type { RecoveryOutcome } from '../../../src/agent/incident'
+// Import the COMPILED artifact from dist/, not raw src/. This file is run by bun
+// and packaged as source (files: ["mcp/"]); src/ is NOT published, so a
+// '../../../src/agent/*' import resolves in the dev repo but throws "Cannot find
+// module" from an installed package (which is exactly what silently broke every
+// Telegram receiver on systemd/global installs). dist/ ships. Guarded by
+// mcp-no-src-imports.test.ts.
+import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-trace.js'
+import { createIncidentStore } from '../../../dist/agent/incident-store.js'
+import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
