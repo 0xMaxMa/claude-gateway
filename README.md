@@ -326,6 +326,8 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 }
 ```
 
+> **⚠️ Upgrade note (configVersion 1.0.13):** the default bind changed from `0.0.0.0` to `127.0.0.1`. If you reach the dashboard/API from another host — most commonly through a **containerized** reverse proxy that connects across the container boundary — the gateway will no longer be reachable after upgrading unless you opt back in explicitly by setting `gateway.bind` to `0.0.0.0` (or the `GATEWAY_BIND` env var). Deployments that only use a host-network proxy or access the dashboard on `localhost` need no change.
+
 ### Terminal Viewer — interactive terminal mode
 
 The dashboard's **Terminal Viewer** opens read-only (a live mirror of the PTY). A toggle in the top-right of the viewer switches it into an **interactive terminal**: keystrokes typed into the panel — printable characters, Enter, arrows, Ctrl-combos, Esc — are streamed into the live PTY, and the panel title changes to reflect the active mode. This is a per-browser client-side choice (Issue #201); there is no server config flag to enable it.

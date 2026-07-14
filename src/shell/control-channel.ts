@@ -100,12 +100,21 @@ export function keystrokesFor(cmd: ControlCommand): string[] {
  */
 export const MAX_PTY_INPUT_BYTES = 8192
 
-/** True when `data` is a non-empty string within the per-frame byte bound. */
+/**
+ * True when `data` is a non-empty string within the per-frame byte bound. The
+ * bound is measured in real UTF-8 bytes (not UTF-16 code units), so multi-byte
+ * input (emoji, non-Latin scripts) is capped at the same byte budget that will
+ * actually be written to the PTY.
+ */
 export function isAcceptablePtyInput(
   data: unknown,
   maxBytes: number = MAX_PTY_INPUT_BYTES,
 ): data is string {
-  return typeof data === 'string' && data.length > 0 && data.length <= maxBytes
+  return (
+    typeof data === 'string' &&
+    data.length > 0 &&
+    Buffer.byteLength(data, 'utf8') <= maxBytes
+  )
 }
 
 /**

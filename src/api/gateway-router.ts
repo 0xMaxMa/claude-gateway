@@ -10,7 +10,7 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
-import { shouldRoutePtyInput } from '../shell/control-channel';
+import { shouldRoutePtyInput, MAX_PTY_INPUT_BYTES } from '../shell/control-channel';
 import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
@@ -582,7 +582,13 @@ export class GatewayRouter {
         }
       });
 
-      this.wss = new WebSocketServer({ noServer: true });
+      // Cap inbound frame size at the WS layer so oversized frames are rejected
+      // before we ever allocate a string from them (Issue #201). The only inbound
+      // frames on this socket are interactive keystrokes, already bounded to
+      // MAX_PTY_INPUT_BYTES; the headroom (8×) tolerates paste bursts while still
+      // refusing abusive payloads. maxPayload only limits frames the server
+      // *receives* — server → client PTY output is unaffected.
+      this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PTY_INPUT_BYTES * 8 });
       const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
 
       // Prune expired tickets and dashboard tokens every 60s.
