@@ -10,9 +10,33 @@
  * is passed, and fall back to push if it's absent or expired/used (the single-use
  * token has no guaranteed lifetime — ~1 min — so push remains the safety net).
  */
+import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { messagingApi } from '@line/bot-sdk';
 import { chunkText, planLineSend, LINE_TEXT_LIMIT } from './pure';
+import { signMediaToken } from './media-sign';
+
+/** Default lifetime of a signed image URL handed to LINE (1 hour). */
+const DEFAULT_MEDIA_URL_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Convert a media path (absolute under the agent media root, or already relative
+ * like "media/<chat>/<file>.png") to the "media/…"-relative form the gateway's
+ * signed-URL route expects. Returns null if it cannot be resolved to the media root.
+ */
+function toRelativeMediaPath(p: string): string | null {
+  if (!p) return null;
+  const normalized = p.replace(/\\/g, '/');
+  if (!path.isAbsolute(normalized)) {
+    return normalized.startsWith('media/') ? normalized : `media/${normalized.replace(/^\/+/, '')}`;
+  }
+  const workspace = process.env.GATEWAY_WORKSPACE_DIR;
+  if (!workspace) return null;
+  const mediaRoot = path.resolve(workspace, '..', 'media');
+  const rel = path.relative(mediaRoot, path.resolve(normalized));
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return `media/${rel.split(path.sep).join('/')}`;
+}
 
 export class LineModule implements ToolModule {
   id = 'line';
@@ -54,11 +78,43 @@ export class LineModule implements ToolModule {
           required: ['chat_id', 'text'],
         },
       },
+      {
+        name: 'line_image',
+        description:
+          'Send an image to the current LINE user. Pass chat_id (the LINE userId from the ' +
+          '<channel> tag) and image (a media path saved by the gateway, e.g. a generate_image ' +
+          'result path or a "media/…" path). LINE can only fetch public HTTPS URLs, so the tool ' +
+          'mints a signed, short-lived public URL for the file and sends it as an image message. ' +
+          'Pass reply_token from the <channel> tag when present to send for FREE (falls back to push).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            chat_id: {
+              type: 'string',
+              description: 'LINE userId to send to (the chat_id from the channel turn).',
+            },
+            image: {
+              type: 'string',
+              description: 'Media path of the image (absolute path under the agent media dir, or a "media/…" relative path).',
+            },
+            preview: {
+              type: 'string',
+              description: 'Optional separate preview-image media path. Defaults to the same image.',
+            },
+            reply_token: {
+              type: 'string',
+              description: 'Optional single-use reply token from the <channel> tag (sends free; falls back to push).',
+            },
+          },
+          required: ['chat_id', 'image'],
+        },
+      },
     ];
   }
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     if (name === 'line_reply') return this.handleReply(args);
+    if (name === 'line_image') return this.handleImage(args);
     return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
   }
 
@@ -120,6 +176,84 @@ export class LineModule implements ToolModule {
     } catch (err) {
       return {
         content: [{ type: 'text', text: `line_reply failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Send an image via a signed short-lived public URL. LINE's servers fetch the
+   * image over public HTTPS (the normal media route is API-key-gated), so we mint
+   * a token the gateway `/media-public/:token` route verifies + streams.
+   */
+  private async handleImage(args: Record<string, unknown>): Promise<McpToolResult> {
+    const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
+    const image = typeof args.image === 'string' ? args.image : '';
+    const preview = typeof args.preview === 'string' && args.preview ? args.preview : image;
+    const replyToken = typeof args.reply_token === 'string' ? args.reply_token : '';
+    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? '';
+
+    if (!chatId) {
+      return { content: [{ type: 'text', text: 'line_image: missing chat_id' }], isError: true };
+    }
+    if (!image) {
+      return { content: [{ type: 'text', text: 'line_image: image path is required' }], isError: true };
+    }
+
+    const publicBase = (process.env.GATEWAY_PUBLIC_URL ?? '').replace(/\/+$/, '');
+    const signSecret = process.env.GATEWAY_MEDIA_SIGN_SECRET ?? '';
+    const agentId = process.env.GATEWAY_AGENT_ID ?? '';
+    if (!publicBase || !signSecret || !agentId) {
+      return {
+        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_PUBLIC_URL, GATEWAY_MEDIA_SIGN_SECRET, or GATEWAY_AGENT_ID)' }],
+        isError: true,
+      };
+    }
+
+    const relImage = toRelativeMediaPath(image);
+    const relPreview = toRelativeMediaPath(preview);
+    if (!relImage || !relPreview) {
+      return {
+        content: [{ type: 'text', text: `line_image: could not resolve media path to the agent media root: ${image}` }],
+        isError: true,
+      };
+    }
+
+    const ttl = Number(process.env.GATEWAY_MEDIA_URL_TTL_MS) > 0
+      ? Number(process.env.GATEWAY_MEDIA_URL_TTL_MS)
+      : DEFAULT_MEDIA_URL_TTL_MS;
+    const exp = Date.now() + ttl;
+    const signUrl = (rel: string): string =>
+      `${publicBase}/media-public/${signMediaToken({ a: agentId, p: rel, e: exp }, signSecret)}`;
+
+    const message = {
+      type: 'image' as const,
+      originalContentUrl: signUrl(relImage),
+      previewImageUrl: signUrl(relPreview),
+    };
+
+    if (!token) {
+      return { content: [{ type: 'text', text: 'line_image: missing LINE_CHANNEL_ACCESS_TOKEN' }], isError: true };
+    }
+    const client = new messagingApi.MessagingApiClient({ channelAccessToken: token });
+
+    let via = 'push';
+    try {
+      if (replyToken) {
+        try {
+          await client.replyMessage({ replyToken, messages: [message] });
+          via = 'reply';
+        } catch {
+          await client.pushMessage({ to: chatId, messages: [message] });
+          via = 'push (reply fallback)';
+        }
+      } else {
+        await client.pushMessage({ to: chatId, messages: [message] });
+      }
+      return { content: [{ type: 'text', text: `Sent image to LINE (${via}).` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `line_image failed: ${(err as Error).message}` }],
         isError: true,
       };
     }

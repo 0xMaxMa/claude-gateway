@@ -2332,15 +2332,6 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttr = effectiveImagePaths.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePaths[0]!)}"` : '';
     const imageParamsNote = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
-    // Persist the composer image options to session meta so the web can restore the
-    // selection on reload (SessionMeta.imageConfig). Only when the send carries them
-    // (the web sends image_params on first-set/change), so this holds the latest.
-    // Channel is 'api' here (api sessions live under api-<chatId>). Best-effort.
-    if (opts.imageParams) {
-      this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
-        .catch(() => {});
-    }
     const channelXml =
       `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}"${imageAttr}>\n` +
       `${message}\n\n` +
@@ -2677,14 +2668,6 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttrStream = effectiveImagePathsStream.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePathsStream[0]!)}"` : '';
     const imageParamsNoteStream = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
-    // Persist composer image config to session meta (SessionMeta.imageConfig) so the
-    // web restores the selection on reload. This is the streaming path the web uses.
-    // Channel 'api' — api sessions live under api-<chatId>. Best-effort.
-    if (opts.imageParams) {
-      this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
-        .catch(() => {});
-    }
     const channelXml =
       `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}"${imageAttrStream}>\n` +
       `${message}\n\n` +
