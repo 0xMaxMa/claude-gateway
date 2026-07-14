@@ -13,11 +13,9 @@
  *   STATE_DIR/typing/{chatId}.error     — written by AgentRunner on session failure
  */
 
-// Import the COMPILED artifact from dist/, not raw src/. These MCP scripts are
-// run directly by bun and are packaged as source (files: ["mcp/"]); src/ is NOT
-// published, so importing '../../../src/agent/*' resolves in the dev repo but
-// throws "Cannot find module" from an installed package. dist/ ships and both
-// runtimes (node gateway + bun MCP) consume it. See mcp-no-src-imports.test.ts.
+// Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
+// so a src/ import crashes this bun-run tool on installed packages. Enforced by
+// tests/unit/mcp-no-src-imports.test.ts.
 import {
   classifyTurn,
   type TurnObservation,

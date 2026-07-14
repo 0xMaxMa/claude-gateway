@@ -30,12 +30,10 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
-// Import the COMPILED artifact from dist/, not raw src/. This file is run by bun
-// and packaged as source (files: ["mcp/"]); src/ is NOT published, so a
-// '../../../src/agent/*' import resolves in the dev repo but throws "Cannot find
-// module" from an installed package (which is exactly what silently broke every
-// Telegram receiver on systemd/global installs). dist/ ships. Guarded by
-// mcp-no-src-imports.test.ts.
+// Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
+// so a src/ import crashes this bun-run receiver on installed packages (the bug
+// that silenced every bot on systemd installs). Enforced by
+// tests/unit/mcp-no-src-imports.test.ts.
 import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-trace.js'
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'

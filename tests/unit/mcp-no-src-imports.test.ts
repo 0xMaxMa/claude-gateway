@@ -15,6 +15,12 @@
  *       e.g. `dist/` — the compiled artifact both runtimes consume).
  * It may NEVER reach into `src/` (or any other non-published path), because that
  * path is absent from the tarball an end user installs.
+ *
+ * Consequence for local dev: because the bun MCP tools consume the COMPILED
+ * `dist/` artifact, `npm run build` must have run before they can resolve those
+ * imports. This is a non-issue in practice — the gateway itself runs from
+ * `dist/`, and `make start` builds first — but a fresh checkout that launches an
+ * MCP tool without building will hit the same "Cannot find module".
  */
 import { readFileSync, readdirSync } from 'fs'
 import { join, resolve, dirname, relative, sep } from 'path'
@@ -42,8 +48,24 @@ function collectMcpSources(dir: string, out: string[] = []): string[] {
   return out
 }
 
+/**
+ * Strip line and block comments before scanning. Import specifiers only ever
+ * appear in real code, so this avoids false positives from prose that mentions
+ * an import path (e.g. the very comments this repo uses to explain why these
+ * files import from dist/ and not src/). Over-stripping is harmless here: we
+ * only extract *relative* specifiers, which never live inside string URLs, so
+ * mangling a `'https://…'` literal cannot change the result, and a real import
+ * statement is never hidden behind a `//` on its own line.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+    .replace(/\/\/[^\n]*/g, '') // line comments
+}
+
 /** Pull every relative import/require specifier out of a source file. */
 function relativeSpecifiers(source: string): string[] {
+  source = stripComments(source)
   const specs: string[] = []
   const patterns = [
     /\bfrom\s*['"]([^'"]+)['"]/g, // import ... from '...'
