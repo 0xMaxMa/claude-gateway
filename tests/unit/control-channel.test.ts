@@ -13,6 +13,9 @@ import {
   KEY_ENTER,
   KEY_UP,
   KEY_DOWN,
+  isAcceptablePtyInput,
+  shouldRoutePtyInput,
+  MAX_PTY_INPUT_BYTES,
 } from '../../src/shell/control-channel'
 
 describe('parseControlCommand — closed vocabulary', () => {
@@ -70,5 +73,43 @@ describe('keystrokesFor — VT100 mapping', () => {
 
   test('U-CC-08: select-option maps to the digit only (Enter is screen-gated by the caller)', () => {
     expect(keystrokesFor({ key: 'select-option', option: 3 })).toEqual(['3'])
+  })
+})
+
+describe('interactive input gate (Issue #201)', () => {
+  test('U-CC-09: isAcceptablePtyInput accepts a non-empty bounded string', () => {
+    expect(isAcceptablePtyInput('a')).toBe(true)
+    expect(isAcceptablePtyInput('\x03')).toBe(true) // Ctrl-C is valid input
+    expect(isAcceptablePtyInput('x'.repeat(MAX_PTY_INPUT_BYTES))).toBe(true)
+  })
+
+  test('U-CC-10: isAcceptablePtyInput rejects empty, oversized, and non-string', () => {
+    expect(isAcceptablePtyInput('')).toBe(false)
+    expect(isAcceptablePtyInput('x'.repeat(MAX_PTY_INPUT_BYTES + 1))).toBe(false)
+    expect(isAcceptablePtyInput(123 as unknown)).toBe(false)
+    expect(isAcceptablePtyInput(null)).toBe(false)
+    expect(isAcceptablePtyInput(undefined)).toBe(false)
+    expect(isAcceptablePtyInput({ toString: () => 'x' } as unknown)).toBe(false)
+  })
+
+  test('U-CC-10b: isAcceptablePtyInput bounds real UTF-8 bytes, not UTF-16 code units', () => {
+    // '😀' is 2 UTF-16 code units but 4 UTF-8 bytes. A run whose code-unit
+    // length is under the bound while its byte length exceeds it must be
+    // rejected — otherwise multi-byte input could smuggle past the cap.
+    const overByBytes = '😀'.repeat(MAX_PTY_INPUT_BYTES / 4 + 1) // ~1 byte over
+    expect(overByBytes.length).toBeLessThan(MAX_PTY_INPUT_BYTES) // under by code units
+    expect(Buffer.byteLength(overByBytes, 'utf8')).toBeGreaterThan(MAX_PTY_INPUT_BYTES)
+    expect(isAcceptablePtyInput(overByBytes)).toBe(false)
+    // Multi-byte input that fits the byte budget is still accepted.
+    expect(isAcceptablePtyInput('café ✓')).toBe(true)
+  })
+
+  test('U-CC-11: shouldRoutePtyInput requires a text frame + acceptable payload', () => {
+    expect(shouldRoutePtyInput(false, 'ls\r')).toBe(true)
+    // binary frame → dropped
+    expect(shouldRoutePtyInput(true, 'ls\r')).toBe(false)
+    // empty / oversized → dropped
+    expect(shouldRoutePtyInput(false, '')).toBe(false)
+    expect(shouldRoutePtyInput(false, 'x'.repeat(MAX_PTY_INPUT_BYTES + 1))).toBe(false)
   })
 })

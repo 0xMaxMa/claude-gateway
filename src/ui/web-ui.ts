@@ -116,6 +116,22 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
     .pty-close:hover { color: #fc8181; }
     .pty-refresh:hover { color: #63b3ed; }
+    /* Keyboard-focus outline on the viewer (it is tabindex focusable so PageUp/
+       PageDown reach the terminal); keep it subtle rather than the default ring. */
+    #pty-terminal:focus, #pty-terminal:focus-visible { outline: 1px solid #2d3748; }
+    .pty-mode-toggle {
+      background: none;
+      border: 1px solid #2d3748;
+      border-radius: 4px;
+      color: #718096;
+      cursor: pointer;
+      font-size: 0.72rem;
+      padding: 1px 7px;
+      margin-right: 6px;
+    }
+    .pty-mode-toggle:hover { color: #63b3ed; border-color: #3d4a5f; }
+    /* Active (input) mode — clearly signals the viewer now types into the PTY. */
+    .pty-mode-toggle.input-active { color: #0d1117; background: #63b3ed; border-color: #63b3ed; font-weight: 600; }
     /* Fixed-size terminal viewport — the server PTY runs at 200x50, so the
        viewer must NOT resize to the panel (that mismatch is what garbles the
        output). We render at the native size and pan horizontally if the 200-col
@@ -230,13 +246,16 @@ export function generateDashboardHtml(dashToken = ''): string {
        in view when streaming. -->
   <div class="pty-viewer" id="pty-viewer">
     <div class="pty-viewer-header">
-      <span>Shell Process Viewer &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
+      <span><span id="pty-title-text">Terminal Viewer</span> &mdash; <span class="agent-label" id="pty-agent-label"></span><span class="session-label" id="pty-session-label"></span></span>
       <span>
+        <button class="pty-mode-toggle" id="pty-mode-toggle-btn" title="Toggle input mode (type into the live terminal)">&#x2328; View</button>
         <button class="pty-refresh" id="pty-refresh-btn" title="Refresh (reconnect &amp; redraw)">&#x21ba;</button>
         <button class="pty-close" id="pty-close-btn" title="Close">&#x2715;</button>
       </span>
     </div>
-    <div id="pty-terminal"></div>
+    <!-- tabindex makes the viewer keyboard-focusable so PageUp/PageDown reach it
+         even in read-only view mode (xterm stdin is disabled there). -->
+    <div id="pty-terminal" tabindex="0"></div>
   </div>
 
   <!-- Sessions — full width (session-centric, flat list) -->
@@ -347,6 +366,11 @@ export function generateDashboardHtml(dashToken = ''): string {
     // multi-byte char into noise — decode as UTF-8 with {stream:true} so sequences
     // split across WebSocket frames are reassembled instead of corrupted.
     let utf8Decoder = null;
+    // Interactive input mode (Issue #201). When on, keystrokes typed into the
+    // terminal are streamed to the live PTY over the same WebSocket. Off by
+    // default (read-only mirror); the viewer flips it on via the mode toggle.
+    let ptyInputMode = false;
+    let ptyOnDataDisposable = null;
 
     // The agent's TUI enables mouse tracking (DECSET 1000/1002/1003/1006...).
     // While those modes are active, xterm.js forwards wheel/click events to the
@@ -370,6 +394,9 @@ export function generateDashboardHtml(dashToken = ''): string {
       // Append the session id after the agent name, e.g. "claude-founder · 3c01897c…".
       document.getElementById('pty-session-label').textContent = sessionId ? ' \\u00b7 ' + sessionId : '';
       document.getElementById('pty-viewer').style.display = 'block';
+      // Always (re)open a fresh session in read-only view mode; the mode toggle
+      // lets the viewer switch into interactive input on demand.
+      setPtyInputMode(false);
 
       if (!term) {
         term = new Terminal({
@@ -485,10 +512,51 @@ export function generateDashboardHtml(dashToken = ''): string {
       // are about to close intentionally, so it does not schedule a new one.
       if (ptyReconnectTimer) { clearTimeout(ptyReconnectTimer); ptyReconnectTimer = null; }
       ptyReconnectAttempts = 0;
+      setPtyInputMode(false); // always leave input mode when closing/switching
       if (ptyWs) { ptyWs.onclose = null; ptyWs.onerror = null; ptyWs.close(); ptyWs = null; }
       currentPtyAgent = null;
       currentPtySession = null;
       document.getElementById('pty-viewer').style.display = 'none';
+    }
+
+    // Switch the viewer between read-only mirror and interactive input. In input
+    // mode the terminal accepts stdin and every keystroke (printable chars,
+    // Enter, arrows, Ctrl-combos, Esc) is streamed to the live PTY over the WS,
+    // like a real terminal; the title and toggle reflect the active mode.
+    function setPtyInputMode(on) {
+      if (!term) on = false;
+      ptyInputMode = !!on;
+      const toggleBtn = document.getElementById('pty-mode-toggle-btn');
+      const titleEl = document.getElementById('pty-title-text');
+      if (term) term.options.disableStdin = !ptyInputMode;
+      // Detach any previous onData listener before (re)attaching, so toggling
+      // off — or toggling on twice — never leaves a duplicate keystroke stream.
+      if (ptyOnDataDisposable) { ptyOnDataDisposable.dispose(); ptyOnDataDisposable = null; }
+      if (ptyInputMode && term) {
+        ptyOnDataDisposable = term.onData(function(data) {
+          if (ptyWs && ptyWs.readyState === WebSocket.OPEN) ptyWs.send(data);
+        });
+      }
+      if (titleEl) titleEl.textContent = ptyInputMode ? 'Interactive Terminal' : 'Terminal Viewer';
+      if (toggleBtn) {
+        toggleBtn.innerHTML = ptyInputMode ? '\\u2328 Input' : '\\u2328 View';
+        toggleBtn.classList.toggle('input-active', ptyInputMode);
+        toggleBtn.title = ptyInputMode
+          ? 'Input mode — keystrokes go to the live terminal (click for read-only)'
+          : 'Toggle input mode (type into the live terminal)';
+      }
+      if (ptyInputMode && term) {
+        term.focus(); // typing goes to xterm's textarea
+      } else {
+        // View mode: focus the container (tabindex) so PageUp/PageDown reach our
+        // key handler instead of scrolling the browser page.
+        const host = document.getElementById('pty-terminal');
+        if (host) host.focus();
+      }
+    }
+
+    function togglePtyInputMode() {
+      setPtyInputMode(!ptyInputMode);
     }
 
     // Refresh: force a clean reconnect of the CURRENT session. The server replays
@@ -502,8 +570,41 @@ export function generateDashboardHtml(dashToken = ''): string {
       await openPtyViewer(agentId, sessionId);
     }
 
+    // Page Up / Page Down keys (Issue #201): the alt-screen mirror keeps no
+    // scrollback of its own, so a physical PageUp/PageDown key is forwarded to the
+    // live TUI — which holds the history and scrolls itself. In read-only view mode
+    // xterm's stdin is disabled, so without this those keys would just scroll the
+    // browser page; here we intercept ONLY these two keys (never printable input)
+    // and send them to the PTY, so the user can page through earlier output without
+    // enabling the interactive keyboard. In input mode xterm already forwards them
+    // via onData, so we skip to avoid double-send.
+    //
+    // The listener is attached to the document, NOT the viewer container: xterm renders
+    // its own focusable helpers inside #pty-terminal, and with disableStdin the
+    // container rarely holds focus reliably (a reconnect or stray click drops it),
+    // so a container-scoped keydown silently missed the keys. Gating on the viewer
+    // being open + view mode keeps it from hijacking PageUp elsewhere on the page,
+    // and we bail when focus is in a real text field so form paging still works.
+    // \\x1b[5~ = PageUp, \\x1b[6~ = PageDown.
+    function forwardPageKey(e) {
+      if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+      if (ptyInputMode) return; // input mode: xterm.onData already sends it
+      // Only while THIS viewer is actually open with a live socket.
+      const viewer = document.getElementById('pty-viewer');
+      if (!viewer || viewer.style.display === 'none') return;
+      if (!ptyWs || ptyWs.readyState !== WebSocket.OPEN) return;
+      // Don't steal paging from a genuine editable field (none in view mode today,
+      // but keep the guard so the document-level listener stays well-behaved).
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || (t.tagName === 'TEXTAREA' && !t.disabled) || t.isContentEditable)) return;
+      e.preventDefault();
+      ptyWs.send(e.key === 'PageUp' ? '\\x1b[5~' : '\\x1b[6~');
+    }
+    document.addEventListener('keydown', forwardPageKey);
+
     document.getElementById('pty-close-btn').addEventListener('click', closePtyViewer);
     document.getElementById('pty-refresh-btn').addEventListener('click', function() { void refreshPtyViewer(); });
+    document.getElementById('pty-mode-toggle-btn').addEventListener('click', togglePtyInputMode);
 
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {

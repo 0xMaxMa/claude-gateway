@@ -10,10 +10,11 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.12",
+  "configVersion": "1.0.13",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
+    "bind": "127.0.0.1",
     "models": [
       { "id": "claude-fable-5[1m]",        "label": "Fable 5 (1M)",     "alias": "fable[1m]",   "contextWindow": 1000000 },
       { "id": "claude-opus-4-8[1m]",       "label": "Opus 4.8 (1M)",    "alias": "opus[1m]",    "contextWindow": 1000000 },

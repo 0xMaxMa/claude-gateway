@@ -225,6 +225,8 @@ ws://localhost:10850/api/v1/agents/<agentId>/pty-stream?session=<sessionId>
 
 Closes with code `4404` if the session is not running in PTY mode.
 
+**Direction:** the stream is server → client (live PTY output) by default, and the socket is bidirectional: inbound **text** frames carry raw keystroke bytes that are written into the live PTY (interactive terminal mode), bounded per frame and dropped for headless sessions. A dashboard viewer only sends these frames while its mode toggle is in input mode (a client-side choice); binary and oversized/empty frames are always dropped. Access is protected by the socket's auth (ticket/API key) and the localhost-default [`gateway.bind`](README.md#gatewaybind) — see the [Terminal Viewer](README.md#terminal-viewer--interactive-terminal-mode) docs.
+
 **Auth levels:** `Key` = any valid API key, `Write` = key with write access to the agent, `Admin` = key with `agents: "*"`.
 
 ---

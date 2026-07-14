@@ -314,6 +314,31 @@ Recovery actions are clamped to a per-stage whitelist and a per-turn budget, and
 }
 ```
 
+### `gateway.bind`
+
+Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.
+
+```json
+{
+  "gateway": {
+    "bind": "127.0.0.1"
+  }
+}
+```
+
+> **⚠️ Upgrade note (configVersion 1.0.13):** the default bind changed from `0.0.0.0` to `127.0.0.1`. If you reach the dashboard/API from another host — most commonly through a **containerized** reverse proxy that connects across the container boundary — the gateway will no longer be reachable after upgrading unless you opt back in explicitly by setting `gateway.bind` to `0.0.0.0` (or the `GATEWAY_BIND` env var). Deployments that only use a host-network proxy or access the dashboard on `localhost` need no change.
+
+### Terminal Viewer — interactive terminal mode
+
+The dashboard's **Terminal Viewer** opens read-only (a live mirror of the PTY). A toggle in the top-right of the viewer switches it into an **interactive terminal**: keystrokes typed into the panel — printable characters, Enter, arrows, Ctrl-combos, Esc — are streamed into the live PTY, and the panel title changes to reflect the active mode. This is a per-browser client-side choice (Issue #201); there is no server config flag to enable it.
+
+Because interactive mode turns a read-only view into a remote-write surface, access is protected upstream rather than by a feature flag:
+
+- **Authentication** — the WebSocket requires a valid dashboard ticket or API key.
+- **`gateway.bind`** — the gateway binds to `127.0.0.1` (localhost) by default, so the dashboard is not reachable from the network out of the box. Expose a non-loopback bind (`0.0.0.0`) **only** behind a trusted authenticating reverse proxy.
+
+Inbound frames are always bounded (text-only, size-capped) and are dropped for headless sessions (no PTY).
+
 ### `gateway.api.keys`
 
 Each key has a `key` string (supports `${ENV_VAR}` interpolation), an optional `description`, and an `agents` field — either an array of agent IDs or `"*"` for full access. Keys support both `Authorization: Bearer` and `X-Api-Key` headers.
@@ -506,7 +531,7 @@ The gateway proxies `/app/:name/:portName/*` to the app containers. Two env vars
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `GATEWAY_BIND` | `0.0.0.0` | Gateway HTTP listen address. Must be `0.0.0.0` (default) when a **containerized** reverse proxy (Caddy, nginx in Docker) needs to reach the gateway. Set to `127.0.0.1` only if using a **host-network** proxy (Traefik on host) — loopback is not reachable across container boundaries. |
+| `GATEWAY_BIND` | `127.0.0.1` | Gateway HTTP listen address. Overrides the `gateway.bind` config field when set. Defaults to localhost-only; set to `0.0.0.0` when a **containerized** reverse proxy (Caddy, nginx in Docker) needs to reach the gateway across container boundaries. A **host-network** proxy (Traefik on host) can keep the localhost default. |
 | `DOCKER_HOST` | _(system default)_ | Docker socket/TCP address. When set to `tcp://host:port` (e.g. DinD), the gateway automatically uses the host extracted from `DOCKER_HOST` to proxy to app containers instead of `127.0.0.1`. |
 
 Example Caddyfile for apps behind Caddy in Docker:

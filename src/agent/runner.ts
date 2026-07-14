@@ -484,6 +484,24 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Route raw interactive-terminal input to the session with this actual
+   * sessionId (Issue #201). The dashboard's Terminal Viewer input mode
+   * streams keystrokes here via the pty-stream WebSocket. Sessions are keyed by
+   * chatId internally, so we match on the process's own sessionId. Returns true
+   * only when a live pty-shell session accepted the bytes (headless / missing /
+   * not-writable → false), so the caller can surface an accurate result.
+   */
+  sendInputToSession(sessionId: string, data: string): boolean {
+    if (!sessionId || typeof data !== 'string' || data.length === 0) return false;
+    for (const proc of this.sessions.values()) {
+      if (proc.sessionId === sessionId) {
+        return proc.sendInput(data);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Build the recovery effects bound to one chat's session (Phase 3b). Each
    * effect resolves the session fresh so it survives a restart mid-recovery.
    * Keystroke effects go through the wrapper control channel; restart/backend
