@@ -12,6 +12,7 @@ import {
   pruneAgentPaths,
   repairInjectedAgentFields,
   AGENT_CREDENTIAL_FIELDS,
+  BIND_PRESERVED_WARNING,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -902,6 +903,81 @@ describe('config-migrator', () => {
       for (const field of expected) {
         expect(AGENT_CREDENTIAL_FIELDS.has(field)).toBe(true);
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // gateway.bind behavior-preserving migration (Issue #204)
+  // ---------------------------------------------------------------------------
+  describe('gateway.bind behavior-preserving migration', () => {
+    const template = (): string =>
+      writeJson('template.json', { configVersion: '1.3.28', gateway: { timezone: 'UTC' } });
+
+    it('pins gateway.bind to 0.0.0.0 when migrating a pre-1.3.26 config that never set it', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.3.25',
+        gateway: { logDir: '/logs' },
+      });
+      const result = migrateConfig(configPath, template(), '1.3.28');
+
+      expect(result.migrated).toBe(true);
+      expect(result.addedFields).toContain('gateway.bind');
+      expect(result.warnings).toContain(BIND_PRESERVED_WARNING);
+
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.bind).toBe('0.0.0.0');
+    });
+
+    it('does not touch bind when migrating a config already on >= 1.3.26', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.3.26',
+        gateway: { logDir: '/logs' },
+      });
+      const result = migrateConfig(configPath, template(), '1.3.28');
+
+      expect(result.addedFields).not.toContain('gateway.bind');
+      expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.bind).toBeUndefined();
+    });
+
+    it('never overwrites an explicit bind on a pre-1.3.26 config', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.3.25',
+        gateway: { bind: '127.0.0.1', logDir: '/logs' },
+      });
+      const result = migrateConfig(configPath, template(), '1.3.28');
+
+      expect(result.addedFields).not.toContain('gateway.bind');
+      expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.bind).toBe('127.0.0.1'); // preserved as-is
+    });
+
+    it('detectMigration dry-run reports gateway.bind without writing to disk', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.3.25',
+        gateway: { logDir: '/logs' },
+      });
+      const result = detectMigration(configPath, template(), '1.3.28');
+
+      expect(result.needed).toBe(true);
+      expect(result.addedFields).toContain('gateway.bind');
+      expect(result.warnings).toContain(BIND_PRESERVED_WARNING);
+
+      // Dry-run must not mutate the file on disk.
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(onDisk.configVersion).toBe('1.3.25');
+      expect(onDisk.gateway.bind).toBeUndefined();
+    });
+
+    it('does not pin bind for a fresh install (no prior config)', () => {
+      const missingConfigPath = path.join(tmpDir, 'does-not-exist.json');
+      const result = detectMigration(missingConfigPath, template(), '1.3.28');
+
+      expect(result.needed).toBe(false);
+      expect(result.addedFields).not.toContain('gateway.bind');
+      expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
     });
   });
 });
