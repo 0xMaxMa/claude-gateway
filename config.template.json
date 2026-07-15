@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.13",
+  "configVersion": "1.0.14",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",

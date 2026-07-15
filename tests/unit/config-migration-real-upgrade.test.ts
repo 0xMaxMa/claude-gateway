@@ -174,4 +174,29 @@ describe('config migration — real v1.3.25 -> current upgrade (Issue #204)', ()
     const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(migrated.gateway.bind).toBe('127.0.0.1');
   });
+
+  // F) The exact field report: a config stamped at the PREVIOUS template
+  //    version (1.0.13) with no bind key was stuck on the 127.0.0.1 runtime
+  //    default because migration either did not run or was version-gated out.
+  //    With the current template ahead of it, the upgrade must now reach it and
+  //    pin 0.0.0.0. Uses the literal 1.0.13 (the version that shipped the
+  //    localhost default) rather than templateVersion() so the regression stays
+  //    pinned to the real broken value even after future version bumps.
+  it('F) a 1.0.13 config with no bind key upgrades to "0.0.0.0"', () => {
+    // Guard: this scenario is only meaningful while the template is ahead of
+    // 1.0.13, otherwise no migration runs and there is nothing to assert.
+    expect(templateVersion()).not.toBe('1.0.13');
+    const configPath = writeConfig({
+      configVersion: '1.0.13',
+      gateway: { logDir: '/logs' },
+      agents: [],
+    });
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.warnings).toContain(BIND_PRESERVED_WARNING);
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.bind).toBe('0.0.0.0');
+  });
 });

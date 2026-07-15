@@ -909,9 +909,11 @@ describe('config-migrator', () => {
   // ---------------------------------------------------------------------------
   // gateway.bind behavior-preserving migration (Issue #204)
   // ---------------------------------------------------------------------------
-  // The localhost-only bind default landed at configVersion 1.0.13 (package
-  // v1.3.26). configVersion is a 1.0.x series, SEPARATE from the release
-  // version — these tests use the real configVersion scale, not 1.3.x.
+  // Any config that reaches a migration without a `bind` key predates the
+  // localhost-only default and was externally reachable, so migration pins
+  // "0.0.0.0" regardless of its configVersion (there is no version gate — an
+  // earlier `< 1.0.13` gate wrongly skipped configs already stamped 1.0.13).
+  // A fresh install carries bind from the template and never migrates.
   describe('gateway.bind behavior-preserving migration', () => {
     // Mirror the real config.template.json, which ships gateway.bind = "127.0.0.1".
     // The template MUST carry bind here, otherwise the test misses the deepMerge
@@ -922,7 +924,7 @@ describe('config-migrator', () => {
         gateway: { timezone: 'UTC', bind: '127.0.0.1' },
       });
 
-    it('pins gateway.bind to 0.0.0.0 when migrating a pre-1.0.13 config that never set it', () => {
+    it('pins gateway.bind to 0.0.0.0 when migrating a config that never set it', () => {
       const configPath = writeJson('config.json', {
         configVersion: '1.0.12',
         gateway: { logDir: '/logs' },
@@ -937,19 +939,21 @@ describe('config-migrator', () => {
       expect(updated.gateway.bind).toBe('0.0.0.0');
     });
 
-    it('does not pin at the 1.0.13 boundary — takes the template localhost default instead', () => {
+    // Regression for the field report: a config already stamped 1.0.13 with no
+    // bind key was left on the 127.0.0.1 runtime default because the old
+    // `< 1.0.13` gate skipped it. It must now pin 0.0.0.0 like any other
+    // no-bind upgrade.
+    it('pins gateway.bind to 0.0.0.0 for a 1.0.13 config that never set bind', () => {
       const configPath = writeJson('config.json', {
         configVersion: '1.0.13',
         gateway: { logDir: '/logs' },
       });
       const result = migrateConfig(configPath, template(), '1.0.14');
 
-      expect(result.migrated).toBe(true); // migration still runs (1.0.13 < 1.0.14)
-      // Our preserve logic must NOT fire (no 0.0.0.0, no warning); the config
-      // simply inherits the template's secure localhost default via deepMerge.
-      expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
+      expect(result.migrated).toBe(true); // migration runs (1.0.13 < 1.0.14)
+      expect(result.warnings).toContain(BIND_PRESERVED_WARNING);
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(updated.gateway.bind).toBe('127.0.0.1');
+      expect(updated.gateway.bind).toBe('0.0.0.0');
     });
 
     it('never overwrites an explicit bind on a pre-1.0.13 config', () => {

@@ -226,15 +226,6 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-/**
- * `configVersion` at which the localhost-only `gateway.bind` default landed
- * (Issue #201 / PR #202, shipped in package v1.3.26). Note: `configVersion`
- * (config.json schema version, currently 1.0.x) is a SEPARATE series from the
- * package/release version (1.3.x) — the gate below compares against the
- * config schema version, not the release version.
- */
-const BIND_LOCALHOST_DEFAULT_CONFIG_VERSION = '1.0.13';
-
 /** Warning surfaced when a migration pins `gateway.bind` to preserve external access (Issue #204). */
 export const BIND_PRESERVED_WARNING =
   'gateway.bind was pinned to "0.0.0.0" to preserve external API/dashboard access across this upgrade. ' +
@@ -243,24 +234,25 @@ export const BIND_PRESERVED_WARNING =
 /**
  * Behavior-preserving migration for `gateway.bind` (Issue #204).
  *
- * configVersion 1.0.13 (package v1.3.26, #201/#202) made the server default to
- * binding 127.0.0.1 when `gateway.bind` is unset. Configs written before that
- * schema version were implicitly bound to 0.0.0.0, so silently applying the new
- * localhost default cuts off external API/dashboard access with no warning. To
- * preserve prior behavior, pin `bind` to "0.0.0.0" for configs older than
- * 1.0.13 that never set it. Fresh installs (no prior config, so no migration
- * runs) keep the secure localhost default.
+ * The localhost-only `gateway.bind` default (Issue #201 / PR #202) makes the
+ * server bind 127.0.0.1 when `gateway.bind` is unset, which silently cuts off
+ * external API/dashboard access for any pre-existing deployment that used to be
+ * reachable on all interfaces.
+ *
+ * This runs ONLY inside a migration, which fires only when the config's
+ * `configVersion` is OLDER than the template's — i.e. only for configs that are
+ * being upgraded, never for fresh installs (a fresh install copies the template
+ * verbatim, so it already carries `bind: "127.0.0.1"` and no migration runs).
+ * Therefore any config that reaches this point WITHOUT a `bind` key predates the
+ * localhost default and was externally reachable, so we pin "0.0.0.0" to
+ * preserve that. We do NOT gate on a specific configVersion: an earlier gate of
+ * `< 1.0.13` wrongly skipped configs already stamped 1.0.13 that never got a
+ * bind, leaving them on the 127.0.0.1 runtime default with no way to recover.
  *
  * Mutates `config` in place when it pins the value. Returns the added field
  * path (`gateway.bind`) if pinned, otherwise null.
  */
-function preserveBindDefault(
-  config: Record<string, unknown>,
-  fromVersion: string,
-): string | null {
-  // Only configs older than the localhost-default schema version were bound to all interfaces.
-  if (compareSemver(fromVersion, BIND_LOCALHOST_DEFAULT_CONFIG_VERSION) >= 0) return null;
-
+function preserveBindDefault(config: Record<string, unknown>): string | null {
   const gateway = config.gateway;
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return null;
 
@@ -395,10 +387,10 @@ export function detectMigration(
   const added: string[] = [];
   const warnings: string[] = [];
 
-  // Preserve external bind behavior for pre-1.0.13 configs (Issue #204) BEFORE
-  // the template merge — mirrors applyMigration so the dry-run reports the same
+  // Preserve external bind for an upgrading config (Issue #204) BEFORE the
+  // template merge — mirrors applyMigration so the dry-run reports the same
   // gateway.bind = "0.0.0.0" instead of the template's localhost default.
-  const bindField = preserveBindDefault(configClone, configVersion);
+  const bindField = preserveBindDefault(configClone);
   if (bindField) {
     added.push(bindField);
     warnings.push(BIND_PRESERVED_WARNING);
@@ -475,15 +467,12 @@ export function applyMigration(
   const added: string[] = [];
   const warnings: string[] = [];
 
-  // Capture the pre-migration version before configVersion is overwritten below.
-  const fromVersion = (config.configVersion as string) ?? '0.0.0';
-
-  // Preserve external bind behavior for pre-1.0.13 configs (Issue #204) BEFORE
-  // the template merge: config.template.json ships gateway.bind = "127.0.0.1",
-  // and deepMerge would inject that localhost default into a config that never
-  // set bind. Pinning here first means deepMerge (which only adds missing keys)
+  // Preserve external bind for an upgrading config (Issue #204) BEFORE the
+  // template merge: config.template.json ships gateway.bind = "127.0.0.1", and
+  // deepMerge would inject that localhost default into a config that never set
+  // bind. Pinning here first means deepMerge (which only adds missing keys)
   // leaves our 0.0.0.0 untouched, so old deployments keep external access.
-  const bindField = preserveBindDefault(config, fromVersion);
+  const bindField = preserveBindDefault(config);
   if (bindField) {
     added.push(bindField);
     warnings.push(BIND_PRESERVED_WARNING);
