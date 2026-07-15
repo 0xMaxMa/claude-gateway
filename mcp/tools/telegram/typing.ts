@@ -13,13 +13,16 @@
  *   STATE_DIR/typing/{chatId}.error     — written by AgentRunner on session failure
  */
 
+// Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
+// so a src/ import crashes this bun-run tool on installed packages. Enforced by
+// tests/unit/mcp-no-src-imports.test.ts.
 import {
   classifyTurn,
   type TurnObservation,
   type TurnStage,
   type TurnIncidentSink,
   type TurnIncidentEvidence,
-} from '../../../src/agent/turn-trace'
+} from '../../../dist/agent/turn-trace.js'
 
 export const TELEGRAM_MAX_CHARS = 4096
 

@@ -161,8 +161,10 @@ export async function installSkill(params: InstallSkillParams): Promise<string> 
     throw new Error(`SKILL.md exceeds ${MAX_SKILL_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB)`);
   }
 
-  // Parse frontmatter to extract name
-  const { extractFrontmatter } = await import('../../../src/skills/parser');
+  // Parse frontmatter to extract name. Import compiled dist/, not raw src/ —
+  // src/ is not published (files: ["mcp/"]), so a src/ import throws "Cannot find
+  // module" on installed packages. Enforced by mcp-no-src-imports.test.ts.
+  const { extractFrontmatter } = await import('../../../dist/skills/parser.js');
   const extracted = extractFrontmatter(content);
   if (!extracted) {
     throw new Error('Invalid SKILL.md: no valid YAML frontmatter found.');

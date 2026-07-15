@@ -30,9 +30,13 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards } from './typing'
-import { formatTurnIncident, type TurnIncident } from '../../../src/agent/turn-trace'
-import { createIncidentStore } from '../../../src/agent/incident-store'
-import type { RecoveryOutcome } from '../../../src/agent/incident'
+// Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
+// so a src/ import crashes this bun-run receiver on installed packages (the bug
+// that silenced every bot on systemd installs). Enforced by
+// tests/unit/mcp-no-src-imports.test.ts.
+import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-trace.js'
+import { createIncidentStore } from '../../../dist/agent/incident-store.js'
+import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
 
