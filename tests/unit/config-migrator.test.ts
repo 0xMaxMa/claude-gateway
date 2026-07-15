@@ -909,16 +909,19 @@ describe('config-migrator', () => {
   // ---------------------------------------------------------------------------
   // gateway.bind behavior-preserving migration (Issue #204)
   // ---------------------------------------------------------------------------
+  // The localhost-only bind default landed at configVersion 1.0.13 (package
+  // v1.3.26). configVersion is a 1.0.x series, SEPARATE from the release
+  // version — these tests use the real configVersion scale, not 1.3.x.
   describe('gateway.bind behavior-preserving migration', () => {
     const template = (): string =>
-      writeJson('template.json', { configVersion: '1.3.28', gateway: { timezone: 'UTC' } });
+      writeJson('template.json', { configVersion: '1.0.14', gateway: { timezone: 'UTC' } });
 
-    it('pins gateway.bind to 0.0.0.0 when migrating a pre-1.3.26 config that never set it', () => {
+    it('pins gateway.bind to 0.0.0.0 when migrating a pre-1.0.13 config that never set it', () => {
       const configPath = writeJson('config.json', {
-        configVersion: '1.3.25',
+        configVersion: '1.0.12',
         gateway: { logDir: '/logs' },
       });
-      const result = migrateConfig(configPath, template(), '1.3.28');
+      const result = migrateConfig(configPath, template(), '1.0.14');
 
       expect(result.migrated).toBe(true);
       expect(result.addedFields).toContain('gateway.bind');
@@ -928,25 +931,26 @@ describe('config-migrator', () => {
       expect(updated.gateway.bind).toBe('0.0.0.0');
     });
 
-    it('does not touch bind when migrating a config already on >= 1.3.26', () => {
+    it('does not touch bind at the 1.0.13 boundary (localhost default already applied)', () => {
       const configPath = writeJson('config.json', {
-        configVersion: '1.3.26',
+        configVersion: '1.0.13',
         gateway: { logDir: '/logs' },
       });
-      const result = migrateConfig(configPath, template(), '1.3.28');
+      const result = migrateConfig(configPath, template(), '1.0.14');
 
+      expect(result.migrated).toBe(true); // migration still runs (1.0.13 < 1.0.14)
       expect(result.addedFields).not.toContain('gateway.bind');
       expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(updated.gateway.bind).toBeUndefined();
     });
 
-    it('never overwrites an explicit bind on a pre-1.3.26 config', () => {
+    it('never overwrites an explicit bind on a pre-1.0.13 config', () => {
       const configPath = writeJson('config.json', {
-        configVersion: '1.3.25',
+        configVersion: '1.0.12',
         gateway: { bind: '127.0.0.1', logDir: '/logs' },
       });
-      const result = migrateConfig(configPath, template(), '1.3.28');
+      const result = migrateConfig(configPath, template(), '1.0.14');
 
       expect(result.addedFields).not.toContain('gateway.bind');
       expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
@@ -956,10 +960,10 @@ describe('config-migrator', () => {
 
     it('detectMigration dry-run reports gateway.bind without writing to disk', () => {
       const configPath = writeJson('config.json', {
-        configVersion: '1.3.25',
+        configVersion: '1.0.12',
         gateway: { logDir: '/logs' },
       });
-      const result = detectMigration(configPath, template(), '1.3.28');
+      const result = detectMigration(configPath, template(), '1.0.14');
 
       expect(result.needed).toBe(true);
       expect(result.addedFields).toContain('gateway.bind');
@@ -967,13 +971,13 @@ describe('config-migrator', () => {
 
       // Dry-run must not mutate the file on disk.
       const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(onDisk.configVersion).toBe('1.3.25');
+      expect(onDisk.configVersion).toBe('1.0.12');
       expect(onDisk.gateway.bind).toBeUndefined();
     });
 
     it('does not pin bind for a fresh install (no prior config)', () => {
       const missingConfigPath = path.join(tmpDir, 'does-not-exist.json');
-      const result = detectMigration(missingConfigPath, template(), '1.3.28');
+      const result = detectMigration(missingConfigPath, template(), '1.0.14');
 
       expect(result.needed).toBe(false);
       expect(result.addedFields).not.toContain('gateway.bind');

@@ -226,8 +226,14 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-/** Version that introduced the localhost-only `gateway.bind` default (Issue #201 / PR #202). */
-const BIND_LOCALHOST_DEFAULT_VERSION = '1.3.26';
+/**
+ * `configVersion` at which the localhost-only `gateway.bind` default landed
+ * (Issue #201 / PR #202, shipped in package v1.3.26). Note: `configVersion`
+ * (config.json schema version, currently 1.0.x) is a SEPARATE series from the
+ * package/release version (1.3.x) — the gate below compares against the
+ * config schema version, not the release version.
+ */
+const BIND_LOCALHOST_DEFAULT_CONFIG_VERSION = '1.0.13';
 
 /** Warning surfaced when a migration pins `gateway.bind` to preserve external access (Issue #204). */
 export const BIND_PRESERVED_WARNING =
@@ -237,13 +243,13 @@ export const BIND_PRESERVED_WARNING =
 /**
  * Behavior-preserving migration for `gateway.bind` (Issue #204).
  *
- * v1.3.26 (#201/#202) made the server default to binding 127.0.0.1 when
- * `gateway.bind` is unset. Deployments upgrading from an earlier version were
- * implicitly bound to 0.0.0.0, so silently applying the new localhost default
- * cuts off external API/dashboard access with no warning. To preserve prior
- * behavior, pin `bind` to "0.0.0.0" for pre-1.3.26 configs that never set it.
- * Fresh installs (no prior config, so no migration runs) keep the secure
- * localhost default.
+ * configVersion 1.0.13 (package v1.3.26, #201/#202) made the server default to
+ * binding 127.0.0.1 when `gateway.bind` is unset. Configs written before that
+ * schema version were implicitly bound to 0.0.0.0, so silently applying the new
+ * localhost default cuts off external API/dashboard access with no warning. To
+ * preserve prior behavior, pin `bind` to "0.0.0.0" for configs older than
+ * 1.0.13 that never set it. Fresh installs (no prior config, so no migration
+ * runs) keep the secure localhost default.
  *
  * Mutates `config` in place when it pins the value. Returns the added field
  * path (`gateway.bind`) if pinned, otherwise null.
@@ -252,8 +258,8 @@ function preserveBindDefault(
   config: Record<string, unknown>,
   fromVersion: string,
 ): string | null {
-  // Only pre-1.3.26 configs were implicitly bound to all interfaces.
-  if (compareSemver(fromVersion, BIND_LOCALHOST_DEFAULT_VERSION) >= 0) return null;
+  // Only configs older than the localhost-default schema version were bound to all interfaces.
+  if (compareSemver(fromVersion, BIND_LOCALHOST_DEFAULT_CONFIG_VERSION) >= 0) return null;
 
   const gateway = config.gateway;
   if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return null;
