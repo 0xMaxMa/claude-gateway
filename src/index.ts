@@ -454,6 +454,9 @@ async function main(): Promise<void> {
       if (migration.addedFields.length) parts.push(`added: ${migration.addedFields.join(', ')}`);
       if (migration.removedFields.length) parts.push(`removed: ${migration.removedFields.join(', ')}`);
       console.log(`[gateway] Config ${parts.join(', ')}.`);
+      for (const warning of migration.warnings) {
+        console.warn(`[gateway] ${warning}`);
+      }
     }
   } catch (err) {
     console.warn(`[gateway] Config migration skipped: ${(err as Error).message}`);

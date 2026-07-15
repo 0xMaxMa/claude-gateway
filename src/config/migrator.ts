@@ -5,6 +5,7 @@ export interface MigrationResult {
   migrated: boolean;
   addedFields: string[];
   removedFields: string[];
+  warnings: string[];
 }
 
 export interface DetectMigrationResult {
@@ -13,6 +14,7 @@ export interface DetectMigrationResult {
   toVersion: string;
   addedFields: string[];
   removedFields: string[];
+  warnings: string[];
   config: Record<string, unknown>;
   template: Record<string, unknown>;
 }
@@ -225,6 +227,52 @@ function compareSemver(a: string, b: string): number {
 }
 
 /**
+ * `configVersion` at which the localhost-only `gateway.bind` default landed
+ * (Issue #201 / PR #202, shipped in package v1.3.26). Note: `configVersion`
+ * (config.json schema version, currently 1.0.x) is a SEPARATE series from the
+ * package/release version (1.3.x) — the gate below compares against the
+ * config schema version, not the release version.
+ */
+const BIND_LOCALHOST_DEFAULT_CONFIG_VERSION = '1.0.13';
+
+/** Warning surfaced when a migration pins `gateway.bind` to preserve external access (Issue #204). */
+export const BIND_PRESERVED_WARNING =
+  'gateway.bind was pinned to "0.0.0.0" to preserve external API/dashboard access across this upgrade. ' +
+  'Set gateway.bind to "127.0.0.1" in config.json if you do not need access from outside this host.';
+
+/**
+ * Behavior-preserving migration for `gateway.bind` (Issue #204).
+ *
+ * configVersion 1.0.13 (package v1.3.26, #201/#202) made the server default to
+ * binding 127.0.0.1 when `gateway.bind` is unset. Configs written before that
+ * schema version were implicitly bound to 0.0.0.0, so silently applying the new
+ * localhost default cuts off external API/dashboard access with no warning. To
+ * preserve prior behavior, pin `bind` to "0.0.0.0" for configs older than
+ * 1.0.13 that never set it. Fresh installs (no prior config, so no migration
+ * runs) keep the secure localhost default.
+ *
+ * Mutates `config` in place when it pins the value. Returns the added field
+ * path (`gateway.bind`) if pinned, otherwise null.
+ */
+function preserveBindDefault(
+  config: Record<string, unknown>,
+  fromVersion: string,
+): string | null {
+  // Only configs older than the localhost-default schema version were bound to all interfaces.
+  if (compareSemver(fromVersion, BIND_LOCALHOST_DEFAULT_CONFIG_VERSION) >= 0) return null;
+
+  const gateway = config.gateway;
+  if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return null;
+
+  const g = gateway as Record<string, unknown>;
+  // Respect any explicit bind the user already set — never overwrite.
+  if ('bind' in g) return null;
+
+  g.bind = '0.0.0.0';
+  return 'gateway.bind';
+}
+
+/**
  * Load a template file, extract the _migration metadata, strip it,
  * and return the clean template along with the ignorePaths set.
  */
@@ -308,6 +356,7 @@ export function detectMigration(
     toVersion: templateVersion,
     addedFields: [],
     removedFields: [],
+    warnings: [],
     config,
     template,
   });
@@ -384,6 +433,14 @@ export function detectMigration(
     );
   }
 
+  // Preserve external bind behavior for pre-1.3.26 configs (Issue #204)
+  const warnings: string[] = [];
+  const bindField = preserveBindDefault(configClone, configVersion);
+  if (bindField) {
+    added.push(bindField);
+    warnings.push(BIND_PRESERVED_WARNING);
+  }
+
   // configVersion will always be updated
   if (!added.includes('configVersion')) {
     added.push('configVersion');
@@ -395,6 +452,7 @@ export function detectMigration(
     toVersion: templateVersion,
     addedFields: added,
     removedFields: removed,
+    warnings,
     config,
     template,
   };
@@ -413,6 +471,10 @@ export function applyMigration(
   removePaths?: string[],
 ): MigrationResult {
   const added: string[] = [];
+  const warnings: string[] = [];
+
+  // Capture the pre-migration version before configVersion is overwritten below.
+  const fromVersion = (config.configVersion as string) ?? '0.0.0';
 
   // Deep-merge top-level keys (except agents)
   const templateWithoutAgents = { ...template };
@@ -453,6 +515,13 @@ export function applyMigration(
     );
   }
 
+  // Preserve external bind behavior for pre-1.3.26 configs (Issue #204)
+  const bindField = preserveBindDefault(config, fromVersion);
+  if (bindField) {
+    added.push(bindField);
+    warnings.push(BIND_PRESERVED_WARNING);
+  }
+
   // Update configVersion
   config.configVersion = templateVersion;
   if (!added.includes('configVersion')) {
@@ -468,7 +537,7 @@ export function applyMigration(
   fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
   fs.renameSync(tmpPath, configPath);
 
-  return { migrated: true, addedFields: added, removedFields: removed };
+  return { migrated: true, addedFields: added, removedFields: removed, warnings };
 }
 
 /**
@@ -485,7 +554,7 @@ export function migrateConfig(
   const detection = detectMigration(configPath, templatePath, templateVersion);
 
   if (!detection.needed) {
-    return { migrated: false, addedFields: [], removedFields: [] };
+    return { migrated: false, addedFields: [], removedFields: [], warnings: [] };
   }
 
   // Load ignorePaths and removePaths again for the actual merge

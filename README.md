@@ -326,7 +326,7 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 }
 ```
 
-> **⚠️ Upgrade note (configVersion 1.0.13):** the default bind changed from `0.0.0.0` to `127.0.0.1`. If you reach the dashboard/API from another host — most commonly through a **containerized** reverse proxy that connects across the container boundary — the gateway will no longer be reachable after upgrading unless you opt back in explicitly by setting `gateway.bind` to `0.0.0.0` (or the `GATEWAY_BIND` env var). Deployments that only use a host-network proxy or access the dashboard on `localhost` need no change.
+> **⚠️ Upgrade note (configVersion 1.0.13):** the default bind changed from `0.0.0.0` to `127.0.0.1`. To avoid silently cutting off external access, the config migrator is **behavior-preserving**: when it upgrades a config created before this change and that config never set `gateway.bind`, it pins `bind` to `0.0.0.0` and logs a one-time warning, so a deployment that was reachable from another host stays reachable. New installs (no prior config, so no migration runs) keep the secure `127.0.0.1` default. If you *want* localhost-only after upgrading, set `gateway.bind` to `127.0.0.1` explicitly (or the `GATEWAY_BIND` env var).
 
 ### Terminal Viewer — interactive terminal mode
 
