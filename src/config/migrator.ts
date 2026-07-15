@@ -393,6 +393,16 @@ export function detectMigration(
   // Dry-run merge on a clone to detect what would be added/removed
   const configClone = structuredClone(config);
   const added: string[] = [];
+  const warnings: string[] = [];
+
+  // Preserve external bind behavior for pre-1.0.13 configs (Issue #204) BEFORE
+  // the template merge — mirrors applyMigration so the dry-run reports the same
+  // gateway.bind = "0.0.0.0" instead of the template's localhost default.
+  const bindField = preserveBindDefault(configClone, configVersion);
+  if (bindField) {
+    added.push(bindField);
+    warnings.push(BIND_PRESERVED_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
@@ -433,14 +443,6 @@ export function detectMigration(
     );
   }
 
-  // Preserve external bind behavior for pre-1.3.26 configs (Issue #204)
-  const warnings: string[] = [];
-  const bindField = preserveBindDefault(configClone, configVersion);
-  if (bindField) {
-    added.push(bindField);
-    warnings.push(BIND_PRESERVED_WARNING);
-  }
-
   // configVersion will always be updated
   if (!added.includes('configVersion')) {
     added.push('configVersion');
@@ -475,6 +477,17 @@ export function applyMigration(
 
   // Capture the pre-migration version before configVersion is overwritten below.
   const fromVersion = (config.configVersion as string) ?? '0.0.0';
+
+  // Preserve external bind behavior for pre-1.0.13 configs (Issue #204) BEFORE
+  // the template merge: config.template.json ships gateway.bind = "127.0.0.1",
+  // and deepMerge would inject that localhost default into a config that never
+  // set bind. Pinning here first means deepMerge (which only adds missing keys)
+  // leaves our 0.0.0.0 untouched, so old deployments keep external access.
+  const bindField = preserveBindDefault(config, fromVersion);
+  if (bindField) {
+    added.push(bindField);
+    warnings.push(BIND_PRESERVED_WARNING);
+  }
 
   // Deep-merge top-level keys (except agents)
   const templateWithoutAgents = { ...template };
@@ -513,13 +526,6 @@ export function applyMigration(
         templateCreds,
       ),
     );
-  }
-
-  // Preserve external bind behavior for pre-1.3.26 configs (Issue #204)
-  const bindField = preserveBindDefault(config, fromVersion);
-  if (bindField) {
-    added.push(bindField);
-    warnings.push(BIND_PRESERVED_WARNING);
   }
 
   // Update configVersion

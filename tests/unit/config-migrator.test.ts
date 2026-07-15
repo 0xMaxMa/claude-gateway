@@ -913,8 +913,14 @@ describe('config-migrator', () => {
   // v1.3.26). configVersion is a 1.0.x series, SEPARATE from the release
   // version — these tests use the real configVersion scale, not 1.3.x.
   describe('gateway.bind behavior-preserving migration', () => {
+    // Mirror the real config.template.json, which ships gateway.bind = "127.0.0.1".
+    // The template MUST carry bind here, otherwise the test misses the deepMerge
+    // interaction that leaks the localhost default into old configs (Issue #204).
     const template = (): string =>
-      writeJson('template.json', { configVersion: '1.0.14', gateway: { timezone: 'UTC' } });
+      writeJson('template.json', {
+        configVersion: '1.0.14',
+        gateway: { timezone: 'UTC', bind: '127.0.0.1' },
+      });
 
     it('pins gateway.bind to 0.0.0.0 when migrating a pre-1.0.13 config that never set it', () => {
       const configPath = writeJson('config.json', {
@@ -931,7 +937,7 @@ describe('config-migrator', () => {
       expect(updated.gateway.bind).toBe('0.0.0.0');
     });
 
-    it('does not touch bind at the 1.0.13 boundary (localhost default already applied)', () => {
+    it('does not pin at the 1.0.13 boundary — takes the template localhost default instead', () => {
       const configPath = writeJson('config.json', {
         configVersion: '1.0.13',
         gateway: { logDir: '/logs' },
@@ -939,10 +945,11 @@ describe('config-migrator', () => {
       const result = migrateConfig(configPath, template(), '1.0.14');
 
       expect(result.migrated).toBe(true); // migration still runs (1.0.13 < 1.0.14)
-      expect(result.addedFields).not.toContain('gateway.bind');
+      // Our preserve logic must NOT fire (no 0.0.0.0, no warning); the config
+      // simply inherits the template's secure localhost default via deepMerge.
       expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
       const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(updated.gateway.bind).toBeUndefined();
+      expect(updated.gateway.bind).toBe('127.0.0.1');
     });
 
     it('never overwrites an explicit bind on a pre-1.0.13 config', () => {
