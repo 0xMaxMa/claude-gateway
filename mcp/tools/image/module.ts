@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as dns from 'node:dns';
+import * as net from 'node:net';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 
 /**
@@ -19,6 +21,11 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_POLL_TIMEOUT_MS = 150_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+// deliver() hardening: cap per-image download (a provider URL could stream GBs →
+// OOM) and cap how many images we write per job (unbounded sequential downloads
+// would hang the tool ~N×30s).
+const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024; // 25 MB per image
+const MAX_DELIVER_IMAGES = 10;
 
 /** Human-readable guidance per api error code (contract §6 taxonomy). */
 const ERROR_HINTS: Record<string, string> = {
@@ -26,6 +33,7 @@ const ERROR_HINTS: Record<string, string> = {
   model_not_image: 'That model is not an image model. Use action="list" to pick an image-capable model.',
   missing_prompt: 'A non-empty prompt is required to generate an image.',
   unsupported_quality: 'The requested quality is not supported by this model. Check supported_qualities from action="list".',
+  image_ref_unsupported: 'This model cannot take a reference image (supports_image_ref is false). Either retry WITHOUT the "image" param — look at the reference image yourself and describe it in the prompt (text-to-image) — or switch to a model whose supports_image_ref is true (see action="list").',
   unauthorized: 'The gateway is not authorised to call the image service (check the proxy secret).',
   insufficient_credit: 'Not enough daily credit to generate this image on the managed pool. Connect your own provider key (BYOK) or try later.',
   no_credential: 'No provider key is available: connect your own key (BYOK) or pick a pool-eligible model.',
@@ -53,8 +61,23 @@ export class ImageModule implements ToolModule {
 
   isEnabled(): boolean {
     // Enabled when the image service endpoint is configured (env-driven, like browser).
-    return !!this.baseUrl() && process.env.GETPOD_IMAGE_DISABLED !== 'true';
+    if (!this.baseUrl() || process.env.GETPOD_IMAGE_DISABLED === 'true') return false;
+    // The Bearer proxy_secret rides every call — refuse a cleartext http URL to a
+    // PUBLIC host (that would leak the secret). http to a local/internal host is a
+    // trusted hop (e.g. host.docker.internal in dev) and stays allowed.
+    if (!baseUrlIsSecure(this.baseUrl())) {
+      if (!this.warnedInsecureUrl) {
+        this.warnedInsecureUrl = true;
+        console.error(
+          `[image] GETPOD_IMAGE_URL is http to a non-local host — refusing to send the proxy secret in cleartext. Use https (or a local/internal host).`
+        );
+      }
+      return false;
+    }
+    return true;
   }
+
+  private warnedInsecureUrl = false;
 
   getTools(): McpToolDefinition[] {
     return imageToolDefs;
@@ -177,7 +200,7 @@ export class ImageModule implements ToolModule {
       }
       if (polled.httpError) return this.mapHttpError(polled.httpError.status, polled.httpError.body);
       last = polled.job!;
-      if (last.status === 'done') return this.deliver(last, taskId);
+      if (last.status === 'done') return await this.deliver(last, taskId);
       if (last.status === 'failed') return this.mapJobError(last);
     }
 
@@ -206,7 +229,7 @@ export class ImageModule implements ToolModule {
     if (polled.__transportError) return this.unavailable(polled.__transportError);
     if (polled.httpError) return this.mapHttpError(polled.httpError.status, polled.httpError.body);
     const job = polled.job!;
-    if (job.status === 'done') return this.deliver(job, taskId);
+    if (job.status === 'done') return await this.deliver(job, taskId);
     if (job.status === 'failed') return this.mapJobError(job);
     return {
       content: [{
@@ -244,9 +267,16 @@ export class ImageModule implements ToolModule {
     }
   }
 
-  /** Write done-job b64 images into the session media dir and return their paths. */
-  private deliver(job: JobResponse, taskId: string): McpToolResult {
-    const images = Array.isArray(job.images) ? job.images.filter((s) => typeof s === 'string' && s.length) : [];
+  /** Write done-job images into the session media dir and return their paths. Each
+   *  item is either base64 bytes (sync providers like openai/gemini) OR an https URL
+   *  (async providers like nanobanana/bfl/fal, which return a hosted file) — download
+   *  URLs, decode base64. */
+  private async deliver(job: JobResponse, taskId: string): Promise<McpToolResult> {
+    const allImages = Array.isArray(job.images) ? job.images.filter((s) => typeof s === 'string' && s.length) : [];
+    // Cap how many we process — downloads are sequential (~30s each), so an
+    // over-long list would hang the tool call far past the poll budget.
+    const images = allImages.slice(0, MAX_DELIVER_IMAGES);
+    const droppedImages = allImages.length - images.length;
     if (!images.length) {
       // done but empty buffer → result_expired (credit already spent, D20)
       const code = job.error?.code ?? 'result_expired';
@@ -257,14 +287,39 @@ export class ImageModule implements ToolModule {
     const files: string[] = [];
     try {
       fs.mkdirSync(mediaDir, { recursive: true });
-      images.forEach((b64, idx) => {
-        const buf = Buffer.from(b64, 'base64');
+      for (let idx = 0; idx < images.length; idx++) {
+        const item = images[idx]!;
+        let buf: Buffer;
+        if (/^https?:\/\//i.test(item)) {
+          // Async providers (nanobanana / bfl / fal / runway) return a hosted image
+          // URL — download the bytes. SSRF guard first: https-only + block any host
+          // that resolves to a private/loopback/link-local/metadata address, and
+          // redirect:'error' so a later hop can't bounce to an internal target.
+          await assertSafeImageUrl(item);
+          const res = await fetch(item, { signal: AbortSignal.timeout(30_000), redirect: 'error' });
+          if (!res.ok) throw new Error(`download image failed: HTTP ${res.status}`);
+          buf = await readCapped(res, DOWNLOAD_MAX_BYTES);
+        } else {
+          // Base64 bytes (openai / gemini / stability / hf) — tolerate a data: URI
+          // wrapper as well as raw base64.
+          const m = /^data:[^;,]*;base64,(.*)$/is.exec(item);
+          buf = Buffer.from(m ? m[1]! : item, 'base64');
+          if (buf.length > DOWNLOAD_MAX_BYTES) {
+            throw new Error(`inline image too large: ${buf.length} bytes (max ${DOWNLOAD_MAX_BYTES})`);
+          }
+        }
         const ext = detectImageExt(buf);
+        if (!ext) {
+          // Not a recognized image — reject instead of saving garbage. This is what
+          // the old code did: base64-decode a URL string into ~60 bytes and save it
+          // as a .png the web then failed to render.
+          throw new Error('provider returned data that is not a recognized image');
+        }
         const filename = `image_${sanitize(process.env.GATEWAY_SESSION_ID ?? 'default')}_${Date.now()}_${idx}.${ext}`;
         const filePath = path.join(mediaDir, filename);
         fs.writeFileSync(filePath, buf);
         files.push(filePath);
-      });
+      }
     } catch (err) {
       return { content: [{ type: 'text', text: `generate_image: failed to save image: ${(err as Error).message}` }], isError: true };
     }
@@ -277,7 +332,9 @@ export class ImageModule implements ToolModule {
           byok: job.byok ?? false,
           cost: job.cost ?? 0,
           files,
-          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply, or line_image.',
+          ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
+          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply, or line_image.'
+            + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
       }],
     };
@@ -344,6 +401,82 @@ function sanitize(s: string): string {
   return s.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'default';
 }
 
+// SSRF guard for provider image URLs. Require https, then resolve the host and
+// reject if ANY resolved address is private / loopback / link-local / metadata —
+// so a compromised provider response can't make the gateway fetch internal or
+// cloud-metadata endpoints. Best-effort screen (a DNS rebind between this lookup
+// and the fetch is still bounded by redirect:'error' at the call site).
+async function assertSafeImageUrl(raw: string): Promise<void> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error('image url is malformed');
+  }
+  if (u.protocol !== 'https:') throw new Error('refusing to download image over a non-https url');
+  let addrs: { address: string }[];
+  try {
+    addrs = await dns.promises.lookup(u.hostname, { all: true });
+  } catch {
+    throw new Error('image url host could not be resolved');
+  }
+  if (!addrs.length || addrs.some((a) => isBlockedAddress(a.address))) {
+    throw new Error('refusing to download image from a non-public address');
+  }
+}
+
+// True for private / loopback / link-local / metadata / reserved IPs (v4 + v6),
+// or anything that isn't a valid IP literal (fail closed).
+function isBlockedAddress(ip: string): boolean {
+  const kind = net.isIP(ip);
+  if (kind === 4) {
+    const p = ip.split('.').map(Number);
+    if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+    const [a, b] = p as [number, number, number, number];
+    if (a === 0 || a === 127) return true; // unspecified / loopback
+    if (a === 10) return true; // 10/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+    if (a === 192 && b === 168) return true; // 192.168/16
+    if (a === 169 && b === 254) return true; // link-local + 169.254.169.254 metadata
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+    if (a >= 224) return true; // multicast / reserved
+    return false;
+  }
+  if (kind === 6) {
+    const lo = ip.toLowerCase();
+    if (lo === '::1' || lo === '::') return true; // loopback / unspecified
+    if (lo.startsWith('fe80')) return true; // link-local
+    if (lo.startsWith('fc') || lo.startsWith('fd')) return true; // unique-local fc00::/7
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lo); // IPv4-mapped
+    if (mapped) return isBlockedAddress(mapped[1]!);
+    return false;
+  }
+  return true; // not a valid IP → block
+}
+
+// Read a response body into a Buffer with a hard byte ceiling: reject early on a
+// too-large Content-Length, and stream-count actual bytes so a chunked response
+// without Content-Length can't blow past the cap (OOM guard).
+async function readCapped(res: Response, cap: number): Promise<Buffer> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > cap) {
+    throw new Error(`download image too large: ${declared} bytes (max ${cap})`);
+  }
+  if (!res.body) {
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > cap) throw new Error(`download image too large (max ${cap} bytes)`);
+    return Buffer.from(ab);
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    total += chunk.length;
+    if (total > cap) throw new Error(`download image exceeded ${cap} bytes`);
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
 function defaultCodeForStatus(status: number): string {
   switch (status) {
     case 400: return 'invalid_model';
@@ -358,25 +491,64 @@ function defaultCodeForStatus(status: number): string {
 }
 
 /** Detect image extension from magic bytes; default png. */
-function detectImageExt(buf: Buffer): string {
+// Returns the extension for a recognized image (by magic bytes), or null when the
+// buffer is NOT a known image — callers must reject that instead of saving garbage
+// (a provider returning a URL parsed as base64, or a download that yielded an HTML
+// error page, both land here).
+function detectImageExt(buf: Buffer): string | null {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
   if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
   if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
   if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
       buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'webp';
-  return 'png';
+  return null;
+}
+
+// https is required for a PUBLIC image endpoint (the Bearer proxy_secret is sent on
+// every call); http is tolerated only for a local/internal host — a trusted hop such
+// as host.docker.internal in dev, where cleartext never leaves the machine/network.
+function baseUrlIsSecure(raw: string): boolean {
+  if (!raw) return false;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol === 'https:') return true;
+  if (u.protocol !== 'http:') return false;
+  const h = u.hostname.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === 'host.docker.internal' ||
+    h.endsWith('.internal') ||
+    h.endsWith('.local') ||
+    /^127\./.test(h) ||
+    h === '::1' ||
+    /^10\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
+  );
 }
 
 const imageToolDefs: McpToolDefinition[] = [
   {
     name: 'generate_image',
     description:
-      'Generate an image from a text prompt via the GetPod image service. ' +
-      'action="generate" submits a prompt and returns the saved image file path(s) once ready — ' +
+      'Generate images from a text prompt (optionally guided by a reference image) via the GetPod image service. ' +
+      'action="generate" submits the request and returns the saved image file path(s) once ready — ' +
       'then deliver them with your channel reply tool (files: [...]). ' +
       'action="status" polls a previously returned task_id. ' +
-      'action="list" returns the available image models with their supported qualities/sizes and cost. ' +
-      'When the user selected options in the composer (an <image-params .../> tag in the turn), pass those values.',
+      'action="list" returns every available image model with its supported_qualities, supported_sizes, cost, and ' +
+      'the capability flags supports_image_ref (image-to-image / edit) and supports_style_ref. Call it FIRST when ' +
+      'choosing a model or when you need to know what a provider can do — you are NOT limited to the composer ' +
+      'options; you may set any parameter the chosen model actually supports. ' +
+      'REFERENCE IMAGE: when the turn includes an image the user wants to transform or edit, prefer a model whose ' +
+      'supports_image_ref is true and pass that image\'s media path in "image" (real image-to-image). If no ' +
+      'img2img-capable model is available — or the model you picked has supports_image_ref=false — do NOT pass ' +
+      '"image": instead look at the reference image yourself, describe what matters in the "prompt", and generate ' +
+      'text-to-image. Never send "image" to a model that does not support it. ' +
+      'When the user selected options in the composer (an <image-params .../> tag in the turn), honor those values.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -394,9 +566,9 @@ const imageToolDefs: McpToolDefinition[] = [
         size: { type: 'string', description: 'Optional size, e.g. "1024x1024".' },
         aspect_ratio: { type: 'string', description: 'Optional aspect ratio, e.g. "1:1" (converted to size if the provider needs it).' },
         n: { type: 'integer', description: 'Optional number of images (default 1).' },
-        image: { type: 'string', description: 'Optional reference-image media path for image-to-image/edit (e.g. "media/xxx.png").' },
-        images: { type: 'array', items: { type: 'string' }, description: 'Optional multiple reference-image media paths.' },
-        style: { type: 'string', description: 'Optional native style parameter (e.g. "vivid").' },
+        image: { type: 'string', description: 'Optional reference-image media path for image-to-image/edit (e.g. "media/xxx.png"). ONLY pass this to a model whose supports_image_ref is true (check action="list"); for any other model, describe the reference image in the prompt instead of sending it here.' },
+        images: { type: 'array', items: { type: 'string' }, description: 'Optional multiple reference-image media paths (same supports_image_ref rule as "image").' },
+        style: { type: 'string', description: 'Optional native style parameter (e.g. "vivid") — only for models whose supports_style_ref is true.' },
         task_id: { type: 'string', description: 'Job id to poll (required for action="status").' },
       },
       required: [],
