@@ -230,6 +230,7 @@ Global default retention policy. Can be overridden per-agent with an `history` k
   "gateway": {
     "history": {
       "retentionDays": 90,
+      "maxHistoryMessages": 30,
       "cleanupHour": 3,
       "cleanupTimezone": "Asia/Bangkok"
     }
@@ -240,6 +241,7 @@ Global default retention policy. Can be overridden per-agent with an `history` k
 | Field | Default | Description |
 |-------|---------|-------------|
 | `retentionDays` | `null` (keep forever) | Delete messages older than N days on each cleanup cycle |
+| `maxHistoryMessages` | `50` | Max history messages re-injected into a session at spawn. Lower it to shrink the context loaded at session start. `0` = inject no history |
 | `cleanupHour` | `3` | Hour of day to run cleanup (24h, in `cleanupTimezone`) |
 | `cleanupTimezone` | `"UTC"` | IANA timezone for the cleanup schedule |
 
@@ -249,7 +251,7 @@ Per-agent override example:
   "agents": [
     {
       "id": "alfred",
-      "history": { "retentionDays": 30 }
+      "history": { "retentionDays": 30, "maxHistoryMessages": 30 }
     }
   ]
 }

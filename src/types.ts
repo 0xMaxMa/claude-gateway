@@ -5,6 +5,10 @@ export interface SessionConfig {
 
 export interface HistoryConfig {
   retentionDays?: number; // 0 = keep forever (disabled), default 60
+  // Max history messages re-injected into a session at spawn. Lower values
+  // shrink the context loaded at session start. Default is MAX_HISTORY_MESSAGES
+  // (50). 0 = inject no history. Per-agent overrides global.
+  maxHistoryMessages?: number;
 }
 
 export interface AgentConfig {
@@ -229,7 +233,7 @@ export interface SessionMeta {
   messageCount: number;
   totalTokensUsed: number;
   lastInputTokens?: number;
-  loadedAtSpawn?: number;   // messages loaded into context at last spawn (≤ MAX_HISTORY_MESSAGES)
+  loadedAtSpawn?: number;   // messages loaded into context at last spawn (≤ the resolved max history messages, default MAX_HISTORY_MESSAGES)
   archivedCount?: number;   // messages not loaded into context (older than loaded window)
   messageCountAtSpawn?: number; // total messageCount at spawn time, used to derive in-context count
 }

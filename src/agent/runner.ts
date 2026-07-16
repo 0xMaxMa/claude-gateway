@@ -6,7 +6,7 @@ import * as net from 'net';
 import * as path from 'path';
 import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment } from '../types';
 import { createLogger } from '../logger';
-import { SessionProcess, MAX_HISTORY_MESSAGES } from '../session/process';
+import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
@@ -1050,14 +1050,23 @@ export class AgentRunner extends EventEmitter {
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
 
+    // Per-agent → global → MAX_HISTORY_MESSAGES: the configured cap on how many
+    // history messages a healthy spawn re-injects. Lets an operator lower the
+    // context loaded at session start (e.g. 50 → 30) without touching code.
+    const configuredMax = resolveMaxHistoryMessages(
+      this.agentConfig.history?.maxHistoryMessages,
+      this.gatewayConfig.gateway.history?.maxHistoryMessages,
+    );
+
     // request_too_large (32MB) recovery: shrink the re-injected history on each
     // consecutive retry so a pathological context eventually fits. recoveryCount
-    // is 0 for healthy sessions → ladder rung 0 = MAX_HISTORY_MESSAGES (same as
-    // the SessionProcess default), so applying it unconditionally is a no-op for
-    // healthy sessions and the only path that sets historyLimit for recovering ones.
+    // is 0 for healthy sessions → use the configured cap directly; a recovering
+    // session steps down the ladder but never re-injects more than that cap.
     const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
     const ladderIdx = Math.min(recoveryCount, TOO_LARGE_HISTORY_LADDER.length - 1);
-    proc.historyLimit = TOO_LARGE_HISTORY_LADDER[ladderIdx];
+    proc.historyLimit = recoveryCount === 0
+      ? configuredMax
+      : Math.min(configuredMax, TOO_LARGE_HISTORY_LADDER[ladderIdx]);
     if (recoveryCount > 0) {
       this.logger.info('Spawning with reduced history after request_too_large', {
         mapKey, recoveryCount, historyLimit: proc.historyLimit,
