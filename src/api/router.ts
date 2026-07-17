@@ -514,7 +514,10 @@ export function createApiRouter(
       res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
       return;
     }
-    const baseUrl = (process.env.GETPOD_IMAGE_URL ?? '').replace(/\/+$/, '');
+    // Same fallback as the image MCP tool: the getpod-provider fronts the image
+    // catalog on the LLM proxy host, so an unset GETPOD_IMAGE_URL reuses
+    // ANTHROPIC_BASE_URL (`||` so empty also falls through).
+    const baseUrl = (process.env.GETPOD_IMAGE_URL || process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
     const proxySecret = process.env.GETPOD_IMAGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
     if (!baseUrl) {
       res.status(503).json({ error: 'Image service not configured' });

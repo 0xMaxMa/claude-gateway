@@ -106,7 +106,13 @@ export class ImageModule implements ToolModule {
   // ── config ────────────────────────────────────────────────────────────────
 
   private baseUrl(): string {
-    return (process.env.GETPOD_IMAGE_URL ?? '').replace(/\/+$/, '');
+    // Reuse the pod's LLM proxy endpoint for image too: the getpod-provider now
+    // fronts /v1/images/{generations,jobs} on the same host as /v1/messages, so an
+    // unset (or empty) GETPOD_IMAGE_URL falls back to ANTHROPIC_BASE_URL — no
+    // separate image URL to provision. GETPOD_IMAGE_URL still wins when set (e.g. a
+    // dedicated image host). `||` (not `??`) so an empty string also falls through.
+    const raw = process.env.GETPOD_IMAGE_URL || process.env.ANTHROPIC_BASE_URL || '';
+    return raw.replace(/\/+$/, '');
   }
 
   private authToken(): string {
