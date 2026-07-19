@@ -500,49 +500,6 @@ export function createApiRouter(
   });
 
   /**
-   * GET /api/v1/agents/:agentId/image-models   (contract E4)
-   *
-   * Proxy the getpod-api image-model catalog (E3: GET /v1/models?kind=image) so the
-   * web composer can fetch the list through the gateway (web talks to the gateway,
-   * never the api directly — D16/D9). Auth here is the normal gateway API-key /
-   * session auth; the upstream call adds the M2M Bearer proxy secret.
-   */
-  router.get('/v1/agents/:agentId/image-models', auth, async (req: Request, res: Response) => {
-    const { agentId } = req.params as { agentId: string };
-    const apiKey = (req as AuthedRequest).apiKey;
-    if (!canAccessAgent(apiKey, agentId)) {
-      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
-      return;
-    }
-    // Same source as the image MCP tool: the getpod-provider fronts the image
-    // catalog on the LLM proxy host, so image reuses ANTHROPIC_BASE_URL — one
-    // provider, one URL for both LLM and image.
-    const baseUrl = (process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
-    const proxySecret = process.env.GETPOD_IMAGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
-    if (!baseUrl) {
-      res.status(503).json({ error: 'Image service not configured' });
-      return;
-    }
-    try {
-      const upstream = await fetch(`${baseUrl}/v1/models?kind=image`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(proxySecret ? { Authorization: `Bearer ${proxySecret}` } : {}),
-          'X-Agent-Id': agentId,
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-      const text = await upstream.text().catch(() => '');
-      res.status(upstream.status);
-      res.type('application/json');
-      res.send(text || '[]');
-    } catch (err) {
-      res.status(502).json({ error: `Image service unavailable: ${(err as Error).message}` });
-    }
-  });
-
-  /**
    * GET /api/v1/agents
    *
    * List agents scoped to the API key. Admin keys see all agents.
