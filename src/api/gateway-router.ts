@@ -26,6 +26,7 @@ import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { MediaStore } from '../history/media-store';
 import { verifyPublicToken } from './public-token';
+import { safeMediaHeaders } from './public-media-headers';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
@@ -677,6 +678,16 @@ export class GatewayRouter {
       }
       res.setHeader('Cache-Control', 'private, max-age=3600, immutable');
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      // Stored-XSS defence: this route serves agent-written files from a public
+      // origin. Decide Content-Type by extension — only raster images go inline;
+      // svg/html/xml/unknown are forced to a non-executable download. We set an
+      // explicit Content-Type BEFORE sendFile so it wins over sendFile's own
+      // extension-based inference (send skips it when Content-Type is already set).
+      const serve = safeMediaHeaders(path.extname(absPath), path.basename(absPath));
+      res.setHeader('Content-Type', serve.contentType);
+      if (serve.disposition) {
+        res.setHeader('Content-Disposition', serve.disposition);
+      }
       res.sendFile(absPath);
     });
 
