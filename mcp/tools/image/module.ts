@@ -69,7 +69,7 @@ export class ImageModule implements ToolModule {
       if (!this.warnedInsecureUrl) {
         this.warnedInsecureUrl = true;
         console.error(
-          `[image] GETPOD_IMAGE_URL is http to a non-local host — refusing to send the proxy secret in cleartext. Use https (or a local/internal host).`
+          `[image] ANTHROPIC_BASE_URL is http to a non-local host — refusing to send the proxy secret in cleartext. Use https (or a local/internal host).`
         );
       }
       return false;
@@ -106,12 +106,10 @@ export class ImageModule implements ToolModule {
   // ── config ────────────────────────────────────────────────────────────────
 
   private baseUrl(): string {
-    // Reuse the pod's LLM proxy endpoint for image too: the getpod-provider now
-    // fronts /v1/images/{generations,jobs} on the same host as /v1/messages, so an
-    // unset (or empty) GETPOD_IMAGE_URL falls back to ANTHROPIC_BASE_URL — no
-    // separate image URL to provision. GETPOD_IMAGE_URL still wins when set (e.g. a
-    // dedicated image host). `||` (not `??`) so an empty string also falls through.
-    const raw = process.env.GETPOD_IMAGE_URL || process.env.ANTHROPIC_BASE_URL || '';
+    // Image reuses ANTHROPIC_BASE_URL (the provider): the getpod-provider fronts
+    // /v1/images/{generations,jobs} on the same host as /v1/messages, so there is
+    // no separate image URL — one provider, one URL for both LLM and image.
+    const raw = process.env.ANTHROPIC_BASE_URL || '';
     return raw.replace(/\/+$/, '');
   }
 

@@ -380,9 +380,11 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
               ? path.resolve(this.agentConfig.workspace, '..', 'media', `api-${this.sessionId}`)
               : '',
-            // Image-generation tool (generate_image) — getpod-api endpoint + M2M
-            // proxy secret (same secret as the LLM path). Empty ⇒ tool disabled.
-            GETPOD_IMAGE_URL: process.env.GETPOD_IMAGE_URL ?? '',
+            // Image-generation tool (generate_image) — reuses ANTHROPIC_BASE_URL
+            // (the provider) + M2M proxy secret (same secret as the LLM path). The
+            // MCP subprocess only sees the env we hand it, so the base URL that
+            // module.ts reads must be forwarded explicitly. Empty ⇒ tool disabled.
+            ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
             GETPOD_IMAGE_API_KEY: process.env.GETPOD_IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
             GETPOD_IMAGE_POLL_TIMEOUT_MS: process.env.GETPOD_IMAGE_POLL_TIMEOUT_MS ?? '',
             // Signed short-lived public media URLs (LINE image delivery). Empty ⇒
