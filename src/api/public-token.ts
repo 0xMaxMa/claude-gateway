@@ -1,20 +1,25 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
- * Signed short-lived media URLs — used to hand a media file to a channel that
- * needs a public HTTPS URL it can fetch WITHOUT the gateway API key (LINE image
- * messages: the normal /api/v1/agents/:id/media route is API-key-gated, so LINE's
- * servers cannot fetch it directly — see plan-image-gen §7 / contract E-storage).
+ * Signed short-lived public tokens — a neutral, reusable primitive for handing a
+ * resource to a caller that needs a public URL it can hit WITHOUT the gateway API
+ * key. Today it backs LINE image delivery (kind `media`: the normal
+ * /api/v1/agents/:id/media route is API-key-gated, so LINE's servers cannot fetch
+ * it directly — see plan-image-gen §7 / contract E-storage), but the `k` (kind)
+ * discriminator lets the same primitive back future share-link features (share
+ * chat, etc.) without a new token type.
  *
- * A token embeds { agentId, relPath, exp } and an HMAC over those fields keyed by
- * the agent's gateway API key (already provisioned on every pod, so no separate
- * media-sign secret is needed). The public route (`/media-public/:token`) resolves
- * that agent's key, verifies the signature + expiry, and streams the file. The
- * signing half lives in the MCP LINE module (mcp/tools/line/media-sign.ts) —
- * KEEP THE ALGORITHM IN SYNC with this file.
+ * A token embeds { kind, agentId, relPath, exp } and an HMAC over those fields
+ * keyed by the agent's gateway API key (already provisioned on every pod, so no
+ * separate signing secret is needed). The public route (`/public/:token`) resolves
+ * that agent's key, verifies the signature + expiry, dispatches on `k`, and serves
+ * the resource. The signing half lives in the MCP LINE module
+ * (mcp/tools/line/public-token.ts) — KEEP THE ALGORITHM IN SYNC with this file.
  */
 
-export type MediaSignPayload = {
+export type PublicToken = {
+  /** kind discriminator — a token of one kind can never cross-verify as another */
+  k: string;
   /** agent id — locates the runner + media root */
   a: string;
   /** relative media path (e.g. "media/<chat>/<file>.png") */
@@ -32,12 +37,12 @@ function b64urlDecode(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
 }
 
-function signingMessage(p: MediaSignPayload): string {
-  return `${p.a}\n${p.p}\n${p.e}`;
+function signingMessage(p: PublicToken): string {
+  return `${p.k}\n${p.a}\n${p.p}\n${p.e}`;
 }
 
 /** Produce a signed token: base64url(payload) + "." + base64url(hmac). */
-export function signMediaToken(payload: MediaSignPayload, secret: string): string {
+export function signPublicToken(payload: PublicToken, secret: string): string {
   const body = b64urlEncode(Buffer.from(JSON.stringify(payload), 'utf-8'));
   const mac = createHmac('sha256', secret).update(signingMessage(payload)).digest();
   return `${body}.${b64urlEncode(mac)}`;
@@ -47,19 +52,25 @@ export function signMediaToken(payload: MediaSignPayload, secret: string): strin
  * Verify a token. Returns the payload when the signature is valid and the token
  * has not expired; otherwise null.
  */
-export function verifyMediaToken(token: string, secret: string): MediaSignPayload | null {
+export function verifyPublicToken(token: string, secret: string): PublicToken | null {
   if (!secret) return null;
   const dot = token.indexOf('.');
   if (dot <= 0) return null;
   const bodyPart = token.slice(0, dot);
   const sigPart = token.slice(dot + 1);
-  let payload: MediaSignPayload;
+  let payload: PublicToken;
   try {
-    payload = JSON.parse(b64urlDecode(bodyPart).toString('utf-8')) as MediaSignPayload;
+    payload = JSON.parse(b64urlDecode(bodyPart).toString('utf-8')) as PublicToken;
   } catch {
     return null;
   }
-  if (!payload || typeof payload.a !== 'string' || typeof payload.p !== 'string' || typeof payload.e !== 'number') {
+  if (
+    !payload ||
+    typeof payload.k !== 'string' ||
+    typeof payload.a !== 'string' ||
+    typeof payload.p !== 'string' ||
+    typeof payload.e !== 'number'
+  ) {
     return null;
   }
   const expected = createHmac('sha256', secret).update(signingMessage(payload)).digest();

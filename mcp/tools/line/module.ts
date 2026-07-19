@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { messagingApi } from '@line/bot-sdk';
 import { chunkText, planLineSend, LINE_TEXT_LIMIT } from './pure';
-import { signMediaToken } from './media-sign';
+import { signPublicToken } from './public-token';
 
 /** Default lifetime of a signed image URL handed to LINE (1 hour). */
 const DEFAULT_MEDIA_URL_TTL_MS = 60 * 60 * 1000;
@@ -184,7 +184,7 @@ export class LineModule implements ToolModule {
   /**
    * Send an image via a signed short-lived public URL. LINE's servers fetch the
    * image over public HTTPS (the normal media route is API-key-gated), so we mint
-   * a token the gateway `/media-public/:token` route verifies + streams.
+   * a token the gateway `/public/:token` route verifies + streams.
    */
   private async handleImage(args: Record<string, unknown>): Promise<McpToolResult> {
     const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
@@ -202,8 +202,8 @@ export class LineModule implements ToolModule {
 
     const publicBase = (process.env.GATEWAY_PUBLIC_URL ?? '').replace(/\/+$/, '');
     // HMAC key for the public media URL = this pod's gateway API key (reused, not a
-    // separate secret). NOT the LLM proxy_secret/CLAUDE_CODE_OAUTH_TOKEN — media-public
-    // is a gateway route, so the gateway's own key is the right signer, and the verify
+    // separate secret). NOT the LLM proxy_secret/CLAUDE_CODE_OAUTH_TOKEN — the public
+    // token is a gateway route, so the gateway's own key is the right signer, and the verify
     // side resolves the same key from config.gateway.api.keys (see gateway-router.ts).
     const signSecret = process.env.GATEWAY_API_KEY ?? '';
     const agentId = process.env.GATEWAY_AGENT_ID ?? '';
@@ -228,7 +228,7 @@ export class LineModule implements ToolModule {
       : DEFAULT_MEDIA_URL_TTL_MS;
     const exp = Date.now() + ttl;
     const signUrl = (rel: string): string =>
-      `${publicBase}/media-public/${signMediaToken({ a: agentId, p: rel, e: exp }, signSecret)}`;
+      `${publicBase}/public/${signPublicToken({ k: 'media', a: agentId, p: rel, e: exp }, signSecret)}`;
 
     const message = {
       type: 'image' as const,

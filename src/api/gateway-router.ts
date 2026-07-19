@@ -25,7 +25,7 @@ import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { MediaStore } from '../history/media-store';
-import { verifyMediaToken } from './media-sign';
+import { verifyPublicToken } from './public-token';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
@@ -417,13 +417,13 @@ export class GatewayRouter {
     const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
   /**
-   * Resolve the gateway API key used to sign a media token. Reads the token's
+   * Resolve the gateway API key used to sign a public token. Reads the token's
    * UNTRUSTED claimed agent id (`payload.a`, base64url body) to pick the key that
    * serves that agent — same selection as SessionProcess.findApiKeyForAgent
    * (agent-scoped, then wildcard, then admin). Returns '' when the token is
-   * malformed or no key matches, so verifyMediaToken returns null ⇒ 403.
+   * malformed or no key matches, so verifyPublicToken returns null ⇒ 403.
    */
-  private resolveMediaTokenKey(token: string): string {
+  private resolvePublicTokenKey(token: string): string {
     const dot = token.indexOf('.');
     if (dot <= 0) return '';
     let agentId: string;
@@ -633,21 +633,30 @@ export class GatewayRouter {
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
 
-    // Public signed media route — serves a media file to callers that cannot present
-    // the gateway API key (e.g. LINE's servers fetching an image message). The token
-    // is a short-lived HMAC over { agentId, relPath, exp } minted by the line_image
-    // MCP tool; it self-authenticates, so this route sits outside API-key auth.
-    // The HMAC key is the agent's gateway API key (config.gateway.api.keys) — the same
-    // key the MCP subprocess signs with (injected as GATEWAY_API_KEY). We can't trust
-    // the token's claimed agent until the signature checks out, so resolveMediaTokenKey
-    // reads `a` UNTRUSTED to pick the candidate key; verifyMediaToken's HMAC is what
-    // makes `a` trustworthy. No match ⇒ '' ⇒ verifyMediaToken returns null ⇒ 403.
-    this.app.get('/media-public/:token', (req: Request, res: Response) => {
+    // Public signed token route — a neutral, reusable primitive that serves a
+    // resource to callers that cannot present the gateway API key (e.g. LINE's
+    // servers fetching an image message). The token is a short-lived HMAC over
+    // { kind, agentId, relPath, exp }; it self-authenticates, so this route sits
+    // outside API-key auth. The HMAC key is the agent's gateway API key
+    // (config.gateway.api.keys) — the same key the MCP subprocess signs with
+    // (injected as GATEWAY_API_KEY). We can't trust the token's claimed agent until
+    // the signature checks out, so resolvePublicTokenKey reads `a` UNTRUSTED to pick
+    // the candidate key; verifyPublicToken's HMAC is what makes `a` trustworthy. No
+    // match ⇒ '' ⇒ verifyPublicToken returns null ⇒ 403. After verify, `k` (kind)
+    // dispatches how the token is served — today only 'media' (stream a file);
+    // future kinds (share chat, etc.) add branches here.
+    this.app.get('/public/:token', (req: Request, res: Response) => {
       const token = req.params.token ?? '';
-      const secret = this.resolveMediaTokenKey(token);
-      const payload = verifyMediaToken(token, secret);
+      const secret = this.resolvePublicTokenKey(token);
+      const payload = verifyPublicToken(token, secret);
       if (!payload) {
-        res.status(403).json({ error: 'Invalid or expired media token' });
+        res.status(403).json({ error: 'Invalid or expired token' });
+        return;
+      }
+      // Kind dispatch: only 'media' (stream a file) is served today. Any other
+      // kind is a token minted for a feature this route doesn't serve yet ⇒ 400.
+      if (payload.k !== 'media') {
+        res.status(400).json({ error: 'Unsupported token kind' });
         return;
       }
       const runner = this.agents.get(payload.a);

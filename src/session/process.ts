@@ -389,7 +389,7 @@ export class SessionProcess extends EventEmitter {
             GETPOD_IMAGE_POLL_TIMEOUT_MS: process.env.GETPOD_IMAGE_POLL_TIMEOUT_MS ?? '',
             // Signed short-lived public media URLs (LINE image delivery). The HMAC
             // key is the agent's gateway API key (GATEWAY_API_KEY, injected above) —
-            // no separate media-sign secret. Empty URL ⇒ line_image "not configured".
+            // no separate public-token secret. Empty URL ⇒ line_image "not configured".
             GATEWAY_PUBLIC_URL: process.env.GATEWAY_PUBLIC_URL ?? '',
             GATEWAY_MEDIA_URL_TTL_MS: process.env.GATEWAY_MEDIA_URL_TTL_MS ?? '',
           },
