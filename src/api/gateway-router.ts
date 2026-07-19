@@ -416,6 +416,37 @@ export class GatewayRouter {
     const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
     const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
+  /**
+   * Resolve the gateway API key used to sign a media token. Reads the token's
+   * UNTRUSTED claimed agent id (`payload.a`, base64url body) to pick the key that
+   * serves that agent — same selection as SessionProcess.findApiKeyForAgent
+   * (agent-scoped, then wildcard, then admin). Returns '' when the token is
+   * malformed or no key matches, so verifyMediaToken returns null ⇒ 403.
+   */
+  private resolveMediaTokenKey(token: string): string {
+    const dot = token.indexOf('.');
+    if (dot <= 0) return '';
+    let agentId: string;
+    try {
+      const bodyPart = token.slice(0, dot);
+      const pad = bodyPart.length % 4 === 0 ? '' : '='.repeat(4 - (bodyPart.length % 4));
+      const json = Buffer.from(
+        bodyPart.replace(/-/g, '+').replace(/_/g, '/') + pad,
+        'base64',
+      ).toString('utf-8');
+      const parsed = JSON.parse(json) as { a?: unknown };
+      if (typeof parsed.a !== 'string' || !parsed.a) return '';
+      agentId = parsed.a;
+    } catch {
+      return '';
+    }
+    const keys = this.gatewayConfig?.gateway?.api?.keys ?? [];
+    const match = keys.find(k =>
+      (Array.isArray(k.agents) && k.agents.includes(agentId)) ||
+      k.agents === '*' ||
+      k.admin
+    );
+    return match?.key ?? '';
   }
 
   // ─── /cli webview terminal viewer ──────────────────────────────────────────
@@ -606,9 +637,15 @@ export class GatewayRouter {
     // the gateway API key (e.g. LINE's servers fetching an image message). The token
     // is a short-lived HMAC over { agentId, relPath, exp } minted by the line_image
     // MCP tool; it self-authenticates, so this route sits outside API-key auth.
+    // The HMAC key is the agent's gateway API key (config.gateway.api.keys) — the same
+    // key the MCP subprocess signs with (injected as GATEWAY_API_KEY). We can't trust
+    // the token's claimed agent until the signature checks out, so resolveMediaTokenKey
+    // reads `a` UNTRUSTED to pick the candidate key; verifyMediaToken's HMAC is what
+    // makes `a` trustworthy. No match ⇒ '' ⇒ verifyMediaToken returns null ⇒ 403.
     this.app.get('/media-public/:token', (req: Request, res: Response) => {
-      const secret = process.env.GATEWAY_MEDIA_SIGN_SECRET ?? '';
-      const payload = verifyMediaToken(req.params.token ?? '', secret);
+      const token = req.params.token ?? '';
+      const secret = this.resolveMediaTokenKey(token);
+      const payload = verifyMediaToken(token, secret);
       if (!payload) {
         res.status(403).json({ error: 'Invalid or expired media token' });
         return;

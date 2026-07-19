@@ -7,9 +7,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * servers cannot fetch it directly — see plan-image-gen §7 / contract E-storage).
  *
  * A token embeds { agentId, relPath, exp } and an HMAC over those fields keyed by
- * GATEWAY_MEDIA_SIGN_SECRET. The public route (`/media-public/:token`) verifies the
- * signature + expiry and streams the file. The signing half lives in the MCP LINE
- * module (mcp/tools/line/media-sign.ts) — KEEP THE ALGORITHM IN SYNC with this file.
+ * the agent's gateway API key (already provisioned on every pod, so no separate
+ * media-sign secret is needed). The public route (`/media-public/:token`) resolves
+ * that agent's key, verifies the signature + expiry, and streams the file. The
+ * signing half lives in the MCP LINE module (mcp/tools/line/media-sign.ts) —
+ * KEEP THE ALGORITHM IN SYNC with this file.
  */
 
 export type MediaSignPayload = {

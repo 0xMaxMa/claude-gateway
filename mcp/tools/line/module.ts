@@ -201,11 +201,15 @@ export class LineModule implements ToolModule {
     }
 
     const publicBase = (process.env.GATEWAY_PUBLIC_URL ?? '').replace(/\/+$/, '');
-    const signSecret = process.env.GATEWAY_MEDIA_SIGN_SECRET ?? '';
+    // HMAC key for the public media URL = this pod's gateway API key (reused, not a
+    // separate secret). NOT the LLM proxy_secret/CLAUDE_CODE_OAUTH_TOKEN — media-public
+    // is a gateway route, so the gateway's own key is the right signer, and the verify
+    // side resolves the same key from config.gateway.api.keys (see gateway-router.ts).
+    const signSecret = process.env.GATEWAY_API_KEY ?? '';
     const agentId = process.env.GATEWAY_AGENT_ID ?? '';
     if (!publicBase || !signSecret || !agentId) {
       return {
-        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_PUBLIC_URL, GATEWAY_MEDIA_SIGN_SECRET, or GATEWAY_AGENT_ID)' }],
+        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_PUBLIC_URL, GATEWAY_API_KEY, or GATEWAY_AGENT_ID)' }],
         isError: true,
       };
     }

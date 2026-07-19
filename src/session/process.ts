@@ -387,10 +387,10 @@ export class SessionProcess extends EventEmitter {
             ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
             GETPOD_IMAGE_API_KEY: process.env.GETPOD_IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
             GETPOD_IMAGE_POLL_TIMEOUT_MS: process.env.GETPOD_IMAGE_POLL_TIMEOUT_MS ?? '',
-            // Signed short-lived public media URLs (LINE image delivery). Empty ⇒
-            // line_image reports "not configured".
+            // Signed short-lived public media URLs (LINE image delivery). The HMAC
+            // key is the agent's gateway API key (GATEWAY_API_KEY, injected above) —
+            // no separate media-sign secret. Empty URL ⇒ line_image "not configured".
             GATEWAY_PUBLIC_URL: process.env.GATEWAY_PUBLIC_URL ?? '',
-            GATEWAY_MEDIA_SIGN_SECRET: process.env.GATEWAY_MEDIA_SIGN_SECRET ?? '',
             GATEWAY_MEDIA_URL_TTL_MS: process.env.GATEWAY_MEDIA_URL_TTL_MS ?? '',
           },
         },
