@@ -2154,7 +2154,15 @@ export function createApiRouter(
       }
       tzOffset = parsed;
     }
-    const sessionId = query['session_id'] ?? undefined;
+    // session_id, like order, can arrive as an array when the param is repeated
+    // (?session_id=a&session_id=b). Guard so it can't reach the sqlite bind as an
+    // array and throw a 500 — surface a 400 instead. (Mirrors the order guard above.)
+    const rawSessionId = query['session_id'] as unknown;
+    if (rawSessionId !== undefined && typeof rawSessionId !== 'string') {
+      res.status(400).json({ error: 'session_id must be a single value' });
+      return;
+    }
+    const sessionId = rawSessionId ?? undefined;
 
     const days = runner.getHistoryDb().getActiveDays(chatId, { from, to, tzOffset, sessionId });
     res.json({ days });

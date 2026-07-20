@@ -4,8 +4,8 @@
  * Spins up a real AgentRunner + GatewayRouter with a mock claude subprocess
  * and exercises all 7 Chat History / Media API endpoints via supertest.
  *
- * Test IDs: I-HIST-01 through I-HIST-27 (non-contiguous: I-HIST-14 is the `order` param
- * test from #211/PR #213; active-days coverage is I-HIST-21 through I-HIST-27)
+ * Test IDs: I-HIST-01 through I-HIST-28 (non-contiguous: I-HIST-14 is the `order` param
+ * test from #211/PR #213; active-days coverage is I-HIST-21 through I-HIST-28)
  */
 
 import * as fs from 'fs';
@@ -801,6 +801,34 @@ describe('Chat History API integration (planning-50)', () => {
 
     expect(ok.status).toBe(200);
     expect(Array.isArray(ok.body.days)).toBe(true);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-28: active-days — repeated session_id param returns 400, not 500 ─────
+  it('I-HIST-28: GET /messages/active-days with a repeated session_id returns 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-28-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-28-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // Express parses ?session_id=a&session_id=b as an array; without the guard it would
+    // reach the sqlite bind and throw a 500. Expect a clean 400 instead.
+    const from = 0;
+    const to = 24 * 60 * 60 * 1000;
+    const res = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/api-any/messages/active-days?from=${from}&to=${to}&session_id=a&session_id=b`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/session_id/i);
 
     await router.stop();
     await runner.stop();

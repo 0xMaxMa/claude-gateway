@@ -2462,6 +2462,12 @@ inverted window (`to <= from`) and a window with no messages both return `{ "day
 status `200`. The window may span at most **366 days** (`to - from`); a larger range returns 400,
 since the calendar only ever requests one visible month at a time.
 
+> **Window is filtered in UTC, days are bucketed in local time.** `from`/`to` are matched against
+> the raw stored `ts` (UTC ms), while the returned day labels use `tz_offset`. For a viewer east of
+> UTC, the first local day of a month begins *before* its UTC midnight (e.g. Bangkok's `2026-07-01`
+> starts at `2026-06-30T17:00Z`). Send `from`/`to` covering the visible month **in the viewer's
+> local time** — i.e. widen the UTC window by `tz_offset` — so edge days aren't under-counted.
+
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
   "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages/active-days?from=1751328000000&to=1754006400000&tz_offset=420" | jq
