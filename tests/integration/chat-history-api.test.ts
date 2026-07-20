@@ -308,6 +308,13 @@ describe('Chat History API integration (planning-50)', () => {
     expect(bad.status).toBe(400);
     expect(bad.body.error).toMatch(/order/i);
 
+    // A repeated param parses as an array, not a string — must 400, never 500
+    const dup = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=asc&order=asc`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(dup.status).toBe(400);
+    expect(dup.body.error).toMatch(/order/i);
+
     await router.stop();
     await runner.stop();
   });

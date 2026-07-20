@@ -232,6 +232,18 @@ describe('HistoryDB.getMessages — order (asc/desc seek-forward)', () => {
     expect(asc.hasMore).toBe(false);
     expect(asc.nextCursor).toBeNull();
   });
+
+  it('rows sharing a ts get a deterministic id-tiebroken order (asc = insertion, desc = reverse)', () => {
+    const db = makeDb();
+    // three messages at the SAME ts, inserted in a known order
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'first', ts: BASE }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'second', ts: BASE }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'third', ts: BASE }));
+    expect(db.getMessages(CHAT, { order: 'asc' }).messages.map((m) => m.content))
+      .toEqual(['first', 'second', 'third']);
+    expect(db.getMessages(CHAT, { order: 'desc' }).messages.map((m) => m.content))
+      .toEqual(['third', 'second', 'first']);
+  });
 });
 
 describe('HistoryDB.listChats', () => {

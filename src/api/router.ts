@@ -2057,8 +2057,15 @@ export function createApiRouter(
     // order: case-insensitive; 'asc' seeks forward, 'desc' (or omitted) is the db default.
     // Reject any other explicit value with 400 so client typos surface instead of silently defaulting.
     let order: 'asc' | undefined;
-    if (query['order'] !== undefined) {
-      const normalized = query['order'].toLowerCase();
+    const rawOrder = query['order'] as unknown;
+    if (rawOrder !== undefined) {
+      // Express parses a repeated/structured param (?order=asc&order=asc) as an
+      // array/object, not a string — guard so .toLowerCase() can't throw a 500.
+      if (typeof rawOrder !== 'string') {
+        res.status(400).json({ error: "order must be 'asc' or 'desc'" });
+        return;
+      }
+      const normalized = rawOrder.toLowerCase();
       if (normalized === 'asc') {
         order = 'asc';
       } else if (normalized === 'desc') {
