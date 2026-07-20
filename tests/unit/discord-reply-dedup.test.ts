@@ -59,6 +59,27 @@ describe('discord_reply file dedup (retry spam guard)', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(3);
   });
 
+  it('a FAILED send does not suppress the retry — the file is re-delivered', async () => {
+    const mod = freshModule();
+    const args = { channel_id: 'c', files: [fileA] };
+
+    // First attempt fails AFTER the size check (e.g. transient Discord error).
+    mockSendMessage.mockRejectedValueOnce(new Error('transient discord failure'));
+    await expect(mod.handleReply(args)).rejects.toThrow('transient discord failure');
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+
+    // Retry the SAME file — because the first send did not succeed, it must send again
+    // (mark-after-success: a failed send never marks the file as delivered).
+    const r2 = await mod.handleReply(args);
+    expect(mockSendMessage).toHaveBeenCalledTimes(2);
+    expect(r2.content[0].text).toMatch(/^sent/);
+
+    // Now it IS delivered, so a further retry is suppressed.
+    const r3 = await mod.handleReply(args);
+    expect(mockSendMessage).toHaveBeenCalledTimes(2);
+    expect(r3.content[0].text).toMatch(/already sent/);
+  });
+
   it('dedup is per-instance (a new session starts clean)', async () => {
     const modA = freshModule();
     await modA.handleReply({ channel_id: 'c', files: [fileA] });

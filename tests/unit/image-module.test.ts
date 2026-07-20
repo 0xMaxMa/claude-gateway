@@ -1,10 +1,12 @@
 /**
  * Unit tests for the image MCP tool's endpoint resolution + https guard
- * (mcp/tools/image/module.ts). Two recent changes are locked in here:
+ * (mcp/tools/image/module.ts). Two behaviors are locked in here:
  *
- *  1. baseUrl() resolves from ANTHROPIC_BASE_URL ONLY — the old GETPOD_IMAGE_URL
- *     fallback was removed. Setting GETPOD_IMAGE_URL must change nothing.
- *  2. baseUrlIsSecure guard — the Bearer proxy secret rides every call, so an http
+ *  1. baseUrl() resolves from IMAGE_BASE_URL first, then ANTHROPIC_BASE_URL —
+ *     image generation may target a provider separate from the LLM, so an
+ *     operator can override the endpoint (and secret via IMAGE_API_KEY) while
+ *     still falling back to the ANTHROPIC_* pair when they share one provider.
+ *  2. baseUrlIsSecure guard — the Bearer secret rides every call, so an http
  *     URL to a PUBLIC host is refused (isEnabled → false). https, or http to a
  *     local/internal host (a trusted hop like host.docker.internal in dev), is allowed.
  *
@@ -14,10 +16,10 @@
 import { ImageModule } from '../../mcp/tools/image/module';
 
 const ENV_KEYS = [
+  'IMAGE_BASE_URL',
   'ANTHROPIC_BASE_URL',
-  'GETPOD_IMAGE_URL',
-  'GETPOD_IMAGE_DISABLED',
-  'GETPOD_IMAGE_API_KEY',
+  'IMAGE_DISABLED',
+  'IMAGE_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
 ] as const;
 
@@ -45,7 +47,7 @@ describe('ImageModule.isEnabled() — endpoint resolution + https guard', () => 
   const enabled = () => new ImageModule().isEnabled();
 
   test('https ANTHROPIC_BASE_URL + token → enabled', () => {
-    process.env.ANTHROPIC_BASE_URL = 'https://provider.getpod.ai';
+    process.env.ANTHROPIC_BASE_URL = 'https://provider.example.com';
     process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
     expect(enabled()).toBe(true);
   });
@@ -68,34 +70,40 @@ describe('ImageModule.isEnabled() — endpoint resolution + https guard', () => 
   });
 
   test('http to a PUBLIC host → disabled (refuses to send Bearer secret in cleartext)', () => {
-    process.env.ANTHROPIC_BASE_URL = 'http://provider.getpod.ai';
+    process.env.ANTHROPIC_BASE_URL = 'http://provider.example.com';
     process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
     expect(enabled()).toBe(false);
     expect(errSpy).toHaveBeenCalled(); // the guard warns once
   });
 
-  test('GETPOD_IMAGE_DISABLED=true → disabled even with a valid https URL', () => {
-    process.env.ANTHROPIC_BASE_URL = 'https://provider.getpod.ai';
+  test('IMAGE_DISABLED=true → disabled even with a valid https URL', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://provider.example.com';
     process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
-    process.env.GETPOD_IMAGE_DISABLED = 'true';
+    process.env.IMAGE_DISABLED = 'true';
     expect(enabled()).toBe(false);
   });
 
-  describe('GETPOD_IMAGE_URL fallback is genuinely removed', () => {
-    test('GETPOD_IMAGE_URL set but ANTHROPIC_BASE_URL unset → still disabled', () => {
-      process.env.GETPOD_IMAGE_URL = 'https://legacy-image.getpod.ai';
+  describe('IMAGE_BASE_URL overrides ANTHROPIC_BASE_URL', () => {
+    test('IMAGE_BASE_URL set (https) with ANTHROPIC_BASE_URL unset → enabled', () => {
+      process.env.IMAGE_BASE_URL = 'https://image.example.com';
       process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
-      expect(enabled()).toBe(false);
+      expect(enabled()).toBe(true);
     });
 
-    test('GETPOD_IMAGE_URL does not override ANTHROPIC_BASE_URL (setting it changes nothing)', () => {
+    test('a valid https IMAGE_BASE_URL overrides a public-http ANTHROPIC_BASE_URL (image wins)', () => {
       // With only a public-http ANTHROPIC_BASE_URL the module is disabled; adding a
-      // valid https GETPOD_IMAGE_URL must NOT rescue it — the fallback is gone.
-      process.env.ANTHROPIC_BASE_URL = 'http://provider.getpod.ai';
+      // valid https IMAGE_BASE_URL points image at a separate endpoint and enables it.
+      process.env.ANTHROPIC_BASE_URL = 'http://provider.example.com';
       process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
       expect(enabled()).toBe(false);
-      process.env.GETPOD_IMAGE_URL = 'https://provider.getpod.ai';
-      expect(new ImageModule().isEnabled()).toBe(false);
+      process.env.IMAGE_BASE_URL = 'https://image.example.com';
+      expect(new ImageModule().isEnabled()).toBe(true);
+    });
+
+    test('IMAGE_API_KEY alone (no ANTHROPIC_AUTH_TOKEN) still enables with a valid URL', () => {
+      process.env.IMAGE_BASE_URL = 'https://image.example.com';
+      process.env.IMAGE_API_KEY = 'image-secret';
+      expect(enabled()).toBe(true);
     });
   });
 });

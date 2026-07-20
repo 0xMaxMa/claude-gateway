@@ -574,10 +574,10 @@ export class DiscordModule implements ChannelModule {
     const requested = (args.files as string[] | undefined) ?? [];
     const useEmbed = Boolean(args.embed);
 
-    // Never re-send a file already delivered this session (retry-dedup): mark
-    // BEFORE sending so a resend after an apparent failure can't duplicate it.
+    // Drop files already delivered successfully this session (retry-dedup): a small
+    // model sometimes retries discord_reply after a transient hiccup even though the
+    // upload landed, which would spam duplicate images.
     const files = requested.filter((f) => typeof f === 'string' && !this.sentFiles.has(f));
-    for (const f of files) this.sentFiles.add(f);
 
     // Nothing new to say or send — the whole reply is a duplicate. No-op success
     // so the agent treats it as delivered and stops retrying.
@@ -593,6 +593,9 @@ export class DiscordModule implements ChannelModule {
     }
 
     const sent = await sendMessage(channel, text, { replyTo, files, useEmbed });
+    // Mark as sent only AFTER the send succeeds — if sendMessage throws, the files
+    // stay un-marked so a genuine retry re-delivers them (never silently dropped).
+    for (const f of files) this.sentFiles.add(f);
     const ids = sent.map(m => m.id).join(', ');
     return { content: [{ type: 'text', text: `sent (${sent.length === 1 ? `id: ${ids}` : `ids: ${ids}`})` }] };
   }

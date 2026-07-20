@@ -5,9 +5,9 @@ import * as net from 'node:net';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 
 /**
- * Image-generation tool module (getpod-ai #184, Track B).
+ * Image-generation tool module (#184, Track B).
  *
- * Mirrors the browser module shape: an env-configured getpod-api endpoint reached
+ * Mirrors the browser module shape: an env-configured image-service endpoint reached
  * with `Authorization: Bearer <proxy_secret>` (the same M2M secret the LLM proxy
  * path already uses — contract §0/D16), a single `generate_image` tool with
  * generate | status | list actions (D18), and results written into the session
@@ -61,7 +61,7 @@ export class ImageModule implements ToolModule {
 
   isEnabled(): boolean {
     // Enabled when the image service endpoint is configured (env-driven, like browser).
-    if (!this.baseUrl() || process.env.GETPOD_IMAGE_DISABLED === 'true') return false;
+    if (!this.baseUrl() || process.env.IMAGE_DISABLED === 'true') return false;
     // The Bearer proxy_secret rides every call — refuse a cleartext http URL to a
     // PUBLIC host (that would leak the secret). http to a local/internal host is a
     // trusted hop (e.g. host.docker.internal in dev) and stays allowed.
@@ -106,16 +106,18 @@ export class ImageModule implements ToolModule {
   // ── config ────────────────────────────────────────────────────────────────
 
   private baseUrl(): string {
-    // Image reuses ANTHROPIC_BASE_URL (the provider): the getpod-provider fronts
-    // /v1/images/{generations,jobs} on the same host as /v1/messages, so there is
-    // no separate image URL — one provider, one URL for both LLM and image.
-    const raw = process.env.ANTHROPIC_BASE_URL || '';
+    // Image generation can target any provider — not necessarily the same host as
+    // the LLM. IMAGE_BASE_URL overrides so an operator can point image at a separate
+    // endpoint; it falls back to ANTHROPIC_BASE_URL when they share one provider that
+    // fronts /v1/images/{generations,jobs} alongside /v1/messages.
+    const raw = process.env.IMAGE_BASE_URL || process.env.ANTHROPIC_BASE_URL || '';
     return raw.replace(/\/+$/, '');
   }
 
   private authToken(): string {
-    // Same M2M proxy secret used by the LLM path; falls back to ANTHROPIC_AUTH_TOKEN.
-    return process.env.GETPOD_IMAGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+    // Image API key overrides so a separate image endpoint can carry its own secret;
+    // falls back to ANTHROPIC_AUTH_TOKEN (the M2M proxy secret) when they share one.
+    return process.env.IMAGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
   }
 
   private headers(): Record<string, string> {
@@ -246,7 +248,7 @@ export class ImageModule implements ToolModule {
   // ── helpers ─────────────────────────────────────────────────────────────
 
   private pollTimeoutMs(): number {
-    const raw = Number(process.env.GETPOD_IMAGE_POLL_TIMEOUT_MS);
+    const raw = Number(process.env.IMAGE_POLL_TIMEOUT_MS);
     return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_POLL_TIMEOUT_MS;
   }
 
@@ -451,8 +453,16 @@ function isBlockedAddress(ip: string): boolean {
     if (lo === '::1' || lo === '::') return true; // loopback / unspecified
     if (lo.startsWith('fe80')) return true; // link-local
     if (lo.startsWith('fc') || lo.startsWith('fd')) return true; // unique-local fc00::/7
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lo); // IPv4-mapped
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lo); // IPv4-mapped (dotted)
     if (mapped) return isBlockedAddress(mapped[1]!);
+    // IPv4-mapped in hex form, e.g. ::ffff:7f00:1 == 127.0.0.1 — decode both
+    // 16-bit groups to dotted octets so it can't slip past the dotted check above.
+    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lo);
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1]!, 16);
+      const low = parseInt(mappedHex[2]!, 16);
+      return isBlockedAddress(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`);
+    }
     return false;
   }
   return true; // not a valid IP → block
@@ -540,7 +550,7 @@ const imageToolDefs: McpToolDefinition[] = [
     name: 'generate_image',
     description:
       'Use this WHENEVER the user asks to create, draw, make, or edit an image — it is built in, no app install needed. ' +
-      'Generate images from a text prompt (optionally guided by a reference image) via the GetPod image service. ' +
+      'Generate images from a text prompt (optionally guided by a reference image) via the configured image generation service. ' +
       'action="generate" submits the request and returns the saved image file path(s) once ready — ' +
       'then deliver them with your channel reply tool (files: [...]). ' +
       'action="status" polls a previously returned task_id. ' +
