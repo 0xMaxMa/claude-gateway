@@ -337,7 +337,7 @@ export class ImageModule implements ToolModule {
           cost: job.cost ?? 0,
           files,
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
-          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply, or line_image.'
+          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply.'
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
       }],
