@@ -186,6 +186,42 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
     expect(res.status).toBe(401);
   });
 
+  it('writes .public-base from x-forwarded-host after a valid signature; not on an invalid one', async () => {
+    const app = buildApp();
+    // <workspace>/../.public-base — workspace is <tmpDir>/ws, so this is <tmpDir>/.public-base.
+    const publicBaseFile = path.resolve(path.join(tmpDir, 'ws'), '..', '.public-base');
+
+    await supertest
+      .default(app)
+      .patch(`/api/v1/agents/${AGENT_ID}`)
+      .set(ADMIN)
+      .send({ line_channel_access_token: ACCESS_TOKEN, line_channel_secret: SECRET, line_dm_policy: 'open' });
+
+    // Invalid signature → no write.
+    const bad = await supertest
+      .default(app)
+      .post(`/webhooks/line/${AGENT_ID}`)
+      .set('Content-Type', 'application/json')
+      .set('x-line-signature', 'nope')
+      .set('x-forwarded-host', 'pod.example.com')
+      .send(JSON.stringify({ events: [] }));
+    expect(bad.status).toBe(401);
+    expect(fs.existsSync(publicBaseFile)).toBe(false);
+
+    // Valid signature → base derived from x-forwarded-host, hardcoded https.
+    const raw = JSON.stringify({ destination: 'x', events: [] });
+    const sig = crypto.createHmac('sha256', SECRET).update(raw).digest('base64');
+    const ok = await supertest
+      .default(app)
+      .post(`/webhooks/line/${AGENT_ID}`)
+      .set('Content-Type', 'application/json')
+      .set('x-line-signature', sig)
+      .set('x-forwarded-host', 'pod.example.com')
+      .send(raw);
+    expect(ok.status).toBe(200);
+    expect(fs.readFileSync(publicBaseFile, 'utf8')).toBe('https://pod.example.com/gateway');
+  });
+
   it('records a denied (off-allowlist) sender on the knock list, not forwarded', async () => {
     // Stand up a local LINE API mock so the gate's best-effort getProfile()
     // resolves fast (returns {}) instead of hitting the real api.line.me.
