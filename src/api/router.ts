@@ -2053,7 +2053,21 @@ export function createApiRouter(
     const before = query['before'] ? parseInt(query['before'], 10) : undefined;
     const after = query['after'] ? parseInt(query['after'], 10) : undefined;
     const sessionId = query['session_id'] ?? undefined;
-    const order = query['order'] === 'asc' ? 'asc' : undefined; // ignore anything but 'asc'; undefined ⇒ db default 'desc'
+
+    // order: case-insensitive; 'asc' seeks forward, 'desc' (or omitted) is the db default.
+    // Reject any other explicit value with 400 so client typos surface instead of silently defaulting.
+    let order: 'asc' | undefined;
+    if (query['order'] !== undefined) {
+      const normalized = query['order'].toLowerCase();
+      if (normalized === 'asc') {
+        order = 'asc';
+      } else if (normalized === 'desc') {
+        order = undefined; // explicit desc == db default
+      } else {
+        res.status(400).json({ error: "order must be 'asc' or 'desc'" });
+        return;
+      }
+    }
 
     const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId, order });
     res.json(page);

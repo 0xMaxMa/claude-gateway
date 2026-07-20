@@ -2377,7 +2377,7 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 | `before` | Return messages before this timestamp (ms) |
 | `after` | Return messages after this timestamp (ms) |
 | `session_id` | Filter to a specific session |
-| `order` | `asc` reads forward (oldest→newest) from `after`; default `desc` (newest→oldest) |
+| `order` | `asc` reads forward (oldest→newest) from `after`; `desc` (default) reads newest→oldest. Case-insensitive; any other value returns `400`. |
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
