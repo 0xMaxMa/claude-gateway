@@ -4,8 +4,9 @@
  * Spins up a real AgentRunner + GatewayRouter with a mock claude subprocess
  * and exercises all 7 Chat History / Media API endpoints via supertest.
  *
- * Test IDs: I-HIST-01 through I-HIST-28 (non-contiguous: I-HIST-14 is the `order` param
- * test from #211/PR #213; active-days coverage is I-HIST-21 through I-HIST-28)
+ * Test IDs: I-HIST-01 through I-HIST-29 (non-contiguous: I-HIST-14 is the `order` param
+ * test from #211/PR #213; active-days coverage is I-HIST-21 through I-HIST-28; I-HIST-29
+ * covers the composite (ts,id) cursor)
  */
 
 import * as fs from 'fs';
@@ -829,6 +830,60 @@ describe('Chat History API integration (planning-50)', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/session_id/i);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-29: composite (ts,id) cursor pages an equal-ts burst without skipping ─────
+  it('I-HIST-29: GET /messages before_id/after_id cursor covers an equal-ts burst end-to-end', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-29-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-29-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // Seed a burst where three messages share ts=200, flanked by a lower and a higher ts,
+    // directly through the history DB so the tie is deterministic (sendMessage stamps wall-clock ts).
+    const chatId = 'telegram-tie-burst';
+    const db = runner.getHistoryDb();
+    const seed: ReadonlyArray<readonly [string, number]> = [
+      ['a', 100], ['b', 200], ['c', 200], ['d', 200], ['e', 300],
+    ];
+    for (const [content, ts] of seed) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-tie', source: 'telegram', role: 'user',
+        content, senderName: 'tester', ts,
+      });
+    }
+
+    // Page desc, 2 at a time, feeding BOTH nextCursor and nextCursorId back each round.
+    const collected: string[] = [];
+    let before: number | undefined;
+    let beforeId: number | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const qs = new URLSearchParams({ limit: '2' });
+      if (before !== undefined) qs.set('before', String(before));
+      if (beforeId !== undefined) qs.set('before_id', String(beforeId));
+      const res = await supertest(router.getApp())
+        .get(`/api/v1/agents/alfred/chats/${chatId}/messages?${qs.toString()}`)
+        .set('X-Api-Key', API_KEY_ADMIN);
+      expect(res.status).toBe(200);
+      collected.push(...res.body.messages.map((m: { content: string }) => m.content));
+      if (!res.body.hasMore) break;
+      before = res.body.nextCursor as number;
+      beforeId = res.body.nextCursorId as number;
+    }
+
+    // Every message exactly once, full desc order — the tied 'b'/'c' are NOT skipped,
+    // which a ts-only cursor (before without before_id) would drop at the ts=200 boundary.
+    expect(collected).toEqual(['e', 'd', 'c', 'b', 'a']);
+    expect(new Set(collected).size).toBe(5);
 
     await router.stop();
     await runner.stop();

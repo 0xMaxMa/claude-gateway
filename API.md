@@ -2377,6 +2377,8 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 | `limit` | Max messages to return (default 50, max 200) |
 | `before` | Return messages before this timestamp (ms) |
 | `after` | Return messages after this timestamp (ms) |
+| `before_id` | Id component of the cursor, paired with `before`. Echo back `nextCursorId` here to page correctly across messages that share a `ts` (see below). Ignored without `before`. |
+| `after_id` | Id component of the cursor, paired with `after` (the `order=asc` counterpart of `before_id`). Ignored without `after`. |
 | `session_id` | Filter to a specific session |
 | `order` | `asc` reads forward (oldest→newest) from `after`; `desc` (default) reads newest→oldest. Case-insensitive; any other value returns `400`. |
 
@@ -2391,9 +2393,13 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "role": "user", "content": "Hello!", "ts": 1775737709000, "sessionId": "abc-123" },
     { "role": "assistant", "content": "Hi there!", "ts": 1775737712000, "sessionId": "abc-123" }
   ],
-  "hasMore": false
+  "hasMore": true,
+  "nextCursor": 1775737709000,
+  "nextCursorId": 8412
 }
 ```
+
+When `hasMore` is `true`, the response carries a **composite cursor**: `nextCursor` (the boundary message's `ts`) and `nextCursorId` (its row id). `nextCursorId` is `null` whenever `nextCursor` is.
 
 **Seek-forward example** (jump to a date and read that day's first messages in one round-trip):
 
@@ -2403,6 +2409,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```
 
 `nextCursor` continues forward via `after` when `order=asc` (vs. `before` for the default `desc`).
+
+**Paging across equal-`ts` messages.** `ts` is millisecond-granular and not unique — an image burst coalesced into one turn, or rapid messages, can share a `ts`. To page a run of tied rows without skipping the remainder at the boundary, echo **both** cursor components back: `before=<nextCursor>&before_id=<nextCursorId>` for the default `desc`, or `after=<nextCursor>&after_id=<nextCursorId>` for `order=asc`. The query then matches the boundary as a composite `(ts, id)` tuple. Passing only `before`/`after` (the `ts`) remains valid and byte-for-byte backward compatible; it just retains the legacy behavior of dropping not-yet-shown rows that share the exact boundary `ts`.
 
 ---
 

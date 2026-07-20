@@ -2052,6 +2052,11 @@ export function createApiRouter(
     const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, 200) : 50;
     const before = query['before'] ? parseInt(query['before'], 10) : undefined;
     const after = query['after'] ? parseInt(query['after'], 10) : undefined;
+    // Optional id component of the cursor, echoed from a prior page's nextCursorId. Paired
+    // with before/after, it forms a composite (ts, id) cursor so paging across messages that
+    // share a ts doesn't skip the tied remainder. Ignored unless its before/after is present.
+    const beforeId = query['before_id'] ? parseInt(query['before_id'], 10) : undefined;
+    const afterId = query['after_id'] ? parseInt(query['after_id'], 10) : undefined;
     const sessionId = query['session_id'] ?? undefined;
 
     // order: case-insensitive; 'asc' seeks forward, 'desc' (or omitted) is the db default.
@@ -2076,7 +2081,7 @@ export function createApiRouter(
       }
     }
 
-    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId, order });
+    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, beforeId, afterId, sessionId, order });
     res.json(page);
   });
 

@@ -19,6 +19,10 @@ export interface MessagePage {
   messages: HistoryMessage[];
   hasMore: boolean;
   nextCursor: number | null;
+  // Row id of the boundary message, paired with nextCursor (ts). Pass both back as
+  // before_id/after_id to page across a run of equal-ts messages without skipping the
+  // tied remainder. null whenever nextCursor is null. See PaginationOpts.beforeId.
+  nextCursorId: number | null;
 }
 
 export interface SearchResult extends HistoryMessage {
@@ -44,6 +48,12 @@ export interface PaginationOpts {
   limit?: number;
   before?: number;
   after?: number;
+  // Optional id component of the cursor, paired with before/after (ts). When supplied,
+  // the boundary is matched as a composite (ts, id) tuple so a page edge landing between
+  // messages that share a ts no longer skips the tied remainder. Ignored unless its
+  // matching before/after is also set. Omitting it preserves the legacy ts-only behavior.
+  beforeId?: number;
+  afterId?: number;
   sessionId?: string;
   order?: 'asc' | 'desc'; // default 'desc' (reverse-chronological)
 }

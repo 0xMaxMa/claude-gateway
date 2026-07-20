@@ -176,13 +176,29 @@ export class HistoryDB {
       conditions.push('session_id = ?');
       params.push(opts.sessionId);
     }
+    // Composite (ts, id) cursor: when the caller pairs before/after with its id component,
+    // match the boundary as a tuple so a page edge landing between equal-ts rows doesn't
+    // skip the tied remainder. Without the id it falls back to the legacy ts-only filter,
+    // keeping existing clients byte-for-byte compatible. before pages toward older rows
+    // (uses <), after pages toward newer rows (uses >) — the id comparison follows the
+    // same direction as its ts.
     if (opts.before !== undefined) {
-      conditions.push('ts < ?');
-      params.push(opts.before);
+      if (opts.beforeId !== undefined) {
+        conditions.push('(ts < ? OR (ts = ? AND id < ?))');
+        params.push(opts.before, opts.before, opts.beforeId);
+      } else {
+        conditions.push('ts < ?');
+        params.push(opts.before);
+      }
     }
     if (opts.after !== undefined) {
-      conditions.push('ts > ?');
-      params.push(opts.after);
+      if (opts.afterId !== undefined) {
+        conditions.push('(ts > ? OR (ts = ? AND id > ?))');
+        params.push(opts.after, opts.after, opts.afterId);
+      } else {
+        conditions.push('ts > ?');
+        params.push(opts.after);
+      }
     }
 
     // Fetch limit+1 to determine hasMore
@@ -190,9 +206,9 @@ export class HistoryDB {
     const order = opts.order === 'asc' ? 'ASC' : 'DESC'; // whitelist; never interpolate raw input
     // Tiebreak on id (AUTOINCREMENT, monotonic with insertion) so rows sharing a
     // ts have a deterministic, chronology-consistent order instead of relying on
-    // SQLite's unspecified default. NOTE: nextCursor is ts-only, so a page
-    // boundary landing between equal-ts rows can still skip the tied remainder —
-    // fully closing that needs a composite (ts,id) cursor (tracked separately).
+    // SQLite's unspecified default. Paired with the composite (ts, id) cursor above,
+    // a page boundary between equal-ts rows is expressible exactly, so no tied row is
+    // skipped or repeated when the caller passes the cursor's id component back.
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
              platform_message_id, media_files, ts
@@ -207,11 +223,11 @@ export class HistoryDB {
     const slice = hasMore ? rows.slice(0, limit) : rows;
 
     const messages = slice.map((r) => this._rowToMessage(r));
-    const nextCursor = hasMore && slice.length > 0
-      ? (slice[slice.length - 1]!['ts'] as number)
-      : null;
+    const boundary = hasMore && slice.length > 0 ? slice[slice.length - 1]! : null;
+    const nextCursor = boundary ? (boundary['ts'] as number) : null;
+    const nextCursorId = boundary ? (boundary['id'] as number) : null;
 
-    return { messages, hasMore, nextCursor };
+    return { messages, hasMore, nextCursor, nextCursorId };
   }
 
   searchMessages(chatId: string, query: string, opts: SearchOpts = {}): SearchPage {

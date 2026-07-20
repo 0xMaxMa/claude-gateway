@@ -246,6 +246,93 @@ describe('HistoryDB.getMessages — order (asc/desc seek-forward)', () => {
   });
 });
 
+describe('HistoryDB.getMessages — composite (ts,id) cursor (boundary skip)', () => {
+  const CHAT = 'telegram-12345';
+
+  // A run where three messages share ts=200, flanked by a lower and a higher ts.
+  // Inserted a..e into an empty db => AUTOINCREMENT ids 1..5 in that order.
+  // desc row order: e,d,c,b,a ; asc row order: a,b,c,d,e.
+  function seedTie(db: HistoryDB): void {
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'a', ts: 100 }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'b', ts: 200 }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'c', ts: 200 }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'd', ts: 200 }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'e', ts: 300 }));
+  }
+
+  // U-HDB-TIE-01 — documents the legacy skip the id component closes: a ts-only
+  // continuation drops the not-yet-shown rows that share the boundary ts.
+  it('desc: ts-only cursor (no id) still skips messages sharing the boundary ts', () => {
+    const db = makeDb();
+    seedTie(db);
+    const page1 = db.getMessages(CHAT, { limit: 2 }); // desc => e(300), d(200)
+    expect(page1.messages.map((m) => m.content)).toEqual(['e', 'd']);
+    expect(page1.nextCursor).toBe(200);
+
+    // ts-only continuation: WHERE ts < 200 => only 'a'; 'b' and 'c' (ts=200) vanish.
+    const page2 = db.getMessages(CHAT, { limit: 2, before: page1.nextCursor! });
+    expect(page2.messages.map((m) => m.content)).toEqual(['a']);
+  });
+
+  // U-HDB-TIE-02 — composite cursor pages desc across the tie with no skip, no dup.
+  it('desc: composite (ts,id) cursor returns every message exactly once across the tie', () => {
+    const db = makeDb();
+    seedTie(db);
+    const collected: string[] = [];
+    let before: number | undefined;
+    let beforeId: number | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const page = db.getMessages(CHAT, { limit: 2, before, beforeId });
+      collected.push(...page.messages.map((m) => m.content));
+      if (!page.hasMore) break;
+      before = page.nextCursor!;
+      beforeId = page.nextCursorId!;
+    }
+    expect(collected).toEqual(['e', 'd', 'c', 'b', 'a']); // full desc, in order
+    expect(new Set(collected).size).toBe(5); // no duplicates
+  });
+
+  // U-HDB-TIE-03 — mirror for asc via after/afterId.
+  it('asc: composite (ts,id) cursor returns every message exactly once across the tie', () => {
+    const db = makeDb();
+    seedTie(db);
+    const collected: string[] = [];
+    let after: number | undefined;
+    let afterId: number | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const page = db.getMessages(CHAT, { order: 'asc', limit: 2, after, afterId });
+      collected.push(...page.messages.map((m) => m.content));
+      if (!page.hasMore) break;
+      after = page.nextCursor!;
+      afterId = page.nextCursorId!;
+    }
+    expect(collected).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(new Set(collected).size).toBe(5);
+  });
+
+  // U-HDB-TIE-04 — nextCursorId travels with nextCursor and is null on the final page.
+  it('exposes nextCursorId alongside nextCursor, both null when there is no next page', () => {
+    const db = makeDb();
+    seedTie(db);
+    const page1 = db.getMessages(CHAT, { limit: 2 });
+    expect(page1.hasMore).toBe(true);
+    expect(typeof page1.nextCursorId).toBe('number');
+
+    const last = db.getMessages(CHAT, { limit: 100 });
+    expect(last.hasMore).toBe(false);
+    expect(last.nextCursor).toBeNull();
+    expect(last.nextCursorId).toBeNull();
+  });
+
+  // U-HDB-TIE-05 — an id component without its ts partner is inert (no accidental filter).
+  it('beforeId is ignored when before is absent', () => {
+    const db = makeDb();
+    seedTie(db);
+    const page = db.getMessages(CHAT, { limit: 100, beforeId: 3 });
+    expect(page.messages).toHaveLength(5);
+  });
+});
+
 describe('HistoryDB.listChats', () => {
   it('returns empty array when no messages', () => {
     const db = makeDb();
