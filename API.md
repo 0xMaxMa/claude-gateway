@@ -2367,7 +2367,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 ### GET /api/v1/agents/:agentId/chats/:chatId/messages
 
-Paginated message history (cursor-based). Returns messages in reverse chronological order.
+Paginated message history (cursor-based). Returns messages in reverse chronological order by default; pass `order=asc` to read forward.
 
 **Query parameters:**
 
@@ -2377,6 +2377,7 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 | `before` | Return messages before this timestamp (ms) |
 | `after` | Return messages after this timestamp (ms) |
 | `session_id` | Filter to a specific session |
+| `order` | `asc` reads forward (oldest→newest) from `after`; default `desc` (newest→oldest) |
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
@@ -2392,6 +2393,15 @@ curl -H "X-Api-Key: my-secret-key-123" \
   "hasMore": false
 }
 ```
+
+**Seek-forward example** (jump to a date and read that day's first messages in one round-trip):
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages?order=asc&after=<startOfDay-1>&limit=20" | jq
+```
+
+`nextCursor` continues forward via `after` when `order=asc` (vs. `before` for the default `desc`).
 
 ---
 

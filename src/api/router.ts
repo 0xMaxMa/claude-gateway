@@ -2034,7 +2034,7 @@ export function createApiRouter(
   /**
    * GET /api/v1/agents/:agentId/chats/:chatId/messages
    * Paginated message history (cursor-based).
-   * Query: limit, before (ts ms), after (ts ms), session_id
+   * Query: limit, before (ts ms), after (ts ms), session_id, order (asc|desc, default desc)
    */
   router.get('/v1/agents/:agentId/chats/:chatId/messages', auth, (req: Request, res: Response) => {
     const { agentId, chatId } = req.params as { agentId: string; chatId: string };
@@ -2053,8 +2053,9 @@ export function createApiRouter(
     const before = query['before'] ? parseInt(query['before'], 10) : undefined;
     const after = query['after'] ? parseInt(query['after'], 10) : undefined;
     const sessionId = query['session_id'] ?? undefined;
+    const order = query['order'] === 'asc' ? 'asc' : undefined; // ignore anything but 'asc'; undefined ⇒ db default 'desc'
 
-    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId });
+    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId, order });
     res.json(page);
   });
 
