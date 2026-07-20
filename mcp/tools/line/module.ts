@@ -10,6 +10,7 @@
  * is passed, and fall back to push if it's absent or expired/used (the single-use
  * token has no guaranteed lifetime — ~1 min — so push remains the safety net).
  */
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { messagingApi } from '@line/bot-sdk';
@@ -200,16 +201,41 @@ export class LineModule implements ToolModule {
       return { content: [{ type: 'text', text: 'line_image: image path is required' }], isError: true };
     }
 
-    const publicBase = (process.env.GATEWAY_PUBLIC_URL ?? '').replace(/\/+$/, '');
+    // Public base URL is derived by the gateway from the inbound LINE webhook and
+    // written to `<workspace>/../.public-base` (no public-base-URL env var). Read it
+    // here at call-time; if it isn't there yet the pod hasn't seen a webhook, so
+    // ask the user to send another message rather than pushing a broken URL.
+    const workspace = process.env.GATEWAY_WORKSPACE_DIR;
+    if (!workspace) {
+      return {
+        content: [{ type: 'text', text: 'line_image: GATEWAY_WORKSPACE_DIR not set' }],
+        isError: true,
+      };
+    }
+    let publicBase = '';
+    try {
+      publicBase = fs
+        .readFileSync(path.resolve(workspace, '..', '.public-base'), 'utf8')
+        .trim()
+        .replace(/\/+$/, '');
+    } catch {
+      publicBase = '';
+    }
+    if (!publicBase) {
+      return {
+        content: [{ type: 'text', text: 'line_image: public base not resolved yet (send a message again)' }],
+        isError: true,
+      };
+    }
     // HMAC key for the public media URL = this pod's gateway API key (reused, not a
     // separate secret). NOT the LLM proxy_secret/CLAUDE_CODE_OAUTH_TOKEN — the public
     // token is a gateway route, so the gateway's own key is the right signer, and the verify
     // side resolves the same key from config.gateway.api.keys (see gateway-router.ts).
     const signSecret = process.env.GATEWAY_API_KEY ?? '';
     const agentId = process.env.GATEWAY_AGENT_ID ?? '';
-    if (!publicBase || !signSecret || !agentId) {
+    if (!signSecret || !agentId) {
       return {
-        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_PUBLIC_URL, GATEWAY_API_KEY, or GATEWAY_AGENT_ID)' }],
+        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_API_KEY or GATEWAY_AGENT_ID)' }],
         isError: true,
       };
     }
