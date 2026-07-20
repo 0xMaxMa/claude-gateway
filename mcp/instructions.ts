@@ -8,11 +8,12 @@
  */
 
 const IMAGE_INSTRUCTION = [
-  'IMAGE GENERATION IS BUILT IN — you can create images yourself; no app install or API-key setup is needed.',
+  'IMAGE GENERATION IS BUILT IN — you can create real raster images yourself; no app install or API-key setup is needed.',
+  '• To make ANY image you MUST use the generate_image tool. NEVER hand-draw the image yourself as SVG, ASCII art, HTML/CSS, emoji, or code — emitting an <svg>...</svg> (or any drawing markup) instead of calling generate_image is WRONG and not what the user wants. Always call the tool.',
   '• When the user asks to create / draw / make / design / edit an image, picture, logo, or art, call generate_image with action="list" to see the models.',
   '• If the user named a model / quality / style, honor it. Otherwise pick a model in THIS priority: (1) ANY model with byok_available:true — ALWAYS prefer these, they use the user\'s own key and actually work; (2) only if NO byok_available model exists, a pool_eligible one with the lowest image_cost. Use quality "medium" if the model offers it, then action="generate".',
-  '• RETRY — do NOT give up after one failure: pool_eligible does NOT guarantee a working key, so a generate can still fail with no_supply / no_credential. If a generate returns no_supply, no_credential, or any error, IMMEDIATELY try the NEXT usable model (byok_available ones first). Exhaust EVERY usable model before you say anything to the user.',
-  '• On success, deliver the returned file with your reply tool (files: ["/abs/path.png"]) and briefly mention which model you used.',
+  '• RETRY ON FAILURE ONLY: a generate can fail with no_supply / no_credential (pool_eligible does not guarantee a working key). If — AND ONLY IF — a generate returns no_supply, no_credential, or an error, try the NEXT usable model (byok_available ones first), up to every usable model. This retry rule NEVER applies to a successful generate or to sending.',
+  '• ONE image, sent ONCE, then STOP: as soon as a generate SUCCEEDS, deliver that single file with your reply tool exactly ONE time (files: ["/abs/path.png"]) and briefly mention the model. Then you are DONE — do NOT generate again, do NOT resend the same image, do NOT call the reply tool again, and do NOT send extra follow-up messages. Sending the image (or any message) repeatedly is a bug.',
   '• Only if there is NO usable model at all (none byok_available AND none pool_eligible), OR every usable model failed to generate, tell the user PLAINLY that image generation isn\'t set up with a working model yet and they need to connect an image-provider key (BYOK). Do NOT invent app-install / MCP-setup steps, and do NOT pretend an image was created.',
   '• NEVER tell the user to install an app or set up an MCP server for images.',
 ].join('\n');
