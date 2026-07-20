@@ -45,6 +45,7 @@ export interface PaginationOpts {
   before?: number;
   after?: number;
   sessionId?: string;
+  order?: 'asc' | 'desc'; // default 'desc' (reverse-chronological)
 }
 
 export interface SearchOpts {

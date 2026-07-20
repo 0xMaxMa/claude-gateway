@@ -2034,7 +2034,7 @@ export function createApiRouter(
   /**
    * GET /api/v1/agents/:agentId/chats/:chatId/messages
    * Paginated message history (cursor-based).
-   * Query: limit, before (ts ms), after (ts ms), session_id
+   * Query: limit, before (ts ms), after (ts ms), session_id, order (asc|desc, default desc)
    */
   router.get('/v1/agents/:agentId/chats/:chatId/messages', auth, (req: Request, res: Response) => {
     const { agentId, chatId } = req.params as { agentId: string; chatId: string };
@@ -2054,7 +2054,29 @@ export function createApiRouter(
     const after = query['after'] ? parseInt(query['after'], 10) : undefined;
     const sessionId = query['session_id'] ?? undefined;
 
-    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId });
+    // order: case-insensitive; 'asc' seeks forward, 'desc' (or omitted) is the db default.
+    // Reject any other explicit value with 400 so client typos surface instead of silently defaulting.
+    let order: 'asc' | undefined;
+    const rawOrder = query['order'] as unknown;
+    if (rawOrder !== undefined) {
+      // Express parses a repeated/structured param (?order=asc&order=asc) as an
+      // array/object, not a string — guard so .toLowerCase() can't throw a 500.
+      if (typeof rawOrder !== 'string') {
+        res.status(400).json({ error: "order must be 'asc' or 'desc'" });
+        return;
+      }
+      const normalized = rawOrder.toLowerCase();
+      if (normalized === 'asc') {
+        order = 'asc';
+      } else if (normalized === 'desc') {
+        order = undefined; // explicit desc == db default
+      } else {
+        res.status(400).json({ error: "order must be 'asc' or 'desc'" });
+        return;
+      }
+    }
+
+    const page = runner.getHistoryDb().getMessages(chatId, { limit, before, after, sessionId, order });
     res.json(page);
   });
 

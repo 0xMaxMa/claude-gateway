@@ -186,12 +186,18 @@ export class HistoryDB {
 
     // Fetch limit+1 to determine hasMore
     params.push(limit + 1);
+    const order = opts.order === 'asc' ? 'ASC' : 'DESC'; // whitelist; never interpolate raw input
+    // Tiebreak on id (AUTOINCREMENT, monotonic with insertion) so rows sharing a
+    // ts have a deterministic, chronology-consistent order instead of relying on
+    // SQLite's unspecified default. NOTE: nextCursor is ts-only, so a page
+    // boundary landing between equal-ts rows can still skip the tied remainder —
+    // fully closing that needs a composite (ts,id) cursor (tracked separately).
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
              platform_message_id, media_files, ts
       FROM messages
       WHERE ${conditions.join(' AND ')}
-      ORDER BY ts DESC
+      ORDER BY ts ${order}, id ${order}
       LIMIT ?
     `;
 

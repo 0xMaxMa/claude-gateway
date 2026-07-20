@@ -107,6 +107,145 @@ describe('HistoryDB.getMessages', () => {
   });
 });
 
+describe('HistoryDB.getMessages — order (asc/desc seek-forward)', () => {
+  const CHAT = 'telegram-12345';
+  const BASE = 1000000;
+
+  function seed(db: HistoryDB, count = 10, overrides: Partial<HistoryMessage> = {}): void {
+    for (let i = 0; i < count; i++) {
+      db.insertMessage(makeMsg({ chatId: CHAT, content: `msg-${i}`, ts: BASE + i, ...overrides }));
+    }
+  }
+
+  it('order="asc" returns oldest-first, strictly ascending', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const page = db.getMessages(CHAT, { order: 'asc' });
+    expect(page.messages).toHaveLength(10);
+    expect(page.messages[0]!.ts).toBe(BASE);
+    for (let i = 1; i < page.messages.length; i++) {
+      expect(page.messages[i]!.ts).toBeGreaterThan(page.messages[i - 1]!.ts);
+    }
+  });
+
+  it('default order (omitted) is desc — newest-first, unchanged from today', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const page = db.getMessages(CHAT);
+    expect(page.messages[0]!.ts).toBe(BASE + 9);
+    for (let i = 1; i < page.messages.length; i++) {
+      expect(page.messages[i]!.ts).toBeLessThan(page.messages[i - 1]!.ts);
+    }
+  });
+
+  it('explicit order="desc" behaves identically to the default', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const implicit = db.getMessages(CHAT);
+    const explicit = db.getMessages(CHAT, { order: 'desc' });
+    expect(explicit.messages.map((m) => m.ts)).toEqual(implicit.messages.map((m) => m.ts));
+  });
+
+  it('asc + after bound excludes everything at or before the bound', () => {
+    const db = makeDb();
+    seed(db, 10); // ts BASE..BASE+9
+    const page = db.getMessages(CHAT, { order: 'asc', after: BASE + 4 });
+    expect(page.messages.map((m) => m.ts)).toEqual([BASE + 5, BASE + 6, BASE + 7, BASE + 8, BASE + 9]);
+    expect(page.messages.every((m) => m.ts > BASE + 4)).toBe(true);
+  });
+
+  it('asc + hasMore is true and exactly `limit` rows are returned when more exist', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const page = db.getMessages(CHAT, { order: 'asc', limit: 3 });
+    expect(page.messages).toHaveLength(3);
+    expect(page.hasMore).toBe(true);
+    expect(page.messages.map((m) => m.ts)).toEqual([BASE, BASE + 1, BASE + 2]);
+  });
+
+  it('asc nextCursor continuation is contiguous — no gap, no overlap across pages', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const page1 = db.getMessages(CHAT, { order: 'asc', limit: 4 });
+    expect(page1.hasMore).toBe(true);
+    expect(page1.nextCursor).toBe(BASE + 3); // newest ts returned in this asc page
+
+    const page2 = db.getMessages(CHAT, { order: 'asc', after: page1.nextCursor!, limit: 4 });
+    const seen = [...page1.messages, ...page2.messages].map((m) => m.ts);
+    expect(seen).toEqual([...new Set(seen)]); // no duplicates
+    expect(page2.messages[0]!.ts).toBe(page1.messages[page1.messages.length - 1]!.ts + 1); // no gap
+  });
+
+  it('asc + before + after returns a bounded ascending window', () => {
+    const db = makeDb();
+    seed(db, 10); // ts BASE..BASE+9
+    const page = db.getMessages(CHAT, { order: 'asc', after: BASE + 2, before: BASE + 7 });
+    expect(page.messages.map((m) => m.ts)).toEqual([BASE + 3, BASE + 4, BASE + 5, BASE + 6]);
+  });
+
+  it('asc + after past the newest ts returns an empty page', () => {
+    const db = makeDb();
+    seed(db, 10);
+    const page = db.getMessages(CHAT, { order: 'asc', after: BASE + 100 });
+    expect(page.messages).toHaveLength(0);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('asc on an unknown chat returns an empty page, not an error', () => {
+    const db = makeDb();
+    seed(db, 3);
+    const page = db.getMessages('telegram-unknown', { order: 'asc' });
+    expect(page.messages).toHaveLength(0);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('asc composes with sessionId filtering', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg({ chatId: CHAT, sessionId: 'session-a', content: 'a1', ts: BASE }));
+    db.insertMessage(makeMsg({ chatId: CHAT, sessionId: 'session-b', content: 'b1', ts: BASE + 1 }));
+    db.insertMessage(makeMsg({ chatId: CHAT, sessionId: 'session-a', content: 'a2', ts: BASE + 2 }));
+    const page = db.getMessages(CHAT, { order: 'asc', sessionId: 'session-a' });
+    expect(page.messages.map((m) => m.content)).toEqual(['a1', 'a2']);
+  });
+
+  it('an arbitrary/garbage order value falls back to desc — never throws, never reaches SQL raw', () => {
+    const db = makeDb();
+    seed(db, 5);
+    expect(() =>
+      db.getMessages(CHAT, { order: 'sideways; DROP TABLE messages;--' as unknown as 'asc' | 'desc' })
+    ).not.toThrow();
+    const page = db.getMessages(CHAT, { order: 'sideways' as unknown as 'asc' | 'desc' });
+    expect(page.messages[0]!.ts).toBe(BASE + 4); // newest-first, i.e. desc fallback
+    // table must still exist / be intact after the "injection" attempt
+    expect(db.getMessages(CHAT).messages).toHaveLength(5);
+  });
+
+  it('single-row result: asc and desc agree, hasMore false, nextCursor null', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg({ chatId: CHAT, ts: BASE }));
+    const asc = db.getMessages(CHAT, { order: 'asc' });
+    const desc = db.getMessages(CHAT, { order: 'desc' });
+    expect(asc.messages).toHaveLength(1);
+    expect(desc.messages).toHaveLength(1);
+    expect(asc.hasMore).toBe(false);
+    expect(asc.nextCursor).toBeNull();
+  });
+
+  it('rows sharing a ts get a deterministic id-tiebroken order (asc = insertion, desc = reverse)', () => {
+    const db = makeDb();
+    // three messages at the SAME ts, inserted in a known order
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'first', ts: BASE }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'second', ts: BASE }));
+    db.insertMessage(makeMsg({ chatId: CHAT, content: 'third', ts: BASE }));
+    expect(db.getMessages(CHAT, { order: 'asc' }).messages.map((m) => m.content))
+      .toEqual(['first', 'second', 'third']);
+    expect(db.getMessages(CHAT, { order: 'desc' }).messages.map((m) => m.content))
+      .toEqual(['third', 'second', 'first']);
+  });
+});
+
 describe('HistoryDB.listChats', () => {
   it('returns empty array when no messages', () => {
     const db = makeDb();

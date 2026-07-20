@@ -258,6 +258,67 @@ describe('Chat History API integration (planning-50)', () => {
     await runner.stop();
   });
 
+  // ─── I-HIST-14: GET messages honors the `order` param (asc/desc, case-insensitive, 400 on invalid) ─
+  it('I-HIST-14: order=asc reads forward, is case-insensitive, and rejects invalid values with 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-14-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-14-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const sid = 'hist-14-session';
+    for (let i = 0; i < 3; i++) {
+      await sendMessage(router.getApp(), 'alfred', `message-${i}`, sid);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    const chatId = `api-${sid}`;
+
+    // asc → strictly ascending ts (oldest first)
+    const asc = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=asc`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(asc.status).toBe(200);
+    const ascTs = asc.body.messages.map((m: { ts: number }) => m.ts);
+    expect(ascTs).toEqual([...ascTs].sort((a, b) => a - b));
+
+    // Uppercase ASC is accepted (case-insensitive) and matches lowercase asc
+    const ascUpper = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=ASC`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(ascUpper.status).toBe(200);
+    expect(ascUpper.body.messages.map((m: { ts: number }) => m.ts)).toEqual(ascTs);
+
+    // desc → strictly descending ts (newest first), same as the default
+    const desc = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=desc`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(desc.status).toBe(200);
+    expect(desc.body.messages.map((m: { ts: number }) => m.ts)).toEqual([...ascTs].reverse());
+
+    // An invalid explicit value surfaces as 400 rather than silently defaulting
+    const bad = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=sideways`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toMatch(/order/i);
+
+    // A repeated param parses as an array, not a string — must 400, never 500
+    const dup = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?order=asc&order=asc`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(dup.status).toBe(400);
+    expect(dup.body.error).toMatch(/order/i);
+
+    await router.stop();
+    await runner.stop();
+  });
+
   // ─── I-HIST-05: FTS search finds matching messages ─────────────────────────
   it('I-HIST-05: GET /chats/:chatId/messages/search finds matching content', async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-05-'));
