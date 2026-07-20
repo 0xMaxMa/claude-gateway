@@ -125,6 +125,27 @@ function buildApiSystemNote(allowTools: boolean, imagePaths?: string[]): string 
   return `<api-context>This is an API request. ${memoryOverride} ${secretsRule} ${toolNote}${imageNote}</api-context>\n`;
 }
 
+/**
+ * Convert absolute file paths (e.g. from a reply tool's `files` input) into
+ * relative `media/<rel>` paths for persistence as message `mediaFiles`.
+ *
+ * Mirrors the transform in `popApiAttachments`: only paths UNDER `mediaRoot`
+ * that pass the `exists` predicate are kept (never arbitrary abs paths, never
+ * dangling files), and backslashes are normalised to forward slashes.
+ *
+ * The `exists` predicate is injected (defaults to `fs.existsSync`) so the pure
+ * string transform is unit-testable without a real filesystem.
+ */
+export function toRelMediaFiles(
+  absPaths: unknown[],
+  mediaRoot: string,
+  exists: (p: string) => boolean = fs.existsSync,
+): string[] {
+  return absPaths
+    .filter((p): p is string => typeof p === 'string' && p.startsWith(mediaRoot) && exists(p))
+    .map((p) => 'media/' + p.slice(mediaRoot.length).replace(/\\/g, '/'));
+}
+
 export class AgentRunner extends EventEmitter {
   private agentConfig: AgentConfig;
   private readonly gatewayConfig: GatewayConfig;
@@ -1177,7 +1198,15 @@ export class AgentRunner extends EventEmitter {
                   replyToolUseId = (block as Record<string, unknown>)['id'] as string ?? null;
                   // Persist the reply text to history so it appears in chat history API
                   const replyText = typeof block.input?.['text'] === 'string' ? block.input['text'].trim() : '';
-                  if (replyText) {
+                  // Capture any images the reply attached (reply tool's `files`)
+                  // so the web transcript renders them via mediaFiles. Only files
+                  // under the agent media root that still exist are recorded.
+                  const replyFiles = Array.isArray(block.input?.['files']) ? (block.input['files'] as unknown[]) : [];
+                  const mediaRoot = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
+                  const replyMedia = toRelMediaFiles(replyFiles, mediaRoot);
+                  // Persist when there is text OR image(s) — an image-only reply
+                  // still needs a row so it shows in the web transcript.
+                  if (replyText || replyMedia.length) {
                     const channelSrc = this.channelSourceMap.get(mapKey) ?? 'telegram';
                     this.historyDb.insertMessage({
                       chatId: `${channelSrc}-${mapKey}`,
@@ -1185,12 +1214,13 @@ export class AgentRunner extends EventEmitter {
                       source: channelSrc as HistorySource,
                       role: 'assistant',
                       content: replyText,
+                      mediaFiles: replyMedia.length ? replyMedia : undefined,
                       ts: Date.now(),
                     });
                     // LINE: the MCP line_reply tool's send is suppressed in
                     // refresh mode; the gateway delivers (free reply, or cache +
                     // postback button when slow). See LineReplyManager.
-                    if (channelSrc === 'line' && this.lineReply) {
+                    if (channelSrc === 'line' && this.lineReply && replyText) {
                       void this.lineReply.onAnswer(mapKey, replyText);
                     }
                   }
