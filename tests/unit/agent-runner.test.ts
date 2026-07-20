@@ -294,7 +294,7 @@ describe('AgentRunner (session pool)', () => {
 
     const sess = getSessions(runner).get('chat:esc')!;
     expect(sess).toBeDefined();
-    expect(sess.historyLimit).toBe(30); // TOO_LARGE_HISTORY_LADDER[2]
+    expect(sess.historyLimit).toBe(30); // default cap 50 → rungs [40,30,20,10,0]; recovery #2 = 30
   }, 15000);
 
   // --------------------------------------------------------------------------
@@ -660,6 +660,78 @@ describe('AgentRunner — typing error notification', () => {
     r.handleRequestTooLarge('chat:big', proc);
     expect(readForward()).toContain('/clear');
     expect(restartSpy).toHaveBeenCalledTimes(6);
+  });
+
+  // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-04: spawnHistoryLimit with the DEFAULT cap (50) reproduces the
+  //   legacy recovery sequence exactly (backward compatibility).
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-04: default cap reproduces the legacy 50→40→30→20→10→0 sequence', () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    const r = runner as unknown as { spawnHistoryLimit: (cap: number, count: number) => number };
+
+    expect(r.spawnHistoryLimit(50, 0)).toBe(50); // healthy
+    // recoveries 1..6 step down and then pin at the 0-history rung
+    expect([1, 2, 3, 4, 5, 6].map(c => r.spawnHistoryLimit(50, c))).toEqual([40, 30, 20, 10, 0, 0]);
+  });
+
+  // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-05: a LOWERED cap steps through only the rungs strictly below
+  //   it — no no-op retry that re-injects the same (already-too-large) size.
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-05: a lowered cap skips rungs >= the cap (no no-op recovery)', () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    const r = runner as unknown as { spawnHistoryLimit: (cap: number, count: number) => number };
+
+    // cap 30 → healthy 30, then strictly-smaller rungs [20, 10, 0] (never a second 30)
+    expect(r.spawnHistoryLimit(30, 0)).toBe(30);
+    expect([1, 2, 3, 4].map(c => r.spawnHistoryLimit(30, c))).toEqual([20, 10, 0, 0]);
+
+    // cap 0 → no history at all, and nothing smaller to recover to
+    expect(r.spawnHistoryLimit(0, 0)).toBe(0);
+    expect(r.spawnHistoryLimit(0, 1)).toBe(0);
+
+    // cap above the ladder top → the leading rung (MAX_HISTORY_MESSAGES) is used
+    expect(r.spawnHistoryLimit(100, 0)).toBe(100);
+    expect(r.spawnHistoryLimit(100, 1)).toBe(50);
+  });
+
+  // --------------------------------------------------------------------------
+  // U-AR-TOOLARGE-06: exhaustion aligns to the lowered cap — a cap of 30 has only
+  //   3 shrink rungs ([20,10,0]), so it gives up after 3 steps, not 5.
+  // --------------------------------------------------------------------------
+  it('U-AR-TOOLARGE-06: lowered cap exhausts after its own rung count (3), not 5', () => {
+    const loweredConfig = makeAgentConfig(agentConfig.workspace, { history: { maxHistoryMessages: 30 } });
+    runner = new AgentRunner(loweredConfig, gatewayConfig);
+    const r = runner as unknown as {
+      handleRequestTooLarge: (mapKey: string, proc: { setProcessing: (b: boolean) => void }) => void;
+      tooLargeRecoveries: Map<string, number>;
+      tooLargeExhausted: Set<string>;
+      restartProcess: (chatId: string) => Promise<void>;
+    };
+    const restartSpy = jest.spyOn(r, 'restartProcess').mockResolvedValue(undefined);
+    const proc = { setProcessing: jest.fn() };
+    const forwardFile = path.join(getTypingDir(), 'chat:low.forward');
+    const readForward = () => JSON.parse(fs.readFileSync(forwardFile, 'utf8')).text as string;
+
+    // Rungs [20,10,0] → 3 climbing steps, each restarts.
+    for (let i = 1; i <= 3; i++) {
+      r.handleRequestTooLarge('chat:low', proc);
+      expect(r.tooLargeRecoveries.get('chat:low')).toBe(i);
+    }
+    expect(restartSpy).toHaveBeenCalledTimes(3);
+    expect(r.tooLargeExhausted.has('chat:low')).toBe(false);
+
+    // 4th: exhausted (0-history still tripped) → pin at 3, surface /clear, restart once.
+    r.handleRequestTooLarge('chat:low', proc);
+    expect(r.tooLargeRecoveries.get('chat:low')).toBe(3);
+    expect(r.tooLargeExhausted.has('chat:low')).toBe(true);
+    expect(readForward()).toContain('/clear');
+    expect(restartSpy).toHaveBeenCalledTimes(4);
+
+    // 5th+: still exhausted → no further restart churn.
+    r.handleRequestTooLarge('chat:low', proc);
+    expect(restartSpy).toHaveBeenCalledTimes(4);
   });
 
   // --------------------------------------------------------------------------

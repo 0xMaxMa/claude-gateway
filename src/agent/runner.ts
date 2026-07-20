@@ -30,14 +30,16 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
 const ANTHROPIC_SOCKET_ERROR = 'socket connection was closed unexpectedly';
 
-// History re-injection ladder for request_too_large (32MB) recovery. Index =
-// number of consecutive 32MB recoveries on a session; the value is how many
-// history messages the NEXT spawn re-injects. Index 0 is the healthy default
-// (= MAX_HISTORY_MESSAGES, sourced from it so the two never drift); each retry
-// steps down a rung, shrinking the re-loaded context until it drops under
-// Anthropic's 32MB request ceiling. Past the last rung (0 history) the context
-// can't shrink further, so the runner stops escalating and asks the user to
-// /clear instead of looping forever.
+// History re-injection ladder for request_too_large (32MB) recovery: the
+// candidate history sizes a recovering session can step down to. The HEALTHY
+// spawn uses the configured cap (resolveMaxHistoryMessages), not an index into
+// this array; on each consecutive 32MB recovery the session drops to the next
+// ladder rung STRICTLY BELOW that cap (see spawnHistoryLimit), so every retry
+// actually shrinks the re-loaded context instead of re-trying the same size.
+// Once even the 0-history rung still trips 32MB the runner stops escalating and
+// asks the user to /clear instead of looping forever. The leading
+// MAX_HISTORY_MESSAGES only acts as a recovery rung when an operator configures
+// a cap higher than it.
 const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 30, 20, 10, 0];
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -1061,12 +1063,11 @@ export class AgentRunner extends EventEmitter {
     // request_too_large (32MB) recovery: shrink the re-injected history on each
     // consecutive retry so a pathological context eventually fits. recoveryCount
     // is 0 for healthy sessions → use the configured cap directly; a recovering
-    // session steps down the ladder but never re-injects more than that cap.
+    // session steps down to the ladder rungs STRICTLY BELOW that cap, so each
+    // retry genuinely shrinks instead of re-trying the same (already-too-large)
+    // size when the cap has been lowered.
     const recoveryCount = this.tooLargeRecoveries.get(mapKey) ?? 0;
-    const ladderIdx = Math.min(recoveryCount, TOO_LARGE_HISTORY_LADDER.length - 1);
-    proc.historyLimit = recoveryCount === 0
-      ? configuredMax
-      : Math.min(configuredMax, TOO_LARGE_HISTORY_LADDER[ladderIdx]);
+    proc.historyLimit = this.spawnHistoryLimit(configuredMax, recoveryCount);
     if (recoveryCount > 0) {
       this.logger.info('Spawning with reduced history after request_too_large', {
         mapKey, recoveryCount, historyLimit: proc.historyLimit,
@@ -1661,6 +1662,30 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * The 32MB-recovery rungs for a given healthy cap: the ladder sizes STRICTLY
+   * below the cap, in descending order. Filtering by `< cap` (not `<=`) drops any
+   * rung equal to or above the cap so a lowered cap never yields a recovery step
+   * that re-injects the same (or more) history — every step actually shrinks.
+   */
+  private recoveryRungs(configuredMax: number): readonly number[] {
+    return TOO_LARGE_HISTORY_LADDER.filter(r => r < configuredMax);
+  }
+
+  /**
+   * History re-injection cap for a spawn, given the configured healthy cap and how
+   * many consecutive 32MB recoveries have happened on the session. recoveryCount 0
+   * = healthy → the full configured cap. Each later recovery drops to the next
+   * rung strictly below the cap; once those are exhausted it stays at 0 (no
+   * history). Kept in sync with the exhaustion threshold in handleRequestTooLarge.
+   */
+  private spawnHistoryLimit(configuredMax: number, recoveryCount: number): number {
+    if (recoveryCount <= 0) return configuredMax;
+    const rungs = this.recoveryRungs(configuredMax);
+    if (rungs.length === 0) return 0;
+    return rungs[Math.min(recoveryCount - 1, rungs.length - 1)];
+  }
+
+  /**
    * Unified recovery for the recoverable "Request too large (max 32MB)" error.
    * Reached from two backends that surface the SAME error differently:
    *  - PTY shell (headless=false): a `system/request_too_large` event emitted by
@@ -1669,22 +1694,30 @@ export class AgentRunner extends EventEmitter {
    *    (is_error + "Request too large (max"); the long-lived process otherwise
    *    stays alive and rejects every subsequent turn forever (Bug B).
    *
-   * Each consecutive recovery shrinks the history re-injected on the next spawn
-   * (TOO_LARGE_HISTORY_LADDER: 50→40→30→20→10→0) so a pathological context drops
-   * under the 32MB ceiling. The respawn happens on the user's NEXT message (no
-   * auto-loop), and the counter resets on the next successful result. Once even a
-   * zero-history spawn still trips 32MB, stop escalating and ask the user to
-   * /clear rather than climb the ladder again.
+   * Each consecutive recovery shrinks the history re-injected on the next spawn,
+   * stepping down the TOO_LARGE_HISTORY_LADDER rungs strictly below the configured
+   * cap (default 50 → 40→30→20→10→0), so a pathological context drops under the
+   * 32MB ceiling. The respawn happens on the user's NEXT message (no auto-loop),
+   * and the counter resets on the next successful result. Once even a zero-history
+   * spawn still trips 32MB, stop escalating and ask the user to /clear rather than
+   * climb the ladder again.
    */
   private handleRequestTooLarge(mapKey: string, proc: SessionProcess): void {
     proc.setProcessing(false);
+    // Recovery steps through the ladder rungs strictly below the configured cap;
+    // the number of those rungs is how many shrink attempts exist before even the
+    // smallest (0-history) spawn has been tried and still trips 32MB.
+    const configuredMax = resolveMaxHistoryMessages(
+      this.agentConfig.history?.maxHistoryMessages,
+      this.gatewayConfig.gateway.history?.maxHistoryMessages,
+    );
+    const stepCount = this.recoveryRungs(configuredMax).length; // shrink attempts available
     const count = (this.tooLargeRecoveries.get(mapKey) ?? 0) + 1;
-    const lastRung = TOO_LARGE_HISTORY_LADDER.length - 1; // index of the 0-history rung
 
-    if (count > lastRung) {
-      // Even the zero-history spawn tripped 32MB — context can't shrink further.
-      // Pin the counter at the last rung and always surface the /clear next step.
-      this.tooLargeRecoveries.set(mapKey, lastRung);
+    if (count > stepCount) {
+      // Even the smallest rung tripped 32MB — context can't shrink further.
+      // Pin the counter at the last step and always surface the /clear next step.
+      this.tooLargeRecoveries.set(mapKey, stepCount);
       this.logger.error('Request too large persists with zero re-injected history', { mapKey, count });
       this.writeAutoForward(
         mapKey,
@@ -1701,7 +1734,7 @@ export class AgentRunner extends EventEmitter {
 
     this.tooLargeRecoveries.set(mapKey, count);
     this.logger.warn('Request too large (32MB) — restarting with reduced history', {
-      mapKey, attempt: count, nextHistoryLimit: TOO_LARGE_HISTORY_LADDER[count],
+      mapKey, attempt: count, nextHistoryLimit: this.spawnHistoryLimit(configuredMax, count),
     });
     // Ordering matters and makes the notice delivery race-free: writeAutoForward
     // persists the `.forward` file synchronously HERE, before restartProcess()
