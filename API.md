@@ -2382,6 +2382,8 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 | `session_id` | Filter to a specific session |
 | `order` | `asc` reads forward (oldest→newest) from `after`; `desc` (default) reads newest→oldest. Case-insensitive; any other value returns `400`. |
 
+`before`, `after`, `before_id`, and `after_id` must be numeric; a present-but-non-numeric value returns `400`.
+
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
   "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages?limit=20" | jq
@@ -2390,8 +2392,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```json
 {
   "messages": [
-    { "role": "user", "content": "Hello!", "ts": 1775737709000, "sessionId": "abc-123" },
-    { "role": "assistant", "content": "Hi there!", "ts": 1775737712000, "sessionId": "abc-123" }
+    { "role": "assistant", "content": "Hi there!", "ts": 1775737712000, "sessionId": "abc-123" },
+    { "role": "user", "content": "Hello!", "ts": 1775737709000, "sessionId": "abc-123" }
   ],
   "hasMore": true,
   "nextCursor": 1775737709000,

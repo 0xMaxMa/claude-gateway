@@ -885,6 +885,16 @@ describe('Chat History API integration (planning-50)', () => {
     expect(collected).toEqual(['e', 'd', 'c', 'b', 'a']);
     expect(new Set(collected).size).toBe(5);
 
+    // A present-but-non-numeric cursor component is a malformed request → 400 (not a
+    // silent empty page). Covers before/after and both id companions uniformly.
+    for (const badParam of ['before=abc', 'after=xyz', 'before_id=nope', 'after_id=nan']) {
+      const bad = await supertest(router.getApp())
+        .get(`/api/v1/agents/alfred/chats/${chatId}/messages?${badParam}`)
+        .set('X-Api-Key', API_KEY_ADMIN);
+      expect(bad.status).toBe(400);
+      expect(bad.body.error).toMatch(/must be a number/i);
+    }
+
     await router.stop();
     await runner.stop();
   });

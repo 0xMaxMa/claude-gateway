@@ -2050,13 +2050,28 @@ export function createApiRouter(
     }
     const query = req.query as Record<string, string>;
     const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, 200) : 50;
-    const before = query['before'] ? parseInt(query['before'], 10) : undefined;
-    const after = query['after'] ? parseInt(query['after'], 10) : undefined;
-    // Optional id component of the cursor, echoed from a prior page's nextCursorId. Paired
-    // with before/after, it forms a composite (ts, id) cursor so paging across messages that
-    // share a ts doesn't skip the tied remainder. Ignored unless its before/after is present.
-    const beforeId = query['before_id'] ? parseInt(query['before_id'], 10) : undefined;
-    const afterId = query['after_id'] ? parseInt(query['after_id'], 10) : undefined;
+    // Numeric cursor params. before/after are ms timestamps; before_id/after_id are the id
+    // component of the composite (ts, id) cursor, echoed from a prior page's nextCursorId —
+    // paired with before/after they stop paging from skipping messages that share a ts
+    // (ignored unless the matching before/after is present). A present-but-non-numeric value
+    // (?before=abc, or a duplicate/structured param) is a malformed request: reject with 400
+    // so client bugs surface, mirroring the `order` guard below, rather than coercing to NaN
+    // and silently returning an empty page.
+    const cursorInts: Record<string, number | undefined> = {};
+    for (const name of ['before', 'after', 'before_id', 'after_id']) {
+      const raw = query[name] as unknown;
+      if (raw === undefined) continue;
+      const n = typeof raw === 'string' ? parseInt(raw, 10) : NaN;
+      if (!Number.isFinite(n)) {
+        res.status(400).json({ error: `${name} must be a number` });
+        return;
+      }
+      cursorInts[name] = n;
+    }
+    const before = cursorInts['before'];
+    const after = cursorInts['after'];
+    const beforeId = cursorInts['before_id'];
+    const afterId = cursorInts['after_id'];
     const sessionId = query['session_id'] ?? undefined;
 
     // order: case-insensitive; 'asc' seeks forward, 'desc' (or omitted) is the db default.
