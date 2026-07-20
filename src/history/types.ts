@@ -53,6 +53,13 @@ export interface SearchOpts {
   offset?: number;
 }
 
+export interface ActiveDaysOpts {
+  from: number; // UTC ms, inclusive (ts >= from)
+  to: number; // UTC ms, exclusive (ts < to)
+  tzOffset?: number; // minutes EAST of UTC (local = UTC + offset); Bangkok = +420; default 0 (UTC)
+  sessionId?: string;
+}
+
 export interface SessionSummary {
   chatId: string | null;
   sessionId: string;

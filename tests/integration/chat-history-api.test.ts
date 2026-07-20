@@ -4,7 +4,8 @@
  * Spins up a real AgentRunner + GatewayRouter with a mock claude subprocess
  * and exercises all 7 Chat History / Media API endpoints via supertest.
  *
- * Test IDs: I-HIST-01 through I-HIST-12
+ * Test IDs: I-HIST-01 through I-HIST-27 (non-contiguous: I-HIST-14 is the `order` param
+ * test from #211/PR #213; active-days coverage is I-HIST-21 through I-HIST-27)
  */
 
 import * as fs from 'fs';
@@ -613,4 +614,195 @@ describe('Chat History API integration (planning-50)', () => {
     await router.stop();
     await runner.stop();
   }, 15000);
+
+  // ─── I-HIST-21: active-days — happy path with tz bucketing + session filter ─
+  it('I-HIST-21: GET /chats/:chatId/messages/active-days returns distinct local days', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-21-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-21-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const sid = 'hist-21-session';
+    await sendMessage(router.getApp(), 'alfred', 'first day message', sid);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const chatId = `api-${sid}`;
+    const now = Date.now();
+    const res = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages/active-days?from=${now - 86400000}&to=${now + 86400000}&tz_offset=420&session_id=${sid}`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.days)).toBe(true);
+    expect(res.body.days.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.days[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-22: active-days — missing from/to returns 400 ────────────────
+  it('I-HIST-22: GET /messages/active-days with missing from/to returns 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-22-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-22-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const noFrom = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/chats/api-any/messages/active-days?to=1000')
+      .set('X-Api-Key', API_KEY_ADMIN);
+    const noTo = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/chats/api-any/messages/active-days?from=0')
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(noFrom.status).toBe(400);
+    expect(noTo.status).toBe(400);
+    expect(noFrom.body.error).toBeDefined();
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-23: active-days — non-numeric from returns 400, not a silent truncation ─
+  it('I-HIST-23: GET /messages/active-days with non-numeric from/to returns 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-23-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-23-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // "100garbage" would silently truncate to 100 under parseInt() — must 400 instead.
+    const res = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/chats/api-any/messages/active-days?from=100garbage&to=200')
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(400);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-24: active-days — non-numeric tz_offset returns 400 ──────────
+  it('I-HIST-24: GET /messages/active-days with non-numeric tz_offset returns 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-24-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-24-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const res = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/chats/api-any/messages/active-days?from=0&to=1000&tz_offset=banana')
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/tz_offset/i);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-25: active-days — 403 when key has no access to agent ────────
+  it('I-HIST-25: GET /messages/active-days returns 403 when key has no access to agent', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-25-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-25-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const res = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/chats/api-any/messages/active-days?from=0&to=1000')
+      .set('X-Api-Key', API_KEY_OTHER);
+
+    expect(res.status).toBe(403);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-26: active-days — 404 when agent not found ───────────────────
+  it('I-HIST-26: GET /messages/active-days returns 404 for unknown agent', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-26-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-26-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const res = await supertest(router.getApp())
+      .get('/api/v1/agents/nonexistent/chats/api-any/messages/active-days?from=0&to=1000')
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(404);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-27: active-days — window larger than 366 days returns 400 ─────
+  it('I-HIST-27: GET /messages/active-days with an over-long window returns 400', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-27-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-27-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // 400 days apart — beyond the 366-day cap that guards against a full-history scan.
+    const from = 0;
+    const to = 400 * 24 * 60 * 60 * 1000;
+    const res = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/api-any/messages/active-days?from=${from}&to=${to}`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/window too large/i);
+
+    // A window exactly at the boundary (366 days) is still accepted (200).
+    const okTo = 366 * 24 * 60 * 60 * 1000;
+    const ok = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/api-any/messages/active-days?from=${from}&to=${okTo}`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+
+    expect(ok.status).toBe(200);
+    expect(Array.isArray(ok.body.days)).toBe(true);
+
+    await router.stop();
+    await runner.stop();
+  });
 });

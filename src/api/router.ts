@@ -2111,6 +2111,56 @@ export function createApiRouter(
   });
 
   /**
+   * GET /api/v1/agents/:agentId/chats/:chatId/messages/active-days
+   * Distinct local calendar days (YYYY-MM-DD) with >= 1 message in a [from, to) window.
+   * Powers the jump-to-date calendar's per-day "has history" dot in one bounded index scan.
+   * Query: from (ts ms, inclusive), to (ts ms, exclusive), tz_offset (min east of UTC, Bangkok=+420), session_id
+   */
+  router.get('/v1/agents/:agentId/chats/:chatId/messages/active-days', auth, (req: Request, res: Response) => {
+    const { agentId, chatId } = req.params as { agentId: string; chatId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+    const query = req.query as Record<string, string>;
+    // Number(), not parseInt() — parseInt("100garbage") silently returns 100, masking a malformed
+    // client value the same way a case-sensitive/silently-defaulting enum param would (see order).
+    const from = query['from'] ? Number(query['from']) : NaN;
+    const to = query['to'] ? Number(query['to']) : NaN;
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      res.status(400).json({ error: 'from and to (ts ms) are required' });
+      return;
+    }
+    // Bound the window so a malformed client can't turn this into a near-full-history scan.
+    // 366 days is far wider than the one-month view the calendar sends, so it never bites
+    // legitimate navigation while still capping a pathological range (E5 in the design notes).
+    const MAX_ACTIVE_DAYS_SPAN_MS = 366 * 24 * 60 * 60 * 1000;
+    if (to - from > MAX_ACTIVE_DAYS_SPAN_MS) {
+      res.status(400).json({ error: 'window too large (max 366 days between from and to)' });
+      return;
+    }
+    let tzOffset = 0;
+    if (query['tz_offset'] !== undefined) {
+      const parsed = Number(query['tz_offset']);
+      if (!Number.isFinite(parsed)) {
+        res.status(400).json({ error: 'tz_offset must be a number (minutes east of UTC)' });
+        return;
+      }
+      tzOffset = parsed;
+    }
+    const sessionId = query['session_id'] ?? undefined;
+
+    const days = runner.getHistoryDb().getActiveDays(chatId, { from, to, tzOffset, sessionId });
+    res.json({ days });
+  });
+
+  /**
    * POST /api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages
    * Inject a message into an existing channel session (cross-channel continuation).
    * Streams the assistant response as SSE.

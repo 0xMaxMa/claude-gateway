@@ -9,6 +9,7 @@ import {
   MessageRole,
   PaginationOpts,
   SearchOpts,
+  ActiveDaysOpts,
   SearchPage,
   SearchResult,
   SessionSummary,
@@ -259,6 +260,44 @@ export class HistoryDB {
     } catch {
       return { results: [], total: 0, hasMore: false };
     }
+  }
+
+  /**
+   * Distinct local calendar days (YYYY-MM-DD) that have >= 1 message in [from, to).
+   *
+   * Rides the idx_messages_chat_ts index as a bounded range scan (chat_id + ts window),
+   * so a one-month window emits at most ~31 rows without a full-history scan.
+   *
+   * Timezone: tzOffset is minutes EAST of UTC (local = UTC + offset), matching the issue's
+   * SQL contract. Bangkok (UTC+7) => +420. The SQL adds (tzOffset * 60000) ms to ts before
+   * bucketing, so days match the viewer's local calendar. Omitted tzOffset defaults to 0 (UTC).
+   * (Clients computing this from JS should send -Date.prototype.getTimezoneOffset().)
+   */
+  getActiveDays(chatId: string, opts: ActiveDaysOpts): string[] {
+    // Short-circuit empty/inverted windows before touching SQLite.
+    if (!(opts.to > opts.from)) {
+      return [];
+    }
+
+    const conditions: string[] = ['chat_id = ?', 'ts >= ?', 'ts < ?'];
+    const params: (string | number)[] = [chatId, opts.from, opts.to];
+    if (opts.sessionId) {
+      conditions.push('session_id = ?');
+      params.push(opts.sessionId);
+    }
+
+    // offsetMs is bound FIRST because it appears first in the SQL text; keep ? order and bind
+    // order in lockstep. tzOffset is minutes east of UTC => local = UTC + offset => add offsetMs.
+    const offsetMs = (opts.tzOffset ?? 0) * 60000;
+    const sql = `
+      SELECT DISTINCT date((ts + ?) / 1000, 'unixepoch') AS day
+      FROM messages
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY day ASC
+    `;
+
+    const rows = this.db.prepare(sql).all(offsetMs, ...params) as Array<{ day: string }>;
+    return rows.map((r) => r.day);
   }
 
   listSessions(chatId?: string): SessionSummary[] {

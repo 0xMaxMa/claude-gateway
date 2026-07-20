@@ -140,6 +140,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/chats/:chatId/sessions` | Key | List sessions for a specific chat |
 | `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages` | Key | Paginated message history (cursor-based) |
 | `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages/search` | Key | Full-text search across messages (SQLite FTS5) |
+| `GET` | `/api/v1/agents/:agentId/chats/:chatId/messages/active-days` | Key | Distinct local calendar days with >= 1 message in a window (jump-to-date dots) |
 | `POST` | `/api/v1/agents/:agentId/chats/:chatId/sessions/:sessionId/messages` | Key | Inject a message into an existing channel session (SSE stream) |
 
 ### Media API
@@ -2436,6 +2437,49 @@ curl -H "X-Api-Key: my-secret-key-123" \
 | Status | When |
 |--------|------|
 | 400 | `q` is missing or empty |
+
+---
+
+### GET /api/v1/agents/:agentId/chats/:chatId/messages/active-days
+
+Returns the distinct **local calendar days** that have at least one message inside a `[from, to)`
+window. Intended for a jump-to-date calendar: the client requests the visible month once and
+draws a "has history" dot under each returned day, without paging the whole thread into memory.
+The query rides the `(chat_id, ts)` index as a bounded range scan, so a one-month window returns
+at most ~31 days.
+
+**Query parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `from` | Yes | Window start, UTC epoch ms, **inclusive** (`ts >= from`) |
+| `to` | Yes | Window end, UTC epoch ms, **exclusive** (`ts < to`) |
+| `tz_offset` | No | Viewer's timezone offset in **minutes east of UTC** (`local = UTC + offset`). Bangkok (UTC+7) is `+420`, India (UTC+5:30) is `+330`, New York (UTC-4 DST) is `-240`. Default `0` (UTC bucketing). Clients computing this from JavaScript should send `-new Date().getTimezoneOffset()` (that API returns the opposite sign). |
+| `session_id` | No | Restrict to a single session (parity with the messages endpoint) |
+
+Days are returned as `YYYY-MM-DD` strings, **distinct and sorted ascending**. An empty or
+inverted window (`to <= from`) and a window with no messages both return `{ "days": [] }` with
+status `200`. The window may span at most **366 days** (`to - from`); a larger range returns 400,
+since the calendar only ever requests one visible month at a time.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:10850/api/v1/agents/alfred/chats/telegram-<CHAT_ID>/messages/active-days?from=1751328000000&to=1754006400000&tz_offset=420" | jq
+```
+
+```json
+{
+  "days": ["2026-07-02", "2026-07-03", "2026-07-05", "2026-07-09"]
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `from` or `to` is missing or non-numeric |
+| 400 | `tz_offset` is present but non-numeric |
+| 400 | window is larger than 366 days (`to - from`) |
 
 ---
 
