@@ -5,9 +5,7 @@ describe('buildChannelInstructions', () => {
     'IMAGE GENERATION IS BUILT IN',
     'byok',
     'NEVER tell the user to install an app',
-    'isn\'t set up with a working model yet',
-    'try the NEXT usable model', // BYOK-first + retry-on-no_supply behavior
-    'NEVER hand-draw the image yourself', // must use the tool, no SVG/ASCII fallback
+    'isn\'t set up with a usable model yet',
   ];
 
   it('includes image guidance when imageEnabled=true', () => {

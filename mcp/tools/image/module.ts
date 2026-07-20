@@ -539,6 +539,7 @@ const imageToolDefs: McpToolDefinition[] = [
   {
     name: 'generate_image',
     description:
+      'Use this WHENEVER the user asks to create, draw, make, or edit an image — it is built in, no app install needed. ' +
       'Generate images from a text prompt (optionally guided by a reference image) via the GetPod image service. ' +
       'action="generate" submits the request and returns the saved image file path(s) once ready — ' +
       'then deliver them with your channel reply tool (files: [...]). ' +
