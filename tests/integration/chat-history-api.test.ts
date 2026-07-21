@@ -1058,4 +1058,41 @@ describe('Chat History API integration (planning-50)', () => {
     await router.stop();
     await runner.stop();
   });
+
+  // ─── I-HIST-33: the HTTP boundary clamps an over-ceiling limit to exactly MAX_HISTORY_LIMIT ──
+  it('I-HIST-33: GET /messages?limit above the ceiling is clamped to MAX_HISTORY_LIMIT at the router', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-33-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-33-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // Seed MORE than the ceiling so "<= MAX" is not trivially satisfied: only a real clamp
+    // at MAX_HISTORY_LIMIT yields exactly the ceiling with hasMore=true. This asserts the
+    // router-layer clamp specifically (the db-layer clamp is covered by unit tests).
+    const chatId = 'telegram-over-ceiling';
+    const db = runner.getHistoryDb();
+    const TOTAL = MAX_HISTORY_LIMIT + 50;
+    for (let i = 0; i < TOTAL; i++) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-over', source: 'telegram', role: 'user',
+        content: `msg-${i}`, senderName: 'tester', ts: 1_000 + i,
+      });
+    }
+
+    const res = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=5000`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(MAX_HISTORY_LIMIT);
+    expect(res.body.hasMore).toBe(true);
+
+    await router.stop();
+    await runner.stop();
+  });
 });

@@ -23,7 +23,6 @@ import {
  * by the HTTP boundary clamp (api/router.ts) so the two ceilings can never drift.
  */
 export const MAX_HISTORY_LIMIT = 1000;
-const MAX_LIMIT = MAX_HISTORY_LIMIT;
 const DEFAULT_LIMIT = 50;
 const PREVIEW_LENGTH = 120;
 
@@ -177,12 +176,13 @@ export class HistoryDB {
 
   getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
     // Coerce limit to an integer before it reaches the SQLite bind (`limit + 1`), mirroring
-    // the HTTP boundary's parseInt: a NaN or fractional limit from a direct caller would
-    // otherwise bind as a non-integer and throw a raw "datatype mismatch". NaN -> DEFAULT_LIMIT;
-    // fractional -> truncated. 0/negative are preserved (explicit, already bounded downstream). #1798
+    // the HTTP boundary's parseInt: a non-finite (NaN/±Infinity) or fractional limit from a
+    // direct caller would otherwise bind as a non-integer and throw a raw "datatype mismatch".
+    // Non-finite -> DEFAULT_LIMIT; fractional -> truncated. 0/negative-finite are preserved
+    // (explicit, already bounded downstream). #1798
     const rawLimit = opts.limit ?? DEFAULT_LIMIT;
-    const intLimit = Number.isNaN(rawLimit) ? DEFAULT_LIMIT : Math.trunc(rawLimit);
-    const limit = Math.min(intLimit, MAX_LIMIT);
+    const intLimit = Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : DEFAULT_LIMIT;
+    const limit = Math.min(intLimit, MAX_HISTORY_LIMIT);
     const conditions: string[] = ['chat_id = ?'];
     const params: (string | number)[] = [chatId];
 

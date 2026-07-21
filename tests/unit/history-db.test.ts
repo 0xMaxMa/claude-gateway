@@ -518,7 +518,7 @@ describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1
 
   it('bad: a negative limit must never bypass MAX_HISTORY_LIMIT and return the whole table', () => {
     // SQLite treats "LIMIT -1" as "no limit at all" — a negative value handed straight
-    // through Math.min(opts.limit, MAX_LIMIT) (Math.min keeps the negative number, since
+    // through Math.min(opts.limit, MAX_HISTORY_LIMIT) (Math.min keeps the negative number, since
     // it's still the smaller of the two) reaches the SQL layer unclamped. Seed well past
     // the ceiling so an unbounded leak is unambiguous versus a correctly-clamped result.
     const db = makeDb();
@@ -567,6 +567,16 @@ describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1
     seed(db, 300);
     expect(() => db.getMessages(CHAT, { limit: Infinity })).not.toThrow();
     const page = db.getMessages(CHAT, { limit: Infinity });
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+  });
+
+  it('bad: -Infinity as limit does not crash and stays within bounds', () => {
+    // -Infinity would reach the SQLite bind as a non-integer (-Infinity + 1) and throw a raw
+    // "datatype mismatch" if the coercion only guarded NaN. Number.isFinite covers it too.
+    const db = makeDb();
+    seed(db, 300);
+    expect(() => db.getMessages(CHAT, { limit: -Infinity })).not.toThrow();
+    const page = db.getMessages(CHAT, { limit: -Infinity });
     expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
   });
 });
