@@ -15,7 +15,14 @@ import {
   SessionSummary,
 } from './types';
 
-const MAX_LIMIT = 200;
+/**
+ * Ceiling for a single message-history page. Raised 200 -> 1000 so a client can
+ * fetch a whole "target day -> now" span in one request (jump-to-date, #1798),
+ * instead of several sequential load-more pages. Bounded (not unlimited) so a
+ * pathological session cannot request an unbounded payload. Exported and reused
+ * by the HTTP boundary clamp (api/router.ts) so the two ceilings can never drift.
+ */
+export const MAX_HISTORY_LIMIT = 1000;
 const DEFAULT_LIMIT = 50;
 const PREVIEW_LENGTH = 120;
 
@@ -168,7 +175,19 @@ export class HistoryDB {
   }
 
   getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
-    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    // Coerce limit to a non-negative integer before it reaches the SQLite bind (`limit + 1`),
+    // mirroring the HTTP boundary's parseInt. Two failure modes to close:
+    //   1. non-finite (NaN/±Infinity) or fractional would bind as a non-integer and throw a
+    //      raw "datatype mismatch" -> non-finite falls back to DEFAULT_LIMIT, fractional truncates.
+    //   2. a negative limit is NOT bounded by the Math.min ceiling (Math.min keeps the smaller,
+    //      i.e. the negative), and SQLite reads a negative "LIMIT -n" as "no limit at all" — so a
+    //      caller passing e.g. limit=-1000 would bypass MAX_HISTORY_LIMIT entirely. Treat any
+    //      negative as invalid input and fall back to DEFAULT_LIMIT, same as non-finite.
+    // Explicit 0 is preserved (a deliberate empty-page request, already bounded). #1798
+    const rawLimit = opts.limit ?? DEFAULT_LIMIT;
+    const coerced = Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : DEFAULT_LIMIT;
+    const intLimit = coerced < 0 ? DEFAULT_LIMIT : coerced;
+    const limit = Math.min(intLimit, MAX_HISTORY_LIMIT);
     const conditions: string[] = ['chat_id = ?'];
     const params: (string | number)[] = [chatId];
 

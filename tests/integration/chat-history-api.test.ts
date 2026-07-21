@@ -18,6 +18,7 @@ import supertest from 'supertest';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
+import { MAX_HISTORY_LIMIT } from '../../src/history/db';
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -894,6 +895,203 @@ describe('Chat History API integration (planning-50)', () => {
       expect(bad.status).toBe(400);
       expect(bad.body.error).toMatch(/must be a number/i);
     }
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-30: raised ceiling lets one call fetch a >200-message span (#1798) ─────
+  it('I-HIST-30: GET /messages?limit=1000 returns more than 200 rows in a single call', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-30-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-30-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // Seed 300 messages directly (well past the old 200 cap) so a single large-limit
+    // request must clear BOTH the HTTP-boundary clamp (router) and the db clamp.
+    const chatId = 'telegram-large-span';
+    const db = runner.getHistoryDb();
+    const TOTAL = 300;
+    for (let i = 0; i < TOTAL; i++) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-large', source: 'telegram', role: 'user',
+        content: `msg-${i}`, senderName: 'tester', ts: 1_000 + i,
+      });
+    }
+
+    // limit=1000: before #1798 the router clamped this to 200 → hasMore:true, 200 rows.
+    const big = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=1000`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(big.status).toBe(200);
+    expect(big.body.messages.length).toBe(TOTAL);
+    expect(big.body.messages.length).toBeGreaterThan(200);
+    expect(big.body.hasMore).toBe(false);
+
+    // No limit → default page size unchanged at 50 (no behavior change for normal clients).
+    const def = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(def.status).toBe(200);
+    expect(def.body.messages).toHaveLength(50);
+    expect(def.body.hasMore).toBe(true);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-31: good — additional valid ?limit= shapes at the HTTP boundary (#1798) ──
+  it('I-HIST-31: valid ?limit= values (mid-range, floor, duplicate param) behave as documented', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-31-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-31-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const chatId = 'telegram-good-limits';
+    const db = runner.getHistoryDb();
+    for (let i = 0; i < 300; i++) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-good', source: 'telegram', role: 'user',
+        content: `msg-${i}`, senderName: 'tester', ts: 1_000 + i,
+      });
+    }
+
+    // Mid-range: between DEFAULT_LIMIT and MAX_HISTORY_LIMIT.
+    const mid = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=250`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(mid.status).toBe(200);
+    expect(mid.body.messages).toHaveLength(250);
+    expect(mid.body.hasMore).toBe(true);
+
+    // limit=0: the router's `parseInt(...) || 50` treats 0 as falsy and falls back to the
+    // default page size — different from the db layer's `?? DEFAULT_LIMIT` (which treats
+    // an explicit 0 as a literal empty-page request). Documents that HTTP callers cannot
+    // use limit=0 to request an empty page; only omitting the param does that.
+    const zero = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=0`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(zero.status).toBe(200);
+    expect(zero.body.messages).toHaveLength(50);
+
+    // Duplicate query param: last-write-wins per Express's default parser.
+    const dup = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=10&limit=20`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(dup.status).toBe(200);
+    expect(dup.body.messages.length).toBeGreaterThan(0);
+    expect(dup.body.messages.length).toBeLessThanOrEqual(20);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-32: bad — malformed/hostile ?limit= values must never crash or leak
+  //                unbounded rows through the HTTP boundary (#1798) ──────────────────
+  it('I-HIST-32: malformed ?limit= values are rejected safely (500 rows seeded, well under the old and new ceilings)', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-32-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-32-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    const chatId = 'telegram-bad-limits';
+    const db = runner.getHistoryDb();
+    const TOTAL = MAX_HISTORY_LIMIT + 50; // seed past the ceiling either way
+    for (let i = 0; i < TOTAL; i++) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-bad', source: 'telegram', role: 'user',
+        content: `msg-${i}`, senderName: 'tester', ts: 1_000 + i,
+      });
+    }
+
+    // Non-numeric: parseInt('abc',10) is NaN, `NaN || 50` falls back to the default — safe.
+    const nonNumeric = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=abc`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(nonNumeric.status).toBe(200);
+    expect(nonNumeric.body.messages).toHaveLength(50);
+
+    // Negative: parseInt('-1000',10) === -1000, truthy, so `-1000 || 50` keeps it and
+    // Math.min(-1000, MAX) stays -1000 at the HTTP boundary — the router clamp never rejects a
+    // negative, only lowers a too-high one. The db layer's coercion is what closes this: it
+    // floors any negative to DEFAULT_LIMIT (SQLite reads a negative LIMIT as "unbounded", which
+    // would otherwise defeat the ceiling this issue exists to enforce). Seeded past the ceiling,
+    // so a regressed unbounded leak would return >200 rows instead of the default page.
+    const negative = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=-1000`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(negative.status).toBe(200);
+    expect(negative.body.messages).toHaveLength(50); // DEFAULT_LIMIT fallback
+    expect(negative.body.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+
+    // Decimal: parseInt truncates, so this should behave like limit=50.
+    const decimal = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=50.9`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(decimal.status).toBe(200);
+    expect(decimal.body.messages).toHaveLength(50);
+
+    // Absurdly oversized numeric string: must clamp to the ceiling, not overflow or crash.
+    const huge = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=99999999999999999999`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(huge.status).toBe(200);
+    expect(huge.body.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-HIST-33: the HTTP boundary clamps an over-ceiling limit to exactly MAX_HISTORY_LIMIT ──
+  it('I-HIST-33: GET /messages?limit above the ceiling is clamped to MAX_HISTORY_LIMIT at the router', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-33-'));
+    const ws = createStructuredWorkspace(base, 'alfred');
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hist-33-log-'));
+    const cfg = makeAgentConfig('alfred', ws);
+    const gwCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gwCfg);
+    await runner.start();
+    const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
+    await router.start(0);
+
+    // Seed MORE than the ceiling so "<= MAX" is not trivially satisfied: only a real clamp
+    // at MAX_HISTORY_LIMIT yields exactly the ceiling with hasMore=true. This asserts the
+    // router-layer clamp specifically (the db-layer clamp is covered by unit tests).
+    const chatId = 'telegram-over-ceiling';
+    const db = runner.getHistoryDb();
+    const TOTAL = MAX_HISTORY_LIMIT + 50;
+    for (let i = 0; i < TOTAL; i++) {
+      db.insertMessage({
+        chatId, sessionId: 'sess-over', source: 'telegram', role: 'user',
+        content: `msg-${i}`, senderName: 'tester', ts: 1_000 + i,
+      });
+    }
+
+    const res = await supertest(router.getApp())
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=5000`)
+      .set('X-Api-Key', API_KEY_ADMIN);
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(MAX_HISTORY_LIMIT);
+    expect(res.body.hasMore).toBe(true);
 
     await router.stop();
     await runner.stop();

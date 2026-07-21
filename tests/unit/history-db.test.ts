@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { HistoryDB } from '../../src/history/db';
+import { HistoryDB, MAX_HISTORY_LIMIT } from '../../src/history/db';
 import { HistoryMessage } from '../../src/history/types';
 
 let tmpDir: string;
@@ -34,6 +34,15 @@ function makeMsg(overrides: Partial<HistoryMessage> = {}): HistoryMessage {
     ts: Date.now(),
     ...overrides,
   };
+}
+
+// Shared seeder for the #1798 ceiling / limit-validation blocks: insert `n` messages under the
+// default chat (makeMsg's chatId), monotonically increasing ts. Hoisted so the two blocks below
+// don't each redeclare an identical local copy.
+function seed(db: HistoryDB, n: number): void {
+  for (let i = 0; i < n; i++) {
+    db.insertMessage(makeMsg({ content: `msg-${i}`, ts: 1_000 + i }));
+  }
 }
 
 describe('HistoryDB.insertMessage', () => {
@@ -414,5 +423,159 @@ describe('HistoryDB.searchMessages', () => {
     expect(result.results).toHaveLength(3);
     expect(result.total).toBe(10);
     expect(result.hasMore).toBe(true);
+  });
+});
+
+describe('HistoryDB.getMessages — MAX_HISTORY_LIMIT ceiling (#1798)', () => {
+  const CHAT = 'telegram-12345';
+
+  it('exports MAX_HISTORY_LIMIT as 1000', () => {
+    expect(MAX_HISTORY_LIMIT).toBe(1000);
+  });
+
+  it('returns more than 200 rows in a single call when limit exceeds the old cap', () => {
+    // AC-2: a large single-call span. 300 > the previous 200 ceiling.
+    const db = makeDb();
+    seed(db, 300);
+    const page = db.getMessages(CHAT, { limit: 1000 });
+    expect(page.messages.length).toBe(300);
+    expect(page.messages.length).toBeGreaterThan(200);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('leaves the default page size unchanged at 50 when no limit is passed', () => {
+    // AC-3: clients that do not request a large limit are unaffected.
+    const db = makeDb();
+    seed(db, 300);
+    const page = db.getMessages(CHAT);
+    expect(page.messages).toHaveLength(50);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('clamps a request above the ceiling to MAX_HISTORY_LIMIT and reports hasMore', () => {
+    // 1001 rows, client asks for far more than the ceiling: return exactly 1000 + hasMore.
+    const db = makeDb();
+    seed(db, MAX_HISTORY_LIMIT + 1);
+    const page = db.getMessages(CHAT, { limit: 5000 });
+    expect(page.messages).toHaveLength(MAX_HISTORY_LIMIT);
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).not.toBeNull();
+  });
+
+  it('returns exactly the ceiling with hasMore false when total equals MAX_HISTORY_LIMIT', () => {
+    // hasMore boundary: limit+1 fetch sees no extra row, so hasMore is false.
+    const db = makeDb();
+    seed(db, MAX_HISTORY_LIMIT);
+    const page = db.getMessages(CHAT, { limit: MAX_HISTORY_LIMIT });
+    expect(page.messages).toHaveLength(MAX_HISTORY_LIMIT);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+});
+
+describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1798)', () => {
+  const CHAT = 'telegram-12345';
+
+  // ── good: interior values across the range ────────────────────────────
+  it('good: a mid-range limit (500) between DEFAULT and MAX_HISTORY_LIMIT returns exactly that many', () => {
+    const db = makeDb();
+    seed(db, 700);
+    const page = db.getMessages(CHAT, { limit: 500 });
+    expect(page.messages).toHaveLength(500);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('good: a below-default limit (10) is honored as-is, not bumped to DEFAULT_LIMIT', () => {
+    const db = makeDb();
+    seed(db, 100);
+    const page = db.getMessages(CHAT, { limit: 10 });
+    expect(page.messages).toHaveLength(10);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('good: an unknown chatId with an explicit large limit returns an empty page, not an error', () => {
+    const db = makeDb();
+    seed(db, 5); // seeded under a different chat below
+    const page = db.getMessages('no-such-chat', { limit: MAX_HISTORY_LIMIT });
+    expect(page.messages).toEqual([]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  // ── bad: values a well-behaved caller should never send, but the layer must survive ──
+  it('bad: limit=0 returns an empty page rather than falling back to DEFAULT_LIMIT', () => {
+    // Documents current behavior: 0 is a valid (if useless) explicit limit, distinct from
+    // "no limit passed". A caller that means "give me the default" must omit the field.
+    const db = makeDb();
+    seed(db, 10);
+    const page = db.getMessages(CHAT, { limit: 0 });
+    expect(page.messages).toEqual([]);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it('bad: a negative limit falls back to DEFAULT_LIMIT instead of leaking the whole table', () => {
+    // SQLite treats a negative "LIMIT -n" as "no limit at all", and Math.min(negative, MAX)
+    // keeps the negative — so before the coercion fix a negative slipped past the ceiling.
+    // Seed above 2x the ceiling so a genuine unbounded leak (which slice(0, negative) would
+    // still surface as thousands of rows) is unambiguous versus the correct default fallback.
+    const db = makeDb();
+    seed(db, MAX_HISTORY_LIMIT * 2 + 100);
+    const page = db.getMessages(CHAT, { limit: -1 });
+    expect(page.messages).toHaveLength(50); // DEFAULT_LIMIT — negative is treated as invalid input
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).not.toBeNull(); // and paging still advances (no hasMore-without-cursor)
+  });
+
+  it('bad: a large negative limit also falls back to DEFAULT_LIMIT, not an unbounded leak', () => {
+    // limit=-1000 is the case that actually leaked pre-fix: the internal `limit + 1` fetch
+    // bound itself to -999, SQLite returned every row, and slice(0, -1000) still handed back
+    // thousands. Seed above 2x the ceiling so the leak would be unmistakable if it regressed.
+    const db = makeDb();
+    seed(db, MAX_HISTORY_LIMIT * 2 + 100);
+    const page = db.getMessages(CHAT, { limit: -1000 });
+    expect(page.messages).toHaveLength(50); // DEFAULT_LIMIT
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+  });
+
+  it('bad: NaN limit must not crash the query and must not exceed MAX_HISTORY_LIMIT', () => {
+    const db = makeDb();
+    seed(db, 300);
+    expect(() => db.getMessages(CHAT, { limit: NaN })).not.toThrow();
+    const page = db.getMessages(CHAT, { limit: NaN });
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+  });
+
+  it('bad: a fractional limit does not crash and stays within bounds', () => {
+    const db = makeDb();
+    seed(db, 100);
+    expect(() => db.getMessages(CHAT, { limit: 50.7 })).not.toThrow();
+    const page = db.getMessages(CHAT, { limit: 50.7 });
+    expect(page.messages.length).toBeLessThanOrEqual(100);
+  });
+
+  it('bad: Number.MAX_SAFE_INTEGER as limit is clamped to MAX_HISTORY_LIMIT, not passed through raw', () => {
+    const db = makeDb();
+    seed(db, 300);
+    const page = db.getMessages(CHAT, { limit: Number.MAX_SAFE_INTEGER });
+    expect(page.messages).toHaveLength(300);
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+  });
+
+  it('bad: Infinity as limit does not crash and stays within bounds', () => {
+    const db = makeDb();
+    seed(db, 300);
+    expect(() => db.getMessages(CHAT, { limit: Infinity })).not.toThrow();
+    const page = db.getMessages(CHAT, { limit: Infinity });
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+  });
+
+  it('bad: -Infinity as limit does not crash and stays within bounds', () => {
+    // -Infinity would reach the SQLite bind as a non-integer (-Infinity + 1) and throw a raw
+    // "datatype mismatch" if the coercion only guarded NaN. Number.isFinite covers it too.
+    const db = makeDb();
+    seed(db, 300);
+    expect(() => db.getMessages(CHAT, { limit: -Infinity })).not.toThrow();
+    const page = db.getMessages(CHAT, { limit: -Infinity });
+    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
   });
 });
