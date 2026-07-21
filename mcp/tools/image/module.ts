@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as dns from 'node:dns';
 import * as net from 'node:net';
@@ -60,7 +61,8 @@ export class ImageModule implements ToolModule {
   toolVisibility: ToolVisibility = 'all-configured';
 
   isEnabled(): boolean {
-    // Enabled when the image service endpoint is configured (env-driven, like browser).
+    // Enabled when the image endpoint is configured in ~/.claude/settings.json (see
+    // baseUrl()) and not explicitly turned off.
     if (!this.baseUrl() || process.env.IMAGE_DISABLED === 'true') return false;
     // The Bearer proxy_secret rides every call — refuse a cleartext http URL to a
     // PUBLIC host (that would leak the secret). http to a local/internal host is a
@@ -106,18 +108,39 @@ export class ImageModule implements ToolModule {
   // ── config ────────────────────────────────────────────────────────────────
 
   private baseUrl(): string {
-    // Image generation can target any provider — not necessarily the same host as
-    // the LLM. IMAGE_BASE_URL overrides so an operator can point image at a separate
-    // endpoint; it falls back to ANTHROPIC_BASE_URL when they share one provider that
-    // fronts /v1/images/{generations,jobs} alongside /v1/messages.
-    const raw = process.env.IMAGE_BASE_URL || process.env.ANTHROPIC_BASE_URL || '';
-    return raw.replace(/\/+$/, '');
+    // Single source of truth: the Claude Code CLI config at ~/.claude/settings.json,
+    // whose `env` block carries ANTHROPIC_BASE_URL (the provider that also fronts
+    // /v1/images/{generations,jobs}). The CLI applies that block internally, not to
+    // the OS environment, so this MCP process can't inherit it — we read the file.
+    return (this.settingsEnv('ANTHROPIC_BASE_URL') || '').replace(/\/+$/, '');
   }
 
   private authToken(): string {
-    // Image API key overrides so a separate image endpoint can carry its own secret;
-    // falls back to ANTHROPIC_AUTH_TOKEN (the M2M proxy secret) when they share one.
-    return process.env.IMAGE_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+    // Same source as baseUrl: the CLI's settings.json env carries the M2M token
+    // (CLAUDE_CODE_OAUTH_TOKEN) that authenticates to the provider.
+    return this.settingsEnv('CLAUDE_CODE_OAUTH_TOKEN') || '';
+  }
+
+  // Parsed `env` block of the CLI config, read once per instance (settings don't
+  // change within a session). undefined = not read yet; null = unreadable.
+  private settingsEnvCache?: Record<string, unknown> | null;
+
+  // settingsEnv reads a single key out of ~/.claude/settings.json's `env` block.
+  // CLAUDE_CONFIG_DIR overrides the ~/.claude location, matching Claude Code. Returns
+  // '' on any error (missing file, bad JSON, absent/non-string key) so callers degrade
+  // to "not configured" rather than throwing.
+  private settingsEnv(key: string): string {
+    if (this.settingsEnvCache === undefined) {
+      try {
+        const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+        this.settingsEnvCache =
+          JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))?.env ?? null;
+      } catch {
+        this.settingsEnvCache = null;
+      }
+    }
+    const v = this.settingsEnvCache?.[key];
+    return typeof v === 'string' ? v : '';
   }
 
   private headers(): Record<string, string> {

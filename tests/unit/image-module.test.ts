@@ -1,109 +1,93 @@
 /**
  * Unit tests for the image MCP tool's endpoint resolution + https guard
- * (mcp/tools/image/module.ts). Two behaviors are locked in here:
+ * (mcp/tools/image/module.ts). Config comes from ONE place — the Claude Code CLI
+ * config at ~/.claude/settings.json (its `env` block carries ANTHROPIC_BASE_URL +
+ * CLAUDE_CODE_OAUTH_TOKEN). The CLI applies that block internally, not to the OS
+ * environment, so this MCP process reads the file directly. Two behaviors locked in:
  *
- *  1. baseUrl() resolves from IMAGE_BASE_URL first, then ANTHROPIC_BASE_URL —
- *     image generation may target a provider separate from the LLM, so an
- *     operator can override the endpoint (and secret via IMAGE_API_KEY) while
- *     still falling back to the ANTHROPIC_* pair when they share one provider.
- *  2. baseUrlIsSecure guard — the Bearer secret rides every call, so an http
- *     URL to a PUBLIC host is refused (isEnabled → false). https, or http to a
+ *  1. baseUrl() resolves from settings.json's env.ANTHROPIC_BASE_URL — absent file /
+ *     key ⇒ not configured ⇒ isEnabled() false.
+ *  2. baseUrlIsSecure guard — the Bearer secret rides every call, so an http URL to
+ *     a PUBLIC host is refused (isEnabled → false). https, or http to a
  *     local/internal host (a trusted hop like host.docker.internal in dev), is allowed.
  *
- * baseUrl() and baseUrlIsSecure are private/module-internal, so we assert their
- * OBSERVABLE effect via isEnabled() driven purely by env.
+ * baseUrl()/settingsEnv() are private, so we assert their OBSERVABLE effect via
+ * isEnabled(), driving it purely by the settings.json we write per test.
  */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { ImageModule } from '../../mcp/tools/image/module';
 
-const ENV_KEYS = [
-  'IMAGE_BASE_URL',
-  'ANTHROPIC_BASE_URL',
-  'IMAGE_DISABLED',
-  'IMAGE_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-] as const;
-
-describe('ImageModule.isEnabled() — endpoint resolution + https guard', () => {
-  const saved: Record<string, string | undefined> = {};
+describe('ImageModule.isEnabled() — endpoint resolution + https guard (config from ~/.claude/settings.json)', () => {
+  let cfgDir: string;
   let errSpy: jest.SpyInstance;
+  const savedCfgDir = process.env.CLAUDE_CONFIG_DIR;
+  const savedDisabled = process.env.IMAGE_DISABLED;
 
   beforeEach(() => {
-    for (const k of ENV_KEYS) {
-      saved[k] = process.env[k];
-      delete process.env[k];
-    }
+    // Point the module at a temp config dir via CLAUDE_CONFIG_DIR (real files — the
+    // os/fs builtins are non-configurable here, so they can't be spied).
+    cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'imgcfg-'));
+    process.env.CLAUDE_CONFIG_DIR = cfgDir;
     // isEnabled() logs to console.error the first time it refuses an insecure URL.
     errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    delete process.env.IMAGE_DISABLED;
   });
 
   afterEach(() => {
-    for (const k of ENV_KEYS) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
     errSpy.mockRestore();
+    fs.rmSync(cfgDir, { recursive: true, force: true });
+    if (savedCfgDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedCfgDir;
+    if (savedDisabled === undefined) delete process.env.IMAGE_DISABLED;
+    else process.env.IMAGE_DISABLED = savedDisabled;
   });
+
+  // Write the `env` block of settings.json — the single source baseUrl()/authToken() read.
+  const setSettings = (env: Record<string, string>) =>
+    fs.writeFileSync(path.join(cfgDir, 'settings.json'), JSON.stringify({ env }));
 
   const enabled = () => new ImageModule().isEnabled();
 
-  test('https ANTHROPIC_BASE_URL + token → enabled', () => {
-    process.env.ANTHROPIC_BASE_URL = 'https://provider.example.com';
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+  test('https ANTHROPIC_BASE_URL in settings.json → enabled', () => {
+    setSettings({ ANTHROPIC_BASE_URL: 'https://provider.example.com', CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
     expect(enabled()).toBe(true);
   });
 
-  test('ANTHROPIC_BASE_URL unset → disabled (no endpoint)', () => {
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+  test('no settings.json file → disabled (nothing configured)', () => {
+    expect(enabled()).toBe(false);
+  });
+
+  test('settings.json without ANTHROPIC_BASE_URL → disabled (no endpoint)', () => {
+    setSettings({ CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
+    expect(enabled()).toBe(false);
+  });
+
+  test('malformed settings.json → disabled (degrades, does not throw)', () => {
+    fs.writeFileSync(path.join(cfgDir, 'settings.json'), '{ not valid json');
     expect(enabled()).toBe(false);
   });
 
   test('http to a local host (host.docker.internal) → enabled (trusted hop)', () => {
-    process.env.ANTHROPIC_BASE_URL = 'http://host.docker.internal:8080';
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+    setSettings({ ANTHROPIC_BASE_URL: 'http://host.docker.internal:8080', CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
     expect(enabled()).toBe(true);
   });
 
   test('http to localhost → enabled (trusted hop)', () => {
-    process.env.ANTHROPIC_BASE_URL = 'http://localhost:8080';
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+    setSettings({ ANTHROPIC_BASE_URL: 'http://localhost:8080', CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
     expect(enabled()).toBe(true);
   });
 
   test('http to a PUBLIC host → disabled (refuses to send Bearer secret in cleartext)', () => {
-    process.env.ANTHROPIC_BASE_URL = 'http://provider.example.com';
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+    setSettings({ ANTHROPIC_BASE_URL: 'http://provider.example.com', CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
     expect(enabled()).toBe(false);
     expect(errSpy).toHaveBeenCalled(); // the guard warns once
   });
 
   test('IMAGE_DISABLED=true → disabled even with a valid https URL', () => {
-    process.env.ANTHROPIC_BASE_URL = 'https://provider.example.com';
-    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+    setSettings({ ANTHROPIC_BASE_URL: 'https://provider.example.com', CLAUDE_CODE_OAUTH_TOKEN: 'proxy-secret' });
     process.env.IMAGE_DISABLED = 'true';
     expect(enabled()).toBe(false);
-  });
-
-  describe('IMAGE_BASE_URL overrides ANTHROPIC_BASE_URL', () => {
-    test('IMAGE_BASE_URL set (https) with ANTHROPIC_BASE_URL unset → enabled', () => {
-      process.env.IMAGE_BASE_URL = 'https://image.example.com';
-      process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
-      expect(enabled()).toBe(true);
-    });
-
-    test('a valid https IMAGE_BASE_URL overrides a public-http ANTHROPIC_BASE_URL (image wins)', () => {
-      // With only a public-http ANTHROPIC_BASE_URL the module is disabled; adding a
-      // valid https IMAGE_BASE_URL points image at a separate endpoint and enables it.
-      process.env.ANTHROPIC_BASE_URL = 'http://provider.example.com';
-      process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
-      expect(enabled()).toBe(false);
-      process.env.IMAGE_BASE_URL = 'https://image.example.com';
-      expect(new ImageModule().isEnabled()).toBe(true);
-    });
-
-    test('IMAGE_API_KEY alone (no ANTHROPIC_AUTH_TOKEN) still enables with a valid URL', () => {
-      process.env.IMAGE_BASE_URL = 'https://image.example.com';
-      process.env.IMAGE_API_KEY = 'image-secret';
-      expect(enabled()).toBe(true);
-    });
   });
 });

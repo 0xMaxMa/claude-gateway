@@ -373,14 +373,9 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
               ? path.resolve(this.agentConfig.workspace, '..', 'media', `api-${this.sessionId}`)
               : '',
-            // Image-generation tool (generate_image) — targets an image provider that
-            // may differ from the LLM: IMAGE_BASE_URL/IMAGE_API_KEY override, falling
-            // back to ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN when they share a provider.
-            // The MCP subprocess only sees the env we hand it, so every var module.ts
-            // reads must be forwarded explicitly. Empty base URL ⇒ tool disabled.
-            IMAGE_BASE_URL: process.env.IMAGE_BASE_URL ?? '',
-            ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
-            IMAGE_API_KEY: process.env.IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
+            // Image-generation tool (generate_image): its endpoint + token are read by
+            // module.ts straight from ~/.claude/settings.json (the CLI's config), so
+            // there is nothing to forward here. Only the operational knobs are env-driven:
             IMAGE_DISABLED: process.env.IMAGE_DISABLED ?? '',
             IMAGE_POLL_TIMEOUT_MS: process.env.IMAGE_POLL_TIMEOUT_MS ?? '',
           },
