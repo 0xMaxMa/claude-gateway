@@ -15,7 +15,15 @@ import {
   SessionSummary,
 } from './types';
 
-const MAX_LIMIT = 200;
+/**
+ * Ceiling for a single message-history page. Raised 200 -> 1000 so a client can
+ * fetch a whole "target day -> now" span in one request (jump-to-date, #1798),
+ * instead of several sequential load-more pages. Bounded (not unlimited) so a
+ * pathological session cannot request an unbounded payload. Exported and reused
+ * by the HTTP boundary clamp (api/router.ts) so the two ceilings can never drift.
+ */
+export const MAX_HISTORY_LIMIT = 1000;
+const MAX_LIMIT = MAX_HISTORY_LIMIT;
 const DEFAULT_LIMIT = 50;
 const PREVIEW_LENGTH = 120;
 
@@ -168,7 +176,13 @@ export class HistoryDB {
   }
 
   getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
-    const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    // Coerce limit to an integer before it reaches the SQLite bind (`limit + 1`), mirroring
+    // the HTTP boundary's parseInt: a NaN or fractional limit from a direct caller would
+    // otherwise bind as a non-integer and throw a raw "datatype mismatch". NaN -> DEFAULT_LIMIT;
+    // fractional -> truncated. 0/negative are preserved (explicit, already bounded downstream). #1798
+    const rawLimit = opts.limit ?? DEFAULT_LIMIT;
+    const intLimit = Number.isNaN(rawLimit) ? DEFAULT_LIMIT : Math.trunc(rawLimit);
+    const limit = Math.min(intLimit, MAX_LIMIT);
     const conditions: string[] = ['chat_id = ?'];
     const params: (string | number)[] = [chatId];
 

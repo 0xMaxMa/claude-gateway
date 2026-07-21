@@ -9,7 +9,7 @@ import { AgentRunner } from '../agent/runner';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig, SessionMeta } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
-import { HistoryDB } from '../history/db';
+import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import type { AgentSessionSummary } from '../history/types';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './line-pending-senders';
@@ -2082,7 +2082,9 @@ export function createApiRouter(
       return;
     }
     const query = req.query as Record<string, string>;
-    const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, 200) : 50;
+    // Ceiling reuses MAX_HISTORY_LIMIT from the history layer so this HTTP-boundary
+    // clamp and the db clamp can never drift (both 1000; see #1798).
+    const limit = query['limit'] ? Math.min(parseInt(query['limit'], 10) || 50, MAX_HISTORY_LIMIT) : 50;
     // Numeric cursor params. before/after are ms timestamps; before_id/after_id are the id
     // component of the composite (ts, id) cursor, echoed from a prior page's nextCursorId —
     // paired with before/after they stop paging from skipping messages that share a ts
