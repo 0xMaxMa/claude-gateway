@@ -175,13 +175,18 @@ export class HistoryDB {
   }
 
   getMessages(chatId: string, opts: PaginationOpts = {}): MessagePage {
-    // Coerce limit to an integer before it reaches the SQLite bind (`limit + 1`), mirroring
-    // the HTTP boundary's parseInt: a non-finite (NaN/±Infinity) or fractional limit from a
-    // direct caller would otherwise bind as a non-integer and throw a raw "datatype mismatch".
-    // Non-finite -> DEFAULT_LIMIT; fractional -> truncated. 0/negative-finite are preserved
-    // (explicit, already bounded downstream). #1798
+    // Coerce limit to a non-negative integer before it reaches the SQLite bind (`limit + 1`),
+    // mirroring the HTTP boundary's parseInt. Two failure modes to close:
+    //   1. non-finite (NaN/±Infinity) or fractional would bind as a non-integer and throw a
+    //      raw "datatype mismatch" -> non-finite falls back to DEFAULT_LIMIT, fractional truncates.
+    //   2. a negative limit is NOT bounded by the Math.min ceiling (Math.min keeps the smaller,
+    //      i.e. the negative), and SQLite reads a negative "LIMIT -n" as "no limit at all" — so a
+    //      caller passing e.g. limit=-1000 would bypass MAX_HISTORY_LIMIT entirely. Treat any
+    //      negative as invalid input and fall back to DEFAULT_LIMIT, same as non-finite.
+    // Explicit 0 is preserved (a deliberate empty-page request, already bounded). #1798
     const rawLimit = opts.limit ?? DEFAULT_LIMIT;
-    const intLimit = Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : DEFAULT_LIMIT;
+    const coerced = Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : DEFAULT_LIMIT;
+    const intLimit = coerced < 0 ? DEFAULT_LIMIT : coerced;
     const limit = Math.min(intLimit, MAX_HISTORY_LIMIT);
     const conditions: string[] = ['chat_id = ?'];
     const params: (string | number)[] = [chatId];

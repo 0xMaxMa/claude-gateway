@@ -1029,16 +1029,17 @@ describe('Chat History API integration (planning-50)', () => {
     expect(nonNumeric.status).toBe(200);
     expect(nonNumeric.body.messages).toHaveLength(50);
 
-    // Negative: MUST stay within the documented ceiling. parseInt('-1',10) === -1, which is
-    // truthy, so `-1 || 50` keeps -1, and Math.min(-1, MAX_HISTORY_LIMIT) is still -1 — the
-    // clamp never rejects a negative number, only ever lowers a number that's too high.
-    // That -1 is handed to db.getMessages({ limit: -1 }), and SQLite's own semantics for
-    // "LIMIT -1" are "no limit at all" — so this can return the entire chat history in one
-    // request, defeating the ceiling this issue exists to enforce.
+    // Negative: parseInt('-1000',10) === -1000, truthy, so `-1000 || 50` keeps it and
+    // Math.min(-1000, MAX) stays -1000 at the HTTP boundary — the router clamp never rejects a
+    // negative, only lowers a too-high one. The db layer's coercion is what closes this: it
+    // floors any negative to DEFAULT_LIMIT (SQLite reads a negative LIMIT as "unbounded", which
+    // would otherwise defeat the ceiling this issue exists to enforce). Seeded past the ceiling,
+    // so a regressed unbounded leak would return >200 rows instead of the default page.
     const negative = await supertest(router.getApp())
-      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=-1`)
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages?limit=-1000`)
       .set('X-Api-Key', API_KEY_ADMIN);
     expect(negative.status).toBe(200);
+    expect(negative.body.messages).toHaveLength(50); // DEFAULT_LIMIT fallback
     expect(negative.body.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
 
     // Decimal: parseInt truncates, so this should behave like limit=50.

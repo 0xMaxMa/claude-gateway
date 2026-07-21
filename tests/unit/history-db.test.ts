@@ -36,6 +36,15 @@ function makeMsg(overrides: Partial<HistoryMessage> = {}): HistoryMessage {
   };
 }
 
+// Shared seeder for the #1798 ceiling / limit-validation blocks: insert `n` messages under the
+// default chat (makeMsg's chatId), monotonically increasing ts. Hoisted so the two blocks below
+// don't each redeclare an identical local copy.
+function seed(db: HistoryDB, n: number): void {
+  for (let i = 0; i < n; i++) {
+    db.insertMessage(makeMsg({ content: `msg-${i}`, ts: 1_000 + i }));
+  }
+}
+
 describe('HistoryDB.insertMessage', () => {
   it('inserts a message without error', () => {
     const db = makeDb();
@@ -420,12 +429,6 @@ describe('HistoryDB.searchMessages', () => {
 describe('HistoryDB.getMessages — MAX_HISTORY_LIMIT ceiling (#1798)', () => {
   const CHAT = 'telegram-12345';
 
-  function seed(db: HistoryDB, n: number): void {
-    for (let i = 0; i < n; i++) {
-      db.insertMessage(makeMsg({ chatId: CHAT, content: `msg-${i}`, ts: 1_000 + i }));
-    }
-  }
-
   it('exports MAX_HISTORY_LIMIT as 1000', () => {
     expect(MAX_HISTORY_LIMIT).toBe(1000);
   });
@@ -473,12 +476,6 @@ describe('HistoryDB.getMessages — MAX_HISTORY_LIMIT ceiling (#1798)', () => {
 describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1798)', () => {
   const CHAT = 'telegram-12345';
 
-  function seed(db: HistoryDB, n: number): void {
-    for (let i = 0; i < n; i++) {
-      db.insertMessage(makeMsg({ chatId: CHAT, content: `msg-${i}`, ts: 1_000 + i }));
-    }
-  }
-
   // ── good: interior values across the range ────────────────────────────
   it('good: a mid-range limit (500) between DEFAULT and MAX_HISTORY_LIMIT returns exactly that many', () => {
     const db = makeDb();
@@ -516,25 +513,27 @@ describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1
     expect(page.hasMore).toBe(true);
   });
 
-  it('bad: a negative limit must never bypass MAX_HISTORY_LIMIT and return the whole table', () => {
-    // SQLite treats "LIMIT -1" as "no limit at all" — a negative value handed straight
-    // through Math.min(opts.limit, MAX_HISTORY_LIMIT) (Math.min keeps the negative number, since
-    // it's still the smaller of the two) reaches the SQL layer unclamped. Seed well past
-    // the ceiling so an unbounded leak is unambiguous versus a correctly-clamped result.
+  it('bad: a negative limit falls back to DEFAULT_LIMIT instead of leaking the whole table', () => {
+    // SQLite treats a negative "LIMIT -n" as "no limit at all", and Math.min(negative, MAX)
+    // keeps the negative — so before the coercion fix a negative slipped past the ceiling.
+    // Seed above 2x the ceiling so a genuine unbounded leak (which slice(0, negative) would
+    // still surface as thousands of rows) is unambiguous versus the correct default fallback.
     const db = makeDb();
-    seed(db, MAX_HISTORY_LIMIT + 50);
+    seed(db, MAX_HISTORY_LIMIT * 2 + 100);
     const page = db.getMessages(CHAT, { limit: -1 });
-    expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
+    expect(page.messages).toHaveLength(50); // DEFAULT_LIMIT — negative is treated as invalid input
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).not.toBeNull(); // and paging still advances (no hasMore-without-cursor)
   });
 
-  it('bad: a large negative limit must not return more rows than exist, unbounded', () => {
-    // limit=-1000 makes the internal `limit + 1` fetch bound itself negative (-999), which
-    // is where SQLite's "negative LIMIT means no limit at all" semantics would actually
-    // engage (limit=-1 above collapses to a LIMIT of 0 and never reaches this path).
-    // Seed well past the ceiling so a genuine unbounded leak is unambiguous.
+  it('bad: a large negative limit also falls back to DEFAULT_LIMIT, not an unbounded leak', () => {
+    // limit=-1000 is the case that actually leaked pre-fix: the internal `limit + 1` fetch
+    // bound itself to -999, SQLite returned every row, and slice(0, -1000) still handed back
+    // thousands. Seed above 2x the ceiling so the leak would be unmistakable if it regressed.
     const db = makeDb();
-    seed(db, MAX_HISTORY_LIMIT + 200);
+    seed(db, MAX_HISTORY_LIMIT * 2 + 100);
     const page = db.getMessages(CHAT, { limit: -1000 });
+    expect(page.messages).toHaveLength(50); // DEFAULT_LIMIT
     expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
   });
 

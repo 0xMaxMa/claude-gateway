@@ -2377,7 +2377,7 @@ Paginated message history (cursor-based). Returns messages in reverse chronologi
 
 | Param | Description |
 |-------|-------------|
-| `limit` | Max messages to return (default 50, max 200) |
+| `limit` | Max messages to return (default 50, max 1000). Values above the max are clamped; non-numeric, `0`, or negative fall back to the default. |
 | `before` | Return messages before this timestamp (ms) |
 | `after` | Return messages after this timestamp (ms) |
 | `before_id` | Id component of the cursor, paired with `before`. Echo back `nextCursorId` here to page correctly across messages that share a `ts` (see below). Ignored without `before`. |
