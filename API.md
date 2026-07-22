@@ -389,6 +389,7 @@ Create a new agent entry in `config.json`. Requires admin key. Also creates the 
 | `id` | Yes | Agent ID — pattern `[a-z][a-z0-9_-]{1,31}` |
 | `description` | Yes | Human-readable description |
 | `model` | No | Claude model ID (default: `claude-sonnet-4-6`) |
+| `allow_tools` | No | Whether the agent may invoke tools when accessed via the API channel (default: `true`). Pass `false` to create a conversational-only agent. |
 
 ```bash
 curl -X POST \
@@ -399,14 +400,14 @@ curl -X POST \
 ```
 
 ```json
-{ "agent": { "id": "my-bot", "description": "My new bot", "model": "claude-sonnet-4-6" } }
+{ "agent": { "id": "my-bot", "description": "My new bot", "model": "claude-sonnet-4-6", "allow_tools": true } }
 ```
 
 **Error responses:**
 
 | Status | When |
 |--------|------|
-| 400 | Invalid `id` format or missing `description` |
+| 400 | Invalid `id` format, missing `description`, or non-boolean `allow_tools` |
 | 403 | Not an admin key |
 | 409 | Agent ID already exists |
 | 501 | Gateway started without a config path |
