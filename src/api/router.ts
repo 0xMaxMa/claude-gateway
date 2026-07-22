@@ -602,8 +602,8 @@ export function createApiRouter(
       res.status(501).json({ error: 'Agent management not available (no configPath)' });
       return;
     }
-    const body = req.body as { id?: unknown; description?: unknown; model?: unknown };
-    const { id, description, model } = body;
+    const body = req.body as { id?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown };
+    const { id, description, model, allow_tools } = body;
 
     if (!id || typeof id !== 'string' || !AGENT_ID_RE.test(id)) {
       res.status(400).json({ error: 'id must match pattern [a-z][a-z0-9_-]{1,31}' });
@@ -613,10 +613,18 @@ export function createApiRouter(
       res.status(400).json({ error: 'description is required' });
       return;
     }
+    if (allow_tools !== undefined && typeof allow_tools !== 'boolean') {
+      res.status(400).json({ error: 'allow_tools must be a boolean' });
+      return;
+    }
     if (agentConfigs.has(id)) {
       res.status(409).json({ error: `Agent '${id}' already exists` });
       return;
     }
+
+    // Default new agents to tool-enabled so they work out of the box; an explicit
+    // `false` in the request body is respected. Mirrors the MCP agent-create path.
+    const allowTools = typeof allow_tools === 'boolean' ? allow_tools : true;
 
     const workspace = path.join('~', '.claude-gateway', 'agents', id, 'workspace');
     const workspaceAbs = path.join(os.homedir(), '.claude-gateway', 'agents', id, 'workspace');
@@ -625,6 +633,7 @@ export function createApiRouter(
       description: (description as string).trim(),
       workspace,
       env: path.join('~', '.claude-gateway', 'agents', id, 'workspace', '.env'),
+      allow_tools: allowTools,
       claude: {
         model: typeof model === 'string' && model.trim() ? model.trim() : 'claude-sonnet-4-6',
         extraFlags: [],
@@ -651,6 +660,7 @@ export function createApiRouter(
       description: (description as string).trim(),
       workspace: workspaceAbs,
       env: path.join(workspaceAbs, '.env'),
+      allow_tools: allowTools,
       claude: {
         model: typeof model === 'string' && model.trim() ? model.trim() : 'claude-sonnet-4-6',
         extraFlags: [],
@@ -678,7 +688,7 @@ export function createApiRouter(
       console.error(`[api] Warning: agent '${id}' created in config but workspace setup failed: ${(err as Error).message}`);
     }
 
-    res.status(201).json({ agent: { id, description: newAgent.description, model: (newAgent.claude as Record<string, unknown>).model } });
+    res.status(201).json({ agent: { id, description: newAgent.description, model: (newAgent.claude as Record<string, unknown>).model, allow_tools: allowTools } });
   });
 
   // ──────────────────────────────────────────────────────────────
@@ -1063,6 +1073,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: absToTildePath(workspaceDirAbs),
       env: absToTildePath(path.join(workspaceDirAbs, '.env')),
+      allow_tools: true,
       claude: { model: defaultModel, extraFlags: [] },
     };
     if (wizard.signatureEmoji) newAgent.signatureEmoji = wizard.signatureEmoji;
@@ -1085,6 +1096,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: workspaceDirAbs,
       env: path.join(workspaceDirAbs, '.env'),
+      allow_tools: true,
       claude: { model: defaultModel, extraFlags: [] },
       ...(wizard.signatureEmoji ? { signatureEmoji: wizard.signatureEmoji } : {}),
       ...(avatarFilename ? { avatar: avatarFilename } : {}),

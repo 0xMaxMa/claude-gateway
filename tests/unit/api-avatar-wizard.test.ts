@@ -990,3 +990,39 @@ describe('POST /api/v1/agents/wizard/:wizardId/complete', () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/agents/wizard/:wizardId/confirm — allow_tools default
+// Regression: the wizard finalize path must default new agents to tool-enabled,
+// matching POST /v1/agents. Previously it never set allow_tools, so wizard-made
+// agents were tool-disabled by the downstream falsy fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /api/v1/agents/wizard/:wizardId/confirm — allow_tools default', () => {
+  it('defaults allow_tools to true in config.json and in memory', async () => {
+    const { app, tmpDir, configPath, agentConfigs } = buildCtx();
+    const state = wizardStore.create('wizardtoolbot', 'A wizard-made bot', {
+      'AGENTS.md': '# Agent: wizardtoolbot\nHello',
+    });
+    try {
+      const res = await supertest.default(app)
+        .post(`/api/v1/agents/wizard/${state.wizardId}/confirm`)
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body.agentId).toBe('wizardtoolbot');
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        agents: { id: string; allow_tools?: boolean }[];
+      };
+      const entry = onDisk.agents.find((a) => a.id === 'wizardtoolbot');
+      expect(entry).toBeDefined();
+      expect(entry!.allow_tools).toBe(true);
+
+      // In-memory config is updated synchronously (no file-watcher round-trip).
+      expect(agentConfigs.get('wizardtoolbot')!.allow_tools).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
