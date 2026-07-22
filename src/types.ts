@@ -302,6 +302,7 @@ export interface CronJob {
   scheduleKind?: CronScheduleKind;  // default: 'cron'
   schedule?: string;                // cron expression (kind=cron)
   scheduleAt?: string;              // ISO-8601 timestamp (kind=at)
+  timezone?: string;                // IANA zone (kind=cron) the schedule fires in; default 'UTC'
   // Payload fields
   type?: CronJobType;               // default: 'command'
   command?: string;                 // shell command (type=command)
@@ -324,6 +325,7 @@ export interface CronJobCreate {
   scheduleKind?: CronScheduleKind;
   schedule?: string;
   scheduleAt?: string;
+  timezone?: string;
   // Payload
   type?: CronJobType;
   command?: string;
@@ -341,6 +343,7 @@ export interface CronJobUpdate {
   scheduleKind?: CronScheduleKind;
   schedule?: string;
   scheduleAt?: string;
+  timezone?: string;
   type?: CronJobType;
   command?: string;
   prompt?: string;

@@ -141,6 +141,7 @@ export class CronManager extends EventEmitter {
       scheduleKind,
       schedule: input.schedule,
       scheduleAt: input.scheduleAt,
+      timezone: input.timezone,
       type,
       command: input.command,
       prompt: input.prompt,
@@ -177,11 +178,12 @@ export class CronManager extends EventEmitter {
     const job = this.jobs.get(id);
     if (!job) throw new Error(`Job not found: ${id}`);
 
-    // Validate schedule if any schedule fields are being updated
+    // Validate schedule if any schedule fields (or the timezone) are being updated
     if (
       input.scheduleKind !== undefined ||
       input.schedule !== undefined ||
-      input.scheduleAt !== undefined
+      input.scheduleAt !== undefined ||
+      input.timezone !== undefined
     ) {
       const merged = { ...job, ...input };
       this.validateSchedule(merged);
@@ -196,6 +198,7 @@ export class CronManager extends EventEmitter {
     if (input.scheduleKind !== undefined) job.scheduleKind = input.scheduleKind;
     if (input.schedule !== undefined) job.schedule = input.schedule;
     if (input.scheduleAt !== undefined) job.scheduleAt = input.scheduleAt;
+    if (input.timezone !== undefined) job.timezone = input.timezone;
     if (input.type !== undefined) job.type = input.type;
     if (input.command !== undefined) job.command = input.command;
     if (input.prompt !== undefined) job.prompt = input.prompt;
@@ -286,17 +289,33 @@ export class CronManager extends EventEmitter {
 
   // ─── Internal ──────────────────────────────────────────────────────────────
 
-  private validateSchedule(input: { scheduleKind?: string; schedule?: string; scheduleAt?: string }): void {
+  private validateSchedule(input: { scheduleKind?: string; schedule?: string; scheduleAt?: string; timezone?: string }): void {
     const kind = input.scheduleKind ?? 'cron';
     if (kind === 'cron') {
       if (!input.schedule) throw new Error('schedule is required for scheduleKind=cron');
       if (!nodeCron.validate(input.schedule)) {
         throw new Error(`Invalid cron expression: "${input.schedule}"`);
       }
+      if (input.timezone !== undefined) this.validateTimezone(input.timezone);
     } else if (kind === 'at') {
       if (!input.scheduleAt) throw new Error('scheduleAt is required for scheduleKind=at');
       const ts = Date.parse(input.scheduleAt);
       if (isNaN(ts)) throw new Error(`Invalid ISO-8601 timestamp: "${input.scheduleAt}"`);
+    }
+  }
+
+  /**
+   * Reject an unresolvable IANA timezone. Probing with Intl.DateTimeFormat throws
+   * a RangeError for an unknown zone; an empty string is also invalid. This is the
+   * same set of zones node-cron accepts, so a value that passes here is safe to
+   * hand to `nodeCron.schedule(..., { timezone })`.
+   */
+  private validateTimezone(tz: string): void {
+    if (!tz) throw new Error('timezone must be a non-empty IANA zone name');
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: tz });
+    } catch {
+      throw new Error(`Invalid timezone: "${tz}" (expected an IANA zone, e.g. "Asia/Bangkok")`);
     }
   }
 
@@ -316,11 +335,14 @@ export class CronManager extends EventEmitter {
     const kind = job.scheduleKind ?? 'cron';
 
     if (kind === 'cron') {
+      // Fire the cron in the job's stored IANA zone (DST-safe via node-cron).
+      // Legacy jobs without a timezone default to 'UTC' — identical to the
+      // previous no-options behavior on the UTC gateway process.
       const task = nodeCron.schedule(job.schedule!, async () => {
         await this.executeJob(job);
-      });
+      }, { timezone: job.timezone ?? 'UTC' });
       this.scheduledTasks.set(job.id, task);
-      this.logger.info(`Scheduled "${job.name}" [cron: ${job.schedule}]`, { id: job.id });
+      this.logger.info(`Scheduled "${job.name}" [cron: ${job.schedule} @ ${job.timezone ?? 'UTC'}]`, { id: job.id });
 
     } else if (kind === 'at') {
       const targetMs = Date.parse(job.scheduleAt!);
