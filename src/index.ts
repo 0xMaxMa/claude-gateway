@@ -351,9 +351,14 @@ async function startAgent(
           updated.systemPrompt,
           'utf8',
         );
-        // Stop idle subprocesses now; busy sessions are deferred until
-        // their current turn completes, then restarted automatically.
-        await runner.restartOrDefer();
+        // Stop idle subprocesses now so they pick up the new registry on
+        // next spawn. Busy sessions are left running (skipBusy) rather than
+        // marked for a deferred restart: a session that triggers a SKILL.md
+        // change mid-turn would otherwise stop itself the instant its turn
+        // completes (the self-restart footgun — same guard the workspace
+        // watcher applies above). The recomposed CLAUDE.md is already on disk,
+        // so a skipped busy session picks up the change on its next spawn.
+        await runner.restartOrDefer({ skipBusy: true });
         logger.info('Skills registry updated', {
           count: updated.skillRegistry?.skills.size ?? 0,
         });

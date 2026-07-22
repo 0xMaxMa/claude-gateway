@@ -13,6 +13,10 @@
  * HR3 — delete shared skill triggers restart
  * HR4 — busy session is NOT stopped; CLAUDE.md still refreshed
  * HR5 — module-dir skill change behaves the same as shared-dir change
+ * HR6 — busy session survives EVEN AFTER its turn completes (no self-restart
+ *       footgun): the skills-reload path must pass skipBusy:true, otherwise a
+ *       session that triggered the SKILL.md change is stopped the instant its
+ *       turn ends. Regression guard for the missing skipBusy on src/index.ts.
  */
 
 import { EventEmitter } from 'events';
@@ -142,7 +146,9 @@ function deleteSkillFile(dir: string, name: string): void {
 
 // Replicates the inline watcher callback in src/index.ts so the integration
 // test exercises the same sequence (reload -> setSkillRegistry ->
-// write CLAUDE.md -> restartOrDefer).
+// write CLAUDE.md -> restartOrDefer). Must stay a faithful mirror of the
+// production callback, including the skipBusy:true guard on the skills path
+// (skipping busy sessions avoids the self-restart footgun — see HR6).
 function wireSkillsWatcher(
   runner: AgentRunner,
   workspaceDir: string,
@@ -166,7 +172,7 @@ function wireSkillsWatcher(
         updated.systemPrompt,
         'utf8',
       );
-      await runner.restartOrDefer();
+      await runner.restartOrDefer({ skipBusy: true });
     },
   });
 }
@@ -314,7 +320,8 @@ describe('Skills hot-reload end-to-end', () => {
     await sendChannelPost(port, 'chat:hr4', 'hi');
     await new Promise((r) => setTimeout(r, 100));
     const sess = getSessions(runner).get('chat:hr4')!;
-    // Session is processing (isProcessing === true from sendChannelPost) — will be deferred, not stopped.
+    // Session is processing (isProcessing === true from sendChannelPost) — with
+    // skipBusy:true it is left running (skipped), not deferred and not stopped.
 
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
     await new Promise((r) => setTimeout(r, 150));
@@ -349,5 +356,48 @@ describe('Skills hot-reload end-to-end', () => {
     const claudeMd = fs.readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('/hr5-skill');
     expect(claudeMd).toContain('**Workspace Skills**');
+  }, 10000);
+
+  // --------------------------------------------------------------------------
+  // HR6 — busy session survives EVEN AFTER its turn completes (footgun guard)
+  //
+  // This is the regression test for the self-restart footgun: a session that
+  // triggers a SKILL.md change while busy must NOT be marked for a deferred
+  // restart, otherwise it is stopped the instant its turn ends. HR4 only checks
+  // survival *during* the turn (which passes even on the buggy code, since the
+  // deferred restart hasn't fired yet); HR6 completes the turn and asserts the
+  // session is still alive — which only holds when the skills-reload path passes
+  // skipBusy:true.
+  // --------------------------------------------------------------------------
+  it('HR6: busy session survives after its turn completes (no deferred restart)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:hr6', 'hi');
+    await new Promise((r) => setTimeout(r, 100));
+    const sess = getSessions(runner).get('chat:hr6')!;
+    expect(sess).toBeDefined();
+    // Session is busy (isProcessing === true from sendChannelPost), as if it is
+    // mid-turn editing its own SKILL.md.
+
+    watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
+    await new Promise((r) => setTimeout(r, 150));
+
+    writeSkillFile(sharedSkillsDir, 'hr6-skill');
+
+    // Wait for the reload to land (CLAUDE.md rewritten).
+    await waitForCondition(() =>
+      fs
+        .readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8')
+        .includes('/hr6-skill'),
+    );
+
+    // The turn now completes. On the buggy path (no skipBusy) the session was
+    // marked pendingRestart and this stops it; with skipBusy:true it survives.
+    sess.setProcessing(false);
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(getSessions(runner).has('chat:hr6')).toBe(true);
+    expect(sess.isRunning()).toBe(true);
   }, 10000);
 });
