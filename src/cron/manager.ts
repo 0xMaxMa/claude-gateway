@@ -198,6 +198,10 @@ export class CronManager extends EventEmitter {
     if (input.scheduleKind !== undefined) job.scheduleKind = input.scheduleKind;
     if (input.schedule !== undefined) job.schedule = input.schedule;
     if (input.scheduleAt !== undefined) job.scheduleAt = input.scheduleAt;
+    // Once set, a timezone can be changed to another valid zone but not cleared
+    // back to "unset": `undefined` is the no-op guard above and `null` is rejected
+    // by validateTimezone. To restore the default behavior, set it to "UTC"
+    // explicitly — which is identical to an unset zone (see scheduleJob()'s ?? 'UTC').
     if (input.timezone !== undefined) job.timezone = input.timezone;
     if (input.type !== undefined) job.type = input.type;
     if (input.command !== undefined) job.command = input.command;

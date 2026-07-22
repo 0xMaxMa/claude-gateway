@@ -1085,7 +1085,7 @@ describe('TZ7-TZ15: Additional timezone edge cases', () => {
     manager.stop();
   });
 
-  it('TZ9: a fixed-offset zone identifier ("+07:00") is accepted (Intl treats it as a valid time zone, not just IANA names)', async () => {
+  it('TZ9: a fixed-offset zone identifier ("+07:00") is accepted AND scheduled with that offset (Intl treats it as a valid time zone, not just IANA names)', async () => {
     const { manager, agentId } = makeManager();
     await manager.start();
 
@@ -1099,6 +1099,13 @@ describe('TZ7-TZ15: Additional timezone edge cases', () => {
     });
 
     expect(job.timezone).toBe('+07:00');
+    // End-to-end: the offset must reach nodeCron.schedule, not just pass create()
+    // validation — proves the accepted-set claim holds through the scheduling path.
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: '+07:00' }),
+    );
 
     manager.stop();
   });
