@@ -621,7 +621,13 @@ export class CronManager extends EventEmitter {
       // more than 30 minutes ago, regardless of whether the schedule produced a new tick.
       let lastExpectedRun: Date;
       try {
-        const interval = CronExpressionParser.parse(job.schedule!, { currentDate: new Date() });
+        // Interpret the schedule in the job's own timezone (matches scheduleJob()'s
+        // node-cron {timezone} default) so catch-up computes the correct missed tick
+        // for non-UTC jobs after a restart.
+        const interval = CronExpressionParser.parse(job.schedule!, {
+          currentDate: new Date(),
+          tz: job.timezone ?? 'UTC',
+        });
         lastExpectedRun = interval.prev().toDate();
       } catch {
         continue; // unparseable schedule — skip catch-up
