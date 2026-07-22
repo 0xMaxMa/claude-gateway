@@ -1073,6 +1073,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: absToTildePath(workspaceDirAbs),
       env: absToTildePath(path.join(workspaceDirAbs, '.env')),
+      allow_tools: true,
       claude: { model: defaultModel, extraFlags: [] },
     };
     if (wizard.signatureEmoji) newAgent.signatureEmoji = wizard.signatureEmoji;
@@ -1095,6 +1096,7 @@ export function createApiRouter(
       description: wizard.prompt.slice(0, 200).trim(),
       workspace: workspaceDirAbs,
       env: path.join(workspaceDirAbs, '.env'),
+      allow_tools: true,
       claude: { model: defaultModel, extraFlags: [] },
       ...(wizard.signatureEmoji ? { signatureEmoji: wizard.signatureEmoji } : {}),
       ...(avatarFilename ? { avatar: avatarFilename } : {}),
