@@ -311,11 +311,11 @@ export class CronManager extends EventEmitter {
    * hand to `nodeCron.schedule(..., { timezone })`.
    */
   private validateTimezone(tz: string): void {
-    if (!tz) throw new Error('timezone must be a non-empty IANA zone name');
+    if (!tz) throw new Error('timezone must be a non-empty time zone string');
     try {
       Intl.DateTimeFormat(undefined, { timeZone: tz });
     } catch {
-      throw new Error(`Invalid timezone: "${tz}" (expected an IANA zone, e.g. "Asia/Bangkok")`);
+      throw new Error(`Invalid timezone: "${tz}" (expected a valid time zone, e.g. an IANA name like "Asia/Bangkok")`);
     }
   }
 

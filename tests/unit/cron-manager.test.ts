@@ -1057,7 +1057,7 @@ describe('TZ7-TZ15: Additional timezone edge cases', () => {
       schedule: '0 9 * * *',
       timezone: '',
       command: 'echo hi',
-    })).rejects.toThrow(/non-empty IANA zone/);
+    })).rejects.toThrow(/non-empty time zone/);
 
     manager.stop();
   });
@@ -1155,7 +1155,7 @@ describe('TZ7-TZ15: Additional timezone edge cases', () => {
     // Simulates a JSON API caller sending `"timezone": null` — not reachable through
     // the CronJobUpdate TS type, but valid at the HTTP/JSON boundary.
     await expect(manager.update(job.id, { timezone: null as unknown as string }))
-      .rejects.toThrow(/non-empty IANA zone/);
+      .rejects.toThrow(/non-empty time zone/);
 
     // Rejected update must not have clobbered the previously-valid timezone.
     expect(manager.get(job.id)?.timezone).toBe('UTC');
