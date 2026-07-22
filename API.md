@@ -1913,6 +1913,7 @@ Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restart
 | `scheduleKind` | No | `"cron"` (default) or `"at"` |
 | `schedule` | If `scheduleKind=cron` | 5-field cron expression e.g. `"0 9 * * *"` |
 | `scheduleAt` | If `scheduleKind=at` | ISO 8601 timestamp for one-shot run |
+| `timezone` | No | IANA zone (e.g. `"Asia/Bangkok"`) the `scheduleKind=cron` expression fires in — DST-safe. Defaults to `"UTC"` (legacy jobs unchanged). An unresolvable zone is rejected with `400`. Ignored for `scheduleKind=at` (absolute instants carry no zone ambiguity). |
 | `type` | No | `"command"` (default) or `"agent"` |
 | `command` | If `type=command` | Shell command to run |
 | `prompt` | If `type=agent` | Prompt sent to the agent as a new turn |
@@ -2006,6 +2007,26 @@ curl -s -X POST http://localhost:10850/api/v1/crons \
     "name": "morning-brief",
     "scheduleKind": "cron",
     "schedule": "0 9 * * *",
+    "type": "agent",
+    "prompt": "Give me a morning summary.",
+    "telegram": "<CHAT_ID>"
+  }' | jq
+```
+
+#### Example: Daily job in a specific timezone
+
+Run every day at 09:00 **Bangkok time** — not 09:00 UTC. Add `timezone` (any IANA zone); node-cron resolves DST at fire time.
+
+```bash
+curl -s -X POST http://localhost:10850/api/v1/crons \
+  -H "X-Api-Key: my-secret-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "claude-founder",
+    "name": "morning-brief-bkk",
+    "scheduleKind": "cron",
+    "schedule": "0 9 * * *",
+    "timezone": "Asia/Bangkok",
     "type": "agent",
     "prompt": "Give me a morning summary.",
     "telegram": "<CHAT_ID>"

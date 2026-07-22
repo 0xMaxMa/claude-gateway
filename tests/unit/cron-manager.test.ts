@@ -885,3 +885,434 @@ describe('Fix 2: catchUpMissedJobs uses cron-parser to detect genuine missed tic
     manager.stop();
   });
 });
+
+// ─── TZ1-TZ6: Per-job timezone (#225) ─────────────────────────────────────────
+
+describe('TZ1-TZ6: Per-job timezone', () => {
+  // Spy on the shared node-cron module instance the manager imports, so we can
+  // assert the timezone option handed to nodeCron.schedule without waiting on
+  // real timers. spyOn calls through by default, so manager.stop() still cleans
+  // the created tasks up.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeCron = require('node-cron');
+  let scheduleSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    scheduleSpy = jest.spyOn(nodeCron, 'schedule');
+  });
+  afterEach(() => {
+    scheduleSpy.mockRestore();
+  });
+
+  it('TZ1: cron job with a timezone is scheduled in that zone', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-job',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'Asia/Bangkok',
+      command: 'echo hi',
+    });
+
+    expect(job.timezone).toBe('Asia/Bangkok');
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'Asia/Bangkok' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ2: cron job without a timezone defaults to UTC', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'no-tz-job',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      command: 'echo hi',
+    });
+
+    expect(job.timezone).toBeUndefined();
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'UTC' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ3: an invalid IANA timezone is rejected on create', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    await expect(manager.create({
+      agentId,
+      name: 'bad-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'Not/AZone',
+      command: 'echo x',
+    })).rejects.toThrow(/Invalid timezone/);
+
+    manager.stop();
+  });
+
+  it('TZ4: update persists the timezone and reschedules in the new zone', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-update',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'UTC',
+      command: 'echo hi',
+    });
+
+    scheduleSpy.mockClear();
+    const updated = await manager.update(job.id, { timezone: 'America/New_York' });
+
+    expect(updated.timezone).toBe('America/New_York');
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'America/New_York' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ5: update to an invalid timezone is rejected', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-bad-update',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      command: 'echo hi',
+    });
+
+    await expect(manager.update(job.id, { timezone: 'Mars/Phobos' }))
+      .rejects.toThrow(/Invalid timezone/);
+
+    manager.stop();
+  });
+
+  it('TZ6: timezone survives a store reload (persistence)', async () => {
+    const tmpDir = makeTmpDir();
+    const { manager, agentId } = makeManager({ tmpDir });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-persist',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'Europe/London',
+      command: 'echo hi',
+    });
+    manager.stop();
+
+    // Fresh manager reading the same store file must recover the timezone.
+    const { manager: manager2 } = makeManager({ tmpDir });
+    await manager2.start();
+    expect(manager2.get(job.id)?.timezone).toBe('Europe/London');
+    manager2.stop();
+  });
+});
+
+// ─── TZ7-TZ15: Additional timezone edge cases (#225 hardening) ────────────────
+
+describe('TZ7-TZ15: Additional timezone edge cases', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const nodeCron = require('node-cron');
+  let scheduleSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    scheduleSpy = jest.spyOn(nodeCron, 'schedule');
+  });
+  afterEach(() => {
+    scheduleSpy.mockRestore();
+  });
+
+  it('TZ7: an empty-string timezone is rejected on create', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    await expect(manager.create({
+      agentId,
+      name: 'empty-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: '',
+      command: 'echo hi',
+    })).rejects.toThrow(/non-empty time zone/);
+
+    manager.stop();
+  });
+
+  it('TZ8: a lower-cased zone name is accepted (Intl resolves it case-insensitively, matching node-cron\'s own check)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'lowercase-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'asia/bangkok',
+      command: 'echo hi',
+    });
+
+    expect(job.timezone).toBe('asia/bangkok');
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'asia/bangkok' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ9: a fixed-offset zone identifier ("+07:00") is accepted AND scheduled with that offset (Intl treats it as a valid time zone, not just IANA names)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'offset-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: '+07:00',
+      command: 'echo hi',
+    });
+
+    expect(job.timezone).toBe('+07:00');
+    // End-to-end: the offset must reach nodeCron.schedule, not just pass create()
+    // validation — proves the accepted-set claim holds through the scheduling path.
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: '+07:00' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ10: a whitespace-padded zone name is rejected', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    await expect(manager.create({
+      agentId,
+      name: 'padded-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: ' Asia/Bangkok ',
+      command: 'echo hi',
+    })).rejects.toThrow(/Invalid timezone/);
+
+    manager.stop();
+  });
+
+  it('TZ11: an at-job with a bogus timezone value is accepted (timezone validation only applies to scheduleKind=cron)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const futureTs = new Date(Date.now() + 60_000).toISOString();
+    const job = await manager.create({
+      agentId,
+      name: 'at-with-garbage-tz',
+      scheduleKind: 'at',
+      scheduleAt: futureTs,
+      timezone: 'Not/AZone',
+      command: 'echo hi',
+    });
+
+    expect(job.timezone).toBe('Not/AZone');
+    expect(scheduleSpy).not.toHaveBeenCalled();
+
+    manager.stop();
+  });
+
+  it('TZ12: an explicit null timezone on update is rejected, not silently ignored', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-null-update',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'UTC',
+      command: 'echo hi',
+    });
+
+    // Simulates a JSON API caller sending `"timezone": null` — not reachable through
+    // the CronJobUpdate TS type, but valid at the HTTP/JSON boundary.
+    await expect(manager.update(job.id, { timezone: null as unknown as string }))
+      .rejects.toThrow(/non-empty time zone/);
+
+    // Rejected update must not have clobbered the previously-valid timezone.
+    expect(manager.get(job.id)?.timezone).toBe('UTC');
+
+    manager.stop();
+  });
+
+  it('TZ13: updating an unrelated field preserves and re-applies the existing timezone', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tz-untouched',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'Asia/Tokyo',
+      command: 'echo hi',
+    });
+
+    scheduleSpy.mockClear();
+    const updated = await manager.update(job.id, { name: 'renamed' });
+
+    expect(updated.timezone).toBe('Asia/Tokyo');
+    expect(scheduleSpy).toHaveBeenCalledWith(
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'Asia/Tokyo' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ14: two concurrent jobs in different zones do not leak timezone across schedules', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    await manager.create({
+      agentId,
+      name: 'job-bkk',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'Asia/Bangkok',
+      command: 'echo bkk',
+    });
+
+    await manager.create({
+      agentId,
+      name: 'job-nyc',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 'America/New_York',
+      command: 'echo nyc',
+    });
+
+    expect(scheduleSpy).toHaveBeenNthCalledWith(
+      1,
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'Asia/Bangkok' }),
+    );
+    expect(scheduleSpy).toHaveBeenNthCalledWith(
+      2,
+      '0 9 * * *',
+      expect.any(Function),
+      expect.objectContaining({ timezone: 'America/New_York' }),
+    );
+
+    manager.stop();
+  });
+
+  it('TZ15: a non-string timezone value (e.g. a number from a malformed request body) is rejected cleanly, not a raw TypeError', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    await expect(manager.create({
+      agentId,
+      name: 'numeric-tz',
+      scheduleKind: 'cron',
+      schedule: '0 9 * * *',
+      timezone: 7 as unknown as string,
+      command: 'echo hi',
+    })).rejects.toThrow(/Invalid timezone/);
+
+    manager.stop();
+  });
+});
+
+// ─── TZ-GAP: catch-up after restart does not honor per-job timezone ──────────
+//
+// Found while writing coverage for #225: catchUpMissedJobs() (src/cron/manager.ts)
+// parses the cron expression with `CronExpressionParser.parse(job.schedule!, { currentDate })`
+// and never forwards `job.timezone`. cron-parser accepts a `tz` option (see
+// node_modules/cron-parser/dist/types/CronExpression.d.ts) — without it, "last expected
+// tick" is computed in the process's local/UTC time, not the job's zone. A restart shortly
+// after a scheduled fire time in a non-UTC zone can therefore mis-detect a missed run (false
+// catch-up, or a genuine miss going uncaught) even though live scheduling (scheduleJob) is
+// correctly zone-aware via node-cron.
+//
+// FIXED: catchUpMissedJobs() now forwards `tz: job.timezone ?? 'UTC'` to the parser, matching
+// scheduleJob()'s node-cron {timezone} default. This test locks that behavior in.
+describe('TZ-GAP: catchUpMissedJobs should honor job.timezone', () => {
+  it('forwards the job\'s timezone to CronExpressionParser.parse during startup catch-up', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { CronExpressionParser } = require('cron-parser');
+    const parseSpy = jest.spyOn(CronExpressionParser, 'parse');
+
+    const tmpDir = makeTmpDir();
+    const storePath = path.join(tmpDir, 'crons.json');
+    const runsDir = path.join(tmpDir, 'runs');
+
+    const twoMinAgo = Date.now() - 2 * 60 * 1000;
+    fs.writeFileSync(storePath, JSON.stringify({
+      version: 1,
+      jobs: [{
+        id: 'tz-gap-job',
+        agentId: 'test-agent',
+        name: 'tz-gap-job',
+        scheduleKind: 'cron',
+        schedule: '* * * * *',
+        timezone: 'Asia/Bangkok',
+        command: 'echo hi',
+        type: 'command',
+        enabled: true,
+        deleteAfterRun: false,
+        createdAt: Date.now() - 200000,
+        updatedAt: Date.now() - 200000,
+        state: {
+          lastRunAt: twoMinAgo,
+          lastStatus: 'ok',
+          lastError: null,
+          runCount: 5,
+          consecutiveErrors: 0,
+        },
+      }],
+    }, null, 2));
+
+    const agentRunners = new Map<string, any>();
+    const agentConfigs = new Map<string, AgentConfig>();
+    agentConfigs.set('test-agent', makeAgentConfig('test-agent'));
+    const manager = new CronManager({ storePath, runsDir }, agentRunners, agentConfigs, makeLogger());
+
+    await manager.start();
+
+    expect(parseSpy).toHaveBeenCalledWith(
+      '* * * * *',
+      expect.objectContaining({ tz: 'Asia/Bangkok' }),
+    );
+
+    parseSpy.mockRestore();
+    manager.stop();
+  });
+});
