@@ -512,8 +512,14 @@ export class CronManager extends EventEmitter {
 
     const sessionId = `cron-${job.id}`;
     const timeoutMs = job.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // Honor the agent's `allow_tools` setting for cron turns, mirroring the API
+    // request path (src/api/router.ts). Cron has no API key, so an unset value
+    // falls back to the secure default (false) rather than the router's apiKey
+    // fallback. Without this, sendApiMessage() defaults the missing option to
+    // `false` and every cron turn runs with tools disabled regardless of config.
+    const allowTools = this.agentConfigs.get(job.agentId)?.allow_tools ?? false;
 
-    const { text } = await runner.sendApiMessage(sessionId, `cron-${job.id}`, job.prompt!, { timeoutMs });
+    const { text } = await runner.sendApiMessage(sessionId, `cron-${job.id}`, job.prompt!, { timeoutMs, allowTools });
     return text;
   }
 
