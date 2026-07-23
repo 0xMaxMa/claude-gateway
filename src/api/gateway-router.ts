@@ -272,6 +272,17 @@ export class GatewayRouter {
     return authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
   }
 
+  /**
+   * True when the resolved bind interface is NOT loopback — i.e. the gateway is
+   * reachable from beyond the local host. Used to fail closed: a keyless install
+   * is safe on localhost but must not expose the dashboard/monitoring surface
+   * unauthenticated on a non-loopback bind.
+   */
+  private isNonLoopbackBind(): boolean {
+    const host = resolveBindHost(process.env.GATEWAY_BIND, this.gatewayConfig?.gateway?.bind);
+    return !(host === '127.0.0.1' || host === '::1' || host === 'localhost' || host.startsWith('127.'));
+  }
+
   /** True when the request carries a live (unexpired) dashboard session cookie. */
   private hasValidDashSession(req: Request): boolean {
     const token = parseCookies(req.headers['cookie'])[DASH_SESSION_COOKIE];
@@ -288,7 +299,17 @@ export class GatewayRouter {
    */
   private requireDashOrApiKey(req: Request, res: Response): boolean {
     const keys = this.apiKeys;
-    if (keys.length === 0) return true; // no auth configured → open, as before
+    if (keys.length === 0) {
+      // No auth configured. Safe on loopback; on a non-loopback bind, refuse
+      // rather than expose the monitoring surface unauthenticated (fail closed).
+      if (this.isNonLoopbackBind()) {
+        res.status(503).json({
+          error: 'Dashboard/monitoring disabled: configure gateway.api.keys to expose it on a non-loopback bind (gateway.bind)',
+        });
+        return false;
+      }
+      return true; // keyless + loopback → open, as before
+    }
     if (timingSafeKeyMatch(keys, this.extractApiToken(req))) return true;
     if (this.hasValidDashSession(req)) return true;
     res.status(401).json({ error: 'Unauthorized' });
@@ -486,7 +507,15 @@ export class GatewayRouter {
     // matching how the /api routers are only mounted when keys exist.
     this.app.get('/dashboard', (req: Request, res: Response) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      if (this.apiKeys.length > 0 && !this.hasValidDashSession(req)) {
+      if (this.apiKeys.length === 0) {
+        // Keyless: open on loopback, but fail closed on a non-loopback bind.
+        if (this.isNonLoopbackBind()) {
+          res.status(503).send(generateLoginHtml(
+            'Dashboard disabled. Configure gateway.api.keys to enable access on a non-loopback bind (gateway.bind).',
+          ));
+          return;
+        }
+      } else if (!this.hasValidDashSession(req)) {
         res.send(generateLoginHtml());
         return;
       }
@@ -667,6 +696,13 @@ export class GatewayRouter {
     // are not exposed to the local network out of the box; operators opt into
     // wider exposure via config or the env var (e.g. "0.0.0.0" behind a proxy).
     const host = resolveBindHost(process.env.GATEWAY_BIND, this.gatewayConfig?.gateway?.bind);
+    // Fail-closed heads-up: a non-loopback bind with no API keys means the
+    // dashboard/monitoring endpoints refuse access (503) until keys are set.
+    if (this.isNonLoopbackBind() && this.apiKeys.length === 0) {
+      process.stderr.write(
+        `[gateway] WARNING: bound to ${host} with no gateway.api.keys — dashboard/status/processes are DISABLED (503) until you configure API keys. Set gateway.api.keys to enable access.\n`,
+      );
+    }
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
         resolve();

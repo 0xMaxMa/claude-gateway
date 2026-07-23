@@ -14,9 +14,14 @@ import { AgentConfig, GatewayConfig, ApiKey } from '../../src/types';
 
 const KEY = 'sk-gateway-test-000000';
 
-function buildApp(apiKeys: ApiKey[] = []) {
+function buildApp(apiKeys: ApiKey[] = [], bind?: string) {
   const gatewayConfig: GatewayConfig = {
-    gateway: { logDir: '/tmp', timezone: 'UTC', ...(apiKeys.length ? { api: { keys: apiKeys } } : {}) },
+    gateway: {
+      logDir: '/tmp',
+      timezone: 'UTC',
+      ...(bind ? { bind } : {}),
+      ...(apiKeys.length ? { api: { keys: apiKeys } } : {}),
+    },
     agents: [],
   };
   const agents = new Map();
@@ -128,7 +133,8 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
     });
   });
 
-  describe('keyless install stays open (no lock-out)', () => {
+  describe('keyless install on loopback stays open (no lock-out)', () => {
+    // No bind → resolves to the 127.0.0.1 default (loopback).
     it('/status is reachable with no credential when no API keys are configured', async () => {
       const res = await supertest(buildApp([])).get('/status');
       expect(res.status).toBe(200);
@@ -140,9 +146,47 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
       expect(res.text).not.toContain('Enter an API key');
     });
 
+    it('explicit loopback bind (127.0.0.1) keyless is still open', async () => {
+      const res = await supertest(buildApp([], '127.0.0.1')).get('/status');
+      expect(res.status).toBe(200);
+    });
+
     it('POST /dashboard/login → 404 when auth is not configured', async () => {
       const res = await supertest(buildApp([])).post('/dashboard/login').send({ key: 'anything' });
       expect(res.status).toBe(404);
+    });
+  });
+
+  describe('keyless install on a NON-loopback bind fails closed', () => {
+    it('/status → 503 (not open) when keyless and bound to 0.0.0.0', async () => {
+      const res = await supertest(buildApp([], '0.0.0.0')).get('/status');
+      expect(res.status).toBe(503);
+    });
+
+    it('/processes → 503 when keyless and bound to 0.0.0.0', async () => {
+      const res = await supertest(buildApp([], '0.0.0.0')).get('/processes');
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /dashboard → 503 with a "configure gateway.api.keys" notice (no open dashboard)', async () => {
+      const res = await supertest(buildApp([], '0.0.0.0')).get('/dashboard');
+      expect(res.status).toBe(503);
+      expect(res.text).toContain('gateway.api.keys');
+      expect(res.text).not.toContain('id="pty-mode-toggle-btn"'); // not the real dashboard
+    });
+
+    it('/health stays public even keyless on 0.0.0.0 (liveness only)', async () => {
+      const res = await supertest(buildApp([], '0.0.0.0')).get('/health');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('configuring an API key re-enables access on 0.0.0.0 (login works)', async () => {
+      const app = buildApp(WITH_KEYS, '0.0.0.0');
+      const status = await supertest(app).get('/status');
+      expect(status.status).toBe(401); // keyed → needs a credential, not 503
+      const login = await supertest(app).post('/dashboard/login').send({ key: KEY });
+      expect(login.status).toBe(200);
     });
   });
 });

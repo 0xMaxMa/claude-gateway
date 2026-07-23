@@ -911,7 +911,22 @@ export function generateDashboardHtml(): string {
  * entered API key to POST /dashboard/login (JSON); on success the server sets the
  * HttpOnly session cookie and we reload into the dashboard. No external deps.
  */
-export function generateLoginHtml(): string {
+export function generateLoginHtml(disabledReason = ''): string {
+  const safeReason = disabledReason
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // When a disabled reason is supplied (keyless install on a non-loopback bind),
+  // render a notice instead of the login form — there is no key to log in with.
+  const bodyInner = safeReason
+    ? `    <h1>Claude Gateway</h1>
+    <div class="sub">${safeReason}</div>`
+    : `    <h1>Claude Gateway</h1>
+    <div class="sub">Enter an API key to access the dashboard.</div>
+    <form id="login-form" autocomplete="off">
+      <label for="key">API key</label>
+      <input id="key" type="password" placeholder="sk-gateway-..." autofocus>
+      <button type="submit">Sign in</button>
+      <div id="err"></div>
+    </form>`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -947,14 +962,7 @@ export function generateLoginHtml(): string {
 </head>
 <body>
   <div class="card">
-    <h1>Claude Gateway</h1>
-    <div class="sub">Enter an API key to access the dashboard.</div>
-    <form id="login-form" autocomplete="off">
-      <label for="key">API key</label>
-      <input id="key" type="password" placeholder="sk-gateway-..." autofocus>
-      <button type="submit">Sign in</button>
-      <div id="err"></div>
-    </form>
+${bodyInner}
   </div>
   <script>
     function basePath() {
@@ -963,7 +971,8 @@ export function generateLoginHtml(): string {
       if (p.endsWith('/dashboard/')) return p.slice(0, -11);
       return p.endsWith('/') ? p.slice(0, -1) : p;
     }
-    document.getElementById('login-form').addEventListener('submit', async function(e) {
+    var loginForm = document.getElementById('login-form');
+    if (loginForm) loginForm.addEventListener('submit', async function(e) {
       e.preventDefault();
       var err = document.getElementById('err');
       err.textContent = '';

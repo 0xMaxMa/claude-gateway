@@ -325,9 +325,11 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 > dashboard session when keys are configured — the dashboard prompts for an API
 > key at `/dashboard` and stores an `HttpOnly` session cookie. `/health` stays
 > public but returns only `{"status":"ok"}` (no agent ids). With **no** keys
-> configured these endpoints stay open, so on a non-loopback bind always set keys.
-> The gateway serves plain HTTP; put TLS in front (reverse proxy) so credentials
-> are not sent in the clear.
+> configured the gateway **fails closed on a non-loopback bind**: `/status`,
+> `/processes`, and `/dashboard` return `503` until you set `gateway.api.keys`
+> (a startup warning is logged). On a loopback bind they stay open, so local
+> keyless installs are unaffected. The gateway serves plain HTTP; put TLS in
+> front (reverse proxy) so credentials are not sent in the clear.
 
 ```json
 {

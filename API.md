@@ -20,11 +20,14 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
 
-¹ **Auth applies only when `gateway.api.keys` is configured.** With no keys, these
-endpoints stay open (a keyless install has no credential to check). "Key or dashboard
-session" accepts an API key (`X-Api-Key` / `Authorization: Bearer`) **or** the
-`dash_session` cookie issued by `POST /dashboard/login`. When bound to a non-loopback
-interface (`gateway.bind = 0.0.0.0`), configure API keys so these are not world-readable.
+¹ **Auth applies when `gateway.api.keys` is configured.** "Key or dashboard session"
+accepts an API key (`X-Api-Key` / `Authorization: Bearer`) **or** the `dash_session`
+cookie issued by `POST /dashboard/login`. With **no** keys configured the behavior
+depends on the bind: on a **loopback** bind (`127.0.0.1`) they stay open (a keyless
+local install has no credential to check); on a **non-loopback** bind (`0.0.0.0` or a
+real IP) they **fail closed** — `/status`, `/processes`, and `/dashboard` return `503`
+until `gateway.api.keys` is set, so the surface is never exposed unauthenticated to the
+network. `/health` stays public in all cases.
 
 ### Agent API
 
