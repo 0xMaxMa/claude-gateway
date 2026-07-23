@@ -283,6 +283,48 @@ describe('T6-T10: Agent type payload', () => {
   });
 });
 
+// ─── T-allowTools: agent tool policy is honored (regression for allow_tools bug) ─
+
+describe('T-allowTools: cron honors the agent allow_tools setting', () => {
+  async function runAgentJob(allowTools: boolean | undefined) {
+    const runner = makeRunner('ok');
+    const { manager, agentId, agentConfigs } = makeManager({ runner, botToken: 'BOT' });
+    // Set the agent's tool policy the same way the UI toggle persists it to config.
+    agentConfigs.get(agentId)!.allow_tools = allowTools;
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'tool-policy',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'do work',
+      telegram: '12345',
+    });
+
+    await manager.run(job.id);
+    const opts = (runner.sendApiMessage as jest.Mock).mock.calls[0][3];
+    manager.stop();
+    return opts;
+  }
+
+  it('forwards allowTools: true when agent.allow_tools is true', async () => {
+    const opts = await runAgentJob(true);
+    expect(opts).toEqual(expect.objectContaining({ allowTools: true }));
+  });
+
+  it('forwards allowTools: false when agent.allow_tools is false', async () => {
+    const opts = await runAgentJob(false);
+    expect(opts).toEqual(expect.objectContaining({ allowTools: false }));
+  });
+
+  it('defaults allowTools to false when agent.allow_tools is unset', async () => {
+    const opts = await runAgentJob(undefined);
+    expect(opts).toEqual(expect.objectContaining({ allowTools: false }));
+  });
+});
+
 // ─── T11-T13: Telegram delivery ───────────────────────────────────────────────
 
 describe('T11-T13: Telegram delivery', () => {
