@@ -2,14 +2,12 @@
  * Generates a self-contained HTML dashboard page for the gateway status UI.
  * No external dependencies except xterm.js CDN for PTY viewer.
  */
-export function generateDashboardHtml(dashToken = ''): string {
-  const safeToken = dashToken.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+export function generateDashboardHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="dash-token" content="${safeToken}">
   <title>Claude Gateway</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css"
     integrity="sha384-eDYu/eBZQNhtqTaA7Wl3XighXKxm/9VYF+Chh3hQS+UUlKQIJ14hK2imKu4n99aR" crossorigin="anonymous"/>
@@ -222,7 +220,7 @@ export function generateDashboardHtml(dashToken = ''): string {
   </style>
 </head>
 <body>
-  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span></h1>
+  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span> <button id="logout-btn" style="float:right;font-size:0.7rem;background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:4px;padding:2px 8px;cursor:pointer;">Logout</button></h1>
   <div class="meta">
     Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
     Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
@@ -288,9 +286,13 @@ export function generateDashboardHtml(dashToken = ''): string {
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js"
     integrity="sha384-pELe6ZHtFxFcuYBq3gMkqvmnNIqUWnAYjBG5gThqQQCjWp8PJ/65MLK4lMIfEK1e" crossorigin="anonymous"></script>
   <script>
-    // Read short-lived dashboard token from meta tag (10 min, server-issued at page load).
-    // The raw API key is never embedded in HTML — only this scoped, expiring token is.
-    const DASHBOARD_API_KEY = document.querySelector('meta[name="dash-token"]') ? document.querySelector('meta[name="dash-token"]').getAttribute('content') : '';
+    // Auth is carried by the HttpOnly 'dash_session' cookie the browser sends
+    // automatically on every same-origin request — no token is embedded in the
+    // page (nothing for view-source/XSS to steal). If any read returns 401 the
+    // session has expired or is missing, so bounce to /dashboard (login page).
+    function onUnauthorized() {
+      window.location.href = apiUrl('/dashboard');
+    }
 
     // Must match the server PTY size (src/shell/screen.ts ScreenModel defaults).
     const PTY_COLS = 200;
@@ -329,19 +331,19 @@ export function generateDashboardHtml(dashToken = ''): string {
     }
 
     async function wsPtyUrl(agentId, sessionId) {
-      // Exchange the API key for a short-lived ticket so the key never appears in
-      // the WS URL (which would expose it in server logs and browser history).
-      // Streams are per-session, so the session id is always part of the request.
+      // Exchange the dashboard session (HttpOnly cookie, sent automatically) for a
+      // short-lived ticket so no credential ever appears in the WS URL (which would
+      // expose it in server logs and browser history). Per-session, so the session
+      // id is always part of the request.
       const base = basePath() + '/api/v1/agents/' + encodeURIComponent(agentId) + '/pty-stream';
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      if (!DASHBOARD_API_KEY) {
-        return proto + '//' + window.location.host + base + '?session=' + encodeURIComponent(sessionId);
-      }
       const r = await fetch(apiUrl('/api/v1/pty-stream-ticket'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Dash-Token': DASHBOARD_API_KEY },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agentId, sessionId }),
       });
+      if (r.status === 401) { onUnauthorized(); return null; }
+      if (!r.ok) throw new Error('ticket HTTP ' + r.status);
       const { ticket } = await r.json();
       return proto + '//' + window.location.host + base + '?ticket=' + ticket;
     }
@@ -457,6 +459,8 @@ export function generateDashboardHtml(dashToken = ''): string {
         schedulePtyReconnect(agentId, sessionId);
         return;
       }
+      // 401 → wsPtyUrl already bounced to the login page; stop here.
+      if (!url) return;
       // The session may have been closed/switched while awaiting the ticket.
       if (currentPtySession !== sessionId) return;
 
@@ -665,6 +669,7 @@ export function generateDashboardHtml(dashToken = ''): string {
       document.getElementById('refresh-indicator').textContent = 'refreshing...';
       try {
         const res = await fetch(apiUrl('/status'));
+        if (res.status === 401) { onUnauthorized(); return; }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
 
@@ -740,6 +745,7 @@ export function generateDashboardHtml(dashToken = ''): string {
     async function refreshProcesses() {
       try {
         const res = await fetch(apiUrl('/processes'));
+        if (res.status === 401) { onUnauthorized(); return; }
         if (!res.ok) return;
         const data = await res.json();
         renderProcessTree(data.processes || [], data.numCpus || 1);
@@ -881,11 +887,108 @@ export function generateDashboardHtml(dashToken = ''): string {
       document.getElementById('proc-tree').innerHTML = lines.join('\\n');
     }
 
+    // Logout — revoke the session cookie server-side, then land on the login page.
+    document.getElementById('logout-btn').addEventListener('click', async function() {
+      try {
+        await fetch(apiUrl('/dashboard/logout'), { method: 'POST' });
+      } catch (e) { /* best-effort; navigate regardless */ }
+      window.location.href = apiUrl('/dashboard');
+    });
+
     refresh();
     refreshProcesses();
     setInterval(refresh, 3000);
     // Process tree (with CPU/mem) is heavier (spawns ps) — refresh a bit slower.
     setInterval(refreshProcesses, 6000);
+  </script>
+</body>
+</html>`;
+}
+
+/**
+ * Minimal, self-contained login page served at GET /dashboard when API keys are
+ * configured and the request has no valid dashboard session cookie. Posts the
+ * entered API key to POST /dashboard/login (JSON); on success the server sets the
+ * HttpOnly session cookie and we reload into the dashboard. No external deps.
+ */
+export function generateLoginHtml(disabledReason = ''): string {
+  const safeReason = disabledReason
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // When a disabled reason is supplied (keyless install on a non-loopback bind),
+  // render a notice instead of the login form — there is no key to log in with.
+  const bodyInner = safeReason
+    ? `    <h1>Claude Gateway</h1>
+    <div class="sub">${safeReason}</div>`
+    : `    <h1>Claude Gateway</h1>
+    <div class="sub">Enter an API key to access the dashboard.</div>
+    <form id="login-form" autocomplete="off">
+      <label for="key">API key</label>
+      <input id="key" type="password" placeholder="sk-gateway-..." autofocus>
+      <button type="submit">Sign in</button>
+      <div id="err"></div>
+    </form>`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Gateway — Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+      background: #0f1117; color: #e2e8f0;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .card {
+      background: #1a202c; border: 1px solid #2d3748; border-radius: 10px;
+      padding: 32px; width: 100%; max-width: 360px;
+    }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    .sub { font-size: 0.8rem; color: #718096; margin-bottom: 20px; }
+    label { display: block; font-size: 0.75rem; color: #a0aec0; margin-bottom: 6px; }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 6px;
+      border: 1px solid #2d3748; background: #0f1117; color: #e2e8f0;
+      font-family: inherit; font-size: 0.9rem;
+    }
+    button {
+      width: 100%; margin-top: 16px; padding: 10px; border: none; border-radius: 6px;
+      background: #3182ce; color: #fff; font-weight: 600; font-size: 0.9rem; cursor: pointer;
+    }
+    button:hover { background: #2b6cb0; }
+    #err { color: #fc8181; font-size: 0.8rem; margin-top: 12px; min-height: 1em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+${bodyInner}
+  </div>
+  <script>
+    function basePath() {
+      var p = window.location.pathname;
+      if (p.endsWith('/dashboard')) return p.slice(0, -10);
+      if (p.endsWith('/dashboard/')) return p.slice(0, -11);
+      return p.endsWith('/') ? p.slice(0, -1) : p;
+    }
+    var loginForm = document.getElementById('login-form');
+    if (loginForm) loginForm.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var err = document.getElementById('err');
+      err.textContent = '';
+      var key = document.getElementById('key').value;
+      try {
+        var res = await fetch(basePath() + '/dashboard/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: key }),
+        });
+        if (res.ok) { window.location.href = basePath() + '/dashboard'; return; }
+        err.textContent = res.status === 401 ? 'Invalid API key.' : ('Login failed (HTTP ' + res.status + ').');
+      } catch (e2) {
+        err.textContent = 'Network error.';
+      }
+    });
   </script>
 </body>
 </html>`;

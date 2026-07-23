@@ -12,10 +12,22 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/health` | None | Health check — status + agent list |
-| `GET` | `/status` | None | Per-agent stats + heartbeat history |
-| `GET` | `/ui` | None | Web UI dashboard |
+| `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
+| `GET` | `/status` | Key or dashboard session¹ | Per-agent stats + heartbeat history |
+| `GET` | `/processes` | Key or dashboard session¹ | Host process tree for the dashboard |
+| `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (serves the login page when unauthenticated) |
+| `POST` | `/dashboard/login` | None (validates a key) | Exchange an API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
+| `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
+
+¹ **Auth applies when `gateway.api.keys` is configured.** "Key or dashboard session"
+accepts an API key (`X-Api-Key` / `Authorization: Bearer`) **or** the `dash_session`
+cookie issued by `POST /dashboard/login`. With **no** keys configured the behavior
+depends on the bind: on a **loopback** bind (`127.0.0.1`) they stay open (a keyless
+local install has no credential to check); on a **non-loopback** bind (`0.0.0.0` or a
+real IP) they **fail closed** — `/status`, `/processes`, and `/dashboard` return `503`
+until `gateway.api.keys` is set, so the surface is never exposed unauthenticated to the
+network. `/health` stays public in all cases.
 
 ### Agent API
 
@@ -186,7 +198,8 @@ curl -s http://localhost:10850/api/v1/sessions/<sessionId>/screen \
 The `sessionId` is the gateway session UUID. Find it from the process list:
 
 ```bash
-curl -s http://localhost:10850/processes | grep -o 'sessions/[^/]*' | head -1
+# /processes requires an API key when gateway.api.keys is configured
+curl -s -H "X-Api-Key: $KEY" http://localhost:10850/processes | grep -o 'sessions/[^/]*' | head -1
 ```
 
 #### Live screen stream (WebSocket)
@@ -197,8 +210,13 @@ each session of an agent is an isolated stream.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `POST` | `/api/v1/pty-stream-ticket` | Key | Exchange an API key for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
+| `POST` | `/api/v1/pty-stream-ticket` | Key *or* dashboard session | Exchange an API key **or** the `dash_session` cookie for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
 | `WS` | `/api/v1/agents/:agentId/pty-stream` | Ticket *or* Key | Subscribe to the live PTY stream for one session |
+
+> The browser dashboard authenticates with the `HttpOnly; SameSite=Lax` `dash_session`
+> cookie (from `POST /dashboard/login`), which is sent automatically — it no longer embeds
+> any token in the page. `POST /api/v1/pty-stream-ticket` accepts that cookie, so
+> the ticket flow works without a token in the HTML or the WS URL.
 
 **Auth path 1 — ephemeral ticket (used by the browser viewer):**
 
@@ -236,24 +254,29 @@ Closes with code `4404` if the session is not running in PTY mode.
 
 ### GET /health
 
-Health check. No auth required.
+Liveness check. No auth required. Intentionally minimal — it returns **only**
+liveness so it is safe to expose to external probes even when the gateway is bound
+to a non-loopback interface. Agent ids moved to `/status` (authenticated).
 
 ```bash
 curl http://localhost:10850/health
 ```
 
 ```json
-{ "status": "ok", "agents": ["alfred", "claude-founder"] }
+{ "status": "ok" }
 ```
 
 ---
 
 ### GET /status
 
-Per-agent stats and heartbeat history. No auth required.
+Per-agent stats and heartbeat history. **Requires an API key or a dashboard session
+cookie when `gateway.api.keys` is configured** (open otherwise). Returns 401 when
+keys are set and no valid credential is supplied.
 
 ```bash
-curl http://localhost:10850/status | jq
+# API key
+curl -H "X-Api-Key: $KEY" http://localhost:10850/status | jq
 ```
 
 ```json

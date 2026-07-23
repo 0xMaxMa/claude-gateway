@@ -108,7 +108,7 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
   }
 
   test('U-UI-01: the mode toggle button and swappable title are always in the markup', () => {
-    const html = generateDashboardHtml('tok')
+    const html = generateDashboardHtml()
     expect(html).toContain('id="pty-mode-toggle-btn"')
     expect(html).toContain('id="pty-title-text"')
     expect(html).toContain('Terminal Viewer')
@@ -117,26 +117,26 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
   test('U-UI-02: the mode toggle ships visible (no inline display:none gate)', () => {
     // With no server flag, the toggle is always rendered — its button markup
     // must not be hidden with an inline style the way the gated version was.
-    const html = generateDashboardHtml('tok')
+    const html = generateDashboardHtml()
     const btn = html.match(/<button class="pty-mode-toggle"[^>]*>/)![0]
     expect(btn).not.toContain('display:none')
   })
 
   test('U-UI-03: the embedded dashboard script is syntactically valid', () => {
-    const body = scriptBody(generateDashboardHtml('tok'))
+    const body = scriptBody(generateDashboardHtml())
     // Parse-only: throws on a syntax error, does not execute (no DOM needed).
     expect(() => new Function(body)).not.toThrow()
   })
 
   test('U-UI-04: input-mode wiring references the shared send path', () => {
-    const body = scriptBody(generateDashboardHtml('tok'))
+    const body = scriptBody(generateDashboardHtml())
     expect(body).toContain('setPtyInputMode')
     expect(body).toContain('term.onData')
     expect(body).toContain('Interactive Terminal') // title in input mode
   })
 
   test('U-UI-05: physical PageUp/PageDown keys are forwarded to the PTY in view mode', () => {
-    const html = generateDashboardHtml('tok')
+    const html = generateDashboardHtml()
     // No on-screen page buttons — paging is driven by the real keyboard keys.
     expect(html).not.toContain('id="pty-pageup-btn"')
     expect(html).not.toContain('id="pty-pagedown-btn"')
@@ -157,7 +157,7 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     // and with disableStdin xterm rarely does, so a reconnect or stray click left
     // PageUp/PageDown dead. Verified end-to-end (headless Chromium) that a
     // document-level listener delivers the keys with focus OUTSIDE the terminal.
-    const body = scriptBody(generateDashboardHtml('tok'))
+    const body = scriptBody(generateDashboardHtml())
     expect(body).toContain("document.addEventListener('keydown', forwardPageKey)")
     // Must NOT be re-scoped back to the focus-dependent container.
     expect(body).not.toContain(

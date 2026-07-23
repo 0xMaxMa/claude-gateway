@@ -320,7 +320,7 @@ describe('Multi-Agent (Option A)', () => {
   });
 
   // ─── I-MA-09: /health lists all running agents ────────────────────────────
-  it('I-MA-09: /health lists all running agents (replaces webhook routing test)', async () => {
+  it('I-MA-09: /status lists all running agents (replaces webhook routing test)', async () => {
     const ws1 = createTempWorkspace('ma09-a-');
     const ws2 = createTempWorkspace('ma09-b-');
     const logDir = createTempDir('ma09-log-');
@@ -345,10 +345,13 @@ describe('Multi-Agent (Option A)', () => {
     const router = new GatewayRouter(agents, configs);
     await router.start(0);
 
-    const res = await supertest(router.getApp()).get('/health');
+    // /health is now minimal (no agent ids); the agent listing lives on /status,
+    // which is open here because no API keys are configured.
+    const res = await supertest(router.getApp()).get('/status');
     expect(res.status).toBe(200);
-    expect(res.body.agents).toContain('ma09-alpha');
-    expect(res.body.agents).toContain('ma09-beta');
+    const ids = res.body.agents.map((a: { id: string }) => a.id);
+    expect(ids).toContain('ma09-alpha');
+    expect(ids).toContain('ma09-beta');
 
     await router.stop();
     await runner1.stop();
