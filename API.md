@@ -16,7 +16,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `GET` | `/status` | Key or dashboard session¹ | Per-agent stats + heartbeat history |
 | `GET` | `/processes` | Key or dashboard session¹ | Host process tree for the dashboard |
 | `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (serves the login page when unauthenticated) |
-| `POST` | `/dashboard/login` | None (validates a key) | Exchange an API key for an `HttpOnly` `dash_session` cookie (8h) |
+| `POST` | `/dashboard/login` | None (validates a key) | Exchange an API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
 
@@ -213,8 +213,8 @@ each session of an agent is an isolated stream.
 | `POST` | `/api/v1/pty-stream-ticket` | Key *or* dashboard session | Exchange an API key **or** the `dash_session` cookie for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
 | `WS` | `/api/v1/agents/:agentId/pty-stream` | Ticket *or* Key | Subscribe to the live PTY stream for one session |
 
-> The browser dashboard authenticates with the `HttpOnly` `dash_session` cookie
-> (from `POST /dashboard/login`), which is sent automatically — it no longer embeds
+> The browser dashboard authenticates with the `HttpOnly; SameSite=Lax` `dash_session`
+> cookie (from `POST /dashboard/login`), which is sent automatically — it no longer embeds
 > any token in the page. `POST /api/v1/pty-stream-ticket` accepts that cookie, so
 > the ticket flow works without a token in the HTML or the WS URL.
 

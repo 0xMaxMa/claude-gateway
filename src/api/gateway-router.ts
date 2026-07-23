@@ -103,6 +103,25 @@ export function resolveBindHost(
   return env || configured || '127.0.0.1';
 }
 
+/**
+ * True when a bind host refers to the local loopback interface only. Handles the
+ * common spellings: `localhost`, IPv4 loopback (`127.0.0.0/8`), IPv6 loopback
+ * (`::1`, its fully-expanded `0:0:...:1`), IPv4-mapped loopback (`::ffff:127.x`),
+ * and bracketed / zone-suffixed IPv6 forms. Anything else (`0.0.0.0`, `::`, a
+ * real IP, a hostname) is treated as non-loopback = potentially exposed.
+ */
+function isLoopbackHost(bind: string | undefined): boolean {
+  let host = (bind ?? '').trim().toLowerCase();
+  if (!host) return true; // empty resolves to the 127.0.0.1 default upstream
+  host = host.replace(/^\[/, '').replace(/\]$/, ''); // strip IPv6 brackets
+  host = host.split('%')[0]; // strip IPv6 zone id (fe80::1%eth0)
+  if (host.startsWith('::ffff:')) host = host.slice(7); // IPv4-mapped IPv6
+  if (host === 'localhost') return true;
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true; // 127.0.0.0/8
+  return false;
+}
+
 // ─── Proxy types ──────────────────────────────────────────────────────────────
 
 interface ProxyRoute {
@@ -184,6 +203,12 @@ export class GatewayRouter {
    *  and carried by the HttpOnly `dash_session` cookie — never embedded in the HTML,
    *  so no token is exposed to view-source/XSS. token → expiresAt. */
   private readonly dashboardTokens = new Map<string, number>();
+
+  /** Failed-login throttle for /dashboard/login, keyed by client IP.
+   *  ip → { count, resetAt }. Blocks brute-forcing configured API keys. */
+  private readonly loginAttempts = new Map<string, { count: number; resetAt: number }>();
+  private static readonly LOGIN_MAX_ATTEMPTS = 10;
+  private static readonly LOGIN_WINDOW_MS = 5 * 60 * 1000;
 
   /** Per-agent message counters (output lines from subprocess) */
   private readonly messagesReceived: Map<string, number> = new Map();
@@ -276,11 +301,14 @@ export class GatewayRouter {
    * True when the resolved bind interface is NOT loopback — i.e. the gateway is
    * reachable from beyond the local host. Used to fail closed: a keyless install
    * is safe on localhost but must not expose the dashboard/monitoring surface
-   * unauthenticated on a non-loopback bind.
+   * unauthenticated on a non-loopback bind. Normalizes IPv6 brackets/zone,
+   * v4-mapped addresses, and the fully-expanded IPv6 loopback so an unusual but
+   * legitimate loopback bind is not mistaken for an exposed one.
    */
   private isNonLoopbackBind(): boolean {
-    const host = resolveBindHost(process.env.GATEWAY_BIND, this.gatewayConfig?.gateway?.bind);
-    return !(host === '127.0.0.1' || host === '::1' || host === 'localhost' || host.startsWith('127.'));
+    return !isLoopbackHost(
+      resolveBindHost(process.env.GATEWAY_BIND, this.gatewayConfig?.gateway?.bind),
+    );
   }
 
   /** True when the request carries a live (unexpired) dashboard session cookie. */
@@ -316,11 +344,45 @@ export class GatewayRouter {
     return false;
   }
 
-  /** Build the Set-Cookie value for the dashboard session (Secure when TLS). */
+  /** Client IP for throttling. Uses req.ip (Express; the socket peer unless
+   *  `trust proxy` is set) with a socket fallback. Behind an untrusted proxy all
+   *  clients share the proxy IP → a shared throttle, which fails safe. */
+  private clientIp(req: Request): string {
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+  }
+
+  /** True when this IP has exceeded the failed-login budget for the window. */
+  private isLoginThrottled(req: Request): boolean {
+    const rec = this.loginAttempts.get(this.clientIp(req));
+    if (!rec || rec.resetAt < Date.now()) return false;
+    return rec.count >= GatewayRouter.LOGIN_MAX_ATTEMPTS;
+  }
+
+  /** Record a failed login for this IP (starts/extends the current window). */
+  private recordLoginFailure(req: Request): void {
+    const ip = this.clientIp(req);
+    const now = Date.now();
+    const rec = this.loginAttempts.get(ip);
+    if (!rec || rec.resetAt < now) {
+      this.loginAttempts.set(ip, { count: 1, resetAt: now + GatewayRouter.LOGIN_WINDOW_MS });
+    } else {
+      rec.count += 1;
+    }
+  }
+
+  /**
+   * Build the Set-Cookie value for the dashboard session (Secure when TLS).
+   * SameSite=Lax: the cookie is not sent on cross-site subresource requests
+   * (fetch/XHR/img) or cross-site POST — so it stays CSRF-safe for the
+   * state-changing POST routes (login/logout/pty-ticket) and the read endpoints'
+   * cross-site fetches — while still being sent on a top-level navigation to
+   * /dashboard, so opening the dashboard from a bookmark or link does not force
+   * a re-login (Strict would drop the cookie there).
+   */
   private buildSessionCookie(req: Request, token: string, ttlMs: number): string {
     const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
     const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
-    return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
+    return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
   }
 
   private setupRoutes(): void {
@@ -540,11 +602,19 @@ export class GatewayRouter {
         res.status(404).json({ error: 'Auth not configured' });
         return;
       }
+      // Throttle brute-force attempts per client IP.
+      if (this.isLoginThrottled(req)) {
+        res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+        return;
+      }
       const key = ((req.body as { key?: string })?.key ?? '').toString();
       if (!timingSafeKeyMatch(keys, key)) {
+        this.recordLoginFailure(req);
         res.status(401).json({ error: 'Invalid API key' });
         return;
       }
+      // Success: clear this IP's failure window.
+      this.loginAttempts.delete(this.clientIp(req));
       const token = crypto.randomBytes(32).toString('hex');
       this.dashboardTokens.set(token, Date.now() + DASH_SESSION_TTL_MS);
       res.setHeader('Set-Cookie', this.buildSessionCookie(req, token, DASH_SESSION_TTL_MS));
@@ -724,7 +794,7 @@ export class GatewayRouter {
       this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PTY_INPUT_BYTES * 8 });
       const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
 
-      // Prune expired tickets and dashboard tokens every 60s.
+      // Prune expired tickets, dashboard tokens, and login-throttle windows every 60s.
       this.ticketPruner = setInterval(() => {
         const now = Date.now();
         for (const [k, v] of this.ptyStreamTickets) {
@@ -732,6 +802,9 @@ export class GatewayRouter {
         }
         for (const [k, exp] of this.dashboardTokens) {
           if (exp < now) this.dashboardTokens.delete(k);
+        }
+        for (const [ip, rec] of this.loginAttempts) {
+          if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
       }, 60_000);
       this.ticketPruner.unref();

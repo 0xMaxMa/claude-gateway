@@ -429,7 +429,7 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const setCookie = login.headers['set-cookie'][0];
       expect(setCookie).toMatch(/dash_session=/);
       expect(setCookie).toMatch(/HttpOnly/);
-      expect(setCookie).toMatch(/SameSite=Strict/);
+      expect(setCookie).toMatch(/SameSite=Lax/);
       const cookie = setCookie.split(';')[0];
 
       // First use with the cookie: should succeed.

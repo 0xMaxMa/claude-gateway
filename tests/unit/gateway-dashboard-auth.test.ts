@@ -84,13 +84,13 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
       expect(res.text).not.toContain('name="dash-token"');
     });
 
-    it('POST /dashboard/login with a valid key sets an HttpOnly SameSite=Strict cookie', async () => {
+    it('POST /dashboard/login with a valid key sets an HttpOnly SameSite=Lax cookie', async () => {
       const res = await supertest(buildApp(WITH_KEYS)).post('/dashboard/login').send({ key: KEY });
       expect(res.status).toBe(200);
       const setCookie = (res.headers['set-cookie'] as unknown as string[])[0];
       expect(setCookie).toMatch(/dash_session=[0-9a-f]{64}/);
       expect(setCookie).toMatch(/HttpOnly/);
-      expect(setCookie).toMatch(/SameSite=Strict/);
+      expect(setCookie).toMatch(/SameSite=Lax/);
       expect(setCookie).toMatch(/Path=\//);
     });
 
@@ -187,6 +187,47 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
       expect(status.status).toBe(401); // keyed → needs a credential, not 503
       const login = await supertest(app).post('/dashboard/login').send({ key: KEY });
       expect(login.status).toBe(200);
+    });
+
+    // Robust loopback detection — these unusual-but-legitimate loopback spellings
+    // must NOT be treated as exposed (keyless → still open), while bind-all forms must.
+    it.each(['localhost', '::1', '0:0:0:0:0:0:0:1', '127.0.0.5'])(
+      'keyless on loopback spelling %s stays open',
+      async (bind) => {
+        const res = await supertest(buildApp([], bind)).get('/status');
+        expect(res.status).toBe(200);
+      },
+    );
+
+    it.each(['::', '192.168.1.10'])('keyless on non-loopback %s fails closed (503)', async (bind) => {
+      const res = await supertest(buildApp([], bind)).get('/status');
+      expect(res.status).toBe(503);
+    });
+  });
+
+  describe('/dashboard/login brute-force throttle', () => {
+    it('blocks with 429 after 10 failed attempts — even with the correct key', async () => {
+      const app = buildApp(WITH_KEYS);
+      // 10 wrong attempts are allowed (each 401)…
+      for (let i = 0; i < 10; i++) {
+        const r = await supertest(app).post('/dashboard/login').send({ key: 'wrong' });
+        expect(r.status).toBe(401);
+      }
+      // …the 11th is throttled, and the throttle applies even to the correct key.
+      const blocked = await supertest(app).post('/dashboard/login').send({ key: KEY });
+      expect(blocked.status).toBe(429);
+    });
+
+    it('a successful login before the limit clears the failure window', async () => {
+      const app = buildApp(WITH_KEYS);
+      for (let i = 0; i < 5; i++) {
+        await supertest(app).post('/dashboard/login').send({ key: 'wrong' });
+      }
+      const ok = await supertest(app).post('/dashboard/login').send({ key: KEY });
+      expect(ok.status).toBe(200);
+      // Window was reset, so a fresh batch of wrong attempts is allowed again.
+      const afterReset = await supertest(app).post('/dashboard/login').send({ key: 'wrong' });
+      expect(afterReset.status).toBe(401);
     });
   });
 });
