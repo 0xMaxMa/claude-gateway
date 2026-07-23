@@ -366,7 +366,8 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       const workspace = createTempWorkspace(`e2e-ticket-${agentId}-`);
       const logDir = createTempDir(`e2e-ticket-${agentId}-log-`);
       const agentCfg = makeAgentConfig(agentId, `token-${agentId}`, workspace);
-      const gatewayCfg = makeGatewayConfig(logDir, [{ key: 'secret-key', agents: '*' }]);
+      // Admin key: the pty-ticket / dashboard surface requires admin (Issue #232).
+      const gatewayCfg = makeGatewayConfig(logDir, [{ key: 'secret-key', agents: '*', admin: true }]);
       const runner = new AgentRunner(agentCfg, gatewayCfg);
       await runner.start();
       // Tickets are bound to a session; stub one live session so the endpoint's

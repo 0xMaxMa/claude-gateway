@@ -320,15 +320,20 @@ Recovery actions are clamped to a per-stage whitelist and a per-turn budget, and
 
 Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.
 
-> **⚠️ Binding to `0.0.0.0`? Configure `gateway.api.keys`.** The monitoring
-> surface (`/status`, `/processes`) and the dashboard require an API key or a
-> dashboard session when keys are configured — the dashboard prompts for an API
-> key at `/dashboard` and stores an `HttpOnly` session cookie. `/health` stays
-> public but returns only `{"status":"ok"}` (no agent ids). With **no** keys
+> **⚠️ Binding to `0.0.0.0`? Configure an admin key in `gateway.api.keys`.** The
+> monitoring surface (`/status`, `/processes`) and the dashboard require an
+> **admin** API key (`admin: true`) or a dashboard session when keys are
+> configured — a scoped or write-only key is rejected (`401`), because the
+> dashboard grants cross-agent, host-wide power (including PTY keystroke injection
+> into any session). The dashboard prompts for an admin key at `/dashboard` and
+> stores an `HttpOnly` session cookie (issued only to an admin key). `/health`
+> stays public but returns only `{"status":"ok"}` (no agent ids). With **no** keys
 > configured the gateway **fails closed on a non-loopback bind**: `/status`,
 > `/processes`, and `/dashboard` return `503` until you set `gateway.api.keys`
-> (a startup warning is logged). On a loopback bind they stay open, so local
-> keyless installs are unaffected. The gateway serves plain HTTP; put TLS in
+> (a startup warning is logged); if keys are set but **none is admin**, the
+> dashboard is inaccessible and a startup warning is logged. On a loopback bind
+> they stay open, so local keyless installs are unaffected. The gateway serves
+> plain HTTP; put TLS in
 > front (reverse proxy) so credentials are not sent in the clear.
 
 ```json
@@ -347,8 +352,8 @@ The dashboard's **Terminal Viewer** opens read-only (a live mirror of the PTY). 
 
 Because interactive mode turns a read-only view into a remote-write surface, access is protected upstream rather than by a feature flag:
 
-- **Authentication** — the WebSocket requires a valid dashboard ticket or API key. The ticket is minted at `POST /api/v1/pty-stream-ticket`, which itself requires an API key or a valid dashboard session cookie — so an unauthenticated caller cannot obtain one. The dashboard gets its session by logging in with an API key at `/dashboard` (`HttpOnly` cookie); no token is embedded in the page.
-- **`gateway.bind`** — the gateway binds to `127.0.0.1` (localhost) by default, so the dashboard is not reachable from the network out of the box. On a non-loopback bind (`0.0.0.0`), configure `gateway.api.keys` so the dashboard and monitoring endpoints require authentication, and prefer a TLS-terminating reverse proxy so credentials are not sent in the clear.
+- **Authentication** — the WebSocket requires a valid dashboard ticket or **admin** API key. The ticket is minted at `POST /api/v1/pty-stream-ticket`, which itself requires an admin API key or a valid dashboard session cookie — so an unauthenticated (or non-admin) caller cannot obtain one. The dashboard gets its session by logging in with an admin key at `/dashboard` (`HttpOnly` cookie); no token is embedded in the page.
+- **`gateway.bind`** — the gateway binds to `127.0.0.1` (localhost) by default, so the dashboard is not reachable from the network out of the box. On a non-loopback bind (`0.0.0.0`), configure an admin key in `gateway.api.keys` so the dashboard and monitoring endpoints require an admin credential, and prefer a TLS-terminating reverse proxy so credentials are not sent in the clear.
 
 Inbound frames are always bounded (text-only, size-capped) and are dropped for headless sessions (no PTY).
 

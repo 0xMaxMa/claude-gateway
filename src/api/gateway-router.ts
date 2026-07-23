@@ -75,6 +75,21 @@ function timingSafeKeyMatch(apiKeys: ApiKey[], token: string): boolean {
   });
 }
 
+/**
+ * Timing-safe match restricted to admin keys (`admin: true`). The dashboard and
+ * monitoring surface (session list, process tree, screen, and PTY keystroke
+ * injection) grants cross-agent, host-wide power that intentionally transcends a
+ * key's `agents` scope — so it requires an admin key, not merely any configured
+ * key. A scoped or write-only key must not reach it. Pre-filters to admin keys,
+ * then reuses the same timing-safe comparison.
+ */
+function timingSafeAdminKeyMatch(apiKeys: ApiKey[], token: string): boolean {
+  return timingSafeKeyMatch(
+    apiKeys.filter((k) => k.admin === true),
+    token,
+  );
+}
+
 function getGatewayVersion(): string {
   try {
     const pkgPath = path.join(__dirname, '..', '..', 'package.json');
@@ -320,10 +335,12 @@ export class GatewayRouter {
   }
 
   /**
-   * Gate a dashboard-adjacent endpoint: accept a valid API key OR a live
-   * dashboard session cookie. When no API keys are configured, auth is disabled
-   * (open) — a keyless install has no credential to check and must not lock
-   * itself out. Writes 401 and returns false when unauthorized.
+   * Gate a dashboard-adjacent endpoint: accept an admin API key OR a live
+   * dashboard session cookie (which is itself only issued to an admin key). The
+   * dashboard grants cross-agent, host-wide power, so a non-admin (scoped or
+   * write-only) key is rejected. When no API keys are configured, auth is
+   * disabled (open) — a keyless install has no credential to check and must not
+   * lock itself out. Writes 401 and returns false when unauthorized.
    */
   private requireDashOrApiKey(req: Request, res: Response): boolean {
     const keys = this.apiKeys;
@@ -338,7 +355,7 @@ export class GatewayRouter {
       }
       return true; // keyless + loopback → open, as before
     }
-    if (timingSafeKeyMatch(keys, this.extractApiToken(req))) return true;
+    if (timingSafeAdminKeyMatch(keys, this.extractApiToken(req))) return true;
     if (this.hasValidDashSession(req)) return true;
     res.status(401).json({ error: 'Unauthorized' });
     return false;
@@ -608,7 +625,10 @@ export class GatewayRouter {
         return;
       }
       const key = ((req.body as { key?: string })?.key ?? '').toString();
-      if (!timingSafeKeyMatch(keys, key)) {
+      // Admin only: the session cookie this issues unlocks cross-agent, host-wide
+      // dashboard power, so a valid-but-non-admin key must not obtain one. The 401
+      // body stays generic (does not confirm the key exists but lacks admin).
+      if (!timingSafeAdminKeyMatch(keys, key)) {
         this.recordLoginFailure(req);
         res.status(401).json({ error: 'Invalid API key' });
         return;
@@ -772,6 +792,13 @@ export class GatewayRouter {
       process.stderr.write(
         `[gateway] WARNING: bound to ${host} with no gateway.api.keys — dashboard/status/processes are DISABLED (503) until you configure API keys. Set gateway.api.keys to enable access.\n`,
       );
+    } else if (this.isNonLoopbackBind() && !this.apiKeys.some((k) => k.admin === true)) {
+      // Keys exist but none is admin: the dashboard requires an admin key, so
+      // login/status/processes will reject every configured key (401). Warn so
+      // the operator knows why access is refused and marks a key `admin: true`.
+      process.stderr.write(
+        `[gateway] WARNING: bound to ${host} with API keys but none is admin — dashboard/status/processes require an admin key, so login will be refused (401). Mark a key "admin": true in gateway.api.keys to enable dashboard access.\n`,
+      );
     }
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(port, host, () => {
@@ -845,12 +872,14 @@ export class GatewayRouter {
         }
 
         // Auth path 2: Bearer token or X-Api-Key header (for non-browser clients).
+        // Admin only — this path grants direct PTY keystroke injection into the
+        // agent's session, so a non-admin key must not pass.
         const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
         const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
         const token = authHeader.startsWith('Bearer ')
           ? authHeader.slice(7).trim()
           : xApiKey.trim();
-        if (!timingSafeKeyMatch(apiKeys, token)) {
+        if (!timingSafeAdminKeyMatch(apiKeys, token)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;

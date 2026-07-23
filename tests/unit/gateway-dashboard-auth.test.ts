@@ -1,9 +1,11 @@
 /**
  * Regression tests for the bind=0.0.0.0 hardening: with API keys configured, the
  * dashboard-adjacent endpoints that used to be reachable with no credential
- * (/status, /processes, /dashboard) now require an API key OR a dashboard session
- * cookie, and /health leaks nothing beyond liveness. When no API keys are
- * configured, behavior stays open (keyless installs must not lock themselves out).
+ * (/status, /processes, /dashboard) now require an ADMIN API key OR a dashboard
+ * session cookie (itself only issued to an admin key), and /health leaks nothing
+ * beyond liveness. A valid-but-non-admin (scoped/write) key is rejected. When no
+ * API keys are configured, behavior stays open (keyless installs must not lock
+ * themselves out).
  *
  * These exercise the real Express app built by GatewayRouter (getApp()) with
  * supertest — no port binding, no WS.
@@ -13,6 +15,7 @@ import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig, ApiKey } from '../../src/types';
 
 const KEY = 'sk-gateway-test-000000';
+const NON_ADMIN_KEY = 'sk-gateway-scoped-00000';
 
 function buildApp(apiKeys: ApiKey[] = [], bind?: string) {
   const gatewayConfig: GatewayConfig = {
@@ -30,7 +33,12 @@ function buildApp(apiKeys: ApiKey[] = [], bind?: string) {
   return router.getApp();
 }
 
-const WITH_KEYS = [{ key: KEY, description: 'test', agents: '*' as const }];
+// The dashboard/monitoring surface requires an ADMIN key. KEY is admin; the
+// scoped key below is a valid, configured key that must NOT reach the dashboard.
+const WITH_KEYS = [
+  { key: KEY, description: 'test admin', agents: '*' as const, admin: true },
+  { key: NON_ADMIN_KEY, description: 'test scoped', agents: ['some-agent'] },
+];
 
 /** Extract the `name=value` pair from a Set-Cookie header for reuse as a Cookie. */
 function cookieFrom(res: { headers: Record<string, string[] | string> }): string {
@@ -202,6 +210,46 @@ describe('gateway dashboard auth hardening (bind 0.0.0.0)', () => {
     it.each(['::', '192.168.1.10'])('keyless on non-loopback %s fails closed (503)', async (bind) => {
       const res = await supertest(buildApp([], bind)).get('/status');
       expect(res.status).toBe(503);
+    });
+  });
+
+  describe('④ dashboard/monitoring requires an ADMIN key (non-admin key rejected)', () => {
+    it('POST /dashboard/login with a valid NON-admin key → 401, no cookie', async () => {
+      const res = await supertest(buildApp(WITH_KEYS)).post('/dashboard/login').send({ key: NON_ADMIN_KEY });
+      expect(res.status).toBe(401);
+      expect(res.headers['set-cookie']).toBeUndefined();
+    });
+
+    it('/status with a valid NON-admin key (X-Api-Key) → 401', async () => {
+      const res = await supertest(buildApp(WITH_KEYS)).get('/status').set('X-Api-Key', NON_ADMIN_KEY);
+      expect(res.status).toBe(401);
+    });
+
+    it('/status with a valid NON-admin key (Bearer) → 401', async () => {
+      const res = await supertest(buildApp(WITH_KEYS)).get('/status').set('Authorization', `Bearer ${NON_ADMIN_KEY}`);
+      expect(res.status).toBe(401);
+    });
+
+    it('/processes with a valid NON-admin key → 401', async () => {
+      const res = await supertest(buildApp(WITH_KEYS)).get('/processes').set('X-Api-Key', NON_ADMIN_KEY);
+      expect(res.status).toBe(401);
+    });
+
+    it('an ADMIN key is accepted at /status and /dashboard/login', async () => {
+      const app = buildApp(WITH_KEYS);
+      const status = await supertest(app).get('/status').set('X-Api-Key', KEY);
+      expect(status.status).toBe(200);
+      const login = await supertest(app).post('/dashboard/login').send({ key: KEY });
+      expect(login.status).toBe(200);
+    });
+
+    it('a config with keys but no admin key rejects every key at login (fail-closed)', async () => {
+      const scopedOnly = [{ key: NON_ADMIN_KEY, description: 'scoped', agents: ['some-agent'] }];
+      const app = buildApp(scopedOnly);
+      const login = await supertest(app).post('/dashboard/login').send({ key: NON_ADMIN_KEY });
+      expect(login.status).toBe(401);
+      const status = await supertest(app).get('/status').set('X-Api-Key', NON_ADMIN_KEY);
+      expect(status.status).toBe(401);
     });
   });
 
