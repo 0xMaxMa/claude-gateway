@@ -180,9 +180,10 @@ export class GatewayRouter {
   private readonly ptyStreamTickets = new Map<string, { agentId: string; sessionId: string; expiresAt: number }>();
   private ticketPruner: ReturnType<typeof setInterval> | null = null;
 
-  /** Short-lived dashboard session tokens (10 min TTL). Issued at /dashboard serve time
-   *  so the raw API key is never embedded in the HTML page source. */
-  private readonly dashboardTokens = new Map<string, number>(); // token → expiresAt
+  /** Dashboard session tokens (DASH_SESSION_TTL_MS). Issued at POST /dashboard/login
+   *  and carried by the HttpOnly `dash_session` cookie — never embedded in the HTML,
+   *  so no token is exposed to view-source/XSS. token → expiresAt. */
+  private readonly dashboardTokens = new Map<string, number>();
 
   /** Per-agent message counters (output lines from subprocess) */
   private readonly messagesReceived: Map<string, number> = new Map();
@@ -773,11 +774,12 @@ export class GatewayRouter {
    * (server → browser); inbound keystrokes are opt-in per browser via the Shell
    * Process Viewer's mode toggle (client-side UX), so a viewer only sends bytes
    * while in input mode. Access to this socket is protected upstream: the caller
-   * has already authenticated (ticket or API key) and the gateway binds to
-   * localhost by default (`gateway.bind`) — set a non-loopback bind only behind
-   * a trusted proxy. Bytes are bounded (text-only, size-capped) and routed to
-   * the owning session; a headless session (no PTY) silently drops them
-   * (sendInputToSession → false).
+   * has already authenticated (one-time ticket or API key), and the ticket itself
+   * is only mintable with an API key or a valid dashboard session — so on a
+   * non-loopback `gateway.bind` an unauthenticated caller cannot reach this stream
+   * (provided `gateway.api.keys` is configured). Bytes are bounded (text-only,
+   * size-capped) and routed to the owning session; a headless session (no PTY)
+   * silently drops them (sendInputToSession → false).
    */
   private attachPtyStreamSocket(ws: WebSocket, agentId: string, sessionId: string): void {
     if (!ptyStreamRegistry.hasSockets(sessionId)) {
