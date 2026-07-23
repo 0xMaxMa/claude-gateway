@@ -13,21 +13,26 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
-| `GET` | `/status` | Key or dashboard session¹ | Per-agent stats + heartbeat history |
-| `GET` | `/processes` | Key or dashboard session¹ | Host process tree for the dashboard |
+| `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats + heartbeat history |
+| `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard |
 | `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (serves the login page when unauthenticated) |
-| `POST` | `/dashboard/login` | None (validates a key) | Exchange an API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
+| `POST` | `/dashboard/login` | None (validates an admin key) | Exchange an **admin** API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
 
-¹ **Auth applies when `gateway.api.keys` is configured.** "Key or dashboard session"
-accepts an API key (`X-Api-Key` / `Authorization: Bearer`) **or** the `dash_session`
-cookie issued by `POST /dashboard/login`. With **no** keys configured the behavior
+¹ **Auth applies when `gateway.api.keys` is configured, and requires an _admin_ key**
+(`admin: true`). The dashboard/monitoring surface grants cross-agent, host-wide power
+(session list, process tree, and PTY keystroke injection into any session), so it
+intentionally requires more than a scoped or write key. "Admin key or dashboard session"
+accepts an admin API key (`X-Api-Key` / `Authorization: Bearer`) **or** the `dash_session`
+cookie issued by `POST /dashboard/login` (which is itself only issued to an admin key). A
+valid but non-admin key is rejected (`401`). With **no** keys configured the behavior
 depends on the bind: on a **loopback** bind (`127.0.0.1`) they stay open (a keyless
 local install has no credential to check); on a **non-loopback** bind (`0.0.0.0` or a
 real IP) they **fail closed** — `/status`, `/processes`, and `/dashboard` return `503`
 until `gateway.api.keys` is set, so the surface is never exposed unauthenticated to the
-network. `/health` stays public in all cases.
+network. If keys are configured but **none is admin**, the dashboard is inaccessible
+(login returns `401`) and a startup warning is emitted. `/health` stays public in all cases.
 
 ### Agent API
 
@@ -198,7 +203,7 @@ curl -s http://localhost:10850/api/v1/sessions/<sessionId>/screen \
 The `sessionId` is the gateway session UUID. Find it from the process list:
 
 ```bash
-# /processes requires an API key when gateway.api.keys is configured
+# /processes requires an admin API key when gateway.api.keys is configured
 curl -s -H "X-Api-Key: $KEY" http://localhost:10850/processes | grep -o 'sessions/[^/]*' | head -1
 ```
 
@@ -210,7 +215,7 @@ each session of an agent is an isolated stream.
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `POST` | `/api/v1/pty-stream-ticket` | Key *or* dashboard session | Exchange an API key **or** the `dash_session` cookie for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
+| `POST` | `/api/v1/pty-stream-ticket` | Admin key *or* dashboard session | Exchange an **admin** API key **or** the `dash_session` cookie for a one-time, 30s-TTL ticket bound to a specific `{ agentId, sessionId }` |
 | `WS` | `/api/v1/agents/:agentId/pty-stream` | Ticket *or* Key | Subscribe to the live PTY stream for one session |
 
 > The browser dashboard authenticates with the `HttpOnly; SameSite=Lax` `dash_session`
@@ -270,9 +275,10 @@ curl http://localhost:10850/health
 
 ### GET /status
 
-Per-agent stats and heartbeat history. **Requires an API key or a dashboard session
-cookie when `gateway.api.keys` is configured** (open otherwise). Returns 401 when
-keys are set and no valid credential is supplied.
+Per-agent stats and heartbeat history. **Requires an _admin_ API key or a dashboard
+session cookie when `gateway.api.keys` is configured** (open otherwise). Returns 401
+when keys are set and no valid admin credential is supplied (a valid non-admin key is
+also rejected).
 
 ```bash
 # API key
