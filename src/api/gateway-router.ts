@@ -14,7 +14,7 @@ import { shouldRoutePtyInput, MAX_PTY_INPUT_BYTES } from '../shell/control-chann
 import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
-import { generateDashboardHtml } from '../ui/web-ui';
+import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
 import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
@@ -28,6 +28,52 @@ import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/** Name of the HttpOnly cookie carrying a dashboard session token. */
+const DASH_SESSION_COOKIE = 'dash_session';
+/** Dashboard session lifetime — long enough to avoid re-login mid-work. */
+const DASH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * Parse a Cookie request header into a name→value map. Manual parser so we take
+ * no new dependency (cookie-parser) just for a single cookie. Values are
+ * URL-decoded; malformed segments are skipped.
+ */
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (!name) continue;
+    try {
+      out[name] = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      out[name] = part.slice(eq + 1).trim();
+    }
+  }
+  return out;
+}
+
+/**
+ * Timing-safe comparison of a presented token against the configured API keys.
+ * Mirrors createApiAuthMiddleware (auth.ts) so the inline auth on the
+ * dashboard-adjacent endpoints is not weaker than the /api middleware.
+ */
+function timingSafeKeyMatch(apiKeys: ApiKey[], token: string): boolean {
+  if (!token) return false;
+  const tokenBuf = Buffer.from(token);
+  return apiKeys.some((k) => {
+    try {
+      const keyBuf = Buffer.from(k.key);
+      if (keyBuf.length !== tokenBuf.length) return false;
+      return crypto.timingSafeEqual(keyBuf, tokenBuf);
+    } catch {
+      return false;
+    }
+  });
+}
 
 function getGatewayVersion(): string {
   try {
@@ -213,6 +259,48 @@ export class GatewayRouter {
     this.setupRoutes();
   }
 
+  /** Configured API keys ([] when none set — auth is then disabled/open). */
+  private get apiKeys(): ApiKey[] {
+    return this.gatewayConfig?.gateway?.api?.keys ?? [];
+  }
+
+  /** Extract a Bearer / X-Api-Key token from request headers. */
+  private extractApiToken(req: Request): string {
+    const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
+    const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
+    return authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
+  }
+
+  /** True when the request carries a live (unexpired) dashboard session cookie. */
+  private hasValidDashSession(req: Request): boolean {
+    const token = parseCookies(req.headers['cookie'])[DASH_SESSION_COOKIE];
+    if (!token) return false;
+    const exp = this.dashboardTokens.get(token) ?? 0;
+    return exp > Date.now();
+  }
+
+  /**
+   * Gate a dashboard-adjacent endpoint: accept a valid API key OR a live
+   * dashboard session cookie. When no API keys are configured, auth is disabled
+   * (open) — a keyless install has no credential to check and must not lock
+   * itself out. Writes 401 and returns false when unauthorized.
+   */
+  private requireDashOrApiKey(req: Request, res: Response): boolean {
+    const keys = this.apiKeys;
+    if (keys.length === 0) return true; // no auth configured → open, as before
+    if (timingSafeKeyMatch(keys, this.extractApiToken(req))) return true;
+    if (this.hasValidDashSession(req)) return true;
+    res.status(401).json({ error: 'Unauthorized' });
+    return false;
+  }
+
+  /** Build the Set-Cookie value for the dashboard session (Secure when TLS). */
+  private buildSessionCookie(req: Request, token: string, ttlMs: number): string {
+    const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+    const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
+    return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
+  }
+
   private setupRoutes(): void {
     if (process.env.DEV_MODE) {
       process.stderr.write('[gateway] DEV_MODE=1 active — module cache busted on every /dashboard request. Never enable in production.\n');
@@ -230,32 +318,14 @@ export class GatewayRouter {
 
     // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
     // MUST be registered before the apiRouter middleware so it handles its own auth
-    // (dashboard token or API key) without the apiRouter's auth gate intercepting first.
+    // without the apiRouter's auth gate intercepting first.
     // The ticket is one-time-use with a 30s TTL so neither the API key nor the
-    // dashboard token appears in WS URLs (server access logs / browser history).
-    // Accepts two credential types:
+    // dashboard session appears in WS URLs (server access logs / browser history).
+    // Accepts two credential types (via requireDashOrApiKey):
     //   • X-Api-Key / Bearer — full API key (programmatic clients)
-    //   • X-Dash-Token       — dashboard session token (browser, 10 min, issued at /dashboard)
+    //   • dash_session cookie — dashboard session (browser, issued at /dashboard/login)
     this.app.post('/api/v1/pty-stream-ticket', (req: Request, res: Response) => {
-      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
-      const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
-      const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
-      const xDashToken = (req.headers['x-dash-token'] as string | undefined) ?? '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
-
-      // Validate: API key OR a live dashboard token.
-      const now = Date.now();
-      const dashExpiry = xDashToken ? (this.dashboardTokens.get(xDashToken) ?? 0) : 0;
-      const dashValid = dashExpiry > now;
-      if (dashValid) {
-        // Dashboard tokens are one-time-use: revoke immediately after auth so a
-        // leaked page source can't be replayed (each /dashboard visit gets a fresh one).
-        this.dashboardTokens.delete(xDashToken);
-      }
-      if (!dashValid && (!token || !apiKeys.some((k) => k.key === token))) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
+      if (!this.requireDashOrApiKey(req, res)) return;
       const body = (req.body as { agentId?: string; sessionId?: string }) ?? {};
       const agentId = body.agentId ?? '';
       const sessionId = body.sessionId ?? '';
@@ -402,34 +472,67 @@ export class GatewayRouter {
       }
     });
 
-    // Health check
+    // Health check — intentionally minimal. Public (no auth) so external liveness
+    // probes work when bound to a non-loopback interface, but it leaks nothing:
+    // no agent ids, no version, just liveness.
     this.app.get('/health', (_req: Request, res: Response) => {
-      res.json({ status: 'ok', agents: [...this.agents.keys()] });
+      res.json({ status: 'ok' });
     });
 
-    // Web dashboard
-    this.app.get('/dashboard', (_req: Request, res: Response) => {
-      // Issue a short-lived dashboard token (10 min) instead of embedding the raw
-      // API key in the HTML. A view-source leak exposes only a token that can
-      // exclusively obtain PTY stream tickets — not make arbitrary API calls.
-      const dashToken = crypto.randomBytes(16).toString('hex');
-      this.dashboardTokens.set(dashToken, Date.now() + 10 * 60 * 1000);
+    // Web dashboard. When API keys are configured, require a live dashboard
+    // session cookie; otherwise serve the login page (API-key form). Keyless
+    // installs have no credential to check, so the dashboard stays open there —
+    // matching how the /api routers are only mounted when keys exist.
+    this.app.get('/dashboard', (req: Request, res: Response) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      if (this.apiKeys.length > 0 && !this.hasValidDashSession(req)) {
+        res.send(generateLoginHtml());
+        return;
+      }
       if (process.env.DEV_MODE) {
         // Hot-reload: bust module cache so each browser refresh picks up the latest compiled web-ui.js
         const webUiPath = require.resolve('../ui/web-ui');
         delete require.cache[webUiPath];
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { generateDashboardHtml: fresh } = require('../ui/web-ui') as typeof import('../ui/web-ui');
-        res.send(fresh(dashToken));
+        res.send(fresh());
       } else {
-        res.send(generateDashboardHtml(dashToken));
+        res.send(generateDashboardHtml());
       }
+    });
+
+    // Dashboard login — exchange a configured API key for an HttpOnly session
+    // cookie (multi-use, 8h). The cookie is never readable by page JS / view-source,
+    // so it can safely gate the dashboard reads and the PTY-ticket exchange.
+    this.app.post('/dashboard/login', (req: Request, res: Response) => {
+      const keys = this.apiKeys;
+      if (keys.length === 0) {
+        res.status(404).json({ error: 'Auth not configured' });
+        return;
+      }
+      const key = ((req.body as { key?: string })?.key ?? '').toString();
+      if (!timingSafeKeyMatch(keys, key)) {
+        res.status(401).json({ error: 'Invalid API key' });
+        return;
+      }
+      const token = crypto.randomBytes(32).toString('hex');
+      this.dashboardTokens.set(token, Date.now() + DASH_SESSION_TTL_MS);
+      res.setHeader('Set-Cookie', this.buildSessionCookie(req, token, DASH_SESSION_TTL_MS));
+      res.json({ ok: true });
+    });
+
+    // Dashboard logout — revoke the session token and clear the cookie.
+    this.app.post('/dashboard/logout', (req: Request, res: Response) => {
+      const token = parseCookies(req.headers['cookie'])[DASH_SESSION_COOKIE];
+      if (token) this.dashboardTokens.delete(token);
+      res.setHeader('Set-Cookie', this.buildSessionCookie(req, '', 0));
+      res.json({ ok: true });
     });
 
     // Process tree endpoint — returns raw ps data for dashboard.
     // Async exec + 3s cache: avoids blocking the event loop on every dashboard poll.
-    this.app.get('/processes', (_req: Request, res: Response) => {
+    this.app.get('/processes', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
       const now = Date.now();
       if (this.processesCache && now - this.processesCache.ts < GatewayRouter.PROCESSES_CACHE_TTL_MS) {
         res.json({ processes: this.processesCache.data, numCpus: GatewayRouter.NUM_CPUS });
@@ -462,17 +565,9 @@ export class GatewayRouter {
     // PTY screen snapshot — plain text, ANSI stripped. For agents that need to
     // observe what is currently displayed in the PTY shell to detect hangs, menu
     // states, or unexpected output without parsing escape codes.
-    // Auth: X-Api-Key or Authorization: Bearer header (API keys only — no dashboard token,
-    // as this endpoint is intended for programmatic/agent access, not the browser).
+    // Auth: X-Api-Key / Bearer (programmatic) OR dashboard session cookie (browser).
     this.app.get('/api/v1/sessions/:sessionId/screen', (req: Request, res: Response) => {
-      const apiKeys = this.gatewayConfig?.gateway?.api?.keys ?? [];
-      const authHeader = (req.headers['authorization'] as string | undefined) ?? '';
-      const xApiKey = (req.headers['x-api-key'] as string | undefined) ?? '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
-      if (!token || !apiKeys.some((k) => k.key === token)) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
+      if (!this.requireDashOrApiKey(req, res)) return;
 
       const sessionId = req.params['sessionId'] ?? '';
       if (!sessionId) {
@@ -497,7 +592,8 @@ export class GatewayRouter {
     });
 
     // Status endpoint — per-agent stats + heartbeat history
-    this.app.get('/status', (_req: Request, res: Response) => {
+    this.app.get('/status', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
       const uptimeMs = Date.now() - this.startedAt.getTime();
 
       const agentsStatus = [...this.agents.entries()].map(([id, runner]) => {
@@ -644,7 +740,7 @@ export class GatewayRouter {
         const token = authHeader.startsWith('Bearer ')
           ? authHeader.slice(7).trim()
           : xApiKey.trim();
-        if (!token || !apiKeys.some((k) => k.key === token)) {
+        if (!timingSafeKeyMatch(apiKeys, token)) {
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;

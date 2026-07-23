@@ -102,7 +102,11 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
     const res = await supertest(router.getApp()).get('/health');
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
-    expect(res.body.agents).toContain('agent-01');
+    // /health is intentionally minimal (no agent ids leaked); agent listing moved
+    // to /status, which is open here because no API keys are configured.
+    const statusRes = await supertest(router.getApp()).get('/status');
+    expect(statusRes.status).toBe(200);
+    expect(statusRes.body.agents.map((a: { id: string }) => a.id)).toContain('agent-01');
 
     await router.stop();
     await runner.stop();
@@ -247,11 +251,13 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
     const router = new GatewayRouter(agents, configs);
     await router.start(0);
 
-    // /health should list both agents
-    const res = await supertest(router.getApp()).get('/health');
+    // /status should list both agents (/health no longer leaks agent ids; open
+    // here because no API keys are configured).
+    const res = await supertest(router.getApp()).get('/status');
     expect(res.status).toBe(200);
-    expect(res.body.agents).toContain('agent-07a');
-    expect(res.body.agents).toContain('agent-07b');
+    const ids = res.body.agents.map((a: { id: string }) => a.id);
+    expect(ids).toContain('agent-07a');
+    expect(ids).toContain('agent-07b');
 
     await router.stop();
     await runner1.stop();
@@ -406,28 +412,46 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
       await router.stop(); await runner.stop();
     });
 
-    it('T-04: dashboard token (from /dashboard) → 200 with ticket, token is one-time-use', async () => {
+    it('T-04: dashboard session cookie (from /dashboard/login) → 200 with ticket, and is multi-use', async () => {
       const { router, runner } = await makeRouter('ticket-agent-04');
-      // Fetch the dashboard page — server issues a short-lived dashToken embedded in HTML.
+      // Unauthenticated /dashboard serves the login page, not the dashboard, and
+      // no longer embeds any token in the HTML.
       const dashRes = await supertest(router.getApp()).get('/dashboard');
       expect(dashRes.status).toBe(200);
-      const metaMatch = /name="dash-token" content="([0-9a-f]+)"/.exec(dashRes.text);
-      expect(metaMatch).not.toBeNull();
-      const dashToken = metaMatch![1];
+      expect(dashRes.text).toContain('Enter an API key');
+      expect(dashRes.text).not.toContain('name="dash-token"');
 
-      // First use: should succeed.
+      // Log in with a configured API key → HttpOnly session cookie.
+      const login = await supertest(router.getApp())
+        .post('/dashboard/login')
+        .send({ key: 'secret-key' });
+      expect(login.status).toBe(200);
+      const setCookie = login.headers['set-cookie'][0];
+      expect(setCookie).toMatch(/dash_session=/);
+      expect(setCookie).toMatch(/HttpOnly/);
+      expect(setCookie).toMatch(/SameSite=Strict/);
+      const cookie = setCookie.split(';')[0];
+
+      // First use with the cookie: should succeed.
       const first = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
-        .set('X-Dash-Token', dashToken)
+        .set('Cookie', cookie)
         .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
       expect(first.status).toBe(200);
 
-      // Second use with the same token: must be rejected (one-time-use).
+      // Second use with the same cookie: session is multi-use (unlike the old
+      // one-time meta token), so it must succeed again.
       const second = await supertest(router.getApp())
         .post('/api/v1/pty-stream-ticket')
-        .set('X-Dash-Token', dashToken)
+        .set('Cookie', cookie)
         .send({ agentId: 'ticket-agent-04', sessionId: 'sess-x' });
-      expect(second.status).toBe(401);
+      expect(second.status).toBe(200);
+
+      // Wrong API key at login → 401, no cookie.
+      const bad = await supertest(router.getApp())
+        .post('/dashboard/login')
+        .send({ key: 'wrong-key' });
+      expect(bad.status).toBe(401);
 
       await router.stop(); await runner.stop();
     });
