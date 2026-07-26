@@ -38,7 +38,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { hasMarkdown, toTelegramHtml, migrateAccess } from './pure'
+import { hasMarkdown, toTelegramHtml, migrateAccess, telegramDisplayName } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -1044,6 +1044,9 @@ async function handleInbound(
       ...(msgId != null ? { message_id: String(msgId) } : {}),
       user: from.username ?? String(from.id),
       user_id: String(from.id),
+      // Human-readable name for the chat picker / history (first_name is always
+      // present; `user` above stays the @handle-or-id for the channel tag).
+      sender_name: telegramDisplayName(from),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
       ...(attachment ? {

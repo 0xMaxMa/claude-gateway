@@ -879,7 +879,7 @@ export class AgentRunner extends EventEmitter {
             source: channelSource as HistorySource,
             role: 'user',
             content: userContent,
-            senderName: meta['user'] ?? undefined,
+            senderName: meta['sender_name'] ?? meta['user'] ?? undefined,
             senderId: meta['user_id'] ?? meta['chat_id'] ?? undefined,
             platformMessageId: meta['message_id'] ?? undefined,
             mediaFiles: mediaFiles.length > 0 ? mediaFiles : undefined,
