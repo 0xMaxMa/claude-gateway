@@ -34,6 +34,12 @@ import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
 import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
+import {
+  createImageSharePublicRouter,
+  createImageSharePrivateRouter,
+  resolvePublicBaseUrl,
+} from './image-share-router';
+import { ImageShareStore } from '../share/image-share-store';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
@@ -608,6 +614,44 @@ export class GatewayRouter {
     // Registered here (after the body parser, before the /api auth router) so it
     // owns its own cookie/approval auth without the API-key gate intercepting.
     this.setupCliRoutes();
+
+    // Image share bridge (#70) — flag-gated, default OFF. With the flag off,
+    // neither the public /shared/:token route nor the private mint API exists
+    // (uniform 404s) and generate_image behaves exactly as before.
+    if ((process.env.IMAGE_SHARE_ENABLED ?? '').toLowerCase() === 'true') {
+      const publicBaseUrl = resolvePublicBaseUrl(process.env.SHARE_PUBLIC_BASE_URL);
+      if (!publicBaseUrl) {
+        // Fail closed (§14): enabled without a valid https origin ⇒ no share surface.
+        console.error(
+          '[image-share] IMAGE_SHARE_ENABLED=true but SHARE_PUBLIC_BASE_URL is missing or invalid ' +
+          '(need an https origin with no path/query) — image sharing stays disabled',
+        );
+      } else {
+        try {
+          const dbPath =
+            process.env.IMAGE_SHARE_DB_PATH ||
+            path.join(os.homedir(), '.claude-gateway', 'image-shares.db');
+          const store = new ImageShareStore(dbPath);
+          const agentsBaseDir = this.configPath
+            ? path.join(path.dirname(this.configPath), 'agents')
+            : path.join(os.homedir(), '.claude-gateway', 'agents');
+          this.app.use(createImageSharePublicRouter(store, agentsBaseDir));
+          if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+            this.app.use(
+              '/api',
+              createImageSharePrivateRouter(
+                store,
+                this.gatewayConfig.gateway.api.keys,
+                agentsBaseDir,
+                publicBaseUrl,
+              ),
+            );
+          }
+        } catch (err) {
+          console.error(`[image-share] failed to initialise share store: ${(err as Error).message}`);
+        }
+      }
+    }
 
     // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
     // MUST be registered before the apiRouter middleware so it handles its own auth
