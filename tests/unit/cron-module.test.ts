@@ -266,5 +266,20 @@ describe('CronModule', () => {
       expect(result.content[0].text).toContain('job_id is required');
       expect(fetchMock).not.toHaveBeenCalled();
     });
+
+    it('sends an empty body when only job_id is given (no-op update)', async () => {
+      const fetchMock = mockFetch({ id: 'j1' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', { job_id: 'j1' });
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.method).toBe('PUT');
+      expect(url).toBe('http://localhost:3000/api/v1/crons/j1');
+      // Only job_id was supplied → it goes in the path, leaving an empty body.
+      expect(JSON.parse(init.body as string)).toEqual({});
+      expect(result.isError).toBeFalsy();
+    });
   });
 });
