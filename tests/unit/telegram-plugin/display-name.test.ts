@@ -19,6 +19,12 @@ describe('telegramDisplayName', () => {
     expect(telegramDisplayName(from)).toBe('Elizabeth')
   })
 
+  it('uses last name alone when first name is absent', () => {
+    // Unrealistic for Telegram (first_name is guaranteed), but completes the name-branch matrix.
+    const from: TelegramSender = { id: 42, last_name: 'Churchill', username: 'liz' }
+    expect(telegramDisplayName(from)).toBe('Churchill')
+  })
+
   it('prefers the real name over the @username handle', () => {
     // The regression: a user WITH a name should never surface as their handle.
     const from: TelegramSender = { id: 42, first_name: 'Elizabeth', username: 'liz' }

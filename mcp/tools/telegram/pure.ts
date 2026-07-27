@@ -375,7 +375,7 @@ export type TelegramSender = {
  * Telegram guarantees `first_name` for real users but makes `username` optional, so the
  * old `username ?? id` fallback surfaced a bare numeric id for anyone without a @handle —
  * which is what users saw in the cron Target picker. Prefer the real name:
- *   "First Last"  →  "First"  →  "@username"  →  "<id>"
+ *   "First Last"  →  "First"  →  "username"  →  "<id>"
  * The id fallback only triggers for the degenerate case (no name and no username at all),
  * preserving the legacy value rather than emitting an empty string.
  */
