@@ -90,6 +90,39 @@ export class CronModule implements ToolModule {
         },
       },
       {
+        name: 'cron_update',
+        description: 'Update an existing cron job. Provide job_id plus only the fields to change.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            job_id: { type: 'string', description: 'ID of the job to update' },
+            name: { type: 'string', description: 'Job name' },
+            schedule: { type: 'string', description: '5-field cron expression' },
+            type: { type: 'string', enum: ['command', 'agent'], description: 'Job type' },
+            command: { type: 'string', description: 'Shell command (type=command)' },
+            prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
+            telegram: { type: 'string', description: 'Telegram chat_id for response' },
+            discord: { type: 'string', description: 'Discord channel_id for agent response delivery' },
+            timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
+            scheduleKind: {
+              type: 'string',
+              enum: ['cron', 'at'],
+              description: 'Schedule type: "cron" for recurring, "at" for one-shot at a specific ISO datetime',
+            },
+            scheduleAt: {
+              type: 'string',
+              description: 'ISO 8601 datetime for one-shot execution (required when scheduleKind=at)',
+            },
+            deleteAfterRun: {
+              type: 'boolean',
+              description: 'Delete the job after it runs once',
+            },
+          },
+          required: ['job_id'],
+          additionalProperties: false,
+        },
+      },
+      {
         name: 'cron_run',
         description: 'Run a cron job immediately',
         inputSchema: {
@@ -138,6 +171,14 @@ export class CronModule implements ToolModule {
         case 'cron_delete': {
           await client.delete(args.job_id as string);
           return { content: [{ type: 'text', text: `deleted job ${args.job_id}` }] };
+        }
+        case 'cron_update': {
+          const { job_id, ...rest } = args as { job_id?: string } & Record<string, unknown>;
+          if (!job_id) {
+            return { content: [{ type: 'text', text: 'cron_update failed: job_id is required' }], isError: true };
+          }
+          const job = await client.update(job_id, rest);
+          return { content: [{ type: 'text', text: JSON.stringify(job, null, 2) }] };
         }
         case 'cron_run': {
           const run = await client.run(args.job_id as string);

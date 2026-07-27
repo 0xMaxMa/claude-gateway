@@ -36,15 +36,16 @@ describe('CronModule', () => {
   });
 
   describe('getTools', () => {
-    it('should return 5 cron-prefixed tools', () => {
+    it('should return 6 cron-prefixed tools', () => {
       const mod = new CronModule();
       const tools = mod.getTools();
 
-      expect(tools).toHaveLength(5);
+      expect(tools).toHaveLength(6);
 
       const names = tools.map(t => t.name);
       expect(names).toContain('cron_list');
       expect(names).toContain('cron_create');
+      expect(names).toContain('cron_update');
       expect(names).toContain('cron_delete');
       expect(names).toContain('cron_run');
       expect(names).toContain('cron_get_runs');
@@ -75,6 +76,21 @@ describe('CronModule', () => {
 
       expect(list).toBeDefined();
       expect(list.description).toContain('List');
+    });
+
+    // cron_update tool schema: job_id required, editable fields present
+    it('cron_update tool should require job_id and expose editable fields', () => {
+      const mod = new CronModule();
+      const tools = mod.getTools();
+      const update = tools.find(t => t.name === 'cron_update')!;
+
+      expect(update).toBeDefined();
+      const schema = update.inputSchema as any;
+      expect(schema.required).toEqual(['job_id']);
+      expect(schema.properties).toHaveProperty('schedule');
+      expect(schema.properties).toHaveProperty('prompt');
+      expect(schema.properties).toHaveProperty('telegram');
+      expect(schema.properties).toHaveProperty('discord');
     });
   });
 
@@ -190,6 +206,65 @@ describe('CronModule', () => {
 
       const body = capturedBody(fetchMock);
       expect(body.deleteAfterRun).toBe(false);
+    });
+  });
+
+  // ─── cron_update (#237) ────────────────────────────────────────────────────
+
+  describe('cron_update handler', () => {
+    let originalFetch: typeof global.fetch;
+
+    beforeEach(() => {
+      originalFetch = global.fetch;
+      process.env.GATEWAY_API_URL = 'http://localhost:3000';
+      process.env.GATEWAY_AGENT_ID = 'test-agent';
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    function mockFetch(responseBody: unknown) {
+      return jest.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify(responseBody), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+    }
+
+    it('maps to PUT /api/v1/crons/:id with only the changed fields (no agentId)', async () => {
+      const fetchMock = mockFetch({ id: 'j1', name: 'renamed' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', {
+        job_id: 'j1',
+        name: 'renamed',
+        schedule: '30 9 * * *',
+      });
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.method).toBe('PUT');
+      expect(url).toBe('http://localhost:3000/api/v1/crons/j1');
+
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ name: 'renamed', schedule: '30 9 * * *' });
+      expect(body).not.toHaveProperty('job_id'); // job_id goes in the path, not the body
+      expect(body).not.toHaveProperty('agentId'); // update reads agentId from the stored job
+
+      expect(result.isError).toBeFalsy();
+    });
+
+    it('rejects a call with no job_id without hitting the API', async () => {
+      const fetchMock = mockFetch({});
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', { name: 'x' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('job_id is required');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

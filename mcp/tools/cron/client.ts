@@ -51,6 +51,13 @@ export class CronClient {
     return this.request('POST', '', { ...params, agentId: this.agentId });
   }
 
+  async update(jobId: string, params: Record<string, unknown>): Promise<unknown> {
+    // Mirrors the backend PUT /v1/crons/:id route (CronManager.update). Unlike
+    // create, no agentId is sent — the route reads it from the stored job for
+    // its access check, and CronJobUpdate has no agentId field.
+    return this.request('PUT', `/${jobId}`, params);
+  }
+
   async delete(jobId: string): Promise<void> {
     await this.request('DELETE', `/${jobId}`);
   }
