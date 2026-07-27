@@ -207,6 +207,26 @@ describe('CronModule', () => {
       const body = capturedBody(fetchMock);
       expect(body.deleteAfterRun).toBe(false);
     });
+
+    // #239: the tool advertises timeout_ms (snake) but the backend reads timeoutMs (camel)
+    it('#239: cron_create maps timeout_ms → timeoutMs in the request body', async () => {
+      const fetchMock = mockFetch({ id: 'j4', name: 'test' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      await mod.handleTool('cron_create', {
+        name: 'timed-job',
+        type: 'agent',
+        schedule: '* * * * *',
+        prompt: 'do something',
+        telegram: 'PLACEHOLDER_CHAT_ID',
+        timeout_ms: 5000,
+      });
+
+      const body = capturedBody(fetchMock);
+      expect(body.timeoutMs).toBe(5000);
+      expect(body).not.toHaveProperty('timeout_ms');
+    });
   });
 
   // ─── cron_update (#237) ────────────────────────────────────────────────────
@@ -280,6 +300,20 @@ describe('CronModule', () => {
       // Only job_id was supplied → it goes in the path, leaving an empty body.
       expect(JSON.parse(init.body as string)).toEqual({});
       expect(result.isError).toBeFalsy();
+    });
+
+    // #239: same snake→camel mapping on the update path
+    it('#239: maps timeout_ms → timeoutMs in the request body', async () => {
+      const fetchMock = mockFetch({ id: 'j1' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      await mod.handleTool('cron_update', { job_id: 'j1', timeout_ms: 5000 });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ timeoutMs: 5000 });
+      expect(body).not.toHaveProperty('timeout_ms');
     });
   });
 });

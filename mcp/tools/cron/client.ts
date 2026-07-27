@@ -20,6 +20,16 @@ export class CronClient {
     return `${base}?${qs}`;
   }
 
+  // The MCP cron tool schemas advertise `timeout_ms` (snake_case), but the REST
+  // API and the CronJob model use `timeoutMs` (camelCase). Map it here so a
+  // timeout set via cron_create / cron_update is actually honored instead of
+  // silently falling back to the default. See #239.
+  private normalizeParams(params: Record<string, unknown>): Record<string, unknown> {
+    if (!('timeout_ms' in params)) return params;
+    const { timeout_ms, ...rest } = params as { timeout_ms?: unknown } & Record<string, unknown>;
+    return timeout_ms !== undefined ? { ...rest, timeoutMs: timeout_ms } : rest;
+  }
+
   private async request(method: string, path: string, body?: unknown, query?: Record<string, string>): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (body) headers['Content-Type'] = 'application/json';
@@ -48,14 +58,14 @@ export class CronClient {
   }
 
   async create(params: Record<string, unknown>): Promise<unknown> {
-    return this.request('POST', '', { ...params, agentId: this.agentId });
+    return this.request('POST', '', { ...this.normalizeParams(params), agentId: this.agentId });
   }
 
   async update(jobId: string, params: Record<string, unknown>): Promise<unknown> {
     // Mirrors the backend PUT /v1/crons/:id route (CronManager.update). Unlike
     // create, no agentId is sent — the route reads it from the stored job for
     // its access check, and CronJobUpdate has no agentId field.
-    return this.request('PUT', `/${jobId}`, params);
+    return this.request('PUT', `/${jobId}`, this.normalizeParams(params));
   }
 
   async delete(jobId: string): Promise<void> {
