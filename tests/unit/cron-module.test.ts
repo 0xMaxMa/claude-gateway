@@ -207,6 +207,114 @@ describe('CronModule', () => {
       const body = capturedBody(fetchMock);
       expect(body.deleteAfterRun).toBe(false);
     });
+
+    // #239: the tool advertises timeout_ms (snake) but the backend reads timeoutMs (camel)
+    it('#239: cron_create maps timeout_ms → timeoutMs in the request body', async () => {
+      const fetchMock = mockFetch({ id: 'j4', name: 'test' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      await mod.handleTool('cron_create', {
+        name: 'timed-job',
+        type: 'agent',
+        schedule: '* * * * *',
+        prompt: 'do something',
+        telegram: 'PLACEHOLDER_CHAT_ID',
+        timeout_ms: 5000,
+      });
+
+      const body = capturedBody(fetchMock);
+      expect(body.timeoutMs).toBe(5000);
+      expect(body).not.toHaveProperty('timeout_ms');
+    });
+  });
+
+  // ─── cron_update (#237) ────────────────────────────────────────────────────
+
+  describe('cron_update handler', () => {
+    let originalFetch: typeof global.fetch;
+
+    beforeEach(() => {
+      originalFetch = global.fetch;
+      process.env.GATEWAY_API_URL = 'http://localhost:3000';
+      process.env.GATEWAY_AGENT_ID = 'test-agent';
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    function mockFetch(responseBody: unknown) {
+      return jest.fn().mockImplementation(async () => {
+        return new Response(JSON.stringify(responseBody), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+    }
+
+    it('maps to PUT /api/v1/crons/:id with only the changed fields (no agentId)', async () => {
+      const fetchMock = mockFetch({ id: 'j1', name: 'renamed' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', {
+        job_id: 'j1',
+        name: 'renamed',
+        schedule: '30 9 * * *',
+      });
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.method).toBe('PUT');
+      expect(url).toBe('http://localhost:3000/api/v1/crons/j1');
+
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ name: 'renamed', schedule: '30 9 * * *' });
+      expect(body).not.toHaveProperty('job_id'); // job_id goes in the path, not the body
+      expect(body).not.toHaveProperty('agentId'); // update reads agentId from the stored job
+
+      expect(result.isError).toBeFalsy();
+    });
+
+    it('rejects a call with no job_id without hitting the API', async () => {
+      const fetchMock = mockFetch({});
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', { name: 'x' });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('job_id is required');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('sends an empty body when only job_id is given (no-op update)', async () => {
+      const fetchMock = mockFetch({ id: 'j1' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      const result = await mod.handleTool('cron_update', { job_id: 'j1' });
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.method).toBe('PUT');
+      expect(url).toBe('http://localhost:3000/api/v1/crons/j1');
+      // Only job_id was supplied → it goes in the path, leaving an empty body.
+      expect(JSON.parse(init.body as string)).toEqual({});
+      expect(result.isError).toBeFalsy();
+    });
+
+    // #239: same snake→camel mapping on the update path
+    it('#239: maps timeout_ms → timeoutMs in the request body', async () => {
+      const fetchMock = mockFetch({ id: 'j1' });
+      global.fetch = fetchMock;
+
+      const mod = new CronModule();
+      await mod.handleTool('cron_update', { job_id: 'j1', timeout_ms: 5000 });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ timeoutMs: 5000 });
+      expect(body).not.toHaveProperty('timeout_ms');
+    });
   });
 
   // ─── cron_update (#237) ────────────────────────────────────────────────────
