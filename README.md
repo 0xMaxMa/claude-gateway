@@ -425,7 +425,7 @@ The MCP server (`mcp/server.ts`) uses a **modular multi-channel architecture**. 
 |--------|-----------|-------|---------|
 | `telegram` | `ChannelModule` | `telegram_reply`, `telegram_react`, `telegram_edit_message`, `telegram_download_attachment` | Send messages, reactions, edit messages in Telegram |
 | `discord` | `ChannelModule` | `discord_reply`, `discord_react`, `discord_edit_message` | Send messages, reactions, edit messages in Discord |
-| `cron` | `ToolModule` | `cron_list`, `cron_create`, `cron_delete`, `cron_run`, `cron_get_runs` | Manage scheduled jobs via gateway REST API |
+| `cron` | `ToolModule` | `cron_list`, `cron_create`, `cron_update`, `cron_delete`, `cron_run`, `cron_get_runs` | Manage scheduled jobs via gateway REST API |
 | `skills` | `ToolModule` | `skill_create`, `skill_delete`, `skill_install` | Create, delete, and install agent skills at runtime |
 
 Tools are **prefixed by channel name** to avoid collisions. Each module controls its own visibility and lifecycle.
@@ -661,7 +661,7 @@ claude-gateway/
         │       └── configure/SKILL.md     ← /telegram:configure skill
         │
         ├── cron/                       ← Cron tool module
-        │   ├── module.ts              ← ToolModule: cron_list, create, delete, run, get_runs
+        │   ├── module.ts              ← ToolModule: cron_list, create, update, delete, run, get_runs
         │   ├── client.ts             ← HTTP client for gateway cron REST API
         │   └── skills/
         │       └── cron/SKILL.md          ← /cron skill
