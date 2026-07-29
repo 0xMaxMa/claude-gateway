@@ -206,6 +206,32 @@ function makeMcpReader(proc: ChildProcess) {
   }
 }
 
+// ── mock AgentRunner callback server (for /cli) ──────────────────────────────
+
+/** Minimal stand-in for the runner's /command endpoint. Captures cli_pair
+ *  requests and returns a viewer link, so the receiver's /cli command can render
+ *  its web_app button. */
+function startMockCallbackServer(port: number) {
+  const commands: Array<Record<string, unknown>> = []
+  const server = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', c => { raw += c })
+    req.on('end', () => {
+      let body: Record<string, unknown> = {}
+      try { body = raw ? JSON.parse(raw) : {} } catch {}
+      commands.push(body)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      if (body['command'] === 'cli_pair') {
+        res.end(JSON.stringify({ success: true, pairingId: 'a'.repeat(36), code: '1234', url: 'https://host.example/cli/' + 'a'.repeat(36) }))
+      } else {
+        res.end(JSON.stringify({ success: true }))
+      }
+    })
+  })
+  server.listen(port, '127.0.0.1')
+  return { commands, close: () => new Promise<void>(r => server.close(() => r())) }
+}
+
 // ── test suite ──────────────────────────────────────────────────────────────
 
 describe('Telegram plugin E2E (process + mock Telegram API)', () => {
@@ -214,6 +240,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
   let proc: ChildProcess
   let mcp: ReturnType<typeof makeMcpReader>
   let idSeq = 10
+  let mockCb: ReturnType<typeof startMockCallbackServer>
 
   function nextId() { return ++idSeq }
 
@@ -241,12 +268,16 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     const port = await getFreePort()
     mock = startMockTelegramServer(port)
 
+    const cbPort = await getFreePort()
+    mockCb = startMockCallbackServer(cbPort)
+
     proc = spawn('bun', [RECEIVER_PATH], {
       env: {
         ...process.env,
         TELEGRAM_BOT_TOKEN: BOT_TOKEN,
         TELEGRAM_STATE_DIR: tmpDir,
         TELEGRAM_API_ROOT: `http://127.0.0.1:${port}`,
+        CLAUDE_CHANNEL_CALLBACK: `http://127.0.0.1:${cbPort}/channel`,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -286,6 +317,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
   afterAll(async () => {
     try { proc?.kill('SIGTERM') } catch {}
     await mock.close()
+    await mockCb?.close()
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -423,4 +455,39 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     )
     expect(notifForStranger).toBeUndefined()
   }, 15000)
+
+  // ── test 6: /cli opens a Mini App (web_app) button ────────────────────────
+
+  test('/cli command → cli_pair callback → sendMessage with a web_app button', async () => {
+    const t0 = Date.now()
+    const now = Math.floor(t0 / 1000)
+
+    mock.queueUpdate({
+      message: {
+        message_id: 77,
+        from: { id: Number(USER_ID), username: 'tester', is_bot: false, first_name: 'Tester' },
+        chat: { id: Number(USER_ID), type: 'private' },
+        date: now,
+        text: '/cli',
+        entities: [{ type: 'bot_command', offset: 0, length: 4 }],
+      },
+    })
+
+    // The receiver must reply with an inline keyboard carrying a Mini App button.
+    const send = await mock.waitForCall('sendMessage', t0, 20000)
+    expect(String(send.body['chat_id'])).toBe(USER_ID)
+
+    let markup = send.body['reply_markup'] as unknown
+    if (typeof markup === 'string') markup = JSON.parse(markup)
+    const rows = (markup as { inline_keyboard?: Array<Array<Record<string, unknown>>> }).inline_keyboard ?? []
+    const webAppBtn = rows.flat().find(b => b['web_app'] !== undefined)
+    expect(webAppBtn).toBeTruthy()
+    expect((webAppBtn!['web_app'] as { url: string }).url).toMatch(/^https:\/\/host\.example\/cli\/[0-9a-f]{36}$/)
+
+    // And it went through the runner callback as a cli_pair for this user.
+    const pair = mockCb.commands.find(c => c['command'] === 'cli_pair')
+    expect(pair).toBeTruthy()
+    expect((pair!['payload'] as { channel: string; user_id: string }).channel).toBe('telegram')
+    expect((pair!['payload'] as { channel: string; user_id: string }).user_id).toBe(USER_ID)
+  }, 30000)
 })
