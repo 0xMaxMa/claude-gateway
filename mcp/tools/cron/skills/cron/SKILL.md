@@ -1,10 +1,11 @@
 ---
 name: cron
-description: Manage scheduled cron jobs for this agent — list, create, delete, run, and view run history. Use when the user asks to schedule tasks, set up recurring jobs, or check cron status.
+description: Manage scheduled cron jobs for this agent — list, create, update, delete, run, and view run history. Use when the user asks to schedule tasks, set up recurring jobs, or check cron status.
 user-invocable: true
 allowed-tools:
   - cron_list
   - cron_create
+  - cron_update
   - cron_delete
   - cron_run
   - cron_get_runs
@@ -36,6 +37,13 @@ Use `cron_create` with the required parameters:
 ### "delete <job_id>" — Delete a cron job
 
 Use `cron_delete` with `job_id`.
+
+### "update <job_id>" — Update an existing cron job
+
+Use `cron_update` with `job_id` plus only the fields to change (e.g. `schedule`,
+`name`, `prompt`, `telegram`, `discord`, `scheduleKind`, `scheduleAt`). Fields left
+out are kept as-is. This edits the job in place, preserving its id and run history
+(unlike delete-and-recreate).
 
 ### "run <job_id>" — Run a job immediately
 
