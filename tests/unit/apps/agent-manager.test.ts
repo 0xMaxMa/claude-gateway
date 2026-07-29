@@ -140,6 +140,36 @@ describe('AgentManager', () => {
       expect(volumes.some((v) => v.includes('settings.json') && v.endsWith(':ro'))).toBe(true);
     });
 
+    it('mounts the agent media dir at the identical host path (:rw) and pre-creates it', () => {
+      // Regression for app-agent containers being unable to read uploaded images:
+      // the gateway hands the agent raw host paths under
+      // <home>/.claude-gateway/agents/<name>/media (a sibling of workspace, outside
+      // the /workspace mount). Mounting that dir at the same absolute path lets the
+      // raw image_path resolve inside the container.
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+
+      const composePath = path.join(entry.installPath, 'docker-compose.yml');
+      const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
+      const services = composed['services'] as Record<string, unknown>;
+      const agentSvc = services['agent'] as Record<string, unknown>;
+      const volumes = agentSvc['volumes'] as string[];
+
+      // The media dir lives under the manager's agentsDir (tmpDir/agents), matching
+      // where the gateway saves uploaded images at runtime.
+      const expectedMediaDir = path.join(tmpDir, 'agents', 'my-agent', 'media');
+
+      // Pre-created on disk so Docker bind-mounts an existing (uid-owned) dir
+      // instead of creating a root-owned one.
+      expect(fs.existsSync(expectedMediaDir)).toBe(true);
+
+      // Mounted read-write with the container destination == the host path the
+      // gateway hands the agent (source may be realpath-resolved).
+      const mediaVol = volumes.find((v) => v.endsWith(`:${expectedMediaDir}:rw`));
+      expect(mediaVol).toBeDefined();
+      expect(mediaVol!.split(':')[1]).toBe(expectedMediaDir);
+    });
+
     it('is a no-op when agentDeclaration is null', () => {
       const entry = makeEntry(tmpDir);
       const noAgentEntry = { ...entry, agentDeclaration: null };
