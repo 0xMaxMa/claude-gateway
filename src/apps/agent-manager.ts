@@ -89,6 +89,20 @@ export class AgentManager {
     let uid = 1000;
     try { uid = os.userInfo().uid; } catch { /* use 1000 */ }
 
+    // Mount the agent's media directory into the container at the SAME absolute
+    // path as the host. The gateway hands the agent uploaded-image paths (and the
+    // browser-screenshot dir) as raw host paths under <agentsDir>/<agentName>/media
+    // — a sibling of workspace, so outside the /workspace mount and never
+    // translated. Mounting it at the identical path lets those raw paths resolve
+    // inside the container with zero translation. Pre-create it (like ~/.claude
+    // above) so Docker bind-mounts an existing uid-owned dir instead of a
+    // root-owned one; :rw because browser screenshots write here. realpathSync
+    // gives the Docker daemon the real source while the destination stays the
+    // host-identical path the agent is handed.
+    const agentMediaDir = path.join(this.agentsDir, agentName, 'media');
+    fs.mkdirSync(agentMediaDir, { recursive: true });
+    const agentMediaSource = fs.realpathSync(agentMediaDir);
+
     // Write Dockerfile.agent: install curl + pre-create ~/.claude owned by host uid so
     // Docker bind-mounts land inside a uid-1000-owned dir and Claude Code can freely
     // create subdirs (session-env, todos, etc.) at runtime without cap_drop: ALL blocking chown.
@@ -117,6 +131,7 @@ export class AgentManager {
         `${homeDir}/.claude.json:${homeDir}/.claude.json:ro`,
         `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
         `${workspaceDir}:/workspace`,
+        `${agentMediaSource}:${agentMediaDir}:rw`,
       ],
     };
 
