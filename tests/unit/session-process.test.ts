@@ -2131,6 +2131,49 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
     await sp.stop();
   });
+
+  // --------------------------------------------------------------------------
+  // U-SP-IDLE-CHILD: child output counts as activity for the idle reaper.
+  // Regression for the idle cleaner reaping a session whose child is actively
+  // self-paced looping (a /loop in dynamic mode driven by ScheduleWakeup): the
+  // wake iterations run inside the child and produce output, but the parent
+  // never injects a message, so before the fix `lastActivityAt` was stale and
+  // `isIdle()` wrongly returned true -> the loop got killed mid-flight.
+  // --------------------------------------------------------------------------
+  it('U-SP-IDLE-CHILD: child stdout output resets the idle clock', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Simulate a session that has had no parent-side injection for 2 minutes:
+    // the last human turn was long ago and it is now waiting between self-wakes.
+    (sp as unknown as { lastActivityAt: number }).lastActivityAt = Date.now() - 120_000;
+    expect(sp.isIdle(60_000)).toBe(true);
+
+    // The child wakes itself and produces output (a self-paced loop iteration).
+    const line = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'working on the next batch' }] } });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    // The session did real work just now, so it must NOT be considered idle.
+    expect(sp.isIdle(60_000)).toBe(false);
+
+    await sp.stop();
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-IDLE-QUIET: a genuinely quiet session (no child output, no parent
+  // injection) still ages out — the fix must not defeat idle cleanup.
+  // --------------------------------------------------------------------------
+  it('U-SP-IDLE-QUIET: session with no child output stays idle and remains reapable', async () => {
+    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    (sp as unknown as { lastActivityAt: number }).lastActivityAt = Date.now() - 120_000;
+
+    // No stdout output emitted — the child is sleeping. It must remain idle.
+    expect(sp.isIdle(60_000)).toBe(true);
+
+    await sp.stop();
+  });
 });
 
 // ── resolveMaxHistoryMessages ────────────────────────────────────────────────
