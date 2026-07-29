@@ -20,6 +20,8 @@ import { runRecovery, toRecoveryOutcome, type RecoveryEffects, type RecoveryRequ
 import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
+import { cliPairingStore, isCliChannel, type CliChannel } from '../cli-viewer/pairing-store';
+import { buildCliUrl } from '../cli-viewer/url';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
@@ -624,6 +626,34 @@ export class AgentRunner extends EventEmitter {
   };
 
   /**
+   * Create a `/cli` webview pairing for an already-authenticated chat user.
+   * Shared by the receiver callback (Telegram/Discord subprocesses) and the
+   * in-process LINE webhook so both mint links the same way. Returns null when
+   * `gateway.publicUrl` is not configured (no link can be built).
+   */
+  createCliPairing(
+    channel: CliChannel,
+    userId: string,
+  ): { pairingId: string; code: string; url: string } | null {
+    if (!isCliChannel(channel) || !userId) return null;
+    if (!buildCliUrl(this.gatewayConfig.gateway.publicUrl, 'probe')) return null;
+    const { pairingId, code } = cliPairingStore.create(this.agentConfig.id, channel, userId);
+    return { pairingId, code, url: buildCliUrl(this.gatewayConfig.gateway.publicUrl, pairingId)! };
+  }
+
+  /** Approve (or deny) a `/cli` pairing on behalf of the authenticated chat user. */
+  approveCliPairing(
+    channel: CliChannel,
+    pairingId: string,
+    userId: string,
+    deny = false,
+  ): 'ok' | 'mismatch' | 'gone' {
+    return deny
+      ? cliPairingStore.deny(pairingId, channel, userId)
+      : cliPairingStore.approve(pairingId, channel, userId);
+  }
+
+  /**
    * Handle POST /command requests from the receiver process.
    * Supports: get_model, set_model, restart.
    */
@@ -651,6 +681,45 @@ export class AgentRunner extends EventEmitter {
     if (command === 'get_models') {
       const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
       respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
+      return;
+    }
+
+    // `/cli` webview terminal viewer — create a pairing on behalf of an
+    // already-authenticated chat user. The channel receiver has verified the
+    // user against its allowlist before calling this; we bind the pairing to that
+    // (channel, user) so only that same user can approve it or (Telegram) match
+    // its initData. The browser-facing routes live on the gateway; here we only
+    // mint the pairing and hand back the phone-openable link.
+    if (command === 'cli_pair') {
+      const payload = body.payload ?? {};
+      const channel = payload['channel'];
+      const userId = typeof payload['user_id'] === 'string' ? payload['user_id'] : '';
+      if (!isCliChannel(channel) || !userId) {
+        respond({ success: false, error: 'invalid_request' }, 400);
+        return;
+      }
+      const pairing = this.createCliPairing(channel, userId);
+      if (!pairing) {
+        respond({ success: false, error: 'not_configured' });
+        return;
+      }
+      respond({ success: true, ...pairing });
+      return;
+    }
+
+    // `/cli` approve/deny — the authenticated chat user acted on the pairing.
+    if (command === 'cli_approve') {
+      const payload = body.payload ?? {};
+      const channel = payload['channel'];
+      const pairingId = typeof payload['pairing_id'] === 'string' ? payload['pairing_id'] : '';
+      const userId = typeof payload['user_id'] === 'string' ? payload['user_id'] : '';
+      const deny = payload['deny'] === true;
+      if (!isCliChannel(channel) || !pairingId || !userId) {
+        respond({ success: false, error: 'invalid_request' }, 400);
+        return;
+      }
+      const result = this.approveCliPairing(channel, pairingId, userId, deny);
+      respond({ success: result === 'ok', result });
       return;
     }
 
