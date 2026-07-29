@@ -665,7 +665,7 @@ export class SessionProcess extends EventEmitter {
       // Without this, a self-paced loop (a /loop in dynamic mode using
       // ScheduleWakeup) that wakes itself and works entirely inside this child
       // process stays invisible to the idle timer and gets reaped mid-flight.
-      this.lastActivityAt = Date.now();
+      this.touch();
       // Update heartbeat so the receiver's stalled detector knows Claude is active
       if (heartbeatPath) {
         try { fs.writeFileSync(heartbeatPath, String(Date.now())) } catch {}
