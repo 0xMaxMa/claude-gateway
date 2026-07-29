@@ -218,7 +218,7 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `idleTimeoutMinutes` | `30` | Kill idle session subprocess after N minutes of inactivity |
+| `idleTimeoutMinutes` | `30` | Kill idle session subprocess after N minutes of inactivity. Inactivity means no incoming message **and** no subprocess output — a session actively producing output (e.g. a self-paced `/loop`) is not treated as idle |
 | `maxConcurrent` | `20` | Max simultaneous active sessions per agent; oldest idle is evicted when exceeded |
 
 ### `gateway.history` (optional)
