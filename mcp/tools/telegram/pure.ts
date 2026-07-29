@@ -360,3 +360,28 @@ export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boo
   }
   return false
 }
+
+/** A Telegram sender, narrowed to the identity fields we read (grammy's `User`). */
+export type TelegramSender = {
+  id: number | string
+  first_name?: string
+  last_name?: string
+  username?: string
+}
+
+/**
+ * Human-readable display name for a Telegram sender, for the chat picker / history.
+ *
+ * Telegram guarantees `first_name` for real users but makes `username` optional, so the
+ * old `username ?? id` fallback surfaced a bare numeric id for anyone without a @handle —
+ * which is what users saw in the cron Target picker. Prefer the real name:
+ *   "First Last"  →  "First"  →  "username"  →  "<id>"
+ * The id fallback only triggers for the degenerate case (no name and no username at all),
+ * preserving the legacy value rather than emitting an empty string.
+ */
+export function telegramDisplayName(from: TelegramSender): string {
+  const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ').trim()
+  if (fullName) return fullName
+  if (from.username) return from.username
+  return String(from.id)
+}
