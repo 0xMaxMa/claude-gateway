@@ -200,3 +200,132 @@ describe('config migration — real v1.3.25 -> current upgrade (Issue #204)', ()
     expect(migrated.gateway.bind).toBe('0.0.0.0');
   });
 });
+
+/**
+ * Real-artifact upgrade tests for Opus 5 support.
+ *
+ * An existing install pins its own gateway.models list in config.json (it
+ * overrides DEFAULT_MODELS), so shipping Opus 5 only in the code registry would
+ * never reach upgrading users. migrateModels() merges the template's models by
+ * id on migration — but that only runs when the template configVersion is ahead
+ * of the user's. These tests drive the REAL template exactly like src/index.ts,
+ * so if someone adds Opus 5 to the registry but forgets to bump configVersion
+ * (or forgets the template entry), the upgrade goes red here — before release.
+ */
+describe('config migration — Opus 5 support reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus5-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const tv = (): string =>
+    JSON.parse(fs.readFileSync(REAL_TEMPLATE, 'utf-8')).configVersion as string;
+
+  /** A realistic pre-Opus-5 install: bind already set (so bind isn't the trigger),
+   *  a models list where `opus` still points at 4.8, plus a custom BYOK model. */
+  function writePreOpus5Config(): string {
+    const p = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      p,
+      JSON.stringify(
+        {
+          configVersion: '1.0.14',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', alias: 'opus[1m]', contextWindow: 1000000 },
+              { id: 'claude-opus-4-8', label: 'Opus 4.8', alias: 'opus', contextWindow: 200000 },
+              { id: 'claude-sonnet-5', label: 'Sonnet 5', alias: 'sonnet', contextWindow: 200000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+          agents: [],
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return p;
+  }
+
+  function runRealUpgrade(configPath: string) {
+    const version = tv();
+    const detection = detectMigration(configPath, REAL_TEMPLATE, version);
+    if (!detection.needed) return { needed: false, addedFields: [] as string[] };
+    const { ignorePaths, removePaths } = loadCleanTemplate(REAL_TEMPLATE);
+    const result = applyMigration(
+      configPath,
+      detection.config,
+      detection.template,
+      version,
+      ignorePaths,
+      removePaths,
+    );
+    return { needed: true, addedFields: result.addedFields };
+  }
+
+  // Guard: the whole point is that the template is ahead of the fixture so a
+  // migration runs. If the template ever drops back to 1.0.14 this is moot.
+  it('the real template is ahead of the pre-Opus-5 fixture (migration will run)', () => {
+    expect(tv()).not.toBe('1.0.14');
+  });
+
+  it('adds both Opus 5 variants to an existing install on upgrade', () => {
+    const configPath = writePreOpus5Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[claude-opus-5]');
+    expect(result.addedFields).toContain('gateway.models[claude-opus-5[1m]]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const ids = migrated.gateway.models.map((m: { id: string }) => m.id);
+    expect(ids).toContain('claude-opus-5');
+    expect(ids).toContain('claude-opus-5[1m]');
+  });
+
+  it('repoints the bare `opus` aliases to Opus 5 and demotes 4.8 to `opus48`', () => {
+    const configPath = writePreOpus5Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const byAlias = (a: string) =>
+      migrated.gateway.models.find((m: { alias: string }) => m.alias === a)?.id;
+
+    expect(byAlias('opus')).toBe('claude-opus-5');
+    expect(byAlias('opus[1m]')).toBe('claude-opus-5[1m]');
+    expect(byAlias('opus48')).toBe('claude-opus-4-8');
+    expect(byAlias('opus48[1m]')).toBe('claude-opus-4-8[1m]');
+  });
+
+  it('gives Opus 5 the correct context windows (1M variant not defaulted to 200k)', () => {
+    const configPath = writePreOpus5Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const ctx = (id: string) =>
+      migrated.gateway.models.find((m: { id: string }) => m.id === id)?.contextWindow;
+
+    expect(ctx('claude-opus-5[1m]')).toBe(1000000);
+    expect(ctx('claude-opus-5')).toBe(200000);
+  });
+
+  it('preserves a user BYOK model that is not in the template', () => {
+    const configPath = writePreOpus5Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const custom = migrated.gateway.models.find(
+      (m: { id: string }) => m.id === 'openrouter/custom-model',
+    );
+    expect(custom).toBeDefined();
+    expect(custom.alias).toBe('mine');
+  });
+});

@@ -886,13 +886,18 @@ const BOT_COMMANDS = [
   { command: 'help', description: 'What this bot can do' },
 ]
 
-// Available AI models for /models command
+// Available AI models for /models command. Fallback only — the picker normally
+// uses the live list from the gateway (get_models); this is shown if that call
+// fails. Keep in sync with DEFAULT_MODELS (src/agent/runner.ts) and
+// config.template.json gateway.models.
 const AVAILABLE_MODELS = [
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable[1m]' },
-  { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus[1m]' },
+  { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus[1m]' },
+  { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]' },
   { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]' },
   { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable' },
-  { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus' },
+  { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus' },
+  { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48' },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46' },
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet' },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46' },
