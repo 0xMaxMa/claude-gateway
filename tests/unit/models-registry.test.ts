@@ -80,3 +80,57 @@ describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
     expect(new Set(aliases).size).toBe(aliases.length);
   });
 });
+
+/**
+ * The Telegram receiver (mcp/tools/telegram/receiver-server.ts) runs as a
+ * separate process and can't import DEFAULT_MODELS, so it keeps a hardcoded
+ * AVAILABLE_MODELS fallback for the /models picker (used when the live
+ * get_models call fails). That third copy silently drifted before — Opus 5 was
+ * added to the two src registries but not here. We can't import the module
+ * (top-level Bot construction needs a token), so we parse the array literal
+ * from source and assert its id/alias set matches the code registry.
+ */
+describe('model registry — Telegram fallback list stays in sync', () => {
+  const RECEIVER = path.join(
+    __dirname,
+    '..',
+    '..',
+    'mcp',
+    'tools',
+    'telegram',
+    'receiver-server.ts',
+  );
+
+  /** Extract { id, alias } pairs from the AVAILABLE_MODELS array literal. */
+  function telegramFallbackModels(): Array<{ id: string; alias: string }> {
+    const src = fs.readFileSync(RECEIVER, 'utf-8');
+    const start = src.indexOf('const AVAILABLE_MODELS = [');
+    expect(start).toBeGreaterThan(-1);
+    // Close on the array's own-line `]` — a bare indexOf(']') would stop at the
+    // `[1m]` suffix inside the first model id.
+    const end = src.indexOf('\n]', start);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    const out: Array<{ id: string; alias: string }> = [];
+    const re = /id:\s*'([^']+)'[^}]*alias:\s*'([^']+)'/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(block)) !== null) out.push({ id: m[1], alias: m[2] });
+    return out;
+  }
+
+  it('lists exactly the same model ids as DEFAULT_MODELS', () => {
+    const telegramIds = telegramFallbackModels().map((m) => m.id).sort();
+    const codeIds = DEFAULT_MODELS.map((m) => m.id).sort();
+    expect(telegramIds).toEqual(codeIds);
+  });
+
+  it('maps each alias identically to DEFAULT_MODELS (incl. opus -> Opus 5)', () => {
+    const codeMap = new Map(DEFAULT_MODELS.map((m) => [m.id, m.alias]));
+    for (const m of telegramFallbackModels()) {
+      expect(m.alias).toBe(codeMap.get(m.id));
+    }
+    // Explicit anchor for the repoint the user asked us to verify everywhere.
+    const opus = telegramFallbackModels().find((m) => m.alias === 'opus');
+    expect(opus?.id).toBe('claude-opus-5');
+  });
+});
