@@ -15,6 +15,14 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
+import {
+  generateCliDevicePage,
+  generateCliViewerPage,
+  generateCliMessagePage,
+} from '../ui/cli-viewer-ui';
+import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
+import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
+import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
@@ -33,6 +41,12 @@ const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const DASH_SESSION_COOKIE = 'dash_session';
 /** Dashboard session lifetime — long enough to avoid re-login mid-work. */
 const DASH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+/** `/cli` device-flow cookies (scoped to a single pairing's path, never `/`). */
+const CLI_PAIR_COOKIE = 'cli_pair';       // binds the browser that opened the link
+const CLI_SESSION_COOKIE = 'cli_session'; // agent-scoped viewer access session
+const CLI_PAIR_TTL_MS = 5 * 60 * 1000;
+const CLI_SESSION_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Parse a Cookie request header into a name→value map. Manual parser so we take
@@ -402,6 +416,177 @@ export class GatewayRouter {
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
   }
 
+  // ─── /cli webview terminal viewer ──────────────────────────────────────────
+
+  /** Path portion of the configured public URL (e.g. "/gateway" behind an
+   *  ingress prefix, or "" at the origin root). Injected into the viewer so its
+   *  API/WS URLs resolve regardless of where the gateway is mounted. */
+  private cliBasePath(): string {
+    const base = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl);
+    if (!base) return '';
+    try {
+      return new URL(base).pathname.replace(/\/+$/, '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Build a `/cli` cookie scoped to a SINGLE pairing's path — never `/`. This
+   * keeps the browser-binding and access tokens off every other route (including
+   * the admin dashboard) and prevents two concurrent `/cli` links from clobbering
+   * each other's cookies.
+   */
+  private buildCliCookie(req: Request, name: string, pairingId: string, value: string, ttlMs: number): string {
+    const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+    const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
+    const scope = `${this.cliBasePath()}/cli/${encodeURIComponent(pairingId)}`;
+    return `${name}=${value}; HttpOnly; SameSite=Lax; Path=${scope}; Max-Age=${maxAge}${secure}`;
+  }
+
+  /**
+   * Resolve the `cli_session` cookie to its agent-scoped pairing, verifying it
+   * belongs to THIS pairing id. Returns null (caller 401s) when the access
+   * session is missing, expired, or points at a different pairing — so a viewer
+   * cookie can only ever reach the one agent it was issued for.
+   */
+  private resolveCliAccess(req: Request, pairingId: string): CliPairing | null {
+    const token = parseCookies(req.headers['cookie'])[CLI_SESSION_COOKIE] ?? '';
+    const p = cliPairingStore.resolveAccess(token);
+    if (!p || p.pairingId !== pairingId) return null;
+    return p;
+  }
+
+  /** Register the `/cli/*` routes (device flow + agent-scoped viewer). */
+  private setupCliRoutes(): void {
+    // Device page — the browser lands here from the chat link. Binds the first
+    // browser (first-writer-wins) and shows the waiting/verify UI.
+    this.app.get('/cli/:pairingId', (req: Request, res: Response) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = cliPairingStore.get(pairingId);
+      if (!p) {
+        res.status(404).send(generateCliMessagePage('Link not found', 'This viewer link is invalid or has expired. Send /cli again.', 'err'));
+        return;
+      }
+      // If this browser already holds a live access session, go straight in.
+      if (this.resolveCliAccess(req, pairingId)) {
+        res.redirect(302, `${this.cliBasePath()}/cli/${encodeURIComponent(pairingId)}/view`);
+        return;
+      }
+      let browserToken = parseCookies(req.headers['cookie'])[CLI_PAIR_COOKIE] ?? '';
+      const fresh = !browserToken;
+      if (fresh) browserToken = crypto.randomBytes(24).toString('hex');
+      const bind = cliPairingStore.bindBrowser(pairingId, browserToken);
+      if (bind === 'gone') {
+        res.status(410).send(generateCliMessagePage('Link expired', 'This viewer link has expired. Send /cli again.', 'err'));
+        return;
+      }
+      if (bind === 'already') {
+        res.status(409).send(generateCliMessagePage('Opened elsewhere', 'This link was already opened in another browser. Send /cli again to get a fresh one.', 'err'));
+        return;
+      }
+      if (fresh) {
+        res.setHeader('Set-Cookie', this.buildCliCookie(req, CLI_PAIR_COOKIE, pairingId, browserToken, CLI_PAIR_TTL_MS));
+      }
+      res.send(generateCliDevicePage({
+        pairingId,
+        agentId: p.agentId,
+        code: p.code,
+        channel: p.channel,
+        basePath: this.cliBasePath(),
+      }));
+    });
+
+    // Poll endpoint (Discord/LINE). Issues the access session once approved.
+    this.app.get('/cli/:pairingId/status', (req: Request, res: Response) => {
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = cliPairingStore.get(pairingId);
+      if (!p) { res.json({ status: 'gone' }); return; }
+      const browserToken = parseCookies(req.headers['cookie'])[CLI_PAIR_COOKIE] ?? '';
+      if (!browserToken || p.browserToken !== browserToken) { res.json({ status: 'foreign' }); return; }
+      if (p.status === 'denied') { res.json({ status: 'denied' }); return; }
+      if (p.status === 'approved' || p.status === 'consumed') {
+        const consumed = cliPairingStore.consume(pairingId, browserToken);
+        if (consumed) {
+          res.setHeader('Set-Cookie', this.buildCliCookie(req, CLI_SESSION_COOKIE, pairingId, consumed.accessToken, CLI_SESSION_TTL_MS));
+          res.json({ status: 'ready' });
+          return;
+        }
+        res.json({ status: 'gone' });
+        return;
+      }
+      res.json({ status: 'pending' });
+    });
+
+    // Telegram initData fast-path — verify the signed payload and unlock.
+    this.app.post('/cli/:pairingId/tg-init', (req: Request, res: Response) => {
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = cliPairingStore.get(pairingId);
+      if (!p || p.channel !== 'telegram') { res.status(404).json({ error: 'not found' }); return; }
+      const botToken = this.configs.get(p.agentId)?.telegram?.botToken ?? '';
+      if (!botToken) { res.status(400).json({ error: 'telegram not configured for this agent' }); return; }
+      const initData = ((req.body as { initData?: unknown })?.initData ?? '').toString();
+      const verified = verifyTelegramInitData(initData, botToken);
+      if (!verified) { res.status(401).json({ error: 'invalid initData' }); return; }
+      if (verified.userId !== p.userId) { res.status(403).json({ error: 'user mismatch' }); return; }
+      cliPairingStore.approve(pairingId, 'telegram', p.userId);
+      // initData already proves identity, so bind THIS browser and issue —
+      // without depending on the cli_pair cookie from the page load, which a
+      // Telegram Mini App webview may not replay.
+      let browserToken = parseCookies(req.headers['cookie'])[CLI_PAIR_COOKIE] ?? '';
+      const fresh = !browserToken;
+      if (fresh) browserToken = crypto.randomBytes(24).toString('hex');
+      const consumed = cliPairingStore.issueAccessForVerifiedUser(pairingId, browserToken);
+      if (!consumed) { res.status(409).json({ error: 'pairing no longer available' }); return; }
+      const cookies = [this.buildCliCookie(req, CLI_SESSION_COOKIE, pairingId, consumed.accessToken, CLI_SESSION_TTL_MS)];
+      if (fresh) cookies.push(this.buildCliCookie(req, CLI_PAIR_COOKIE, pairingId, browserToken, CLI_PAIR_TTL_MS));
+      res.setHeader('Set-Cookie', cookies);
+      res.json({ status: 'ready' });
+    });
+
+    // Agent-scoped viewer page.
+    this.app.get('/cli/:pairingId/view', (req: Request, res: Response) => {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = this.resolveCliAccess(req, pairingId);
+      if (!p) {
+        res.status(401).send(generateCliMessagePage('Session expired', 'Your viewer session has ended. Send /cli again to reconnect.', 'err'));
+        return;
+      }
+      res.send(generateCliViewerPage({ pairingId, agentId: p.agentId, basePath: this.cliBasePath() }));
+    });
+
+    // Agent-scoped list of live pty-shell sessions to attach to.
+    this.app.get('/cli/:pairingId/sessions', (req: Request, res: Response) => {
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = this.resolveCliAccess(req, pairingId);
+      if (!p) { res.status(401).json({ error: 'Unauthorized' }); return; }
+      const runner = this.agents.get(p.agentId);
+      const sessions = (runner?.getSessionsSummary() ?? [])
+        .filter((s) => s.mode === 'pty-shell' && s.isRunning && ptyStreamRegistry.hasSockets(s.sessionId))
+        .map((s) => ({ sessionId: s.sessionId, source: s.source, model: s.model, uptimeSec: s.uptimeSec }));
+      res.json({ agentId: p.agentId, sessions });
+    });
+
+    // Agent-scoped PTY ticket — mints into the same one-time ticket map the
+    // dashboard uses, but gated by the cli_session cookie and pinned to this
+    // pairing's agent. Reuses the existing pty-stream WebSocket auth path.
+    this.app.post('/cli/:pairingId/pty-ticket', (req: Request, res: Response) => {
+      const pairingId = req.params['pairingId'] ?? '';
+      const p = this.resolveCliAccess(req, pairingId);
+      if (!p) { res.status(401).json({ error: 'Unauthorized' }); return; }
+      const sessionId = ((req.body as { sessionId?: unknown })?.sessionId ?? '').toString();
+      const runner = this.agents.get(p.agentId);
+      const belongs = (runner?.getSessionsSummary() ?? []).some((s) => s.sessionId === sessionId);
+      if (!sessionId || !belongs) { res.status(404).json({ error: 'Session not found' }); return; }
+      const ticket = crypto.randomBytes(16).toString('hex');
+      const expiresAt = Date.now() + 30_000;
+      this.ptyStreamTickets.set(ticket, { agentId: p.agentId, sessionId, expiresAt });
+      res.json({ ticket, expiresAt: new Date(expiresAt).toISOString() });
+    });
+  }
+
   private setupRoutes(): void {
     if (process.env.DEV_MODE) {
       process.stderr.write('[gateway] DEV_MODE=1 active — module cache busted on every /dashboard request. Never enable in production.\n');
@@ -416,6 +601,11 @@ export class GatewayRouter {
     );
 
     this.app.use(express.json());
+
+    // `/cli` webview terminal viewer routes (device flow + agent-scoped viewer).
+    // Registered here (after the body parser, before the /api auth router) so it
+    // owns its own cookie/approval auth without the API-key gate intercepting.
+    this.setupCliRoutes();
 
     // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
     // MUST be registered before the apiRouter middleware so it handles its own auth
@@ -833,6 +1023,7 @@ export class GatewayRouter {
         for (const [ip, rec] of this.loginAttempts) {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
+        cliPairingStore.prune();
       }, 60_000);
       this.ticketPruner.unref();
 

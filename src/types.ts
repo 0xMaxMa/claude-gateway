@@ -155,6 +155,16 @@ export interface GatewayConfig {
      * var, when set, takes precedence over this field.
      */
     bind?: string;
+    /**
+     * Absolute, externally-reachable origin of this gateway (e.g.
+     * "https://gateway.example.com"), used to build phone-openable links such as
+     * the `/cli` webview terminal viewer. The process cannot infer its own public
+     * URL (it binds localhost by default and sits behind a reverse proxy), so the
+     * operator sets it explicitly. Unset = features that need a public link (e.g.
+     * `/cli`) are disabled and report that they are not configured. No trailing
+     * slash required; a trailing slash is trimmed when building links.
+     */
+    publicUrl?: string;
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];

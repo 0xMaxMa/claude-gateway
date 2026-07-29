@@ -350,6 +350,90 @@ describe('AgentRunner /command endpoint', () => {
     expect(data.success).toBe(true);
     expect(data.restarted).toBe(false);
   });
+
+  // --------------------------------------------------------------------------
+  // U-CMD-CLI-01: cli_pair reports not_configured when gateway.publicUrl is unset
+  // --------------------------------------------------------------------------
+  it('U-CMD-CLI-01: cli_pair → not_configured without gateway.publicUrl', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    const { data } = await sendCommand(port, {
+      command: 'cli_pair',
+      payload: { channel: 'telegram', user_id: '42' },
+    });
+    expect(data.success).toBe(false);
+    expect(data.error).toBe('not_configured');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-CMD-CLI-02: cli_pair mints a pairing + link when publicUrl is configured
+  // --------------------------------------------------------------------------
+  it('U-CMD-CLI-02: cli_pair returns pairingId/code/url when configured', async () => {
+    gatewayConfig.gateway.publicUrl = 'https://host.example/gw';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    const { data } = await sendCommand(port, {
+      command: 'cli_pair',
+      payload: { channel: 'discord', user_id: 'u-7' },
+    });
+    expect(data.success).toBe(true);
+    expect(String(data.pairingId)).toMatch(/^[0-9a-f]{36}$/);
+    expect(String(data.code)).toMatch(/^\d{4}$/);
+    expect(String(data.url)).toBe(`https://host.example/gw/cli/${data.pairingId}`);
+  });
+
+  // --------------------------------------------------------------------------
+  // U-CMD-CLI-03: cli_approve validates channel + user against the pairing
+  // --------------------------------------------------------------------------
+  it('U-CMD-CLI-03: cli_approve only succeeds for the pairing owner', async () => {
+    gatewayConfig.gateway.publicUrl = 'https://host.example';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    const { data: pair } = await sendCommand(port, {
+      command: 'cli_pair',
+      payload: { channel: 'discord', user_id: 'owner' },
+    });
+    const pairingId = String(pair.pairingId);
+
+    // Wrong user → mismatch, not approved.
+    const { data: wrong } = await sendCommand(port, {
+      command: 'cli_approve',
+      payload: { channel: 'discord', pairing_id: pairingId, user_id: 'intruder' },
+    });
+    expect(wrong.success).toBe(false);
+    expect(wrong.result).toBe('mismatch');
+
+    // Correct owner → approved.
+    const { data: ok } = await sendCommand(port, {
+      command: 'cli_approve',
+      payload: { channel: 'discord', pairing_id: pairingId, user_id: 'owner' },
+    });
+    expect(ok.success).toBe(true);
+    expect(ok.result).toBe('ok');
+  });
+
+  // --------------------------------------------------------------------------
+  // U-CMD-CLI-04: cli_pair rejects an unknown channel
+  // --------------------------------------------------------------------------
+  it('U-CMD-CLI-04: cli_pair rejects an invalid channel (400)', async () => {
+    gatewayConfig.gateway.publicUrl = 'https://host.example';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    const { status, data } = await sendCommand(port, {
+      command: 'cli_pair',
+      payload: { channel: 'sms', user_id: 'u-1' },
+    });
+    expect(status).toBe(400);
+    expect(data.success).toBe(false);
+  });
 });
 
 // ── SessionProcess restart watcher tests (U-CMD-08, U-CMD-09) ────────────────

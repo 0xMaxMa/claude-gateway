@@ -147,6 +147,19 @@ export function normalizeLineEvent(
 
 export type NormalizedLinePostback = { chatId: string; replyToken: string; data: string };
 
+/** Parse a `/cli` approve/deny postback payload, or null when it's not ours. */
+export function parseCliPostback(data: string): { pairingId: string; deny: boolean } | null {
+  try {
+    const p = JSON.parse(data) as { action?: string; pairing_id?: string };
+    if (p.action === 'cli_approve' || p.action === 'cli_deny') {
+      return { pairingId: typeof p.pairing_id === 'string' ? p.pairing_id : '', deny: p.action === 'cli_deny' };
+    }
+  } catch {
+    // not JSON / not ours
+  }
+  return null;
+}
+
 /**
  * Normalize a LINE postback event (the slow-LLM "Get answer" button tap) into
  * {chatId, replyToken, data}. Returns null for non-postback / non-user / tokenless
@@ -269,6 +282,25 @@ export function createLineWebhookHandler(
       // is safe — only users who received the button can tap it.
       const pb = normalizeLinePostback(event);
       if (pb) {
+        // `/cli` approve/deny — unlock (or reject) a terminal-viewer pairing.
+        // The pairing binds the requesting user; approveCliPairing checks the
+        // tapping user (pb.chatId, a LINE-verified id) matches, so bypassing the
+        // access gate here is safe — same as the slow-LLM postback below.
+        const cli = parseCliPostback(pb.data);
+        if (cli) {
+          const result = runner.approveCliPairing('line', cli.pairingId, pb.chatId, cli.deny);
+          if (client && pb.replyToken) {
+            const text = cli.deny
+              ? 'Denied.'
+              : result === 'ok'
+                ? 'Approved — return to the browser.'
+                : 'Could not approve (the link may have expired). Send /cli again.';
+            await client
+              .replyMessage({ replyToken: pb.replyToken, messages: [{ type: 'text', text }] })
+              .catch(() => {});
+          }
+          continue;
+        }
         try {
           await runner.handleLinePostback(pb.chatId, pb.replyToken, pb.data);
         } catch (err) {
@@ -357,6 +389,37 @@ export function createLineWebhookHandler(
       const norm = normalizeLineEvent(event, resolved);
       if (!norm) continue;
       const userId = norm.meta.chat_id;
+
+      // `/cli` opens the live terminal viewer (DM only). Mint a pairing and reply
+      // with an open-link + Approve/Deny buttons instead of forwarding to the
+      // agent. Reached only after the access gate above authorized this source.
+      if ((norm.content ?? '').trim().toLowerCase() === '/cli') {
+        if (norm.meta['line_chat_type'] === 'user' && client) {
+          const replyToken = norm.meta['reply_token'] ?? '';
+          const pairing = runner.createCliPairing('line', userId);
+          if (replyToken) {
+            const messages: messagingApi.Message[] = pairing
+              ? [{
+                  type: 'template',
+                  altText: 'Live terminal viewer',
+                  template: {
+                    type: 'buttons',
+                    text: `Live terminal viewer\nCode ${pairing.code} — open, confirm the code, then Approve.`,
+                    actions: [
+                      { type: 'uri', label: 'Open terminal', uri: pairing.url },
+                      { type: 'postback', label: `Approve ${pairing.code}`, data: JSON.stringify({ action: 'cli_approve', pairing_id: pairing.pairingId }), displayText: 'Approve terminal viewer' },
+                      { type: 'postback', label: 'Deny', data: JSON.stringify({ action: 'cli_deny', pairing_id: pairing.pairingId }) },
+                    ],
+                  },
+                }]
+              : [{ type: 'text', text: 'Terminal viewer is not configured. Set gateway.publicUrl in config.json first.' }];
+            await client.replyMessage({ replyToken, messages }).catch((err) => {
+              logger.debug('LINE /cli reply failed', { error: (err as Error).message });
+            });
+          }
+        }
+        continue;
+      }
 
       // Group/room activation gate: unless requireMention is explicitly false,
       // only respond when the bot is @mentioned (native isSelf or its name).

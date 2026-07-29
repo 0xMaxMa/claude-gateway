@@ -29,7 +29,7 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
 - **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
 - **Session persistence** — conversation history saved and restored across restarts
-- **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; app-agents always stay headless
+- **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; a `/cli` chat command (Telegram/Discord/LINE) opens the same viewer for a single agent, agent-scoped and without an admin key; app-agents always stay headless
 
 ---
 
@@ -346,6 +346,18 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 
 > **⚠️ Upgrade note:** the default bind changed from `0.0.0.0` to `127.0.0.1` (configVersion 1.0.13). To avoid silently cutting off external access, the config migrator is **behavior-preserving**: whenever it upgrades a config that never set `gateway.bind`, it pins `bind` to `0.0.0.0` and logs a one-time warning, so a deployment that was reachable from another host stays reachable. This applies to *any* upgraded config with no `bind` key — including one already stamped `1.0.13` that never received a bind (an earlier version gated this on `< 1.0.13` and left such configs stuck on the `127.0.0.1` default). New installs (no prior config, so no migration runs) keep the secure `127.0.0.1` default. If you *want* localhost-only after upgrading, set `gateway.bind` to `127.0.0.1` explicitly (or the `GATEWAY_BIND` env var).
 
+### `gateway.publicUrl`
+
+Absolute, externally-reachable origin of the gateway (for example `https://gateway.example.com`, or `https://host.example.com/gateway` behind an ingress path prefix). The process cannot infer its own public URL — it binds localhost by default and sits behind a reverse proxy — so it must be set explicitly for features that hand out a phone-openable link. Currently that is the `/cli` terminal viewer; when `publicUrl` is unset, `/cli` replies that the viewer is not configured. Leave it blank to keep `/cli` disabled. A trailing slash is optional. Use an `https://` origin — Telegram Mini Apps require HTTPS.
+
+```json
+{
+  "gateway": {
+    "publicUrl": "https://gateway.example.com"
+  }
+}
+```
+
 ### Terminal Viewer — interactive terminal mode
 
 The dashboard's **Terminal Viewer** opens read-only (a live mirror of the PTY). A toggle in the top-right of the viewer switches it into an **interactive terminal**: keystrokes typed into the panel — printable characters, Enter, arrows, Ctrl-combos, Esc — are streamed into the live PTY, and the panel title changes to reflect the active mode. This is a per-browser client-side choice (Issue #201); there is no server config flag to enable it.
@@ -356,6 +368,17 @@ Because interactive mode turns a read-only view into a remote-write surface, acc
 - **`gateway.bind`** — the gateway binds to `127.0.0.1` (localhost) by default, so the dashboard is not reachable from the network out of the box. On a non-loopback bind (`0.0.0.0`), configure an admin key in `gateway.api.keys` so the dashboard and monitoring endpoints require an admin credential, and prefer a TLS-terminating reverse proxy so credentials are not sent in the clear.
 
 Inbound frames are always bounded (text-only, size-capped) and are dropped for headless sessions (no PTY).
+
+#### `/cli` — open the terminal viewer from chat
+
+The `/cli` command (Telegram, Discord, LINE) opens the same live terminal viewer for **one agent**, without an admin key. It requires `gateway.publicUrl` and an agent running with `gateway.headless: false`. Unlike the admin dashboard, a `/cli` session is **agent-scoped**: its cookie and PTY ticket can only reach the originating agent's own sessions — never another agent, the process tree, or a cross-agent stream.
+
+The viewer link is never a credential; unlocking it requires a proof tied to an allowlist-gated chat action:
+
+- **Telegram** opens a Mini App and the gateway verifies Telegram's signed `initData` (HMAC with the agent's own bot token) — nothing secret rides in the URL, and the `initData` user must match the user who ran `/cli`.
+- **Discord** and **LINE** send an open-viewer link plus an **Approve** button; the browser stays locked until you approve in the chat, so a leaked or forwarded link cannot be unlocked by anyone who cannot approve there.
+
+The first browser to open a link owns it (opening the link in a second browser is rejected), the viewer defaults to read-only (toggle for input), and viewer sessions expire (30 min) — send `/cli` again to reconnect.
 
 ### `gateway.api.keys`
 

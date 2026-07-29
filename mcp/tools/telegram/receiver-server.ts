@@ -881,6 +881,7 @@ const BOT_COMMANDS = [
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
   { command: 'models', description: 'Switch AI model' },
+  { command: 'cli', description: 'Open the live terminal viewer' },
   { command: 'start', description: 'Welcome and setup guide' },
   { command: 'status', description: 'Check your pairing status' },
   { command: 'help', description: 'What this bot can do' },
@@ -1146,7 +1147,8 @@ bot.command('help', async ctx => {
     `/restart — graceful restart session\n\n` +
     `*Agent*\n` +
     `/model — show current AI model\n` +
-    `/models — switch AI model\n\n` +
+    `/models — switch AI model\n` +
+    `/cli — open the live terminal viewer\n\n` +
     `*Account*\n` +
     `/start — pairing instructions\n` +
     `/status — check your pairing state`,
@@ -1235,6 +1237,44 @@ bot.command('models', async ctx => {
     })
   } catch (err) {
     await ctx.reply('Failed to get model info.')
+  }
+})
+
+// /cli — open the live terminal viewer as a Telegram Mini App. The Mini App
+// page reads Telegram's signed initData and the gateway verifies it (HMAC with
+// this bot's token), so nothing secret rides in the URL. Private chat + allowlist
+// only, matching every other command.
+bot.command('cli', async ctx => {
+  if (ctx.chat?.type !== 'private') return
+  const access = loadAccess()
+  if (!access.allowFrom.includes(String(ctx.from!.id))) return
+  if (!CALLBACK_URL_BASE) return
+
+  try {
+    const res = await fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command: 'cli_pair',
+        payload: { channel: 'telegram', user_id: String(ctx.from!.id) },
+      }),
+    })
+    const data = (await res.json()) as { success?: boolean; url?: string; error?: string }
+    if (!data.success || !data.url) {
+      if (data.error === 'not_configured') {
+        await ctx.reply('Terminal viewer is not configured. Set gateway.publicUrl in config.json first.')
+      } else {
+        await ctx.reply('Could not open the terminal viewer right now.')
+      }
+      return
+    }
+    // web_app button launches the Mini App; Telegram requires an HTTPS URL.
+    const keyboard = new InlineKeyboard().webApp('\u{1F5A5} Open terminal', data.url)
+    await ctx.reply('Live terminal viewer (read-only by default — toggle input inside):', {
+      reply_markup: keyboard,
+    })
+  } catch {
+    await ctx.reply('Could not open the terminal viewer right now.')
   }
 })
 
