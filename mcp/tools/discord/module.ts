@@ -33,6 +33,18 @@ import type { DiscordMessageContext } from './types';
 
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 
+/** AgentRunner callback base (origin of CLAUDE_CHANNEL_CALLBACK, "" when unset).
+ *  Used to mint/approve `/cli` pairings via the runner, the same bridge the
+ *  Telegram receiver uses for /models. */
+function cliCallbackBase(): string {
+  try {
+    const u = new URL(process.env.CLAUDE_CHANNEL_CALLBACK ?? '');
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return '';
+  }
+}
+
 export class DiscordModule implements ChannelModule {
   id = 'discord' as ChannelId;
   toolVisibility: ToolVisibility = 'current-channel';
@@ -281,6 +293,45 @@ export class DiscordModule implements ChannelModule {
       }
 
       // action === 'deliver'
+      // `/cli` opens the live terminal viewer: mint a pairing (link + Approve
+      // button) instead of forwarding the text to the agent. Only reached after
+      // gate() authorized this user, so it inherits the channel's access control.
+      const cliText = (msg.content ?? '').replace(/<@!?\d+>/g, '').trim().toLowerCase();
+      if (cliText === '/cli') {
+        const base = cliCallbackBase();
+        try {
+          const res = await fetch(base + '/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'cli_pair', payload: { channel: 'discord', user_id: context.userId } }),
+          });
+          const data = (await res.json()) as { success?: boolean; url?: string; code?: string; pairingId?: string; error?: string };
+          if (!data.success || !data.url || !data.pairingId) {
+            await msg.channel.send(
+              data.error === 'not_configured'
+                ? 'Terminal viewer is not configured. Set gateway.publicUrl in config.json first.'
+                : 'Could not open the terminal viewer right now.',
+            ).catch(() => {});
+            return;
+          }
+          const components = [{
+            type: 1,
+            components: [
+              { type: 2, style: 5, label: '\u{1F5A5} Open terminal', url: data.url },
+              { type: 2, style: 2, label: `Approve ${data.code}`, custom_id: `cli:approve:${data.pairingId}` },
+              { type: 2, style: 4, label: 'Deny', custom_id: `cli:deny:${data.pairingId}` },
+            ],
+          }];
+          await msg.channel.send({
+            content: 'Live terminal viewer — open the link, confirm the code matches, then tap **Approve** to unlock (read-only by default).',
+            components,
+          }).catch(() => {});
+        } catch {
+          await msg.channel.send('Could not open the terminal viewer right now.').catch(() => {});
+        }
+        return;
+      }
+
       // Start typing indicator before handing off to runner
       const channelId = context.channelId;
       const typingFileDir = path.join(this.stateDir, 'typing');
@@ -347,11 +398,58 @@ export class DiscordModule implements ChannelModule {
       message?: { id: string };
       client: { user?: { id: string } };
       reply(opts: { content: string; ephemeral: boolean }): Promise<unknown>;
-      update(opts: { components: unknown[] }): Promise<unknown>;
+      update(opts: { components: unknown[]; content?: string }): Promise<unknown>;
     }
     this.client.on('interactionCreate', async (interaction: ButtonInteraction) => {
       try {
         if (!interaction.isButton?.()) return;
+
+        // `/cli` approve/deny — unlock (or reject) a pending terminal-viewer
+        // pairing. Re-runs the access gate on the tapping user, then relays the
+        // decision to the runner. The pairing itself checks the user id matches.
+        const cliM = /^cli:(approve|deny):([0-9a-f]{36})$/.exec(interaction.customId ?? '');
+        if (cliM) {
+          const isDM = !interaction.guildId;
+          const isThread = interaction.channel?.isThread?.() ?? false;
+          const context: DiscordMessageContext = {
+            guildId: interaction.guildId ?? null,
+            channelId: interaction.channelId,
+            threadId: isThread ? interaction.channelId : null,
+            userId: interaction.user.id,
+            username: interaction.user.username,
+            messageId: interaction.message?.id ?? '',
+            isDM,
+            isThread,
+            mentionsBot: true,
+          };
+          const access = loadAccessFn();
+          const result = gate(access, context, saveAccessFn, () => randomBytes(3).toString('hex'));
+          if (result.action !== 'deliver') {
+            await interaction.reply({ content: 'Not authorized.', ephemeral: true }).catch(() => {});
+            return;
+          }
+          const deny = cliM[1] === 'deny';
+          const base = cliCallbackBase();
+          let ok = false;
+          try {
+            const res = await fetch(base + '/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                command: 'cli_approve',
+                payload: { channel: 'discord', pairing_id: cliM[2], user_id: interaction.user.id, deny },
+              }),
+            });
+            ok = !!((await res.json()) as { success?: boolean }).success;
+          } catch {}
+          const content = deny
+            ? '\u{1F6AB} Denied.'
+            : ok
+              ? '✅ Approved — return to the browser.'
+              : '⚠️ Could not approve (the link may have expired). Send /cli again.';
+          await interaction.update({ components: [], content }).catch(() => {});
+          return;
+        }
 
         // Cancel button: send ESC sentinel to dismiss the pending menu cleanly.
         if ((interaction.customId ?? '') === 'menu:cancel') {
