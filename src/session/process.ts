@@ -474,6 +474,13 @@ export class SessionProcess extends EventEmitter {
     const freshModel = this.readFreshModel();
     const args = this.buildArgs(effectiveMcpPath, freshModel);
 
+    // gemini/* models are driven by the Antigravity CLI (agy) via the agy-shell
+    // wrapper instead of the claude binary. The wrapper speaks the identical
+    // stream-json stdio protocol, so everything downstream (stdin priming,
+    // stdout parser, runner reply bridge) is unchanged — only the spawned
+    // command and a few AGY_* env vars differ.
+    const isGemini = freshModel.startsWith('gemini/');
+
     // Resolve the claude binary. An explicit CLAUDE_BIN (which may carry args) is
     // trusted verbatim; otherwise probe PATH and the native-installer / legacy
     // install locations so a gateway launched with a minimal PATH still finds it.
@@ -517,7 +524,7 @@ export class SessionProcess extends EventEmitter {
     // Safe mode (forceHeadless) overrides the configured PTY backend so a
     // repeatedly-failing wrapper degrades to headless instead of re-wedging.
     const usePtyShell =
-      this.gatewayConfig.gateway.headless === false && !isAppAgent && !this.forceHeadless;
+      this.gatewayConfig.gateway.headless === false && !isAppAgent && !this.forceHeadless && !isGemini;
     this.backend = usePtyShell ? 'pty-shell' : 'headless';
     let ptyRealBin: string | null = null;
     // Pre-calculate heartbeat path so we can pass it to the PTY shell before spawn.
@@ -542,6 +549,15 @@ export class SessionProcess extends EventEmitter {
       this.logger.warn('gateway.headless=false is not supported for app-agents — using headless backend', {
         sessionId: this.sessionId,
       });
+    }
+
+    // gemini/* → run the agy-shell wrapper (node) instead of claude. It reads the
+    // model / persona system prompt / MCP manifest from the AGY_* env set on the
+    // spawn below, drives `agy -p` per turn, and emits Claude-shaped stream-json.
+    if (isGemini && !isAppAgent) {
+      const agyShellPath = path.resolve(__dirname, 'agy-shell.js');
+      claudeBin = process.execPath;
+      allArgs = [agyShellPath];
     }
 
     this.logger.info('Spawning session subprocess', {
@@ -601,6 +617,15 @@ export class SessionProcess extends EventEmitter {
         ...(ptyRealBin ? { CLAUDE_REAL_BIN: ptyRealBin } : {}),
         ...(ptyHeartbeatPath ? { PTY_SHELL_HEARTBEAT_PATH: ptyHeartbeatPath } : {}),
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
+        ...(isGemini
+          ? {
+              AGY_MODEL: freshModel,
+              AGY_BIN: process.env.AGY_BIN || 'agy',
+              AGY_PERSONA: process.env.AGY_PERSONA || 'getpod',
+              AGY_SYSTEM_PROMPT_FILE: path.join(this.agentConfig.workspace, 'CLAUDE.md'),
+              ...(effectiveMcpPath ? { AGY_MCP_CONFIG_FILE: effectiveMcpPath } : {}),
+            }
+          : {}),
       },
       cwd: this.agentConfig.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
