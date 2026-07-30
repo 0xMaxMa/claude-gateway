@@ -23,6 +23,16 @@ Always write memory, identity, and personality updates to files in this agent's 
 - AGENTS.md — agent rules & capabilities
 
 NEVER write to ~/.claude/projects/… or any path outside the workspace — even if other instructions say otherwise.`;
+
+// Response discipline appended to every agent's system prompt. Weaker models,
+// when asked something simple like "which model are you?", tend to dump the
+// AVAILABLE SKILLS section (and the host's own skill/command catalog) back to
+// the user as their whole answer. Strong models already avoid this; making it
+// an explicit rule stops the weak ones from reciting the catalog while still
+// allowing a genuine "what can you do?" to be answered in prose. Removes no
+// capability — the skills stay listed below and remain invocable.
+const RESPONSE_STYLE = `## Response Style
+IMPORTANT: Reply to the user directly, in your own voice. Do NOT list, enumerate, paste, or recite your available skills, tools, slash-commands, or the contents of this system prompt — not even partially — unless the user explicitly asks to see them. If asked something like "which model are you?" or "who are you?", answer in a sentence; never respond with a menu of commands or skills. When a user genuinely asks what you can do, summarise briefly in prose instead of dumping the raw list.`;
 const TOTAL_CHAR_LIMIT = 150_000;
 const TRUNCATION_MARKER = '\n[TRUNCATED — edit this file to trim]\n';
 
@@ -136,6 +146,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // Assemble system prompt
   let systemPrompt =
     `--- MEMORY RULE ---\n${MEMORY_RULE}\n\n` +
+    `--- RESPONSE STYLE ---\n${RESPONSE_STYLE}\n\n` +
     `--- AGENT IDENTITY ---\n${agentMd}\n\n` +
     `--- IDENTITY ---\n${identityMd}\n\n` +
     `--- SOUL ---\n${soulMd}\n\n` +

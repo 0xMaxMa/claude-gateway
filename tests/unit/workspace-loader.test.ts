@@ -86,6 +86,7 @@ describe('workspace-loader', () => {
     const prompt = result.systemPrompt;
 
     const memoryRuleIdx = prompt.indexOf('--- MEMORY RULE ---');
+    const responseStyleIdx = prompt.indexOf('--- RESPONSE STYLE ---');
     const agentIdx = prompt.indexOf('--- AGENT IDENTITY ---');
     const identityIdx = prompt.indexOf('--- IDENTITY ---');
     const soulIdx = prompt.indexOf('--- SOUL ---');
@@ -94,7 +95,8 @@ describe('workspace-loader', () => {
     const heartbeatIdx = prompt.indexOf('--- HEARTBEAT CONFIG ---');
 
     expect(memoryRuleIdx).toBeGreaterThanOrEqual(0);
-    expect(agentIdx).toBeGreaterThan(memoryRuleIdx);
+    expect(responseStyleIdx).toBeGreaterThan(memoryRuleIdx);
+    expect(agentIdx).toBeGreaterThan(responseStyleIdx);
     expect(identityIdx).toBeGreaterThan(agentIdx);
     expect(soulIdx).toBeGreaterThan(identityIdx);
     expect(userIdx).toBeGreaterThan(soulIdx);
@@ -114,6 +116,7 @@ describe('workspace-loader', () => {
     expect(result.systemPrompt).toContain('--- LONG-TERM MEMORY ---');
     expect(result.systemPrompt).toContain('--- HEARTBEAT CONFIG ---');
     expect(result.systemPrompt).toContain('--- MEMORY RULE ---');
+    expect(result.systemPrompt).toContain('--- RESPONSE STYLE ---');
   });
 
   // -------------------------------------------------------------------------
@@ -124,6 +127,18 @@ describe('workspace-loader', () => {
     expect(result.systemPrompt).toContain('## Memory Rule');
     expect(result.systemPrompt).toContain('MEMORY.md');
     expect(result.systemPrompt).toContain('AGENTS.md');
+  });
+
+  // -------------------------------------------------------------------------
+  // TC-2: Response-style / anti-recite directive is injected
+  // -------------------------------------------------------------------------
+  it('TC-2: system prompt contains the response-style anti-recite directive', async () => {
+    const result = await loadWorkspace(path.join(FIXTURES, 'valid-full'));
+    expect(result.systemPrompt).toContain('## Response Style');
+    // The directive must forbid reciting the skills/commands catalog...
+    expect(result.systemPrompt).toMatch(/Do NOT list, enumerate, paste, or recite/);
+    // ...while still allowing a genuine "what can you do?" to be answered.
+    expect(result.systemPrompt).toContain('unless the user explicitly asks');
   });
 
   // -------------------------------------------------------------------------
