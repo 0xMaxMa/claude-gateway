@@ -400,6 +400,75 @@ describe('T11-T13: Telegram delivery', () => {
     manager.stop();
   });
 
+  it('T11c: update() on an existing channel-less agent job → prompt change succeeds, not rejected (#253)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'no-channel-update',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hello',
+      // no telegram, no discord
+    });
+
+    // Changing `prompt` triggers manager.update()'s validatePayload(merged) branch.
+    // Before #253, merged still had no telegram/discord and this threw
+    // "telegram or discord is required for type=agent" even though the update
+    // never touched the channel fields.
+    const updated = await manager.update(job.id, { prompt: 'updated prompt' });
+
+    expect(updated.prompt).toBe('updated prompt');
+    expect(updated.telegram).toBeUndefined();
+    expect(updated.discord).toBeUndefined();
+
+    manager.stop();
+  });
+
+  it('T11d: update() changing type command→agent on a channel-less job succeeds (#253)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'type-flip-no-channel',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: 'echo hi',
+      // no telegram, no discord
+    });
+
+    const updated = await manager.update(job.id, { type: 'agent', prompt: 'now an agent' });
+
+    expect(updated.type).toBe('agent');
+    expect(updated.prompt).toBe('now an agent');
+
+    manager.stop();
+  });
+
+  it('T11e: update() changing type command→agent WITHOUT a prompt is still rejected (#253 did not loosen this)', async () => {
+    const { manager, agentId } = makeManager();
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'type-flip-no-prompt',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: 'echo hi',
+    });
+
+    await expect(manager.update(job.id, { type: 'agent' })).rejects.toThrow(
+      'prompt is required for type=agent',
+    );
+
+    manager.stop();
+  });
+
   it('T12: type=agent error → Telegram not called', async () => {
     const runner = {
       sendApiMessage: jest.fn().mockRejectedValue(new Error('agent failed')),
