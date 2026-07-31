@@ -329,9 +329,8 @@ export class CronManager extends EventEmitter {
       if (!input.command) throw new Error('command is required for type=command');
     } else if (kind === 'agent') {
       if (!input.prompt) throw new Error('prompt is required for type=agent');
-      if (!input.telegram && !input.discord) {
-        throw new Error('telegram or discord is required for type=agent');
-      }
+      // telegram/discord are optional: a channel-less agent job runs and its
+      // output is saved to Run History; delivery is simply skipped (see #253).
     }
   }
 

@@ -369,6 +369,37 @@ describe('T11-T13: Telegram delivery', () => {
     manager.stop();
   });
 
+  it('T11b: type=agent with no channel → runs and captures output, no delivery (#253)', async () => {
+    const runner = makeRunner('channel-less result');
+    const { manager, agentId } = makeManager({ runner, botToken: 'TOKEN123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'no-channel-job',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hello',
+      // no telegram, no discord — result lives in Run History only
+    });
+
+    const log = await manager.run(job.id);
+
+    // Engine still runs the agent and persists the outcome (→ Run History)…
+    expect(runner.sendApiMessage).toHaveBeenCalled();
+    expect(log.status).toBe('ok');
+    expect(log.output).toContain('channel-less result');
+
+    // …but no channel delivery is attempted.
+    const telegramCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    expect(telegramCall).toBeUndefined();
+
+    manager.stop();
+  });
+
   it('T12: type=agent error → Telegram not called', async () => {
     const runner = {
       sendApiMessage: jest.fn().mockRejectedValue(new Error('agent failed')),

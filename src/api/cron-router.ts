@@ -104,10 +104,9 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
       res.status(400).json({ error: 'prompt is required for type=agent' });
       return;
     }
-    if (type === 'agent' && !body.telegram && !body.discord) {
-      res.status(400).json({ error: 'telegram or discord is required for type=agent' });
-      return;
-    }
+    // Note: telegram/discord are optional for type=agent. A channel-less job still
+    // runs and persists its result to Run History (executeJob → appendRunLog is
+    // unconditional; delivery is skipped when no channel is set). See #253.
 
     try {
       const job = await manager.create(body as CronJobCreate);
