@@ -171,7 +171,6 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
       display:flex; align-items:center; gap:10px; padding:8px 12px;
       background:#0b0e14; border-bottom:1px solid #232a3b; font-size:13px; flex:0 0 auto;
     }
-    header .agent { font-weight:600; }
     header .status { color:#7a88a8; margin-left:auto; }
     select, button {
       background:#131722; color:#c8d3f5; border:1px solid #2b3450; border-radius:8px;
@@ -180,12 +179,27 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
     button.on { background:#1f6feb; border-color:#1f6feb; color:#fff; }
     #term { flex:1; min-height:0; padding:6px; }
     .hint { color:#7a88a8; padding:16px; font-size:13px; }
+    /* Shortcut keys — inline in the header, only shown in input mode. Compact but
+       still touch-friendly for mobile webviews. */
+    #keybar { display:none; align-items:center; gap:4px; }
+    #keybar button {
+      min-width:30px; min-height:30px; font-size:13px; line-height:1;
+      padding:4px 8px; touch-action:manipulation; -webkit-user-select:none; user-select:none;
+    }
+    #keybar button:active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+    #keybar .esc { font-weight:600; }
   `;
   const body = `
   <header>
-    <span class="agent">${htmlEscape(opts.agentId)}</span>
     <select id="sess" title="Session" style="display:none"></select>
     <button id="toggle" title="Toggle input">🔒 Read-only</button>
+    <div id="keybar">
+      <button type="button" class="esc" data-seq="esc" title="Escape">Esc</button>
+      <button type="button" data-seq="left" title="Arrow Left" aria-label="Arrow Left">◀</button>
+      <button type="button" data-seq="up" title="Arrow Up" aria-label="Arrow Up">▲</button>
+      <button type="button" data-seq="down" title="Arrow Down" aria-label="Arrow Down">▼</button>
+      <button type="button" data-seq="right" title="Arrow Right" aria-label="Arrow Right">▶</button>
+    </div>
     <span class="status" id="status">connecting…</span>
   </header>
   <div id="term"></div>
@@ -198,7 +212,9 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
     var statusEl = document.getElementById('status');
     var sel = document.getElementById('sess');
     var toggleBtn = document.getElementById('toggle');
+    var keybar = document.getElementById('keybar');
     function setStatus(t){ statusEl.textContent = t; }
+    var ESC = String.fromCharCode(27);
 
     var term = new Terminal({
       cols: 200, rows: 50, scrollback: 0, disableStdin: true, convertEol: false,
@@ -209,11 +225,38 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
 
     var ws = null, inputMode = false, onDataDisposable = null, currentSession = null, reconnectT = null;
 
+    function wsSend(s){ if (s && ws && ws.readyState===1) ws.send(s); }
+
+    // Map a shortcut button to the bytes a real key would send. Arrow keys depend
+    // on the terminal's DECCKM (application cursor keys) state — xterm.js exposes
+    // it via term.modes; fall back to the normal-mode CSI form when unavailable.
+    function keySeq(name){
+      var app = term.modes && term.modes.applicationCursorKeysMode;
+      var p = app ? 'O' : '[';
+      switch (name) {
+        case 'esc':   return ESC;
+        case 'up':    return ESC + p + 'A';
+        case 'down':  return ESC + p + 'B';
+        case 'right': return ESC + p + 'C';
+        case 'left':  return ESC + p + 'D';
+      }
+      return '';
+    }
+
+    Array.prototype.forEach.call(keybar.querySelectorAll('button'), function(btn){
+      // preventDefault on press keeps the terminal's hidden textarea focused so the
+      // mobile soft keyboard does not dismiss when a shortcut is tapped.
+      btn.addEventListener('mousedown', function(e){ e.preventDefault(); });
+      btn.addEventListener('touchstart', function(e){ e.preventDefault(); wsSend(keySeq(btn.getAttribute('data-seq'))); }, { passive:false });
+      btn.addEventListener('click', function(e){ e.preventDefault(); wsSend(keySeq(btn.getAttribute('data-seq'))); });
+    });
+
     function setInputMode(on){
       inputMode = on;
       term.options.disableStdin = !on;
       toggleBtn.className = on ? 'on' : '';
       toggleBtn.textContent = on ? '⌨️ Input ON' : '🔒 Read-only';
+      keybar.style.display = on ? 'flex' : 'none';
       if (onDataDisposable) { onDataDisposable.dispose(); onDataDisposable = null; }
       if (on) { onDataDisposable = term.onData(function(d){ if (ws && ws.readyState===1) ws.send(d); }); }
     }
@@ -240,7 +283,7 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
         ws = new WebSocket(wsUrl(d.ticket));
         ws.binaryType = 'arraybuffer';
         var dec = new TextDecoder();
-        ws.onopen = function(){ setStatus('live'); };
+        ws.onopen = function(){ setStatus(''); };
         ws.onmessage = function(ev){
           var data = typeof ev.data === 'string' ? ev.data : dec.decode(ev.data, { stream:true });
           term.write(data);

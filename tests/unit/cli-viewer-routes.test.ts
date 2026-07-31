@@ -96,6 +96,16 @@ describe('/cli webview terminal viewer routes', () => {
     expect(view.status).toBe(200);
     expect(view.text).toContain(AGENT);
 
+    // Input-mode shortcut bar: Esc + four arrows, wired by data-seq and gated by
+    // the input toggle (display:none until input mode is on).
+    expect(view.text).toContain('id="keybar"');
+    for (const seq of ['esc', 'left', 'up', 'down', 'right']) {
+      expect(view.text).toContain(`data-seq="${seq}"`);
+    }
+    expect(view.text).toContain("keybar.style.display = on ? 'flex' : 'none'");
+    // Arrow keys must honor DECCKM (application vs normal cursor keys).
+    expect(view.text).toContain('applicationCursorKeysMode');
+
     // Sessions list is filtered to the agent's live pty-shell sessions.
     const sessions = await supertest(app).get(`/cli/${pairingId}/sessions`).set('Cookie', session);
     expect(sessions.body.agentId).toBe(AGENT);
