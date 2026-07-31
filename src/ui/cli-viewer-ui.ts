@@ -171,7 +171,6 @@ export function generateCliViewerPage(opts: CliViewerPageOpts): string {
       display:flex; align-items:center; gap:10px; padding:8px 12px;
       background:#0b0e14; border-bottom:1px solid #232a3b; font-size:13px; flex:0 0 auto;
     }
-    header .agent { font-weight:600; }
     header .status { color:#7a88a8; margin-left:auto; }
     select, button {
       background:#131722; color:#c8d3f5; border:1px solid #2b3450; border-radius:8px;
