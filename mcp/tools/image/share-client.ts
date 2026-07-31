@@ -16,6 +16,21 @@ export type ShareItem = { share_id: string; url: string; expires_at: string };
 
 export type ArtifactItem = { artifact_id: string; artifact_ref: string; index: number; path: string };
 
+/**
+ * One entry of the session image catalog (#72). `index` is 1-based and stable —
+ * it is the order of FIRST appearance of that file in the session, so "รูปที่ 1"
+ * / "the first image" maps to index 1 deterministically. `ref` is what to feed
+ * back into generate_image's image/images argument.
+ */
+export type CatalogItem = {
+  index: number;
+  ref: string;
+  relative_path: string;
+  origin: string;
+  ts: number;
+  available: boolean;
+};
+
 /** Error carrying the gateway's stable machine-readable code (e.g. image_ref_not_found). */
 export class ShareClientError extends Error {
   readonly code: string;
@@ -46,7 +61,7 @@ function apiBase(): string {
 }
 
 async function callGateway(
-  method: 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'DELETE',
   pathname: string,
   body?: Record<string, unknown>,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
@@ -90,6 +105,47 @@ export async function createShares(
   const items = json.items;
   if (!Array.isArray(items)) throw new ShareClientError('share_failed', 'invalid share response', status);
   return items as ShareItem[];
+}
+
+/**
+ * Read the ground-truth catalog of every image in this session (#72), numbered
+ * by first appearance. Read-only: no token is minted and nothing is persisted.
+ * Callers must check shareBridgeEnabled() first (same contract as createShares).
+ */
+export async function listSessionImages(): Promise<CatalogItem[]> {
+  const query =
+    `agent_id=${encodeURIComponent(process.env.GATEWAY_AGENT_ID ?? '')}` +
+    `&session_id=${encodeURIComponent(process.env.GATEWAY_SESSION_ID ?? '')}`;
+  const { status, json } = await callGateway('GET', `/api/v1/image-catalog?${query}`);
+  if (status !== 200) {
+    const { code, message } = extractError(json, `image catalog request failed (HTTP ${status})`, 'catalog_failed');
+    throw new ShareClientError(code, message, status);
+  }
+  const items = json.items;
+  if (!Array.isArray(items)) throw new ShareClientError('catalog_failed', 'invalid catalog response', status);
+  return items as CatalogItem[];
+}
+
+/**
+ * Pull a { code, message } out of a gateway error body. The private routes are
+ * not uniform: some return { error: "text", code: "x" } (share mint) and some
+ * return { error: { code, message } } (image service style), so accept both and
+ * fall back to the supplied defaults.
+ */
+function extractError(
+  json: Record<string, unknown>,
+  fallbackMessage: string,
+  fallbackCode: string,
+): { code: string; message: string } {
+  let code = typeof json.code === 'string' ? json.code : '';
+  let message = typeof json.error === 'string' ? json.error : '';
+  const err = json.error;
+  if (err && typeof err === 'object') {
+    const nested = err as { code?: unknown; message?: unknown };
+    if (!code && typeof nested.code === 'string') code = nested.code;
+    if (!message && typeof nested.message === 'string') message = nested.message;
+  }
+  return { code: code || fallbackCode, message: message || fallbackMessage };
 }
 
 /** Revoke a share by id. Throws ShareClientError on failure. */

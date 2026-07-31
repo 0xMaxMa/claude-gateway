@@ -241,6 +241,20 @@ export class ImageShareStore {
     };
   }
 
+  /** Newest artifact id registered for (agent, session, relative_path), or null.
+   *  Read-only reverse lookup for the session image catalog (#72): a path that
+   *  was produced by generate_image gets the stable `artifact:<id>` ref instead
+   *  of a raw path. Same agent+session binding as resolveArtifact — a path
+   *  registered by another agent/session is invisible here. */
+  findArtifactByPath(agentId: string, sessionId: string, relativePath: string): string | null {
+    const row = this.db.prepare(
+      `SELECT id FROM image_artifacts
+       WHERE agent_id = ? AND session_id = ? AND relative_path = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).get(agentId, sessionId, relativePath) as { id: string } | undefined;
+    return row ? row.id : null;
+  }
+
   // ── shares (§9) ───────────────────────────────────────────────────────────
 
   /**

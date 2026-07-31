@@ -7,6 +7,7 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 import {
   ShareClientError,
   createShares,
+  listSessionImages,
   registerArtifacts,
   revokeSharesBestEffort,
   shareBridgeEnabled,
@@ -105,9 +106,11 @@ export class ImageModule implements ToolModule {
         return this.handleStatus(args);
       case 'list':
         return this.handleList();
+      case 'list_refs':
+        return this.handleListRefs();
       default:
         return {
-          content: [{ type: 'text', text: `generate_image: unknown action "${action}" (expected generate | status | list)` }],
+          content: [{ type: 'text', text: `generate_image: unknown action "${action}" (expected generate | status | list | list_refs)` }],
           isError: true,
         };
     }
@@ -187,6 +190,48 @@ export class ImageModule implements ToolModule {
     const body = await res.text().catch(() => '');
     if (!res.ok) return this.mapHttpError(res.status, body);
     return { content: [{ type: 'text', text: body || '[]' }] };
+  }
+
+  /**
+   * action="list_refs" (#72) — return the deterministic, gateway-computed catalog
+   * of every image in this session so the agent never has to count images from its
+   * own transcript (which breaks after compaction/resume). Read-only.
+   *
+   * Gated on the share bridge exactly like reference minting: with the bridge off
+   * there is no catalog endpoint to read, so the action stays inert (legacy mode
+   * gains no new behavior).
+   */
+  private async handleListRefs(): Promise<McpToolResult> {
+    if (!shareBridgeEnabled()) {
+      return {
+        content: [{ type: 'text', text: 'generate_image: list_refs is unavailable (image share bridge is not configured).' }],
+        isError: true,
+      };
+    }
+    let items;
+    try {
+      items = await listSessionImages();
+    } catch (err) {
+      if (err instanceof ShareClientError) {
+        return { content: [{ type: 'text', text: `generate_image: ${err.code}: ${err.message}` }], isError: true };
+      }
+      return {
+        content: [{ type: 'text', text: `generate_image: image share service unavailable: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          images: items,
+          note: 'Ground-truth catalog of every image in this session, numbered in order of first appearance ("รูปที่ 1" = index 1). '
+            + 'To use one as a reference, pass its "ref" value in the "image"/"images" argument of action="generate". '
+            + 'Do NOT count images from conversation memory. If the user\'s reference is ambiguous or the index does not exist, '
+            + 'ask the user instead of guessing. Items with available:false can no longer be used.',
+        }),
+      }],
+    };
   }
 
   private async handleGenerate(args: Record<string, unknown>): Promise<McpToolResult> {
@@ -726,14 +771,23 @@ const imageToolDefs: McpToolDefinition[] = [
       'img2img-capable model is available — or the model you picked has supports_image_ref=false — do NOT pass ' +
       '"image": instead look at the reference image yourself, describe what matters in the "prompt", and generate ' +
       'text-to-image. Never send "image" to a model that does not support it. ' +
+      'EARLIER IMAGES IN THE CHAT: when the user points at an image from earlier in this conversation ' +
+      '("รูปที่ 2", "the first image", "the picture you just made", "that logo from before"), call ' +
+      'action="list_refs" FIRST. It returns the ground-truth catalog of this session\'s images numbered by ' +
+      'first appearance; pass the chosen item\'s "ref" into "image"/"images". NEVER work out which earlier ' +
+      'image the user means by counting from your own memory of the conversation — the numbering there is ' +
+      'not reliable, and not remembering any images is NOT evidence there are none (your context may have ' +
+      'been reset while the chat history still has them): never answer "no images attached" to such a ' +
+      'request before list_refs has returned an empty catalog. If the catalog makes the request ambiguous ' +
+      '(or the requested index does not exist), ask the user which image they mean instead of guessing. ' +
       'When the user selected options in the composer (an <image-params .../> tag in the turn), honor those values.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['generate', 'status', 'list'],
-          description: 'generate (default) | status | list',
+          enum: ['generate', 'status', 'list', 'list_refs'],
+          description: 'generate (default) | status | list | list_refs (numbered catalog of this session\'s images, for resolving "the second image" style references)',
         },
         model: {
           type: 'string',

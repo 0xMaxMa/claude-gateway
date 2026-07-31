@@ -15,6 +15,7 @@ import {
 } from '../../src/api/image-share-router';
 import { resolveGatewayPublicUrl } from '../../src/config/public-url';
 import { ImageShareStore } from '../../src/share/image-share-store';
+import { HistoryDB } from '../../src/history/db';
 import { ApiKey } from '../../src/types';
 
 const PNG = Buffer.concat([
@@ -78,6 +79,7 @@ describe('image share router', () => {
   afterEach(() => {
     logSpy.mockRestore();
     store.close();
+    HistoryDB.evict(baseDir, AGENT);
     fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
@@ -273,6 +275,97 @@ describe('image share router', () => {
         .set(AUTH_A1)
         .send({ agent_id: AGENT, session_id: SESSION, provider: 'p', model: 'm', files: ['../../x.png'] });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('image catalog (#72)', () => {
+    const seedHistory = () => {
+      const db = HistoryDB.forAgent(baseDir, AGENT);
+      db.insertMessage({
+        chatId: `api-${SESSION}`,
+        sessionId: SESSION,
+        source: 'api',
+        role: 'user',
+        content: 'here you go',
+        mediaFiles: [`media/${SESSION}/ok.png`],
+        ts: 1_700_000_001_000,
+      });
+      db.insertMessage({
+        chatId: `api-${SESSION}`,
+        sessionId: SESSION,
+        source: 'api',
+        role: 'assistant',
+        content: 'made one',
+        mediaFiles: [`media/${SESSION}/ok.jpg`],
+        ts: 1_700_000_002_000,
+      });
+    };
+
+    const get = (query: string, auth?: Record<string, string>) => {
+      const r = request().get(`/api/v1/image-catalog${query}`);
+      return auth ? r.set(auth) : r;
+    };
+
+    test('no auth → 401; key without access to the agent → 403', async () => {
+      expect((await get(`?agent_id=${AGENT}&session_id=${SESSION}`)).status).toBe(401);
+      expect((await get(`?agent_id=${AGENT}&session_id=${SESSION}`, AUTH_B1)).status).toBe(403);
+    });
+
+    test('missing or blank agent_id / session_id → 400', async () => {
+      for (const q of ['', `?agent_id=${AGENT}`, `?session_id=${SESSION}`, `?agent_id=%20&session_id=${SESSION}`]) {
+        const res = await get(q, AUTH_A1);
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('agent_id and session_id are required');
+      }
+    });
+
+    test('returns the session catalog with ordinals, origin and availability', async () => {
+      seedHistory();
+      const res = await get(`?agent_id=${AGENT}&session_id=${SESSION}`, AUTH_A1);
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([
+        {
+          index: 1,
+          ref: `${SESSION}/ok.png`,
+          relative_path: `${SESSION}/ok.png`,
+          origin: 'upload',
+          ts: 1_700_000_001_000,
+          available: true,
+        },
+        {
+          index: 2,
+          ref: `${SESSION}/ok.jpg`,
+          relative_path: `${SESSION}/ok.jpg`,
+          origin: 'generated',
+          ts: 1_700_000_002_000,
+          available: true,
+        },
+      ]);
+    });
+
+    test('a session with no media returns an empty list', async () => {
+      const res = await get(`?agent_id=${AGENT}&session_id=nothing-here`, AUTH_A1);
+      expect(res.status).toBe(200);
+      expect(res.body.items).toEqual([]);
+    });
+
+    test('response carries no share token and mints nothing (read-only)', async () => {
+      seedHistory();
+      const minted = await mintOne();
+      const token = minted.url.split('/shared/')[1]!;
+
+      const res = await get(`?agent_id=${AGENT}&session_id=${SESSION}`, AUTH_A1);
+      expect(res.status).toBe(200);
+      const body = JSON.stringify(res.body);
+      expect(body).not.toContain(token);
+      expect(body).not.toContain('token');
+      expect(body).not.toContain('/shared/');
+      expect(body).not.toContain(minted.share_id);
+      for (const item of res.body.items as Array<Record<string, unknown>>) {
+        expect(Object.keys(item).sort()).toEqual(
+          ['available', 'index', 'origin', 'ref', 'relative_path', 'ts'],
+        );
+      }
     });
   });
 

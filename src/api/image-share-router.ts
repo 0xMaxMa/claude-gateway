@@ -12,6 +12,7 @@ import {
   validateShareFile,
   DEFAULT_SHARE_TTL_SECONDS,
 } from '../share/image-share-store';
+import { computeSessionImageCatalog } from '../share/session-image-catalog';
 
 /**
  * Image share bridge HTTP surface (#70, plan §10/§11).
@@ -20,9 +21,12 @@ import {
  *   Private : POST     /api/v1/image-shares — mint (API-key auth, agent-scoped)
  *             DELETE   /api/v1/image-shares/:shareId
  *             POST     /api/v1/image-artifacts
+ *             GET      /api/v1/image-catalog   — session image list (#72)
  *
  * Deliberately NOT implemented (§10): any list endpoint (GET /api/v1/image-shares,
- * GET /shared) — shares are unenumerable by design.
+ * GET /shared) — shares are unenumerable by design. /v1/image-catalog is NOT an
+ * exception: it enumerates the session's IMAGES (paths / artifact refs), never
+ * shares, and never returns a token.
  *
  * Logging rules (§19): log share id / purpose / status / byte count only —
  * never the plaintext token, never an absolute filesystem path.
@@ -367,6 +371,31 @@ export function createImageSharePrivateRouter(
     }
     console.log(`[image-share] artifacts registered count=${items.length} provider=${provider}`);
     res.status(201).json({ items });
+  });
+
+  /**
+   * GET /api/v1/image-catalog?agent_id=...&session_id=... — the deterministic
+   * image list of one session, oldest first (#72). Response:
+   * { items: [{ index, ref, relative_path, origin, ts, available }] }.
+   *
+   * Read-only: it mints nothing and returns no token, so "the agent can look up
+   * image N" never widens the share surface. Same trust model as the mint
+   * endpoint (caller holds a gateway key scoped to the agent).
+   */
+  router.get('/v1/image-catalog', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const agentId = typeof req.query.agent_id === 'string' ? req.query.agent_id.trim() : '';
+    const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    if (!agentId || !sessionId) {
+      res.status(400).json({ error: 'agent_id and session_id are required' });
+      return;
+    }
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const items = computeSessionImageCatalog({ agentsBaseDir, store, agentId, sessionId });
+    res.json({ items });
   });
 
   return router;
