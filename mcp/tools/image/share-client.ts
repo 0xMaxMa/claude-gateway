@@ -28,12 +28,12 @@ export class ShareClientError extends Error {
 }
 
 /**
- * The bridge is usable only when the feature flag is on AND the gateway API
- * env (URL/key/agent/session identity) reached this subprocess.
+ * The bridge client is usable when the gateway API identity reached this
+ * subprocess. gateway.publicUrl is the sole server-side enable switch: when it
+ * is absent the private mint endpoint is not mounted and calls fail closed.
  */
 export function shareBridgeEnabled(): boolean {
   return (
-    (process.env.IMAGE_SHARE_ENABLED ?? '').toLowerCase() === 'true' &&
     !!process.env.GATEWAY_API_URL &&
     !!process.env.GATEWAY_API_KEY &&
     !!process.env.GATEWAY_AGENT_ID &&

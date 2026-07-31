@@ -2,8 +2,7 @@
  * Unit tests for the image share bridge HTTP surface (#70) —
  * src/api/image-share-router.ts. Covers plan §20.1 API-level items:
  * mint/batch order, agent-scope auth, uniform public 404s, GET/HEAD vs 405,
- * the no-list guarantee, the in-handler per-IP rate limit (§11), and the
- * SHARE_PUBLIC_BASE_URL fail-closed validation (§14).
+ * the no-list guarantee and the in-handler per-IP rate limit (§11).
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -13,8 +12,8 @@ import * as supertest from 'supertest';
 import {
   createImageSharePublicRouter,
   createImageSharePrivateRouter,
-  resolvePublicBaseUrl,
 } from '../../src/api/image-share-router';
+import { resolveGatewayPublicUrl } from '../../src/config/public-url';
 import { ImageShareStore } from '../../src/share/image-share-store';
 import { ApiKey } from '../../src/types';
 
@@ -26,7 +25,7 @@ const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(
 
 const AGENT = 'a1';
 const SESSION = 'session-1';
-const BASE_URL = 'https://pod-123.vm.example.com';
+const BASE_URL = 'https://pod-123.vm.example.com/gateway';
 
 const KEYS: ApiKey[] = [
   { key: 'admin-key', agents: '*', admin: true },
@@ -277,17 +276,27 @@ describe('image share router', () => {
     });
   });
 
-  describe('resolvePublicBaseUrl (§14 fail-closed)', () => {
-    test('accepts https origins; rejects http-to-public, paths, queries, garbage', () => {
-      expect(resolvePublicBaseUrl('https://pod-1.vm.getpod.ai')).toBe('https://pod-1.vm.getpod.ai');
-      expect(resolvePublicBaseUrl('https://pod-1.vm.getpod.ai/')).toBe('https://pod-1.vm.getpod.ai');
-      expect(resolvePublicBaseUrl('http://localhost:10850')).toBe('http://localhost:10850');
-      expect(resolvePublicBaseUrl('http://pod-1.vm.getpod.ai')).toBeNull();
-      expect(resolvePublicBaseUrl('https://pod-1.vm.getpod.ai/base')).toBeNull();
-      expect(resolvePublicBaseUrl('https://pod-1.vm.getpod.ai?x=1')).toBeNull();
-      expect(resolvePublicBaseUrl('')).toBeNull();
-      expect(resolvePublicBaseUrl(undefined)).toBeNull();
-      expect(resolvePublicBaseUrl('not a url')).toBeNull();
+  describe('resolveGatewayPublicUrl (§14 fail-closed)', () => {
+    test('requires /gateway and permits HTTP only for local development hosts', () => {
+      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway')).toBe(
+        'https://pod-1.vm.getpod.ai/gateway',
+      );
+      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway/')).toBe(
+        'https://pod-1.vm.getpod.ai/gateway',
+      );
+      expect(resolveGatewayPublicUrl('http://host.docker.internal:10850/gateway')).toBe(
+        'http://host.docker.internal:10850/gateway',
+      );
+      expect(resolveGatewayPublicUrl('http://localhost:10850/gateway')).toBe(
+        'http://localhost:10850/gateway',
+      );
+      expect(resolveGatewayPublicUrl('http://pod-1.vm.getpod.ai/gateway')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/shared')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway?x=1')).toBeNull();
+      expect(resolveGatewayPublicUrl('')).toBeNull();
+      expect(resolveGatewayPublicUrl(undefined)).toBeNull();
+      expect(resolveGatewayPublicUrl('not a url')).toBeNull();
     });
   });
 });

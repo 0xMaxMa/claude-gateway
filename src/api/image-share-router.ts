@@ -36,30 +36,6 @@ const MAX_TTL_SECONDS = 86_400;
 const MAX_ARTIFACT_FILES = 10;
 const DEFAULT_PUBLIC_RATE_PER_MIN = 60;
 
-/**
- * Validate SHARE_PUBLIC_BASE_URL (§14): must be an https origin (http tolerated
- * only for loopback/dev hosts) with no path, query or fragment. Returns the
- * normalized origin, or null → caller must fail closed.
- */
-export function resolvePublicBaseUrl(raw: string | undefined): string | null {
-  if (!raw || !raw.trim()) return null;
-  let u: URL;
-  try {
-    u = new URL(raw.trim());
-  } catch {
-    return null;
-  }
-  if (u.pathname !== '/' && u.pathname !== '') return null;
-  if (u.search || u.hash || u.username || u.password) return null;
-  if (u.protocol === 'https:') return u.origin;
-  if (u.protocol === 'http:') {
-    const h = u.hostname.toLowerCase();
-    const local = h === 'localhost' || /^127\./.test(h) || h === '::1' || h === '[::1]' || h.endsWith('.internal') || h.endsWith('.local');
-    return local ? u.origin : null;
-  }
-  return null;
-}
-
 function errStatus(code: string): number {
   switch (code) {
     case 'image_ref_not_found': return 404;
@@ -113,7 +89,9 @@ export function createImageSharePublicRouter(
     return true;
   };
 
-  router.all('/shared/:token', (req: Request, res: Response) => {
+  // /shared is the path after production Traefik strips /gateway.
+  // /gateway/shared is the direct-path alias used by localhost Docker E2E.
+  router.all(['/shared/:token', '/gateway/shared/:token'], (req: Request, res: Response) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.status(405).set('Allow', 'GET, HEAD').type('text/plain').send('Method Not Allowed');
       return;

@@ -148,6 +148,12 @@ export interface GatewayConfig {
     logDir: string;
     timezone: string;
     /**
+     * Externally reachable gateway base URL, including the /gateway prefix.
+     * Its presence enables the image-share bridge and is the sole source used
+     * to mint public /gateway/shared/:token URLs.
+     */
+    publicUrl?: string;
+    /**
      * Network interface the HTTP/WebSocket server binds to. Defaults to
      * "127.0.0.1" (localhost-only) so the dashboard and API are not exposed to
      * the local network out of the box. Set to "0.0.0.0" to expose all

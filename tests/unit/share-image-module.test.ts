@@ -1,6 +1,6 @@
 /**
  * Unit tests for the standalone share_image MCP tool (#70) —
- * mcp/tools/share-image/module.ts. Locks in: flag/env gating, create/revoke
+ * mcp/tools/share-image/module.ts. Locks in: gateway-context gating, create/revoke
  * plumbing through the authenticated gateway API, and the DELIBERATE absence
  * of any list action (plan §15).
  */
@@ -9,7 +9,6 @@ import { ShareImageModule } from '../../mcp/tools/share-image/module';
 const GATEWAY = 'http://127.0.0.1:19999';
 
 const ENV_KEYS = [
-  'IMAGE_SHARE_ENABLED',
   'GATEWAY_API_URL',
   'GATEWAY_API_KEY',
   'GATEWAY_AGENT_ID',
@@ -29,7 +28,6 @@ describe('share_image MCP module', () => {
       saved[k] = process.env[k];
       delete process.env[k];
     }
-    process.env.IMAGE_SHARE_ENABLED = 'true';
     process.env.GATEWAY_API_URL = GATEWAY;
     process.env.GATEWAY_API_KEY = 'gw-key';
     process.env.GATEWAY_AGENT_ID = 'a1';
@@ -38,7 +36,7 @@ describe('share_image MCP module', () => {
     responder = (url, method) => {
       if (method === 'POST') {
         return new Response(
-          JSON.stringify({ items: [{ share_id: 'shr_1', url: 'https://vm.example.com/shared/tok1', expires_at: '2099-01-01T00:00:00Z' }] }),
+          JSON.stringify({ items: [{ share_id: 'shr_1', url: 'https://vm.example.com/gateway/shared/tok1', expires_at: '2099-01-01T00:00:00Z' }] }),
           { status: 201 },
         );
       }
@@ -65,11 +63,8 @@ describe('share_image MCP module', () => {
   });
 
   describe('gating', () => {
-    test('enabled only when the flag AND the full gateway env are present', () => {
+    test('enabled only when the full gateway API context is present', () => {
       expect(new ShareImageModule().isEnabled()).toBe(true);
-      process.env.IMAGE_SHARE_ENABLED = 'false';
-      expect(new ShareImageModule().isEnabled()).toBe(false);
-      process.env.IMAGE_SHARE_ENABLED = 'true';
       delete process.env.GATEWAY_SESSION_ID;
       expect(new ShareImageModule().isEnabled()).toBe(false);
     });
@@ -102,7 +97,7 @@ describe('share_image MCP module', () => {
         refs: [{ path: 'media/session-1/image.png' }],
       });
       const payload = JSON.parse(res.content[0]!.text) as { items: Array<{ url: string }> };
-      expect(payload.items[0]!.url).toBe('https://vm.example.com/shared/tok1');
+      expect(payload.items[0]!.url).toBe('https://vm.example.com/gateway/shared/tok1');
     });
 
     test('batch paths + artifact refs are classified correctly', async () => {

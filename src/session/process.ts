@@ -390,10 +390,6 @@ export class SessionProcess extends EventEmitter {
             IMAGE_API_KEY: process.env.IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
             IMAGE_DISABLED: process.env.IMAGE_DISABLED ?? '',
             IMAGE_POLL_TIMEOUT_MS: process.env.IMAGE_POLL_TIMEOUT_MS ?? '',
-            // Image share bridge (#70): flag gates share_image + generate_image
-            // ref normalization/artifact registration in the MCP subprocess.
-            // Must be forwarded explicitly — the subprocess env is allowlisted.
-            IMAGE_SHARE_ENABLED: process.env.IMAGE_SHARE_ENABLED ?? '',
             IMAGE_SHARE_MAX_REFS: process.env.IMAGE_SHARE_MAX_REFS ?? '',
           },
         },

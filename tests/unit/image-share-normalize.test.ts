@@ -6,8 +6,8 @@
  * through the gateway share API, image/images mutual exclusion, order
  * preservation, count/duplicate/http rejection BEFORE any billing call,
  * best-effort revoke on submit failure, artifact registration after file
- * write, and the flag-off regression guarantee (raw pass-through, zero share
- * calls).
+ * write, and the no-gateway-context regression guarantee (raw pass-through,
+ * zero share calls).
  *
  * global.fetch is mocked: calls to GATEWAY_API_URL (share/artifact API) and to
  * the image provider are captured and answered per test.
@@ -27,7 +27,6 @@ const ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'IMAGE_DISABLED',
   'IMAGE_POLL_TIMEOUT_MS',
-  'IMAGE_SHARE_ENABLED',
   'IMAGE_SHARE_MAX_REFS',
   'GATEWAY_API_URL',
   'GATEWAY_API_KEY',
@@ -62,7 +61,6 @@ describe('generate_image share-bridge normalization (#70)', () => {
     }
     process.env.IMAGE_BASE_URL = PROVIDER;
     process.env.IMAGE_API_KEY = 'image-secret';
-    process.env.IMAGE_SHARE_ENABLED = 'true';
     process.env.GATEWAY_API_URL = GATEWAY;
     process.env.GATEWAY_API_KEY = 'gw-key';
     process.env.GATEWAY_AGENT_ID = 'a1';
@@ -72,7 +70,7 @@ describe('generate_image share-bridge normalization (#70)', () => {
 
     calls = [];
     shareStatus = 201;
-    shareItems = [{ share_id: 'shr_1', url: 'https://vm.example.com/shared/tok1', expires_at: new Date(Date.now() + 60000).toISOString() }];
+    shareItems = [{ share_id: 'shr_1', url: 'https://vm.example.com/gateway/shared/tok1', expires_at: new Date(Date.now() + 60000).toISOString() }];
     shareErrorBody = {};
     submitStatus = 202;
     jobResult = { status: 'done', task_id: 't-1', images: [PNG_B64] };
@@ -138,16 +136,16 @@ describe('generate_image share-bridge normalization (#70)', () => {
   const revokeCalls = () => calls.filter((c) => c.method === 'DELETE' && c.url.includes('/api/v1/image-shares/'));
   const submitCall = () => calls.find((c) => c.url === `${PROVIDER}/v1/images/generations`);
 
-  describe('flag off — regression guarantee', () => {
+  describe('no gateway context — regression guarantee', () => {
     test('local path passes through UNCHANGED and no share API is called', async () => {
-      process.env.IMAGE_SHARE_ENABLED = '';
+      delete process.env.GATEWAY_SESSION_ID;
       submitStatus = 400; // end the flow right after submit
       await generate({ image: 'media/session-1/duck.png' });
       expect(shareCalls()).toHaveLength(0);
       expect(submitCall()!.body!.image).toBe('media/session-1/duck.png');
     });
 
-    test('text-to-image with flag ON also makes zero share calls', async () => {
+    test('text-to-image with gateway context also makes zero share calls', async () => {
       submitStatus = 400;
       await generate({});
       expect(shareCalls()).toHaveLength(0);
@@ -155,7 +153,7 @@ describe('generate_image share-bridge normalization (#70)', () => {
     });
   });
 
-  describe('flag on — auto-normalization (§7)', () => {
+  describe('gateway context present — auto-normalization (§7)', () => {
     test('local path ref → share API mint, submit carries the share URL', async () => {
       const res = await generate({ image: 'media/session-1/duck.png' });
       expect(res.isError).toBeUndefined();
@@ -168,7 +166,7 @@ describe('generate_image share-bridge normalization (#70)', () => {
         refs: [{ path: 'media/session-1/duck.png' }],
       });
       expect(sc[0]!.headers['Authorization']).toBe('Bearer gw-key');
-      expect(submitCall()!.body!.image).toBe('https://vm.example.com/shared/tok1');
+      expect(submitCall()!.body!.image).toBe('https://vm.example.com/gateway/shared/tok1');
     });
 
     test('artifact:<id> ref → share API receives artifact_id', async () => {
@@ -178,8 +176,8 @@ describe('generate_image share-bridge normalization (#70)', () => {
 
     test('multiple refs preserve order, https passes through untouched', async () => {
       shareItems = [
-        { share_id: 'shr_1', url: 'https://vm.example.com/shared/tok1', expires_at: '2099-01-01T00:00:00Z' },
-        { share_id: 'shr_2', url: 'https://vm.example.com/shared/tok2', expires_at: '2099-01-01T00:00:00Z' },
+        { share_id: 'shr_1', url: 'https://vm.example.com/gateway/shared/tok1', expires_at: '2099-01-01T00:00:00Z' },
+        { share_id: 'shr_2', url: 'https://vm.example.com/gateway/shared/tok2', expires_at: '2099-01-01T00:00:00Z' },
       ];
       await generate({
         images: ['https://cdn.example.com/pic.png', 'media/session-1/a.png', 'artifact:img_b'],
@@ -189,8 +187,8 @@ describe('generate_image share-bridge normalization (#70)', () => {
       // Submit merges back preserving the caller's order.
       expect(submitCall()!.body!.images).toEqual([
         'https://cdn.example.com/pic.png',
-        'https://vm.example.com/shared/tok1',
-        'https://vm.example.com/shared/tok2',
+        'https://vm.example.com/gateway/shared/tok1',
+        'https://vm.example.com/gateway/shared/tok2',
       ]);
     });
 
@@ -268,8 +266,8 @@ describe('generate_image share-bridge normalization (#70)', () => {
       });
     }, 20000);
 
-    test('flag off → done job returns files with NO artifacts field (regression)', async () => {
-      process.env.IMAGE_SHARE_ENABLED = '';
+    test('no gateway context → done job returns files with NO artifacts field (regression)', async () => {
+      delete process.env.GATEWAY_SESSION_ID;
       const res = await generate({});
       const payload = JSON.parse(res.content[0]!.text) as Record<string, unknown>;
       expect(payload.files).toBeDefined();
