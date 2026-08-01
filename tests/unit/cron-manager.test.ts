@@ -371,7 +371,9 @@ describe('T11-T13: Telegram delivery', () => {
 
   it('T11b: type=agent with no channel → runs and captures output, no delivery (#253)', async () => {
     const runner = makeRunner('channel-less result');
-    const { manager, agentId } = makeManager({ runner, botToken: 'TOKEN123' });
+    // Configure BOTH bot tokens so the "no delivery" assertions below prove it's the
+    // job's missing channel *destination* — not missing bot config — that skips delivery.
+    const { manager, agentId } = makeManager({ runner, botToken: 'TOKEN123', discordBotToken: 'DISC123' });
     await manager.start();
 
     const job = await manager.create({
@@ -391,11 +393,16 @@ describe('T11-T13: Telegram delivery', () => {
     expect(log.status).toBe('ok');
     expect(log.output).toContain('channel-less result');
 
-    // …but no channel delivery is attempted.
+    // …but no channel delivery is attempted — neither Telegram nor Discord.
     const telegramCall = fetchMock.mock.calls.find((c) =>
       typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
     );
     expect(telegramCall).toBeUndefined();
+
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(discordCall).toBeUndefined();
 
     manager.stop();
   });
