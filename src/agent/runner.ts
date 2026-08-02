@@ -1035,14 +1035,46 @@ export class AgentRunner extends EventEmitter {
       typeof p.n === 'number' ? `n="${p.n}"` : '',
       p.image_ref ? `image_ref="${AgentRunner.escapeXmlAttr(p.image_ref)}"` : '',
     ].filter(Boolean);
-    if (!attrs.length) return '';
+    const refs = (p.image_refs ?? []).filter((r) => typeof r === 'string' && r.trim().length > 0);
+    if (!attrs.length && !refs.length) return '';
+    if (!refs.length) {
+      return (
+        `<image-params ${attrs.join(' ')} />\n` +
+        `The user selected the image-generation options above in the composer. When the request ` +
+        `involves creating or editing an image, call the generate_image tool (action="generate") ` +
+        `using these values (pass image_ref as the "image" argument for image-to-image), then ` +
+        `deliver the returned image with your reply tool.\n`
+      );
+    }
+    // Explicitly selected reference images (#73). Rendered as nested elements so a
+    // ref containing separators (commas, quotes) stays unambiguous.
+    const openTag = attrs.length ? `<image-params ${attrs.join(' ')}>` : '<image-params>';
+    const refLines = refs
+      .map((r, i) => `  <ref index="${i + 1}">${AgentRunner.escapeXmlAttr(r.trim())}</ref>`)
+      .join('\n');
+    const passInstruction =
+      refs.length === 1
+        ? `Pass that single ref as the "image" argument of generate_image.`
+        : `Pass all ${refs.length} refs as the "images" argument of generate_image, in the same order.`;
     return (
-      `<image-params ${attrs.join(' ')} />\n` +
+      `${openTag}\n${refLines}\n</image-params>\n` +
       `The user selected the image-generation options above in the composer. When the request ` +
       `involves creating or editing an image, call the generate_image tool (action="generate") ` +
-      `using these values (pass image_ref as the "image" argument for image-to-image), then ` +
-      `deliver the returned image with your reply tool.\n`
+      `using these values, then deliver the returned image with your reply tool.\n` +
+      `The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ` +
+      `${passInstruction} Do NOT reinterpret which images they are, do NOT call list_refs to ` +
+      `second-guess an explicit selection, and do not drop any of them.\n`
     );
+  }
+
+  /**
+   * The durable slice of the composer image options — everything except
+   * `image_refs`, which is a per-turn explicit selection (#73) and must never be
+   * restored as sticky session config. Returns undefined when nothing is durable.
+   */
+  private static durableImageConfig(p: ImageParams): ImageParams | undefined {
+    const { image_refs: _refs, ...durable } = p;
+    return Object.keys(durable).length ? durable : undefined;
   }
 
   private static buildChannelXml(params: {
@@ -2335,10 +2367,12 @@ export class AgentRunner extends EventEmitter {
     // Persist the composer image options to session meta so the web can restore the
     // selection on reload (SessionMeta.imageConfig). Only when the send carries them
     // (the web sends image_params on first-set/change), so this holds the latest.
+    // image_refs are per-turn and deliberately excluded (#73).
     // Channel is 'api' here (api sessions live under api-<chatId>). Best-effort.
-    if (opts.imageParams) {
+    const durableImageConfig = opts.imageParams ? AgentRunner.durableImageConfig(opts.imageParams) : undefined;
+    if (durableImageConfig) {
       this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfig }, 'api')
         .catch(() => {});
     }
     const channelXml =
@@ -2679,10 +2713,14 @@ export class AgentRunner extends EventEmitter {
     const imageParamsNoteStream = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
     // Persist composer image config to session meta (SessionMeta.imageConfig) so the
     // web restores the selection on reload. This is the streaming path the web uses.
+    // image_refs are per-turn and deliberately excluded (#73).
     // Channel 'api' — api sessions live under api-<chatId>. Best-effort.
-    if (opts.imageParams) {
+    const durableImageConfigStream = opts.imageParams
+      ? AgentRunner.durableImageConfig(opts.imageParams)
+      : undefined;
+    if (durableImageConfigStream) {
       this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfigStream }, 'api')
         .catch(() => {});
     }
     const channelXml =

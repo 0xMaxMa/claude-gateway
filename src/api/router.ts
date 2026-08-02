@@ -311,6 +311,25 @@ export function createApiRouter(
           if (v.trim()) out[f] = v.trim();
         }
       }
+      // image_refs (#73) — reference images explicitly selected in the composer,
+      // order-significant. Each entry is a ref from GET /api/v1/image-catalog.
+      if (ip.image_refs !== undefined) {
+        const refs = ip.image_refs;
+        if (!Array.isArray(refs) || refs.some((r) => typeof r !== 'string' || !r.trim())) {
+          res.status(400).json({ error: 'image_params.image_refs must be an array of non-empty strings' });
+          return;
+        }
+        const trimmedRefs = (refs as string[]).map((r) => r.trim());
+        if (trimmedRefs.length > 5) {
+          res.status(400).json({ error: 'image_params.image_refs allows at most 5 references' });
+          return;
+        }
+        if (new Set(trimmedRefs).size !== trimmedRefs.length) {
+          res.status(400).json({ error: 'image_params.image_refs must not contain duplicates' });
+          return;
+        }
+        if (trimmedRefs.length) out.image_refs = trimmedRefs;
+      }
       if (ip.n !== undefined) {
         if (typeof ip.n !== 'number' || !Number.isFinite(ip.n) || ip.n < 1) {
           res.status(400).json({ error: 'image_params.n must be a positive number' });

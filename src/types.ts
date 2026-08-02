@@ -282,6 +282,14 @@ export type ImageParams = {
   size?: string;
   aspect_ratio?: string;
   image_ref?: string;
+  /**
+   * Reference images explicitly selected in the composer, in the order the user
+   * picked them. Each entry is a `ref` value from GET /api/v1/image-catalog —
+   * either an `artifact:<id>` ref or a media-relative path (the same forms the
+   * generate_image `image`/`images` arguments accept). Per-turn only: unlike the
+   * rest of ImageParams these are NOT persisted as durable session image config.
+   */
+  image_refs?: string[];
   n?: number;
 };
 
