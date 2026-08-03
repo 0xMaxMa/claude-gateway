@@ -52,8 +52,8 @@ export class AppsModule implements ToolModule {
           properties: {
             registry_app: { type: 'string', description: 'Registry app name (e.g. "getpod-manager")' },
             version: { type: 'string', description: 'Registry version to install (default: latest)' },
-            github_url: { type: 'string', description: 'GitHub repo URL (requires commit)' },
-            commit: { type: 'string', description: '40-char hex commit hash (required with github_url)' },
+            github_url: { type: 'string', description: 'GitHub repo URL' },
+            commit: { type: 'string', description: '40-char hex commit hash to pin (optional; with github_url, omit to auto-resolve the default branch HEAD)' },
             local_path: { type: 'string', description: 'Local app path within ~/.claude-gateway/apps/' },
             env_vars: {
               type: 'object',
