@@ -8,6 +8,7 @@ import { RegistryClient, RegistryVersion } from './registry-client';
 import {
   parseAppYaml,
   generateCompose,
+  generateSecretValue,
   ComposePort,
   ComposeSocket,
 } from './compose-generator';
@@ -494,9 +495,27 @@ export class AppInstaller {
       const val = (envVars[key] ?? '').replace(/[\r\n]/g, '');
       envLines.push(`${key}=${val}`);
     }
-    // Also write any explicitly provided vars not already declared as secrets
+    // Self-generating secrets: write a fresh random value unless the operator
+    // pinned one via envVars. Log only the key names, never the values.
+    const generatedKeySet = new Set(generated.generatedKeys.map((g) => g.key));
+    const generatedNames: string[] = [];
+    for (const g of generated.generatedKeys) {
+      const pinned = envVars[g.key];
+      let val: string;
+      if (pinned !== undefined && pinned !== '') {
+        val = pinned.replace(/[\r\n]/g, '');
+      } else {
+        val = generateSecretValue(g.encoding, g.bytes);
+        generatedNames.push(g.key);
+      }
+      envLines.push(`${g.key}=${val}`);
+    }
+    if (generatedNames.length > 0) {
+      this.log(job, `Generated secrets: ${generatedNames.join(', ')}`);
+    }
+    // Also write any explicitly provided vars not already declared as secrets/generated
     for (const [k, v] of Object.entries(envVars)) {
-      if (!generated.secretKeys.includes(k)) {
+      if (!generated.secretKeys.includes(k) && !generatedKeySet.has(k)) {
         envLines.push(`${k}=${v.replace(/[\r\n]/g, '')}`);
       }
     }

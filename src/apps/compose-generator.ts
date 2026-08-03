@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import * as yaml from 'js-yaml';
 
 // ─── app.yaml types ───────────────────────────────────────────────────────────
@@ -97,10 +98,23 @@ export interface AgentDeclaration {
   name: string;
 }
 
+export interface GeneratedKey {
+  key: string;
+  encoding: GeneratorEncoding;
+  bytes: number;
+}
+
 export interface GeneratedCompose {
   ports: ComposePort[];
   sockets: ComposeSocket[];
   secretKeys: string[];
+  /**
+   * Keys the installer must fill with a fresh random value at install time
+   * (declared in app.yaml as `KEY=!generate:<encoding>:<bytes>`). Kept out of
+   * both the compose `environment` block and `secretKeys` so they are never
+   * prompted for.
+   */
+  generatedKeys: GeneratedKey[];
   agentDeclaration: AgentDeclaration | null;
   warnings: string[];
 }
@@ -120,6 +134,65 @@ const ALLOWED_CAPS = new Set([
   'NET_BIND_SERVICE', 'KILL', 'AUDIT_WRITE',
 ]);
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+// ─── Self-generating secrets ────────────────────────────────────────────────
+// An app.yaml env entry of the form `KEY=!generate:<encoding>:<bytes>` declares
+// a per-install random string. The installer fills it with crypto.randomBytes
+// at install time; the author never has to hand a value to the installer.
+export type GeneratorEncoding = 'hex' | 'base64' | 'base64url';
+const GENERATE_PREFIX = '!generate:';
+const GEN_ENCODINGS = new Set<GeneratorEncoding>(['hex', 'base64', 'base64url']);
+const GEN_MIN_BYTES = 8;
+const GEN_MAX_BYTES = 512;
+
+/**
+ * Parse a generator marker value (`!generate:<encoding>:<bytes>`).
+ * Returns null when `value` is not a marker at all (a plain static value).
+ * Throws — naming the service and key — when it IS a marker but malformed,
+ * so a typo fails at parse time rather than installing a broken app.
+ */
+export function parseGeneratorMarker(
+  svcName: string,
+  key: string,
+  value: string,
+): { encoding: GeneratorEncoding; bytes: number } | null {
+  if (!value.startsWith(GENERATE_PREFIX)) return null;
+  const spec = value.slice(GENERATE_PREFIX.length);
+  const parts = spec.split(':');
+  if (parts.length !== 2) {
+    throw new Error(
+      `Service "${svcName}".environment key "${key}": generator marker must be "!generate:<encoding>:<bytes>"`,
+    );
+  }
+  const [encoding, bytesStr] = parts;
+  if (!GEN_ENCODINGS.has(encoding as GeneratorEncoding)) {
+    throw new Error(
+      `Service "${svcName}".environment key "${key}": unknown generator encoding "${encoding}" (allowed: ${[...GEN_ENCODINGS].join(', ')})`,
+    );
+  }
+  if (!/^[0-9]+$/.test(bytesStr)) {
+    throw new Error(
+      `Service "${svcName}".environment key "${key}": generator length must be an integer, got "${bytesStr}"`,
+    );
+  }
+  const bytes = parseInt(bytesStr, 10);
+  if (bytes < GEN_MIN_BYTES || bytes > GEN_MAX_BYTES) {
+    throw new Error(
+      `Service "${svcName}".environment key "${key}": generator length ${bytes} out of range (${GEN_MIN_BYTES}-${GEN_MAX_BYTES} bytes)`,
+    );
+  }
+  return { encoding: encoding as GeneratorEncoding, bytes };
+}
+
+/**
+ * Produce a random secret value for a generated key. `base64url` yields a
+ * URL/connection-string-safe string (no `+` `/` `=`), which matters when the
+ * value is embedded in e.g. `postgres://user:pass@host/db`.
+ */
+export function generateSecretValue(encoding: GeneratorEncoding, bytes: number): string {
+  return crypto.randomBytes(bytes).toString(encoding);
+}
+
 const IMAGE_RE = /^[a-z0-9._\-/:@]+$/;
 const NAMED_VOLUME_RE = /^[a-z0-9_-]+$/;
 const AGENT_NAME_RE = /^[a-z][a-z0-9-]{1,63}$/;
@@ -196,6 +269,7 @@ export function generateCompose(
     ports: [],
     sockets: [],
     secretKeys: [],
+    generatedKeys: [],
     agentDeclaration: null,
     warnings: [],
   };
@@ -300,7 +374,17 @@ export function generateCompose(
           result.secretKeys.push(key);
         }
       } else {
-        staticEnv.push(envEntry);
+        const key = envEntry.slice(0, eqIdx).trim();
+        const value = envEntry.slice(eqIdx + 1);
+        const gen = parseGeneratorMarker(svcName, key, value);
+        if (gen) {
+          // Self-generating secret — filled at install, kept out of compose
+          if (!result.generatedKeys.some((g) => g.key === key)) {
+            result.generatedKeys.push({ key, encoding: gen.encoding, bytes: gen.bytes });
+          }
+        } else {
+          staticEnv.push(envEntry);
+        }
       }
     }
     if (staticEnv.length > 0) composeSvc.environment = staticEnv;
@@ -632,11 +716,16 @@ function validateEnvironment(svcName: string, envList: unknown): void {
         `Service "${svcName}".environment key "${key}" must match ${ENV_KEY_RE}`,
       );
     }
-    // Strip any newlines from value (value after =)
-    if (entry.includes('=') && /[\n\r]/.test(entry.slice(entry.indexOf('=') + 1))) {
-      throw new Error(
-        `Service "${svcName}".environment entry "${key}" value contains newline characters`,
-      );
+    if (entry.includes('=')) {
+      const value = entry.slice(entry.indexOf('=') + 1);
+      // Reject a malformed generator marker at parse time (throws naming svc+key).
+      parseGeneratorMarker(svcName, key, value);
+      // Strip any newlines from value (value after =)
+      if (/[\n\r]/.test(value)) {
+        throw new Error(
+          `Service "${svcName}".environment entry "${key}" value contains newline characters`,
+        );
+      }
     }
   }
 }

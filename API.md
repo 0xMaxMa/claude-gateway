@@ -3103,7 +3103,7 @@ services:
 | `image` | Docker image (mutually exclusive with `build`) |
 | `command` | Override container command |
 | `entrypoint` | Override container entrypoint |
-| `environment` | Static env vars (`KEY=value`) or secret keys (`KEY` without `=`) |
+| `environment` | Static env vars (`KEY=value`), secret keys to prompt for (`KEY` without `=`), or self-generating secrets (`KEY=!generate:<encoding>:<bytes>`) |
 | `volumes` | Volume mounts (named volumes or host paths within app dir) |
 | `ports` | Array of port declarations (see below) |
 | `depends_on` | Service dependency list |
@@ -3111,6 +3111,8 @@ services:
 | `gateway_api` | Host script bridge via Unix socket (see below) |
 
 **Banned fields:** `network_mode: host`, `privileged`, `cap_add`. The gateway always injects `cap_drop: ALL`, `restart: unless-stopped`, `env_file: .env`, and resource limits.
+
+**Self-generating secrets (`!generate`):** An `environment` entry of the form `KEY=!generate:<encoding>:<bytes>` declares a per-install random string. The installer fills it with `crypto.randomBytes(<bytes>)` at install time — the author never hands a value to the installer, and such keys are **not** reported in `secretKeys` (they are never prompted for). Encodings: `hex`, `base64`, `base64url` (URL/connection-string safe — no `+` `/` `=`). Length must be `8`–`512` bytes; an unknown encoding or bad length fails at parse. An explicit `env_vars` value for the key overrides generation, and `update` preserves the value already in `.env` (never regenerates). Example: `- NEXTAUTH_SECRET=!generate:base64:32`.
 
 **Agent service declaration:**
 
