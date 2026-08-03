@@ -43,8 +43,8 @@ export class HistoryDB {
     this.db.exec('PRAGMA foreign_keys=ON');
     this._initSchema();
     this.insertStmt = this.db.prepare(
-      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -89,6 +89,7 @@ export class HistoryDB {
         sender_id           TEXT,
         platform_message_id TEXT,
         media_files         TEXT,
+        image_refs          TEXT,
         ts                  INTEGER NOT NULL,
         created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
       );
@@ -115,6 +116,15 @@ export class HistoryDB {
       END;
 
     `);
+
+    // image_refs (#74) postdates existing DBs: CREATE TABLE IF NOT EXISTS won't
+    // touch them, so migrate with a guarded ALTER. "duplicate column" is the
+    // only expected error (fresh DBs already have it from the CREATE above).
+    try {
+      this.db.exec('ALTER TABLE messages ADD COLUMN image_refs TEXT');
+    } catch {
+      /* column already exists */
+    }
   }
 
   insertMessage(msg: HistoryMessage): void {
@@ -129,6 +139,7 @@ export class HistoryDB {
         msg.senderId ?? null,
         msg.platformMessageId ?? null,
         msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
+        msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null,
         msg.ts,
       );
     } catch (err) {
@@ -230,7 +241,7 @@ export class HistoryDB {
     // skipped or repeated when the caller passes the cursor's id component back.
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
-             platform_message_id, media_files, ts
+             platform_message_id, media_files, image_refs, ts
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY ts ${order}, id ${order}
@@ -457,6 +468,14 @@ export class HistoryDB {
         mediaFiles = undefined;
       }
     }
+    let imageRefs: string[] | undefined;
+    if (r['image_refs'] && typeof r['image_refs'] === 'string') {
+      try {
+        imageRefs = JSON.parse(r['image_refs'] as string) as string[];
+      } catch {
+        imageRefs = undefined;
+      }
+    }
     return {
       id: r['id'] as number,
       chatId: r['chat_id'] as string,
@@ -468,6 +487,7 @@ export class HistoryDB {
       senderId: (r['sender_id'] as string | null) ?? undefined,
       platformMessageId: (r['platform_message_id'] as string | null) ?? undefined,
       mediaFiles,
+      ...(imageRefs?.length ? { imageRefs } : {}),
       ts: r['ts'] as number,
     };
   }

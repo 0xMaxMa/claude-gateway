@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../../src/history/db';
 import { HistoryMessage } from '../../src/history/types';
 
@@ -58,6 +59,69 @@ describe('HistoryDB.insertMessage', () => {
     const page = db.getMessages('telegram-12345');
     expect(page.messages).toHaveLength(1);
     expect(page.messages[0]!.mediaFiles).toEqual(['media/telegram-12345/photo.jpg']);
+  });
+
+  it('round-trips imageRefs on a user row (#74)', () => {
+    const db = makeDb();
+    const refs = ['artifact:img_abc123', 'api-42/upload.png'];
+    db.insertMessage(makeMsg({ imageRefs: refs }));
+    const page = db.getMessages('telegram-12345');
+    expect(page.messages).toHaveLength(1);
+    expect(page.messages[0]!.imageRefs).toEqual(refs);
+  });
+
+  it('omits imageRefs when absent or empty', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg({ ts: 1 }));
+    db.insertMessage(makeMsg({ ts: 2, imageRefs: [] }));
+    const page = db.getMessages('telegram-12345');
+    expect(page.messages).toHaveLength(2);
+    for (const m of page.messages) {
+      expect(m.imageRefs).toBeUndefined();
+    }
+  });
+
+  it('opens a pre-#74 database and migrates it in place (guarded ALTER)', () => {
+    // Simulate an old DB: create the table WITHOUT image_refs, then let
+    // HistoryDB open the same file — _initSchema must add the column instead
+    // of failing, and inserts/reads must work.
+    const dbDir = path.join(agentsBaseDir, AGENT_ID);
+    fs.mkdirSync(dbDir, { recursive: true });
+    const raw = new DatabaseSync(path.join(dbDir, 'history.db'));
+    raw.exec(`
+      CREATE TABLE messages (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id             TEXT    NOT NULL,
+        session_id          TEXT    NOT NULL,
+        source              TEXT    NOT NULL,
+        role                TEXT    NOT NULL,
+        content             TEXT    NOT NULL,
+        sender_name         TEXT,
+        sender_id           TEXT,
+        platform_message_id TEXT,
+        media_files         TEXT,
+        ts                  INTEGER NOT NULL,
+        created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+      );
+    `);
+    raw.close();
+
+    const db = makeDb();
+    db.insertMessage(makeMsg({ imageRefs: ['artifact:img_migrated'] }));
+    const page = db.getMessages('telegram-12345');
+    expect(page.messages[0]!.imageRefs).toEqual(['artifact:img_migrated']);
+  });
+
+  it('tolerates malformed image_refs JSON (returns undefined, not a throw)', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg());
+    // Corrupt the column directly — _rowToMessage must swallow the parse error.
+    const raw = new DatabaseSync(path.join(agentsBaseDir, AGENT_ID, 'history.db'));
+    raw.exec(`UPDATE messages SET image_refs = '{not json'`);
+    raw.close();
+    const page = db.getMessages('telegram-12345');
+    expect(page.messages).toHaveLength(1);
+    expect(page.messages[0]!.imageRefs).toBeUndefined();
   });
 
   it('inserts multiple messages', () => {

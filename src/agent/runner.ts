@@ -2336,6 +2336,10 @@ export class AgentRunner extends EventEmitter {
         role: 'user',
         content: message,
         mediaFiles: finalMediaFiles?.length ? finalMediaFiles : undefined,
+        // Display-only (#74): lets the UI show which earlier images this turn
+        // referenced after a reload. The generation path reads the refs from the
+        // image-params note, never from here.
+        imageRefs: opts.imageParams?.image_refs?.length ? opts.imageParams.image_refs : undefined,
         ts: apiUserTs,
       });
     }
@@ -2548,6 +2552,10 @@ export class AgentRunner extends EventEmitter {
         role: 'user',
         content: message,
         mediaFiles: finalMediaFilesStream?.length ? finalMediaFilesStream : undefined,
+        // Display-only (#74): lets the UI show which earlier images this turn
+        // referenced after a reload. The generation path reads the refs from the
+        // image-params note, never from here.
+        imageRefs: opts.imageParams?.image_refs?.length ? opts.imageParams.image_refs : undefined,
         ts: streamUserTs,
       });
     }
