@@ -312,6 +312,40 @@ describe('AgentManager', () => {
       await manager.deleteAgent(entry);
       // no throw = pass
     });
+
+    // Safety: deleting an app-agent must never remove a user-created agent that
+    // happens to share the same id (issue #263 — orphan reclaim must not touch
+    // user agents).
+    it('removes only the app-agent entry, preserving a same-named user agent', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          gateway: { logDir: 'logs', timezone: 'UTC' },
+          agents: [
+            { id: 'shared', type: 'user' }, // user-created agent (not an app-agent)
+            { id: 'shared', type: 'app-agent', containerName: 'app-shared' },
+          ],
+        }),
+        'utf-8',
+      );
+      // The user agent has a REAL workspace dir at the shared path.
+      const userWs = path.join(tmpDir, 'agents', 'shared', 'workspace');
+      fs.mkdirSync(userWs, { recursive: true });
+      fs.writeFileSync(path.join(userWs, 'SOUL.md'), 'user data', 'utf-8');
+
+      await manager.deleteAgentByName('shared');
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        agents: Array<Record<string, unknown>>;
+      };
+      // app-agent entry removed…
+      expect(config.agents.filter((a) => a['id'] === 'shared' && a['type'] === 'app-agent')).toHaveLength(0);
+      // …but the user agent entry is preserved
+      expect(config.agents.filter((a) => a['id'] === 'shared' && a['type'] === 'user')).toHaveLength(1);
+      // and its real workspace dir is untouched
+      expect(fs.existsSync(path.join(userWs, 'SOUL.md'))).toBe(true);
+    });
   });
 
   // ─── findAgentByName() ────────────────────────────────────────────────────

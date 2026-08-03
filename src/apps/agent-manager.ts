@@ -203,7 +203,13 @@ export class AgentManager {
    */
   async deleteAgentByName(agentName: string): Promise<void> {
     const workspaceLink = path.join(this.agentsDir, agentName, 'workspace');
-    try { fs.rmSync(workspaceLink, { force: true }); } catch { /* already gone */ }
+    // Only remove the symlink an app-agent owns — never a user agent's real
+    // workspace directory that may sit at the same path under a shared name.
+    try {
+      if (fs.lstatSync(workspaceLink).isSymbolicLink()) {
+        fs.rmSync(workspaceLink, { force: true });
+      }
+    } catch { /* already gone */ }
     await this.removeConfigEntry(agentName);
   }
 
@@ -306,7 +312,11 @@ export class AgentManager {
   private async removeConfigEntry(agentId: string): Promise<void> {
     return this.withConfigLock(() => {
       const config = this.readConfig();
-      config.agents = config.agents.filter((a) => a['id'] !== agentId);
+      // Only ever remove the app-agent entry — never a user-created agent that
+      // happens to share the same id. All callers operate on app agents.
+      config.agents = config.agents.filter(
+        (a) => !(a['id'] === agentId && a['type'] === 'app-agent'),
+      );
       this.writeConfig(config);
     });
   }
