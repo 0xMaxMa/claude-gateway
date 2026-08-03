@@ -1077,6 +1077,37 @@ export class AgentRunner extends EventEmitter {
     return Object.keys(durable).length ? durable : undefined;
   }
 
+  /**
+   * The web builds image_ref/image_refs from the paths the upload endpoint
+   * returned — the ui-upload STAGING paths. promoteUiUploads then MOVES those
+   * files into per-session storage, so a note or history row built from the
+   * raw params would hand out dead paths (the agent's generate_image call
+   * fails image_ref_not_found and has to guess its way to the real file).
+   * Substitute every ref that matches a promoted staging path with its new
+   * session path; refs that were never staged (catalog refs, artifact:<id>)
+   * pass through untouched. (#74)
+   */
+  static remapImageParamsRefs(
+    p: ImageParams | undefined,
+    stagedPaths: readonly string[] | undefined,
+    promotedPaths: readonly string[] | undefined,
+  ): ImageParams | undefined {
+    if (!p || !stagedPaths?.length || !promotedPaths?.length) return p;
+    const map = new Map<string, string>();
+    for (let i = 0; i < Math.min(stagedPaths.length, promotedPaths.length); i++) {
+      const from = stagedPaths[i]!;
+      const to = promotedPaths[i]!;
+      if (from !== to) map.set(from, to);
+    }
+    if (!map.size) return p;
+    const remap = (r: string): string => map.get(r) ?? r;
+    return {
+      ...p,
+      ...(p.image_ref ? { image_ref: remap(p.image_ref) } : {}),
+      ...(p.image_refs?.length ? { image_refs: p.image_refs.map(remap) } : {}),
+    };
+  }
+
   private static buildChannelXml(params: {
     content?: string;
     meta?: Record<string, string>;
@@ -2311,6 +2342,9 @@ export class AgentRunner extends EventEmitter {
     const finalMediaFiles = opts.mediaFiles?.length
       ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger)
       : undefined;
+    // Refs built from staging paths must follow the files to their promoted
+    // location — see remapImageParamsRefs (#74).
+    const imageParams = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFiles);
 
     // Resolve media files to absolute paths for file-path based image passing
     // (same pattern as Telegram — Claude Code reads files via Read tool instead of base64 inline)
@@ -2339,7 +2373,7 @@ export class AgentRunner extends EventEmitter {
         // Display-only (#74): lets the UI show which earlier images this turn
         // referenced after a reload. The generation path reads the refs from the
         // image-params note, never from here.
-        imageRefs: opts.imageParams?.image_refs?.length ? opts.imageParams.image_refs : undefined,
+        imageRefs: imageParams?.image_refs?.length ? imageParams.image_refs : undefined,
         ts: apiUserTs,
       });
     }
@@ -2367,13 +2401,13 @@ export class AgentRunner extends EventEmitter {
 
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttr = effectiveImagePaths.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePaths[0]!)}"` : '';
-    const imageParamsNote = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
+    const imageParamsNote = imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '';
     // Persist the composer image options to session meta so the web can restore the
     // selection on reload (SessionMeta.imageConfig). Only when the send carries them
     // (the web sends image_params on first-set/change), so this holds the latest.
     // image_refs are per-turn and deliberately excluded (#73).
     // Channel is 'api' here (api sessions live under api-<chatId>). Best-effort.
-    const durableImageConfig = opts.imageParams ? AgentRunner.durableImageConfig(opts.imageParams) : undefined;
+    const durableImageConfig = imageParams ? AgentRunner.durableImageConfig(imageParams) : undefined;
     if (durableImageConfig) {
       this.sessionStore
         .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfig }, 'api')
@@ -2532,6 +2566,9 @@ export class AgentRunner extends EventEmitter {
     const finalMediaFilesStream = opts.mediaFiles?.length
       ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger)
       : undefined;
+    // Refs built from staging paths must follow the files to their promoted
+    // location — see remapImageParamsRefs (#74).
+    const imageParamsStream = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFilesStream);
 
     // Resolve media files to absolute paths for file-path based image passing
     const imagePathsStream = finalMediaFilesStream?.length ? this.resolveMediaPaths(finalMediaFilesStream) : [];
@@ -2555,7 +2592,7 @@ export class AgentRunner extends EventEmitter {
         // Display-only (#74): lets the UI show which earlier images this turn
         // referenced after a reload. The generation path reads the refs from the
         // image-params note, never from here.
-        imageRefs: opts.imageParams?.image_refs?.length ? opts.imageParams.image_refs : undefined,
+        imageRefs: imageParamsStream?.image_refs?.length ? imageParamsStream.image_refs : undefined,
         ts: streamUserTs,
       });
     }
@@ -2718,13 +2755,13 @@ export class AgentRunner extends EventEmitter {
 
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttrStream = effectiveImagePathsStream.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePathsStream[0]!)}"` : '';
-    const imageParamsNoteStream = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
+    const imageParamsNoteStream = imageParamsStream ? AgentRunner.buildImageParamsNote(imageParamsStream) : '';
     // Persist composer image config to session meta (SessionMeta.imageConfig) so the
     // web restores the selection on reload. This is the streaming path the web uses.
     // image_refs are per-turn and deliberately excluded (#73).
     // Channel 'api' — api sessions live under api-<chatId>. Best-effort.
-    const durableImageConfigStream = opts.imageParams
-      ? AgentRunner.durableImageConfig(opts.imageParams)
+    const durableImageConfigStream = imageParamsStream
+      ? AgentRunner.durableImageConfig(imageParamsStream)
       : undefined;
     if (durableImageConfigStream) {
       this.sessionStore

@@ -236,3 +236,47 @@ describe('durable image config excludes per-turn refs (#73)', () => {
     });
   });
 });
+
+describe('remapImageParamsRefs — staging refs follow promoted files (#74)', () => {
+  const STAGED = ['media/ui-upload/abc123/one.jpeg', 'media/ui-upload/abc123/two.png'];
+  const PROMOTED = ['media/api-s1/1-one.jpeg', 'media/api-s1/2-two.png'];
+
+  const remap = (p: ImageParams | undefined, staged?: string[], promoted?: string[]) =>
+    AgentRunner.remapImageParamsRefs(p, staged, promoted);
+
+  it('rewrites image_ref and matching image_refs entries to the promoted paths', () => {
+    const out = remap(
+      {
+        model: 'gpt-image',
+        image_ref: STAGED[0],
+        image_refs: ['artifact:img_keep', STAGED[0]!, STAGED[1]!],
+      },
+      STAGED,
+      PROMOTED,
+    );
+    expect(out).toEqual({
+      model: 'gpt-image',
+      image_ref: PROMOTED[0],
+      image_refs: ['artifact:img_keep', PROMOTED[0], PROMOTED[1]],
+    });
+  });
+
+  it('leaves catalog/artifact refs untouched and preserves order', () => {
+    const refs = ['api-s1/old-upload.jpeg', 'artifact:img_x'];
+    const out = remap({ image_refs: [...refs] }, STAGED, PROMOTED);
+    expect(out!.image_refs).toEqual(refs);
+  });
+
+  it('is a no-op without params, without media files, or when promotion failed (same path back)', () => {
+    expect(remap(undefined, STAGED, PROMOTED)).toBeUndefined();
+    const p: ImageParams = { image_refs: [STAGED[0]!] };
+    expect(remap(p, undefined, undefined)).toBe(p);
+    // promoteUiUploads returns the ORIGINAL path when a move fails — no mapping entry.
+    expect(remap(p, STAGED, [...STAGED])).toBe(p);
+  });
+
+  it('does not add ref fields that were not present', () => {
+    const out = remap({ model: 'gpt-image' }, STAGED, PROMOTED);
+    expect(out).toEqual({ model: 'gpt-image' });
+  });
+});
