@@ -247,9 +247,9 @@ export function createAppsRouter(
         res.status(404).json({ error: `App "${req.params.name}" not found` });
         return;
       }
-      if (entry.source !== 'registry') {
+      if (entry.source === 'local') {
         res.status(400).json({
-          error: 'Only registry-installed apps can be updated via this endpoint',
+          error: 'Local (symlinked) apps cannot be updated — reinstall from source instead',
         });
         return;
       }

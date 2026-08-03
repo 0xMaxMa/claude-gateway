@@ -99,7 +99,7 @@ export class AppsModule implements ToolModule {
       },
       {
         name: 'update_app',
-        description: 'Update a registry-installed app to its latest version. Returns a jobId.',
+        description: 'Update an installed app. Registry apps update to their latest published version; GitHub-URL (custom) apps update to their repo default-branch HEAD. Returns a jobId.',
         inputSchema: {
           type: 'object',
           properties: {

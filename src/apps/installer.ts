@@ -680,17 +680,14 @@ export class AppInstaller {
 
     const entry = await this.registry.get(appName);
     if (!entry) throw new Error(`App "${appName}" is not installed`);
-    if (entry.source !== 'registry') {
-      throw new Error('Only registry-installed apps can be updated via this endpoint');
-    }
 
-    // Resolve latest version
-    const app = await this.registryClient.findApp(appName);
-    if (!app) throw new Error(`App "${appName}" not found in registry`);
-    const latest = selectLatest(app.versions);
-    if (!latest) throw new Error(`No versions available for "${appName}"`);
+    // Resolve the repo + target commit for this app's source. Registry apps
+    // resolve the latest published version; GitHub-installed apps resolve the
+    // default branch HEAD via git ls-remote. Local (symlinked) apps have no
+    // remote to pull and are not updatable.
+    const target = await this.resolveUpdateTarget(entry);
 
-    if (latest.commit === entry.commit) {
+    if (target.newCommit === entry.commit) {
       job.status = 'completed';
       job.result = {
         appName,
@@ -699,26 +696,31 @@ export class AppInstaller {
         agentDeclaration: entry.agentDeclaration ?? null,
       };
       job.updatedAt = Date.now();
-      this.log(job, `Already at latest version ${entry.version}`);
+      this.log(job, `Already at latest commit ${entry.commit.slice(0, 8)}`);
       return;
     }
 
-    this.log(job, `Updating ${appName} from ${entry.version} → ${latest.version}`);
+    this.log(job, `Updating ${appName} ${entry.commit.slice(0, 8)} → ${target.newCommit.slice(0, 8)}`);
 
     const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${crypto.randomUUID()}`);
     try {
       // ── Shallow fetch of specific commit into tmp dir ─────────────────────
-      this.log(job, `Cloning ${app.repo}`);
+      this.log(job, `Cloning ${target.repo}`);
       fs.mkdirSync(tmpDir, { recursive: true });
       this.run(['git', 'init'], tmpDir);
-      this.run(['git', 'remote', 'add', 'origin', app.repo], tmpDir);
-      this.run(['git', 'fetch', '--depth', '1', 'origin', latest.commit], tmpDir);
+      this.run(['git', 'remote', 'add', 'origin', target.repo], tmpDir);
+      this.run(['git', 'fetch', '--depth', '1', 'origin', target.newCommit], tmpDir);
       this.run(['git', 'checkout', 'FETCH_HEAD'], tmpDir);
 
       const yamlContent = fs.readFileSync(path.join(tmpDir, 'app.yaml'), 'utf-8');
       const appYaml = parseAppYaml(yamlContent, tmpDir);
       const composePath = path.join(tmpDir, 'docker-compose.yml');
       const generated = generateCompose(appYaml, appName, tmpDir, composePath);
+
+      // Registry apps carry the published version; GitHub installs read it
+      // from the freshly-fetched app.yaml.
+      const newVersion = target.registryVersion ?? appYaml.version;
+      this.log(job, `New version ${newVersion}`);
 
       for (const w of generated.warnings) {
         this.log(job, `Warning: ${w}`);
@@ -738,8 +740,8 @@ export class AppInstaller {
 
       const newEntry: AppEntry = {
         ...entry,
-        version: latest.version,
-        commit: latest.commit,
+        version: newVersion,
+        commit: target.newCommit,
         installPath: tmpDir,
         ...(generated.agentDeclaration !== null ? { agentDeclaration: generated.agentDeclaration } : {}),
         ...(agentPaths ? { agentPaths } : {}),
@@ -856,7 +858,7 @@ export class AppInstaller {
         agentDeclaration: generated.agentDeclaration,
       };
       job.updatedAt = Date.now();
-      this.log(job, `Update complete → ${latest.version}`);
+      this.log(job, `Update complete → ${newVersion}`);
 
     } catch (err) {
       if (fs.existsSync(tmpDir)) {
@@ -864,6 +866,40 @@ export class AppInstaller {
       }
       throw err;
     }
+  }
+
+  /**
+   * Resolve the repo URL and target commit to update an installed app to.
+   * - `registry`: latest published version via the registry client.
+   * - `custom` (GitHub URL install): the default branch HEAD via git ls-remote,
+   *   so the app follows its repo without a data-destroying reinstall.
+   * - `local` (symlinked dir): not updatable — there is no remote to pull.
+   */
+  private async resolveUpdateTarget(
+    entry: AppEntry,
+  ): Promise<{ repo: string; newCommit: string; registryVersion?: string }> {
+    if (entry.source === 'registry') {
+      const app = await this.registryClient.findApp(entry.name);
+      if (!app) throw new Error(`App "${entry.name}" not found in registry`);
+      const latest = selectLatest(app.versions);
+      if (!latest) throw new Error(`No versions available for "${entry.name}"`);
+      return { repo: app.repo, newCommit: latest.commit, registryVersion: latest.version };
+    }
+
+    if (entry.source === 'custom') {
+      const url = entry.githubUrl;
+      if (!url || !GITHUB_URL_RE.test(url)) {
+        throw new Error(`App "${entry.name}" has no valid GitHub URL to update from`);
+      }
+      const { stdout } = this.run(['git', 'ls-remote', url, 'HEAD'], process.cwd());
+      const match = stdout.trim().match(/^([0-9a-f]{40})\s+HEAD/);
+      if (!match) throw new Error(`Could not resolve HEAD commit for ${url}`);
+      return { repo: url, newCommit: match[1] };
+    }
+
+    throw new Error(
+      `App "${entry.name}" is installed from a local path and cannot be updated — reinstall from source instead`,
+    );
   }
 
   private async resolveSource(

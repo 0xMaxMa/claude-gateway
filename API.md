@@ -3005,7 +3005,12 @@ For custom/local apps, `latest` and `latest_commit` are `null` and `updateable` 
 
 ### POST /api/v1/apps/:name/update
 
-Start an async update to the latest registry version. Uses blue/green swap: build new version in `/tmp/`, stop old containers, start new, swap directories, rollback automatically if new containers fail health check.
+Start an async update. Uses blue/green swap: build new version in `/tmp/`, stop old containers, start new, swap directories, rollback automatically if new containers fail health check. The `.env` from the previous install is copied forward, so volumes and secrets are preserved.
+
+The update target depends on the app's `source`:
+- `registry` — the latest published registry version.
+- `custom` (installed from a GitHub URL) — the current default-branch `HEAD` of the app's repo, resolved via `git ls-remote`. If the resolved commit already matches the installed one, the job completes as a no-op.
+- `local` (symlinked directory) — not updatable; returns `400`.
 
 ```bash
 curl -X POST \
@@ -3023,7 +3028,7 @@ Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress.
 
 | Status | When |
 |--------|------|
-| 400 | App source is `custom` or `local` (cannot be updated via this endpoint) |
+| 400 | App source is `local` (symlinked apps cannot be updated) |
 | 403 | Not an admin key |
 | 404 | App not installed |
 
