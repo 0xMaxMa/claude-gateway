@@ -820,6 +820,83 @@ services:
       expect(job.error).toMatch(/local path|cannot be updated/i);
     });
   });
+
+  // ── Rollback cleanup of root-owned / undeletable app dirs (issue #261) ─────
+  describe('install rollback — undeletable (root-owned) app directory', () => {
+    // Emulate the prod failure: a GitHub install clones successfully, a
+    // container leaves behind a directory the gateway user cannot traverse
+    // (stand-in for root-owned postgres/pgdata), then `docker compose up`
+    // fails. The rollback's fs.rmSync then throws EACCES and must escalate to
+    // `sudo rm -rf` instead of silently orphaning the directory.
+    function makeFailingGitSpawn(appName: string, port: number, head: string) {
+      return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: 1.0.0
+commit: "${head}"
+services:
+  app:
+    image: postgres:16-alpine
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: pg_isready
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+          // Stand-in for a root-owned bind mount: a dir this user can't recurse.
+          const locked = path.join(opts.cwd, 'pgdata');
+          fs.mkdirSync(locked);
+          fs.writeFileSync(path.join(locked, 'PG_VERSION'), '16');
+          fs.chmodSync(locked, 0o000);
+        }
+        if (args.some((a) => a === 'up')) {
+          return { stdout: '', stderr: 'mock: compose up failed', status: 1 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    // As root the scenario can't occur (root deletes anything), so skip.
+    (isRoot ? it.skip : it)(
+      'escalates to sudo rm -rf when rollback hits an EACCES app dir instead of swallowing it',
+      async () => {
+        const githubUrl = 'https://github.com/test/rollback-app';
+        const appDir = path.join(appsDir, 'rollback-app');
+        const locked = path.join(appDir, 'pgdata');
+        const spawn = makeFailingGitSpawn('rollback-app', 5500, 'e'.repeat(40));
+        const installer = makeInstaller(spawn);
+
+        try {
+          const job = await waitForJob(installer, installer.install({ githubUrl }), 5000);
+          expect(job.status).toBe('failed'); // install failed at compose up
+
+          // The rollback must escalate to `sudo rm -rf <appDir>` rather than
+          // silently swallowing EACCES and orphaning the directory.
+          const sawSudoRm = spawn.mock.calls.some(
+            (c) => c[0] === 'sudo' && Array.isArray(c[1]) && c[1].join(' ') === `rm -rf ${appDir}`,
+          );
+          expect(sawSudoRm).toBe(true);
+        } finally {
+          // Restore perms so the leftover tmp dir can be cleaned up.
+          try { fs.chmodSync(locked, 0o755); } catch { /* already gone */ }
+          try { fs.rmSync(appDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        }
+      },
+    );
+  });
 });
 
 // ─── Utility ──────────────────────────────────────────────────────────────────

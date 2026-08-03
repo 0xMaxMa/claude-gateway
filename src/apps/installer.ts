@@ -665,9 +665,16 @@ export class AppInstaller {
         if (stat.isSymbolicLink()) {
           fs.unlinkSync(appDir);
         } else {
-          fs.rmSync(appDir, { recursive: true, force: true });
+          this.rmrf(appDir);
         }
-      } catch { /* already gone */ }
+      } catch (cleanupErr) {
+        // Directory may already be gone — that's fine. Anything else (e.g. a
+        // root-owned file the sudo fallback still couldn't remove) leaves an
+        // orphan on disk, so surface it in the logs instead of swallowing.
+        if ((cleanupErr as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.log(job, `Warning: rollback could not fully remove "${appDir}": ${(cleanupErr as Error).message}`);
+        }
+      }
       throw err;
     }
   }
@@ -795,7 +802,7 @@ export class AppInstaller {
           rollbackFailed = true;
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+        this.rmrf(tmpDir);
         if (rollbackFailed) {
           throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
         }
@@ -842,7 +849,7 @@ export class AppInstaller {
       try {
         this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], oldBackupDir, 120_000);
       } catch { /* non-fatal */ }
-      fs.rmSync(oldBackupDir, { recursive: true, force: true });
+      this.rmrf(oldBackupDir);
 
       // ── Build result ──────────────────────────────────────────────────────
       const proxyUrls: Record<string, string> = {};
@@ -862,7 +869,7 @@ export class AppInstaller {
 
     } catch (err) {
       if (fs.existsSync(tmpDir)) {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+        this.rmrf(tmpDir);
       }
       throw err;
     }
@@ -1023,8 +1030,11 @@ export class AppInstaller {
     try {
       fs.rmSync(dirPath, { recursive: true, force: true });
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'EACCES') {
-        console.warn(`[installer] EACCES removing "${dirPath}" — falling back to sudo rm -rf`);
+      const code = (err as NodeJS.ErrnoException).code;
+      // Containers running as root leave root-owned files (e.g. postgres pgdata)
+      // that the gateway user cannot delete — fs.rmSync surfaces EACCES or EPERM.
+      if (code === 'EACCES' || code === 'EPERM') {
+        console.warn(`[installer] ${code} removing "${dirPath}" — falling back to sudo rm -rf`);
         this.run(['sudo', 'rm', '-rf', dirPath]);
       } else {
         throw err;
