@@ -3,16 +3,7 @@ import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
-import { RegistryClient, RegistryVersion } from '../apps/registry-client';
-
-function selectLatest(versions: RegistryVersion[]): RegistryVersion | undefined {
-  if (versions.length === 0) return undefined;
-  const withDate = versions.filter((v) => v.approved_at);
-  if (withDate.length > 0) {
-    return withDate.reduce((a, b) => (a.approved_at > b.approved_at ? a : b));
-  }
-  return versions[versions.length - 1];
-}
+import { RegistryClient } from '../apps/registry-client';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -183,51 +174,15 @@ export function createAppsRouter(
         return;
       }
 
-      if (entry.source !== 'registry') {
-        res.json({
-          installed: entry.version,
-          installed_commit: entry.commit,
-          latest: null,
-          latest_commit: null,
-          behind: false,
-          updateable: false,
-        });
-        return;
-      }
-
-      try {
-        const app = await registryClient.findApp(entry.name);
-        if (!app) {
-          res.json({
-            installed: entry.version,
-            installed_commit: entry.commit,
-            latest: null,
-            latest_commit: null,
-            behind: false,
-            updateable: false,
-          });
-          return;
-        }
-        const latest = selectLatest(app.versions);
-        res.json({
-          installed: entry.version,
-          installed_commit: entry.commit,
-          latest: latest?.version ?? null,
-          latest_commit: latest?.commit ?? null,
-          behind: latest ? latest.commit !== entry.commit : false,
-          updateable: latest ? latest.commit !== entry.commit : false,
-        });
-      } catch {
-        // Registry unreachable — return what we know
-        res.json({
-          installed: entry.version,
-          installed_commit: entry.commit,
-          latest: null,
-          latest_commit: null,
-          behind: false,
-          updateable: false,
-        });
-      }
+      const info = await installer.getUpdateInfo(entry);
+      res.json({
+        installed: entry.version,
+        installed_commit: entry.commit,
+        latest: info.latestVersion,
+        latest_commit: info.latestCommit,
+        behind: info.updateable,
+        updateable: info.updateable,
+      });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -247,9 +202,9 @@ export function createAppsRouter(
         res.status(404).json({ error: `App "${req.params.name}" not found` });
         return;
       }
-      if (entry.source !== 'registry') {
+      if (entry.source === 'local') {
         res.status(400).json({
-          error: 'Only registry-installed apps can be updated via this endpoint',
+          error: 'Local (symlinked) apps cannot be updated — reinstall from source instead',
         });
         return;
       }

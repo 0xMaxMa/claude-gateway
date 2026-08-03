@@ -46,6 +46,7 @@ function makeEntry(overrides: Partial<AppEntry> = {}): AppEntry {
 function makeInstaller(
   registry: AppsRegistry,
   appsDir?: string,
+  spawn?: (cmd: string, args: string[], opts?: object) => { stdout: string; stderr: string; status: number },
 ): { installer: AppInstaller; callbacks: InstallerCallbacks } {
   const callbacks: InstallerCallbacks = {
     registerRoutes: jest.fn((_appName: string, _ports: ComposePort[]) => {}),
@@ -57,7 +58,7 @@ function makeInstaller(
     registry,
     new RegistryClient(),
     callbacks,
-    jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 }),
+    (spawn ?? jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 })) as ConstructorParameters<typeof AppInstaller>[3],
     appsDir ?? makeTmpDir(),
   );
   return { installer, callbacks };
@@ -92,10 +93,11 @@ const VALID_REGISTRY_APPS = [
 function makeApp(
   registry: AppsRegistry,
   registryClient: RegistryClient,
+  spawn?: (cmd: string, args: string[], opts?: object) => { stdout: string; stderr: string; status: number },
 ): express.Application {
   const app = express();
   app.use(express.json());
-  const { installer } = makeInstaller(registry);
+  const { installer } = makeInstaller(registry, undefined, spawn);
   app.use('/api', createAppsRouter(registry, installer, registryClient, API_KEYS));
   return app;
 }
@@ -334,13 +336,52 @@ describe('createAppsRouter()', () => {
       expect(res.status).toBe(404);
     });
 
-    it('returns updateable: false for custom/local apps', async () => {
-      await registry.upsert(makeEntry({ source: 'custom' }));
+    it('returns updateable: false for local apps', async () => {
+      await registry.upsert(makeEntry({ source: 'local' }));
       const res = await request(app)
         .get('/api/v1/apps/test-app/version')
         .set('Authorization', `Bearer ${READ_KEY.key}`);
       expect(res.status).toBe(200);
       expect(res.body.updateable).toBe(false);
+      expect(res.body.latest_commit).toBeNull();
+    });
+
+    it('reports a custom app as updateable when its repo HEAD has moved', async () => {
+      const newHead = 'b'.repeat(40);
+      const spawn = jest.fn((cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${newHead}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const customApp = makeApp(registry, registryClient, spawn);
+      await registry.upsert(makeEntry({ source: 'custom', commit: 'a'.repeat(40) }));
+
+      const res = await request(customApp)
+        .get('/api/v1/apps/test-app/version')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body.updateable).toBe(true);
+      expect(res.body.latest_commit).toBe(newHead);
+    });
+
+    it('reports a custom app as not updateable when already at HEAD', async () => {
+      const head = 'a'.repeat(40);
+      const spawn = jest.fn((cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const customApp = makeApp(registry, registryClient, spawn);
+      await registry.upsert(makeEntry({ source: 'custom', commit: head }));
+
+      const res = await request(customApp)
+        .get('/api/v1/apps/test-app/version')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body.updateable).toBe(false);
+      expect(res.body.latest_commit).toBe(head);
     });
 
     it('returns version info for registry app', async () => {

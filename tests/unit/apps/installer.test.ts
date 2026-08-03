@@ -714,6 +714,112 @@ services:
       expect(job.logs.join('\n')).toContain(`Resolved HEAD → ${resolved.slice(0, 8)}`);
     });
   });
+
+  // ── update() — GitHub-installed (custom) apps (issue #259) ────────────────
+  describe('update() — custom (GitHub) apps', () => {
+    function readEnvFile(appDir: string): Record<string, string> {
+      const content = fs.readFileSync(path.join(appDir, '.env'), 'utf-8');
+      const out: Record<string, string> = {};
+      for (const line of content.split('\n')) {
+        const i = line.indexOf('=');
+        if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
+      }
+      return out;
+    }
+
+    // Spawn mock whose ls-remote HEAD and app.yaml (written on checkout) are
+    // driven by a mutable `state`, so one installer can install at one commit
+    // then update to another.
+    function makeGitState(appName: string, port: number) {
+      const state = { head: 'a'.repeat(40), version: '1.0.0' };
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:${port}/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      return { state, spawn };
+    }
+
+    it('updates a GitHub-installed app to the new default-branch HEAD, preserving .env', async () => {
+      const githubUrl = 'https://github.com/test/custom-app';
+      const { state, spawn } = makeGitState('custom-app', 5400);
+      const installer = makeInstaller(spawn);
+
+      // Install at HEAD "aaaa…" with a secret that must survive the update
+      state.head = 'a'.repeat(40);
+      state.version = '1.0.0';
+      await waitForJob(installer, installer.install({ githubUrl, envVars: { APP_SECRET: 'keep-me' } }), 5000);
+
+      let entry = await registry.get('custom-app');
+      expect(entry?.source).toBe('custom');
+      expect(entry?.commit).toBe('a'.repeat(40));
+      expect(readEnvFile(entry!.installPath)['APP_SECRET']).toBe('keep-me');
+
+      // Default branch advances → update should follow HEAD
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update('custom-app'), 5000);
+      expect(job.status).toBe('completed');
+
+      entry = await registry.get('custom-app');
+      expect(entry?.commit).toBe('b'.repeat(40));
+      expect(entry?.version).toBe('2.0.0');
+      // secret (and therefore volumes) preserved via .env copy-forward
+      expect(readEnvFile(entry!.installPath)['APP_SECRET']).toBe('keep-me');
+    });
+
+    it('is a no-op when the custom app is already at HEAD', async () => {
+      const githubUrl = 'https://github.com/test/steady-app';
+      const { state, spawn } = makeGitState('steady-app', 5401);
+      const installer = makeInstaller(spawn);
+
+      state.head = 'c'.repeat(40);
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      // HEAD unchanged → update completes without rebuilding
+      const job = await waitForJob(installer, installer.update('steady-app'), 5000);
+      expect(job.status).toBe('completed');
+      expect(job.logs.join('\n')).toContain(`Already at latest commit ${'c'.repeat(8)}`);
+
+      const entry = await registry.get('steady-app');
+      expect(entry?.commit).toBe('c'.repeat(40));
+    });
+
+    it('rejects updating a local (symlinked) app', async () => {
+      const appDir = makeAppDir(srcDir, 'local-app', 5402);
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect((await registry.get('local-app'))?.source).toBe('local');
+
+      const job = await waitForJob(installer, installer.update('local-app'), 5000);
+      expect(job.status).toBe('failed');
+      expect(job.error).toMatch(/local path|cannot be updated/i);
+    });
+  });
 });
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
