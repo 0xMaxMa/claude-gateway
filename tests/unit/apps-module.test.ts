@@ -32,5 +32,26 @@ describe('AppsModule', () => {
       // must signal the optional / auto-resolve behavior
       expect(commitDesc.toLowerCase()).toContain('optional');
     });
+
+    // Regression for #265: a pre-install inspect tool must exist so GitHub-URL
+    // installs can surface required secrets before installing (browse_registry
+    // only knows registry apps). Without it the agent reports "Secrets: none".
+    it('exposes an inspect_app tool that accepts a github_url source', () => {
+      const tools = new AppsModule().getTools();
+      const inspect = tools.find((t) => t.name === 'inspect_app');
+      expect(inspect).toBeDefined();
+
+      const props = (inspect!.inputSchema as {
+        properties: Record<string, { description?: string }>;
+      }).properties;
+      // accepts the same source fields as install (at least github_url)
+      expect(props['github_url']).toBeDefined();
+      expect(props['registry_app']).toBeDefined();
+      expect(props['local_path']).toBeDefined();
+
+      // description must point agents at it before install for secret discovery
+      const desc = (inspect!.description ?? '').toLowerCase();
+      expect(desc).toContain('secret');
+    });
   });
 });

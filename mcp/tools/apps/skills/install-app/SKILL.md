@@ -4,6 +4,7 @@ description: Install an app from the registry or a GitHub URL. Interactive — s
 user-invocable: true
 allowed-tools:
   - mcp__gateway__install_app
+  - mcp__gateway__inspect_app
   - mcp__gateway__poll_install_job
   - mcp__gateway__browse_registry
 ---
@@ -44,8 +45,20 @@ If the app is not found in the registry and no GitHub URL given, stop with a hel
 
 ## Step 2 — Check for required env vars
 
-Call `browse_registry` to get the app definition. If the app has `secretKeys` listed, those
-env vars must be supplied. Prompt the user for each missing secret before proceeding:
+Call `inspect_app` with the same source you will install (`github_url` [+ `commit`],
+`registry_app` [+ `version`], or `local_path`). It fetches and parses the app's
+`app.yaml` **without installing** and returns the real secret requirements:
+
+- `secretKeys` — env vars the operator **must** supply (no default). Prompt for
+  each one before proceeding.
+- `generatedKeys` — secrets the gateway **auto-generates** at install time
+  (declared as `KEY=!generate:...`). Do **not** prompt for these; just note they
+  will be generated.
+
+This is essential for a **GitHub-URL** install: such apps have no registry entry,
+so `browse_registry` cannot reveal their secrets — only `inspect_app` can.
+
+If `inspect_app` reports `secretKeys`, prompt the user for each:
 
 ```
 This app requires the following environment variables:
@@ -59,21 +72,27 @@ Please provide values, e.g.:
 
 Wait for the user's reply. Parse key=value pairs.
 
-If no secrets are needed, proceed immediately.
+If `secretKeys` is empty (only `generatedKeys`, or no secrets at all), proceed
+immediately — do not invent secrets or ask for ones the app did not declare.
+
+> If `inspect_app` fails (e.g. the repo is unreachable), tell the user the error
+> and stop — do not fall back to assuming "no secrets".
 
 ---
 
 ## Step 3 — Show permissions summary
 
-Before installing, show a brief summary:
+Before installing, show a brief summary (use the `name`, `version`, `ports`,
+`secretKeys`, and `generatedKeys` returned by `inspect_app`):
 
 ```
 Installing: <app-name> v<version>
 Source: <registry|github>
 Repo: <url>
 Commit: <first 8 chars, or "latest on default branch (auto-resolved)" for a GitHub install with no pinned commit>
-Proxy routes: (from registry metadata if available)
-Secrets to inject: <list or "none">
+Proxy routes: <from inspect_app ports, or "none">
+Secrets to provide: <secretKeys the user supplied, or "none">
+Secrets auto-generated: <generatedKeys, or "none">
 
 Proceed? (yes/no)
 ```

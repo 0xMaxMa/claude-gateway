@@ -11,6 +11,8 @@ import {
   generateSecretValue,
   ComposePort,
   ComposeSocket,
+  GeneratedKey,
+  AgentDeclaration,
 } from './compose-generator';
 import { AgentManager } from './agent-manager';
 
@@ -36,6 +38,25 @@ export interface InstallResult {
   proxyUrls: Record<string, string>; // portName → /app/<name>/<port>/
   secretKeys: string[];
   agentDeclaration?: { path: string; name: string } | null;
+}
+
+/**
+ * Read-only preview of an install source, computed by fetching and parsing the
+ * app.yaml BEFORE any install. Surfaces the secrets an operator must supply
+ * ({@link InspectResult.secretKeys}) and the ones the gateway auto-generates
+ * ({@link InspectResult.generatedKeys}) so the pre-install summary is accurate
+ * even for a GitHub-URL app that has no registry entry.
+ */
+export interface InspectResult {
+  name: string;
+  version: string;
+  source: AppEntry['source'];
+  commit: string;
+  secretKeys: string[];
+  generatedKeys: GeneratedKey[];
+  ports: ComposePort[];
+  agentDeclaration: AgentDeclaration | null;
+  warnings: string[];
 }
 
 export interface JobState {
@@ -152,6 +173,84 @@ export class AppInstaller {
 
   getJob(jobId: string): JobState | undefined {
     return this.jobs.get(jobId);
+  }
+
+  /**
+   * Read-only inspection of an install source — no install side effects, no
+   * files left behind. Resolves the repo + commit, fetches the app.yaml
+   * (shallow clone into a tmp dir for registry/GitHub sources; direct read for
+   * a local path), parses it, and returns the metadata needed for an accurate
+   * pre-install summary: the required secrets (`secretKeys`, must be prompted)
+   * and the self-generated secrets (`generatedKeys`, auto-filled at install).
+   *
+   * This is what lets a GitHub-URL install surface its required secrets before
+   * installing — such apps have no registry entry, so `browse_registry` cannot
+   * reveal them.
+   */
+  async inspectSource(options: InstallOptions): Promise<InspectResult> {
+    // Mode B — local path: read app.yaml directly, no clone.
+    if (options.localPath) {
+      const resolved = path.resolve(options.localPath);
+      if (!fs.existsSync(path.join(resolved, 'app.yaml'))) {
+        throw new Error(`app.yaml not found in "${resolved}"`);
+      }
+      return this.inspectDir(resolved, 'local', 'local');
+    }
+
+    // Mode A — registry or GitHub: resolve, then shallow-clone into a tmp dir.
+    // Passing a null job keeps resolveSource silent (there is no install job).
+    const resolved = await this.resolveSource(null, options, options.version ?? '0.0.0');
+    const tmpDir = path.join(os.tmpdir(), `cg-inspect-${crypto.randomUUID()}`);
+    try {
+      fs.mkdirSync(tmpDir, { recursive: true });
+      this.run(['git', 'init'], tmpDir);
+      this.run(['git', 'remote', 'add', 'origin', resolved.githubUrl], tmpDir);
+      this.run(['git', 'fetch', '--depth', '1', 'origin', resolved.commit], tmpDir);
+      this.run(['git', 'checkout', 'FETCH_HEAD'], tmpDir);
+      return this.inspectDir(tmpDir, resolved.source, resolved.commit, resolved.version);
+    } finally {
+      try {
+        this.rmrf(tmpDir);
+      } catch {
+        /* best-effort cleanup of a read-only tmp clone */
+      }
+    }
+  }
+
+  /**
+   * Parse the app.yaml in `appDir` and derive the pre-install metadata without
+   * mutating `appDir`. generateCompose writes the compose file to its output
+   * path, so we point it at a throwaway tmp file (removed here) to keep the
+   * inspection read-only even for a local source.
+   */
+  private inspectDir(
+    appDir: string,
+    source: AppEntry['source'],
+    commit: string,
+    fallbackVersion?: string,
+  ): InspectResult {
+    const appYaml = parseAppYaml(fs.readFileSync(path.join(appDir, 'app.yaml'), 'utf-8'), appDir);
+    const tmpCompose = path.join(os.tmpdir(), `cg-inspect-compose-${crypto.randomUUID()}.yml`);
+    try {
+      const generated = generateCompose(appYaml, appYaml.name, appDir, tmpCompose);
+      return {
+        name: appYaml.name,
+        version: appYaml.version || fallbackVersion || '0.0.0',
+        source,
+        commit,
+        secretKeys: generated.secretKeys,
+        generatedKeys: generated.generatedKeys,
+        ports: generated.ports,
+        agentDeclaration: generated.agentDeclaration,
+        warnings: generated.warnings,
+      };
+    } finally {
+      try {
+        fs.rmSync(tmpCompose, { force: true });
+      } catch {
+        /* best-effort cleanup of the throwaway compose file */
+      }
+    }
   }
 
   /** Start an async update job. Returns jobId immediately. */
@@ -949,7 +1048,7 @@ export class AppInstaller {
   }
 
   private async resolveSource(
-    job: JobState,
+    job: JobState | null,
     options: InstallOptions,
     defaultVersion: string,
   ): Promise<{
@@ -985,7 +1084,7 @@ export class AppInstaller {
         if (!app) throw new Error(`App "${options.registryApp}" not found in registry`);
         const latest = selectLatest(app.versions);
         if (!latest) throw new Error(`No versions available for "${options.registryApp}"`);
-        this.log(job, `Using latest version ${latest.version}`);
+        if (job) this.log(job, `Using latest version ${latest.version}`);
         return {
           appName: options.registryApp,
           commit: latest.commit,
@@ -1015,12 +1114,12 @@ export class AppInstaller {
         commit = options.commit;
       } else {
         // Auto-resolve HEAD commit via git ls-remote
-        this.log(job, `Resolving HEAD commit for ${options.githubUrl}`);
+        if (job) this.log(job, `Resolving HEAD commit for ${options.githubUrl}`);
         const { stdout } = this.run(['git', 'ls-remote', options.githubUrl, 'HEAD'], process.cwd());
         const match = stdout.trim().match(/^([0-9a-f]{40})\s+HEAD/);
         if (!match) throw new Error(`Could not resolve HEAD commit for ${options.githubUrl}`);
         commit = match[1];
-        this.log(job, `Resolved HEAD → ${commit.slice(0, 8)}`);
+        if (job) this.log(job, `Resolved HEAD → ${commit.slice(0, 8)}`);
       }
       const appName = options.githubUrl.split('/').pop()?.replace(/\.git$/, '') ?? 'app';
       return {

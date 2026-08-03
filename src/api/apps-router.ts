@@ -95,6 +95,44 @@ export function createAppsRouter(
     }
   });
 
+  /**
+   * POST /api/v1/apps/inspect — read-only preview of an install source.
+   * Fetches and parses the app.yaml (without installing) so callers can see the
+   * required secrets (`secretKeys`) and auto-generated secrets (`generatedKeys`)
+   * before install — essential for GitHub-URL apps that have no registry entry.
+   * Admin-gated to match the install authorization floor.
+   */
+  router.post('/v1/apps/inspect', async (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required to inspect apps' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const options = {
+      registryApp: typeof body.registry_app === 'string' ? body.registry_app : undefined,
+      version: typeof body.version === 'string' ? body.version : undefined,
+      githubUrl: typeof body.github_url === 'string' ? body.github_url : undefined,
+      commit: typeof body.commit === 'string' ? body.commit : undefined,
+      localPath: typeof body.local_path === 'string' ? body.local_path : undefined,
+    };
+
+    if (!options.registryApp && !options.githubUrl && !options.localPath) {
+      res.status(400).json({
+        error: 'Provide one of: registry_app, github_url, or local_path',
+      });
+      return;
+    }
+
+    try {
+      const info = await installer.inspectSource(options);
+      res.json(info);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   /** GET /api/v1/apps/jobs/:jobId — poll install job status */
   router.get('/v1/apps/jobs/:jobId', (req: Request, res: Response) => {
     const job = installer.getJob(req.params.jobId);

@@ -225,6 +225,81 @@ describe('createAppsRouter()', () => {
     });
   });
 
+  // ── POST /api/v1/apps/inspect ──────────────────────────────────────────
+
+  describe('POST /api/v1/apps/inspect', () => {
+    /** Spawn that resolves HEAD and writes an app.yaml (bare-key secret +
+     *  self-generating secret) on checkout, so inspect returns real keys. */
+    function inspectSpawn(head: string) {
+      return (cmd: string, args: string[], opts?: object) => {
+        const cwd = (opts as { cwd?: string } | undefined)?.cwd;
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && cwd) {
+          fs.writeFileSync(
+            path.join(cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: secretful-app
+version: 3.1.0
+commit: "${head}"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - DB_PASSWORD
+      - SESSION_SECRET=!generate:hex:32
+    ports:
+      - name: api
+        host: 5400
+        container: 5400
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5400/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      };
+    }
+
+    it('returns 403 for non-admin key', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/inspect')
+        .set('Authorization', `Bearer ${READ_KEY.key}`)
+        .send({ github_url: 'https://github.com/test/secretful-app' });
+      expect(res.status).toBe(403);
+    });
+
+    it('returns 400 when no source provided', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/inspect')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 200 with required + generated secrets for a GitHub URL', async () => {
+      const head = 'abcdef0123456789abcdef0123456789abcdef01';
+      const inspectApp = makeApp(registry, registryClient, inspectSpawn(head));
+      const res = await request(inspectApp)
+        .post('/api/v1/apps/inspect')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ github_url: 'https://github.com/test/secretful-app' });
+      expect(res.status).toBe(200);
+      expect(res.body.name).toBe('secretful-app');
+      expect(res.body.secretKeys).toEqual(['DB_PASSWORD']);
+      expect(res.body.generatedKeys).toEqual([
+        { key: 'SESSION_SECRET', encoding: 'hex', bytes: 32 },
+      ]);
+      // No install happened.
+      expect(await registry.get('secretful-app')).toBeUndefined();
+    });
+  });
+
   // ── GET /api/v1/apps/jobs/:jobId ───────────────────────────────────────
 
   describe('GET /api/v1/apps/jobs/:jobId', () => {
