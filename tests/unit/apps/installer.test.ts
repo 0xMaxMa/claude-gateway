@@ -819,6 +819,77 @@ services:
       expect(job.status).toBe('failed');
       expect(job.error).toMatch(/local path|cannot be updated/i);
     });
+
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    // A cleanup failure on the post-update backup dir must not fail an
+    // already-successful update (issue #261 self-review). As root the dir is
+    // always removable, so the scenario can't occur.
+    (isRoot ? it.skip : it)(
+      'completes the update even when the old backup dir cannot be removed',
+      async () => {
+        const githubUrl = 'https://github.com/test/backup-app';
+        const appName = 'backup-app';
+        const state = { head: 'a'.repeat(40), version: '1.0.0' };
+        const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+          if (cmd === 'git' && args[0] === 'ls-remote') {
+            return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+          }
+          if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+            fs.writeFileSync(
+              path.join(opts.cwd, 'app.yaml'),
+              `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5600
+        container: 5600
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5600/health
+      interval: 30s
+`.trim(),
+              'utf-8',
+            );
+          }
+          // The sudo fallback also fails, so removal genuinely cannot complete.
+          if (cmd === 'sudo') return { stdout: '', stderr: 'mock: sudo denied', status: 1 };
+          return { stdout: '', stderr: '', status: 0 };
+        });
+        const installer = makeInstaller(spawn);
+
+        await waitForJob(installer, installer.install({ githubUrl }), 5000);
+        const appDir = path.join(appsDir, appName);
+        // Make the installed dir un-removable — after the swap it becomes the
+        // old backup dir the post-update cleanup tries (and fails) to delete.
+        const locked = path.join(appDir, 'pgdata');
+        fs.mkdirSync(locked);
+        fs.writeFileSync(path.join(locked, 'PG_VERSION'), '16');
+        fs.chmodSync(locked, 0o000);
+
+        try {
+          state.head = 'b'.repeat(40);
+          state.version = '2.0.0';
+          const job = await waitForJob(installer, installer.update(appName), 5000);
+
+          // Update itself succeeded — the backup-cleanup failure must not flip it to failed.
+          expect(job.status).toBe('completed');
+          expect((await registry.get(appName))?.commit).toBe('b'.repeat(40));
+          expect(job.logs.join('\n')).toMatch(/failed to remove old backup dir/i);
+        } finally {
+          for (const d of fs.readdirSync(appsDir)) {
+            if (d.startsWith(appName)) {
+              try { fs.chmodSync(path.join(appsDir, d, 'pgdata'), 0o755); } catch { /* n/a */ }
+            }
+          }
+        }
+      },
+    );
   });
 
   // ── Rollback cleanup of root-owned / undeletable app dirs (issue #261) ─────

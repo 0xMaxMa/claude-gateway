@@ -802,7 +802,7 @@ export class AppInstaller {
           rollbackFailed = true;
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
-        this.rmrf(tmpDir);
+        this.safeRmrf(tmpDir, job, 'update temp dir');
         if (rollbackFailed) {
           throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
         }
@@ -849,7 +849,7 @@ export class AppInstaller {
       try {
         this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], oldBackupDir, 120_000);
       } catch { /* non-fatal */ }
-      this.rmrf(oldBackupDir);
+      this.safeRmrf(oldBackupDir, job, 'old backup dir');
 
       // ── Build result ──────────────────────────────────────────────────────
       const proxyUrls: Record<string, string> = {};
@@ -869,7 +869,7 @@ export class AppInstaller {
 
     } catch (err) {
       if (fs.existsSync(tmpDir)) {
-        this.rmrf(tmpDir);
+        this.safeRmrf(tmpDir, job, 'update temp dir');
       }
       throw err;
     }
@@ -1038,6 +1038,22 @@ export class AppInstaller {
         this.run(['sudo', 'rm', '-rf', dirPath]);
       } else {
         throw err;
+      }
+    }
+  }
+
+  /**
+   * Best-effort directory removal for cleanup paths where a failure must not
+   * abort the operation (e.g. deleting a post-update backup, or a tmp clone
+   * during rollback). Logs a warning instead of throwing so a cleanup error
+   * never masks a successful result or the original failure.
+   */
+  private safeRmrf(dirPath: string, job: JobState, label: string): void {
+    try {
+      this.rmrf(dirPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.log(job, `Warning: failed to remove ${label} "${dirPath}": ${(err as Error).message}`);
       }
     }
   }
