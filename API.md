@@ -1974,8 +1974,8 @@ Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restart
 | `type` | No | `"command"` (default) or `"agent"` |
 | `command` | If `type=command` | Shell command to run |
 | `prompt` | If `type=agent` | Prompt sent to the agent as a new turn |
-| `telegram` | If `type=agent` | Telegram chat_id to deliver the agent response |
-| `discord` | If `type=agent` | Discord channel_id to deliver the agent response |
+| `telegram` | No | Telegram chat_id to deliver the agent response (optional for `type=agent`) |
+| `discord` | No | Discord channel_id to deliver the agent response (optional for `type=agent`) |
 | `timeoutMs` | No | Execution timeout in ms (default 120000) — applies to both `command` and `agent` |
 | `deleteAfterRun` | No | `true` to auto-delete after first run (one-shot jobs) |
 | `enabled` | No | `true` (default) / `false` to create disabled |
@@ -1985,11 +1985,11 @@ Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restart
 | | `command` | `agent` |
 |---|---|---|
 | Runs | Shell command | Agent turn (new Claude session) |
-| Key field | `command` | `prompt` + `telegram` and/or `discord` |
+| Key field | `command` | `prompt` (channels optional) |
 | Output | stdout/stderr | Agent response text |
-| Delivery | Logged only | Sent to Telegram and/or Discord |
+| Delivery | Logged only | Sent to Telegram and/or Discord if set, otherwise logged only |
 
-> **Note:** For `type=agent`, at least one of `telegram` or `discord` is required. Both can be set to deliver to multiple channels simultaneously.
+> **Note:** For `type=agent`, only `prompt` is required. `telegram` and `discord` are optional — set either (or both) to deliver the agent response to those channels; with neither, the job still runs on schedule and its response is logged only (no delivery).
 
 ---
 
