@@ -119,7 +119,7 @@ describe('T21-T23: Router validation for new fields', () => {
     expect(res.body.error).toContain('prompt');
   });
 
-  it('T23b: POST with type=agent + missing telegram and discord → 400', async () => {
+  it('T23b: POST with type=agent + no telegram and no discord → 201 (channel-less, #253)', async () => {
     const { app } = makeApp();
 
     const res = await request(app)
@@ -131,11 +131,13 @@ describe('T21-T23: Router validation for new fields', () => {
         schedule: '* * * * *',
         type: 'agent',
         prompt: 'hello',
-        // no telegram, no discord
+        // no telegram, no discord — result is read from Run History
       });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('telegram or discord is required for type=agent');
+    expect(res.status).toBe(201);
+    expect(res.body.job).toBeDefined();
+    expect(res.body.job.telegram).toBeUndefined();
+    expect(res.body.job.discord).toBeUndefined();
   });
 
   it('T23c: POST with type=agent + telegram only → 201', async () => {
