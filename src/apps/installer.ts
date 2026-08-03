@@ -869,6 +869,31 @@ export class AppInstaller {
   }
 
   /**
+   * Report whether an installed app has a newer version/commit available,
+   * without performing the update. Mirrors the resolution `runUpdate` uses:
+   * registry apps compare against the latest published version, custom apps
+   * against the repo default-branch HEAD, and local apps are never updatable.
+   * Never throws — a registry/network failure is reported as not-updatable.
+   */
+  async getUpdateInfo(
+    entry: AppEntry,
+  ): Promise<{ latestVersion: string | null; latestCommit: string | null; updateable: boolean }> {
+    if (entry.source === 'local') {
+      return { latestVersion: null, latestCommit: null, updateable: false };
+    }
+    try {
+      const target = await this.resolveUpdateTarget(entry);
+      return {
+        latestVersion: target.registryVersion ?? null,
+        latestCommit: target.newCommit,
+        updateable: target.newCommit !== entry.commit,
+      };
+    } catch {
+      return { latestVersion: null, latestCommit: null, updateable: false };
+    }
+  }
+
+  /**
    * Resolve the repo URL and target commit to update an installed app to.
    * - `registry`: latest published version via the registry client.
    * - `custom` (GitHub URL install): the default branch HEAD via git ls-remote,
