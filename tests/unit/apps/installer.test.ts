@@ -655,6 +655,64 @@ services:
       const entry = await registry.get('cloned-app');
       expect(entry?.version).toBe('2.3.4');
     });
+
+    it('auto-resolves the default branch HEAD when no commit is given', async () => {
+      // The install must not require a user-supplied commit: when omitted, the
+      // installer resolves HEAD via `git ls-remote` and pins that commit.
+      const resolved = 'abcdef0123456789abcdef0123456789abcdef01'; // 40-hex
+      const githubUrl = 'https://github.com/test/headless-app';
+
+      let lsRemoteCalled = false;
+      const resolveSpawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          lsRemoteCalled = true;
+          // git ls-remote <url> HEAD → "<sha>\tHEAD"
+          return { stdout: `${resolved}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: headless-app
+version: 1.0.0
+commit: "${resolved}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5300
+        container: 5300
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5300/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      const installer = makeInstaller(resolveSpawn);
+      const jobId = installer.install({ githubUrl }); // no commit
+      const job = await waitForJob(installer, jobId, 5000);
+
+      expect(job.status).toBe('completed');
+      expect(lsRemoteCalled).toBe(true);
+      // the resolved HEAD is pinned in the registry entry
+      const entry = await registry.get('headless-app');
+      expect(entry?.commit).toBe(resolved);
+      // and the fetch pins the resolved commit, not a branch name
+      expect(
+        resolveSpawn.mock.calls.some(
+          (c) => c[0] === 'git' && c[1][0] === 'fetch' && c[1].includes(resolved),
+        ),
+      ).toBe(true);
+      // the resolved commit is surfaced in the job logs
+      expect(job.logs.join('\n')).toContain(`Resolved HEAD → ${resolved.slice(0, 8)}`);
+    });
   });
 });
 
