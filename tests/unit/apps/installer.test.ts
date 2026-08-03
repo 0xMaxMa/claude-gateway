@@ -715,6 +715,94 @@ services:
     });
   });
 
+  // ── inspectSource() — read-only pre-install preview (issue #265) ──────────
+  describe('inspectSource() — GitHub URL', () => {
+    /** Spawn mock: resolves HEAD via ls-remote and writes an app.yaml whose
+     *  service declares a bare-key secret + a self-generating secret. */
+    function inspectSpawn(head: string) {
+      return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: secretful-app
+version: 3.1.0
+commit: "${head}"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - DB_PASSWORD
+      - SESSION_SECRET=!generate:hex:32
+      - NODE_ENV=production
+    ports:
+      - name: api
+        host: 5400
+        container: 5400
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5400/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    function tmpInspectDirs(): string[] {
+      return fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('cg-inspect-'));
+    }
+
+    it('returns required + generated secrets parsed from app.yaml, without installing', async () => {
+      const head = 'abcdef0123456789abcdef0123456789abcdef01';
+      const before = tmpInspectDirs();
+      const installer = makeInstaller(inspectSpawn(head));
+
+      const info = await installer.inspectSource({
+        githubUrl: 'https://github.com/test/secretful-app',
+      });
+
+      // Real required secret (bare key) is surfaced — the whole point of the fix.
+      expect(info.secretKeys).toEqual(['DB_PASSWORD']);
+      // Self-generating secret is reported separately (never prompted for).
+      expect(info.generatedKeys).toEqual([
+        { key: 'SESSION_SECRET', encoding: 'hex', bytes: 32 },
+      ]);
+      // Canonical metadata comes from the fetched app.yaml, not the URL.
+      expect(info.name).toBe('secretful-app');
+      expect(info.version).toBe('3.1.0');
+      expect(info.source).toBe('custom');
+      expect(info.commit).toBe(head); // auto-resolved HEAD
+
+      // No install side effects: nothing registered, no app dir created.
+      expect(await registry.get('secretful-app')).toBeUndefined();
+      expect(fs.existsSync(path.join(appsDir, 'secretful-app'))).toBe(false);
+      expect(callbacks.registeredRoutes).toHaveLength(0);
+
+      // No tmp clone dir left behind.
+      expect(tmpInspectDirs()).toEqual(before);
+    });
+
+    it('propagates a resolution failure instead of silently reporting no secrets', async () => {
+      const failing = jest.fn((cmd: string, args: string[]) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: '', stderr: 'not found', status: 1 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeInstaller(failing as typeof successSpawn);
+      await expect(
+        installer.inspectSource({ githubUrl: 'https://github.com/test/missing' }),
+      ).rejects.toThrow();
+    });
+  });
+
   // ── update() — GitHub-installed (custom) apps (issue #259) ────────────────
   describe('update() — custom (GitHub) apps', () => {
     function readEnvFile(appDir: string): Record<string, string> {

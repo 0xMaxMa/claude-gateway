@@ -60,6 +60,10 @@ export class AppsClient {
     return this.request('POST', '/install', params);
   }
 
+  async inspect(params: Record<string, unknown>): Promise<unknown> {
+    return this.request('POST', '/inspect', params);
+  }
+
   async pollJob(jobId: string): Promise<unknown> {
     return this.request('GET', `/jobs/${encodeURIComponent(jobId)}`);
   }

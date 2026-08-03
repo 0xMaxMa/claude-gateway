@@ -150,6 +150,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/apps/registry/:name` | Key | Get versions of a registry app |
 | `GET` | `/api/v1/apps` | Key | List installed apps |
 | `POST` | `/api/v1/apps/install` | Admin | Start async install → `jobId` |
+| `POST` | `/api/v1/apps/inspect` | Admin | Read-only preview of a source → required/generated secrets (no install) |
 | `GET` | `/api/v1/apps/jobs/:jobId` | Key | Poll install/update job status + logs |
 | `GET` | `/api/v1/apps/:name` | Key | Get installed app info |
 | `DELETE` | `/api/v1/apps/:name` | Admin | Uninstall app |
@@ -2696,6 +2697,7 @@ Manage Docker-compose apps installed on the gateway. Apps can be sourced from th
 | `GET` | `/api/v1/apps/registry/:name` | Key | Get versions of a specific registry app |
 | `GET` | `/api/v1/apps` | Key | List all installed apps |
 | `POST` | `/api/v1/apps/install` | Admin | Start async install → returns `jobId` |
+| `POST` | `/api/v1/apps/inspect` | Admin | Read-only preview of a source → required/generated secrets (no install) |
 | `GET` | `/api/v1/apps/jobs/:jobId` | Key | Poll install/update job status + logs |
 | `GET` | `/api/v1/apps/:name` | Key | Get installed app info |
 | `DELETE` | `/api/v1/apps/:name` | Admin | Uninstall app (docker down + cleanup) |
@@ -2862,6 +2864,57 @@ curl -X POST \
 | 403 | Not an admin key |
 
 > Poll `GET /api/v1/apps/jobs/:jobId` to track progress. Install pipeline: clone/symlink → validate `app.yaml` → generate compose → build images → start containers → register proxy routes. On failure, container logs are appended to `logs` before rollback.
+
+---
+
+### POST /api/v1/apps/inspect
+
+Read-only preview of an install source. Fetches and parses the app's `app.yaml`
+(shallow clone for registry/GitHub sources; direct read for a local path)
+**without installing anything and leaving no files behind**, and returns the
+metadata needed for an accurate pre-install summary — most importantly which
+secrets the operator must supply versus which the gateway auto-generates.
+
+This is essential for a **GitHub-URL** install: such apps have no registry entry,
+so `GET /api/v1/apps/registry/:name` cannot reveal their required secrets — only
+this endpoint can.
+
+**Request body:** same source fields as install (`registry_app` [+ `version`],
+`github_url` [+ `commit`], or `local_path`). `env_vars` is ignored — nothing is
+injected. One of the three sources is required.
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{"github_url": "https://github.com/myorg/my-app"}' \
+  http://localhost:10850/api/v1/apps/inspect | jq
+```
+
+**Response `200`:**
+```json
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "source": "custom",
+  "commit": "abc123def456abc123def456abc123def456abc1",
+  "secretKeys": ["DB_PASSWORD"],
+  "generatedKeys": [{ "key": "SESSION_SECRET", "encoding": "hex", "bytes": 32 }],
+  "ports": [{ "name": "web", "service": "app", "hostPort": 12000, "containerPort": 3000, "type": "web" }],
+  "agentDeclaration": null,
+  "warnings": []
+}
+```
+
+- `secretKeys` — env vars the operator **must** supply (declared as bare keys in `app.yaml`).
+- `generatedKeys` — secrets the gateway fills with a fresh random value at install (declared as `KEY=!generate:<encoding>:<bytes>`); never prompted for.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Missing source fields, invalid `github_url`/`commit` format, repo unreachable, or `app.yaml` missing/invalid |
+| 403 | Not an admin key |
 
 ---
 

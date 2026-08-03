@@ -77,6 +77,21 @@ export class AppsModule implements ToolModule {
         },
       },
       {
+        name: 'inspect_app',
+        description: 'Preview an install source WITHOUT installing: fetch and parse the app.yaml and return the required secrets (secretKeys, must be provided) and auto-generated secrets (generatedKeys, filled by the gateway), plus name, version, ports, and warnings. Call this BEFORE install_app for a GitHub URL — such apps have no registry entry, so browse_registry cannot reveal their required secrets. Pass github_url (+ optional commit), registry_app (+ optional version), or local_path.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            registry_app: { type: 'string', description: 'Registry app name' },
+            version: { type: 'string', description: 'Registry version (default: latest)' },
+            github_url: { type: 'string', description: 'GitHub repo URL' },
+            commit: { type: 'string', description: '40-char hex commit hash to pin (optional; with github_url, omit to auto-resolve the default branch HEAD)' },
+            local_path: { type: 'string', description: 'Local app path within ~/.claude-gateway/apps/' },
+          },
+          additionalProperties: false,
+        },
+      },
+      {
         name: 'list_apps',
         description: 'List all installed apps with their status and proxy URLs.',
         inputSchema: {
@@ -164,6 +179,17 @@ export class AppsModule implements ToolModule {
       case 'poll_install_job': {
         const jobId = args['job_id'] as string;
         const data = await client.pollJob(jobId);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'inspect_app': {
+        const params: Record<string, unknown> = {};
+        if (args['registry_app']) params['registry_app'] = args['registry_app'];
+        if (args['version']) params['version'] = args['version'];
+        if (args['github_url']) params['github_url'] = args['github_url'];
+        if (args['commit']) params['commit'] = args['commit'];
+        if (args['local_path']) params['local_path'] = args['local_path'];
+        const data = await client.inspect(params);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
