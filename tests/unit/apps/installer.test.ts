@@ -968,6 +968,126 @@ services:
       },
     );
   });
+
+  // ── Agent-name conflict / orphan reclaim (issue #263) ──────────────────────
+  describe('install — agent-name conflict vs orphan reclaim', () => {
+    function makeAgentMgr(existingAgentName: string) {
+      return {
+        findAgentByName: jest.fn(async (n: string) => (n === existingAgentName ? n : null)),
+        deleteAgentByName: jest.fn(async () => {}),
+        deleteAgent: jest.fn(async () => {}),
+        detectAgentPaths: jest.fn(() => ({
+          claudeBin: '/usr/bin/claude',
+          nodeBin: '/usr/bin/node',
+          npmRoot: '/usr/lib/node_modules',
+        })),
+        injectAgentService: jest.fn(() => {}),
+        upsertAgent: jest.fn(async () => {}),
+        backupMemory: jest.fn(() => null),
+        restoreMemory: jest.fn(() => {}),
+      };
+    }
+
+    function makeInstallerWithAgent(
+      spawn: typeof successSpawn,
+      agentMgr: ReturnType<typeof makeAgentMgr>,
+    ) {
+      return new AppInstaller(
+        registry,
+        new RegistryClient(),
+        callbacks,
+        spawn,
+        appsDir,
+        agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
+        successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      );
+    }
+
+    // GitHub install of an app that declares an agent service.
+    function agentGitSpawn(appName: string, agentName: string, port: number, head: string) {
+      return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: 1.0.0
+commit: "${head}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:${port}/health
+      interval: 30s
+  agent:
+    path: ./agent
+    name: ${agentName}
+`.trim(),
+            'utf-8',
+          );
+          fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    it('reclaims an orphaned agent (registered but owned by no installed app) and proceeds', async () => {
+      const agentMgr = makeAgentMgr('orphan-bot'); // config says it exists…
+      // …but no installed app declares it → orphan
+      const spawn = agentGitSpawn('agent-app', 'orphan-bot', 5700, 'a'.repeat(40));
+      const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
+
+      const job = await waitForJob(
+        installer,
+        installer.install({ githubUrl: 'https://github.com/test/agent-app' }),
+        5000,
+      );
+
+      expect(agentMgr.deleteAgentByName).toHaveBeenCalledWith('orphan-bot');
+      expect(job.status).toBe('completed');
+    });
+
+    it('throws a clear conflict when the agent is owned by a different installed app', async () => {
+      // A different app already owns "shared-bot".
+      await registry.upsert({
+        name: 'other-app',
+        version: '1.0.0',
+        commit: 'b'.repeat(40),
+        githubUrl: 'https://github.com/test/other-app',
+        installPath: path.join(appsDir, 'other-app'),
+        ports: [],
+        sockets: {},
+        installedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        status: 'running',
+        source: 'custom',
+        agentDeclaration: { path: './agent', name: 'shared-bot' },
+      });
+
+      const agentMgr = makeAgentMgr('shared-bot');
+      const spawn = agentGitSpawn('agent-app', 'shared-bot', 5701, 'c'.repeat(40));
+      const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
+
+      const job = await waitForJob(
+        installer,
+        installer.install({ githubUrl: 'https://github.com/test/agent-app' }),
+        5000,
+      );
+
+      expect(job.status).toBe('failed');
+      expect(job.error).toMatch(/already registered by app "other-app"/);
+      expect(agentMgr.deleteAgentByName).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ─── Utility ──────────────────────────────────────────────────────────────────

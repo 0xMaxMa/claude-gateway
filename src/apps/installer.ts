@@ -467,11 +467,25 @@ export class AppInstaller {
 
     // Conflict check — agent name (if app declares an agent), inside install lock
     if (generated.agentDeclaration && this.agentManager) {
-      const conflict = await this.agentManager.findAgentByName(generated.agentDeclaration.name);
+      const agentName = generated.agentDeclaration.name;
+      const conflict = await this.agentManager.findAgentByName(agentName);
       if (conflict) {
-        throw new Error(
-          `Agent name "${generated.agentDeclaration.name}" is already registered — agent name conflict`,
+        // The agent is registered in config.json — but is it owned by an app that
+        // is actually installed? If a different installed app declares it, that's a
+        // real conflict. If no installed app owns it, it's an orphan left behind by
+        // a prior install that was killed before rollback could deregister it —
+        // reclaim it (preserves the agent's sessions) so the app can install.
+        const apps = await this.registry.list();
+        const owner = apps.find(
+          (a) => a.name !== appName && a.agentDeclaration?.name === agentName,
         );
+        if (owner) {
+          throw new Error(
+            `Agent name "${agentName}" is already registered by app "${owner.name}"`,
+          );
+        }
+        this.log(job, `Reclaiming orphaned agent registration "${agentName}"`);
+        await this.agentManager.deleteAgentByName(agentName);
       }
     }
 
