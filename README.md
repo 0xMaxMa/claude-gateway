@@ -529,6 +529,7 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `POST` | `/api/v1/agents/wizard/:wizardId/complete` | Skip channel and finalise wizard (admin) |
 | `GET` | `/api/v1/apps/registry` | Browse community app registry (admin key) |
 | `POST` | `/api/v1/apps/install` | Install app from registry, GitHub, or local path → `jobId` (admin) |
+| `POST` | `/api/v1/apps/inspect` | Preview a source's required/generated secrets before install, no install (admin) |
 | `GET` | `/api/v1/apps/jobs/:jobId` | Poll install/update job status and logs |
 | `GET` | `/api/v1/apps` | List installed apps |
 | `GET` | `/api/v1/apps/:name` | Get app info |
