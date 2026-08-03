@@ -135,6 +135,42 @@ services:
         const y = MINIMAL_IMAGE_YAML + '\n    environment:\n      - MY_VAR=hello';
         expect(() => parseAppYaml(y, dir)).not.toThrow();
       });
+
+      describe('generator marker', () => {
+        it('accepts a valid !generate marker', () => {
+          const y = MINIMAL_IMAGE_YAML + '\n    environment:\n      - NEXTAUTH_SECRET=!generate:base64:32';
+          expect(() => parseAppYaml(y, dir)).not.toThrow();
+        });
+
+        it('accepts hex and base64url encodings', () => {
+          const yHex = MINIMAL_IMAGE_YAML + '\n    environment:\n      - TOKEN=!generate:hex:16';
+          const yUrl = MINIMAL_IMAGE_YAML + '\n    environment:\n      - DB_PASSWORD=!generate:base64url:24';
+          expect(() => parseAppYaml(yHex, dir)).not.toThrow();
+          expect(() => parseAppYaml(yUrl, dir)).not.toThrow();
+        });
+
+        it('throws naming service and key on unknown encoding', () => {
+          const y = MINIMAL_IMAGE_YAML + '\n    environment:\n      - SECRET=!generate:rot13:32';
+          expect(() => parseAppYaml(y, dir)).toThrow(/web.*SECRET.*rot13/);
+        });
+
+        it('throws on non-numeric length', () => {
+          const y = MINIMAL_IMAGE_YAML + '\n    environment:\n      - SECRET=!generate:base64:lots';
+          expect(() => parseAppYaml(y, dir)).toThrow(/SECRET.*integer/);
+        });
+
+        it('throws on out-of-range length', () => {
+          const yLow = MINIMAL_IMAGE_YAML + '\n    environment:\n      - SECRET=!generate:base64:2';
+          const yHigh = MINIMAL_IMAGE_YAML + '\n    environment:\n      - SECRET=!generate:base64:99999';
+          expect(() => parseAppYaml(yLow, dir)).toThrow(/SECRET.*out of range/);
+          expect(() => parseAppYaml(yHigh, dir)).toThrow(/SECRET.*out of range/);
+        });
+
+        it('throws on malformed marker shape', () => {
+          const y = MINIMAL_IMAGE_YAML + '\n    environment:\n      - SECRET=!generate:base64';
+          expect(() => parseAppYaml(y, dir)).toThrow(/SECRET.*!generate/);
+        });
+      });
     });
 
     describe('ports', () => {
@@ -493,6 +529,49 @@ services:
     it('does not include static keys in result.secretKeys', () => {
       const result = generate(yamlWithEnv);
       expect(result.secretKeys).not.toContain('DATABASE_URL');
+    });
+  });
+
+  describe('generated secrets', () => {
+    const yamlWithGen = `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  web:
+    image: nginx:1.25
+    environment:
+      - NEXTAUTH_SECRET=!generate:base64:32
+      - DB_PASSWORD=!generate:base64url:24
+      - NEXTAUTH_URL
+      - APP_ENV=production
+`.trim();
+
+    it('collects generated keys into result.generatedKeys', () => {
+      const result = generate(yamlWithGen);
+      const byKey = Object.fromEntries(result.generatedKeys.map((g) => [g.key, g]));
+      expect(byKey['NEXTAUTH_SECRET']).toEqual({ key: 'NEXTAUTH_SECRET', encoding: 'base64', bytes: 32 });
+      expect(byKey['DB_PASSWORD']).toEqual({ key: 'DB_PASSWORD', encoding: 'base64url', bytes: 24 });
+    });
+
+    it('keeps generated keys out of the compose environment block', () => {
+      generate(yamlWithGen);
+      const compose = readCompose(outputPath);
+      const svc = (compose.services as Record<string, unknown>).web as Record<string, unknown>;
+      const env = (svc.environment as string[]) ?? [];
+      expect(env.some((e) => e.startsWith('NEXTAUTH_SECRET'))).toBe(false);
+      expect(env.some((e) => e.startsWith('DB_PASSWORD'))).toBe(false);
+      // ...but a real static var still passes through
+      expect(env).toContain('APP_ENV=production');
+    });
+
+    it('does not report generated keys as secretKeys to prompt for', () => {
+      const result = generate(yamlWithGen);
+      expect(result.secretKeys).not.toContain('NEXTAUTH_SECRET');
+      expect(result.secretKeys).not.toContain('DB_PASSWORD');
+      // a genuine bare key is still a prompt
+      expect(result.secretKeys).toContain('NEXTAUTH_URL');
     });
   });
 

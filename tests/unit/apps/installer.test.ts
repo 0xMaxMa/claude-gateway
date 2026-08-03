@@ -254,6 +254,128 @@ services:
       expect(envContent).toContain('BASE_PATH=/app/web-app/web');
     });
 
+    // ── Self-generating secrets (issue #255) ─────────────────────────────────
+    function makeGenAppDir(dir: string, appName: string, port = 5000): string {
+      const appDir = path.join(dir, appName);
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, 'app.yaml'),
+        `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - GEN_HEX=!generate:hex:16
+      - GEN_URLSAFE=!generate:base64url:24
+      - USER_KEY
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+`.trim(),
+        'utf-8',
+      );
+      return appDir;
+    }
+
+    function readEnv(appDir: string): Record<string, string> {
+      const content = fs.readFileSync(path.join(appDir, '.env'), 'utf-8');
+      const out: Record<string, string> = {};
+      for (const line of content.split('\n')) {
+        const i = line.indexOf('=');
+        if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
+      }
+      return out;
+    }
+
+    it('writes a fresh random value for a generated key', async () => {
+      const appDir = makeGenAppDir(srcDir, 'gen-app');
+      const installer = makeInstaller();
+      const jobId = installer.install({ localPath: appDir });
+      await waitForJob(installer, jobId, 5000);
+
+      const env = readEnv(appDir);
+      // hex:16 → 32 hex chars; base64url has no + / = padding
+      expect(env['GEN_HEX']).toMatch(/^[0-9a-f]{32}$/);
+      expect(env['GEN_URLSAFE']).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(env['GEN_URLSAFE'].length).toBeGreaterThan(0);
+    });
+
+    it('produces different values on two installs of the same app', async () => {
+      const appDirA = makeGenAppDir(srcDir, 'gen-app-a', 5001);
+      const appDirB = makeGenAppDir(srcDir, 'gen-app-b', 5002);
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDirA }), 5000);
+      await waitForJob(installer, installer.install({ localPath: appDirB }), 5000);
+
+      expect(readEnv(appDirA)['GEN_HEX']).not.toBe(readEnv(appDirB)['GEN_HEX']);
+    });
+
+    it('lets an explicit env_var override generation', async () => {
+      const appDir = makeGenAppDir(srcDir, 'gen-app');
+      const installer = makeInstaller();
+      const jobId = installer.install({
+        localPath: appDir,
+        envVars: { GEN_HEX: 'pinned-value' },
+      });
+      await waitForJob(installer, jobId, 5000);
+
+      const env = readEnv(appDir);
+      expect(env['GEN_HEX']).toBe('pinned-value');
+      // the un-pinned generated key is still randomized, and not double-written
+      expect(env['GEN_URLSAFE']).toMatch(/^[A-Za-z0-9_-]+$/);
+      const hexCount = fs
+        .readFileSync(path.join(appDir, '.env'), 'utf-8')
+        .split('\n')
+        .filter((l) => l.startsWith('GEN_HEX=')).length;
+      expect(hexCount).toBe(1);
+    });
+
+    it('never writes the generated value into the job logs', async () => {
+      const appDir = makeGenAppDir(srcDir, 'gen-app');
+      const installer = makeInstaller();
+      const jobId = installer.install({ localPath: appDir });
+      await waitForJob(installer, jobId, 5000);
+
+      const env = readEnv(appDir);
+      const logs = installer.getJob(jobId)!.logs.join('\n');
+      expect(logs).toContain('Generated secrets: GEN_HEX, GEN_URLSAFE');
+      expect(logs).not.toContain(env['GEN_HEX']);
+      expect(logs).not.toContain(env['GEN_URLSAFE']);
+    });
+
+    it('does not report generated keys in job result secretKeys', async () => {
+      const appDir = makeGenAppDir(srcDir, 'gen-app');
+      const installer = makeInstaller();
+      const jobId = installer.install({ localPath: appDir });
+      const job = await waitForJob(installer, jobId, 5000);
+
+      const secretKeys = (job.result as { secretKeys: string[] }).secretKeys;
+      expect(secretKeys).toContain('USER_KEY');
+      expect(secretKeys).not.toContain('GEN_HEX');
+      expect(secretKeys).not.toContain('GEN_URLSAFE');
+    });
+
+    it('update preserves a generated value already in .env (copies verbatim)', async () => {
+      // The update path (installer.ts:708-712) copies the existing .env into the
+      // new install dir instead of rebuilding it, so a generated DB password
+      // survives an update and never locks the app out of its own volume.
+      const appDir = makeGenAppDir(srcDir, 'gen-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const original = readEnv(appDir)['GEN_HEX'];
+      // Simulate the update copy step against a fresh target dir.
+      const newDir = fs.mkdtempSync(path.join(os.tmpdir(), 'installer-update-'));
+      fs.copyFileSync(path.join(appDir, '.env'), path.join(newDir, '.env'));
+      expect(readEnv(newDir)['GEN_HEX']).toBe(original);
+    });
+
     it('fails when local_path has no app.yaml', async () => {
       const outsidePath = path.join(tmpDir, 'evil-app');
       fs.mkdirSync(outsidePath);

@@ -73,7 +73,11 @@ Rules for port type:
 
 Rules for environment variables:
 - If the Dockerfile has `ENV FOO=bar` → `FOO=bar` (has default)
-- If you see `ARG FOO` or `ENV FOO` with no value → `FOO` (secret, no default)
+- If you see `ARG FOO` or `ENV FOO` with no value → `FOO` (secret, no default — installer prompts for it)
+- If the value is a **per-install random string** the user cannot meaningfully supply (session secret, DB password, internal API token) → `FOO=!generate:<encoding>:<bytes>`. The installer fills it with a fresh random value automatically, so the install never stalls asking for it.
+  - Encodings: `hex`, `base64`, `base64url` (use `base64url` when the value is embedded in a URL or connection string — it has no `+` `/` `=`). Length is `8`–`512` bytes.
+  - Examples: `NEXTAUTH_SECRET=!generate:base64:32`, `DB_PASSWORD=!generate:base64url:24`
+  - Only leave a bare `FOO` (no `=`) for values a **human** must answer (a public URL, an external account, an API key from a third party).
 
 ---
 
