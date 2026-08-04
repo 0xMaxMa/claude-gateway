@@ -4,8 +4,50 @@ import { createApiAuthMiddleware, isAdmin } from './auth';
 import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
+import { assertValidHostPort } from '../apps/compose-generator';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
+
+/**
+ * Parse a request-body `ports` field into a validated host-port override map.
+ * Returns undefined when absent. Throws (→ 400) on a non-object, a non-integer
+ * value, or a banned / sub-1024 port — the same floor generateCompose enforces,
+ * surfaced synchronously so callers get a clear error instead of a failed job.
+ */
+function parsePortsField(raw: unknown): Record<string, number> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('"ports" must be an object mapping port name to host port');
+  }
+  const out: Record<string, number> = {};
+  for (const [name, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof val !== 'number' || !Number.isInteger(val)) {
+      throw new Error(`Port override "${name}" must be an integer`);
+    }
+    assertValidHostPort(name, val); // throws on banned / < 1024
+    out[name] = val;
+  }
+  return out;
+}
+
+/**
+ * Parse a request-body `env_vars` field into a validated string map. Returns
+ * undefined when absent. Throws (→ 400) on a non-object or a non-string value.
+ */
+function parseEnvVarsField(raw: unknown): Record<string, string> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('"env_vars" must be an object');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== 'string') {
+      throw new Error(`env var "${k}" must be a string`);
+    }
+    out[k] = v;
+  }
+  return out;
+}
 
 // ─── Router ───────────────────────────────────────────────────────────────────
 
@@ -69,6 +111,13 @@ export function createAppsRouter(
     }
 
     const body = req.body as Record<string, unknown>;
+    let portOverrides: Record<string, number> | undefined;
+    try {
+      portOverrides = parsePortsField(body.ports);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
     const options = {
       registryApp: typeof body.registry_app === 'string' ? body.registry_app : undefined,
       version: typeof body.version === 'string' ? body.version : undefined,
@@ -78,6 +127,7 @@ export function createAppsRouter(
       envVars: typeof body.env_vars === 'object' && body.env_vars !== null && !Array.isArray(body.env_vars)
         ? (body.env_vars as Record<string, string>)
         : undefined,
+      portOverrides,
     };
 
     if (!options.registryApp && !options.githubUrl && !options.localPath) {
@@ -250,6 +300,72 @@ export function createAppsRouter(
       res.status(202).json({ jobId });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/apps/:name/reconfigure — async reconfigure → { jobId }.
+   * Merges `env_vars` into the app's existing .env (keys not sent are kept) and
+   * optionally overrides host `ports`, then force-recreates the container while
+   * preserving its named volumes/data. Admin-gated to match install/update.
+   */
+  router.post('/v1/apps/:name/reconfigure', async (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required to reconfigure apps' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    let envVars: Record<string, string> | undefined;
+    let portOverrides: Record<string, number> | undefined;
+    try {
+      envVars = parseEnvVarsField(body.env_vars);
+      portOverrides = parsePortsField(body.ports);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+
+    const hasEnv = envVars !== undefined && Object.keys(envVars).length > 0;
+    const hasPorts = portOverrides !== undefined && Object.keys(portOverrides).length > 0;
+    if (!hasEnv && !hasPorts) {
+      res.status(400).json({ error: 'Provide env_vars and/or ports to reconfigure' });
+      return;
+    }
+
+    try {
+      const entry = await registry.get(req.params.name);
+      if (!entry) {
+        res.status(404).json({ error: `App "${req.params.name}" not found` });
+        return;
+      }
+      if (entry.source === 'local') {
+        res.status(400).json({
+          error: 'Local (symlinked) apps cannot be reconfigured — reinstall from source instead',
+        });
+        return;
+      }
+      // Cross-app host-port collision — deterministic, so reject up front (400).
+      if (hasPorts && portOverrides) {
+        const collision = await installer.findHostPortCollision(
+          req.params.name,
+          Object.entries(portOverrides).map(([name, hostPort]) => ({ name, hostPort })),
+        );
+        if (collision) {
+          res.status(400).json({ error: collision });
+          return;
+        }
+      }
+      const jobId = installer.reconfigure(req.params.name, { envVars, portOverrides });
+      res.status(202).json({ jobId });
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes('already being')) {
+        res.status(409).json({ error: msg });
+        return;
+      }
+      res.status(500).json({ error: msg });
     }
   });
 

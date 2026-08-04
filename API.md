@@ -159,6 +159,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/apps/:name/restart` | Admin | Restart app |
 | `GET` | `/api/v1/apps/:name/version` | Key | Check installed vs latest version |
 | `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → `jobId` |
+| `POST` | `/api/v1/apps/:name/reconfigure` | Admin | Start async env/host-port reconfigure (keeps volumes) → `jobId` |
 | `GET` | `/app/:name/:portName/*` | None | Reverse proxy to installed app |
 
 ### Cron API
@@ -2706,6 +2707,7 @@ Manage Docker-compose apps installed on the gateway. Apps can be sourced from th
 | `POST` | `/api/v1/apps/:name/restart` | Admin | Restart app |
 | `GET` | `/api/v1/apps/:name/version` | Key | Check current + latest version |
 | `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → returns `jobId` |
+| `POST` | `/api/v1/apps/:name/reconfigure` | Admin | Start async env/host-port reconfigure (keeps volumes) → returns `jobId` |
 
 ---
 
@@ -2801,6 +2803,7 @@ Start an asynchronous install job. Returns immediately with a `jobId` to poll.
 | `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted). Omit to auto-resolve HEAD. |
 | `local_path` | One of | Absolute path to local project dir (dev mode — symlinked, source never deleted) |
 | `env_vars` | No | Pre-supplied env vars as a JSON **object** (not array). Keys must match vars declared in `app.yaml`. |
+| `ports` | No | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Default host port comes from `app.yaml`. Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`). |
 
 **Mode A — registry install:**
 ```bash
@@ -3084,6 +3087,45 @@ Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress.
 | 400 | App source is `local` (symlinked apps cannot be updated) |
 | 403 | Not an admin key |
 | 404 | App not installed |
+
+---
+
+### POST /api/v1/apps/:name/reconfigure
+
+Start an async reconfigure of an already-installed app — change its env vars and/or host ports, then force-recreate the container **in place**. Named volumes (and their data) are preserved: this is a `docker compose up --force-recreate`, never a `down -v`. The container always restarts so it picks up the new values.
+
+**Request body** (at least one of `env_vars` / `ports` is required):
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `env_vars` | One of | Env vars to **merge** into the app's existing `.env` as a JSON **object** (values must be strings). Keys not supplied are preserved; existing self-generated secrets are kept, not rotated. |
+| `ports` | One of | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`), and must not collide with another installed app. |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "env_vars": { "DATABASE_URL": "postgres://..." },
+    "ports": { "web": 4000 }
+  }' \
+  http://localhost:10850/api/v1/apps/agent-note/reconfigure | jq
+```
+
+```json
+{ "jobId": "772fa622-a41d-63f6-c938-668877662222" }
+```
+
+Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress. When a host port changes, the proxy route is re-registered and the returned job's `proxyUrls` reflect the new port.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Neither `env_vars` nor `ports` supplied; a `ports` value is non-integer / banned / `< 1024` / collides with another app; an `env_vars` value is not a string; app source is `local` |
+| 403 | Not an admin key |
+| 404 | App not installed |
+| 409 | App is already being installed / updated / reconfigured |
 
 ---
 

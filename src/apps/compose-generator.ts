@@ -121,7 +121,25 @@ export interface GeneratedCompose {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const BANNED_PORTS = new Set([22, 80, 443, 10850]);
+export const BANNED_PORTS = new Set([22, 80, 443, 10850]);
+
+/**
+ * Validate a host port supplied as an override (install `ports` field or the
+ * reconfigure endpoint). External input — enforce the same floor and banned
+ * set the app.yaml validator ({@link validatePorts}) applies to declared host
+ * ports, so an override can never map an app onto ssh/http/https/the gateway.
+ * Throws with a caller-friendly message on failure.
+ */
+export function assertValidHostPort(portName: string, value: number): void {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new Error(`Port override for "${portName}" must be an integer`);
+  }
+  if (value < 1024 || BANNED_PORTS.has(value)) {
+    throw new Error(
+      `Port override for "${portName}" (${value}) is banned or below 1024`,
+    );
+  }
+}
 const ALLOWED_SERVICE_FIELDS = new Set([
   'build', 'image', 'command', 'entrypoint', 'working_dir', 'user',
   'environment', 'volumes', 'ports', 'depends_on', 'healthcheck', 'gateway_api',
@@ -260,10 +278,15 @@ export function generateCompose(
   appName: string,
   appDir: string,
   outputPath: string,
+  portOverrides?: Record<string, number>,
 ): GeneratedCompose {
   if (!APP_NAME_RE.test(appName)) {
     throw new Error(`Invalid app name: "${appName}"`);
   }
+
+  // Track which override keys actually match a declared port name so an
+  // override for a non-existent port is reported rather than silently ignored.
+  const unusedOverrides = new Set(Object.keys(portOverrides ?? {}));
 
   const result: GeneratedCompose = {
     ports: [],
@@ -408,7 +431,15 @@ export function generateCompose(
 
     for (const portDef of svc.ports ?? []) {
       const containerPort = portDef.container;
-      const hostPort = portDef.host;
+      let hostPort = portDef.host;
+      // Host-port override (install `ports` field / reconfigure). Validated
+      // against the same floor + banned set as declared ports.
+      if (portOverrides && Object.prototype.hasOwnProperty.call(portOverrides, portDef.name)) {
+        const override = portOverrides[portDef.name];
+        assertValidHostPort(portDef.name, override);
+        hostPort = override;
+        unusedOverrides.delete(portDef.name);
+      }
       composeSvc.ports = (composeSvc.ports as string[] | undefined) ?? [];
       (composeSvc.ports as string[]).push(`${hostPort}:${containerPort}`);
 
@@ -502,6 +533,27 @@ export function generateCompose(
     };
 
     composeServices[svcName] = composeSvc;
+  }
+
+  // Port-override post-checks (only when overrides were supplied, so existing
+  // installs without overrides keep their exact behavior).
+  if (portOverrides) {
+    if (unusedOverrides.size > 0) {
+      throw new Error(
+        `Port override for unknown port name(s): ${[...unusedOverrides].join(', ')}`,
+      );
+    }
+    // Reject overrides that make two ports share one host port within the app.
+    const seenHost = new Map<number, string>();
+    for (const p of result.ports) {
+      const prev = seenHost.get(p.hostPort);
+      if (prev !== undefined && prev !== p.name) {
+        throw new Error(
+          `Host port ${p.hostPort} is used by more than one port ("${prev}" and "${p.name}")`,
+        );
+      }
+      seenHost.set(p.hostPort, p.name);
+    }
   }
 
   // Top-level volumes for named volumes

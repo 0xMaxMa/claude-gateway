@@ -476,4 +476,103 @@ services:
       expect(typeof res.body.updateable).toBe('boolean');
     });
   });
+
+  // ── POST /api/v1/apps/:name/reconfigure ────────────────────────────────
+  describe('POST /api/v1/apps/:name/reconfigure', () => {
+    it('returns 403 for non-admin key', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${READ_KEY.key}`)
+        .send({ env_vars: { FOO: 'bar' } });
+      expect(res.status).toBe(403);
+    });
+
+    it('returns 404 when app not installed', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/ghost/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ env_vars: { FOO: 'bar' } });
+      expect(res.status).toBe(404);
+    });
+
+    it('returns 400 for a local (symlinked) app', async () => {
+      await registry.upsert(makeEntry({ source: 'local' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ env_vars: { FOO: 'bar' } });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/local/i);
+    });
+
+    it('returns 400 when neither env_vars nor ports is provided', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 for a banned override port', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ ports: { api: 443 } });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/banned/i);
+    });
+
+    it('returns 400 for an override port below 1024', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ ports: { api: 1000 } });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 for a non-integer override port', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ ports: { api: 'nope' } });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 for a non-string env var value', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ env_vars: { FOO: 123 } });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 when an override port collides with another installed app', async () => {
+      await registry.upsert(makeEntry({ name: 'other-app', ports: [
+        { name: 'api', service: 'app', hostPort: 6001, containerPort: 6001, type: 'api', rateLimit: 200 },
+      ] }));
+      await registry.upsert(makeEntry({ name: 'test-app' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ ports: { api: 6001 } });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/already used by app "other-app"/);
+    });
+
+    it('returns 202 with a jobId for a valid env-only reconfigure', async () => {
+      await registry.upsert(makeEntry({ source: 'custom' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ env_vars: { FEATURE_FLAG: 'on' } });
+      expect(res.status).toBe(202);
+      expect(typeof res.body.jobId).toBe('string');
+    });
+  });
 });
