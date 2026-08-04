@@ -536,6 +536,7 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `DELETE` | `/api/v1/apps/:name` | Uninstall app (admin) |
 | `POST` | `/api/v1/apps/:name/start\|stop\|restart` | Start/stop/restart app containers (admin) |
 | `POST` | `/api/v1/apps/:name/update` | Blue-green update with auto-rollback → `jobId` (admin) |
+| `POST` | `/api/v1/apps/:name/reconfigure` | Change env vars / host ports on an installed app, with rollback → `jobId` (admin) |
 | `GET` | `/app/:name/:portName/*` | Reverse proxy to installed app (no auth) |
 
 **Wizard API** — create agents programmatically with the same flow as the interactive `make create-agent` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.

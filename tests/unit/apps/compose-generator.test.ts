@@ -920,3 +920,91 @@ services:
     });
   });
 });
+
+// ─── generateCompose() — host-port overrides (issue #267) ───────────────────────
+
+describe('generateCompose() — port overrides', () => {
+  let appDir: string;
+  let outputPath: string;
+
+  beforeEach(() => {
+    appDir = makeTmpDir();
+    outputPath = path.join(makeTmpDir(), 'docker-compose.yml');
+  });
+
+  function generate(
+    yamlContent: string,
+    overrides?: Record<string, number>,
+    appName = 'my-app',
+  ): ReturnType<typeof generateCompose> {
+    const appYaml = parseAppYaml(yamlContent, appDir);
+    return generateCompose(appYaml, appName, appDir, outputPath, overrides);
+  }
+
+  const TWO_PORT_YAML = `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  web:
+    image: nginx:1.25
+    ports:
+      - name: app
+        host: 8080
+        container: 8080
+        type: api
+      - name: admin
+        host: 9090
+        container: 9090
+        type: api
+`.trim();
+
+  it('uses the app.yaml host port when no override is given', () => {
+    const result = generate(MINIMAL_IMAGE_YAML);
+    expect(result.ports.find((p) => p.name === 'app')?.hostPort).toBe(8080);
+    const compose = readCompose(outputPath);
+    const svc = (compose.services as Record<string, unknown>).web as Record<string, unknown>;
+    expect(svc.ports).toEqual(['8080:8080']);
+  });
+
+  it('overrides the host port for the named port only', () => {
+    const result = generate(TWO_PORT_YAML, { app: 8888 });
+    expect(result.ports.find((p) => p.name === 'app')?.hostPort).toBe(8888);
+    expect(result.ports.find((p) => p.name === 'admin')?.hostPort).toBe(9090);
+    const compose = readCompose(outputPath);
+    const svc = (compose.services as Record<string, unknown>).web as Record<string, unknown>;
+    expect(svc.ports).toEqual(['8888:8080', '9090:9090']);
+  });
+
+  it('keeps the container port unchanged when overriding the host port', () => {
+    const result = generate(MINIMAL_IMAGE_YAML, { app: 8888 });
+    const port = result.ports.find((p) => p.name === 'app');
+    expect(port?.hostPort).toBe(8888);
+    expect(port?.containerPort).toBe(8080);
+  });
+
+  it('rejects a banned override port', () => {
+    expect(() => generate(MINIMAL_IMAGE_YAML, { app: 443 })).toThrow('banned');
+  });
+
+  it('rejects an override port below 1024', () => {
+    expect(() => generate(MINIMAL_IMAGE_YAML, { app: 1000 })).toThrow('below 1024');
+  });
+
+  it('rejects the gateway port (10850) as an override', () => {
+    expect(() => generate(MINIMAL_IMAGE_YAML, { app: 10850 })).toThrow('banned');
+  });
+
+  it('rejects a non-integer override port', () => {
+    expect(() => generate(MINIMAL_IMAGE_YAML, { app: 8080.5 })).toThrow('integer');
+  });
+
+  it('rejects an override for an unknown port name', () => {
+    expect(() => generate(MINIMAL_IMAGE_YAML, { nonexistent: 8888 })).toThrow('unknown port name');
+  });
+
+  it('rejects two ports overridden onto the same host port', () => {
+    expect(() => generate(TWO_PORT_YAML, { app: 7000, admin: 7000 })).toThrow('more than one port');
+  });
+});

@@ -12,6 +12,7 @@ import {
   ComposePort,
   ComposeSocket,
   GeneratedKey,
+  GeneratedCompose,
   AgentDeclaration,
 } from './compose-generator';
 import { AgentManager } from './agent-manager';
@@ -31,6 +32,16 @@ export interface InstallOptions {
   localPath?: string;
   /** Pre-supplied env vars (secrets that would otherwise be prompted) */
   envVars?: Record<string, string>;
+  /** Host-port overrides per port name (default host comes from app.yaml) */
+  portOverrides?: Record<string, number>;
+}
+
+/** Options for {@link AppInstaller.reconfigure}. */
+export interface ReconfigureOptions {
+  /** Env vars to merge into the existing .env (unsent keys are preserved) */
+  envVars?: Record<string, string>;
+  /** Host-port overrides per port name (unset = app.yaml default) */
+  portOverrides?: Record<string, number>;
 }
 
 export interface InstallResult {
@@ -273,6 +284,40 @@ export class AppInstaller {
     this.jobs.set(jobId, job);
 
     void this.runUpdate(job, appName).catch((err: unknown) => {
+      this.failJob(job, err instanceof Error ? err.message : String(err));
+    }).finally(() => {
+      this.installingNames.delete(appName);
+    });
+
+    return jobId;
+  }
+
+  /**
+   * Start an async reconfigure job — merge env vars and/or override host ports
+   * on an already-installed app, then force-recreate the container. Named
+   * volumes (and their data) survive because this is an `up --force-recreate`,
+   * never a `down -v`. Returns jobId immediately. Throws synchronously (409)
+   * if the app is mid install/update/reconfigure.
+   */
+  reconfigure(appName: string, options: ReconfigureOptions): string {
+    this.pruneOldJobs();
+
+    if (this.installingNames.has(appName)) {
+      throw new Error(`App "${appName}" is already being installed or updated`);
+    }
+    this.installingNames.add(appName);
+
+    const jobId = crypto.randomUUID();
+    const job: JobState = {
+      id: jobId,
+      status: 'pending',
+      logs: [],
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.jobs.set(jobId, job);
+
+    void this.runReconfigure(job, appName, options).catch((err: unknown) => {
       this.failJob(job, err instanceof Error ? err.message : String(err));
     }).finally(() => {
       this.installingNames.delete(appName);
@@ -545,23 +590,15 @@ export class AppInstaller {
     // ── Generate docker-compose.yml ───────────────────────────────────────
     this.log(job, 'Generating docker-compose.yml');
     const composePath = path.join(appDir, 'docker-compose.yml');
-    const generated = generateCompose(appYaml, appName, appDir, composePath);
+    const generated = generateCompose(appYaml, appName, appDir, composePath, options.portOverrides);
 
     // Conflict check — host port uniqueness across all installed apps
-    const installedApps = await this.registry.list();
-    const usedHostPorts = new Map<number, string>();
-    for (const app of installedApps) {
-      for (const port of app.ports) {
-        usedHostPorts.set(port.hostPort, app.name);
-      }
-    }
-    for (const port of generated.ports) {
-      const owner = usedHostPorts.get(port.hostPort);
-      if (owner) {
-        throw new Error(
-          `Host port ${port.hostPort} (port "${port.name}") is already used by app "${owner}"`,
-        );
-      }
+    const collision = await this.findHostPortCollision(
+      appName,
+      generated.ports.map((p) => ({ name: p.name, hostPort: p.hostPort })),
+    );
+    if (collision) {
+      throw new Error(collision);
     }
 
     // Conflict check — agent name (if app declares an agent), inside install lock
@@ -594,50 +631,9 @@ export class AppInstaller {
 
     // ── Write .env ────────────────────────────────────────────────────────
     this.log(job, 'Writing .env');
-    const envVars = options.envVars ?? {};
-    const envLines: string[] = [];
-
-    // Inject BASE_PATH for web-type ports
-    for (const port of generated.ports) {
-      if (port.type === 'web') {
-        envVars[`BASE_PATH`] = `/app/${appName}/${port.name}`;
-      }
-    }
-
-    for (const key of generated.secretKeys) {
-      const val = (envVars[key] ?? '').replace(/[\r\n]/g, '');
-      envLines.push(`${key}=${val}`);
-    }
-    // Self-generating secrets: write a fresh random value unless the operator
-    // pinned one via envVars. Log only the key names, never the values.
-    const generatedKeySet = new Set(generated.generatedKeys.map((g) => g.key));
-    const generatedNames: string[] = [];
-    for (const g of generated.generatedKeys) {
-      const pinned = envVars[g.key];
-      let val: string;
-      if (pinned !== undefined && pinned !== '') {
-        val = pinned.replace(/[\r\n]/g, '');
-      } else {
-        val = generateSecretValue(g.encoding, g.bytes);
-        generatedNames.push(g.key);
-      }
-      envLines.push(`${g.key}=${val}`);
-    }
+    const generatedNames = this.writeEnvFile(appDir, appName, generated, options.envVars ?? {});
     if (generatedNames.length > 0) {
       this.log(job, `Generated secrets: ${generatedNames.join(', ')}`);
-    }
-    // Also write any explicitly provided vars not already declared as secrets/generated
-    for (const [k, v] of Object.entries(envVars)) {
-      if (!generated.secretKeys.includes(k) && !generatedKeySet.has(k)) {
-        envLines.push(`${k}=${v.replace(/[\r\n]/g, '')}`);
-      }
-    }
-
-    const envPath = path.join(appDir, '.env');
-    try {
-      fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
-    } catch (err) {
-      throw new Error(`Failed to write .env: ${(err as Error).message}`);
     }
 
     // ── Create socket files ───────────────────────────────────────────────
@@ -1014,6 +1010,301 @@ export class AppInstaller {
   }
 
   /**
+   * Reconfigure an installed app: merge env vars and/or override host ports,
+   * then force-recreate the container in place. No clone, no dir swap — the app
+   * stays at its current commit/appDir; only its .env and (optionally) its
+   * compose port mappings change. Named volumes and their data survive because
+   * this is an `up --force-recreate`, never a `down -v`.
+   */
+  private async runReconfigure(
+    job: JobState,
+    appName: string,
+    options: ReconfigureOptions,
+  ): Promise<void> {
+    job.status = 'running';
+    job.updatedAt = Date.now();
+
+    const entry = await this.registry.get(appName);
+    if (!entry) throw new Error(`App "${appName}" is not installed`);
+    if (entry.source === 'local') {
+      throw new Error(
+        `App "${appName}" is installed from a local path and cannot be reconfigured — reinstall from source instead`,
+      );
+    }
+
+    const appDir = entry.installPath;
+    const composePath = path.join(appDir, 'docker-compose.yml');
+    const portOverrides = options.portOverrides;
+    const hasPortChange =
+      portOverrides !== undefined && Object.keys(portOverrides).length > 0;
+
+    // Parse the app's on-disk app.yaml (present from the original install/update).
+    const yamlPath = path.join(appDir, 'app.yaml');
+    if (!fs.existsSync(yamlPath)) {
+      throw new Error(`app.yaml not found for "${appName}" — cannot reconfigure`);
+    }
+    const appYaml = parseAppYaml(fs.readFileSync(yamlPath, 'utf-8'), appDir);
+
+    this.log(job, 'Preparing reconfigure');
+
+    // Snapshot the current on-disk state BEFORE any mutation so a failed
+    // recreate can be rolled back. Both an env-only and a port change rewrite
+    // .env and force-recreate the container; a port change additionally rewrites
+    // the live compose file and swaps proxy routes. If the new container never
+    // comes up the app would otherwise be left down (or, for a port change,
+    // unreachable with routes gone and compose/registry mismatched).
+    const envPath = path.join(appDir, '.env');
+    const oldComposeContent =
+      hasPortChange && fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
+    const oldEnvContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : null;
+    const oldPorts = entry.ports;
+
+    // Compute (and validate) the port metadata. Always generate to a TEMP file
+    // first: the live compose must not change until the overrides are validated
+    // (generateCompose checks them) and we are inside the guarded section below.
+    // Writing the live file here would leave the new ports on disk against the
+    // still-running old container if a later step (collision, agent inject)
+    // throws (finding F2). An env-only reconfigure never touches the compose.
+    let generated: GeneratedCompose;
+    let newComposeContent: string;
+    {
+      const tmpCompose = path.join(os.tmpdir(), `cg-reconf-${appName}-${crypto.randomUUID()}.yml`);
+      try {
+        generated = generateCompose(appYaml, appName, appDir, tmpCompose, portOverrides);
+        newComposeContent = fs.readFileSync(tmpCompose, 'utf-8');
+      } finally {
+        fs.rmSync(tmpCompose, { force: true });
+      }
+    }
+
+    // Host-port collision across other installed apps (only if ports changed).
+    // Runs before the live compose is touched, so a collision leaves nothing to
+    // undo on disk.
+    if (hasPortChange) {
+      const collision = await this.findHostPortCollision(
+        appName,
+        generated.ports.map((p) => ({ name: p.name, hostPort: p.hostPort })),
+      );
+      if (collision) throw new Error(collision);
+    }
+
+    // Apply the reconfigure. Everything from here mutates live state (compose
+    // file, .env, proxy routes, the running container), so it is guarded: a
+    // reconfigure that fails to recreate is rolled back to the previous
+    // ports/compose/.env so the app stays reachable (planning §4.1 step 10 —
+    // best-effort reopen).
+    try {
+      // Swap in the newly-generated compose only now that we're inside the
+      // guard (finding F2). Regenerating drops the injected agent service, so we
+      // re-inject it. An env-only reconfigure leaves the compose untouched.
+      if (hasPortChange) {
+        this.log(job, 'Updating docker-compose.yml');
+        fs.writeFileSync(composePath, newComposeContent);
+        if (generated.agentDeclaration && this.agentManager) {
+          const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+          this.agentManager.injectAgentService({ ...entry, agentPaths });
+        }
+      }
+
+      // Merge the new env vars onto the existing .env: keys not supplied are
+      // preserved, and existing generated-secret values are carried over rather
+      // than rotated (writeEnvFile treats an already-present value as pinned).
+      this.log(job, 'Writing .env');
+      const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
+      this.writeEnvFile(appDir, appName, generated, mergedEnv);
+
+      // Deregister old proxy routes before the port mapping changes (the proxy is
+      // bound to the old hostPort).
+      if (hasPortChange) {
+        this.callbacks.deregisterRoutes(appName);
+      }
+
+      // Force-recreate so the container picks up the new .env / port mapping —
+      // compose does not detect an env_file content change on its own. This is an
+      // `up`, not a `down -v`, so named volumes (and their data) survive.
+      this.log(job, 'Recreating container');
+      this.composeUp(appName, appDir, job, { forceRecreate: true });
+
+      await this.registry.updateStatus(appName, 'running');
+
+      // Persist the reconfigure: always bump updatedAt so the registry reflects
+      // that the app was reconfigured; refresh the port mappings + re-register
+      // proxy routes only when a host port actually changed.
+      const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
+      if (hasPortChange) {
+        updatedEntry.ports = generated.ports.map((p) => ({
+          name: p.name,
+          service: p.service,
+          hostPort: p.hostPort,
+          containerPort: p.containerPort,
+          type: p.type,
+          rateLimit: p.rateLimit,
+        }));
+      }
+      await this.registry.upsert(updatedEntry);
+      if (hasPortChange) {
+        this.callbacks.registerRoutes(appName, generated.ports);
+      }
+    } catch (reconfErr) {
+      // Roll back a failed reconfigure so the app stays reachable. Both a
+      // port change and an env-only change rewrite .env and force-recreate the
+      // container, so a bad value (failed healthcheck) or an unbindable port can
+      // leave the app down either way (finding F1). Restore the previous .env,
+      // restore the previous compose + re-register the old routes when a port
+      // change had swapped them, then bring the old container back on the old
+      // config. Best-effort: a failing rollback is logged, not thrown.
+      this.log(job, `Reconfigure failed — rolling back "${appName}"`);
+      try {
+        if (oldEnvContent !== null) {
+          fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
+          fs.chmodSync(envPath, 0o600);
+        }
+        if (hasPortChange && oldComposeContent !== null) {
+          fs.writeFileSync(composePath, oldComposeContent);
+        }
+        this.composeUp(appName, appDir, job, { forceRecreate: true });
+        if (hasPortChange) {
+          this.callbacks.registerRoutes(
+            appName,
+            oldPorts.map((p) => ({
+              name: p.name,
+              service: p.service,
+              hostPort: p.hostPort,
+              containerPort: p.containerPort,
+              type: p.type,
+              rateLimit: p.rateLimit,
+            })),
+          );
+        }
+        await this.registry.updateStatus(appName, 'running');
+      } catch (rollbackErr) {
+        this.log(
+          job,
+          `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`,
+        );
+      }
+      throw reconfErr;
+    }
+
+    const proxyUrls: Record<string, string> = {};
+    for (const p of generated.ports) {
+      proxyUrls[p.name] = `/app/${appName}/${p.name}/`;
+    }
+
+    job.status = 'completed';
+    job.result = {
+      appName,
+      proxyUrls,
+      secretKeys: generated.secretKeys,
+      agentDeclaration: entry.agentDeclaration ?? null,
+    };
+    job.updatedAt = Date.now();
+    this.log(job, `Reconfigure complete: ${JSON.stringify(proxyUrls)}`);
+  }
+
+  /**
+   * Return an error message if any of the given host ports is already bound by a
+   * *different* installed app, else null. Shared by install and reconfigure so
+   * the cross-app collision rule stays in one place.
+   */
+  async findHostPortCollision(
+    selfName: string,
+    ports: Array<{ name: string; hostPort: number }>,
+  ): Promise<string | null> {
+    const installedApps = await this.registry.list();
+    const usedHostPorts = new Map<number, string>();
+    for (const app of installedApps) {
+      if (app.name === selfName) continue;
+      for (const port of app.ports) {
+        usedHostPorts.set(port.hostPort, app.name);
+      }
+    }
+    for (const p of ports) {
+      const owner = usedHostPorts.get(p.hostPort);
+      if (owner) {
+        return `Host port ${p.hostPort} (port "${p.name}") is already used by app "${owner}"`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Write the app's .env file (mode 0600). Emits, in order: BASE_PATH for web
+   * ports, declared secretKeys, self-generating generatedKeys (a fresh random
+   * value unless already present in `envVars` — operator-pinned on install, or
+   * the existing value on reconfigure), then any extra vars. Returns the names
+   * of freshly generated secrets (for logging — never the values). Shared by
+   * runInstall and runReconfigure so the .env format cannot drift.
+   */
+  private writeEnvFile(
+    appDir: string,
+    appName: string,
+    generated: Pick<GeneratedCompose, 'ports' | 'secretKeys' | 'generatedKeys'>,
+    envVars: Record<string, string>,
+  ): string[] {
+    const merged: Record<string, string> = { ...envVars };
+    // Inject BASE_PATH for web-type ports
+    for (const port of generated.ports) {
+      if (port.type === 'web') {
+        merged['BASE_PATH'] = `/app/${appName}/${port.name}`;
+      }
+    }
+
+    const envLines: string[] = [];
+    for (const key of generated.secretKeys) {
+      const val = (merged[key] ?? '').replace(/[\r\n]/g, '');
+      envLines.push(`${key}=${val}`);
+    }
+    const generatedKeySet = new Set(generated.generatedKeys.map((g) => g.key));
+    const generatedNames: string[] = [];
+    for (const g of generated.generatedKeys) {
+      const pinned = merged[g.key];
+      let val: string;
+      if (pinned !== undefined && pinned !== '') {
+        val = pinned.replace(/[\r\n]/g, '');
+      } else {
+        val = generateSecretValue(g.encoding, g.bytes);
+        generatedNames.push(g.key);
+      }
+      envLines.push(`${g.key}=${val}`);
+    }
+    // Any explicitly provided vars not already declared as secrets/generated.
+    for (const [k, v] of Object.entries(merged)) {
+      if (!generated.secretKeys.includes(k) && !generatedKeySet.has(k)) {
+        envLines.push(`${k}=${v.replace(/[\r\n]/g, '')}`);
+      }
+    }
+
+    const envPath = path.join(appDir, '.env');
+    try {
+      fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
+      // writeFileSync's `mode` only applies when the file is created; on
+      // reconfigure the .env already exists, so re-assert 0600 explicitly to
+      // keep secrets owner-only regardless of the file's prior permissions.
+      fs.chmodSync(envPath, 0o600);
+    } catch (err) {
+      throw new Error(`Failed to write .env: ${(err as Error).message}`);
+    }
+    return generatedNames;
+  }
+
+  /** Parse an app's existing .env into a key→value map (empty if absent). */
+  private readEnvFile(appDir: string): Record<string, string> {
+    const envPath = path.join(appDir, '.env');
+    const out: Record<string, string> = {};
+    if (!fs.existsSync(envPath)) return out;
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      out[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return out;
+  }
+
+  /**
    * Resolve the repo URL and target commit to update an installed app to.
    * - `registry`: latest published version via the registry client.
    * - `custom` (GitHub URL install): the default branch HEAD via git ls-remote,
@@ -1176,10 +1467,14 @@ export class AppInstaller {
    * Captures container logs into the job on failure before rethrowing.
    * job is optional — when omitted (e.g. startStopRestart) logs go to stderr.
    */
-  private composeUp(appName: string, dir: string, job?: JobState): void {
+  private composeUp(appName: string, dir: string, job?: JobState, opts?: { forceRecreate?: boolean }): void {
     this.stopConflictingContainers(appName);
+    const args = ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'];
+    if (opts?.forceRecreate) {
+      args.push('--force-recreate');
+    }
     try {
-      this.run(['docker', 'compose', '-p', appName, 'up', '-d', '--wait'], dir, 600_000);
+      this.run(args, dir, 600_000);
     } catch (upErr) {
       if (job) {
         try {
