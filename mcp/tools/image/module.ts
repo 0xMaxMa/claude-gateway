@@ -546,7 +546,7 @@ export class ImageModule implements ToolModule {
           files,
           ...(artifacts ? { artifacts } : {}),
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
-          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply.'
+          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
             + (artifacts ? ' To edit this image later, reference it via its artifact_ref (e.g. image: "artifact:...").' : '')
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
@@ -760,7 +760,10 @@ const imageToolDefs: McpToolDefinition[] = [
       'Use this WHENEVER the user asks to create, draw, make, or edit an image — it is built in, no app install needed. ' +
       'Generate images from a text prompt (optionally guided by a reference image) via the configured image generation service. ' +
       'action="generate" submits the request and returns the saved image file path(s) once ready — ' +
-      'then deliver them with your channel reply tool (files: [...]). ' +
+      'then deliver them with your channel reply tool (files: [...]). AFTER A SUCCESSFUL GENERATE: do NOT ' +
+      'open/Read the produced file to inspect it and do NOT re-analyze it — the generation already succeeded; ' +
+      'attach it with your reply tool and answer in one or two short sentences. Every extra step risks pushing ' +
+      'the request past its timeout. ' +
       'action="status" polls a previously returned task_id. ' +
       'action="list" returns every available image model with its supported_qualities, supported_sizes, cost, and ' +
       'the capability flags supports_image_ref (image-to-image / edit) and supports_style_ref. Call it FIRST when ' +

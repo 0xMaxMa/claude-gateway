@@ -1068,7 +1068,9 @@ export class AgentRunner extends EventEmitter {
       `using these values, then deliver the returned image with your reply tool.\n` +
       `The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ` +
       `${passInstruction} Do NOT reinterpret which images they are, do NOT call list_refs to ` +
-      `second-guess an explicit selection, and do not drop any of them.\n`
+      `second-guess an explicit selection, and do not drop any of them. ` +
+      `Do NOT open or Read the referenced files first — the image model receives the actual files; ` +
+      `reading them wastes minutes and can push the request past its timeout. Go straight to generate_image.\n`
     );
   }
 

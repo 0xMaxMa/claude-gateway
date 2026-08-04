@@ -203,7 +203,9 @@ describe('buildImageParamsNote with image_refs (#73)', () => {
         'The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ' +
         'Pass all 3 refs as the "images" argument of generate_image, in the same order. ' +
         'Do NOT reinterpret which images they are, do NOT call list_refs to ' +
-        'second-guess an explicit selection, and do not drop any of them.\n',
+        'second-guess an explicit selection, and do not drop any of them. ' +
+        'Do NOT open or Read the referenced files first — the image model receives the actual files; ' +
+        'reading them wastes minutes and can push the request past its timeout. Go straight to generate_image.\n',
     );
   });
 
