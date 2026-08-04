@@ -2803,7 +2803,7 @@ Start an asynchronous install job. Returns immediately with a `jobId` to poll.
 | `commit` | If `github_url` | 40-char hex commit SHA (branch names not accepted). Omit to auto-resolve HEAD. |
 | `local_path` | One of | Absolute path to local project dir (dev mode — symlinked, source never deleted) |
 | `env_vars` | No | Pre-supplied env vars as a JSON **object** (not array). Keys must match vars declared in `app.yaml`. |
-| `ports` | No | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Default host port comes from `app.yaml`. Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`). |
+| `ports` | No | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Default host port comes from `app.yaml`. Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`). The integer/banned/`< 1024` checks are synchronous (`400`); a port **name** that the app does not declare is caught only once the source is fetched, so it surfaces as a **failed install job**, not a sync `400` (the app's `app.yaml` is not available until the job runs). Reconfigure, by contrast, validates names synchronously because the app is already installed. |
 
 **Mode A — registry install:**
 ```bash
@@ -3098,8 +3098,8 @@ Start an async reconfigure of an already-installed app — change its env vars a
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `env_vars` | One of | Env vars to **merge** into the app's existing `.env` as a JSON **object** (values must be strings). Keys not supplied are preserved; existing self-generated secrets are kept, not rotated. |
-| `ports` | One of | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`), and must not collide with another installed app. |
+| `env_vars` | One of | Env vars to **merge** into the app's existing `.env` as a JSON **object** (values must be strings). Keys not supplied are preserved; existing self-generated secrets are kept, not rotated. Passing an **empty string** (`""`) for a self-generating (`!generate`) key rotates it — the installer discards the old value and generates a fresh secret. |
+| `ports` | One of | Host-port overrides as a JSON **object** mapping port name → host port (e.g. `{ "web": 4000 }`). Overrides must be integers ≥ 1024 and not banned (`22`, `80`, `443`, `10850`), and must not collide with another installed app. A port name not declared by the app is rejected with `400` (see errors). |
 
 ```bash
 curl -X POST \
@@ -3117,6 +3117,8 @@ curl -X POST \
 ```
 
 Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress. When a host port changes, the proxy route is re-registered and the returned job's `proxyUrls` reflect the new port.
+
+**Rollback on failure:** if a host-port reconfigure fails to recreate the container (e.g. the new port is unbindable or the healthcheck never passes), the app is rolled back to its previous ports — the old compose/`.env` are restored, the old container is brought back up, and the old proxy routes are re-registered — so the app stays reachable. The job is still reported as `failed`.
 
 **Error responses:**
 

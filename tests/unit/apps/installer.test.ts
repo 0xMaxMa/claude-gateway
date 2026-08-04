@@ -1317,6 +1317,91 @@ services:
       expect(job.error).toMatch(/already used by app "other-app"/);
     });
 
+    it('rolls back to the previous port/compose/routes when the recreate fails', async () => {
+      // Install succeeds; the port-change recreate then fails on its FIRST
+      // `up --force-recreate`, while the rollback's recreate (the second) is
+      // allowed to succeed — mirroring a real "new port unbindable" failure.
+      let forceRecreateCount = 0;
+      const calls: Array<{ cmd: string; args: string[] }> = [];
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        calls.push({ cmd, args });
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: reconf-app
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - DB_PASSWORD
+    ports:
+      - name: api
+        host: 5600
+        container: 5600
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5600/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        if (cmd === 'docker' && args.includes('up') && args.includes('--force-recreate')) {
+          forceRecreateCount += 1;
+          if (forceRecreateCount === 1) {
+            return { stdout: '', stderr: 'mocked: host port unbindable', status: 1 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      const installer = makeInstaller(spawn as unknown as typeof successSpawn);
+      const installJob = await waitForJob(
+        installer,
+        installer.install({
+          githubUrl: 'https://github.com/test/reconf-app',
+          commit: 'a'.repeat(40),
+          envVars: { DB_PASSWORD: 'orig-secret' },
+        }),
+        5000,
+      );
+      expect(installJob.status).toBe('completed');
+
+      const appDir = (await registry.get('reconf-app'))!.installPath;
+      const composePath = path.join(appDir, 'docker-compose.yml');
+      expect(fs.readFileSync(composePath, 'utf-8')).toContain('5600:5600');
+
+      callbacks.deregistered.length = 0;
+      callbacks.registeredRoutes.length = 0;
+
+      const job = await waitForJob(
+        installer,
+        installer.reconfigure('reconf-app', { portOverrides: { api: 5650 } }),
+        5000,
+      );
+
+      // Job is reported failed — but the app is left rolled back, not broken.
+      expect(job.status).toBe('failed');
+      // On-disk compose restored to the OLD port (the new 5650 mapping is gone).
+      const composeAfter = fs.readFileSync(composePath, 'utf-8');
+      expect(composeAfter).toContain('5600:5600');
+      expect(composeAfter).not.toContain('5650');
+      // Registry still holds the OLD port (new ports were never persisted).
+      const entry = await registry.get('reconf-app');
+      expect(entry?.ports[0].hostPort).toBe(5600);
+      // OLD routes are re-registered after the deregister, so the app is reachable.
+      expect(callbacks.deregistered).toContain('reconf-app');
+      const reg = callbacks.registeredRoutes.filter((r) => r.appName === 'reconf-app');
+      expect(reg.length).toBeGreaterThan(0);
+      expect(reg[reg.length - 1].ports[0].hostPort).toBe(5600);
+      // The rollback issued a second force-recreate to bring the old container back.
+      expect(forceRecreateCount).toBe(2);
+    });
+
     it('rejects reconfigure of a local (symlinked) app', async () => {
       const appDir = makeAppDir(srcDir, 'local-reconf');
       const installer = makeInstaller();

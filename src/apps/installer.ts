@@ -1047,6 +1047,16 @@ export class AppInstaller {
 
     this.log(job, 'Preparing reconfigure');
 
+    // Snapshot the current on-disk state BEFORE any mutation so a failed
+    // recreate can be rolled back. A port change rewrites the live compose file
+    // and swaps proxy routes; if the new container never comes up the app would
+    // otherwise be left unreachable (routes gone, compose/registry mismatched).
+    const envPath = path.join(appDir, '.env');
+    const oldComposeContent =
+      hasPortChange && fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
+    const oldEnvContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : null;
+    const oldPorts = entry.ports;
+
     // Compute (and validate) the port metadata. Only overwrite the live compose
     // file when a host port actually changed — regenerating drops the injected
     // agent service, so we re-inject it, and an env-only reconfigure must not
@@ -1076,44 +1086,86 @@ export class AppInstaller {
       if (collision) throw new Error(collision);
     }
 
-    // Merge the new env vars onto the existing .env: keys not supplied are
-    // preserved, and existing generated-secret values are carried over rather
-    // than rotated (writeEnvFile treats an already-present value as pinned).
-    this.log(job, 'Writing .env');
-    const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
-    this.writeEnvFile(appDir, appName, generated, mergedEnv);
+    // Apply the reconfigure. Everything from here mutates live state (.env,
+    // proxy routes, the running container), so it is guarded: a port change that
+    // fails to recreate is rolled back to the previous ports/compose/.env so the
+    // app stays reachable (planning §4.1 step 10 — best-effort reopen).
+    try {
+      // Merge the new env vars onto the existing .env: keys not supplied are
+      // preserved, and existing generated-secret values are carried over rather
+      // than rotated (writeEnvFile treats an already-present value as pinned).
+      this.log(job, 'Writing .env');
+      const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
+      this.writeEnvFile(appDir, appName, generated, mergedEnv);
 
-    // Deregister old proxy routes before the port mapping changes (the proxy is
-    // bound to the old hostPort).
-    if (hasPortChange) {
-      this.callbacks.deregisterRoutes(appName);
-    }
+      // Deregister old proxy routes before the port mapping changes (the proxy is
+      // bound to the old hostPort).
+      if (hasPortChange) {
+        this.callbacks.deregisterRoutes(appName);
+      }
 
-    // Force-recreate so the container picks up the new .env / port mapping —
-    // compose does not detect an env_file content change on its own. This is an
-    // `up`, not a `down -v`, so named volumes (and their data) survive.
-    this.log(job, 'Recreating container');
-    this.composeUp(appName, appDir, job, { forceRecreate: true });
+      // Force-recreate so the container picks up the new .env / port mapping —
+      // compose does not detect an env_file content change on its own. This is an
+      // `up`, not a `down -v`, so named volumes (and their data) survive.
+      this.log(job, 'Recreating container');
+      this.composeUp(appName, appDir, job, { forceRecreate: true });
 
-    await this.registry.updateStatus(appName, 'running');
+      await this.registry.updateStatus(appName, 'running');
 
-    // Persist the reconfigure: always bump updatedAt so the registry reflects
-    // that the app was reconfigured; refresh the port mappings + re-register
-    // proxy routes only when a host port actually changed.
-    const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
-    if (hasPortChange) {
-      updatedEntry.ports = generated.ports.map((p) => ({
-        name: p.name,
-        service: p.service,
-        hostPort: p.hostPort,
-        containerPort: p.containerPort,
-        type: p.type,
-        rateLimit: p.rateLimit,
-      }));
-    }
-    await this.registry.upsert(updatedEntry);
-    if (hasPortChange) {
-      this.callbacks.registerRoutes(appName, generated.ports);
+      // Persist the reconfigure: always bump updatedAt so the registry reflects
+      // that the app was reconfigured; refresh the port mappings + re-register
+      // proxy routes only when a host port actually changed.
+      const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
+      if (hasPortChange) {
+        updatedEntry.ports = generated.ports.map((p) => ({
+          name: p.name,
+          service: p.service,
+          hostPort: p.hostPort,
+          containerPort: p.containerPort,
+          type: p.type,
+          rateLimit: p.rateLimit,
+        }));
+      }
+      await this.registry.upsert(updatedEntry);
+      if (hasPortChange) {
+        this.callbacks.registerRoutes(appName, generated.ports);
+      }
+    } catch (reconfErr) {
+      // Roll back a failed port change: restore the previous compose/.env,
+      // bring the old container back on the old ports, and re-register the old
+      // routes so the app is reachable again. Env-only reconfigure leaves the
+      // compose and routes untouched, so there is nothing to restore there.
+      if (hasPortChange) {
+        this.log(job, `Reconfigure failed — rolling back "${appName}" to previous ports`);
+        try {
+          if (oldComposeContent !== null) {
+            fs.writeFileSync(composePath, oldComposeContent);
+          }
+          if (oldEnvContent !== null) {
+            fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
+            fs.chmodSync(envPath, 0o600);
+          }
+          this.composeUp(appName, appDir, job, { forceRecreate: true });
+          this.callbacks.registerRoutes(
+            appName,
+            oldPorts.map((p) => ({
+              name: p.name,
+              service: p.service,
+              hostPort: p.hostPort,
+              containerPort: p.containerPort,
+              type: p.type,
+              rateLimit: p.rateLimit,
+            })),
+          );
+          await this.registry.updateStatus(appName, 'running');
+        } catch (rollbackErr) {
+          this.log(
+            job,
+            `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`,
+          );
+        }
+      }
+      throw reconfErr;
     }
 
     const proxyUrls: Record<string, string> = {};
@@ -1208,6 +1260,10 @@ export class AppInstaller {
     const envPath = path.join(appDir, '.env');
     try {
       fs.writeFileSync(envPath, envLines.join('\n') + '\n', { mode: 0o600 });
+      // writeFileSync's `mode` only applies when the file is created; on
+      // reconfigure the .env already exists, so re-assert 0600 explicitly to
+      // keep secrets owner-only regardless of the file's prior permissions.
+      fs.chmodSync(envPath, 0o600);
     } catch (err) {
       throw new Error(`Failed to write .env: ${(err as Error).message}`);
     }
