@@ -66,6 +66,11 @@ const PROTECTED_WORKSPACE_FILES = [
 ];
 
 const MAX_API_IMAGES = 5;
+/** Extra time an api turn may keep running AFTER its soft timeout already
+ *  answered the caller (#75). The soft timeout only abandons the WAIT — the
+ *  CLI turn is still producing a result that must reach history, exactly like
+ *  the client-disconnect path. This cap bounds a genuinely hung turn. */
+const API_TIMEOUT_HARD_CAP_EXTRA_MS = 600_000;
 // Hard timeout for the one-shot local `claude -p` triage during recovery
 // (Epic #195, Phase 3b). A slow/hung triage collapses to a safe notify-only.
 const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
@@ -2379,6 +2384,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.pendingApiSessions.add(sessionId);
+    // A previous turn that died (hard timeout, crash) may have left attachments
+    // buffered under this session — they belong to THAT turn; never let them
+    // ride along on this one (#75).
+    this.pendingApiAttachments.delete(sessionId);
     session.touch();
 
     // Image paths only work when allowTools:true — Claude needs the Read tool to access them
@@ -2455,12 +2464,17 @@ export class AgentRunner extends EventEmitter {
       };
 
       const fail = (err: Error) => {
+        // Terminal close for a turn that produced no result (#75): record it so
+        // history does not end on a dangling user message, and drain the
+        // attachment buffer so nothing leaks into the next turn.
+        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
         cleanup();
-        reject(err);
+        reject(err); // no-op when the soft timeout already rejected
       };
 
       const cleanup = () => {
         clearTimeout(globalTimer);
+        if (hardCapTimer) clearTimeout(hardCapTimer);
         if (quietTimer) clearTimeout(quietTimer);
         session.off('output', onOutput);
         this.pendingApiSessions.delete(sessionId);
@@ -2514,9 +2528,17 @@ export class AgentRunner extends EventEmitter {
         }
       };
 
+      // Soft timeout (#75): unblock the caller now, but KEEP the output listener
+      // attached — a turn finishing moments late must still persist its result
+      // and attachments, mirroring the client-disconnect path. The hard cap
+      // bounds a genuinely hung turn.
+      let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
       const globalTimer = setTimeout(() => {
-        session.setProcessing(false);
-        fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        hardCapTimer = setTimeout(() => {
+          session.setProcessing(false);
+          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+        }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
       }, opts.timeoutMs);
 
       session.on('output', onOutput);
@@ -2598,6 +2620,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     this.pendingApiSessions.add(sessionId);
+    // A previous turn that died (hard timeout, crash) may have left attachments
+    // buffered under this session — they belong to THAT turn; never let them
+    // ride along on this one (#75).
+    this.pendingApiAttachments.delete(sessionId);
     session.touch();
 
     const buffer: string[] = [];
@@ -2642,11 +2668,17 @@ export class AgentRunner extends EventEmitter {
       if (settled) return;
       settled = true;
       cleanup();
+      // Terminal close for a turn that produced no result (#75): record it so
+      // history does not end on a dangling user message (the web reads that
+      // state as "still thinking" and spins forever), and drain the attachment
+      // buffer so nothing leaks into the next turn.
+      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
       callbacks.onError(err);
     };
 
     const cleanup = () => {
       clearTimeout(globalTimer);
+      if (hardCapTimer) clearTimeout(hardCapTimer);
       session.off('output', onOutput);
       this.pendingApiSessions.delete(sessionId);
     };
@@ -2728,9 +2760,21 @@ export class AgentRunner extends EventEmitter {
       }
     };
 
+    // Soft timeout (#75): tell the SSE client now, but KEEP the output listener
+    // attached — exactly like onClientDisconnect — so a turn that finishes a few
+    // seconds past the budget still lands in history with its attachments
+    // (observed: 304s image turn vs 300s budget → image generated, reply lost,
+    // spinner stuck). The hard cap bounds a genuinely hung turn.
+    let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
     const globalTimer = setTimeout(() => {
-      session.setProcessing(false);
-      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      clientGone = true;
+      try {
+        callbacks.onError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      } catch { /* client already gone */ }
+      hardCapTimer = setTimeout(() => {
+        session.setProcessing(false);
+        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+      }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
     }, opts.timeoutMs);
 
     session.on('output', onOutput);
@@ -2803,6 +2847,33 @@ export class AgentRunner extends EventEmitter {
    * Pop and return buffered attachment paths for a session, then clear the buffer.
    * Converts absolute paths to relative media URLs for the API response.
    */
+  /**
+   * Close a turn that died without a result (#75): drain any attachments the
+   * turn already registered (the files exist on disk — deliver them rather
+   * than leak them into the NEXT turn's reply) and record a terminal
+   * assistant row so history never ends on a dangling user message.
+   * System-initiated turns (skipUserMessage) have nothing dangling to close —
+   * only the buffer is drained.
+   */
+  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean): void {
+    const attachments = this.popApiAttachments(sessionId);
+    if (skipUserMessage) return;
+    const failTs = Date.now();
+    const content = `\u26a0\ufe0f ${err.message}`;
+    this.sessionStore
+      .appendMessage(this.agentConfig.id, sessionId, { role: 'assistant', content, ts: failTs })
+      .catch(() => {});
+    this.historyDb.insertMessage({
+      chatId: `api-${chatId}`,
+      sessionId,
+      source: 'api',
+      role: 'assistant',
+      content,
+      mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
+      ts: failTs,
+    });
+  }
+
   popApiAttachments(sessionId: string): ApiAttachment[] {
     const paths = this.pendingApiAttachments.get(sessionId) ?? [];
     this.pendingApiAttachments.delete(sessionId);
