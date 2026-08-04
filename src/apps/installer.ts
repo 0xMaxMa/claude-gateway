@@ -1048,36 +1048,38 @@ export class AppInstaller {
     this.log(job, 'Preparing reconfigure');
 
     // Snapshot the current on-disk state BEFORE any mutation so a failed
-    // recreate can be rolled back. A port change rewrites the live compose file
-    // and swaps proxy routes; if the new container never comes up the app would
-    // otherwise be left unreachable (routes gone, compose/registry mismatched).
+    // recreate can be rolled back. Both an env-only and a port change rewrite
+    // .env and force-recreate the container; a port change additionally rewrites
+    // the live compose file and swaps proxy routes. If the new container never
+    // comes up the app would otherwise be left down (or, for a port change,
+    // unreachable with routes gone and compose/registry mismatched).
     const envPath = path.join(appDir, '.env');
     const oldComposeContent =
       hasPortChange && fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : null;
     const oldEnvContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : null;
     const oldPorts = entry.ports;
 
-    // Compute (and validate) the port metadata. Only overwrite the live compose
-    // file when a host port actually changed — regenerating drops the injected
-    // agent service, so we re-inject it, and an env-only reconfigure must not
-    // touch the compose at all. generateCompose validates the overrides.
+    // Compute (and validate) the port metadata. Always generate to a TEMP file
+    // first: the live compose must not change until the overrides are validated
+    // (generateCompose checks them) and we are inside the guarded section below.
+    // Writing the live file here would leave the new ports on disk against the
+    // still-running old container if a later step (collision, agent inject)
+    // throws (finding F2). An env-only reconfigure never touches the compose.
     let generated: GeneratedCompose;
-    if (hasPortChange) {
-      generated = generateCompose(appYaml, appName, appDir, composePath, portOverrides);
-      if (generated.agentDeclaration && this.agentManager) {
-        const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
-        this.agentManager.injectAgentService({ ...entry, agentPaths });
-      }
-    } else {
+    let newComposeContent: string;
+    {
       const tmpCompose = path.join(os.tmpdir(), `cg-reconf-${appName}-${crypto.randomUUID()}.yml`);
       try {
         generated = generateCompose(appYaml, appName, appDir, tmpCompose, portOverrides);
+        newComposeContent = fs.readFileSync(tmpCompose, 'utf-8');
       } finally {
         fs.rmSync(tmpCompose, { force: true });
       }
     }
 
     // Host-port collision across other installed apps (only if ports changed).
+    // Runs before the live compose is touched, so a collision leaves nothing to
+    // undo on disk.
     if (hasPortChange) {
       const collision = await this.findHostPortCollision(
         appName,
@@ -1086,11 +1088,24 @@ export class AppInstaller {
       if (collision) throw new Error(collision);
     }
 
-    // Apply the reconfigure. Everything from here mutates live state (.env,
-    // proxy routes, the running container), so it is guarded: a port change that
-    // fails to recreate is rolled back to the previous ports/compose/.env so the
-    // app stays reachable (planning §4.1 step 10 — best-effort reopen).
+    // Apply the reconfigure. Everything from here mutates live state (compose
+    // file, .env, proxy routes, the running container), so it is guarded: a
+    // reconfigure that fails to recreate is rolled back to the previous
+    // ports/compose/.env so the app stays reachable (planning §4.1 step 10 —
+    // best-effort reopen).
     try {
+      // Swap in the newly-generated compose only now that we're inside the
+      // guard (finding F2). Regenerating drops the injected agent service, so we
+      // re-inject it. An env-only reconfigure leaves the compose untouched.
+      if (hasPortChange) {
+        this.log(job, 'Updating docker-compose.yml');
+        fs.writeFileSync(composePath, newComposeContent);
+        if (generated.agentDeclaration && this.agentManager) {
+          const agentPaths = entry.agentPaths ?? this.agentManager.detectAgentPaths();
+          this.agentManager.injectAgentService({ ...entry, agentPaths });
+        }
+      }
+
       // Merge the new env vars onto the existing .env: keys not supplied are
       // preserved, and existing generated-secret values are carried over rather
       // than rotated (writeEnvFile treats an already-present value as pinned).
@@ -1131,21 +1146,24 @@ export class AppInstaller {
         this.callbacks.registerRoutes(appName, generated.ports);
       }
     } catch (reconfErr) {
-      // Roll back a failed port change: restore the previous compose/.env,
-      // bring the old container back on the old ports, and re-register the old
-      // routes so the app is reachable again. Env-only reconfigure leaves the
-      // compose and routes untouched, so there is nothing to restore there.
-      if (hasPortChange) {
-        this.log(job, `Reconfigure failed — rolling back "${appName}" to previous ports`);
-        try {
-          if (oldComposeContent !== null) {
-            fs.writeFileSync(composePath, oldComposeContent);
-          }
-          if (oldEnvContent !== null) {
-            fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
-            fs.chmodSync(envPath, 0o600);
-          }
-          this.composeUp(appName, appDir, job, { forceRecreate: true });
+      // Roll back a failed reconfigure so the app stays reachable. Both a
+      // port change and an env-only change rewrite .env and force-recreate the
+      // container, so a bad value (failed healthcheck) or an unbindable port can
+      // leave the app down either way (finding F1). Restore the previous .env,
+      // restore the previous compose + re-register the old routes when a port
+      // change had swapped them, then bring the old container back on the old
+      // config. Best-effort: a failing rollback is logged, not thrown.
+      this.log(job, `Reconfigure failed — rolling back "${appName}"`);
+      try {
+        if (oldEnvContent !== null) {
+          fs.writeFileSync(envPath, oldEnvContent, { mode: 0o600 });
+          fs.chmodSync(envPath, 0o600);
+        }
+        if (hasPortChange && oldComposeContent !== null) {
+          fs.writeFileSync(composePath, oldComposeContent);
+        }
+        this.composeUp(appName, appDir, job, { forceRecreate: true });
+        if (hasPortChange) {
           this.callbacks.registerRoutes(
             appName,
             oldPorts.map((p) => ({
@@ -1157,13 +1175,13 @@ export class AppInstaller {
               rateLimit: p.rateLimit,
             })),
           );
-          await this.registry.updateStatus(appName, 'running');
-        } catch (rollbackErr) {
-          this.log(
-            job,
-            `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`,
-          );
         }
+        await this.registry.updateStatus(appName, 'running');
+      } catch (rollbackErr) {
+        this.log(
+          job,
+          `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`,
+        );
       }
       throw reconfErr;
     }
