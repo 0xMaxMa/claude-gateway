@@ -552,6 +552,16 @@ services:
       expect(res.status).toBe(400);
     });
 
+    it('returns 400 for an unknown override port name', async () => {
+      await registry.upsert(makeEntry()); // declares only port "api"
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/reconfigure')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ ports: { nonexistent: 6100 } });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/[Uu]nknown port name/);
+    });
+
     it('returns 400 when an override port collides with another installed app', async () => {
       await registry.upsert(makeEntry({ name: 'other-app', ports: [
         { name: 'api', service: 'app', hostPort: 6001, containerPort: 6001, type: 'api', rateLimit: 200 },

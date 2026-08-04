@@ -346,6 +346,19 @@ export function createAppsRouter(
         });
         return;
       }
+      // Reject overrides for ports the app does not declare — the registry entry
+      // already carries the valid port names, so this is a clean 400 up front
+      // rather than a failed job.
+      if (hasPorts && portOverrides) {
+        const knownPorts = new Set(entry.ports.map((p) => p.name));
+        const unknown = Object.keys(portOverrides).filter((name) => !knownPorts.has(name));
+        if (unknown.length > 0) {
+          res.status(400).json({
+            error: `Unknown port name(s): ${unknown.join(', ')}`,
+          });
+          return;
+        }
+      }
       // Cross-app host-port collision — deterministic, so reject up front (400).
       if (hasPorts && portOverrides) {
         const collision = await installer.findHostPortCollision(

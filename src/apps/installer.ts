@@ -1097,9 +1097,12 @@ export class AppInstaller {
 
     await this.registry.updateStatus(appName, 'running');
 
-    // Persist the new port mappings + re-register proxy routes.
+    // Persist the reconfigure: always bump updatedAt so the registry reflects
+    // that the app was reconfigured; refresh the port mappings + re-register
+    // proxy routes only when a host port actually changed.
+    const updatedEntry: AppEntry = { ...entry, updatedAt: new Date().toISOString() };
     if (hasPortChange) {
-      const portEntries: PortEntry[] = generated.ports.map((p) => ({
+      updatedEntry.ports = generated.ports.map((p) => ({
         name: p.name,
         service: p.service,
         hostPort: p.hostPort,
@@ -1107,11 +1110,9 @@ export class AppInstaller {
         type: p.type,
         rateLimit: p.rateLimit,
       }));
-      await this.registry.upsert({
-        ...entry,
-        ports: portEntries,
-        updatedAt: new Date().toISOString(),
-      });
+    }
+    await this.registry.upsert(updatedEntry);
+    if (hasPortChange) {
       this.callbacks.registerRoutes(appName, generated.ports);
     }
 
