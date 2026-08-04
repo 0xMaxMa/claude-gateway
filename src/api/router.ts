@@ -2458,7 +2458,22 @@ export function createApiRouter(
       const baseName = path.basename(rawFilename).replace(/\s+/g, '_');
       const safeBaseName = SAFE_FILENAME_RE.test(baseName) ? baseName : 'upload';
       const rawExt = path.extname(safeBaseName).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10);
-      const ext = rawExt || (mimeType.includes('pdf') ? '.pdf' : '.bin');
+      // No usable extension (clipboard paste, non-ASCII filename sanitized to
+      // 'upload') → derive it from the MIME type. Falling straight to .bin made
+      // pasted images invisible to the session image catalog, which keys off the
+      // file extension — so they could never be referenced (#74).
+      const mimeExt = mimeType.includes('png')
+        ? '.png'
+        : mimeType.includes('jpeg') || mimeType.includes('jpg')
+          ? '.jpeg'
+          : mimeType.includes('webp')
+            ? '.webp'
+            : mimeType.includes('gif')
+              ? '.gif'
+              : mimeType.includes('pdf')
+                ? '.pdf'
+                : '.bin';
+      const ext = rawExt || mimeExt;
 
       const tmpFile = path.join(os.tmpdir(), `gw-${Date.now()}${ext}`);
       try {

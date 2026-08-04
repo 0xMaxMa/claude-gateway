@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
-import { ImageShareStore } from './image-share-store';
+import { detectImageMime, ImageShareStore } from './image-share-store';
 
 /**
  * Session image catalog (#72) — the single deterministic answer to
@@ -21,6 +21,27 @@ import { ImageShareStore } from './image-share-store';
 
 /** Phase-1 catalog scope: raster images the share/reference path can carry. */
 const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif)$/i;
+
+/** Legacy uploads whose original name had no extension were stored as .bin
+ *  (clipboard pastes, sanitized non-ASCII filenames). Their extension says
+ *  nothing, so ask the bytes: read just enough header to run the same magic-
+ *  bytes sniff the share layer validates with. Anything unreadable is not an
+ *  image for catalog purposes. */
+function binFileIsImage(agentsBaseDir: string, agentId: string, relativePath: string): boolean {
+  try {
+    const abs = MediaStore.resolvePath(agentsBaseDir, agentId, relativePath);
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const header = Buffer.alloc(12);
+      const read = fs.readSync(fd, header, 0, 12, 0);
+      return detectImageMime(header.subarray(0, read)) !== null;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
 
 export type SessionImageCatalogItem = {
   /** 1-based ordinal by FIRST appearance — the number the agent and UI share. */
@@ -72,7 +93,11 @@ export function computeSessionImageCatalog(opts: {
     for (const raw of row.mediaFiles) {
       if (typeof raw !== 'string' || !raw.trim()) continue;
       const relativePath = toMediaRootRelative(raw.trim());
-      if (!IMAGE_EXT_RE.test(relativePath)) continue;
+      if (
+        !IMAGE_EXT_RE.test(relativePath) &&
+        !(/\.bin$/i.test(relativePath) && binFileIsImage(agentsBaseDir, agentId, relativePath))
+      )
+        continue;
       // First appearance owns the ordinal forever — re-sending the same file
       // later must not create a second entry or shift the numbers after it.
       if (seen.has(relativePath)) continue;

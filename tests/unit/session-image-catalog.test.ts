@@ -241,4 +241,28 @@ describe('computeSessionImageCatalog (#72)', () => {
   test('a session with no media yields an empty catalog', () => {
     expect(catalog('empty-session')).toEqual([]);
   });
+
+  test('a .bin upload whose bytes are an image IS catalogued (#74 clipboard paste)', () => {
+    // Legacy naming: extensionless uploads were stored as .bin — the bytes,
+    // not the name, decide whether it is a referenceable image.
+    writeFile('paste.bin');
+    say('user', [mediaRef('paste.bin')]);
+    const items = catalog();
+    expect(items).toHaveLength(1);
+    expect(items[0]!.relative_path).toBe(`${SESSION}/paste.bin`);
+    expect(items[0]!.available).toBe(true);
+  });
+
+  test('a .bin file that is not an image stays out of the catalog', () => {
+    const dir = path.join(baseDir, AGENT, 'media', SESSION);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'notes.bin'), Buffer.from('just some text'));
+    say('user', [mediaRef('notes.bin')]);
+    expect(catalog()).toEqual([]);
+  });
+
+  test('a .bin entry whose file is gone is not catalogued (bytes unverifiable)', () => {
+    say('user', [mediaRef('ghost.bin')]);
+    expect(catalog()).toEqual([]);
+  });
 });
