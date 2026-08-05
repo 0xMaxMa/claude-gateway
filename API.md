@@ -3179,6 +3179,7 @@ services:
     ports:
       - name: web
         container: 4000
+        host: 4000
         type: web
         rate_limit: 200
 ```
@@ -3207,10 +3208,20 @@ services:
 | `entrypoint` | Override container entrypoint |
 | `environment` | Static env vars (`KEY=value`), secret keys to prompt for (`KEY` without `=`), or self-generating secrets (`KEY=!generate:<encoding>:<bytes>`) |
 | `volumes` | Volume mounts (named volumes or host paths within app dir) |
-| `ports` | Array of port declarations (see below) |
+| `ports` | Array of port declarations (see **Port fields** below) |
 | `depends_on` | Service dependency list |
 | `healthcheck` | Docker healthcheck (test, interval, timeout, retries) |
 | `gateway_api` | Host script bridge via Unix socket (see below) |
+
+**Port fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Port identifier used in the proxy path (`/app/:name/:portName`). Unique within the service. |
+| `container` | Yes | Port the app listens on **inside** the container. Integer `>= 1024`, not a banned port (`22`, `80`, `443`, `10850`), unique within the service. |
+| `host` | Yes | Port exposed on the **host**. Integer `>= 1024`, not a banned port (`22`, `80`, `443`, `10850`), unique within the service. A manifest with a port that has no integer `host` is rejected at install/inspect (`ports["<name>"].host is required and must be an integer`). Default it to the same value as `container`; the installer can override it via the install/reconfigure `ports` field. |
+| `type` | No | `api` (strips the `/app/:name/:portName` prefix before forwarding) or `web` (preserves the full path, required for SPAs). |
+| `rate_limit` | No | Requests per second for this port (positive number, default 200). |
 
 **Banned fields:** `network_mode: host`, `privileged`, `cap_add`. The gateway always injects `cap_drop: ALL`, `restart: unless-stopped`, `env_file: .env`, and resource limits.
 
