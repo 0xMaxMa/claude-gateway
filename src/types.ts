@@ -148,12 +148,6 @@ export interface GatewayConfig {
     logDir: string;
     timezone: string;
     /**
-     * Externally reachable gateway base URL, including the /gateway prefix.
-     * Its presence enables the image-share bridge and is the sole source used
-     * to mint public /gateway/shared/:token URLs.
-     */
-    publicUrl?: string;
-    /**
      * Network interface the HTTP/WebSocket server binds to. Defaults to
      * "127.0.0.1" (localhost-only) so the dashboard and API are not exposed to
      * the local network out of the box. Set to "0.0.0.0" to expose all
@@ -162,13 +156,15 @@ export interface GatewayConfig {
      */
     bind?: string;
     /**
-     * Absolute, externally-reachable origin of this gateway (e.g.
-     * "https://gateway.example.com"), used to build phone-openable links such as
-     * the `/cli` webview terminal viewer. The process cannot infer its own public
-     * URL (it binds localhost by default and sits behind a reverse proxy), so the
-     * operator sets it explicitly. Unset = features that need a public link (e.g.
-     * `/cli`) are disabled and report that they are not configured. No trailing
-     * slash required; a trailing slash is trimmed when building links.
+     * Absolute, externally-reachable base URL of this gateway, including any
+     * reverse-proxy path prefix (e.g. "https://gateway.example.com" or
+     * "https://vm.example.com/gateway"). Two consumers: phone-openable links
+     * such as the `/cli` webview terminal viewer, and the image-share bridge —
+     * its presence is the sole enable switch and source for minting public
+     * shared-image URLs. The process cannot infer its own public URL (it binds
+     * localhost by default and sits behind a reverse proxy), so the operator
+     * sets it explicitly. Unset = features that need a public link are
+     * disabled. A trailing slash is trimmed when building links.
      */
     publicUrl?: string;
     models?: ModelConfig[];
