@@ -115,10 +115,37 @@ export async function verifyDiscordToken(token: string): Promise<{ ok: boolean; 
 
 function firstNonEmptyLine(text: string): string {
   for (const line of text.split('\n')) {
+    // Skip pure code-fence lines (```markdown, ```ts, ``` …) so a stray wrapper
+    // fence never leaks into a derived value such as the agent description.
+    if (/^```[\w-]*$/.test(line.trim())) continue;
     const trimmed = line.replace(/^#+\s*/, '').trim();
     if (trimmed) return trimmed;
   }
   return text.trim().slice(0, 80);
+}
+
+/**
+ * Remove a single outer Markdown code-fence wrapper that a generating LLM may
+ * have wrapped whole-document output in (e.g. ```markdown … ```). Only strips
+ * when BOTH the first non-empty line is a fence opener (```lang or bare ```) AND
+ * the last non-empty line is a bare closing fence (```), so partial/unbalanced
+ * fences are left untouched. Inner/legitimate fenced blocks are preserved;
+ * unfenced content is returned unchanged.
+ */
+function stripOuterCodeFence(text: string): string {
+  const lines = text.split('\n');
+
+  let first = 0;
+  while (first < lines.length && lines[first].trim() === '') first++;
+  let last = lines.length - 1;
+  while (last >= 0 && lines[last].trim() === '') last--;
+  if (first >= last) return text; // need at least two non-empty lines
+
+  const isOpener = /^```[\w-]*$/.test(lines[first].trim());
+  const isCloser = /^```$/.test(lines[last].trim());
+  if (!isOpener || !isCloser) return text; // not a clean wrapper — leave as-is
+
+  return lines.slice(first + 1, last).join('\n').trim();
 }
 
 function envVarName(agentId: string, channel: 'telegram' | 'discord'): string {
@@ -215,16 +242,20 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   fs.mkdirSync(wsDir, { recursive: true });
 
   // 8. Write workspace files
+  // AI-generated *_md content is stored verbatim, so strip any outer code-fence
+  // wrapper the generating model may have added before it reaches disk AND the
+  // firstNonEmptyLine(agentsMdContent) description derivation below.
   const agentsMdContent =
-    args.agents_md ??
-    `# Agent: ${agentId.charAt(0).toUpperCase() + agentId.slice(1)}\n\n${description}`;
+    args.agents_md !== undefined
+      ? stripOuterCodeFence(args.agents_md)
+      : `# Agent: ${agentId.charAt(0).toUpperCase() + agentId.slice(1)}\n\n${description}`;
   fs.writeFileSync(path.join(wsDir, 'AGENTS.md'), agentsMdContent, 'utf8');
 
   if (args.soul_md) {
-    fs.writeFileSync(path.join(wsDir, 'SOUL.md'), args.soul_md, 'utf8');
+    fs.writeFileSync(path.join(wsDir, 'SOUL.md'), stripOuterCodeFence(args.soul_md), 'utf8');
   }
   if (args.user_md) {
-    fs.writeFileSync(path.join(wsDir, 'USER.md'), args.user_md, 'utf8');
+    fs.writeFileSync(path.join(wsDir, 'USER.md'), stripOuterCodeFence(args.user_md), 'utf8');
   }
 
   // Write stub files for any standard files not yet present
