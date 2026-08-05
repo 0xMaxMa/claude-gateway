@@ -35,24 +35,27 @@ function extractYamlBlocks(markdown: string): string[] {
 }
 
 describe('app.yaml authoring docs — required port host field', () => {
-  it('API.md minimal example is accepted by the real validator', () => {
+  it('every app.yaml example in API.md is accepted by the real validator', () => {
     const md = fs.readFileSync(API_MD, 'utf-8');
-    // The minimal app.yaml example is the only yaml block that declares both a
-    // top-level manifest (`apiVersion:`) and a concrete container port.
-    const example = extractYamlBlocks(md).find(
+    // Validate EVERY manifest-style block (declares both a top-level
+    // `apiVersion:` and a concrete `container:` port), not just the first — so
+    // a second host-less example added to API.md later is also caught.
+    const examples = extractYamlBlocks(md).filter(
       (b) => b.includes('apiVersion:') && b.includes('container:'),
     );
-    expect(example).toBeDefined();
+    expect(examples.length).toBeGreaterThan(0);
 
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-port-host-'));
-    try {
-      fs.writeFileSync(path.join(dir, 'app.yaml'), example as string, 'utf-8');
-      // Throws "ports[...].host is required" if the documented example omits host.
-      expect(() =>
-        processAppYaml(dir, 'my-app', path.join(dir, 'out.yml')),
-      ).not.toThrow();
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+    for (const example of examples) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-port-host-'));
+      try {
+        fs.writeFileSync(path.join(dir, 'app.yaml'), example, 'utf-8');
+        // Throws "ports[...].host is required" if the example omits host.
+        expect(() =>
+          processAppYaml(dir, 'my-app', path.join(dir, 'out.yml')),
+        ).not.toThrow();
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
