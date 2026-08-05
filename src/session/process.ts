@@ -391,6 +391,13 @@ export class SessionProcess extends EventEmitter {
             IMAGE_DISABLED: process.env.IMAGE_DISABLED ?? '',
             IMAGE_POLL_TIMEOUT_MS: process.env.IMAGE_POLL_TIMEOUT_MS ?? '',
             IMAGE_SHARE_MAX_REFS: process.env.IMAGE_SHARE_MAX_REFS ?? '',
+            // Signed short-lived public media URLs (LINE image delivery). The HMAC
+            // key is the agent's gateway API key (GATEWAY_API_KEY, injected above) —
+            // no separate public-token secret. The public base URL is derived by the
+            // gateway from the inbound LINE webhook and written to
+            // `<workspace>/../.public-base`, which line_image reads at call-time
+            // (no public-base-URL env var).
+            GATEWAY_MEDIA_URL_TTL_MS: process.env.GATEWAY_MEDIA_URL_TTL_MS ?? '',
           },
         },
       },

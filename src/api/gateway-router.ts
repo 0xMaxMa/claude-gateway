@@ -24,6 +24,9 @@ import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
+import { MediaStore } from '../history/media-store';
+import { verifyPublicToken } from './public-token';
+import { safeMediaHeaders } from './public-media-headers';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
@@ -331,8 +334,6 @@ export class GatewayRouter {
     return authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : xApiKey.trim();
   }
 
-
-
   /**
    * True when the resolved bind interface is NOT loopback — i.e. the gateway is
    * reachable from beyond the local host. Used to fail closed: a keyless install
@@ -382,7 +383,6 @@ export class GatewayRouter {
     return false;
   }
 
-  /** True when this IP has exceeded the failed-login budget for the window. */
   /** Client IP for throttling. Uses req.ip (Express; the socket peer unless
    *  `trust proxy` is set) with a socket fallback. Behind an untrusted proxy all
    *  clients share the proxy IP → a shared throttle, which fails safe. */
@@ -390,6 +390,7 @@ export class GatewayRouter {
     return req.ip || req.socket?.remoteAddress || 'unknown';
   }
 
+  /** True when this IP has exceeded the failed-login budget for the window. */
   private isLoginThrottled(req: Request): boolean {
     const rec = this.loginAttempts.get(this.clientIp(req));
     if (!rec || rec.resetAt < Date.now()) return false;
@@ -421,6 +422,39 @@ export class GatewayRouter {
     const secure = req.secure || req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
     const maxAge = Math.max(0, Math.floor(ttlMs / 1000));
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
+  }
+
+  /**
+   * Resolve the gateway API key used to sign a public token. Reads the token's
+   * UNTRUSTED claimed agent id (`payload.a`, base64url body) to pick the key that
+   * serves that agent — same selection as SessionProcess.findApiKeyForAgent
+   * (agent-scoped, then wildcard, then admin). Returns '' when the token is
+   * malformed or no key matches, so verifyPublicToken returns null ⇒ 403.
+   */
+  private resolvePublicTokenKey(token: string): string {
+    const dot = token.indexOf('.');
+    if (dot <= 0) return '';
+    let agentId: string;
+    try {
+      const bodyPart = token.slice(0, dot);
+      const pad = bodyPart.length % 4 === 0 ? '' : '='.repeat(4 - (bodyPart.length % 4));
+      const json = Buffer.from(
+        bodyPart.replace(/-/g, '+').replace(/_/g, '/') + pad,
+        'base64',
+      ).toString('utf-8');
+      const parsed = JSON.parse(json) as { a?: unknown };
+      if (typeof parsed.a !== 'string' || !parsed.a) return '';
+      agentId = parsed.a;
+    } catch {
+      return '';
+    }
+    const keys = this.gatewayConfig?.gateway?.api?.keys ?? [];
+    const match = keys.find(k =>
+      (Array.isArray(k.agents) && k.agents.includes(agentId)) ||
+      k.agents === '*' ||
+      k.admin
+    );
+    return match?.key ?? '';
   }
 
   // ─── /cli webview terminal viewer ──────────────────────────────────────────
@@ -606,6 +640,67 @@ export class GatewayRouter {
       '/webhooks',
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
+
+    // Public signed token route — a neutral, reusable primitive that serves a
+    // resource to callers that cannot present the gateway API key (e.g. LINE's
+    // servers fetching an image message). The token is a short-lived HMAC over
+    // { kind, agentId, relPath, exp }; it self-authenticates, so this route sits
+    // outside API-key auth. The HMAC key is the agent's gateway API key
+    // (config.gateway.api.keys) — the same key the MCP subprocess signs with
+    // (injected as GATEWAY_API_KEY). We can't trust the token's claimed agent until
+    // the signature checks out, so resolvePublicTokenKey reads `a` UNTRUSTED to pick
+    // the candidate key; verifyPublicToken's HMAC is what makes `a` trustworthy. No
+    // match ⇒ '' ⇒ verifyPublicToken returns null ⇒ 403. After verify, `k` (kind)
+    // dispatches how the token is served — today only 'media' (stream a file);
+    // future kinds (share chat, etc.) add branches here.
+    // Registered at BOTH the bare path and under /gateway: pods reach it bare
+    // (their reverse proxy strips the /gateway prefix before forwarding), while
+    // a direct tunnel to the gateway (local dev) hits the prefixed form because
+    // persistPublicBase hardcodes "https://<host>/gateway" into .public-base.
+    this.app.get(['/public/:token', '/gateway/public/:token'], (req: Request, res: Response) => {
+      const token = req.params.token ?? '';
+      const secret = this.resolvePublicTokenKey(token);
+      const payload = verifyPublicToken(token, secret);
+      if (!payload) {
+        res.status(403).json({ error: 'Invalid or expired token' });
+        return;
+      }
+      // Kind dispatch: only 'media' (stream a file) is served today. Any other
+      // kind is a token minted for a feature this route doesn't serve yet ⇒ 400.
+      if (payload.k !== 'media') {
+        res.status(400).json({ error: 'Unsupported token kind' });
+        return;
+      }
+      const runner = this.agents.get(payload.a);
+      if (!runner) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      let absPath: string;
+      try {
+        absPath = MediaStore.resolvePath(runner.getAgentsBaseDir(), payload.a, payload.p);
+      } catch {
+        res.status(400).json({ error: 'Invalid path' });
+        return;
+      }
+      if (!fs.existsSync(absPath)) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'private, max-age=3600, immutable');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      // Stored-XSS defence: this route serves agent-written files from a public
+      // origin. Decide Content-Type by extension — only raster images go inline;
+      // svg/html/xml/unknown are forced to a non-executable download. We set an
+      // explicit Content-Type BEFORE sendFile so it wins over sendFile's own
+      // extension-based inference (send skips it when Content-Type is already set).
+      const serve = safeMediaHeaders(path.extname(absPath), path.basename(absPath));
+      res.setHeader('Content-Type', serve.contentType);
+      if (serve.disposition) {
+        res.setHeader('Content-Disposition', serve.disposition);
+      }
+      res.sendFile(absPath);
+    });
 
     this.app.use(express.json());
 

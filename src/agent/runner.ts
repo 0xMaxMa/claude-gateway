@@ -1334,6 +1334,26 @@ export class AgentRunner extends EventEmitter {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
               for (const block of msg!.content) {
+                // LINE sends images through its own line_image tool (not the reply
+                // tool's `files`), so capture those sends into history too — the
+                // web transcript and the session image catalog key off mediaFiles.
+                if (block.type === 'tool_use' && block.name === 'mcp__gateway__line_image') {
+                  const imgPath = typeof block.input?.['image'] === 'string' ? block.input['image'] : '';
+                  const mediaRootLine = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
+                  const lineMedia = toRelMediaFiles(imgPath ? [imgPath] : [], mediaRootLine);
+                  if (lineMedia.length) {
+                    const channelSrcLine = this.channelSourceMap.get(mapKey) ?? 'line';
+                    this.historyDb.insertMessage({
+                      chatId: `${channelSrcLine}-${mapKey}`,
+                      sessionId: actualSessionId,
+                      source: channelSrcLine as HistorySource,
+                      role: 'assistant',
+                      content: '',
+                      mediaFiles: lineMedia,
+                      ts: Date.now(),
+                    });
+                  }
+                }
                 if (block.type === 'tool_use' && block.name === replyToolName && !replyCalled) {
                   replyCalled = true;
                   replyToolUseId = (block as Record<string, unknown>)['id'] as string ?? null;

@@ -546,7 +546,7 @@ export class ImageModule implements ToolModule {
           files,
           ...(artifacts ? { artifacts } : {}),
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
-          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
+          note: 'Image saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]), or line_image on LINE. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
             + (artifacts ? ' To edit this image later, reference it via its artifact_ref (e.g. image: "artifact:...").' : '')
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
