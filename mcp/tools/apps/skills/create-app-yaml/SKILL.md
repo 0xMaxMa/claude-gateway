@@ -52,7 +52,8 @@ services:
     build: .                        # or ./subdir if not root
     ports:
       - name: <api|web>
-        container: <port>
+        container: <port>           # port the app listens on inside the container
+        host: <port>                # REQUIRED — host port to expose (default: same as container)
         type: <api|web>             # api = REST/backend, web = serves HTML
         rate_limit: 60              # requests per second
     environment:
@@ -66,6 +67,11 @@ services:
       timeout: 10s
       retries: 3
 ```
+
+Rules for `host` (required on every port):
+- `host` is the port exposed on the machine; `container` is the port the app listens on inside the container. Every declared port **must** have an integer `host` — the gateway rejects a manifest without it (`ports["<name>"].host is required and must be an integer`), so a host-less app fails to install.
+- Default `host` to the same value as `container` unless that port is already taken.
+- `host` must be `>= 1024`, must not be a banned port (`22`, `80`, `443`, `10850`), and must be unique across the app's ports. The user can override it at install time, but the field must be present.
 
 Rules for port type:
 - `type: web` if Dockerfile serves static HTML, runs Next.js/React/Vite, or uses nginx/caddy
@@ -88,6 +94,7 @@ Show the generated `app.yaml` to the user and explain:
 2. They can add a `healthcheck:` if the service has a health endpoint
 3. If the app has an agent, they can add an `agent:` service block
 4. The `rate_limit` is requests per second — adjust to match expected load
+5. **Validate before publishing** — run `POST /api/v1/apps/inspect` with `local_path` (or the `inspect_app` MCP tool) pointed at the app directory. This runs the same manifest validation as install without needing a pinned commit, so a missing `host` or other schema error is caught locally instead of failing the install wizard after publish.
 
 ---
 
