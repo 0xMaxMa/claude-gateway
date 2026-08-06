@@ -322,6 +322,170 @@ describe('createAgent — optional fields', () => {
 });
 
 // ---------------------------------------------------------------------------
+// createAgent — code-fence stripping (issue #271)
+// ---------------------------------------------------------------------------
+
+describe('createAgent — agents_md code-fence stripping', () => {
+  function descOf(id: string): string {
+    const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    return cfg.agents.find((a: { id: string }) => a.id === id).description;
+  }
+  function agentsMd(id: string): string {
+    const wsDir = path.join(tmpDir, 'agents', id, 'workspace');
+    return fs.readFileSync(path.join(wsDir, 'AGENTS.md'), 'utf8');
+  }
+
+  it('AMH-fence-a: fenced agents_md → clean file + clean description', async () => {
+    mockTelegramOk();
+    await createAgent({
+      id: 'fenced',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```markdown\n# Agent: Foo\n\nBar baz\n```',
+    });
+
+    expect(agentsMd('fenced')).toBe('# Agent: Foo\n\nBar baz');
+    expect(agentsMd('fenced')).not.toContain('```');
+    expect(descOf('fenced')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-b: unfenced agents_md → written unchanged (no regression)', async () => {
+    mockTelegramOk();
+    const raw = '# Agent: Foo\n\nBar';
+    await createAgent({
+      id: 'plain',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: raw,
+    });
+
+    expect(agentsMd('plain')).toBe(raw);
+    expect(descOf('plain')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-c: inner code block preserved when outer wrapper stripped', async () => {
+    mockTelegramOk();
+    await createAgent({
+      id: 'inner',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```markdown\n# Agent: Foo\n\n```ts\nx();\n```\n```',
+    });
+
+    const written = agentsMd('inner');
+    // Outer wrapper gone…
+    expect(written.startsWith('# Agent: Foo')).toBe(true);
+    // …but the inner fenced snippet survives intact.
+    expect(written).toContain('```ts\nx();\n```');
+    expect(descOf('inner')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-d: opener without matching closer → left untouched (fail-safe)', async () => {
+    mockTelegramOk();
+    const raw = '```markdown\n# Agent: Foo';
+    await createAgent({
+      id: 'partial',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: raw,
+    });
+
+    // No closing fence → not a clean wrapper → file kept verbatim…
+    expect(agentsMd('partial')).toBe(raw);
+    // …but the description still skips the stray fence line (layer-2 hardening).
+    expect(descOf('partial')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-e: bare ``` opener/closer is stripped', async () => {
+    mockTelegramOk();
+    await createAgent({
+      id: 'bare',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```\n# Agent: Foo\n```',
+    });
+
+    expect(agentsMd('bare')).toBe('# Agent: Foo');
+    expect(descOf('bare')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-f: soul_md / user_md wrappers are also stripped', async () => {
+    mockTelegramOk();
+    await createAgent({
+      id: 'soulfence',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      soul_md: '```markdown\nSoul body\n```',
+      user_md: '```md\nUser body\n```',
+    });
+
+    const wsDir = path.join(tmpDir, 'agents', 'soulfence', 'workspace');
+    expect(fs.readFileSync(path.join(wsDir, 'SOUL.md'), 'utf8')).toBe('Soul body');
+    expect(fs.readFileSync(path.join(wsDir, 'USER.md'), 'utf8')).toBe('User body');
+  });
+
+  it('AMH-fence-g: two-block false-positive (F2) — locks the accepted limitation', async () => {
+    mockTelegramOk();
+    // Content that legitimately OPENS with one fenced block and CLOSES with a
+    // different one is indistinguishable from a single outer wrapper at the line
+    // level, so its outer fences are peeled. This test pins that accepted
+    // behavior (see stripOuterCodeFence F2 note). Real AGENTS.md opens with a
+    // heading, so this shape does not occur in practice.
+    await createAgent({
+      id: 'twoblock',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```ts\na();\n```\n\nprose\n\n```ts\nb();\n```',
+    });
+
+    // Outer fence lines are removed; the middle survives verbatim.
+    expect(agentsMd('twoblock')).toBe('a();\n```\n\nprose\n\n```ts\nb();');
+  });
+
+  it('AMH-fence-h: CRLF line endings + trailing spaces on fence lines → still stripped', async () => {
+    mockTelegramOk();
+    // A generator may emit \r\n and/or pad the fence line with spaces. .trim()
+    // in the scanner normalizes both, so the wrapper is still recognized.
+    await createAgent({
+      id: 'crlf',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```markdown  \r\n# Agent: Foo\r\n\r\nBar\r\n```  \r\n',
+    });
+
+    const written = agentsMd('crlf');
+    expect(written.startsWith('# Agent: Foo')).toBe(true);
+    expect(written).not.toMatch(/```/);
+    expect(descOf('crlf')).toBe('Agent: Foo');
+  });
+
+  it('AMH-fence-i: agents_md: null (malformed MCP input) → default stub, no throw', async () => {
+    mockTelegramOk();
+    // createAgent receives args cast from `unknown` (external MCP JSON), so a
+    // caller can send `agents_md: null`. The typeof guard must fall back to the
+    // default stub rather than reach stripOuterCodeFence and throw on .split.
+    await createAgent({
+      id: 'nullmd',
+      description: 'A null agent.',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: null,
+    } as unknown as Parameters<typeof createAgent>[0]);
+
+    expect(agentsMd('nullmd')).toBe('# Agent: Nullmd\n\nA null agent.');
+    expect(descOf('nullmd')).toBe('Agent: Nullmd');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createAgent — validation errors (no network calls expected)
 // ---------------------------------------------------------------------------
 

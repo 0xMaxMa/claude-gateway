@@ -16,6 +16,13 @@ export const TELEGRAM_USER_ID_REGEX = /^\d{6,15}$/;
 export const DISCORD_USER_ID_REGEX = /^\d{17,19}$/;
 
 const FILENAME_SAFE_REGEX = /^[A-Z][A-Z0-9_-]*\.md$/i;
+
+// A whole line that is *only* a Markdown code fence, after trimming (which also
+// drops a trailing \r on CRLF input and surrounding spaces). FENCE_LINE_REGEX
+// matches both an opener (```markdown, ```ts) and a bare fence (```);
+// FENCE_CLOSE_REGEX matches only the bare closing fence.
+const FENCE_LINE_REGEX = /^```[\w-]*$/;
+const FENCE_CLOSE_REGEX = /^```$/;
 const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'USER.md'];
 
 // ---------------------------------------------------------------------------
@@ -115,10 +122,45 @@ export async function verifyDiscordToken(token: string): Promise<{ ok: boolean; 
 
 function firstNonEmptyLine(text: string): string {
   for (const line of text.split('\n')) {
+    // Skip pure code-fence lines (```markdown, ```ts, ``` …) so a stray wrapper
+    // fence never leaks into a derived value such as the agent description.
+    if (FENCE_LINE_REGEX.test(line.trim())) continue;
     const trimmed = line.replace(/^#+\s*/, '').trim();
     if (trimmed) return trimmed;
   }
   return text.trim().slice(0, 80);
+}
+
+/**
+ * Remove a single outer Markdown code-fence wrapper that a generating LLM may
+ * have wrapped whole-document output in (e.g. ```markdown … ```). Only strips
+ * when BOTH the first non-empty line is a fence opener (```lang or bare ```) AND
+ * the last non-empty line is a bare closing fence (```), so partial/unbalanced
+ * fences are left untouched. Inner/legitimate fenced blocks are preserved;
+ * unfenced content is returned unchanged.
+ *
+ * Known limitation (F2): a *legitimate* document whose first non-empty line
+ * opens a fenced block and whose last non-empty line closes a different one —
+ * two independent blocks with prose stripped away in between — is
+ * indistinguishable at the line level from a single outer wrapper, so its outer
+ * fences are peeled. This is accepted: real AGENTS.md/SOUL.md content opens with
+ * a heading, not a code fence, so the false-positive shape does not occur in
+ * practice. See test "AMH-fence-g" which locks this behavior.
+ */
+function stripOuterCodeFence(text: string): string {
+  const lines = text.split('\n');
+
+  let first = 0;
+  while (first < lines.length && lines[first].trim() === '') first++;
+  let last = lines.length - 1;
+  while (last >= 0 && lines[last].trim() === '') last--;
+  if (first >= last) return text; // need at least two non-empty lines
+
+  const isOpener = FENCE_LINE_REGEX.test(lines[first].trim());
+  const isCloser = FENCE_CLOSE_REGEX.test(lines[last].trim());
+  if (!isOpener || !isCloser) return text; // not a clean wrapper — leave as-is
+
+  return lines.slice(first + 1, last).join('\n').trim();
 }
 
 function envVarName(agentId: string, channel: 'telegram' | 'discord'): string {
@@ -215,16 +257,25 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   fs.mkdirSync(wsDir, { recursive: true });
 
   // 8. Write workspace files
+  // AI-generated *_md content is stored verbatim, so strip any outer code-fence
+  // wrapper the generating model may have added before it reaches disk AND the
+  // firstNonEmptyLine(agentsMdContent) description derivation below.
+  // Guard with a typeof check (not `!== undefined`): args is external MCP input
+  // cast from `unknown`, so a caller can send `agents_md: null`. A bare null
+  // would reach stripOuterCodeFence and throw on `.split`; the typeof gate falls
+  // back to the default stub for both null and undefined, matching the prior
+  // `??` behavior while still stripping a real string wrapper.
   const agentsMdContent =
-    args.agents_md ??
-    `# Agent: ${agentId.charAt(0).toUpperCase() + agentId.slice(1)}\n\n${description}`;
+    typeof args.agents_md === 'string'
+      ? stripOuterCodeFence(args.agents_md)
+      : `# Agent: ${agentId.charAt(0).toUpperCase() + agentId.slice(1)}\n\n${description}`;
   fs.writeFileSync(path.join(wsDir, 'AGENTS.md'), agentsMdContent, 'utf8');
 
   if (args.soul_md) {
-    fs.writeFileSync(path.join(wsDir, 'SOUL.md'), args.soul_md, 'utf8');
+    fs.writeFileSync(path.join(wsDir, 'SOUL.md'), stripOuterCodeFence(args.soul_md), 'utf8');
   }
   if (args.user_md) {
-    fs.writeFileSync(path.join(wsDir, 'USER.md'), args.user_md, 'utf8');
+    fs.writeFileSync(path.join(wsDir, 'USER.md'), stripOuterCodeFence(args.user_md), 'utf8');
   }
 
   // Write stub files for any standard files not yet present
