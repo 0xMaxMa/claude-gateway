@@ -195,11 +195,19 @@ export class ImageShareStore {
         model         TEXT NOT NULL,
         task_id       TEXT,
         image_index   INTEGER NOT NULL DEFAULT 0,
-        created_at    INTEGER NOT NULL
+        created_at    INTEGER NOT NULL,
+        prompt        TEXT
       );
       CREATE INDEX IF NOT EXISTS image_artifacts_session_created
         ON image_artifacts(agent_id, session_id, created_at DESC);
     `);
+    // DBs created before the `prompt` column existed: CREATE TABLE IF NOT
+    // EXISTS leaves them untouched, so add the column in place. Additive and
+    // nullable — older rows simply have no prompt.
+    const cols = this.db.prepare(`PRAGMA table_info(image_artifacts)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'prompt')) {
+      this.db.exec('ALTER TABLE image_artifacts ADD COLUMN prompt TEXT');
+    }
   }
 
   // ── artifacts (§8) ────────────────────────────────────────────────────────
@@ -212,12 +220,13 @@ export class ImageShareStore {
     model: string;
     taskId?: string;
     imageIndex?: number;
+    prompt?: string;
   }): string {
     const id = `img_${randomBytes(9).toString('base64url')}`;
     this.db.prepare(
-      `INSERT INTO image_artifacts (id, agent_id, session_id, relative_path, provider, model, task_id, image_index, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, a.agentId, a.sessionId, a.relativePath, a.provider, a.model, a.taskId ?? null, a.imageIndex ?? 0, Date.now());
+      `INSERT INTO image_artifacts (id, agent_id, session_id, relative_path, provider, model, task_id, image_index, created_at, prompt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, a.agentId, a.sessionId, a.relativePath, a.provider, a.model, a.taskId ?? null, a.imageIndex ?? 0, Date.now(), a.prompt ?? null);
     return id;
   }
 
@@ -246,13 +255,17 @@ export class ImageShareStore {
    *  was produced by generate_image gets the stable `artifact:<id>` ref instead
    *  of a raw path. Same agent+session binding as resolveArtifact — a path
    *  registered by another agent/session is invisible here. */
-  findArtifactByPath(agentId: string, sessionId: string, relativePath: string): string | null {
+  findArtifactByPath(
+    agentId: string,
+    sessionId: string,
+    relativePath: string,
+  ): { id: string; prompt: string | null } | null {
     const row = this.db.prepare(
-      `SELECT id FROM image_artifacts
+      `SELECT id, prompt FROM image_artifacts
        WHERE agent_id = ? AND session_id = ? AND relative_path = ?
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-    ).get(agentId, sessionId, relativePath) as { id: string } | undefined;
-    return row ? row.id : null;
+    ).get(agentId, sessionId, relativePath) as { id: string; prompt: string | null } | undefined;
+    return row ? { id: row.id, prompt: row.prompt } : null;
   }
 
   // ── shares (§9) ───────────────────────────────────────────────────────────

@@ -29,6 +29,9 @@ export type CatalogItem = {
   origin: string;
   ts: number;
   available: boolean;
+  /** What the image is: the generation prompt (origin=generated) or the user
+   *  text that accompanied the upload. Absent when neither exists. */
+  desc?: string;
 };
 
 /** Error carrying the gateway's stable machine-readable code (e.g. image_ref_not_found). */
@@ -174,7 +177,7 @@ export async function revokeSharesBestEffort(shareIds: string[]): Promise<void> 
  */
 export async function registerArtifacts(
   files: string[],
-  meta: { provider: string; model: string; taskId?: string },
+  meta: { provider: string; model: string; taskId?: string; prompt?: string },
 ): Promise<ArtifactItem[] | null> {
   try {
     const { status, json } = await callGateway('POST', '/api/v1/image-artifacts', {
@@ -183,6 +186,7 @@ export async function registerArtifacts(
       provider: meta.provider,
       model: meta.model,
       ...(meta.taskId ? { task_id: meta.taskId } : {}),
+      ...(meta.prompt ? { prompt: meta.prompt } : {}),
       files,
     });
     if (status !== 201 || !Array.isArray(json.items)) return null;

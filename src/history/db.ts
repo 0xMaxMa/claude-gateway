@@ -398,19 +398,21 @@ export class HistoryDB {
    * ordinals derived from it) never depends on SQLite's default row order.
    * Rows whose media_files JSON is malformed are skipped, like pruneOlderThan.
    */
-  listSessionMedia(sessionId: string): Array<{ id: number; role: string; mediaFiles: string[]; ts: number }> {
+  listSessionMedia(
+    sessionId: string,
+  ): Array<{ id: number; role: string; content: string; mediaFiles: string[]; ts: number }> {
     const rows = this.db.prepare(
-      `SELECT id, role, media_files, ts FROM messages
+      `SELECT id, role, content, media_files, ts FROM messages
        WHERE session_id = ? AND media_files IS NOT NULL
        ORDER BY ts ASC, id ASC`,
-    ).all(sessionId) as Array<{ id: number; role: string; media_files: string; ts: number }>;
+    ).all(sessionId) as Array<{ id: number; role: string; content: string | null; media_files: string; ts: number }>;
 
-    const out: Array<{ id: number; role: string; mediaFiles: string[]; ts: number }> = [];
+    const out: Array<{ id: number; role: string; content: string; mediaFiles: string[]; ts: number }> = [];
     for (const row of rows) {
       try {
         const mediaFiles = JSON.parse(row.media_files) as string[];
         if (!Array.isArray(mediaFiles)) continue; // not a JSON array — skip
-        out.push({ id: row.id, role: row.role, mediaFiles, ts: row.ts });
+        out.push({ id: row.id, role: row.role, content: row.content ?? '', mediaFiles, ts: row.ts });
       } catch {
         // malformed JSON — skip
       }

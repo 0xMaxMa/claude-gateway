@@ -149,6 +149,24 @@ describe('image share router', () => {
       expect(many.body.code).toBe('too_many_refs');
     });
 
+    test('registration persists the prompt, capped at 500 chars', async () => {
+      const reg = await request()
+        .post('/api/v1/image-artifacts')
+        .set(AUTH_A1)
+        .send({
+          agent_id: AGENT,
+          session_id: SESSION,
+          provider: 'codex-image',
+          model: 'gpt-image',
+          prompt: `pad ${'x'.repeat(600)}`,
+          files: [`${SESSION}/ok.png`],
+        });
+      expect(reg.status).toBe(201);
+      const found = store.findArtifactByPath(AGENT, SESSION, `${SESSION}/ok.png`);
+      expect(found?.prompt).toHaveLength(500);
+      expect(found?.prompt!.startsWith('pad x')).toBe(true);
+    });
+
     test('artifact refs resolve only in the owning agent/session', async () => {
       const reg = await request()
         .post('/api/v1/image-artifacts')
@@ -331,6 +349,7 @@ describe('image share router', () => {
           origin: 'upload',
           ts: 1_700_000_001_000,
           available: true,
+          desc: 'here you go',
         },
         {
           index: 2,
@@ -362,9 +381,9 @@ describe('image share router', () => {
       expect(body).not.toContain('/shared/');
       expect(body).not.toContain(minted.share_id);
       for (const item of res.body.items as Array<Record<string, unknown>>) {
-        expect(Object.keys(item).sort()).toEqual(
-          ['available', 'index', 'origin', 'ref', 'relative_path', 'ts'],
-        );
+        // desc is optional (only when the source message carried text / a prompt)
+        const keys = Object.keys(item).filter((k) => k !== 'desc').sort();
+        expect(keys).toEqual(['available', 'index', 'origin', 'ref', 'relative_path', 'ts']);
       }
     });
   });

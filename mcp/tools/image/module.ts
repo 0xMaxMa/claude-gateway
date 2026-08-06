@@ -227,8 +227,13 @@ export class ImageModule implements ToolModule {
           images: items,
           note: 'Ground-truth catalog of every image in this session, numbered in order of first appearance ("รูปที่ 1" = index 1). '
             + 'To use one as a reference, pass its "ref" value in the "image"/"images" argument of action="generate". '
-            + 'Do NOT count images from conversation memory. If the user\'s reference is ambiguous or the index does not exist, '
-            + 'ask the user instead of guessing. Items with available:false can no longer be used.',
+            + 'Do NOT count images from conversation memory. '
+            + 'Resolution precedence: (1) when the user names an index ("Image 3", "รูปที่ 3") or attached an image this turn, '
+            + 'trust that EXACTLY — never let "desc" override an explicit reference; '
+            + '(2) when the user refers by content ("the dog picture"), match against each item\'s "desc" '
+            + '(the generation prompt, or the user text that came with an upload); '
+            + '(3) if the reference is ambiguous or the index does not exist, ask the user instead of guessing. '
+            + 'Items with available:false can no longer be used.',
         }),
       }],
     };
@@ -320,7 +325,7 @@ export class ImageModule implements ToolModule {
       }
       if (polled.httpError) return this.mapHttpError(polled.httpError.status, polled.httpError.body);
       last = polled.job!;
-      if (last.status === 'done') return await this.deliver(last, taskId, model);
+      if (last.status === 'done') return await this.deliver(last, taskId, model, prompt);
       if (last.status === 'failed') return this.mapJobError(last);
     }
 
@@ -461,7 +466,10 @@ export class ImageModule implements ToolModule {
    *  item is either base64 bytes (sync providers like openai/gemini) OR an https URL
    *  (async providers like nanobanana/bfl/fal, which return a hosted file) — download
    *  URLs, decode base64. */
-  private async deliver(job: JobResponse, taskId: string, model?: string): Promise<McpToolResult> {
+  // `prompt` is only known on the generate path (same-turn poll); the
+  // action="status" path re-enters in a later turn without it, so those
+  // artifacts register promptless.
+  private async deliver(job: JobResponse, taskId: string, model?: string, prompt?: string): Promise<McpToolResult> {
     const allImages = Array.isArray(job.images) ? job.images.filter((s) => typeof s === 'string' && s.length) : [];
     // Cap how many we process — downloads are sequential (~30s each), so an
     // over-long list would hang the tool call far past the poll budget.
@@ -523,7 +531,7 @@ export class ImageModule implements ToolModule {
       const slash = (model ?? '').indexOf('/');
       const provider = slash > 0 ? (model as string).slice(0, slash) : 'unknown';
       const modelName = slash > 0 ? (model as string).slice(slash + 1) : (model || 'unknown');
-      const registered = await registerArtifacts(files, { provider, model: modelName, taskId });
+      const registered = await registerArtifacts(files, { provider, model: modelName, taskId, prompt });
       if (registered) {
         artifacts = registered.map((item, index) => ({
           artifact_id: item.artifact_id,

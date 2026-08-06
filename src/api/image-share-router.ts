@@ -38,6 +38,7 @@ const PURPOSE_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const MIN_TTL_SECONDS = 10;
 const MAX_TTL_SECONDS = 86_400;
 const MAX_ARTIFACT_FILES = 10;
+const MAX_ARTIFACT_PROMPT_CHARS = 500;
 const DEFAULT_PUBLIC_RATE_PER_MIN = 60;
 
 function errStatus(code: string): number {
@@ -311,7 +312,7 @@ export function createImageSharePrivateRouter(
 
   /**
    * POST /api/v1/image-artifacts — register generated images as private
-   * artifacts (§8). Body: { agent_id, session_id, provider, model, task_id?, files: [path] }.
+   * artifacts (§8). Body: { agent_id, session_id, provider, model, task_id?, prompt?, files: [path] }.
    * Registration never makes a file public — shares are minted separately.
    */
   router.post('/v1/image-artifacts', auth, (req: Request, res: Response) => {
@@ -322,6 +323,7 @@ export function createImageSharePrivateRouter(
       provider?: unknown;
       model?: unknown;
       task_id?: unknown;
+      prompt?: unknown;
       files?: unknown;
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
@@ -346,6 +348,12 @@ export function createImageSharePrivateRouter(
     const provider = typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : 'unknown';
     const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : 'unknown';
     const taskId = typeof body.task_id === 'string' && body.task_id.trim() ? body.task_id.trim() : undefined;
+    // Generation prompt, kept as catalog metadata (`desc`) so a later turn can
+    // resolve "the dog picture" style references. Capped — it describes, it is
+    // not a transcript.
+    const prompt = typeof body.prompt === 'string' && body.prompt.trim()
+      ? body.prompt.trim().slice(0, MAX_ARTIFACT_PROMPT_CHARS)
+      : undefined;
 
     const items: Array<{ artifact_id: string; artifact_ref: string; index: number; path: string }> = [];
     for (let index = 0; index < (files as string[]).length; index++) {
@@ -366,6 +374,7 @@ export function createImageSharePrivateRouter(
         model,
         taskId,
         imageIndex: index,
+        prompt,
       });
       items.push({ artifact_id: artifactId, artifact_ref: `artifact:${artifactId}`, index, path: file });
     }

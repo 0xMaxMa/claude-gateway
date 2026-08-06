@@ -52,7 +52,24 @@ export type SessionImageCatalogItem = {
   origin: 'upload' | 'generated';
   ts: number;
   available: boolean;
+  /** What the image IS, so content references ("the dog picture") resolve
+   *  without conversation memory: the generation prompt for generated images,
+   *  the accompanying user text for uploads. Omitted when neither exists. */
+  desc?: string;
 };
+
+/** Cap catalog descriptions — they describe, they are not a transcript. */
+const MAX_DESC_CHARS = 200;
+
+/** Channel receivers persist bare placeholders ("(photo)") for captionless
+ *  media — those describe nothing, so they don't become a desc. */
+const PLACEHOLDER_CONTENT_RE = /^\((?:photo|image|video|file|sticker|audio|voice)\)$/i;
+
+function toDesc(text: string | null | undefined): string | undefined {
+  const t = (text ?? '').trim();
+  if (!t || PLACEHOLDER_CONTENT_RE.test(t)) return undefined;
+  return t.length > MAX_DESC_CHARS ? `${t.slice(0, MAX_DESC_CHARS)}…` : t;
+}
 
 /**
  * History stores media as `media/<chat>/<file>` while image_artifacts (and
@@ -102,16 +119,20 @@ export function computeSessionImageCatalog(opts: {
       // later must not create a second entry or shift the numbers after it.
       if (seen.has(relativePath)) continue;
       seen.add(relativePath);
-      const artifactId = store.findArtifactByPath(agentId, sessionId, relativePath);
+      const artifact = store.findArtifactByPath(agentId, sessionId, relativePath);
+      // Generated → the generation prompt (persisted on the artifact); upload →
+      // whatever the user said in the message that carried the file.
+      const desc = origin === 'generated' ? toDesc(artifact?.prompt) : toDesc(row.content);
       items.push({
         index: items.length + 1,
-        ref: artifactId ? `artifact:${artifactId}` : relativePath,
+        ref: artifact ? `artifact:${artifact.id}` : relativePath,
         relative_path: relativePath,
         origin,
         ts: row.ts,
         // A missing file STAYS listed (available:false) so the ordinals of the
         // images after it do not shift under the agent mid-conversation.
         available: isOnDisk(agentsBaseDir, agentId, relativePath),
+        ...(desc ? { desc } : {}),
       });
     }
   }
