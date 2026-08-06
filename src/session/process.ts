@@ -98,6 +98,8 @@ export class SessionProcess extends EventEmitter {
   // recent turn. Surfaced read-only for the status dashboard. Best-effort —
   // reset to 0 until the first tokenUsage event fires.
   private lastTotalTokens = 0;
+  // Real model from Claude stream, updated per turn. Persisted to SessionMeta.
+  _lastModel = '';
   private thinkingRecoveryCount = 0;
   // Binary path last spawned and the last non-empty stderr line, retained so a
   // fatal `Session max restarts reached` names what actually failed (e.g. an
@@ -166,6 +168,11 @@ export class SessionProcess extends EventEmitter {
   /** Latest context-window token usage for this session (for status/UI). */
   get totalTokens(): number {
     return this.lastTotalTokens;
+  }
+
+  /** Real model from the last Claude stream, updated per turn. */
+  get lastModel(): string {
+    return this._lastModel;
   }
 
   private readFreshModel(): string {
@@ -680,6 +687,10 @@ export class SessionProcess extends EventEmitter {
           const obj = JSON.parse(line);
           // stream-json assistant message (partial or final)
           if (obj.type === 'assistant' && Array.isArray(obj.message?.content)) {
+            // Capture the real model from the stream
+            if (typeof obj.message?.model === 'string') {
+              this._lastModel = obj.message.model;
+            }
             // Extract full text from all text blocks in this message
             let fullText = '';
             for (const block of obj.message.content) {

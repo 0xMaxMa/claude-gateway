@@ -578,7 +578,7 @@ export function createApiRouter(
           description: cfg?.description ?? '',
           sessions: sessions.map((s) => {
             const meta = metaMap.get(s.sessionId);
-            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null };
+            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null, model: meta?.model ?? null };
           }),
         };
       }),

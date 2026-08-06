@@ -250,6 +250,8 @@ export interface SessionMeta {
    *  can restore the composer selection on reload; the agent's own context is the
    *  functional source of truth. Updated whenever a send carries image_params. */
   imageConfig?: ImageParams;
+  /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
+  model?: string;
 }
 
 export interface SessionIndex {
