@@ -439,7 +439,7 @@ export class SessionStore {
     agentId: string,
     chatId: string,
     sessionId: string,
-    meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn' | 'imageConfig'>>,
+    meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn' | 'imageConfig' | 'model'>>,
     channel: 'telegram' | 'discord' | 'api' | 'line' = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
@@ -588,8 +588,8 @@ export class SessionStore {
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */
-  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams }>> {
-    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams }>();
+  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; model?: string }>> {
+    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; model?: string }>();
     const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
     let entries: fs.Dirent[];
     try {
@@ -604,7 +604,7 @@ export class SessionStore {
         const chatId = e.name.slice(channel.length + 1);
         const index = await this.loadIndex(agentId, chatId, channel);
         if (index) {
-          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig });
+          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, model: s.model });
         }
       });
     await Promise.all(reads);

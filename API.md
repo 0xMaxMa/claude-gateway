@@ -2375,7 +2375,8 @@ curl -H "X-Api-Key: admin-key-456" \
           "lastActivity": 1775823600000,
           "lastMessage": "Sure, I can help with that!",
           "sessionName": "Project Planning",
-          "imageConfig": { "model": "openai/gpt-image-1", "quality": "medium" }
+          "imageConfig": { "model": "openai/gpt-image-1", "quality": "medium" },
+          "model": "claude-opus-4-8"
         }
       ]
     }
@@ -2396,6 +2397,7 @@ curl -H "X-Api-Key: admin-key-456" \
 | `lastMessage` | string\|null | Preview of the last message content |
 | `sessionName` | string\|null | Human-readable session name (set via `/rename` or `POST /sessions`) |
 | `imageConfig` | object\|null | Last `image_params` sent for this session (composer image-generation options); `null` when none set. Lets a web client restore the composer selection on reload. |
+| `model` | string\|null | Real Claude model that produced the session's latest turn, captured from the stream and updated every turn (so a mid-session `/model` switch is reflected). `null` for legacy sessions recorded before this was tracked, or when no turn has run yet. |
 
 **Error responses:**
 

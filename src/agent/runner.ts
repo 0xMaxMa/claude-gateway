@@ -1489,6 +1489,7 @@ export class AgentRunner extends EventEmitter {
           await this.sessionStore.updateSessionMeta(this.agentConfig.id, mapKey, actualSessionId, {
             totalTokensUsed: current + totalTokens,
             lastInputTokens: inputTokens,
+            ...(proc.lastModel && { model: proc.lastModel }),
           }, ch);
         } catch {
           // Non-fatal — token tracking is best-effort
@@ -2759,7 +2760,7 @@ export class AgentRunner extends EventEmitter {
     return this.historyDb;
   }
 
-  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams }>> {
+  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; model?: string }>> {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 

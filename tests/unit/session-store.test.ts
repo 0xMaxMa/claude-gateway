@@ -376,6 +376,74 @@ describe('session-store', () => {
     expect(meta!.messageCount).toBe(0);
   });
 
+  // -------------------------------------------------------------------------
+  // U9-U13: model field persistence (#273)
+  // -------------------------------------------------------------------------
+  it('U9: updateSessionMeta persists the model field', async () => {
+    const index = await store.getOrCreateIndex('test-agent', '123456');
+    const sessionId = index.activeSessionId;
+
+    await store.updateSessionMeta('test-agent', '123456', sessionId, {
+      model: 'claude-opus-4-8',
+    });
+
+    const updated = await store.listSessions('test-agent', '123456');
+    const meta = updated.sessions.find(s => s.id === sessionId);
+    expect(meta!.model).toBe('claude-opus-4-8');
+  });
+
+  it('U10: updateSessionMeta with model: undefined clears a previously stored model (documents current overwrite behavior)', async () => {
+    const index = await store.getOrCreateIndex('test-agent', '123456');
+    const sessionId = index.activeSessionId;
+
+    await store.updateSessionMeta('test-agent', '123456', sessionId, { model: 'claude-opus-4-8' });
+    let meta = (await store.listSessions('test-agent', '123456')).sessions.find(s => s.id === sessionId);
+    expect(meta!.model).toBe('claude-opus-4-8');
+
+    // Mirrors runner.ts's `model: proc.lastModel || undefined` when lastModel is ''.
+    await store.updateSessionMeta('test-agent', '123456', sessionId, { model: undefined });
+    meta = (await store.listSessions('test-agent', '123456')).sessions.find(s => s.id === sessionId);
+    expect(meta!.model).toBeUndefined();
+  });
+
+  it('U11: updateSessionMeta throws for a session that does not exist in the index', async () => {
+    await store.getOrCreateIndex('test-agent', '123456');
+
+    await expect(
+      store.updateSessionMeta('test-agent', '123456', 'nonexistent-session-id', { model: 'claude-opus-4-8' }),
+    ).rejects.toThrow(/not found/);
+  });
+
+  it('U12: getAllSessionMeta returns model for sessions across telegram, discord, and api channels', async () => {
+    const tg = await store.getOrCreateIndex('agent-model', 'tg-1', 'telegram');
+    await store.updateSessionMeta('agent-model', 'tg-1', tg.activeSessionId, { model: 'claude-sonnet-4-6' }, 'telegram');
+
+    const dc = await store.getOrCreateIndex('agent-model', 'dc-1', 'discord');
+    await store.updateSessionMeta('agent-model', 'dc-1', dc.activeSessionId, { model: 'claude-opus-4-8' }, 'discord');
+
+    const api = await store.getOrCreateIndex('agent-model', 'api-1', 'api');
+    await store.updateSessionMeta('agent-model', 'api-1', api.activeSessionId, { model: 'claude-fable-5' }, 'api');
+
+    const metaMap = await store.getAllSessionMeta('agent-model');
+    expect(metaMap.get(tg.activeSessionId)?.model).toBe('claude-sonnet-4-6');
+    expect(metaMap.get(dc.activeSessionId)?.model).toBe('claude-opus-4-8');
+    expect(metaMap.get(api.activeSessionId)?.model).toBe('claude-fable-5');
+  });
+
+  it('U13: getAllSessionMeta reports model: undefined for a session that never had one set', async () => {
+    const index = await store.getOrCreateIndex('agent-nomode', 'tg-2', 'telegram');
+
+    const metaMap = await store.getAllSessionMeta('agent-nomode');
+    const meta = metaMap.get(index.activeSessionId);
+    expect(meta).toBeDefined();
+    expect(meta!.model).toBeUndefined();
+  });
+
+  it('U14: getAllSessionMeta returns an empty map for an agent with no sessions directory', async () => {
+    const metaMap = await store.getAllSessionMeta('agent-does-not-exist');
+    expect(metaMap.size).toBe(0);
+  });
+
   // ─── API channel routing (#160) ──────────────────────────────────────────────
   //
   // api sessions keep their conversation context in the flat sessions/{sessionId}.jsonl
