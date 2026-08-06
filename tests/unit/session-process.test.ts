@@ -1231,6 +1231,96 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-21..25: lastModel — real model captured from the assistant stream (#273)
+  // --------------------------------------------------------------------------
+  it('U-SP-21: lastModel is empty string before any assistant message arrives', async () => {
+    const sp = new SessionProcess('chat:model1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    expect(sp.lastModel).toBe('');
+  });
+
+  it('U-SP-22: lastModel is captured from message.model on an assistant stream event', async () => {
+    const sp = new SessionProcess('chat:model2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{ type: 'text', text: 'hi' }],
+      },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    expect(sp.lastModel).toBe('claude-opus-4-8');
+  });
+
+  it('U-SP-23: lastModel updates to the newest value across multiple turns (model switch mid-session)', async () => {
+    const sp = new SessionProcess('chat:model3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const turn1 = JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-sonnet-4-6', content: [{ type: 'text', text: 'first' }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(turn1 + '\n'));
+    expect(sp.lastModel).toBe('claude-sonnet-4-6');
+
+    const turn2 = JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-opus-4-8', content: [{ type: 'text', text: 'second' }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(turn2 + '\n'));
+    expect(sp.lastModel).toBe('claude-opus-4-8');
+  });
+
+  it('U-SP-24: lastModel is unaffected (stays at prior value) when message.model is missing or non-string', async () => {
+    const sp = new SessionProcess('chat:model4', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Establish a known value first.
+    const good = JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-sonnet-4-6', content: [{ type: 'text', text: 'first' }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(good + '\n'));
+    expect(sp.lastModel).toBe('claude-sonnet-4-6');
+
+    // No model field at all.
+    const noModel = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'second' }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(noModel + '\n'));
+    expect(sp.lastModel).toBe('claude-sonnet-4-6');
+
+    // model present but wrong type (e.g. server sends a number/null instead of a string).
+    const badType = JSON.stringify({
+      type: 'assistant',
+      message: { model: 12345, content: [{ type: 'text', text: 'third' }] },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(badType + '\n'));
+    expect(sp.lastModel).toBe('claude-sonnet-4-6');
+  });
+
+  it('U-SP-25: lastModel is captured even from a tool-only assistant message (no text block)', async () => {
+    const sp = new SessionProcess('chat:model5', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-8',
+        content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }],
+      },
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    expect(sp.lastModel).toBe('claude-opus-4-8');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-20: Status file still works for tool_use in partial messages
   // --------------------------------------------------------------------------
   it('U-SP-20: tool_use in partial assistant message still writes status', async () => {
