@@ -260,8 +260,13 @@ export async function createAgent(args: CreateAgentArgs): Promise<string> {
   // AI-generated *_md content is stored verbatim, so strip any outer code-fence
   // wrapper the generating model may have added before it reaches disk AND the
   // firstNonEmptyLine(agentsMdContent) description derivation below.
+  // Guard with a typeof check (not `!== undefined`): args is external MCP input
+  // cast from `unknown`, so a caller can send `agents_md: null`. A bare null
+  // would reach stripOuterCodeFence and throw on `.split`; the typeof gate falls
+  // back to the default stub for both null and undefined, matching the prior
+  // `??` behavior while still stripping a real string wrapper.
   const agentsMdContent =
-    args.agents_md !== undefined
+    typeof args.agents_md === 'string'
       ? stripOuterCodeFence(args.agents_md)
       : `# Agent: ${agentId.charAt(0).toUpperCase() + agentId.slice(1)}\n\n${description}`;
   fs.writeFileSync(path.join(wsDir, 'AGENTS.md'), agentsMdContent, 'utf8');

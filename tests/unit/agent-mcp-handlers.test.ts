@@ -466,6 +466,23 @@ describe('createAgent — agents_md code-fence stripping', () => {
     expect(written).not.toMatch(/```/);
     expect(descOf('crlf')).toBe('Agent: Foo');
   });
+
+  it('AMH-fence-i: agents_md: null (malformed MCP input) → default stub, no throw', async () => {
+    mockTelegramOk();
+    // createAgent receives args cast from `unknown` (external MCP JSON), so a
+    // caller can send `agents_md: null`. The typeof guard must fall back to the
+    // default stub rather than reach stripOuterCodeFence and throw on .split.
+    await createAgent({
+      id: 'nullmd',
+      description: 'A null agent.',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: null,
+    } as unknown as Parameters<typeof createAgent>[0]);
+
+    expect(agentsMd('nullmd')).toBe('# Agent: Nullmd\n\nA null agent.');
+    expect(descOf('nullmd')).toBe('Agent: Nullmd');
+  });
 });
 
 // ---------------------------------------------------------------------------
