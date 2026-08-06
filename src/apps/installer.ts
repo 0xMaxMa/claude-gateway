@@ -919,8 +919,13 @@ export class AppInstaller {
       }
 
       // ── Swap dirs ─────────────────────────────────────────────────────────
+      // Swap in place at the recorded install path — NOT path.join(appsDir, appName).
+      // For legacy installs the on-disk dir is named after the source repo/URL
+      // basename, so `installPath` basename can differ from the app name. Using
+      // the app name here throws ENOENT (issue #275). `entry.installPath` is the
+      // authoritative location the `down`/rollback steps above already use.
       this.log(job, 'Swapping app directories');
-      const finalDir = path.join(this.appsDir, appName);
+      const finalDir = entry.installPath;
       const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
       fs.renameSync(finalDir, oldBackupDir);
       fs.renameSync(tmpDir, finalDir);

@@ -880,6 +880,43 @@ services:
       expect(readEnvFile(entry!.installPath)['APP_SECRET']).toBe('keep-me');
     });
 
+    it('updates an app whose on-disk dir name ≠ app.yaml name (legacy install, issue #275)', async () => {
+      // Legacy installs named the on-disk dir after the source repo basename,
+      // so installPath basename can differ from the app name. The dir-swap must
+      // key off entry.installPath (like the down/rollback steps), not the app
+      // name — otherwise it throws ENOENT renaming a non-existent apps/<name>.
+      const githubUrl = 'https://github.com/test/cc-monitor-appstore';
+      const { state, spawn } = makeGitState('cc-monitor', 5403);
+      const installer = makeInstaller(spawn);
+
+      state.head = 'a'.repeat(40);
+      state.version = '1.0.0';
+      await waitForJob(installer, installer.install({ githubUrl, envVars: { APP_SECRET: 'keep-me' } }), 5000);
+
+      // Simulate the legacy on-disk layout: rename the installed dir to the repo
+      // basename and repoint the registry's installPath at it (dir name ≠ name).
+      const entry = await registry.get('cc-monitor');
+      const legacyDir = path.join(appsDir, 'cc-monitor-appstore');
+      fs.renameSync(entry!.installPath, legacyDir);
+      await registry.upsert({ ...entry!, installPath: legacyDir });
+      expect(fs.existsSync(path.join(appsDir, 'cc-monitor'))).toBe(false);
+
+      // Update must complete end-to-end (previously threw ENOENT at the swap).
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update('cc-monitor'), 5000);
+      expect(job.status).toBe('completed');
+
+      const after = await registry.get('cc-monitor');
+      expect(after?.commit).toBe('b'.repeat(40));
+      expect(after?.version).toBe('2.0.0');
+      // Registry installPath stays at the real (legacy) directory, still on disk.
+      expect(after?.installPath).toBe(legacyDir);
+      expect(fs.existsSync(legacyDir)).toBe(true);
+      // Secret (and therefore volumes) preserved via the .env copy-forward.
+      expect(readEnvFile(after!.installPath)['APP_SECRET']).toBe('keep-me');
+    });
+
     it('is a no-op when the custom app is already at HEAD', async () => {
       const githubUrl = 'https://github.com/test/steady-app';
       const { state, spawn } = makeGitState('steady-app', 5401);
