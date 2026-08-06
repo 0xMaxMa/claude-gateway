@@ -429,6 +429,43 @@ describe('createAgent — agents_md code-fence stripping', () => {
     expect(fs.readFileSync(path.join(wsDir, 'SOUL.md'), 'utf8')).toBe('Soul body');
     expect(fs.readFileSync(path.join(wsDir, 'USER.md'), 'utf8')).toBe('User body');
   });
+
+  it('AMH-fence-g: two-block false-positive (F2) — locks the accepted limitation', async () => {
+    mockTelegramOk();
+    // Content that legitimately OPENS with one fenced block and CLOSES with a
+    // different one is indistinguishable from a single outer wrapper at the line
+    // level, so its outer fences are peeled. This test pins that accepted
+    // behavior (see stripOuterCodeFence F2 note). Real AGENTS.md opens with a
+    // heading, so this shape does not occur in practice.
+    await createAgent({
+      id: 'twoblock',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```ts\na();\n```\n\nprose\n\n```ts\nb();\n```',
+    });
+
+    // Outer fence lines are removed; the middle survives verbatim.
+    expect(agentsMd('twoblock')).toBe('a();\n```\n\nprose\n\n```ts\nb();');
+  });
+
+  it('AMH-fence-h: CRLF line endings + trailing spaces on fence lines → still stripped', async () => {
+    mockTelegramOk();
+    // A generator may emit \r\n and/or pad the fence line with spaces. .trim()
+    // in the scanner normalizes both, so the wrapper is still recognized.
+    await createAgent({
+      id: 'crlf',
+      description: 'x',
+      channel: 'telegram',
+      bot_token: VALID_TG_TOKEN,
+      agents_md: '```markdown  \r\n# Agent: Foo\r\n\r\nBar\r\n```  \r\n',
+    });
+
+    const written = agentsMd('crlf');
+    expect(written.startsWith('# Agent: Foo')).toBe(true);
+    expect(written).not.toMatch(/```/);
+    expect(descOf('crlf')).toBe('Agent: Foo');
+  });
 });
 
 // ---------------------------------------------------------------------------

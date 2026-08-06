@@ -16,6 +16,13 @@ export const TELEGRAM_USER_ID_REGEX = /^\d{6,15}$/;
 export const DISCORD_USER_ID_REGEX = /^\d{17,19}$/;
 
 const FILENAME_SAFE_REGEX = /^[A-Z][A-Z0-9_-]*\.md$/i;
+
+// A whole line that is *only* a Markdown code fence, after trimming (which also
+// drops a trailing \r on CRLF input and surrounding spaces). FENCE_LINE_REGEX
+// matches both an opener (```markdown, ```ts) and a bare fence (```);
+// FENCE_CLOSE_REGEX matches only the bare closing fence.
+const FENCE_LINE_REGEX = /^```[\w-]*$/;
+const FENCE_CLOSE_REGEX = /^```$/;
 const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'USER.md'];
 
 // ---------------------------------------------------------------------------
@@ -117,7 +124,7 @@ function firstNonEmptyLine(text: string): string {
   for (const line of text.split('\n')) {
     // Skip pure code-fence lines (```markdown, ```ts, ``` …) so a stray wrapper
     // fence never leaks into a derived value such as the agent description.
-    if (/^```[\w-]*$/.test(line.trim())) continue;
+    if (FENCE_LINE_REGEX.test(line.trim())) continue;
     const trimmed = line.replace(/^#+\s*/, '').trim();
     if (trimmed) return trimmed;
   }
@@ -131,6 +138,14 @@ function firstNonEmptyLine(text: string): string {
  * the last non-empty line is a bare closing fence (```), so partial/unbalanced
  * fences are left untouched. Inner/legitimate fenced blocks are preserved;
  * unfenced content is returned unchanged.
+ *
+ * Known limitation (F2): a *legitimate* document whose first non-empty line
+ * opens a fenced block and whose last non-empty line closes a different one —
+ * two independent blocks with prose stripped away in between — is
+ * indistinguishable at the line level from a single outer wrapper, so its outer
+ * fences are peeled. This is accepted: real AGENTS.md/SOUL.md content opens with
+ * a heading, not a code fence, so the false-positive shape does not occur in
+ * practice. See test "AMH-fence-g" which locks this behavior.
  */
 function stripOuterCodeFence(text: string): string {
   const lines = text.split('\n');
@@ -141,8 +156,8 @@ function stripOuterCodeFence(text: string): string {
   while (last >= 0 && lines[last].trim() === '') last--;
   if (first >= last) return text; // need at least two non-empty lines
 
-  const isOpener = /^```[\w-]*$/.test(lines[first].trim());
-  const isCloser = /^```$/.test(lines[last].trim());
+  const isOpener = FENCE_LINE_REGEX.test(lines[first].trim());
+  const isCloser = FENCE_CLOSE_REGEX.test(lines[last].trim());
   if (!isOpener || !isCloser) return text; // not a clean wrapper — leave as-is
 
   return lines.slice(first + 1, last).join('\n').trim();
