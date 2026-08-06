@@ -1489,7 +1489,7 @@ export class AgentRunner extends EventEmitter {
           await this.sessionStore.updateSessionMeta(this.agentConfig.id, mapKey, actualSessionId, {
             totalTokensUsed: current + totalTokens,
             lastInputTokens: inputTokens,
-            model: proc.lastModel || undefined,
+            ...(proc.lastModel && { model: proc.lastModel }),
           }, ch);
         } catch {
           // Non-fatal — token tracking is best-effort
