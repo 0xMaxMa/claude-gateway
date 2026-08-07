@@ -96,7 +96,10 @@ export function createAppsRouter(
   router.get('/v1/apps', async (_req: Request, res: Response) => {
     try {
       const apps = await registry.list();
-      res.json({ apps });
+      // Reconcile each stored status against the live Docker runtime so a
+      // container that crashed/was killed externally no longer reports running.
+      const reconciled = await installer.reconcileStatuses(apps);
+      res.json({ apps: reconciled });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -201,7 +204,9 @@ export function createAppsRouter(
         res.status(404).json({ error: `App "${req.params.name}" not found` });
         return;
       }
-      res.json(entry);
+      // Reconcile the stored status against the live Docker runtime before return.
+      const reconciled = await installer.reconcileStatus(entry);
+      res.json(reconciled);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
