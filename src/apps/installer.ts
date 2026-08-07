@@ -408,6 +408,64 @@ export class AppInstaller {
   }
 
   /**
+   * Reconcile one app's stored status against the live Docker runtime and
+   * return the entry with a fresh status. The stored status in `apps.json` is
+   * only written at install/start/stop/reconfigure time, so a container that
+   * crashed, was OOM-killed, or was stopped from outside the gateway leaves the
+   * registry stuck on `running`. This queries the actual container state and
+   * corrects the record.
+   *
+   * Best-effort and fail-safe: if the runtime cannot be queried (docker
+   * unreachable, compose file gone, non-zero exit) the entry is returned
+   * unchanged, so a transient daemon hiccup never fabricates a false `stopped`.
+   * An app in the `building` state is skipped so an in-flight install — which
+   * owns the status and will set `running` on completion — is not clobbered.
+   *
+   * When the live status differs from the stored one it is persisted back to
+   * `apps.json` before returning, so subsequent reads and the boot-time restore
+   * see the truth.
+   */
+  async reconcileStatus(entry: AppEntry): Promise<AppEntry> {
+    const live = await this.queryRuntimeStatus(entry);
+    if (live === entry.status) return entry;
+    await this.registry.updateStatus(entry.name, live);
+    return { ...entry, status: live, updatedAt: new Date().toISOString() };
+  }
+
+  /** Reconcile a list of entries against the Docker runtime, in parallel. See {@link reconcileStatus}. */
+  async reconcileStatuses(entries: AppEntry[]): Promise<AppEntry[]> {
+    return Promise.all(entries.map((e) => this.reconcileStatus(e)));
+  }
+
+  /**
+   * Query the live Docker state for one app and map it to an AppEntry status.
+   * Returns the stored status unchanged when the runtime cannot be determined
+   * (see {@link reconcileStatus} for the fail-safe rationale).
+   *
+   * Uses the async (non-blocking) spawn seam, not spawnSync: this runs on the
+   * read path (`GET /apps`, possibly polled), so it must not freeze the gateway
+   * event loop while `docker compose ps` runs. reconcileStatuses() therefore
+   * genuinely parallelises across apps.
+   */
+  private async queryRuntimeStatus(entry: AppEntry): Promise<AppEntry['status']> {
+    // An install in flight owns the status — don't race it.
+    if (entry.status === 'building') return entry.status;
+    let stdout: string;
+    try {
+      const res = await this.spawnAsync(
+        'docker',
+        ['compose', '-p', entry.name, 'ps', '-a', '--format', 'json'],
+        { cwd: entry.installPath, timeoutMs: 10_000 },
+      );
+      if (res.status !== 0) return entry.status; // can't determine — keep stored
+      stdout = res.stdout ?? '';
+    } catch {
+      return entry.status; // docker missing / spawn failed / timed out — keep stored
+    }
+    return mapContainerStatesToAppStatus(parseComposePs(stdout));
+  }
+
+  /**
    * Bring up containers for every app marked `running` in the registry.
    *
    * Compose has no host-reboot restart policy here, so after the gateway (or
@@ -1613,6 +1671,81 @@ function selectLatest(versions: RegistryVersion[]): RegistryVersion | undefined 
     return withDate.reduce((a, b) => (a.approved_at > b.approved_at ? a : b));
   }
   return versions[versions.length - 1];
+}
+
+// ─── Docker runtime reconciliation helpers ─────────────────────────────────────
+
+/** One container's runtime facts, distilled from `docker compose ps` JSON. */
+export interface ComposePsContainer {
+  /** Lower-cased compose state: running | restarting | exited | dead | created | paused | … */
+  state: string;
+  /** Process exit code (0 when still running or absent). */
+  exitCode: number;
+}
+
+/**
+ * Parse `docker compose ps -a --format json` stdout into a flat container list.
+ * Handles both output shapes compose has shipped: newline-delimited JSON
+ * objects (v2.21+) and a single JSON array (older). Malformed lines and entries
+ * without a string `State` are skipped rather than throwing — a best-effort
+ * parse must never crash the read path.
+ */
+export function parseComposePs(stdout: string): ComposePsContainer[] {
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  const out: ComposePsContainer[] = [];
+  const push = (o: unknown): void => {
+    if (o && typeof o === 'object' && typeof (o as { State?: unknown }).State === 'string') {
+      const rec = o as { State: string; ExitCode?: unknown };
+      out.push({
+        state: rec.State.toLowerCase(),
+        exitCode: typeof rec.ExitCode === 'number' ? rec.ExitCode : 0,
+      });
+    }
+  };
+  // Whole-string JSON array (older compose).
+  if (trimmed.startsWith('[')) {
+    try {
+      const arr = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(arr)) {
+        arr.forEach(push);
+        return out;
+      }
+    } catch {
+      /* fall through to line-by-line parsing */
+    }
+  }
+  // Newline-delimited JSON objects (current compose).
+  for (const line of trimmed.split('\n')) {
+    const l = line.trim();
+    if (!l) continue;
+    try {
+      push(JSON.parse(l));
+    } catch {
+      /* skip a malformed line */
+    }
+  }
+  return out;
+}
+
+/**
+ * Map an app's compose-project container states to a single AppEntry status:
+ *   - no containers                                   → stopped
+ *   - any running / restarting                        → running
+ *   - any dead, or exited with a non-zero exit code   → error   (crash)
+ *   - else (clean exit / created / paused)            → stopped
+ */
+export function mapContainerStatesToAppStatus(
+  containers: ComposePsContainer[],
+): AppEntry['status'] {
+  if (containers.length === 0) return 'stopped';
+  if (containers.some((c) => c.state === 'running' || c.state === 'restarting')) {
+    return 'running';
+  }
+  if (containers.some((c) => c.state === 'dead' || (c.state === 'exited' && c.exitCode !== 0))) {
+    return 'error';
+  }
+  return 'stopped';
 }
 
 // ─── Default spawn implementation ─────────────────────────────────────────────
