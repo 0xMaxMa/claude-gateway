@@ -428,7 +428,13 @@ export class AppInstaller {
   async reconcileStatus(entry: AppEntry): Promise<AppEntry> {
     const live = await this.queryRuntimeStatus(entry);
     if (live === entry.status) return entry;
-    await this.registry.updateStatus(entry.name, live);
+    try {
+      await this.registry.updateStatus(entry.name, live);
+    } catch {
+      // Persisting failed (e.g. registry lock contention). Still return the
+      // corrected status so the read is accurate — a later read retries the
+      // write. Never let one app's persist failure reject the whole list.
+    }
     return { ...entry, status: live, updatedAt: new Date().toISOString() };
   }
 

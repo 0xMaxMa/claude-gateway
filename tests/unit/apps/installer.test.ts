@@ -1641,6 +1641,18 @@ services:
       expect(reconciled.status).toBe('running'); // rejection swallowed, no false flip
     });
 
+    it('still returns the corrected status when the persist write fails', async () => {
+      await registry.upsert({ ...makeEntryFor('persist-fail', 6009), status: 'running' });
+      const installer = makeInstaller(successSpawn, psSpawn('') /* no containers */);
+      // Simulate a registry lock/write failure on persist.
+      jest.spyOn(registry, 'updateStatus').mockRejectedValueOnce(new Error('lock timeout'));
+
+      const reconciled = await installer.reconcileStatus((await registry.get('persist-fail'))!);
+      // Read is still corrected in-memory even though the write failed —
+      // reconcileStatus must never reject and 500 the whole list.
+      expect(reconciled.status).toBe('stopped');
+    });
+
     it('does not reconcile an app in the building state (in-flight install)', async () => {
       await registry.upsert({ ...makeEntryFor('installing-app', 6005), status: 'building' });
       const spawn = psSpawn('');
