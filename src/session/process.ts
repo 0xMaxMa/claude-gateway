@@ -325,7 +325,14 @@ export class SessionProcess extends EventEmitter {
     if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
-    const sessionDir = path.join(this.agentConfig.workspace, '.sessions', this.sessionId);
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    const sessionDir = path.join(sessionsRoot, this.sessionId);
+    // Defense-in-depth: a sessionId containing '../' would escape the .sessions
+    // directory. Reject anything that resolves outside it.
+    const sessionDirRel = path.relative(sessionsRoot, sessionDir);
+    if (sessionDirRel.startsWith('..') || path.isAbsolute(sessionDirRel)) {
+      throw new Error('invalid session id');
+    }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');

@@ -23,6 +23,15 @@ type AuthedRequest = Request & { apiKey: ApiKey };
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-() ]+$/;
 
+// session_id becomes a filesystem key (sessions/<id>.jsonl, .sessions/<id>/) so it
+// must be constrained to the same safe charset as chat_id — no '/' or '.' that could
+// escape the agent's directory. Clients may pass custom (non-UUID) session ids, so
+// this preserves that while blocking path traversal.
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+export function isValidSessionId(v: unknown): v is string {
+  return typeof v === 'string' && SESSION_ID_RE.test(v);
+}
+
 function maskToken(token: string): string {
   if (token.length <= 12) return '•'.repeat(token.length);
   return token.slice(0, 8) + '•••••' + token.slice(-4);
@@ -261,8 +270,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    if (session_id !== undefined && typeof session_id !== 'string') {
-      res.status(400).json({ error: 'session_id must be a string if provided' });
+    if (session_id !== undefined && !isValidSessionId(session_id)) {
+      res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
 
@@ -2949,6 +2958,10 @@ export function createApiRouter(
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
     if (!sessionId) {
       res.status(400).json({ error: 'session_id is required' });
+      return;
+    }
+    if (!isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
     // chat_id is optional — provide the same value used when creating the session via POST /sessions

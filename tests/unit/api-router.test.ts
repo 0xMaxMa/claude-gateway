@@ -2,7 +2,7 @@ import express from 'express';
 import { EventEmitter } from 'events';
 import * as supertest from 'supertest';
 import * as http from 'http';
-import { createApiRouter } from '../../src/api/router';
+import { createApiRouter, isValidSessionId } from '../../src/api/router';
 import { AgentConfig, ApiKey, StreamEvent } from '../../src/types';
 
 // ── Minimal mock AgentRunner ─────────────────────────────────────────────────
@@ -255,6 +255,16 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
       .set(AUTH)
       .send({ message: 'hi', chat_id: 'test-chat', session_id: 123 });
     expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when session_id contains path-traversal characters', async () => {
+    const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'hi', chat_id: 'test-chat', session_id: '../evil' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/session_id must be/);
   });
 
   it('returns 401 when no auth header', async () => {
@@ -1122,5 +1132,24 @@ describe('GET /api/v1/agents/sessions', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.agents[0].sessions).toEqual([]);
+  });
+});
+
+describe('isValidSessionId', () => {
+  it('accepts a normal id and a UUID', () => {
+    expect(isValidSessionId('my-session-001')).toBe(true);
+    expect(isValidSessionId('550e8400-e29b-41d4-a716-446655440000')).toBe(true);
+    expect(isValidSessionId('a'.repeat(64))).toBe(true);
+  });
+
+  it('rejects path-traversal, separators, dots, empty, and over-length strings', () => {
+    expect(isValidSessionId('../x')).toBe(false);
+    expect(isValidSessionId('a/b')).toBe(false);
+    expect(isValidSessionId('.')).toBe(false);
+    expect(isValidSessionId('a.jsonl')).toBe(false);
+    expect(isValidSessionId('')).toBe(false);
+    expect(isValidSessionId('a'.repeat(65))).toBe(false);
+    expect(isValidSessionId(123)).toBe(false);
+    expect(isValidSessionId(undefined)).toBe(false);
   });
 });
