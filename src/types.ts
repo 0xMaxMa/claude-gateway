@@ -156,13 +156,15 @@ export interface GatewayConfig {
      */
     bind?: string;
     /**
-     * Absolute, externally-reachable origin of this gateway (e.g.
-     * "https://gateway.example.com"), used to build phone-openable links such as
-     * the `/cli` webview terminal viewer. The process cannot infer its own public
-     * URL (it binds localhost by default and sits behind a reverse proxy), so the
-     * operator sets it explicitly. Unset = features that need a public link (e.g.
-     * `/cli`) are disabled and report that they are not configured. No trailing
-     * slash required; a trailing slash is trimmed when building links.
+     * Absolute, externally-reachable base URL of this gateway, including any
+     * reverse-proxy path prefix (e.g. "https://gateway.example.com" or
+     * "https://vm.example.com/gateway"). Two consumers: phone-openable links
+     * such as the `/cli` webview terminal viewer, and the image-share bridge —
+     * its presence is the sole enable switch and source for minting public
+     * shared-image URLs. The process cannot infer its own public URL (it binds
+     * localhost by default and sits behind a reverse proxy), so the operator
+     * sets it explicitly. Unset = features that need a public link are
+     * disabled. A trailing slash is trimmed when building links.
      */
     publicUrl?: string;
     models?: ModelConfig[];
@@ -276,6 +278,14 @@ export type ImageParams = {
   size?: string;
   aspect_ratio?: string;
   image_ref?: string;
+  /**
+   * Reference images explicitly selected in the composer, in the order the user
+   * picked them. Each entry is a `ref` value from GET /api/v1/image-catalog —
+   * either an `artifact:<id>` ref or a media-relative path (the same forms the
+   * generate_image `image`/`images` arguments accept). Per-turn only: unlike the
+   * rest of ImageParams these are NOT persisted as durable session image config.
+   */
+  image_refs?: string[];
   n?: number;
 };
 

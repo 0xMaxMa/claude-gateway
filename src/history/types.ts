@@ -12,6 +12,11 @@ export interface HistoryMessage {
   senderId?: string;
   platformMessageId?: string;
   mediaFiles?: string[];
+  /** Catalog refs (`artifact:<id>` or media-root-relative path) this user turn
+   *  explicitly referenced via image_params.image_refs (#74). Display-only:
+   *  the UI joins them against the session image catalog to show which earlier
+   *  images the message pointed at. Never used for generation replay. */
+  imageRefs?: string[];
   ts: number;
 }
 

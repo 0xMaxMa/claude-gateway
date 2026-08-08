@@ -1971,6 +1971,125 @@ describe('AgentRunner — sendApiMessageStream', () => {
 
 // ── sendApiMessage (sync) tests ───────────────────────────────────────────────
 
+describe('AgentRunner — timeout keeps listening (#75)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-t75-test-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    agentConfig = makeAgentConfig(workspace);
+    fs.mkdirSync(workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  it('stream: a result arriving AFTER the soft timeout still persists to history with its attachments', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const errorPromise = new Promise<Error>((resolve) => {
+      runner.sendApiMessageStream(
+        'late-1',
+        'late-chat',
+        'slow turn',
+        { onChunk: () => {}, onDone: () => {}, onError: (err) => resolve(err) },
+        { timeoutMs: 200 },
+      );
+    });
+    await waitForSession(runner, 'late-1');
+
+    // Soft timeout fires and the client is told…
+    const err = await errorPromise;
+    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+
+    // …but the turn is still listening: register an attachment and finish late.
+    const mediaDir = path.join(runner.getAgentsBaseDir(), 'alfred', 'media', 'api-late-1');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    const absFile = path.join(mediaDir, 'late.png');
+    fs.writeFileSync(absFile, 'png-bytes');
+    runner.addApiAttachments('late-1', [absFile]);
+
+    const session = getSessions(runner).get('late-1')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'finished late' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    // Newest-first: [assistant "finished late", user "slow turn"]
+    const page = runner.getHistoryDb().getMessages('api-late-chat');
+    expect(page.messages).toHaveLength(2);
+    expect(page.messages[0]!.role).toBe('assistant');
+    expect(page.messages[0]!.content).toBe('finished late');
+    expect(page.messages[0]!.mediaFiles).toEqual(['media/api-late-1/late.png']);
+    // Session slot freed only after the late result, and the buffer is drained.
+    expect(runner.hasActiveApiSession('late-1')).toBe(false);
+    expect(runner.popApiAttachments('late-1')).toEqual([]);
+  }, 15000);
+
+  it('sync: a result arriving AFTER the soft timeout still persists to history', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const rejected = runner
+      .sendApiMessage('late-sync', 'late-sync-chat', 'slow turn', { timeoutMs: 200 })
+      .then(() => null, (err: Error) => err);
+    await waitForSession(runner, 'late-sync');
+    const err = await rejected;
+    expect(err).not.toBeNull();
+    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+
+    const session = getSessions(runner).get('late-sync')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'sync late' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    // Newest-first: [assistant "sync late", user "slow turn"]
+    const page = runner.getHistoryDb().getMessages('api-late-sync-chat');
+    expect(page.messages).toHaveLength(2);
+    expect(page.messages[0]!.role).toBe('assistant');
+    expect(page.messages[0]!.content).toBe('sync late');
+  }, 15000);
+
+  it('a new turn clears attachments a dead turn left behind (no cross-turn leak)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    // Simulate a dead turn's leftovers sitting in the buffer.
+    const mediaDir = path.join(runner.getAgentsBaseDir(), 'alfred', 'media', 'api-leak-1');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    const stale = path.join(mediaDir, 'stale.png');
+    fs.writeFileSync(stale, 'stale-bytes');
+    runner.addApiAttachments('leak-1', [stale]);
+
+    const donePromise = new Promise<string>((resolve) => {
+      runner.sendApiMessageStream(
+        'leak-1',
+        'leak-chat',
+        'fresh turn',
+        { onChunk: () => {}, onDone: (text) => resolve(text), onError: () => {} },
+        { timeoutMs: 5000 },
+      );
+    });
+    await waitForSession(runner, 'leak-1');
+    const session = getSessions(runner).get('leak-1')!;
+    session.emit('output', JSON.stringify({ type: 'result', result: 'clean reply' }));
+    await donePromise;
+    await new Promise(r => setTimeout(r, 50));
+
+    const page = runner.getHistoryDb().getMessages('api-leak-chat');
+    const assistantRow = page.messages.find((m) => m.role === 'assistant')!;
+    // The stale attachment from the dead turn must NOT ride on this reply.
+    expect(assistantRow.mediaFiles).toBeUndefined();
+  }, 15000);
+});
+
 describe('AgentRunner — sendApiMessage (sync)', () => {
   let tmpDir: string;
   let agentConfig: AgentConfig;

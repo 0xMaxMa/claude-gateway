@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import { GatewayConfig, AgentConfig } from '../types';
+import { resolveGatewayPublicUrl } from './public-url';
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -183,7 +184,17 @@ export function loadConfig(configPath: string): GatewayConfig {
   }
 
   // Interpolate gateway config (fatal if env vars missing here)
-  const interpolatedGateway = interpolateObject(config.gateway);
+  const interpolatedGateway = interpolateObject(config.gateway) as Record<string, unknown>;
+  if (interpolatedGateway.publicUrl !== undefined) {
+    const normalizedPublicUrl = resolveGatewayPublicUrl(interpolatedGateway.publicUrl);
+    if (!normalizedPublicUrl) {
+      throw new ConfigValidationError(
+        'gateway.publicUrl must be an HTTPS URL ending in /gateway with no credentials, query, or fragment ' +
+        '(HTTP is allowed only for localhost and *.internal/*.local development hosts)',
+      );
+    }
+    interpolatedGateway.publicUrl = normalizedPublicUrl;
+  }
 
   // Interpolate each agent individually — skip agents with missing env vars
   const interpolatedAgents: unknown[] = [];

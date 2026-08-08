@@ -579,4 +579,20 @@ describe('session-store', () => {
     expect(tgMsgs).toHaveLength(1);
     expect(tgMsgs[0].content).toBe('telegram msg');
   });
+
+  // -------------------------------------------------------------------------
+  // U-SEC-01: path-traversal session ids are rejected (defense-in-depth)
+  // -------------------------------------------------------------------------
+  it('U-SEC-01: appendMessage rejects a session id that escapes the agent dir', async () => {
+    await expect(
+      store.appendMessage('alfred', '../../otherAgent/sessions/x', makeMsg('user', 'pwn')),
+    ).rejects.toThrow('invalid session id');
+    // Nothing must have been written outside alfred's sessions dir.
+    const escaped = path.join(tmpDir, 'otherAgent', 'sessions', 'x.jsonl');
+    expect(fs.existsSync(escaped)).toBe(false);
+  });
+
+  it('U-SEC-02: loadSession rejects a session id that escapes the agent dir', async () => {
+    await expect(store.loadSession('alfred', '../evil')).rejects.toThrow('invalid session id');
+  });
 });

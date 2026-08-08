@@ -204,6 +204,7 @@ export class ConfigWatcher extends EventEmitter {
     // Gateway-level fields (emitted with agentId: '')
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
+      { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
     ];
     for (const { field, oldVal, newVal } of gatewayFieldPairs) {
       if (!deepEqual(oldVal, newVal)) {

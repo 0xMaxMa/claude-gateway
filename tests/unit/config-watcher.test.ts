@@ -110,9 +110,14 @@ describe('config-watcher', () => {
     baerbelModel?: string;
     alfredExtraFlags?: string[];
     alfredDangerouslySkip?: boolean;
+    publicUrl?: string;
   }): Record<string, unknown> {
     return {
-      gateway: { logDir: '/tmp/claude-gateway-test-logs', timezone: 'Asia/Bangkok' },
+      gateway: {
+        logDir: '/tmp/claude-gateway-test-logs',
+        timezone: 'Asia/Bangkok',
+        ...(overrides?.publicUrl ? { publicUrl: overrides.publicUrl } : {}),
+      },
       agents: [
         {
           id: 'alfred',
@@ -303,6 +308,34 @@ describe('config-watcher', () => {
       'Config file changed but no effective differences detected',
     );
 
+    watcher.stop();
+  });
+
+  it('reports gateway.publicUrl changes as restart-required', () => {
+    const configPath = path.join(tmpDir, 'config-public-url.json');
+    writeConfigFile(configPath, rawConfig());
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    writeConfigFile(
+      configPath,
+      rawConfig({ publicUrl: 'https://vm.example.com/gateway' }),
+    );
+    watcher.reload();
+
+    const changes: ConfigChange[] = changeSpy.mock.calls[0][0];
+    expect(changes).toContainEqual(expect.objectContaining({
+      agentId: '',
+      field: 'gateway.publicUrl',
+      oldValue: undefined,
+      newValue: 'https://vm.example.com/gateway',
+      hotReloadable: false,
+    }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Config changes require restart to take effect',
+      expect.objectContaining({ fields: expect.arrayContaining(['gateway.publicUrl']) }),
+    );
     watcher.stop();
   });
 

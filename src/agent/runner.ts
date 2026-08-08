@@ -66,6 +66,11 @@ const PROTECTED_WORKSPACE_FILES = [
 ];
 
 const MAX_API_IMAGES = 5;
+/** Extra time an api turn may keep running AFTER its soft timeout already
+ *  answered the caller (#75). The soft timeout only abandons the WAIT — the
+ *  CLI turn is still producing a result that must reach history, exactly like
+ *  the client-disconnect path. This cap bounds a genuinely hung turn. */
+const API_TIMEOUT_HARD_CAP_EXTRA_MS = 600_000;
 // Hard timeout for the one-shot local `claude -p` triage during recovery
 // (Epic #195, Phase 3b). A slow/hung triage collapses to a safe notify-only.
 const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
@@ -1035,14 +1040,79 @@ export class AgentRunner extends EventEmitter {
       typeof p.n === 'number' ? `n="${p.n}"` : '',
       p.image_ref ? `image_ref="${AgentRunner.escapeXmlAttr(p.image_ref)}"` : '',
     ].filter(Boolean);
-    if (!attrs.length) return '';
+    const refs = (p.image_refs ?? []).filter((r) => typeof r === 'string' && r.trim().length > 0);
+    if (!attrs.length && !refs.length) return '';
+    if (!refs.length) {
+      return (
+        `<image-params ${attrs.join(' ')} />\n` +
+        `The user selected the image-generation options above in the composer. When the request ` +
+        `involves creating or editing an image, call the generate_image tool (action="generate") ` +
+        `using these values (pass image_ref as the "image" argument for image-to-image), then ` +
+        `deliver the returned image with your reply tool.\n`
+      );
+    }
+    // Explicitly selected reference images (#73). Rendered as nested elements so a
+    // ref containing separators (commas, quotes) stays unambiguous.
+    const openTag = attrs.length ? `<image-params ${attrs.join(' ')}>` : '<image-params>';
+    const refLines = refs
+      .map((r, i) => `  <ref index="${i + 1}">${AgentRunner.escapeXmlAttr(r.trim())}</ref>`)
+      .join('\n');
+    const passInstruction =
+      refs.length === 1
+        ? `Pass that single ref as the "image" argument of generate_image.`
+        : `Pass all ${refs.length} refs as the "images" argument of generate_image, in the same order.`;
     return (
-      `<image-params ${attrs.join(' ')} />\n` +
+      `${openTag}\n${refLines}\n</image-params>\n` +
       `The user selected the image-generation options above in the composer. When the request ` +
       `involves creating or editing an image, call the generate_image tool (action="generate") ` +
-      `using these values (pass image_ref as the "image" argument for image-to-image), then ` +
-      `deliver the returned image with your reply tool.\n`
+      `using these values, then deliver the returned image with your reply tool.\n` +
+      `The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ` +
+      `${passInstruction} Do NOT reinterpret which images they are, do NOT call list_refs to ` +
+      `second-guess an explicit selection, and do not drop any of them. ` +
+      `Do NOT open or Read the referenced files first — the image model receives the actual files; ` +
+      `reading them wastes minutes and can push the request past its timeout. Go straight to generate_image.\n`
     );
+  }
+
+  /**
+   * The durable slice of the composer image options — everything except
+   * `image_refs`, which is a per-turn explicit selection (#73) and must never be
+   * restored as sticky session config. Returns undefined when nothing is durable.
+   */
+  private static durableImageConfig(p: ImageParams): ImageParams | undefined {
+    const { image_refs: _refs, ...durable } = p;
+    return Object.keys(durable).length ? durable : undefined;
+  }
+
+  /**
+   * The web builds image_ref/image_refs from the paths the upload endpoint
+   * returned — the ui-upload STAGING paths. promoteUiUploads then MOVES those
+   * files into per-session storage, so a note or history row built from the
+   * raw params would hand out dead paths (the agent's generate_image call
+   * fails image_ref_not_found and has to guess its way to the real file).
+   * Substitute every ref that matches a promoted staging path with its new
+   * session path; refs that were never staged (catalog refs, artifact:<id>)
+   * pass through untouched. (#74)
+   */
+  static remapImageParamsRefs(
+    p: ImageParams | undefined,
+    stagedPaths: readonly string[] | undefined,
+    promotedPaths: readonly string[] | undefined,
+  ): ImageParams | undefined {
+    if (!p || !stagedPaths?.length || !promotedPaths?.length) return p;
+    const map = new Map<string, string>();
+    for (let i = 0; i < Math.min(stagedPaths.length, promotedPaths.length); i++) {
+      const from = stagedPaths[i]!;
+      const to = promotedPaths[i]!;
+      if (from !== to) map.set(from, to);
+    }
+    if (!map.size) return p;
+    const remap = (r: string): string => map.get(r) ?? r;
+    return {
+      ...p,
+      ...(p.image_ref ? { image_ref: remap(p.image_ref) } : {}),
+      ...(p.image_refs?.length ? { image_refs: p.image_refs.map(remap) } : {}),
+    };
   }
 
   private static buildChannelXml(params: {
@@ -1264,6 +1334,26 @@ export class AgentRunner extends EventEmitter {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
               for (const block of msg!.content) {
+                // LINE sends images through its own line_image tool (not the reply
+                // tool's `files`), so capture those sends into history too — the
+                // web transcript and the session image catalog key off mediaFiles.
+                if (block.type === 'tool_use' && block.name === 'mcp__gateway__line_image') {
+                  const imgPath = typeof block.input?.['image'] === 'string' ? block.input['image'] : '';
+                  const mediaRootLine = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
+                  const lineMedia = toRelMediaFiles(imgPath ? [imgPath] : [], mediaRootLine);
+                  if (lineMedia.length) {
+                    const channelSrcLine = this.channelSourceMap.get(mapKey) ?? 'line';
+                    this.historyDb.insertMessage({
+                      chatId: `${channelSrcLine}-${mapKey}`,
+                      sessionId: actualSessionId,
+                      source: channelSrcLine as HistorySource,
+                      role: 'assistant',
+                      content: '',
+                      mediaFiles: lineMedia,
+                      ts: Date.now(),
+                    });
+                  }
+                }
                 if (block.type === 'tool_use' && block.name === replyToolName && !replyCalled) {
                   replyCalled = true;
                   replyToolUseId = (block as Record<string, unknown>)['id'] as string ?? null;
@@ -2279,6 +2369,9 @@ export class AgentRunner extends EventEmitter {
     const finalMediaFiles = opts.mediaFiles?.length
       ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger)
       : undefined;
+    // Refs built from staging paths must follow the files to their promoted
+    // location — see remapImageParamsRefs (#74).
+    const imageParams = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFiles);
 
     // Resolve media files to absolute paths for file-path based image passing
     // (same pattern as Telegram — Claude Code reads files via Read tool instead of base64 inline)
@@ -2304,11 +2397,19 @@ export class AgentRunner extends EventEmitter {
         role: 'user',
         content: message,
         mediaFiles: finalMediaFiles?.length ? finalMediaFiles : undefined,
+        // Display-only (#74): lets the UI show which earlier images this turn
+        // referenced after a reload. The generation path reads the refs from the
+        // image-params note, never from here.
+        imageRefs: imageParams?.image_refs?.length ? imageParams.image_refs : undefined,
         ts: apiUserTs,
       });
     }
 
     this.pendingApiSessions.add(sessionId);
+    // A previous turn that died (hard timeout, crash) may have left attachments
+    // buffered under this session — they belong to THAT turn; never let them
+    // ride along on this one (#75).
+    this.pendingApiAttachments.delete(sessionId);
     session.touch();
 
     // Image paths only work when allowTools:true — Claude needs the Read tool to access them
@@ -2331,14 +2432,16 @@ export class AgentRunner extends EventEmitter {
 
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttr = effectiveImagePaths.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePaths[0]!)}"` : '';
-    const imageParamsNote = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
+    const imageParamsNote = imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '';
     // Persist the composer image options to session meta so the web can restore the
     // selection on reload (SessionMeta.imageConfig). Only when the send carries them
     // (the web sends image_params on first-set/change), so this holds the latest.
+    // image_refs are per-turn and deliberately excluded (#73).
     // Channel is 'api' here (api sessions live under api-<chatId>). Best-effort.
-    if (opts.imageParams) {
+    const durableImageConfig = imageParams ? AgentRunner.durableImageConfig(imageParams) : undefined;
+    if (durableImageConfig) {
       this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfig }, 'api')
         .catch(() => {});
     }
     const channelXml =
@@ -2383,12 +2486,17 @@ export class AgentRunner extends EventEmitter {
       };
 
       const fail = (err: Error) => {
+        // Terminal close for a turn that produced no result (#75): record it so
+        // history does not end on a dangling user message, and drain the
+        // attachment buffer so nothing leaks into the next turn.
+        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
         cleanup();
-        reject(err);
+        reject(err); // no-op when the soft timeout already rejected
       };
 
       const cleanup = () => {
         clearTimeout(globalTimer);
+        if (hardCapTimer) clearTimeout(hardCapTimer);
         if (quietTimer) clearTimeout(quietTimer);
         session.off('output', onOutput);
         this.pendingApiSessions.delete(sessionId);
@@ -2442,9 +2550,17 @@ export class AgentRunner extends EventEmitter {
         }
       };
 
+      // Soft timeout (#75): unblock the caller now, but KEEP the output listener
+      // attached — a turn finishing moments late must still persist its result
+      // and attachments, mirroring the client-disconnect path. The hard cap
+      // bounds a genuinely hung turn.
+      let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
       const globalTimer = setTimeout(() => {
-        session.setProcessing(false);
-        fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        hardCapTimer = setTimeout(() => {
+          session.setProcessing(false);
+          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+        }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
       }, opts.timeoutMs);
 
       session.on('output', onOutput);
@@ -2494,6 +2610,9 @@ export class AgentRunner extends EventEmitter {
     const finalMediaFilesStream = opts.mediaFiles?.length
       ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger)
       : undefined;
+    // Refs built from staging paths must follow the files to their promoted
+    // location — see remapImageParamsRefs (#74).
+    const imageParamsStream = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFilesStream);
 
     // Resolve media files to absolute paths for file-path based image passing
     const imagePathsStream = finalMediaFilesStream?.length ? this.resolveMediaPaths(finalMediaFilesStream) : [];
@@ -2514,11 +2633,19 @@ export class AgentRunner extends EventEmitter {
         role: 'user',
         content: message,
         mediaFiles: finalMediaFilesStream?.length ? finalMediaFilesStream : undefined,
+        // Display-only (#74): lets the UI show which earlier images this turn
+        // referenced after a reload. The generation path reads the refs from the
+        // image-params note, never from here.
+        imageRefs: imageParamsStream?.image_refs?.length ? imageParamsStream.image_refs : undefined,
         ts: streamUserTs,
       });
     }
 
     this.pendingApiSessions.add(sessionId);
+    // A previous turn that died (hard timeout, crash) may have left attachments
+    // buffered under this session — they belong to THAT turn; never let them
+    // ride along on this one (#75).
+    this.pendingApiAttachments.delete(sessionId);
     session.touch();
 
     const buffer: string[] = [];
@@ -2563,11 +2690,17 @@ export class AgentRunner extends EventEmitter {
       if (settled) return;
       settled = true;
       cleanup();
+      // Terminal close for a turn that produced no result (#75): record it so
+      // history does not end on a dangling user message (the web reads that
+      // state as "still thinking" and spins forever), and drain the attachment
+      // buffer so nothing leaks into the next turn.
+      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
       callbacks.onError(err);
     };
 
     const cleanup = () => {
       clearTimeout(globalTimer);
+      if (hardCapTimer) clearTimeout(hardCapTimer);
       session.off('output', onOutput);
       this.pendingApiSessions.delete(sessionId);
     };
@@ -2649,9 +2782,21 @@ export class AgentRunner extends EventEmitter {
       }
     };
 
+    // Soft timeout (#75): tell the SSE client now, but KEEP the output listener
+    // attached — exactly like onClientDisconnect — so a turn that finishes a few
+    // seconds past the budget still lands in history with its attachments
+    // (observed: 304s image turn vs 300s budget → image generated, reply lost,
+    // spinner stuck). The hard cap bounds a genuinely hung turn.
+    let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
     const globalTimer = setTimeout(() => {
-      session.setProcessing(false);
-      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      clientGone = true;
+      try {
+        callbacks.onError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      } catch { /* client already gone */ }
+      hardCapTimer = setTimeout(() => {
+        session.setProcessing(false);
+        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+      }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
     }, opts.timeoutMs);
 
     session.on('output', onOutput);
@@ -2676,13 +2821,17 @@ export class AgentRunner extends EventEmitter {
 
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttrStream = effectiveImagePathsStream.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePathsStream[0]!)}"` : '';
-    const imageParamsNoteStream = opts.imageParams ? AgentRunner.buildImageParamsNote(opts.imageParams) : '';
+    const imageParamsNoteStream = imageParamsStream ? AgentRunner.buildImageParamsNote(imageParamsStream) : '';
     // Persist composer image config to session meta (SessionMeta.imageConfig) so the
     // web restores the selection on reload. This is the streaming path the web uses.
+    // image_refs are per-turn and deliberately excluded (#73).
     // Channel 'api' — api sessions live under api-<chatId>. Best-effort.
-    if (opts.imageParams) {
+    const durableImageConfigStream = imageParamsStream
+      ? AgentRunner.durableImageConfig(imageParamsStream)
+      : undefined;
+    if (durableImageConfigStream) {
       this.sessionStore
-        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: opts.imageParams }, 'api')
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfigStream }, 'api')
         .catch(() => {});
     }
     const channelXml =
@@ -2720,6 +2869,33 @@ export class AgentRunner extends EventEmitter {
    * Pop and return buffered attachment paths for a session, then clear the buffer.
    * Converts absolute paths to relative media URLs for the API response.
    */
+  /**
+   * Close a turn that died without a result (#75): drain any attachments the
+   * turn already registered (the files exist on disk — deliver them rather
+   * than leak them into the NEXT turn's reply) and record a terminal
+   * assistant row so history never ends on a dangling user message.
+   * System-initiated turns (skipUserMessage) have nothing dangling to close —
+   * only the buffer is drained.
+   */
+  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean): void {
+    const attachments = this.popApiAttachments(sessionId);
+    if (skipUserMessage) return;
+    const failTs = Date.now();
+    const content = `\u26a0\ufe0f ${err.message}`;
+    this.sessionStore
+      .appendMessage(this.agentConfig.id, sessionId, { role: 'assistant', content, ts: failTs })
+      .catch(() => {});
+    this.historyDb.insertMessage({
+      chatId: `api-${chatId}`,
+      sessionId,
+      source: 'api',
+      role: 'assistant',
+      content,
+      mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
+      ts: failTs,
+    });
+  }
+
   popApiAttachments(sessionId: string): ApiAttachment[] {
     const paths = this.pendingApiAttachments.get(sessionId) ?? [];
     this.pendingApiAttachments.delete(sessionId);
