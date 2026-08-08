@@ -18,7 +18,7 @@ export type ArtifactItem = { artifact_id: string; artifact_ref: string; index: n
 
 /**
  * One entry of the session image catalog (#72). `index` is 1-based and stable —
- * it is the order of FIRST appearance of that file in the session, so "รูปที่ 1"
+ * it is the order of FIRST appearance of that file in the session, so "image 1"
  * / "the first image" maps to index 1 deterministically. `ref` is what to feed
  * back into generate_image's image/images argument.
  */

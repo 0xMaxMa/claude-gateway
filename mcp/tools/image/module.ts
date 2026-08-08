@@ -225,10 +225,10 @@ export class ImageModule implements ToolModule {
         type: 'text',
         text: JSON.stringify({
           images: items,
-          note: 'Ground-truth catalog of every image in this session, numbered in order of first appearance ("รูปที่ 1" = index 1). '
+          note: 'Ground-truth catalog of every image in this session, numbered in order of first appearance ("image 1" = index 1). '
             + 'To use one as a reference, pass its "ref" value in the "image"/"images" argument of action="generate". '
             + 'Do NOT count images from conversation memory. '
-            + 'Resolution precedence: (1) when the user names an index ("Image 3", "รูปที่ 3") or attached an image this turn, '
+            + 'Resolution precedence: (1) when the user names an index ("Image 3", "the third image") or attached an image this turn, '
             + 'trust that EXACTLY — never let "desc" override an explicit reference; '
             + '(2) when the user refers by content ("the dog picture"), match against each item\'s "desc" '
             + '(the generation prompt, or the user text that came with an upload); '
@@ -783,7 +783,7 @@ const imageToolDefs: McpToolDefinition[] = [
       '"image": instead look at the reference image yourself, describe what matters in the "prompt", and generate ' +
       'text-to-image. Never send "image" to a model that does not support it. ' +
       'EARLIER IMAGES IN THE CHAT: when the user points at an image from earlier in this conversation ' +
-      '("รูปที่ 2", "the first image", "the picture you just made", "that logo from before"), call ' +
+      '("image number 2", "the first image", "the picture you just made", "that logo from before"), call ' +
       'action="list_refs" FIRST. It returns the ground-truth catalog of this session\'s images numbered by ' +
       'first appearance; pass the chosen item\'s "ref" into "image"/"images". NEVER work out which earlier ' +
       'image the user means by counting from your own memory of the conversation — the numbering there is ' +

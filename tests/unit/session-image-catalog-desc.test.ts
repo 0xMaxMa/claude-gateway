@@ -90,7 +90,7 @@ describe('session image catalog desc', () => {
       provider: 'p',
       model: 'm',
     });
-    say('assistant', 'ส่งรูปให้แล้วครับ', [mediaRef('gen.png')]);
+    say('assistant', 'here is the image you asked for', [mediaRef('gen.png')]);
 
     const [item] = catalog();
     // assistant chatter is NOT a description of the image — generated items
@@ -100,11 +100,11 @@ describe('session image catalog desc', () => {
 
   test('upload carries the accompanying user text as desc', () => {
     writeFile('up.png');
-    say('user', 'ต้องการเอารูปนี้ทำเป็นโปสเตอร์ขายนมแพะ', [mediaRef('up.png')]);
+    say('user', 'turn this into a goat milk ad poster', [mediaRef('up.png')]);
 
     const [item] = catalog();
     expect(item!.origin).toBe('upload');
-    expect(item!.desc).toBe('ต้องการเอารูปนี้ทำเป็นโปสเตอร์ขายนมแพะ');
+    expect(item!.desc).toBe('turn this into a goat milk ad poster');
   });
 
   test.each(['(photo)', '(Image)', '(sticker)', '', '   '])(
@@ -129,11 +129,11 @@ describe('session image catalog desc', () => {
 
   test('desc comes from the FIRST appearance, like every other catalog field', () => {
     writeFile('up.png');
-    say('user', 'รูปหมาคอร์กี้', [mediaRef('up.png')]);
-    say('user', 'ส่งซ้ำอีกรอบ', [mediaRef('up.png')]);
+    say('user', 'a corgi dog', [mediaRef('up.png')]);
+    say('user', 'send it again', [mediaRef('up.png')]);
 
     const [item] = catalog();
-    expect(item!.desc).toBe('รูปหมาคอร์กี้');
+    expect(item!.desc).toBe('a corgi dog');
   });
 });
 
