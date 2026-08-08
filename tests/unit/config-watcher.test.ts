@@ -320,7 +320,7 @@ describe('config-watcher', () => {
 
     writeConfigFile(
       configPath,
-      rawConfig({ publicUrl: 'https://pod-maxma.example.com/gateway' }),
+      rawConfig({ publicUrl: 'https://vm.example.com/gateway' }),
     );
     watcher.reload();
 
@@ -329,7 +329,7 @@ describe('config-watcher', () => {
       agentId: '',
       field: 'gateway.publicUrl',
       oldValue: undefined,
-      newValue: 'https://pod-maxma.example.com/gateway',
+      newValue: 'https://vm.example.com/gateway',
       hotReloadable: false,
     }));
     expect(logger.warn).toHaveBeenCalledWith(

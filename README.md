@@ -223,13 +223,13 @@ The URL must end in `/gateway`; changing it requires a gateway restart.
 ```json
 {
   "gateway": {
-    "publicUrl": "https://pod-maxma.example.com/gateway"
+    "publicUrl": "https://vm.example.com/gateway"
   }
 }
 ```
 
 Minted image URLs have the stable form
-`https://pod-maxma.example.com/gateway/shared/TOKEN`. Missing `publicUrl`
+`https://vm.example.com/gateway/shared/TOKEN`. Missing `publicUrl`
 keeps the share endpoint disabled. HTTP is accepted only for local development
 hosts such as `http://host.docker.internal:10850/gateway`.
 
