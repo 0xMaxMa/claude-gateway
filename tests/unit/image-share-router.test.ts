@@ -390,11 +390,11 @@ describe('image share router', () => {
 
   describe('resolveGatewayPublicUrl (§14 fail-closed)', () => {
     test('requires /gateway and permits HTTP only for local development hosts', () => {
-      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway')).toBe(
-        'https://pod-1.vm.getpod.ai/gateway',
+      expect(resolveGatewayPublicUrl('https://pod-1.example.com/gateway')).toBe(
+        'https://pod-1.example.com/gateway',
       );
-      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway/')).toBe(
-        'https://pod-1.vm.getpod.ai/gateway',
+      expect(resolveGatewayPublicUrl('https://pod-1.example.com/gateway/')).toBe(
+        'https://pod-1.example.com/gateway',
       );
       expect(resolveGatewayPublicUrl('http://host.docker.internal:10850/gateway')).toBe(
         'http://host.docker.internal:10850/gateway',
@@ -402,10 +402,10 @@ describe('image share router', () => {
       expect(resolveGatewayPublicUrl('http://localhost:10850/gateway')).toBe(
         'http://localhost:10850/gateway',
       );
-      expect(resolveGatewayPublicUrl('http://pod-1.vm.getpod.ai/gateway')).toBeNull();
-      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai')).toBeNull();
-      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/shared')).toBeNull();
-      expect(resolveGatewayPublicUrl('https://pod-1.vm.getpod.ai/gateway?x=1')).toBeNull();
+      expect(resolveGatewayPublicUrl('http://pod-1.example.com/gateway')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.example.com')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.example.com/shared')).toBeNull();
+      expect(resolveGatewayPublicUrl('https://pod-1.example.com/gateway?x=1')).toBeNull();
       expect(resolveGatewayPublicUrl('')).toBeNull();
       expect(resolveGatewayPublicUrl(undefined)).toBeNull();
       expect(resolveGatewayPublicUrl('not a url')).toBeNull();

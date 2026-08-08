@@ -216,13 +216,13 @@ describe('config-loader', () => {
       return configPath;
     };
 
-    const valid = write('public-url-valid.json', 'https://pod-maxma.vm.getpod.ai/gateway/');
-    expect(loadConfig(valid).gateway.publicUrl).toBe('https://pod-maxma.vm.getpod.ai/gateway');
+    const valid = write('public-url-valid.json', 'https://pod-maxma.example.com/gateway/');
+    expect(loadConfig(valid).gateway.publicUrl).toBe('https://pod-maxma.example.com/gateway');
 
     for (const [index, value] of [
-      'https://pod-maxma.vm.getpod.ai',
-      'http://pod-maxma.vm.getpod.ai/gateway',
-      'https://pod-maxma.vm.getpod.ai/gateway?token=x',
+      'https://pod-maxma.example.com',
+      'http://pod-maxma.example.com/gateway',
+      'https://pod-maxma.example.com/gateway?token=x',
       'not-a-url',
     ].entries()) {
       expect(() => loadConfig(write(`public-url-invalid-${index}.json`, value))).toThrow(
