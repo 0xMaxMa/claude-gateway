@@ -134,11 +134,14 @@ export class ImageModule implements ToolModule {
 
   private authToken(): string {
     // IMAGE_API_KEY overrides so a separate image endpoint can carry its own secret;
-    // falls back to ANTHROPIC_AUTH_TOKEN, then to the CLI config's M2M token
-    // (CLAUDE_CODE_OAUTH_TOKEN in ~/.claude/settings.json).
+    // falls back to ANTHROPIC_AUTH_TOKEN, then to the CLI config's `env` block in
+    // ~/.claude/settings.json. Check BOTH token keys there: a proxy deployment may store the
+    // M2M secret under ANTHROPIC_AUTH_TOKEN (the same key the env path uses) or under
+    // CLAUDE_CODE_OAUTH_TOKEN — mirror the env precedence and accept either.
     return (
       process.env.IMAGE_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKEN ||
+      this.settingsEnv('ANTHROPIC_AUTH_TOKEN') ||
       this.settingsEnv('CLAUDE_CODE_OAUTH_TOKEN')
     );
   }
