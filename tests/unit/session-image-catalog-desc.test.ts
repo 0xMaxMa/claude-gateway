@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { HistoryDB } from '../../src/history/db';
-import { ImageShareStore } from '../../src/share/image-share-store';
+import { ShareStore } from '../../src/share/share-store';
 import { computeSessionImageCatalog } from '../../src/share/session-image-catalog';
 
 const PNG = Buffer.concat([
@@ -23,7 +23,7 @@ const SESSION = 'session-1';
 
 describe('session image catalog desc', () => {
   let baseDir: string;
-  let store: ImageShareStore;
+  let store: ShareStore;
   let db: HistoryDB;
   let ts: number;
 
@@ -53,7 +53,7 @@ describe('session image catalog desc', () => {
   beforeEach(() => {
     baseDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'imgdesc-')));
     fs.mkdirSync(path.join(baseDir, AGENT, 'media', SESSION), { recursive: true });
-    store = new ImageShareStore(path.join(baseDir, 'shares.db'));
+    store = new ShareStore(path.join(baseDir, 'shares.db'));
     db = HistoryDB.forAgent(baseDir, AGENT);
     ts = 1_700_000_000_000;
   });
@@ -149,7 +149,7 @@ describe('image_artifacts prompt column', () => {
   });
 
   test('registerArtifact persists prompt; findArtifactByPath returns it', () => {
-    const store = new ImageShareStore(path.join(baseDir, 'shares.db'));
+    const store = new ShareStore(path.join(baseDir, 'shares.db'));
     try {
       store.registerArtifact({
         agentId: AGENT,
@@ -197,7 +197,7 @@ describe('image_artifacts prompt column', () => {
     ).run(AGENT, SESSION, `${SESSION}/old.png`);
     legacy.close();
 
-    const store = new ImageShareStore(dbPath);
+    const store = new ShareStore(dbPath);
     try {
       // Old row survives with a null prompt…
       expect(store.findArtifactByPath(AGENT, SESSION, `${SESSION}/old.png`)).toEqual({

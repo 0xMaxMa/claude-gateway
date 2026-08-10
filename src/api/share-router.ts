@@ -5,26 +5,26 @@ import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
 import {
-  ImageShareStore,
-  ImageShareError,
+  ShareStore,
+  ShareError,
   ShareLimits,
   detectImageMime,
   shareLimitsFromEnv,
   validateShareFile,
   DEFAULT_SHARE_TTL_SECONDS,
-} from '../share/image-share-store';
+} from '../share/share-store';
 import { computeSessionImageCatalog } from '../share/session-image-catalog';
 
 /**
- * Image share bridge HTTP surface (#70, plan §10/§11).
+ * Share bridge HTTP surface (#70, plan §10/§11).
  *
  *   Public  : GET|HEAD /shared/:token       — token IS the capability, no auth
- *   Private : POST     /api/v1/image-shares — mint (API-key auth, agent-scoped)
- *             DELETE   /api/v1/image-shares/:shareId
+ *   Private : POST     /api/v1/shares — mint (API-key auth, agent-scoped)
+ *             DELETE   /api/v1/shares/:shareId
  *             POST     /api/v1/image-artifacts
  *             GET      /api/v1/image-catalog   — session image list (#72)
  *
- * Deliberately NOT implemented (§10): any list endpoint (GET /api/v1/image-shares,
+ * Deliberately NOT implemented (§10): any list endpoint (GET /api/v1/shares,
  * GET /shared) — shares are unenumerable by design. /v1/image-catalog is NOT an
  * exception: it enumerates the session's IMAGES (paths / artifact refs), never
  * shares, and never returns a token.
@@ -64,8 +64,8 @@ export type PublicShareRouterOpts = {
   ratePerMinute?: number;
 };
 
-export function createImageSharePublicRouter(
-  store: ImageShareStore,
+export function createSharesPublicRouter(
+  store: ShareStore,
   agentsBaseDir: string,
   opts: PublicShareRouterOpts = {},
 ): Router {
@@ -156,7 +156,7 @@ export function createImageSharePublicRouter(
         });
         stream.pipe(res);
       }
-      console.log(`[image-share] fetch ok share=${share.shareId} purpose=${share.purpose} bytes=${stat.size}`);
+      console.log(`[share] fetch ok share=${share.shareId} purpose=${share.purpose} bytes=${stat.size}`);
     } catch {
       if (fd !== undefined) {
         try { fs.closeSync(fd); } catch { /* already closed */ }
@@ -169,11 +169,11 @@ export function createImageSharePublicRouter(
   return router;
 }
 
-export function createImageSharePrivateRouter(
-  store: ImageShareStore,
+export function createSharesPrivateRouter(
+  store: ShareStore,
   apiKeys: ApiKey[],
   agentsBaseDir: string,
-  publicBaseUrl: string,
+  publicBaseUrl?: string,
   limitsOverride?: ShareLimits,
 ): Router {
   const router = Router();
@@ -185,11 +185,14 @@ export function createImageSharePrivateRouter(
   })();
 
   /**
-   * POST /api/v1/image-shares — mint one or more shares (§10).
+   * POST /api/v1/shares — mint one or more shares (§10).
    * Body: { agent_id, session_id, purpose?, ttl_seconds?, refs: [{artifact_id}|{path}] }
-   * Response: { items: [{ share_id, url, expires_at }] } — order preserved.
+   * Response: { items: [{ share_id, token, url?, expires_at }] } — order preserved.
+   * `token` is always present (host-agnostic capability); `url` is a convenience
+   * built from `gateway.publicUrl` and is omitted when that is unset — callers
+   * with their own public base (e.g. LINE) build the URL from `token`.
    */
-  router.post('/v1/image-shares', auth, (req: Request, res: Response) => {
+  router.post('/v1/shares', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const body = req.body as {
       agent_id?: unknown;
@@ -263,7 +266,7 @@ export function createImageSharePrivateRouter(
       try {
         validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes);
       } catch (err) {
-        if (err instanceof ImageShareError) {
+        if (err instanceof ShareError) {
           res.status(errStatus(err.code)).json({ error: err.message, code: err.code });
           return;
         }
@@ -293,10 +296,11 @@ export function createImageSharePrivateRouter(
         purpose,
         ttlSeconds,
       });
-      console.log(`[image-share] mint share=${mint.shareId} purpose=${purpose} deduped=${mint.deduped}`);
+      console.log(`[share] mint share=${mint.shareId} purpose=${purpose} deduped=${mint.deduped}`);
       return {
         share_id: mint.shareId,
-        url: `${publicBaseUrl}/shared/${mint.token}`,
+        token: mint.token,
+        ...(publicBaseUrl ? { url: `${publicBaseUrl}/shared/${mint.token}` } : {}),
         expires_at: new Date(mint.expiresAtMs).toISOString(),
       };
     });
@@ -304,11 +308,11 @@ export function createImageSharePrivateRouter(
   });
 
   /**
-   * DELETE /api/v1/image-shares/:shareId — revoke (§10). Only a key with
+   * DELETE /api/v1/shares/:shareId — revoke (§10). Only a key with
    * access to the owning agent (or admin) may revoke; anything else is a
    * uniform 404 so share ids are not confirmable cross-tenant.
    */
-  router.delete('/v1/image-shares/:shareId', auth, (req: Request, res: Response) => {
+  router.delete('/v1/shares/:shareId', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     const shareId = req.params.shareId ?? '';
     const owner = store.getShareOwner(shareId);
@@ -317,7 +321,7 @@ export function createImageSharePrivateRouter(
       return;
     }
     store.revokeShare(shareId);
-    console.log(`[image-share] revoke share=${shareId} purpose=${owner.purpose}`);
+    console.log(`[share] revoke share=${shareId} purpose=${owner.purpose}`);
     res.json({ revoked: true });
   });
 
@@ -373,7 +377,7 @@ export function createImageSharePrivateRouter(
       try {
         validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes);
       } catch (err) {
-        const code = err instanceof ImageShareError ? err.code : 'invalid_path';
+        const code = err instanceof ShareError ? err.code : 'invalid_path';
         res.status(errStatus(code)).json({ error: err instanceof Error ? err.message : 'invalid file', code });
         return;
       }
@@ -389,7 +393,7 @@ export function createImageSharePrivateRouter(
       });
       items.push({ artifact_id: artifactId, artifact_ref: `artifact:${artifactId}`, index, path: file });
     }
-    console.log(`[image-share] artifacts registered count=${items.length} provider=${provider}`);
+    console.log(`[share] artifacts registered count=${items.length} provider=${provider}`);
     res.status(201).json({ items });
   });
 

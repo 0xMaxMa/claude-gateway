@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
-import { detectImageMime, ImageShareStore } from './image-share-store';
+import { detectImageMime, ShareStore } from './share-store';
 
 /**
  * Session image catalog (#72) — the single deterministic answer to
@@ -94,7 +94,7 @@ function isOnDisk(agentsBaseDir: string, agentId: string, relativePath: string):
 
 export function computeSessionImageCatalog(opts: {
   agentsBaseDir: string;
-  store: ImageShareStore;
+  store: ShareStore;
   agentId: string;
   sessionId: string;
 }): SessionImageCatalogItem[] {

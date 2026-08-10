@@ -5,11 +5,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { MediaStore } from '../history/media-store';
 
 /**
- * Image share bridge — SQLite-backed store for short-lived public image shares
+ * Share bridge — SQLite-backed store for short-lived public image shares
  * and private image artifacts (#70, plan §8/§9).
  *
  * The gateway MAIN process is the only owner of this DB: MCP subprocesses go
- * through the authenticated HTTP API (image-share-router.ts) and never open
+ * through the authenticated HTTP API (share-router.ts) and never open
  * SQLite themselves. Tokens are bearer capabilities: 24 random bytes,
  * base64url, and ONLY the SHA-256 hash is persisted — the plaintext token
  * exists in the mint response (and a short-lived in-memory dedupe cache) only.
@@ -52,7 +52,7 @@ export function shareLimitsFromEnv(): ShareLimits {
 }
 
 /** Typed error with a stable machine-readable code (used for HTTP mapping). */
-export class ImageShareError extends Error {
+export class ShareError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
     super(message);
@@ -84,7 +84,7 @@ export type ValidatedShareFile = {
  * canonicalize, require containment in the agent's media root, reject symlink
  * escapes, require a regular file, validate magic bytes and the per-file cap.
  * Returns only the media-root-relative path — client-supplied absolute paths
- * are never persisted. Throws ImageShareError with a stable code.
+ * are never persisted. Throws ShareError with a stable code.
  */
 export function validateShareFile(
   agentsBaseDir: string,
@@ -106,19 +106,19 @@ export function validateShareFile(
       resolved = MediaStore.resolvePath(agentsBaseDir, agentId, ref);
     }
   } catch {
-    throw new ImageShareError('invalid_path', 'path is outside the agent media root');
+    throw new ShareError('invalid_path', 'path is outside the agent media root');
   }
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(resolved); // realpath already followed links; lstat guards devices/FIFOs
   } catch {
-    throw new ImageShareError('image_ref_not_found', 'referenced image file does not exist');
+    throw new ShareError('image_ref_not_found', 'referenced image file does not exist');
   }
   if (!stat.isFile()) {
-    throw new ImageShareError('invalid_path', 'referenced path is not a regular file');
+    throw new ShareError('invalid_path', 'referenced path is not a regular file');
   }
   if (stat.size > maxFileBytes) {
-    throw new ImageShareError('image_too_large', `image exceeds ${maxFileBytes} bytes`);
+    throw new ShareError('image_too_large', `image exceeds ${maxFileBytes} bytes`);
   }
   const header = Buffer.alloc(12);
   const fd = fs.openSync(resolved, 'r');
@@ -129,11 +129,11 @@ export function validateShareFile(
   }
   const mime = detectImageMime(header);
   if (!mime) {
-    throw new ImageShareError('unsupported_image_type', 'only PNG, JPEG and WebP can be shared');
+    throw new ShareError('unsupported_image_type', 'only PNG, JPEG and WebP can be shared');
   }
   const relativePath = path.relative(root, resolved);
   if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-    throw new ImageShareError('invalid_path', 'path is outside the agent media root');
+    throw new ShareError('invalid_path', 'path is outside the agent media root');
   }
   return { relativePath, size: stat.size, mime };
 }
@@ -164,7 +164,7 @@ export type ArtifactRow = {
   model: string;
 };
 
-export class ImageShareStore {
+export class ShareStore {
   private readonly db: DatabaseSync;
   /** In-memory idempotent-mint cache: dedupe key → last mint. Plaintext tokens
    *  live here only for MINT_DEDUPE_WINDOW_MS, never on disk (§9/§17.4). */

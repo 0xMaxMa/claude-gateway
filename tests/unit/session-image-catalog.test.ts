@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { HistoryDB } from '../../src/history/db';
-import { ImageShareStore } from '../../src/share/image-share-store';
+import { ShareStore } from '../../src/share/share-store';
 import { computeSessionImageCatalog } from '../../src/share/session-image-catalog';
 
 const PNG = Buffer.concat([
@@ -23,7 +23,7 @@ const SESSION = 'session-1';
 describe('computeSessionImageCatalog (#72)', () => {
   let baseDir: string;
   let mediaDir: string;
-  let store: ImageShareStore;
+  let store: ShareStore;
   let db: HistoryDB;
   let ts: number;
 
@@ -61,7 +61,7 @@ describe('computeSessionImageCatalog (#72)', () => {
     baseDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'imgcatalog-')));
     mediaDir = path.join(baseDir, AGENT, 'media', SESSION);
     fs.mkdirSync(mediaDir, { recursive: true });
-    store = new ImageShareStore(path.join(baseDir, 'shares.db'));
+    store = new ShareStore(path.join(baseDir, 'shares.db'));
     db = HistoryDB.forAgent(baseDir, AGENT);
     ts = 1_700_000_000_000;
   });

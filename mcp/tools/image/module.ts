@@ -12,7 +12,8 @@ import {
   revokeSharesBestEffort,
   shareBridgeEnabled,
   type ShareRef,
-} from './share-client';
+  type ShareItem,
+} from '../shared/share-client';
 
 /**
  * Image-generation tool module (#184, Track B).
@@ -420,7 +421,7 @@ export class ImageModule implements ToolModule {
       }
     }
     const localRefs = entries.filter((e): e is Extract<Entry, { kind: 'local' }> => e.kind === 'local');
-    let minted: { share_id: string; url: string }[] = [];
+    let minted: ShareItem[] = [];
     if (localRefs.length) {
       try {
         minted = await createShares(localRefs.map((e) => e.ref), { purpose: 'codex_ref' });
@@ -437,10 +438,16 @@ export class ImageModule implements ToolModule {
         await revokeSharesBestEffort(minted.map((m) => m.share_id));
         return fail('generate_image: image share service returned a mismatched share count.');
       }
+      // Provider fetches these refs over HTTPS, so each needs an absolute URL —
+      // which the share API only fills when gateway.publicUrl is configured.
+      if (minted.some((m) => !m.url)) {
+        await revokeSharesBestEffort(minted.map((m) => m.share_id));
+        return fail('generate_image: image reference sharing requires gateway.publicUrl to be configured.');
+      }
     }
     // Merge back preserving the caller's order.
     let next = 0;
-    const urls = entries.map((e) => (e.kind === 'url' ? e.url : minted[next++]!.url));
+    const urls = entries.map((e) => (e.kind === 'url' ? e.url : minted[next++]!.url!));
     return { urls, mintedShareIds: minted.map((m) => m.share_id) };
   }
 

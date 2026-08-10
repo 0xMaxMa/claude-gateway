@@ -5,7 +5,7 @@ import {
   revokeShare,
   shareBridgeEnabled,
   type ShareRef,
-} from '../image/share-client';
+} from '../shared/share-client';
 
 /**
  * Standalone share_image MCP tool (#70, plan §15) — explicit create/revoke of

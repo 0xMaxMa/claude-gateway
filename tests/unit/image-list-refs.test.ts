@@ -1,6 +1,6 @@
 /**
  * Unit tests for generate_image action="list_refs" (#72) —
- * mcp/tools/image/module.ts + mcp/tools/image/share-client.ts.
+ * mcp/tools/image/module.ts + mcp/tools/shared/share-client.ts.
  *
  * list_refs is the agent's ONLY sanctioned way to resolve "image 2" / "the first
  * image" to a real file: the gateway computes the numbering, the agent never counts

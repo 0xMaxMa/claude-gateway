@@ -12,7 +12,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 
 export type ShareRef = { artifact_id?: string; path?: string };
 
-export type ShareItem = { share_id: string; url: string; expires_at: string };
+export type ShareItem = { share_id: string; token: string; url?: string; expires_at: string };
 
 export type ArtifactItem = { artifact_id: string; artifact_ref: string; index: number; path: string };
 
@@ -99,7 +99,7 @@ export async function createShares(
     refs,
   };
   if (opts.ttlSeconds !== undefined) body.ttl_seconds = opts.ttlSeconds;
-  const { status, json } = await callGateway('POST', '/api/v1/image-shares', body);
+  const { status, json } = await callGateway('POST', '/api/v1/shares', body);
   if (status !== 201) {
     const code = typeof json.code === 'string' ? json.code : 'share_failed';
     const message = typeof json.error === 'string' ? json.error : `share request failed (HTTP ${status})`;
@@ -153,7 +153,7 @@ function extractError(
 
 /** Revoke a share by id. Throws ShareClientError on failure. */
 export async function revokeShare(shareId: string): Promise<void> {
-  const { status, json } = await callGateway('DELETE', `/api/v1/image-shares/${encodeURIComponent(shareId)}`);
+  const { status, json } = await callGateway('DELETE', `/api/v1/shares/${encodeURIComponent(shareId)}`);
   if (status !== 200) {
     const message = typeof json.error === 'string' ? json.error : `revoke failed (HTTP ${status})`;
     throw new ShareClientError('revoke_failed', message, status);

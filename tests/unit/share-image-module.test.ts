@@ -80,7 +80,7 @@ describe('share_image MCP module', () => {
   });
 
   describe('create', () => {
-    test('single path → POST /api/v1/image-shares with identity from env', async () => {
+    test('single path → POST /api/v1/shares with identity from env', async () => {
       const res = await new ShareImageModule().handleTool('share_image', {
         action: 'create',
         path: 'media/session-1/image.png',
@@ -88,7 +88,7 @@ describe('share_image MCP module', () => {
       });
       expect(res.isError).toBeUndefined();
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/image-shares`);
+      expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/shares`);
       expect(calls[0]!.body).toMatchObject({
         agent_id: 'a1',
         session_id: 'session-1',
@@ -127,11 +127,11 @@ describe('share_image MCP module', () => {
   });
 
   describe('revoke', () => {
-    test('DELETE /api/v1/image-shares/:id', async () => {
+    test('DELETE /api/v1/shares/:id', async () => {
       const res = await new ShareImageModule().handleTool('share_image', { action: 'revoke', share_id: 'shr_1' });
       expect(res.isError).toBeUndefined();
       expect(calls[0]!.method).toBe('DELETE');
-      expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/image-shares/shr_1`);
+      expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/shares/shr_1`);
     });
 
     test('missing share_id → error, no call', async () => {

@@ -25,8 +25,6 @@ import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { MediaStore } from '../history/media-store';
-import { verifyPublicToken } from './public-token';
-import { safeMediaHeaders } from './public-media-headers';
 import { createCronRouter } from './cron-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
@@ -38,10 +36,10 @@ import { RegistryClient } from '../apps/registry-client';
 import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
 import {
-  createImageSharePublicRouter,
-  createImageSharePrivateRouter,
-} from './image-share-router';
-import { ImageShareStore } from '../share/image-share-store';
+  createSharesPublicRouter,
+  createSharesPrivateRouter,
+} from './share-router';
+import { ShareStore } from '../share/share-store';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
@@ -424,38 +422,6 @@ export class GatewayRouter {
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
   }
 
-  /**
-   * Resolve the gateway API key used to sign a public token. Reads the token's
-   * UNTRUSTED claimed agent id (`payload.a`, base64url body) to pick the key that
-   * serves that agent — same selection as SessionProcess.findApiKeyForAgent
-   * (agent-scoped, then wildcard, then admin). Returns '' when the token is
-   * malformed or no key matches, so verifyPublicToken returns null ⇒ 403.
-   */
-  private resolvePublicTokenKey(token: string): string {
-    const dot = token.indexOf('.');
-    if (dot <= 0) return '';
-    let agentId: string;
-    try {
-      const bodyPart = token.slice(0, dot);
-      const pad = bodyPart.length % 4 === 0 ? '' : '='.repeat(4 - (bodyPart.length % 4));
-      const json = Buffer.from(
-        bodyPart.replace(/-/g, '+').replace(/_/g, '/') + pad,
-        'base64',
-      ).toString('utf-8');
-      const parsed = JSON.parse(json) as { a?: unknown };
-      if (typeof parsed.a !== 'string' || !parsed.a) return '';
-      agentId = parsed.a;
-    } catch {
-      return '';
-    }
-    const keys = this.gatewayConfig?.gateway?.api?.keys ?? [];
-    const match = keys.find(k =>
-      (Array.isArray(k.agents) && k.agents.includes(agentId)) ||
-      k.agents === '*' ||
-      k.admin
-    );
-    return match?.key ?? '';
-  }
 
   // ─── /cli webview terminal viewer ──────────────────────────────────────────
 
@@ -641,67 +607,6 @@ export class GatewayRouter {
       createWebhooksRouter(this.agents, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
     );
 
-    // Public signed token route — a neutral, reusable primitive that serves a
-    // resource to callers that cannot present the gateway API key (e.g. LINE's
-    // servers fetching an image message). The token is a short-lived HMAC over
-    // { kind, agentId, relPath, exp }; it self-authenticates, so this route sits
-    // outside API-key auth. The HMAC key is the agent's gateway API key
-    // (config.gateway.api.keys) — the same key the MCP subprocess signs with
-    // (injected as GATEWAY_API_KEY). We can't trust the token's claimed agent until
-    // the signature checks out, so resolvePublicTokenKey reads `a` UNTRUSTED to pick
-    // the candidate key; verifyPublicToken's HMAC is what makes `a` trustworthy. No
-    // match ⇒ '' ⇒ verifyPublicToken returns null ⇒ 403. After verify, `k` (kind)
-    // dispatches how the token is served — today only 'media' (stream a file);
-    // future kinds (share chat, etc.) add branches here.
-    // Registered at BOTH the bare path and under /gateway: pods reach it bare
-    // (their reverse proxy strips the /gateway prefix before forwarding), while
-    // a direct tunnel to the gateway (local dev) hits the prefixed form because
-    // persistPublicBase hardcodes "https://<host>/gateway" into .public-base.
-    this.app.get(['/public/:token', '/gateway/public/:token'], (req: Request, res: Response) => {
-      const token = req.params.token ?? '';
-      const secret = this.resolvePublicTokenKey(token);
-      const payload = verifyPublicToken(token, secret);
-      if (!payload) {
-        res.status(403).json({ error: 'Invalid or expired token' });
-        return;
-      }
-      // Kind dispatch: only 'media' (stream a file) is served today. Any other
-      // kind is a token minted for a feature this route doesn't serve yet ⇒ 400.
-      if (payload.k !== 'media') {
-        res.status(400).json({ error: 'Unsupported token kind' });
-        return;
-      }
-      const runner = this.agents.get(payload.a);
-      if (!runner) {
-        res.status(404).json({ error: 'Agent not found' });
-        return;
-      }
-      let absPath: string;
-      try {
-        absPath = MediaStore.resolvePath(runner.getAgentsBaseDir(), payload.a, payload.p);
-      } catch {
-        res.status(400).json({ error: 'Invalid path' });
-        return;
-      }
-      if (!fs.existsSync(absPath)) {
-        res.status(404).json({ error: 'Not found' });
-        return;
-      }
-      res.setHeader('Cache-Control', 'private, max-age=3600, immutable');
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      // Stored-XSS defence: this route serves agent-written files from a public
-      // origin. Decide Content-Type by extension — only raster images go inline;
-      // svg/html/xml/unknown are forced to a non-executable download. We set an
-      // explicit Content-Type BEFORE sendFile so it wins over sendFile's own
-      // extension-based inference (send skips it when Content-Type is already set).
-      const serve = safeMediaHeaders(path.extname(absPath), path.basename(absPath));
-      res.setHeader('Content-Type', serve.contentType);
-      if (serve.disposition) {
-        res.setHeader('Content-Disposition', serve.disposition);
-      }
-      res.sendFile(absPath);
-    });
-
     this.app.use(express.json());
 
     // `/cli` webview terminal viewer routes (device flow + agent-scoped viewer).
@@ -709,35 +614,38 @@ export class GatewayRouter {
     // owns its own cookie/approval auth without the API-key gate intercepting.
     this.setupCliRoutes();
 
-    // Image share bridge (#70): gateway.publicUrl is the sole enable switch and
-    // source for public /gateway/shared/:token URLs. No provisioned feature env
-    // is involved. Missing publicUrl keeps both public and private surfaces off.
-    // Normalize so a trailing slash can't produce "//shared/<token>" in mint URLs.
-    const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
-    if (publicUrl) {
-      try {
-        const dbPath =
-          process.env.IMAGE_SHARE_DB_PATH ||
-          path.join(os.homedir(), '.claude-gateway', 'image-shares.db');
-        const store = new ImageShareStore(dbPath);
-        const agentsBaseDir = this.configPath
-          ? path.join(path.dirname(this.configPath), 'agents')
-          : path.join(os.homedir(), '.claude-gateway', 'agents');
-        this.app.use(createImageSharePublicRouter(store, agentsBaseDir));
-        if (this.gatewayConfig?.gateway?.api?.keys?.length) {
-          this.app.use(
-            '/api',
-            createImageSharePrivateRouter(
-              store,
-              this.gatewayConfig.gateway.api.keys,
-              agentsBaseDir,
-              publicUrl,
-            ),
-          );
-        }
-      } catch (err) {
-        console.error(`[image-share] failed to initialise share store: ${(err as Error).message}`);
+    // Share bridge (#70): a single reusable /shared/:token primitive. The store +
+    // public fetch route mount UNCONDITIONALLY — the public route only serves tokens
+    // that were actually minted (else a uniform 404), so it is safe to always mount.
+    // The private mint/revoke endpoint mounts when API keys exist (it is API-key
+    // gated). `gateway.publicUrl` is NO LONGER an enable switch: it is only the
+    // default base for the `url` convenience field in mint responses. Callers
+    // without it — e.g. LINE, which derives its host from the inbound webhook —
+    // build the URL from the returned `token` (host-agnostic). Normalize so a
+    // trailing slash can't produce "//shared/<token>" in mint URLs.
+    try {
+      const dbPath =
+        process.env.IMAGE_SHARE_DB_PATH ||
+        path.join(os.homedir(), '.claude-gateway', 'shares.db');
+      const store = new ShareStore(dbPath);
+      const agentsBaseDir = this.configPath
+        ? path.join(path.dirname(this.configPath), 'agents')
+        : path.join(os.homedir(), '.claude-gateway', 'agents');
+      this.app.use(createSharesPublicRouter(store, agentsBaseDir));
+      if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+        const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
+        this.app.use(
+          '/api',
+          createSharesPrivateRouter(
+            store,
+            this.gatewayConfig.gateway.api.keys,
+            agentsBaseDir,
+            publicUrl,
+          ),
+        );
       }
+    } catch (err) {
+      console.error(`[share] failed to initialise share store: ${(err as Error).message}`);
     }
 
     // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.

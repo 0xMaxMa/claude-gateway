@@ -84,13 +84,13 @@ describe('generate_image share-bridge normalization (#70)', () => {
       }
       calls.push({ url, method, body, headers: (init?.headers ?? {}) as Record<string, string> });
 
-      if (url.startsWith(`${GATEWAY}/api/v1/image-shares`) && method === 'POST') {
+      if (url.startsWith(`${GATEWAY}/api/v1/shares`) && method === 'POST') {
         return new Response(
           JSON.stringify(shareStatus === 201 ? { items: shareItems } : shareErrorBody),
           { status: shareStatus },
         );
       }
-      if (url.startsWith(`${GATEWAY}/api/v1/image-shares/`) && method === 'DELETE') {
+      if (url.startsWith(`${GATEWAY}/api/v1/shares/`) && method === 'DELETE') {
         return new Response(JSON.stringify({ revoked: true }), { status: 200 });
       }
       if (url.startsWith(`${GATEWAY}/api/v1/image-artifacts`) && method === 'POST') {
@@ -132,8 +132,8 @@ describe('generate_image share-bridge normalization (#70)', () => {
       ...extra,
     });
 
-  const shareCalls = () => calls.filter((c) => c.url === `${GATEWAY}/api/v1/image-shares` && c.method === 'POST');
-  const revokeCalls = () => calls.filter((c) => c.method === 'DELETE' && c.url.includes('/api/v1/image-shares/'));
+  const shareCalls = () => calls.filter((c) => c.url === `${GATEWAY}/api/v1/shares` && c.method === 'POST');
+  const revokeCalls = () => calls.filter((c) => c.method === 'DELETE' && c.url.includes('/api/v1/shares/'));
   const submitCall = () => calls.find((c) => c.url === `${PROVIDER}/v1/images/generations`);
 
   describe('no gateway context — regression guarantee', () => {
@@ -232,7 +232,7 @@ describe('generate_image share-bridge normalization (#70)', () => {
       submitStatus = 400;
       const res = await generate({ image: 'media/session-1/duck.png' });
       expect(res.isError).toBe(true);
-      expect(revokeCalls().map((c) => c.url)).toEqual([`${GATEWAY}/api/v1/image-shares/shr_1`]);
+      expect(revokeCalls().map((c) => c.url)).toEqual([`${GATEWAY}/api/v1/shares/shr_1`]);
     });
   });
 

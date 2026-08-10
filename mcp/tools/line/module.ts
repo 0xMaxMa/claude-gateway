@@ -15,9 +15,9 @@ import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { messagingApi } from '@line/bot-sdk';
 import { chunkText, planLineSend, LINE_TEXT_LIMIT } from './pure';
-import { signPublicToken } from './public-token';
+import { createShares, ShareClientError, shareBridgeEnabled } from '../shared/share-client';
 
-/** Default lifetime of a signed image URL handed to LINE (1 hour). */
+/** Default lifetime of a share URL handed to LINE (1 hour). */
 const DEFAULT_MEDIA_URL_TTL_MS = 60 * 60 * 1000;
 
 /**
@@ -183,9 +183,12 @@ export class LineModule implements ToolModule {
   }
 
   /**
-   * Send an image via a signed short-lived public URL. LINE's servers fetch the
-   * image over public HTTPS (the normal media route is API-key-gated), so we mint
-   * a token the gateway `/public/:token` route verifies + streams.
+   * Send an image to LINE. LINE's servers fetch the image over public HTTPS (the
+   * normal media route is API-key-gated), so we mint a short-lived share token via
+   * the gateway share bridge — the SAME `/shared/:token` primitive the image tools
+   * use — and hand LINE the resulting public URL. The host comes from `.public-base`
+   * (derived by the gateway from the inbound webhook); the token is host-agnostic,
+   * so we simply prepend that base to `/shared/<token>`.
    */
   private async handleImage(args: Record<string, unknown>): Promise<McpToolResult> {
     const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
@@ -227,15 +230,12 @@ export class LineModule implements ToolModule {
         isError: true,
       };
     }
-    // HMAC key for the public media URL = this pod's gateway API key (reused, not a
-    // separate secret). NOT the LLM proxy_secret/CLAUDE_CODE_OAUTH_TOKEN — the public
-    // token is a gateway route, so the gateway's own key is the right signer, and the verify
-    // side resolves the same key from config.gateway.api.keys (see gateway-router.ts).
-    const signSecret = process.env.GATEWAY_API_KEY ?? '';
-    const agentId = process.env.GATEWAY_AGENT_ID ?? '';
-    if (!signSecret || !agentId) {
+    // The share bridge (the same authenticated local gateway API the image tools
+    // use) needs the session identity injected into this subprocess. Missing it =
+    // image delivery isn't wired up on this pod.
+    if (!shareBridgeEnabled()) {
       return {
-        content: [{ type: 'text', text: 'line_image: image delivery not configured (missing GATEWAY_API_KEY or GATEWAY_AGENT_ID)' }],
+        content: [{ type: 'text', text: 'line_image: image delivery not configured (share bridge unavailable)' }],
         isError: true,
       };
     }
@@ -249,17 +249,37 @@ export class LineModule implements ToolModule {
       };
     }
 
-    const ttl = Number(process.env.GATEWAY_MEDIA_URL_TTL_MS) > 0
+    const ttlMs = Number(process.env.GATEWAY_MEDIA_URL_TTL_MS) > 0
       ? Number(process.env.GATEWAY_MEDIA_URL_TTL_MS)
       : DEFAULT_MEDIA_URL_TTL_MS;
-    const exp = Date.now() + ttl;
-    const signUrl = (rel: string): string =>
-      `${publicBase}/public/${signPublicToken({ k: 'media', a: agentId, p: rel, e: exp }, signSecret)}`;
+    const ttlSeconds = Math.max(10, Math.ceil(ttlMs / 1000));
+
+    // Mint one share per ref (order preserved). Identical refs dedupe to the same
+    // token within the store's idempotency window — fine, LINE gets a valid URL.
+    let originalContentUrl: string;
+    let previewImageUrl: string;
+    try {
+      const items = await createShares(
+        [{ path: relImage }, { path: relPreview }],
+        { purpose: 'line', ttlSeconds },
+      );
+      if (!items[0]?.token || !items[1]?.token) {
+        throw new ShareClientError('share_failed', 'share response missing token', 500);
+      }
+      originalContentUrl = `${publicBase}/shared/${items[0].token}`;
+      previewImageUrl = `${publicBase}/shared/${items[1].token}`;
+    } catch (err) {
+      const msg = err instanceof ShareClientError ? `${err.code}: ${err.message}` : String(err);
+      return {
+        content: [{ type: 'text', text: `line_image: failed to mint share URL — ${msg}` }],
+        isError: true,
+      };
+    }
 
     const message = {
       type: 'image' as const,
-      originalContentUrl: signUrl(relImage),
-      previewImageUrl: signUrl(relPreview),
+      originalContentUrl,
+      previewImageUrl,
     };
 
     if (!token) {

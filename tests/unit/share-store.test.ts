@@ -1,6 +1,6 @@
 /**
  * Unit tests for the image share/artifact store (#70) —
- * src/share/image-share-store.ts. Covers plan §20.1 store-level items:
+ * src/share/share-store.ts. Covers plan §20.1 store-level items:
  * token format + hash-only persistence, idempotent mint (§17.4), lazy expiry,
  * artifact agent/session binding, and the full §12 filesystem validation set
  * (traversal, symlink escape, non-regular files, magic bytes, size caps).
@@ -11,12 +11,12 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  ImageShareStore,
-  ImageShareError,
+  ShareStore,
+  ShareError,
   SHARE_TOKEN_RE,
   validateShareFile,
   detectImageMime,
-} from '../../src/share/image-share-store';
+} from '../../src/share/share-store';
 
 const PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -37,7 +37,7 @@ describe('image share store', () => {
   let baseDir: string; // agentsBaseDir
   let mediaDir: string; // agents/a1/media/session-1
   let dbPath: string;
-  let store: ImageShareStore;
+  let store: ShareStore;
 
   beforeEach(() => {
     // realpath: macOS tmpdir is a symlink (/var → /private/var); the store
@@ -46,8 +46,8 @@ describe('image share store', () => {
     mediaDir = path.join(baseDir, AGENT, 'media', SESSION);
     fs.mkdirSync(mediaDir, { recursive: true });
     fs.writeFileSync(path.join(mediaDir, 'ok.png'), PNG);
-    dbPath = path.join(baseDir, 'image-shares.db');
-    store = new ImageShareStore(dbPath);
+    dbPath = path.join(baseDir, 'shares.db');
+    store = new ShareStore(dbPath);
   });
 
   afterEach(() => {
@@ -55,7 +55,7 @@ describe('image share store', () => {
     fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
-  const mint = (overrides: Partial<Parameters<ImageShareStore['mintShare']>[0]> = {}) =>
+  const mint = (overrides: Partial<Parameters<ShareStore['mintShare']>[0]> = {}) =>
     store.mintShare({
       agentId: AGENT,
       sessionId: SESSION,
@@ -169,7 +169,7 @@ describe('image share store', () => {
       try {
         fn();
       } catch (err) {
-        if (err instanceof ImageShareError) return err.code;
+        if (err instanceof ShareError) return err.code;
         return `unexpected:${(err as Error).message}`;
       }
       return 'no-error';

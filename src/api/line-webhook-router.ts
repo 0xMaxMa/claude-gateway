@@ -53,8 +53,9 @@ function hostFromPublicUrl(publicUrl: string | undefined): string {
 /**
  * Persist the gateway's own public base URL (derived from the inbound LINE
  * webhook request) to `<workspace>/../.public-base`, which the `line_image` MCP
- * tool reads at call-time to mint signed `/public/<token>` URLs. This removes the
- * need for any public-base-URL env var.
+ * tool reads at call-time to build `/shared/<token>` URLs (the token is minted
+ * via the gateway share bridge). This removes the need for any public-base-URL
+ * env var.
  *
  * Scheme is hardcoded `https`: the pod's Traefik `web-vm` entrypoint does NOT
  * trust forwarded headers, so X-Forwarded-Proto arrives as `http` (wrong). The
