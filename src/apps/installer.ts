@@ -948,6 +948,11 @@ export class AppInstaller {
       this.callbacks.deregisterRoutes(appName);
       this.callbacks.stopSockets(appName);
 
+      // Capture the current (old) image IDs while the old stack is still up, so
+      // we can reclaim exactly those images after the update — without a
+      // `compose down` that would collide with the new stack (issue #283).
+      const oldImageIds = this.captureComposeImageIds(appName, entry.installPath);
+
       // ── Bring old containers down (keeps images for rollback) ─────────────
       this.log(job, 'Stopping old containers');
       this.run(['docker', 'compose', '-p', appName, 'down'], entry.installPath, 120_000);
@@ -981,6 +986,11 @@ export class AppInstaller {
         }
         throw upErr;
       }
+
+      // Capture the new stack's image IDs (still at tmpDir) so image reclamation
+      // below never removes an image the new containers depend on (e.g. when the
+      // old and new versions happen to share a base/image).
+      const newImageIds = this.captureComposeImageIds(appName, tmpDir);
 
       // ── Swap dirs ─────────────────────────────────────────────────────────
       // Swap in place at the recorded install path — NOT path.join(appsDir, appName).
@@ -1023,10 +1033,20 @@ export class AppInstaller {
         await this.callbacks.startSocket(sockPath, sock, sock.scripts, finalDir);
       }
 
-      // ── Clean up old backup (best-effort) ─────────────────────────────────
-      try {
-        this.run(['docker', 'compose', '-p', appName, 'down', '--rmi', 'all'], oldBackupDir, 120_000);
-      } catch { /* non-fatal */ }
+      // ── Reclaim old images (best-effort) ──────────────────────────────────
+      // Do NOT `compose -p <app> down` the backup dir here: `down` selects
+      // resources by the project label, and the freshly-started new stack now
+      // shares `project=<app>`, so it would stop & remove the *new* container
+      // (issue #283). The old containers were already removed by the "Stopping
+      // old containers" step, so only the old images remain to reclaim. Remove
+      // each old image that the new stack does not still depend on.
+      const newImageSet = new Set(newImageIds);
+      for (const imageId of oldImageIds) {
+        if (newImageSet.has(imageId)) continue; // shared with new stack — keep
+        try {
+          this.run(['docker', 'image', 'rm', imageId], os.tmpdir(), 60_000);
+        } catch { /* still in use or already gone — non-fatal */ }
+      }
       this.safeRmrf(oldBackupDir, job, 'old backup dir');
 
       // ── Build result ──────────────────────────────────────────────────────
@@ -1627,6 +1647,30 @@ export class AppInstaller {
       if (!id || !project || project === appName) continue;
       try { this.run(['docker', 'stop', id], os.tmpdir(), 15_000); } catch { /* ignore */ }
       try { this.run(['docker', 'rm', id], os.tmpdir(), 15_000); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Best-effort: capture the image IDs a compose project's services currently
+   * resolve to. Used by {@link update} to reclaim the *previous* version's
+   * images after a successful update WITHOUT running `compose down` — `down`
+   * selects by the `-p <project>` label, and the freshly-started new stack now
+   * shares that label, so a `down` on the old backup dir would tear the new
+   * container back down (issue #283). Returns a de-duplicated list of image
+   * IDs, or `[]` on any error (nothing to reclaim / docker unavailable).
+   */
+  private captureComposeImageIds(appName: string, dir: string): string[] {
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'images', '--quiet'],
+        dir,
+        15_000,
+      );
+      return [...new Set(
+        stdout.trim().split('\n').map((s) => s.trim()).filter(Boolean),
+      )];
+    } catch {
+      return [];
     }
   }
 
