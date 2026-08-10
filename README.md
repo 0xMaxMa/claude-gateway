@@ -214,6 +214,28 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 }
 ```
 
+### `gateway.publicUrl` (optional)
+
+The externally reachable gateway base URL. Set it manually to enable short-lived
+public image shares used by `generate_image` reference edits and `share_image`.
+The URL must end in `/gateway`; changing it requires a gateway restart.
+
+```json
+{
+  "gateway": {
+    "publicUrl": "https://vm.example.com/gateway"
+  }
+}
+```
+
+Minted share URLs have the stable form
+`https://vm.example.com/gateway/shared/TOKEN`. When `publicUrl` is set the mint
+response includes this ready-built `url`; when it is unset the response still
+returns the `token` (the share endpoint stays enabled) and callers with their own
+public base — e.g. LINE, which derives its host from the inbound webhook — build
+`<base>/shared/<token>` themselves. HTTP is accepted only for local development
+hosts such as `http://host.docker.internal:10850/gateway`.
+
 ### `session`
 
 | Field | Default | Description |

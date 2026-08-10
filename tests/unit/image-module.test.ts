@@ -109,20 +109,6 @@ describe('ImageModule.isEnabled() — endpoint resolution + https guard', () => 
       expect(enabled()).toBe(false);
     });
 
-    test('token stored under ANTHROPIC_AUTH_TOKEN in settings.json is accepted → enabled', () => {
-      // A proxy deployment may carry the M2M secret under ANTHROPIC_AUTH_TOKEN (the same key
-      // the env path uses) rather than CLAUDE_CODE_OAUTH_TOKEN — both must resolve the token.
-      setSettings({ ANTHROPIC_BASE_URL: 'https://provider.example.com', ANTHROPIC_AUTH_TOKEN: 'proxy-secret' });
-      expect(enabled()).toBe(true);
-    });
-
-    test('endpoint in settings.json but no token anywhere → disabled (no silent 401)', () => {
-      // A resolvable https URL with no token must disable the tool cleanly rather than
-      // advertise it and 401 on an empty Bearer at call time.
-      setSettings({ ANTHROPIC_BASE_URL: 'https://provider.example.com' });
-      expect(enabled()).toBe(false);
-    });
-
     test('malformed settings.json → disabled (degrades, does not throw)', () => {
       fs.writeFileSync(path.join(cfgDir, 'settings.json'), '{ not valid json');
       expect(enabled()).toBe(false);

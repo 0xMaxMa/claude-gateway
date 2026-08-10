@@ -37,7 +37,15 @@ export class SessionStore {
    * Resolve the file path for a legacy API session (JSONL format).
    */
   private resolvePath(agentId: string, chatId: string): string {
-    return path.join(this.agentsBaseDir, agentId, 'sessions', `${chatId}.jsonl`);
+    const agentDir = path.join(this.agentsBaseDir, agentId, 'sessions');
+    const resolved = path.join(agentDir, `${chatId}.jsonl`);
+    // Defense-in-depth: a chatId/sessionId containing '../' would escape the agent's
+    // sessions directory. Reject anything that resolves outside it.
+    const rel = path.relative(agentDir, resolved);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error('invalid session id');
+    }
+    return resolved;
   }
 
   /**

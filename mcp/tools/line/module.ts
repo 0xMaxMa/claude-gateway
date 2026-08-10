@@ -10,9 +10,34 @@
  * is passed, and fall back to push if it's absent or expired/used (the single-use
  * token has no guaranteed lifetime — ~1 min — so push remains the safety net).
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { messagingApi } from '@line/bot-sdk';
 import { chunkText, planLineSend, LINE_TEXT_LIMIT } from './pure';
+import { createShares, ShareClientError, shareBridgeEnabled } from '../shared/share-client';
+
+/** Default lifetime of a share URL handed to LINE (1 hour). */
+const DEFAULT_MEDIA_URL_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Convert a media path (absolute under the agent media root, or already relative
+ * like "media/<chat>/<file>.png") to the "media/…"-relative form the gateway's
+ * signed-URL route expects. Returns null if it cannot be resolved to the media root.
+ */
+function toRelativeMediaPath(p: string): string | null {
+  if (!p) return null;
+  const normalized = p.replace(/\\/g, '/');
+  if (!path.isAbsolute(normalized)) {
+    return normalized.startsWith('media/') ? normalized : `media/${normalized.replace(/^\/+/, '')}`;
+  }
+  const workspace = process.env.GATEWAY_WORKSPACE_DIR;
+  if (!workspace) return null;
+  const mediaRoot = path.resolve(workspace, '..', 'media');
+  const rel = path.relative(mediaRoot, path.resolve(normalized));
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return `media/${rel.split(path.sep).join('/')}`;
+}
 
 export class LineModule implements ToolModule {
   id = 'line';
@@ -54,11 +79,43 @@ export class LineModule implements ToolModule {
           required: ['chat_id', 'text'],
         },
       },
+      {
+        name: 'line_image',
+        description:
+          'Send an image to the current LINE user. Pass chat_id (the LINE userId from the ' +
+          '<channel> tag) and image (a media path saved by the gateway, e.g. a generate_image ' +
+          'result path or a "media/…" path). LINE can only fetch public HTTPS URLs, so the tool ' +
+          'mints a signed, short-lived public URL for the file and sends it as an image message. ' +
+          'Pass reply_token from the <channel> tag when present to send for FREE (falls back to push).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            chat_id: {
+              type: 'string',
+              description: 'LINE userId to send to (the chat_id from the channel turn).',
+            },
+            image: {
+              type: 'string',
+              description: 'Media path of the image (absolute path under the agent media dir, or a "media/…" relative path).',
+            },
+            preview: {
+              type: 'string',
+              description: 'Optional separate preview-image media path. Defaults to the same image.',
+            },
+            reply_token: {
+              type: 'string',
+              description: 'Optional single-use reply token from the <channel> tag (sends free; falls back to push).',
+            },
+          },
+          required: ['chat_id', 'image'],
+        },
+      },
     ];
   }
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
     if (name === 'line_reply') return this.handleReply(args);
+    if (name === 'line_image') return this.handleImage(args);
     return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
   }
 
@@ -120,6 +177,135 @@ export class LineModule implements ToolModule {
     } catch (err) {
       return {
         content: [{ type: 'text', text: `line_reply failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Send an image to LINE. LINE's servers fetch the image over public HTTPS (the
+   * normal media route is API-key-gated), so we mint a short-lived share token via
+   * the gateway share bridge — the SAME `/shared/:token` primitive the image tools
+   * use — and hand LINE the resulting public URL. The host comes from `.public-base`
+   * (derived by the gateway from the inbound webhook); the token is host-agnostic,
+   * so we simply prepend that base to `/shared/<token>`.
+   */
+  private async handleImage(args: Record<string, unknown>): Promise<McpToolResult> {
+    const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
+    const image = typeof args.image === 'string' ? args.image : '';
+    const preview = typeof args.preview === 'string' && args.preview ? args.preview : image;
+    const replyToken = typeof args.reply_token === 'string' ? args.reply_token : '';
+    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN ?? '';
+
+    if (!chatId) {
+      return { content: [{ type: 'text', text: 'line_image: missing chat_id' }], isError: true };
+    }
+    if (!image) {
+      return { content: [{ type: 'text', text: 'line_image: image path is required' }], isError: true };
+    }
+    // Fail fast on a missing LINE token BEFORE any file IO or share mint, so a
+    // misconfigured pod never mints a throwaway share it can't deliver.
+    if (!token) {
+      return { content: [{ type: 'text', text: 'line_image: missing LINE_CHANNEL_ACCESS_TOKEN' }], isError: true };
+    }
+
+    // Public base URL is derived by the gateway from the inbound LINE webhook and
+    // written to `<workspace>/../.public-base` (no public-base-URL env var). Read it
+    // here at call-time; if it isn't there yet the pod hasn't seen a webhook, so
+    // ask the user to send another message rather than pushing a broken URL.
+    const workspace = process.env.GATEWAY_WORKSPACE_DIR;
+    if (!workspace) {
+      return {
+        content: [{ type: 'text', text: 'line_image: GATEWAY_WORKSPACE_DIR not set' }],
+        isError: true,
+      };
+    }
+    let publicBase = '';
+    try {
+      publicBase = fs
+        .readFileSync(path.resolve(workspace, '..', '.public-base'), 'utf8')
+        .trim()
+        .replace(/\/+$/, '');
+    } catch {
+      publicBase = '';
+    }
+    if (!publicBase) {
+      return {
+        content: [{ type: 'text', text: 'line_image: public base not resolved yet (send a message again)' }],
+        isError: true,
+      };
+    }
+    // The share bridge (the same authenticated local gateway API the image tools
+    // use) needs the session identity injected into this subprocess. Missing it =
+    // image delivery isn't wired up on this pod.
+    if (!shareBridgeEnabled()) {
+      return {
+        content: [{ type: 'text', text: 'line_image: image delivery not configured (share bridge unavailable)' }],
+        isError: true,
+      };
+    }
+
+    const relImage = toRelativeMediaPath(image);
+    const relPreview = toRelativeMediaPath(preview);
+    if (!relImage || !relPreview) {
+      return {
+        content: [{ type: 'text', text: `line_image: could not resolve media path to the agent media root: ${image}` }],
+        isError: true,
+      };
+    }
+
+    const ttlMs = Number(process.env.GATEWAY_MEDIA_URL_TTL_MS) > 0
+      ? Number(process.env.GATEWAY_MEDIA_URL_TTL_MS)
+      : DEFAULT_MEDIA_URL_TTL_MS;
+    const ttlSeconds = Math.max(10, Math.ceil(ttlMs / 1000));
+
+    // Mint one share per ref (order preserved). Identical refs dedupe to the same
+    // token within the store's idempotency window — fine, LINE gets a valid URL.
+    let originalContentUrl: string;
+    let previewImageUrl: string;
+    try {
+      const items = await createShares(
+        [{ path: relImage }, { path: relPreview }],
+        { purpose: 'line', ttlSeconds },
+      );
+      if (!items[0]?.token || !items[1]?.token) {
+        throw new ShareClientError('share_failed', 'share response missing token', 500);
+      }
+      originalContentUrl = `${publicBase}/shared/${items[0].token}`;
+      previewImageUrl = `${publicBase}/shared/${items[1].token}`;
+    } catch (err) {
+      const msg = err instanceof ShareClientError ? `${err.code}: ${err.message}` : String(err);
+      return {
+        content: [{ type: 'text', text: `line_image: failed to mint share URL — ${msg}` }],
+        isError: true,
+      };
+    }
+
+    const message = {
+      type: 'image' as const,
+      originalContentUrl,
+      previewImageUrl,
+    };
+
+    const client = new messagingApi.MessagingApiClient({ channelAccessToken: token });
+
+    let via = 'push';
+    try {
+      if (replyToken) {
+        try {
+          await client.replyMessage({ replyToken, messages: [message] });
+          via = 'reply';
+        } catch {
+          await client.pushMessage({ to: chatId, messages: [message] });
+          via = 'push (reply fallback)';
+        }
+      } else {
+        await client.pushMessage({ to: chatId, messages: [message] });
+      }
+      return { content: [{ type: 'text', text: `Sent image to LINE (${via}).` }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `line_image failed: ${(err as Error).message}` }],
         isError: true,
       };
     }

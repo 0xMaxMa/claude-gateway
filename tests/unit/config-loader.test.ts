@@ -198,4 +198,36 @@ describe('config-loader', () => {
     fs.writeFileSync(configPath, 'not { valid json');
     expect(() => loadConfig(configPath)).toThrow(ConfigValidationError);
   });
+
+  it('normalizes a valid gateway.publicUrl and rejects unsafe values', () => {
+    const write = (name: string, publicUrl: unknown) => {
+      const configPath = path.join(tmpDir, name);
+      fs.writeFileSync(configPath, JSON.stringify({
+        gateway: { logDir: '/tmp', timezone: 'UTC', publicUrl },
+        agents: [{
+          id: 'test',
+          description: '',
+          workspace: '/tmp',
+          env: '/tmp/.env',
+          telegram: { botToken: 'tok' },
+          claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+        }],
+      }));
+      return configPath;
+    };
+
+    const valid = write('public-url-valid.json', 'https://pod-maxma.example.com/gateway/');
+    expect(loadConfig(valid).gateway.publicUrl).toBe('https://pod-maxma.example.com/gateway');
+
+    for (const [index, value] of [
+      'https://pod-maxma.example.com',
+      'http://pod-maxma.example.com/gateway',
+      'https://pod-maxma.example.com/gateway?token=x',
+      'not-a-url',
+    ].entries()) {
+      expect(() => loadConfig(write(`public-url-invalid-${index}.json`, value))).toThrow(
+        /gateway\.publicUrl/,
+      );
+    }
+  });
 });

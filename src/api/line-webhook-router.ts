@@ -35,6 +35,64 @@ import type { WebhookAppHandler } from './webhooks-router';
 const LOADING_SECONDS = 20; // 5..60, multiple of 5; 1:1 chats only
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // matches MediaStore.maxUploadBytes
 
+/** A sane public hostname: letters, digits, dot, hyphen, optional :port. */
+const HOST_RE = /^[A-Za-z0-9.\-:]+$/;
+
+/** Extract host[:port] from a configured publicUrl (e.g. "https://vm.example.com/gateway"
+ *  → "vm.example.com"). Returns '' when unset or unparseable so the caller falls
+ *  back to the request host. */
+function hostFromPublicUrl(publicUrl: string | undefined): string {
+  if (!publicUrl) return '';
+  try {
+    return new URL(publicUrl).host;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Persist the gateway's own public base URL (derived from the inbound LINE
+ * webhook request) to `<workspace>/../.public-base`, which the `line_image` MCP
+ * tool reads at call-time to build `/shared/<token>` URLs (the token is minted
+ * via the gateway share bridge). This removes the need for any public-base-URL
+ * env var.
+ *
+ * Scheme is hardcoded `https`: the pod's Traefik `web-vm` entrypoint does NOT
+ * trust forwarded headers, so X-Forwarded-Proto arrives as `http` (wrong). The
+ * Host header IS reliable (pod FQDN).
+ *
+ * Defensive by contract: validates the host, only rewrites when the content
+ * changed (avoids I/O per message), writes atomically (temp + rename), and never
+ * throws — a failure here must not break webhook handling.
+ */
+function persistPublicBase(
+  workspace: string,
+  host: string,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  try {
+    const h = (host.split(',')[0] ?? '').trim();
+    if (!h || !HOST_RE.test(h)) {
+      logger.debug('LINE webhook: skip .public-base (invalid/empty host)', { host });
+      return;
+    }
+    const base = `https://${h}/gateway`;
+    const target = path.resolve(workspace, '..', '.public-base');
+    let current = '';
+    try {
+      current = fs.readFileSync(target, 'utf8');
+    } catch {
+      current = '';
+    }
+    if (current === base) return;
+    const tmp = path.join(path.dirname(target), `.public-base.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, base, { mode: 0o600 });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    logger.debug('LINE webhook: .public-base write failed', { error: (err as Error).message });
+  }
+}
+
 /** Pick a file extension from an image's magic bytes; default jpg (LINE photos). */
 function sniffImageExt(buf: Buffer): string {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
@@ -247,6 +305,20 @@ export function createLineWebhookHandler(
       res.status(401).json({ error: 'invalid signature' });
       return;
     }
+
+    // Signature verified: derive our own public base URL and persist it for the
+    // line_image MCP tool. Prefer the configured gateway.publicUrl host — it is
+    // the trusted origin. Only when publicUrl is unset do we fall back to the
+    // request host (X-Forwarded-Host / Host), which a client could spoof; that
+    // fallback is still gated behind the channel-secret signature above.
+    const configuredHost = hostFromPublicUrl(runner.getGatewayPublicUrl());
+    const fwdHost = req.headers['x-forwarded-host'];
+    const host =
+      configuredHost ||
+      (typeof fwdHost === 'string' ? fwdHost : Array.isArray(fwdHost) ? fwdHost[0] : '') ||
+      req.headers.host ||
+      '';
+    persistPublicBase(runner.getAgentConfig().workspace, host, logger);
 
     // Acknowledge immediately; process events after responding.
     res.status(200).json({ ok: true });

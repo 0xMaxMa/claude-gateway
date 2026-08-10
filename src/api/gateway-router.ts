@@ -34,6 +34,11 @@ import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
 import { createAppsRouter } from './apps-router';
 import { ComposePort } from '../apps/compose-generator';
+import {
+  createSharesPublicRouter,
+  createSharesPrivateRouter,
+} from './share-router';
+import { ShareStore } from '../share/share-store';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
@@ -416,6 +421,7 @@ export class GatewayRouter {
     return `${DASH_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
   }
 
+
   // ─── /cli webview terminal viewer ──────────────────────────────────────────
 
   /** Path portion of the configured public URL (e.g. "/gateway" behind an
@@ -606,6 +612,40 @@ export class GatewayRouter {
     // Registered here (after the body parser, before the /api auth router) so it
     // owns its own cookie/approval auth without the API-key gate intercepting.
     this.setupCliRoutes();
+
+    // Share bridge (#70): a single reusable /shared/:token primitive. The store +
+    // public fetch route mount UNCONDITIONALLY — the public route only serves tokens
+    // that were actually minted (else a uniform 404), so it is safe to always mount.
+    // The private mint/revoke endpoint mounts when API keys exist (it is API-key
+    // gated). `gateway.publicUrl` is NO LONGER an enable switch: it is only the
+    // default base for the `url` convenience field in mint responses. Callers
+    // without it — e.g. LINE, which derives its host from the inbound webhook —
+    // build the URL from the returned `token` (host-agnostic). Normalize so a
+    // trailing slash can't produce "//shared/<token>" in mint URLs.
+    try {
+      const dbPath =
+        process.env.IMAGE_SHARE_DB_PATH ||
+        path.join(os.homedir(), '.claude-gateway', 'shares.db');
+      const store = new ShareStore(dbPath);
+      const agentsBaseDir = this.configPath
+        ? path.join(path.dirname(this.configPath), 'agents')
+        : path.join(os.homedir(), '.claude-gateway', 'agents');
+      this.app.use(createSharesPublicRouter(store, agentsBaseDir));
+      if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+        const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
+        this.app.use(
+          '/api',
+          createSharesPrivateRouter(
+            store,
+            this.gatewayConfig.gateway.api.keys,
+            agentsBaseDir,
+            publicUrl,
+          ),
+        );
+      }
+    } catch (err) {
+      console.error(`[share] failed to initialise share store: ${(err as Error).message}`);
+    }
 
     // Ephemeral WS ticket — exchange a short-lived token for PTY stream access.
     // MUST be registered before the apiRouter middleware so it handles its own auth
@@ -1246,4 +1286,3 @@ export class GatewayRouter {
   }
 
 }
-

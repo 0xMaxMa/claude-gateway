@@ -325,7 +325,14 @@ export class SessionProcess extends EventEmitter {
     if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
-    const sessionDir = path.join(this.agentConfig.workspace, '.sessions', this.sessionId);
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    const sessionDir = path.join(sessionsRoot, this.sessionId);
+    // Defense-in-depth: a sessionId containing '../' would escape the .sessions
+    // directory. Reject anything that resolves outside it.
+    const sessionDirRel = path.relative(sessionsRoot, sessionDir);
+    if (sessionDirRel.startsWith('..') || path.isAbsolute(sessionDirRel)) {
+      throw new Error('invalid session id');
+    }
     fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
 
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
@@ -390,6 +397,15 @@ export class SessionProcess extends EventEmitter {
             IMAGE_API_KEY: process.env.IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
             IMAGE_DISABLED: process.env.IMAGE_DISABLED ?? '',
             IMAGE_POLL_TIMEOUT_MS: process.env.IMAGE_POLL_TIMEOUT_MS ?? '',
+            IMAGE_SHARE_MAX_REFS: process.env.IMAGE_SHARE_MAX_REFS ?? '',
+            // Short-lived public media URLs (LINE image delivery). line_image
+            // mints a share token via the gateway share bridge (using
+            // GATEWAY_API_KEY, injected above) and builds a `/shared/<token>` URL —
+            // no HMAC / separate public-token secret. The public base URL is derived
+            // by the gateway from the inbound LINE webhook and written to
+            // `<workspace>/../.public-base`, which line_image reads at call-time
+            // (no public-base-URL env var).
+            GATEWAY_MEDIA_URL_TTL_MS: process.env.GATEWAY_MEDIA_URL_TTL_MS ?? '',
           },
         },
       },

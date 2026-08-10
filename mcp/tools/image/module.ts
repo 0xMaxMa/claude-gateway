@@ -4,6 +4,16 @@ import * as path from 'node:path';
 import * as dns from 'node:dns';
 import * as net from 'node:net';
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
+import {
+  ShareClientError,
+  createShares,
+  listSessionImages,
+  registerArtifacts,
+  revokeSharesBestEffort,
+  shareBridgeEnabled,
+  type ShareRef,
+  type ShareItem,
+} from '../shared/share-client';
 
 /**
  * Image-generation tool module (#184, Track B).
@@ -61,12 +71,9 @@ export class ImageModule implements ToolModule {
   toolVisibility: ToolVisibility = 'all-configured';
 
   isEnabled(): boolean {
-    // Enabled when BOTH the endpoint and an auth token resolve (from env or the CLI config
-    // at ~/.claude/settings.json; see baseUrl()/authToken()) and the tool isn't explicitly
-    // turned off. Requiring the token here means a config that resolves a URL but no token
-    // disables the tool cleanly, instead of advertising it and then failing every call with a
-    // 401 on an empty Bearer.
-    if (!this.baseUrl() || !this.authToken() || process.env.IMAGE_DISABLED === 'true') return false;
+    // Enabled when the image endpoint is configured in ~/.claude/settings.json (see
+    // baseUrl()) and not explicitly turned off.
+    if (!this.baseUrl() || process.env.IMAGE_DISABLED === 'true') return false;
     // The Bearer proxy_secret rides every call — refuse a cleartext http URL to a
     // PUBLIC host (that would leak the secret). http to a local/internal host is a
     // trusted hop (e.g. host.docker.internal in dev) and stays allowed.
@@ -100,9 +107,11 @@ export class ImageModule implements ToolModule {
         return this.handleStatus(args);
       case 'list':
         return this.handleList();
+      case 'list_refs':
+        return this.handleListRefs();
       default:
         return {
-          content: [{ type: 'text', text: `generate_image: unknown action "${action}" (expected generate | status | list)` }],
+          content: [{ type: 'text', text: `generate_image: unknown action "${action}" (expected generate | status | list | list_refs)` }],
           isError: true,
         };
     }
@@ -187,6 +196,53 @@ export class ImageModule implements ToolModule {
     return { content: [{ type: 'text', text: body || '[]' }] };
   }
 
+  /**
+   * action="list_refs" (#72) — return the deterministic, gateway-computed catalog
+   * of every image in this session so the agent never has to count images from its
+   * own transcript (which breaks after compaction/resume). Read-only.
+   *
+   * Gated on the share bridge exactly like reference minting: with the bridge off
+   * there is no catalog endpoint to read, so the action stays inert (legacy mode
+   * gains no new behavior).
+   */
+  private async handleListRefs(): Promise<McpToolResult> {
+    if (!shareBridgeEnabled()) {
+      return {
+        content: [{ type: 'text', text: 'generate_image: list_refs is unavailable (image share bridge is not configured).' }],
+        isError: true,
+      };
+    }
+    let items;
+    try {
+      items = await listSessionImages();
+    } catch (err) {
+      if (err instanceof ShareClientError) {
+        return { content: [{ type: 'text', text: `generate_image: ${err.code}: ${err.message}` }], isError: true };
+      }
+      return {
+        content: [{ type: 'text', text: `generate_image: image share service unavailable: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          images: items,
+          note: 'Ground-truth catalog of every image in this session, numbered in order of first appearance ("image 1" = index 1). '
+            + 'To use one as a reference, pass its "ref" value in the "image"/"images" argument of action="generate". '
+            + 'Do NOT count images from conversation memory. '
+            + 'Resolution precedence: (1) when the user names an index ("Image 3", "the third image") or attached an image this turn, '
+            + 'trust that EXACTLY — never let "desc" override an explicit reference; '
+            + '(2) when the user refers by content ("the dog picture"), match against each item\'s "desc" '
+            + '(the generation prompt, or the user text that came with an upload); '
+            + '(3) if the reference is ambiguous or the index does not exist, ask the user instead of guessing. '
+            + 'Items with available:false can no longer be used.',
+        }),
+      }],
+    };
+  }
+
   private async handleGenerate(args: Record<string, unknown>): Promise<McpToolResult> {
     const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
     const model = typeof args.model === 'string' ? args.model.trim() : '';
@@ -202,13 +258,39 @@ export class ImageModule implements ToolModule {
     for (const k of ['quality', 'size', 'aspect_ratio', 'style'] as const) {
       if (typeof args[k] === 'string' && (args[k] as string).length) reqBody[k] = args[k];
     }
-    if (typeof args.n === 'number' && args.n > 0) reqBody.n = args.n;
-    if (typeof args.image === 'string' && args.image.length) reqBody.image = args.image;
-    if (Array.isArray(args.images) && args.images.every((x) => typeof x === 'string') && args.images.length) {
-      reqBody.images = args.images;
+    if (typeof args.n === 'number' && args.n > 0) {
+      // Clamp the requested image count — an unbounded n is forwarded straight to
+      // the provider (cost / abuse). MAX_DELIVER_IMAGES is the most we can deliver
+      // back anyway, so generating more is wasted spend.
+      reqBody.n = Math.min(Math.floor(args.n), MAX_DELIVER_IMAGES);
     }
 
-    // Submit (E1)
+    // Reference images (#70): when the share bridge is enabled, local paths and
+    // artifact:<id> refs are auto-converted to short-lived public share URLs via
+    // the authenticated gateway API (plan §7). With the bridge off, behavior is
+    // EXACTLY the legacy pass-through (regression guarantee).
+    const rawImage = typeof args.image === 'string' && args.image.length ? args.image : undefined;
+    const rawImages =
+      Array.isArray(args.images) && args.images.every((x) => typeof x === 'string') && args.images.length
+        ? (args.images as string[])
+        : undefined;
+    let mintedShareIds: string[] = [];
+    if (shareBridgeEnabled() && (rawImage || rawImages)) {
+      if (rawImage && rawImages) {
+        return { content: [{ type: 'text', text: 'generate_image: pass either "image" or "images", not both.' }], isError: true };
+      }
+      const normalized = await this.normalizeRefs(rawImage ? [rawImage] : rawImages!);
+      if ('error' in normalized) return normalized.error;
+      mintedShareIds = normalized.mintedShareIds;
+      if (rawImage) reqBody.image = normalized.urls[0];
+      else reqBody.images = normalized.urls;
+    } else {
+      if (rawImage) reqBody.image = rawImage;
+      if (rawImages) reqBody.images = rawImages;
+    }
+
+    // Submit (E1). On an immediate submit failure, best-effort revoke any share
+    // URLs minted for this call (§18) — the TTL still bounds exposure otherwise.
     let res: Response;
     try {
       res = await fetch(`${this.baseUrl()}/v1/images/generations`, {
@@ -218,19 +300,25 @@ export class ImageModule implements ToolModule {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
+      await revokeSharesBestEffort(mintedShareIds);
       return this.unavailable(err);
     }
     const submitText = await res.text().catch(() => '');
-    if (!res.ok) return this.mapHttpError(res.status, submitText);
+    if (!res.ok) {
+      await revokeSharesBestEffort(mintedShareIds);
+      return this.mapHttpError(res.status, submitText);
+    }
 
     let submit: JobResponse;
     try {
       submit = JSON.parse(submitText) as JobResponse;
     } catch {
+      await revokeSharesBestEffort(mintedShareIds);
       return { content: [{ type: 'text', text: 'generate_image: invalid JSON from image service on submit' }], isError: true };
     }
     const taskId = submit.task_id;
     if (!taskId) {
+      await revokeSharesBestEffort(mintedShareIds);
       return { content: [{ type: 'text', text: 'generate_image: image service did not return a task_id' }], isError: true };
     }
 
@@ -246,7 +334,7 @@ export class ImageModule implements ToolModule {
       }
       if (polled.httpError) return this.mapHttpError(polled.httpError.status, polled.httpError.body);
       last = polled.job!;
-      if (last.status === 'done') return await this.deliver(last, taskId);
+      if (last.status === 'done') return await this.deliver(last, taskId, model, prompt);
       if (last.status === 'failed') return this.mapJobError(last);
     }
 
@@ -287,6 +375,82 @@ export class ImageModule implements ToolModule {
 
   // ── helpers ─────────────────────────────────────────────────────────────
 
+  /**
+   * Normalize reference inputs (#70, plan §7), preserving order:
+   *   https URL          → validate syntax, pass through
+   *   http URL           → reject (phase 1 requires HTTPS)
+   *   artifact:<id>      → resolve+mint via gateway share API
+   *   local media path   → validate+mint via gateway share API
+   * Rejects duplicates and over-count BEFORE any minting/billing.
+   */
+  private async normalizeRefs(
+    refs: string[],
+  ): Promise<{ urls: string[]; mintedShareIds: string[] } | { error: McpToolResult }> {
+    const fail = (text: string): { error: McpToolResult } => ({
+      error: { content: [{ type: 'text', text }], isError: true },
+    });
+    const maxRefs = (() => {
+      const n = Number(process.env.IMAGE_SHARE_MAX_REFS);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+    })();
+    if (refs.length > maxRefs) {
+      return fail(`generate_image: too many reference images (max ${maxRefs}).`);
+    }
+    if (new Set(refs).size !== refs.length) {
+      return fail('generate_image: duplicate reference images are not allowed.');
+    }
+    type Entry = { kind: 'url'; url: string } | { kind: 'local'; ref: ShareRef };
+    const entries: Entry[] = [];
+    for (const raw of refs) {
+      const ref = raw.trim();
+      if (/^https:\/\//i.test(ref)) {
+        try {
+          new URL(ref);
+        } catch {
+          return fail(`generate_image: reference URL is malformed.`);
+        }
+        entries.push({ kind: 'url', url: ref });
+      } else if (/^http:\/\//i.test(ref)) {
+        return fail('generate_image: http:// reference URLs are not allowed — use https.');
+      } else if (ref.startsWith('artifact:')) {
+        const id = ref.slice('artifact:'.length).trim();
+        if (!id) return fail('generate_image: empty artifact reference.');
+        entries.push({ kind: 'local', ref: { artifact_id: id } });
+      } else {
+        entries.push({ kind: 'local', ref: { path: ref } });
+      }
+    }
+    const localRefs = entries.filter((e): e is Extract<Entry, { kind: 'local' }> => e.kind === 'local');
+    let minted: ShareItem[] = [];
+    if (localRefs.length) {
+      try {
+        minted = await createShares(localRefs.map((e) => e.ref), { purpose: 'codex_ref' });
+      } catch (err) {
+        if (err instanceof ShareClientError) {
+          if (err.code === 'image_ref_not_found') {
+            return fail('generate_image: image_ref_not_found: the referenced image/artifact does not exist in this session.');
+          }
+          return fail(`generate_image: ${err.code}: ${err.message}`);
+        }
+        return fail(`generate_image: image share service unavailable: ${(err as Error).message}`);
+      }
+      if (minted.length !== localRefs.length) {
+        await revokeSharesBestEffort(minted.map((m) => m.share_id));
+        return fail('generate_image: image share service returned a mismatched share count.');
+      }
+      // Provider fetches these refs over HTTPS, so each needs an absolute URL —
+      // which the share API only fills when gateway.publicUrl is configured.
+      if (minted.some((m) => !m.url)) {
+        await revokeSharesBestEffort(minted.map((m) => m.share_id));
+        return fail('generate_image: image reference sharing requires gateway.publicUrl to be configured.');
+      }
+    }
+    // Merge back preserving the caller's order.
+    let next = 0;
+    const urls = entries.map((e) => (e.kind === 'url' ? e.url : minted[next++]!.url!));
+    return { urls, mintedShareIds: minted.map((m) => m.share_id) };
+  }
+
   private pollTimeoutMs(): number {
     const raw = Number(process.env.IMAGE_POLL_TIMEOUT_MS);
     return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_POLL_TIMEOUT_MS;
@@ -317,7 +481,10 @@ export class ImageModule implements ToolModule {
    *  item is either base64 bytes (sync providers like openai/gemini) OR an https URL
    *  (async providers like nanobanana/bfl/fal, which return a hosted file) — download
    *  URLs, decode base64. */
-  private async deliver(job: JobResponse, taskId: string): Promise<McpToolResult> {
+  // `prompt` is only known on the generate path (same-turn poll); the
+  // action="status" path re-enters in a later turn without it, so those
+  // artifacts register promptless.
+  private async deliver(job: JobResponse, taskId: string, model?: string, prompt?: string): Promise<McpToolResult> {
     const allImages = Array.isArray(job.images) ? job.images.filter((s) => typeof s === 'string' && s.length) : [];
     // Cap how many we process — downloads are sequential (~30s each), so an
     // over-long list would hang the tool call far past the poll budget.
@@ -338,9 +505,18 @@ export class ImageModule implements ToolModule {
         let buf: Buffer;
         if (/^https?:\/\//i.test(item)) {
           // Async providers (nanobanana / bfl / fal / runway) return a hosted image
-          // URL — download the bytes. SSRF guard first: https-only + block any host
-          // that resolves to a private/loopback/link-local/metadata address, and
-          // redirect:'error' so a later hop can't bounce to an internal target.
+          // URL — download the bytes. SSRF guard: https-only + reject any host that
+          // resolves to a private/loopback/link-local/metadata address, and
+          // redirect:'error' so a 3xx hop can't bounce to an internal target.
+          //
+          // Residual risk (accepted): this is a best-effort screen, NOT a full
+          // rebinding defence. assertSafeImageUrl resolves DNS once; fetch()
+          // resolves again (Node/undici does not pin the vetted IP), so a
+          // low-TTL record could answer public here and 127.0.0.1 at fetch time.
+          // redirect:'error' does NOT close this — it only blocks HTTP redirects,
+          // not DNS rebinding. The backstop is downstream: the response body must
+          // pass detectImageExt() below, so an internal non-image endpoint yields
+          // unrecognized bytes and is rejected before anything is written to disk.
           await assertSafeImageUrl(item);
           const res = await fetch(item, { signal: AbortSignal.timeout(30_000), redirect: 'error' });
           if (!res.ok) throw new Error(`download image failed: HTTP ${res.status}`);
@@ -369,6 +545,28 @@ export class ImageModule implements ToolModule {
     } catch (err) {
       return { content: [{ type: 'text', text: `generate_image: failed to save image: ${(err as Error).message}` }], isError: true };
     }
+
+    // Register the written files as private artifacts (#70, plan §8) so a later
+    // turn can reference them as artifact:<id> for editing. Best-effort: when
+    // the bridge is off or registration fails, the response simply carries no
+    // artifacts — file delivery is unaffected.
+    let artifacts: Array<Record<string, unknown>> | undefined;
+    if (shareBridgeEnabled() && files.length) {
+      const slash = (model ?? '').indexOf('/');
+      const provider = slash > 0 ? (model as string).slice(0, slash) : 'unknown';
+      const modelName = slash > 0 ? (model as string).slice(slash + 1) : (model || 'unknown');
+      const registered = await registerArtifacts(files, { provider, model: modelName, taskId, prompt });
+      if (registered) {
+        artifacts = registered.map((item, index) => ({
+          artifact_id: item.artifact_id,
+          artifact_ref: item.artifact_ref,
+          index,
+          path: files[index],
+          provider,
+          model: modelName,
+        }));
+      }
+    }
     return {
       content: [{
         type: 'text',
@@ -378,8 +576,10 @@ export class ImageModule implements ToolModule {
           byok: job.byok ?? false,
           cost: job.cost ?? 0,
           files,
+          ...(artifacts ? { artifacts } : {}),
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
-          note: 'Image saved. Deliver it to the user with your channel reply tool (files: [...]) — e.g. api_reply, reply.'
+          note: 'Image saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]), or line_image on LINE. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
+            + (artifacts ? ' To edit this image later, reference it via its artifact_ref (e.g. image: "artifact:...").' : '')
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
       }],
@@ -450,8 +650,10 @@ function sanitize(s: string): string {
 // SSRF guard for provider image URLs. Require https, then resolve the host and
 // reject if ANY resolved address is private / loopback / link-local / metadata —
 // so a compromised provider response can't make the gateway fetch internal or
-// cloud-metadata endpoints. Best-effort screen (a DNS rebind between this lookup
-// and the fetch is still bounded by redirect:'error' at the call site).
+// cloud-metadata endpoints. Best-effort screen only: a DNS rebind between this
+// lookup and the fetch is NOT prevented here (Node does not let us pin the vetted
+// IP without a custom undici dispatcher). The real backstop is the caller's
+// post-download detectImageExt() check — non-image bytes are rejected before use.
 async function assertSafeImageUrl(raw: string): Promise<void> {
   let u: URL;
   try {
@@ -592,7 +794,10 @@ const imageToolDefs: McpToolDefinition[] = [
       'Use this WHENEVER the user asks to create, draw, make, or edit an image — it is built in, no app install needed. ' +
       'Generate images from a text prompt (optionally guided by a reference image) via the configured image generation service. ' +
       'action="generate" submits the request and returns the saved image file path(s) once ready — ' +
-      'then deliver them with your channel reply tool (files: [...]). ' +
+      'then deliver them with your channel reply tool (files: [...]). AFTER A SUCCESSFUL GENERATE: do NOT ' +
+      'open/Read the produced file to inspect it and do NOT re-analyze it — the generation already succeeded; ' +
+      'attach it with your reply tool and answer in one or two short sentences. Every extra step risks pushing ' +
+      'the request past its timeout. ' +
       'action="status" polls a previously returned task_id. ' +
       'action="list" returns every available image model with its supported_qualities, supported_sizes, cost, and ' +
       'the capability flags supports_image_ref (image-to-image / edit) and supports_style_ref. Call it FIRST when ' +
@@ -603,14 +808,23 @@ const imageToolDefs: McpToolDefinition[] = [
       'img2img-capable model is available — or the model you picked has supports_image_ref=false — do NOT pass ' +
       '"image": instead look at the reference image yourself, describe what matters in the "prompt", and generate ' +
       'text-to-image. Never send "image" to a model that does not support it. ' +
+      'EARLIER IMAGES IN THE CHAT: when the user points at an image from earlier in this conversation ' +
+      '("image number 2", "the first image", "the picture you just made", "that logo from before"), call ' +
+      'action="list_refs" FIRST. It returns the ground-truth catalog of this session\'s images numbered by ' +
+      'first appearance; pass the chosen item\'s "ref" into "image"/"images". NEVER work out which earlier ' +
+      'image the user means by counting from your own memory of the conversation — the numbering there is ' +
+      'not reliable, and not remembering any images is NOT evidence there are none (your context may have ' +
+      'been reset while the chat history still has them): never answer "no images attached" to such a ' +
+      'request before list_refs has returned an empty catalog. If the catalog makes the request ambiguous ' +
+      '(or the requested index does not exist), ask the user which image they mean instead of guessing. ' +
       'When the user selected options in the composer (an <image-params .../> tag in the turn), honor those values.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['generate', 'status', 'list'],
-          description: 'generate (default) | status | list',
+          enum: ['generate', 'status', 'list', 'list_refs'],
+          description: 'generate (default) | status | list | list_refs (numbered catalog of this session\'s images, for resolving "the second image" style references)',
         },
         model: {
           type: 'string',
@@ -621,8 +835,8 @@ const imageToolDefs: McpToolDefinition[] = [
         size: { type: 'string', description: 'Optional size, e.g. "1024x1024".' },
         aspect_ratio: { type: 'string', description: 'Optional aspect ratio, e.g. "1:1" (converted to size if the provider needs it).' },
         n: { type: 'integer', description: 'Optional number of images (default 1).' },
-        image: { type: 'string', description: 'Optional reference-image media path for image-to-image/edit (e.g. "media/xxx.png"). ONLY pass this to a model whose supports_image_ref is true (check action="list"); for any other model, describe the reference image in the prompt instead of sending it here.' },
-        images: { type: 'array', items: { type: 'string' }, description: 'Optional multiple reference-image media paths (same supports_image_ref rule as "image").' },
+        image: { type: 'string', description: 'Optional reference image for image-to-image/edit: a media path (e.g. "media/xxx.png"), an "artifact:<id>" ref from a previous generate_image result, or an https URL. Local/artifact refs are converted to short-lived URLs automatically. ONLY pass this to a model whose supports_image_ref is true (check action="list"); for any other model, describe the reference image in the prompt instead of sending it here. Do not pass both "image" and "images".' },
+        images: { type: 'array', items: { type: 'string' }, description: 'Optional multiple reference images (max 5; media paths, artifact:<id> refs, or https URLs — same supports_image_ref rule as "image"). Order is preserved.' },
         style: { type: 'string', description: 'Optional native style parameter (e.g. "vivid") — only for models whose supports_style_ref is true.' },
         task_id: { type: 'string', description: 'Job id to poll (required for action="status").' },
       },

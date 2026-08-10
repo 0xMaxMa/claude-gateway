@@ -23,6 +23,23 @@ type AuthedRequest = Request & { apiKey: ApiKey };
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
 const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-() ]+$/;
 
+// session_id becomes a filesystem key (sessions/<id>.jsonl, .sessions/<id>/) so it
+// must be constrained to the same safe charset as chat_id — no '/' or '.' that could
+// escape the agent's directory. Clients may pass custom (non-UUID) session ids, so
+// this preserves that while blocking path traversal.
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+export function isValidSessionId(v: unknown): v is string {
+  return typeof v === 'string' && SESSION_ID_RE.test(v);
+}
+
+// agent_id likewise becomes a filesystem key (agents/<id>/media/…), so any
+// endpoint that joins it into a path MUST format-validate it first — a bare
+// non-empty check lets "../x" relocate the containment root itself. Exported so
+// sibling routers (image share) apply the identical guard as the /api routes.
+export function isValidAgentId(v: unknown): v is string {
+  return typeof v === 'string' && AGENT_ID_RE.test(v);
+}
+
 function maskToken(token: string): string {
   if (token.length <= 12) return '•'.repeat(token.length);
   return token.slice(0, 8) + '•••••' + token.slice(-4);
@@ -261,8 +278,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    if (session_id !== undefined && typeof session_id !== 'string') {
-      res.status(400).json({ error: 'session_id must be a string if provided' });
+    if (session_id !== undefined && !isValidSessionId(session_id)) {
+      res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
 
@@ -310,6 +327,25 @@ export function createApiRouter(
           }
           if (v.trim()) out[f] = v.trim();
         }
+      }
+      // image_refs (#73) — reference images explicitly selected in the composer,
+      // order-significant. Each entry is a ref from GET /api/v1/image-catalog.
+      if (ip.image_refs !== undefined) {
+        const refs = ip.image_refs;
+        if (!Array.isArray(refs) || refs.some((r) => typeof r !== 'string' || !r.trim())) {
+          res.status(400).json({ error: 'image_params.image_refs must be an array of non-empty strings' });
+          return;
+        }
+        const trimmedRefs = (refs as string[]).map((r) => r.trim());
+        if (trimmedRefs.length > 5) {
+          res.status(400).json({ error: 'image_params.image_refs allows at most 5 references' });
+          return;
+        }
+        if (new Set(trimmedRefs).size !== trimmedRefs.length) {
+          res.status(400).json({ error: 'image_params.image_refs must not contain duplicates' });
+          return;
+        }
+        if (trimmedRefs.length) out.image_refs = trimmedRefs;
       }
       if (ip.n !== undefined) {
         if (typeof ip.n !== 'number' || !Number.isFinite(ip.n) || ip.n < 1) {
@@ -2439,7 +2475,22 @@ export function createApiRouter(
       const baseName = path.basename(rawFilename).replace(/\s+/g, '_');
       const safeBaseName = SAFE_FILENAME_RE.test(baseName) ? baseName : 'upload';
       const rawExt = path.extname(safeBaseName).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 10);
-      const ext = rawExt || (mimeType.includes('pdf') ? '.pdf' : '.bin');
+      // No usable extension (clipboard paste, non-ASCII filename sanitized to
+      // 'upload') → derive it from the MIME type. Falling straight to .bin made
+      // pasted images invisible to the session image catalog, which keys off the
+      // file extension — so they could never be referenced (#74).
+      const mimeExt = mimeType.includes('png')
+        ? '.png'
+        : mimeType.includes('jpeg') || mimeType.includes('jpg')
+          ? '.jpeg'
+          : mimeType.includes('webp')
+            ? '.webp'
+            : mimeType.includes('gif')
+              ? '.gif'
+              : mimeType.includes('pdf')
+                ? '.pdf'
+                : '.bin';
+      const ext = rawExt || mimeExt;
 
       const tmpFile = path.join(os.tmpdir(), `gw-${Date.now()}${ext}`);
       try {
@@ -2915,6 +2966,10 @@ export function createApiRouter(
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
     if (!sessionId) {
       res.status(400).json({ error: 'session_id is required' });
+      return;
+    }
+    if (!isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
     // chat_id is optional — provide the same value used when creating the session via POST /sessions

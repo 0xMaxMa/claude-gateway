@@ -43,8 +43,8 @@ export class HistoryDB {
     this.db.exec('PRAGMA foreign_keys=ON');
     this._initSchema();
     this.insertStmt = this.db.prepare(
-      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -89,6 +89,7 @@ export class HistoryDB {
         sender_id           TEXT,
         platform_message_id TEXT,
         media_files         TEXT,
+        image_refs          TEXT,
         ts                  INTEGER NOT NULL,
         created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
       );
@@ -115,6 +116,15 @@ export class HistoryDB {
       END;
 
     `);
+
+    // image_refs (#74) postdates existing DBs: CREATE TABLE IF NOT EXISTS won't
+    // touch them, so migrate with an explicit existence check. Only ALTER when the
+    // column is genuinely absent — a blanket try/catch would also swallow real
+    // failures (disk full, corruption) as if the column already existed.
+    const messageCols = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+    if (!messageCols.some((c) => c.name === 'image_refs')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN image_refs TEXT');
+    }
   }
 
   insertMessage(msg: HistoryMessage): void {
@@ -129,6 +139,7 @@ export class HistoryDB {
         msg.senderId ?? null,
         msg.platformMessageId ?? null,
         msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
+        msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null,
         msg.ts,
       );
     } catch (err) {
@@ -230,7 +241,7 @@ export class HistoryDB {
     // skipped or repeated when the caller passes the cursor's id component back.
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
-             platform_message_id, media_files, ts
+             platform_message_id, media_files, image_refs, ts
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY ts ${order}, id ${order}
@@ -380,6 +391,35 @@ export class HistoryDB {
     }));
   }
 
+  /**
+   * Media-bearing messages of one session, oldest first — the deterministic
+   * input for the session image catalog (#72). Rides idx_messages_session and
+   * keeps the (ts, id) tiebreak used everywhere else so the ordering (and the
+   * ordinals derived from it) never depends on SQLite's default row order.
+   * Rows whose media_files JSON is malformed are skipped, like pruneOlderThan.
+   */
+  listSessionMedia(
+    sessionId: string,
+  ): Array<{ id: number; role: string; content: string; mediaFiles: string[]; ts: number }> {
+    const rows = this.db.prepare(
+      `SELECT id, role, content, media_files, ts FROM messages
+       WHERE session_id = ? AND media_files IS NOT NULL
+       ORDER BY ts ASC, id ASC`,
+    ).all(sessionId) as Array<{ id: number; role: string; content: string | null; media_files: string; ts: number }>;
+
+    const out: Array<{ id: number; role: string; content: string; mediaFiles: string[]; ts: number }> = [];
+    for (const row of rows) {
+      try {
+        const mediaFiles = JSON.parse(row.media_files) as string[];
+        if (!Array.isArray(mediaFiles)) continue; // not a JSON array — skip
+        out.push({ id: row.id, role: row.role, content: row.content ?? '', mediaFiles, ts: row.ts });
+      } catch {
+        // malformed JSON — skip
+      }
+    }
+    return out;
+  }
+
   clearChat(chatId: string): void {
     this.db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
   }
@@ -430,6 +470,14 @@ export class HistoryDB {
         mediaFiles = undefined;
       }
     }
+    let imageRefs: string[] | undefined;
+    if (r['image_refs'] && typeof r['image_refs'] === 'string') {
+      try {
+        imageRefs = JSON.parse(r['image_refs'] as string) as string[];
+      } catch {
+        imageRefs = undefined;
+      }
+    }
     return {
       id: r['id'] as number,
       chatId: r['chat_id'] as string,
@@ -441,6 +489,7 @@ export class HistoryDB {
       senderId: (r['sender_id'] as string | null) ?? undefined,
       platformMessageId: (r['platform_message_id'] as string | null) ?? undefined,
       mediaFiles,
+      ...(imageRefs?.length ? { imageRefs } : {}),
       ts: r['ts'] as number,
     };
   }
