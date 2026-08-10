@@ -32,10 +32,15 @@ const KEYS: ApiKey[] = [
   { key: 'admin-key', agents: '*', admin: true },
   { key: 'a1-key', agents: [AGENT] },
   { key: 'b1-key', agents: ['b1'] },
+  // Non-admin wildcard key: passes canAccessAgent for ANY agent id, so it is the
+  // key that would weaponize a "../"-laden agent_id if format validation were
+  // missing (HIGH #1 regression below).
+  { key: 'star-key', agents: '*' },
 ];
 
 const AUTH_A1 = { Authorization: 'Bearer a1-key' };
 const AUTH_B1 = { Authorization: 'Bearer b1-key' };
+const AUTH_STAR = { Authorization: 'Bearer star-key' };
 
 describe('image share router', () => {
   let baseDir: string;
@@ -81,6 +86,53 @@ describe('image share router', () => {
     store.close();
     HistoryDB.evict(baseDir, AGENT);
     fs.rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  describe('id format validation (HIGH #1 — sandbox-escape guard)', () => {
+    // A non-admin agents:'*' key passes canAccessAgent for any id, so without a
+    // format check a "../"-laden agent_id would relocate the media containment
+    // root itself (path.join(base, agentId, 'media')) outside the agents tree.
+    const BAD_AGENTS = ['../../../../etc', '..', 'a/../../b', 'A1', 'has space', ''];
+    const BAD_SESSIONS = ['../../secrets', 'a/b', 'has space', ''];
+
+    test('mint rejects malformed agent_id with 400 before any path resolution', async () => {
+      for (const bad of BAD_AGENTS) {
+        const res = await request()
+          .post('/api/v1/image-shares')
+          .set(AUTH_STAR)
+          .send({ agent_id: bad, session_id: SESSION, refs: [{ path: `${SESSION}/ok.png` }] });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('agent_id and session_id must be valid identifiers');
+      }
+    });
+
+    test('mint rejects malformed session_id with 400', async () => {
+      for (const bad of BAD_SESSIONS) {
+        const res = await request()
+          .post('/api/v1/image-shares')
+          .set(AUTH_STAR)
+          .send({ agent_id: AGENT, session_id: bad, refs: [{ path: `${SESSION}/ok.png` }] });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('agent_id and session_id must be valid identifiers');
+      }
+    });
+
+    test('artifacts rejects malformed agent_id with 400', async () => {
+      const res = await request()
+        .post('/api/v1/image-artifacts')
+        .set(AUTH_STAR)
+        .send({ agent_id: '../../../../etc', session_id: SESSION, files: [`${SESSION}/ok.png`] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('agent_id and session_id must be valid identifiers');
+    });
+
+    test('catalog rejects malformed agent_id with 400', async () => {
+      const res = await request()
+        .get(`/api/v1/image-catalog?agent_id=${encodeURIComponent('../../../../etc')}&session_id=${SESSION}`)
+        .set(AUTH_STAR);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('agent_id and session_id must be valid identifiers');
+    });
   });
 
   describe('mint (§10)', () => {
@@ -333,7 +385,7 @@ describe('image share router', () => {
       for (const q of ['', `?agent_id=${AGENT}`, `?session_id=${SESSION}`, `?agent_id=%20&session_id=${SESSION}`]) {
         const res = await get(q, AUTH_A1);
         expect(res.status).toBe(400);
-        expect(res.body.error).toBe('agent_id and session_id are required');
+        expect(res.body.error).toBe('agent_id and session_id must be valid identifiers');
       }
     });
 

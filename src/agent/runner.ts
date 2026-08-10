@@ -1306,6 +1306,11 @@ export class AgentRunner extends EventEmitter {
       // Auto-forward result text to channel if agent didn't call reply tool.
       let replyCalled = false;
       let replyToolUseId: string | null = null; // track id to detect failed tool calls
+      // line_image tool_use blocks re-appear across cumulative `assistant` stream
+      // snapshots (--include-partial-messages), so dedupe history inserts by the
+      // block id — otherwise one sent image lands in the transcript N times and
+      // skews the session image catalog's "image N" ordinal.
+      const seenLineImageIds = new Set<string>();
       // Set when an interactive-menu prompt was rendered to the channel this turn,
       // so the result's plain-text auto-forward is skipped (no duplicate message).
       let menuSentThisTurn = false;
@@ -1338,10 +1343,16 @@ export class AgentRunner extends EventEmitter {
                 // tool's `files`), so capture those sends into history too — the
                 // web transcript and the session image catalog key off mediaFiles.
                 if (block.type === 'tool_use' && block.name === 'mcp__gateway__line_image') {
+                  const lineBlockId = (block as Record<string, unknown>)['id'];
+                  const dedupeKey = typeof lineBlockId === 'string' ? lineBlockId : '';
+                  // Skip if this tool_use block was already persisted this turn
+                  // (cumulative assistant snapshots re-emit completed blocks).
+                  if (dedupeKey && seenLineImageIds.has(dedupeKey)) continue;
                   const imgPath = typeof block.input?.['image'] === 'string' ? block.input['image'] : '';
                   const mediaRootLine = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
                   const lineMedia = toRelMediaFiles(imgPath ? [imgPath] : [], mediaRootLine);
                   if (lineMedia.length) {
+                    if (dedupeKey) seenLineImageIds.add(dedupeKey);
                     const channelSrcLine = this.channelSourceMap.get(mapKey) ?? 'line';
                     this.historyDb.insertMessage({
                       chatId: `${channelSrcLine}-${mapKey}`,
@@ -1540,6 +1551,7 @@ export class AgentRunner extends EventEmitter {
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
+            seenLineImageIds.clear();
             menuSentThisTurn = false;
             menuPromptTextThisTurn = '';
             // In pty-shell mode, a `result` fires after every Claude API sub-turn
@@ -2202,6 +2214,13 @@ export class AgentRunner extends EventEmitter {
     return { ...this.agentConfig };
   }
 
+  /** Configured gateway.publicUrl, or undefined. The trusted source for the
+   *  gateway's own public origin — preferred over request-derived hosts, which
+   *  a client can spoof via X-Forwarded-Host. */
+  getGatewayPublicUrl(): string | undefined {
+    return this.gatewayConfig.gateway.publicUrl;
+  }
+
   startTelegramReceiver(): void {
     if (this.receiver?.isRunning()) return;
     if (!this.agentConfig.telegram?.botToken) return;
@@ -2651,6 +2670,15 @@ export class AgentRunner extends EventEmitter {
     const buffer: string[] = [];
     let settled = false;
     let clientGone = false;
+    // onError must fire at most once per turn. The soft timeout notifies the
+    // client directly (below) WITHOUT setting `settled`, so the later hard-cap
+    // fail() would otherwise call onError a second time.
+    let errorNotified = false;
+    const notifyError = (err: Error) => {
+      if (errorNotified) return;
+      errorNotified = true;
+      callbacks.onError(err);
+    };
     // Track partial message text for delta computation (--include-partial-messages)
     let lastPartialText = '';
     // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
@@ -2695,7 +2723,7 @@ export class AgentRunner extends EventEmitter {
       // state as "still thinking" and spins forever), and drain the attachment
       // buffer so nothing leaks into the next turn.
       this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
-      callbacks.onError(err);
+      notifyError(err);
     };
 
     const cleanup = () => {
@@ -2791,8 +2819,12 @@ export class AgentRunner extends EventEmitter {
     const globalTimer = setTimeout(() => {
       clientGone = true;
       try {
-        callbacks.onError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        notifyError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
       } catch { /* client already gone */ }
+      // The session stays in-flight (pendingApiSessions) until the hard cap so a
+      // retry on the SAME session_id gets a 409 CONFLICT rather than interleaving
+      // with the subprocess that is still processing this turn. This lock is
+      // intentionally held for the whole soft→hard window (see API.md §409).
       hardCapTimer = setTimeout(() => {
         session.setProcessing(false);
         fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));

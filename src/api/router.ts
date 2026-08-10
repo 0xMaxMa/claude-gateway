@@ -32,6 +32,14 @@ export function isValidSessionId(v: unknown): v is string {
   return typeof v === 'string' && SESSION_ID_RE.test(v);
 }
 
+// agent_id likewise becomes a filesystem key (agents/<id>/media/…), so any
+// endpoint that joins it into a path MUST format-validate it first — a bare
+// non-empty check lets "../x" relocate the containment root itself. Exported so
+// sibling routers (image share) apply the identical guard as the /api routes.
+export function isValidAgentId(v: unknown): v is string {
+  return typeof v === 'string' && AGENT_ID_RE.test(v);
+}
+
 function maskToken(token: string): string {
   if (token.length <= 12) return '•'.repeat(token.length);
   return token.slice(0, 8) + '•••••' + token.slice(-4);

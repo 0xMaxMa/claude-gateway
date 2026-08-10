@@ -712,7 +712,8 @@ export class GatewayRouter {
     // Image share bridge (#70): gateway.publicUrl is the sole enable switch and
     // source for public /gateway/shared/:token URLs. No provisioned feature env
     // is involved. Missing publicUrl keeps both public and private surfaces off.
-    const publicUrl = this.gatewayConfig?.gateway?.publicUrl;
+    // Normalize so a trailing slash can't produce "//shared/<token>" in mint URLs.
+    const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
     if (publicUrl) {
       try {
         const dbPath =

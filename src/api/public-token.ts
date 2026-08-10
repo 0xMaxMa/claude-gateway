@@ -37,14 +37,18 @@ function b64urlDecode(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
 }
 
-function signingMessage(p: PublicToken): string {
-  return `${p.k}\n${p.a}\n${p.p}\n${p.e}`;
+function signingMessage(body: string): string {
+  // Sign over the exact base64url payload string. base64url has no delimiter
+  // characters, so this is unambiguous — unlike a "\n"-joined field list, where a
+  // newline inside a field (e.g. a media path) could shift field boundaries and
+  // make two distinct payloads share one signature.
+  return body;
 }
 
 /** Produce a signed token: base64url(payload) + "." + base64url(hmac). */
 export function signPublicToken(payload: PublicToken, secret: string): string {
   const body = b64urlEncode(Buffer.from(JSON.stringify(payload), 'utf-8'));
-  const mac = createHmac('sha256', secret).update(signingMessage(payload)).digest();
+  const mac = createHmac('sha256', secret).update(signingMessage(body)).digest();
   return `${body}.${b64urlEncode(mac)}`;
 }
 
@@ -73,7 +77,10 @@ export function verifyPublicToken(token: string, secret: string): PublicToken | 
   ) {
     return null;
   }
-  const expected = createHmac('sha256', secret).update(signingMessage(payload)).digest();
+  // Sign over the RECEIVED body string (not a re-serialization of the parsed
+  // payload) so JSON key-order / whitespace differences can never cause a
+  // mismatch, and the delimiter ambiguity is gone entirely.
+  const expected = createHmac('sha256', secret).update(signingMessage(bodyPart)).digest();
   let provided: Buffer;
   try {
     provided = b64urlDecode(sigPart);

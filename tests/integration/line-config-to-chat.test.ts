@@ -57,6 +57,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
     let cfg = configs.get(AGENT_ID)!;
     return {
       getAgentConfig: () => cfg,
+      getGatewayPublicUrl: () => undefined,
       updateAgentConfig: (next: AgentConfig) => { cfg = next; },
       getCallbackPort: () => callbackPort,
     } as unknown as AgentRunner;

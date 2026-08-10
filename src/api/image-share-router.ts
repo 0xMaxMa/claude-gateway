@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
+import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
 import { ApiKey } from '../types';
 import {
@@ -78,6 +79,12 @@ export function createImageSharePublicRouter(
   // the event loop with the chat API, so a cheap 404-flood must be shed here
   // before it reaches the SQLite lookup (§11).
   const rateMap = new Map<string, { count: number; resetAt: number }>();
+  // Throttle the lazy expiry sweep: a token miss triggers a full-table DELETE,
+  // so an unauthenticated 404-flood must not turn every miss into a table write.
+  // Sweep at most once per minute (the rows are only garbage-collected, never
+  // served, so a minute of staleness is harmless).
+  let lastSweepMs = 0;
+  const SWEEP_THROTTLE_MS = 60_000;
   const allow = (ip: string): boolean => {
     const now = Date.now();
     const entry = rateMap.get(ip);
@@ -108,7 +115,11 @@ export function createImageSharePublicRouter(
     const token = req.params.token ?? '';
     const share = store.lookupByToken(token);
     if (!share) {
-      store.cleanupExpired(); // lazy expiry sweep
+      const nowMs = Date.now();
+      if (nowMs - lastSweepMs >= SWEEP_THROTTLE_MS) {
+        lastSweepMs = nowMs;
+        store.cleanupExpired(); // throttled lazy expiry sweep (≤1×/min)
+      }
       publicNotFound(res);
       return;
     }
@@ -189,8 +200,8 @@ export function createImageSharePrivateRouter(
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
-    if (!agentId || !sessionId) {
-      res.status(400).json({ error: 'agent_id and session_id are required' });
+    if (!isValidAgentId(agentId) || !isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'agent_id and session_id must be valid identifiers' });
       return;
     }
     if (!canAccessAgent(apiKey, agentId)) {
@@ -328,8 +339,8 @@ export function createImageSharePrivateRouter(
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
     const sessionId = typeof body.session_id === 'string' ? body.session_id.trim() : '';
-    if (!agentId || !sessionId) {
-      res.status(400).json({ error: 'agent_id and session_id are required' });
+    if (!isValidAgentId(agentId) || !isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'agent_id and session_id must be valid identifiers' });
       return;
     }
     if (!canAccessAgent(apiKey, agentId)) {
@@ -395,8 +406,8 @@ export function createImageSharePrivateRouter(
     const apiKey = (req as AuthedRequest).apiKey;
     const agentId = typeof req.query.agent_id === 'string' ? req.query.agent_id.trim() : '';
     const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
-    if (!agentId || !sessionId) {
-      res.status(400).json({ error: 'agent_id and session_id are required' });
+    if (!isValidAgentId(agentId) || !isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'agent_id and session_id must be valid identifiers' });
       return;
     }
     if (!canAccessAgent(apiKey, agentId)) {

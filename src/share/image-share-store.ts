@@ -28,6 +28,10 @@ export const DEFAULT_SHARE_TTL_SECONDS = 1800; // 30 min (§3.15)
 export const DEFAULT_MAX_REFS = 5;
 export const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MiB
 export const DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50 MiB
+/** Artifacts older than this are pruned opportunistically — far beyond any share
+ *  TTL (max 24h) and any live session, so removal never breaks an active ref. */
+export const ARTIFACT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const ARTIFACT_PRUNE_THROTTLE_MS = 60 * 60 * 1000; // sweep at most once/hour
 
 export type ShareLimits = {
   maxRefs: number;
@@ -165,6 +169,8 @@ export class ImageShareStore {
   /** In-memory idempotent-mint cache: dedupe key → last mint. Plaintext tokens
    *  live here only for MINT_DEDUPE_WINDOW_MS, never on disk (§9/§17.4). */
   private readonly mintCache = new Map<string, MintedShare & { mintedAtMs: number }>();
+  /** Last opportunistic artifact-prune timestamp (throttle, see registerArtifact). */
+  private lastArtifactPruneMs = 0;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -227,7 +233,21 @@ export class ImageShareStore {
       `INSERT INTO image_artifacts (id, agent_id, session_id, relative_path, provider, model, task_id, image_index, created_at, prompt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, a.agentId, a.sessionId, a.relativePath, a.provider, a.model, a.taskId ?? null, a.imageIndex ?? 0, Date.now(), a.prompt ?? null);
+    this.pruneOldArtifacts();
     return id;
+  }
+
+  /** Opportunistic, throttled retention sweep — delete artifacts older than
+   *  ARTIFACT_RETENTION_MS. Best-effort: a failure here must not fail the insert. */
+  private pruneOldArtifacts(): void {
+    const now = Date.now();
+    if (now - this.lastArtifactPruneMs < ARTIFACT_PRUNE_THROTTLE_MS) return;
+    this.lastArtifactPruneMs = now;
+    try {
+      this.db.prepare('DELETE FROM image_artifacts WHERE created_at <= ?').run(now - ARTIFACT_RETENTION_MS);
+    } catch {
+      /* best-effort */
+    }
   }
 
   /** Resolve an artifact bound to the SAME agent AND session — cross-agent or

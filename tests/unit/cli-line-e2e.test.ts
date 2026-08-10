@@ -42,6 +42,7 @@ function fakeRunner(): AgentRunner {
       id: AGENT,
       line: { channelSecret: SECRET, channelAccessToken: 'tok', dmPolicy: 'open' },
     }),
+    getGatewayPublicUrl: () => undefined,
     getCallbackPort: () => 0,
     createCliPairing: (channel: 'telegram' | 'discord' | 'line', userId: string) => {
       const { pairingId, code } = cliPairingStore.create(AGENT, channel, userId);
@@ -65,6 +66,7 @@ function post(handler: ReturnType<typeof createLineWebhookHandler>, events: unkn
   const req = {
     params: { agentId: AGENT },
     header: (h: string) => (h.toLowerCase() === 'x-line-signature' ? sig : undefined),
+    headers: {},
     body: buf,
   };
   return handler.handlePost(req as never, makeRes() as never);

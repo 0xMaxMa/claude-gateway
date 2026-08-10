@@ -38,6 +38,18 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // matches MediaStore.maxUploadBytes
 /** A sane public hostname: letters, digits, dot, hyphen, optional :port. */
 const HOST_RE = /^[A-Za-z0-9.\-:]+$/;
 
+/** Extract host[:port] from a configured publicUrl (e.g. "https://vm.example.com/gateway"
+ *  → "vm.example.com"). Returns '' when unset or unparseable so the caller falls
+ *  back to the request host. */
+function hostFromPublicUrl(publicUrl: string | undefined): string {
+  if (!publicUrl) return '';
+  try {
+    return new URL(publicUrl).host;
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Persist the gateway's own public base URL (derived from the inbound LINE
  * webhook request) to `<workspace>/../.public-base`, which the `line_image` MCP
@@ -293,11 +305,15 @@ export function createLineWebhookHandler(
       return;
     }
 
-    // Signature verified: derive our own public base URL from this trusted
-    // request and persist it for the line_image MCP tool. The Host is reliable;
-    // the scheme is hardcoded https (see persistPublicBase).
+    // Signature verified: derive our own public base URL and persist it for the
+    // line_image MCP tool. Prefer the configured gateway.publicUrl host — it is
+    // the trusted origin. Only when publicUrl is unset do we fall back to the
+    // request host (X-Forwarded-Host / Host), which a client could spoof; that
+    // fallback is still gated behind the channel-secret signature above.
+    const configuredHost = hostFromPublicUrl(runner.getGatewayPublicUrl());
     const fwdHost = req.headers['x-forwarded-host'];
     const host =
+      configuredHost ||
       (typeof fwdHost === 'string' ? fwdHost : Array.isArray(fwdHost) ? fwdHost[0] : '') ||
       req.headers.host ||
       '';

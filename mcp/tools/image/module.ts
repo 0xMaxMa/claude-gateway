@@ -257,7 +257,12 @@ export class ImageModule implements ToolModule {
     for (const k of ['quality', 'size', 'aspect_ratio', 'style'] as const) {
       if (typeof args[k] === 'string' && (args[k] as string).length) reqBody[k] = args[k];
     }
-    if (typeof args.n === 'number' && args.n > 0) reqBody.n = args.n;
+    if (typeof args.n === 'number' && args.n > 0) {
+      // Clamp the requested image count — an unbounded n is forwarded straight to
+      // the provider (cost / abuse). MAX_DELIVER_IMAGES is the most we can deliver
+      // back anyway, so generating more is wasted spend.
+      reqBody.n = Math.min(Math.floor(args.n), MAX_DELIVER_IMAGES);
+    }
 
     // Reference images (#70): when the share bridge is enabled, local paths and
     // artifact:<id> refs are auto-converted to short-lived public share URLs via
@@ -493,9 +498,18 @@ export class ImageModule implements ToolModule {
         let buf: Buffer;
         if (/^https?:\/\//i.test(item)) {
           // Async providers (nanobanana / bfl / fal / runway) return a hosted image
-          // URL — download the bytes. SSRF guard first: https-only + block any host
-          // that resolves to a private/loopback/link-local/metadata address, and
-          // redirect:'error' so a later hop can't bounce to an internal target.
+          // URL — download the bytes. SSRF guard: https-only + reject any host that
+          // resolves to a private/loopback/link-local/metadata address, and
+          // redirect:'error' so a 3xx hop can't bounce to an internal target.
+          //
+          // Residual risk (accepted): this is a best-effort screen, NOT a full
+          // rebinding defence. assertSafeImageUrl resolves DNS once; fetch()
+          // resolves again (Node/undici does not pin the vetted IP), so a
+          // low-TTL record could answer public here and 127.0.0.1 at fetch time.
+          // redirect:'error' does NOT close this — it only blocks HTTP redirects,
+          // not DNS rebinding. The backstop is downstream: the response body must
+          // pass detectImageExt() below, so an internal non-image endpoint yields
+          // unrecognized bytes and is rejected before anything is written to disk.
           await assertSafeImageUrl(item);
           const res = await fetch(item, { signal: AbortSignal.timeout(30_000), redirect: 'error' });
           if (!res.ok) throw new Error(`download image failed: HTTP ${res.status}`);
@@ -629,8 +643,10 @@ function sanitize(s: string): string {
 // SSRF guard for provider image URLs. Require https, then resolve the host and
 // reject if ANY resolved address is private / loopback / link-local / metadata —
 // so a compromised provider response can't make the gateway fetch internal or
-// cloud-metadata endpoints. Best-effort screen (a DNS rebind between this lookup
-// and the fetch is still bounded by redirect:'error' at the call site).
+// cloud-metadata endpoints. Best-effort screen only: a DNS rebind between this
+// lookup and the fetch is NOT prevented here (Node does not let us pin the vetted
+// IP without a custom undici dispatcher). The real backstop is the caller's
+// post-download detectImageExt() check — non-image bytes are rejected before use.
 async function assertSafeImageUrl(raw: string): Promise<void> {
   let u: URL;
   try {

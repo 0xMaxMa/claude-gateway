@@ -134,3 +134,44 @@ describe('MCP sign copy stays in sync with the src verify copy', () => {
     expect(signPublicTokenMcp(payload, KEY)).toBe(signPublicToken(payload, KEY));
   });
 });
+
+describe('canonicalization is delimiter-safe (signs over the base64url body)', () => {
+  // Old scheme signed "${k}\n${a}\n${p}\n${e}". Because a field may itself contain
+  // "\n", two DISTINCT payloads could produce the identical signing string, so one
+  // signature validated both — a real forgery across agent id + path.
+  const E = 1_900_000_000_000; // fixed future expiry so both payloads share it
+  //  a='x',  p='y\nz'  → "media\nx\ny\nz\nE"
+  //  a='x\ny', p='z'   → "media\nx\ny\nz\nE"   (IDENTICAL under the old join)
+  const pA: PublicToken = { k: 'media', a: 'x', p: 'y\nz', e: E };
+  const pB: PublicToken = { k: 'media', a: 'x\ny', p: 'z', e: E };
+
+  const b64url = (s: string) =>
+    Buffer.from(s, 'utf-8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  test('a relPath containing a newline still round-trips exactly', () => {
+    const payload = freshPayload({ p: 'media/chat/evil\n999/pic.png' });
+    const token = signPublicToken(payload, KEY);
+    expect(verifyPublicToken(token, KEY)).toEqual(payload);
+  });
+
+  test('a token minted for pA cannot be reused to forge pB (boundary-shift attack)', () => {
+    // Attacker legitimately holds a token for pA, then swaps in pB's body while
+    // keeping pA's MAC. Under the old "\n"-join both share a signing string, so
+    // the forged token would verify as pB. Signing over the body defeats it.
+    const macA = signPublicToken(pA, KEY).split('.')[1];
+    const forged = `${b64url(JSON.stringify(pB))}.${macA}`;
+    expect(verifyPublicToken(forged, KEY)).toBeNull();
+  });
+
+  test('pA and pB get DISTINCT signatures (no cross-payload collision)', () => {
+    expect(signPublicToken(pA, KEY).split('.')[1]).not.toBe(signPublicToken(pB, KEY).split('.')[1]);
+    expect(verifyPublicToken(signPublicToken(pA, KEY), KEY)).toEqual(pA);
+    expect(verifyPublicToken(signPublicToken(pB, KEY), KEY)).toEqual(pB);
+  });
+
+  test('MCP copy also signs the body (newline path stays in sync)', () => {
+    const payload = freshPayload({ a: 'agentSync', p: 'media/x/ev\nil.png' });
+    expect(signPublicTokenMcp(payload, KEY)).toBe(signPublicToken(payload, KEY));
+    expect(verifyPublicToken(signPublicTokenMcp(payload, KEY), KEY)).toEqual(payload);
+  });
+});

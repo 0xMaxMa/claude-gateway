@@ -194,6 +194,25 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/media` | Key | Upload a media file (image/* or PDF) — returns `mediaPath` |
 | `GET` | `/api/v1/agents/:agentId/media/*` | Key | Serve a media file by path |
 
+### Image Share Bridge API
+
+Short-lived public image shares + private image artifacts (enabled only when
+`gateway.publicUrl` is set). A token IS the capability — only its SHA-256 hash is
+stored, and shares are unenumerable (there is no list endpoint by design).
+**Phase-1 supports raster images only (PNG / JPEG / WebP);** any other type is
+rejected with `415 unsupported_image_type` at both mint and fetch time. `agent_id`
+and `session_id` must be valid identifiers (same charset as elsewhere) or the
+request is `400` before any path resolution.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/image-shares` | Key (agent-scoped) | Mint one or more shares for artifact refs / media paths → `{ items: [{ share_id, url, expires_at }] }` (order preserved; TTL 10s–24h, default 30 min; idempotent within a 60s window) |
+| `DELETE` | `/api/v1/image-shares/:shareId` | Key (owner/admin) | Revoke a share (uniform `404` when the key can't access the owner) |
+| `POST` | `/api/v1/image-artifacts` | Key (agent-scoped) | Register generated images as private artifacts (registration never makes a file public) |
+| `GET` | `/api/v1/image-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session image list (oldest first); mints nothing, returns no token |
+| `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream a shared image inline; uniform `404` for unknown/expired/revoked/traversal; per-IP rate limited |
+| `GET` | `/public/:token` | None (HMAC-signed token) | Serve a signed media file (LINE image delivery). Raster images stream inline; every other type is forced to an `application/octet-stream` download (stored-XSS defence) |
+
 ### PTY Shell API
 
 Available only for agents running in wrap-shell (PTY) mode (`gateway.headless: false`).
@@ -1262,6 +1281,7 @@ curl -X POST \
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
 > - Error 409 = session is currently processing a request — wait and retry
+> - After a soft timeout (504), the same `session_id` keeps returning `409` until the hard cap (a further 10 min) — the subprocess is still finishing that turn, so a retry would interleave. Use a new `session_id` to start immediately.
 
 ---
 

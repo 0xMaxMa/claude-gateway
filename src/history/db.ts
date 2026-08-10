@@ -118,12 +118,12 @@ export class HistoryDB {
     `);
 
     // image_refs (#74) postdates existing DBs: CREATE TABLE IF NOT EXISTS won't
-    // touch them, so migrate with a guarded ALTER. "duplicate column" is the
-    // only expected error (fresh DBs already have it from the CREATE above).
-    try {
+    // touch them, so migrate with an explicit existence check. Only ALTER when the
+    // column is genuinely absent — a blanket try/catch would also swallow real
+    // failures (disk full, corruption) as if the column already existed.
+    const messageCols = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
+    if (!messageCols.some((c) => c.name === 'image_refs')) {
       this.db.exec('ALTER TABLE messages ADD COLUMN image_refs TEXT');
-    } catch {
-      /* column already exists */
     }
   }
 
