@@ -203,6 +203,11 @@ export class LineModule implements ToolModule {
     if (!image) {
       return { content: [{ type: 'text', text: 'line_image: image path is required' }], isError: true };
     }
+    // Fail fast on a missing LINE token BEFORE any file IO or share mint, so a
+    // misconfigured pod never mints a throwaway share it can't deliver.
+    if (!token) {
+      return { content: [{ type: 'text', text: 'line_image: missing LINE_CHANNEL_ACCESS_TOKEN' }], isError: true };
+    }
 
     // Public base URL is derived by the gateway from the inbound LINE webhook and
     // written to `<workspace>/../.public-base` (no public-base-URL env var). Read it
@@ -282,9 +287,6 @@ export class LineModule implements ToolModule {
       previewImageUrl,
     };
 
-    if (!token) {
-      return { content: [{ type: 'text', text: 'line_image: missing LINE_CHANNEL_ACCESS_TOKEN' }], isError: true };
-    }
     const client = new messagingApi.MessagingApiClient({ channelAccessToken: token });
 
     let via = 'push';
