@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { GatewayConfig, AgentConfig } from '../types';
+import { GatewayConfig } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
 
 export class ConfigValidationError extends Error {

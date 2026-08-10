@@ -33,7 +33,6 @@ import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
 import { createAppsRouter } from './apps-router';
-import { ComposePort } from '../apps/compose-generator';
 import {
   createSharesPublicRouter,
   createSharesPrivateRouter,
