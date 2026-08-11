@@ -136,8 +136,43 @@ describe('AgentManager', () => {
       expect(volumes).toBeDefined();
       expect(volumes.some((v) => v.includes('claude') && v.endsWith(':ro'))).toBe(true);
       expect(volumes.some((v) => v.endsWith(':/workspace'))).toBe(true);
-      expect(volumes.some((v) => v.includes('.claude.json') && v.endsWith(':ro'))).toBe(true);
+      // ~/.claude.json is mounted read-only to a *seed* path (copied to a writable
+      // file at container start — see the regression test below), not at its real path.
+      expect(volumes.some((v) => v.includes('.claude.json.seed') && v.endsWith(':ro'))).toBe(true);
       expect(volumes.some((v) => v.includes('settings.json') && v.endsWith(':ro'))).toBe(true);
+    });
+
+    it('seeds a writable ~/.claude.json via copy instead of a read-only mount at its real path (regression: app-agent "Not logged in")', () => {
+      // Claude Code rewrites ~/.claude.json atomically at startup (write temp +
+      // rename over the target). Bind-mounting the host file at its real container
+      // path makes that rename fail with EBUSY, so auth state is never persisted
+      // and every app-agent turn returns "Not logged in · Please run /login".
+      // Fix: mount the host file read-only to a seed path (host file untouched) and
+      // copy it into a writable ~/.claude.json at container start.
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+
+      const composePath = path.join(entry.installPath, 'docker-compose.yml');
+      const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
+      const services = composed['services'] as Record<string, unknown>;
+      const agentSvc = services['agent'] as Record<string, unknown>;
+      const volumes = agentSvc['volumes'] as string[];
+      const home = os.homedir();
+
+      // The host ~/.claude.json must NOT be bind-mounted at its real container
+      // path (that is the mountpoint whose atomic-rename fails).
+      const realPathMount = volumes.find((v) => v.split(':')[1] === `${home}/.claude.json`);
+      expect(realPathMount).toBeUndefined();
+
+      // It is mounted read-only to a seed path, sourced from the host file.
+      const seedMount = volumes.find((v) => v.split(':')[1] === `${home}/.claude.json.seed`);
+      expect(seedMount).toBeDefined();
+      expect(seedMount!.endsWith(':ro')).toBe(true);
+      expect(seedMount!.split(':')[0]).toBe(`${home}/.claude.json`);
+
+      // The container copies the seed into a writable ~/.claude.json at start.
+      const command = agentSvc['command'] as string;
+      expect(command).toContain(`cp ${home}/.claude.json.seed ${home}/.claude.json`);
     });
 
     it('mounts the agent media dir at the identical host path (:rw) and pre-creates it', () => {

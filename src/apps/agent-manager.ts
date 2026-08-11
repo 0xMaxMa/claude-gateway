@@ -89,6 +89,18 @@ export class AgentManager {
     let uid = 1000;
     try { uid = os.userInfo().uid; } catch { /* use 1000 */ }
 
+    // Claude Code rewrites ~/.claude.json atomically at startup (write temp +
+    // rename over the target). Bind-mounting the host file at its real path makes
+    // that rename fail with `Device or resource busy` (a mountpoint cannot be
+    // replaced via rename, regardless of ro/rw), so the session cannot persist the
+    // auth state carried by settings.json's env block and falls back to
+    // "Not logged in". Instead we bind-mount the host file to a read-only *seed*
+    // path (host file never mutated) and copy it into a writable ~/.claude.json at
+    // container start (see `command` below) so the atomic rewrite succeeds. The
+    // copy targets the literal homeDir: container-start HOME is `/`, but the
+    // gateway runs turns with `docker exec -e HOME=<homeDir>` (see process.ts).
+    const claudeJsonSeed = `${homeDir}/.claude.json.seed`;
+
     // Mount the agent's media directory into the container at the SAME absolute
     // path as the host. The gateway hands the agent uploaded-image paths (and the
     // browser-screenshot dir) as raw host paths under <agentsDir>/<agentName>/media
@@ -118,7 +130,10 @@ export class AgentManager {
     const agentService = {
       build: { context: entry.installPath, dockerfile: 'Dockerfile.agent' },
       user: `${uid}:${uid}`,
-      command: `sleep infinity`,
+      // Seed a writable ~/.claude.json from the read-only seed mount, then idle.
+      // `cp` overwrites on every (re)start so the container always picks up the
+      // current host auth; `exec` keeps the container's PID 1 as sleep.
+      command: `sh -c 'cp ${claudeJsonSeed} ${homeDir}/.claude.json && exec sleep infinity'`,
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
@@ -128,7 +143,7 @@ export class AgentManager {
         `${claudeBin}:${claudeBin}:ro`,
         `${nodeBin}:/usr/bin/node:ro`,
         `${npmRoot}:${npmRoot}:ro`,
-        `${homeDir}/.claude.json:${homeDir}/.claude.json:ro`,
+        `${homeDir}/.claude.json:${claudeJsonSeed}:ro`,
         `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
         `${workspaceDir}:/workspace`,
         `${agentMediaSource}:${agentMediaDir}:rw`,
