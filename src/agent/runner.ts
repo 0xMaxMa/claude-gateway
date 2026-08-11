@@ -1013,8 +1013,15 @@ export class AgentRunner extends EventEmitter {
             try {
               const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['image_path']);
               mediaFiles.push(rel);
+              // Surface the MediaStore copy to the agent instead of the raw staging
+              // path. app-agents run in a container where only the MediaStore dir is
+              // bind-mounted at an identical absolute path; the raw source (/tmp for
+              // LINE, <workspace>/.*-state for TG/Discord) is invisible inside it.
+              // Mutating meta['image_path'] here (same object as entry.meta) makes the
+              // channel XML and image-size tracker below both use the readable path.
+              meta['image_path'] = MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, rel);
             } catch {
-              // Non-fatal — continue without media
+              // Non-fatal — leave the original path so host agents still read it
             }
           }
           this.historyDb.insertMessage({
