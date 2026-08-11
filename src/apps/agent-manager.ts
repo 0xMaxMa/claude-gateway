@@ -316,7 +316,13 @@ export class AgentManager {
       const config = this.readConfig();
       const idx = config.agents.findIndex((a) => a['id'] === agentId);
       if (idx >= 0) {
-        config.agents[idx] = entry;
+        // Merge — never replace. `entry` carries only the app-managed fields
+        // rebuilt from the app declaration (id/type/container/claudeBin/workspace/…);
+        // spreading it over the existing entry refreshes those while preserving
+        // any operator-added keys — crucially the `line`/`telegram`/`discord`
+        // channel blocks configured after install. A full replace here wiped
+        // those on every reconcile/restart, silently disconnecting the channel.
+        config.agents[idx] = { ...config.agents[idx], ...entry };
       } else {
         config.agents.push(entry);
       }
