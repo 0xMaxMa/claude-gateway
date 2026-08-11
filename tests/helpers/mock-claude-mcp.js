@@ -179,6 +179,13 @@ async function main() {
     const trimmed = line.trim()
     if (!trimmed) return
 
+    // Emit a stream-json `result` after each turn so agent-runner clears its
+    // in-flight state (setProcessing(false)) and the gateway turn queue flushes
+    // the next queued message (#290) — real Claude Code ends every turn this way.
+    const emitResult = () => {
+      process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '' }) + '\n')
+    }
+
     // First line is always the initial prompt from agent-runner.
     // When history is deferred and bundled with the first user message, the channel
     // XML may be embedded at the end of this first line — parse it here too.
@@ -193,6 +200,7 @@ async function main() {
           pendingChannels.push(ch)
         }
       }
+      emitResult()
       return
     }
 
@@ -204,6 +212,7 @@ async function main() {
       } else {
         pendingChannels.push(ch)
       }
+      emitResult()
     } else if (!mcpConfigPath) {
       // Fallback echo mode (no MCP config)
       process.stdout.write(`[mock-claude] received: ${trimmed}\n`)

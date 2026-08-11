@@ -32,6 +32,13 @@ function spawnWrapper(inputLog: string): ChildProcess {
   return spawnHarnessWrapper(MOCK_TUI_BIN, { FAKE_TUI_INPUT_LOG: inputLog });
 }
 
+function spawnWrapperNoMarker(inputLog: string): ChildProcess {
+  return spawnHarnessWrapper(MOCK_TUI_BIN, {
+    FAKE_TUI_INPUT_LOG: inputLog,
+    FAKE_TUI_NO_BUSY_MARKER: '1',
+  });
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
@@ -132,4 +139,33 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
     expect(lines.some((l) => l === 'POST_STOP_MESSAGE')).toBe(true);
     expect(lines.some((l) => l.includes('INTERRUPTED') && l.includes('POST_STOP'))).toBe(false);
   }, 25000);
+
+  /**
+   * I-PTY-STOP-04 (Issue #290): the turn still ends when the TUI never renders the
+   * "esc to interrupt" busy marker (v2.1.227+). With no marker, sawBusy used to
+   * stay false forever, so the fallback end-of-turn (sawBusy && sawAssistant) never
+   * fired and the SECOND message hung behind an unended turn. sawBusy is now set
+   * from the transcript assistant record, so the fallback fires and M2 submits.
+   *
+   * Proven-red: revert the onAssistant sawBusy assignment in claude-pty-shell.ts and
+   * only FIRST_NO_MARKER reaches the log (M1's turn never ends → M2 stays queued).
+   */
+  it('I-PTY-STOP-04: turn ends via fallback with no busy marker, so the next message submits', async () => {
+    wrapper = spawnWrapperNoMarker(inputLog);
+    await waitMs(2500); // TUI ready
+
+    wrapper.stdin!.write(makeTurnJson('FIRST_NO_MARKER'));
+    await waitForLogEntries(inputLog, 1, 5000);
+
+    // Fallback needs the assistant record (~300ms) + FALLBACK_IDLE_QUIET_MS (2000ms)
+    // + margin. If the fallback is broken (pre-fix), the turn never ends here.
+    await waitMs(3200);
+
+    wrapper.stdin!.write(makeTurnJson('SECOND_NO_MARKER'));
+    const lines = await waitForLogEntries(inputLog, 2, 6000);
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe('FIRST_NO_MARKER');
+    expect(lines[1]).toBe('SECOND_NO_MARKER');
+  }, 30000);
 });

@@ -36,6 +36,13 @@ handleAuthShim(args);
 const writeTranscript = makeTranscriptWriter(parseSessionId(args));
 const logInput = makeFileLogger('FAKE_TUI_INPUT_LOG');
 
+// When set, the fake TUI simulates recent Claude Code (v2.1.227+): its status bar
+// never renders the "esc to interrupt" busy marker, and it writes an assistant
+// record WITHOUT a turn_duration record. The turn can then only end via the
+// Driver's fallback end-of-turn heuristic — which requires sawBusy, now set from
+// the transcript (assistant record) rather than the dead screen marker (#290).
+const NO_BUSY_MARKER = process.env.FAKE_TUI_NO_BUSY_MARKER === '1';
+
 function idle() {
   // Clear screen so "esc to interrupt" is gone; then show only idle prompt.
   // This mirrors Ink's full re-render and ensures isBusy()=false.
@@ -52,6 +59,18 @@ function submit(text) {
   if (!trimmed) { idle(); return; }
   busy = true;
   logInput(trimmed);
+  if (NO_BUSY_MARKER) {
+    // No "esc to interrupt" marker anywhere — mirrors v2.1.227. The status line is
+    // a spinner + randomized gerund, which we simply omit.
+    process.stdout.write('\x1b[2J\x1b[H❯ ');
+    setTimeout(() => {
+      busy = false;
+      // assistant record only — no turn_duration, so the fallback must end the turn.
+      writeTranscript(trimmed, { assistantOnly: true });
+      idle();
+    }, 300);
+    return;
+  }
   // Show busy state
   process.stdout.write('\x1b[2J\x1b[Hesc to interrupt\r\n❯ ');
   setTimeout(() => {

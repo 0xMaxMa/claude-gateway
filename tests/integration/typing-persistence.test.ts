@@ -157,6 +157,10 @@ describe('Typing Indicator Persistence', () => {
   beforeEach(() => {
     jest.useFakeTimers();
 
+    // Plain text is now coalesced too (#290) — shrink the debounce so a lone
+    // 'hello' spawns almost immediately, as these tests assume.
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '20';
+
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-test-'));
     agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
     fs.mkdirSync(agentConfig.workspace, { recursive: true });
@@ -177,6 +181,7 @@ describe('Typing Indicator Persistence', () => {
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
     jest.clearAllMocks();
+    delete process.env.CHANNEL_COALESCE_WINDOW_MS;
   });
 
   function typingFileExists(): boolean {
