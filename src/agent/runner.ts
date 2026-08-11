@@ -1571,7 +1571,11 @@ export class AgentRunner extends EventEmitter {
             // tool-call gaps), so its flush is driven by `session_idle` instead
             // (below) — flushing on every sub-turn `result` would inject the next
             // message mid-work.
-            if (proc.backend !== 'pty-shell') {
+            // Skip when a deferred restart is armed: this session is about to be
+            // torn down (deferredRestartReady), so draining the queue into it now
+            // would kill the queued turn with the process. The restart handler
+            // re-drives the preserved queue into the fresh session instead.
+            if (proc.backend !== 'pty-shell' && !proc.hasPendingRestart()) {
               this.flushNextTurn(mapKey);
             }
             // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
@@ -1702,7 +1706,12 @@ export class AgentRunner extends EventEmitter {
             // Gateway turn queue: on pty-shell this is the true end of the user's
             // turn (the wrapper only emits it when its own `this.turn` is null, so
             // it never fires between sub-turns) — flush the next queued turn.
-            this.flushNextTurn(mapKey);
+            // Skip when a deferred restart is armed (see the headless `result`
+            // path above): the restart handler re-drives the queue into the fresh
+            // session so the queued turn is not killed with this one.
+            if (!proc.hasPendingRestart()) {
+              this.flushNextTurn(mapKey);
+            }
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
               typingDoneTimer = null;
@@ -1758,7 +1767,12 @@ export class AgentRunner extends EventEmitter {
         // now, so release the active slot. If turns were queued behind it, deliver
         // the next one (injectTurn respawns the session) so a crash mid-turn does
         // not strand the messages the user already sent.
-        this.flushNextTurn(mapKey);
+        // Skip on a deferred restart: this exit is the intentional teardown, and
+        // its handler re-drives the queue into the fresh session AFTER deleting
+        // the dead one from the pool — flushing here would reuse the dead proc.
+        if (!proc.hasPendingRestart()) {
+          this.flushNextTurn(mapKey);
+        }
         // LINE: a process exit with a button whose answer never arrived (crash /
         // teardown mid-turn) → surface the interrupted notice so a tap returns it
         // instead of a stale "still thinking". markInterrupted no-ops on a READY
@@ -1775,6 +1789,12 @@ export class AgentRunner extends EventEmitter {
         this.logger.info('Deferred restart: stopping session after turn completed', { mapKey });
         await proc.stop();
         this.sessions.delete(mapKey);
+        // Re-drive any turn queued behind the just-completed turn. The turn-end
+        // and exit flush paths deliberately skipped it (hasPendingRestart guards)
+        // so it was not drained into this now-dead session. Flushing here — after
+        // the dead proc is removed from the pool — re-injects it into a freshly
+        // spawned session instead of losing it with the restart.
+        this.flushNextTurn(mapKey);
       });
     }
 

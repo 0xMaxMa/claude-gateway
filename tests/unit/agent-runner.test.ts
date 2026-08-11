@@ -4624,4 +4624,51 @@ describe('AgentRunner — gateway turn queue, coalesce, and /stop', () => {
     await new Promise(r => setTimeout(r, 80));
     expect(channelWrites().length).toBe(1);
   }, 15000);
+
+  // U-AR-Q5 (Issue #297): a turn queued behind an in-flight turn must survive a
+  // DEFERRED restart that fires on the same turn-end. Regression: the turn-end
+  // flush drained the queue into the session that the deferred restart then
+  // killed, so the queued turn died with the process and was never re-injected.
+  it('U-AR-Q5: a turn queued behind a deferred-restart turn is preserved, not lost', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:q5', 'first');
+    await waitForSession(runner, 'chat:q5');
+    await new Promise(r => setTimeout(r, 80)); // coalesce flush + inject turn 1
+    const session = getSessions(runner).get('chat:q5')!;
+    expect(channelWrites().length).toBe(1);
+    expect(channelWrites()[0]).toContain('first');
+
+    // Second message arrives mid-turn → QUEUED behind the in-flight turn.
+    await sendChannelPost(port, 'chat:q5', 'second');
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(1); // still queued, not injected
+
+    // A CLAUDE.md / workspace change arms a DEFERRED restart on the busy session
+    // (the exact trigger from the incident: a memory write mid-turn).
+    await runner.restartOrDefer();
+    expect(getSessions(runner).has('chat:q5')).toBe(true); // deferred, not stopped yet
+
+    // Turn 1 ends. On the SAME end signal the gateway both (a) would flush the
+    // queued turn and (b) tears the session down for the deferred restart. The
+    // queued 'second' must survive — re-injected into the fresh session, not
+    // killed with the old one.
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'done' }));
+    await new Promise(r => setTimeout(r, 250)); // teardown + respawn + re-inject
+
+    // The chat's session is respawned…
+    expect(getSessions(runner).has('chat:q5')).toBe(true);
+    // …and 'second' reached a LIVE session (not the torn-down/killed one). On the
+    // pre-fix code 'second' was written to the old proc that was then killed, so
+    // no live proc ever received it.
+    const liveGotSecond = allProcesses.some(
+      p => !p.killed &&
+        (p.stdin?.write as jest.Mock).mock.calls
+          .map((c: unknown[]) => String(c[0]))
+          .some((w: string) => w.includes('<channel') && w.includes('second')),
+    );
+    expect(liveGotSecond).toBe(true);
+  }, 15000);
 });
