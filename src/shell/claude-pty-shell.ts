@@ -596,6 +596,14 @@ class Driver {
    * single no-op Ctrl+U and returns.
    */
   private async clearInput(): Promise<void> {
+    // Fast path (the common case): the input is already empty, so send a single
+    // Ctrl+U as a harmless no-op — exactly the pre-#296 behavior — and skip the
+    // settle loop entirely so a clean submit gains no latency.
+    if (this.screen.inputDraft() === '') {
+      this.host.writeRaw('\x15');
+      return;
+    }
+    // A draft is present: clear it a line at a time until the input reads empty.
     for (let i = 0; i < INPUT_CLEAR_MAX_KEYS; i++) {
       this.host.writeRaw('\x15'); // Ctrl+U: clear one input line
       await new Promise((r) => setTimeout(r, INPUT_CLEAR_SETTLE_MS));
