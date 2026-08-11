@@ -1091,6 +1091,17 @@ export class SessionProcess extends EventEmitter {
     }
   }
 
+  /**
+   * True once a deferred restart has been armed (the session was busy when the
+   * restart was requested, so teardown waits for the current turn to end). The
+   * runner reads this to avoid flushing a queued turn into a session that is
+   * about to be torn down — the queue is re-driven into the fresh session after
+   * the restart instead (see the deferredRestartReady handler in runner.ts).
+   */
+  hasPendingRestart(): boolean {
+    return this._pendingRestart;
+  }
+
   touch(): void {
     this.lastActivityAt = Date.now();
   }
