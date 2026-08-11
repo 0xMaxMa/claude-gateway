@@ -282,6 +282,59 @@ describe('AgentManager', () => {
       expect(matching).toHaveLength(1);
     });
 
+    // Regression (#294): channel config (line/telegram/discord) added to an
+    // app-agent entry AFTER install must survive reconcile/upsert. The old code
+    // did `config.agents[idx] = entry` (full replace) with an entry rebuilt from
+    // the app declaration that carries no channel blocks, so every gateway
+    // restart silently wiped them — disconnecting the agent's LINE/Telegram/Discord.
+    it('preserves operator-added channel config (line/telegram/discord) on re-upsert while refreshing app-managed fields', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      // Simulate an already-installed app-agent whose channel config was added
+      // after install, plus a stale app-managed field (container) to prove the
+      // merge still refreshes declaration-owned fields.
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          gateway: { logDir: 'logs', timezone: 'UTC' },
+          agents: [
+            {
+              id: 'my-agent',
+              type: 'app-agent',
+              container: 'stale-container',
+              line: { channelSecret: 'sec-123', channelAccessToken: 'tok-abc', slowResponseThreshold: 45 },
+              telegram: { botToken: 'tg-token' },
+              discord: { botToken: 'dc-token' },
+            },
+          ],
+        }),
+        'utf-8',
+      );
+
+      const entry = makeEntry(tmpDir); // agentDeclaration.name === 'my-agent', container my-app-agent
+      await manager.upsertAgent(entry);
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        agents: Array<Record<string, unknown>>;
+      };
+      const agentEntry = config.agents.find((a) => a['id'] === 'my-agent');
+      expect(agentEntry).toBeDefined();
+
+      // Channel blocks survive the reconcile (the actual regression).
+      expect(agentEntry!['line']).toEqual({
+        channelSecret: 'sec-123',
+        channelAccessToken: 'tok-abc',
+        slowResponseThreshold: 45,
+      });
+      expect(agentEntry!['telegram']).toEqual({ botToken: 'tg-token' });
+      expect(agentEntry!['discord']).toEqual({ botToken: 'dc-token' });
+
+      // App-managed fields are still refreshed from the declaration (not left stale).
+      expect(agentEntry!['container']).toBe('my-app-agent');
+      expect(agentEntry!['type']).toBe('app-agent');
+      // Still a single entry — merge, not append.
+      expect(config.agents.filter((a) => a['id'] === 'my-agent')).toHaveLength(1);
+    });
+
     it('updates symlink if it already exists', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);
