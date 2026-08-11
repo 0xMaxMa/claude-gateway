@@ -185,8 +185,14 @@ export function loadConfig(configPath: string): GatewayConfig {
 
   // Interpolate gateway config (fatal if env vars missing here)
   const interpolatedGateway = interpolateObject(config.gateway) as Record<string, unknown>;
-  if (interpolatedGateway.publicUrl !== undefined) {
-    const normalizedPublicUrl = resolveGatewayPublicUrl(interpolatedGateway.publicUrl);
+  const rawPublicUrl = interpolatedGateway.publicUrl;
+  if (typeof rawPublicUrl === 'string' && !rawPublicUrl.trim()) {
+    // Blank/whitespace-only is "not configured", not "invalid". Normalize to
+    // undefined so downstream consumers see a single unset representation and
+    // report "not configured" rather than throwing or emitting a broken link.
+    interpolatedGateway.publicUrl = undefined;
+  } else if (rawPublicUrl !== undefined) {
+    const normalizedPublicUrl = resolveGatewayPublicUrl(rawPublicUrl);
     if (!normalizedPublicUrl) {
       throw new ConfigValidationError(
         'gateway.publicUrl must be an HTTPS URL ending in /gateway with no credentials, query, or fragment ' +

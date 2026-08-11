@@ -230,4 +230,64 @@ describe('config-loader', () => {
       );
     }
   });
+
+  it('treats blank/whitespace/absent gateway.publicUrl as unset (no throw)', () => {
+    const write = (name: string, publicUrl: unknown) => {
+      const configPath = path.join(tmpDir, name);
+      fs.writeFileSync(configPath, JSON.stringify({
+        gateway: { logDir: '/tmp', timezone: 'UTC', publicUrl },
+        agents: [{
+          id: 'test',
+          description: '',
+          workspace: '/tmp',
+          env: '/tmp/.env',
+          telegram: { botToken: 'tok' },
+          claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+        }],
+      }));
+      return configPath;
+    };
+
+    // Empty string (the value config.template.json used to ship) → unset, boots.
+    expect(loadConfig(write('public-url-empty.json', '')).gateway.publicUrl).toBeUndefined();
+    // Whitespace-only → same as empty.
+    expect(loadConfig(write('public-url-blank.json', '   ')).gateway.publicUrl).toBeUndefined();
+    // Absent key (JSON.stringify drops undefined) → unset, no regression.
+    expect(loadConfig(write('public-url-absent.json', undefined)).gateway.publicUrl).toBeUndefined();
+  });
+
+  it('boots from the shipped config.template.json gateway block', () => {
+    const template = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', '..', 'config.template.json'), 'utf-8'),
+    );
+    // Guard the template fix: the shipped gateway block must not carry a value
+    // the loader rejects. Keep the template's real gateway block, swap in one
+    // minimal agent so agent interpolation needs no env, and satisfy the two
+    // gateway api-key env placeholders so we exercise the real gateway block.
+    const configPath = path.join(tmpDir, 'from-template.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      gateway: template.gateway,
+      agents: [{
+        id: 'test',
+        description: '',
+        workspace: '/tmp',
+        env: '/tmp/.env',
+        telegram: { botToken: 'tok' },
+        claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+      }],
+    }));
+    const prevMy = process.env.MY_API_KEY;
+    const prevAdmin = process.env.ADMIN_API_KEY;
+    process.env.MY_API_KEY = 'sk-test-my';
+    process.env.ADMIN_API_KEY = 'sk-test-admin';
+    try {
+      expect(() => loadConfig(configPath)).not.toThrow();
+      expect(loadConfig(configPath).gateway.publicUrl).toBeUndefined();
+    } finally {
+      if (prevMy === undefined) delete process.env.MY_API_KEY;
+      else process.env.MY_API_KEY = prevMy;
+      if (prevAdmin === undefined) delete process.env.ADMIN_API_KEY;
+      else process.env.ADMIN_API_KEY = prevAdmin;
+    }
+  });
 });

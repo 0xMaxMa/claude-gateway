@@ -15,7 +15,6 @@
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
     "bind": "127.0.0.1",
-    "publicUrl": "",
     "models": [
       { "id": "claude-fable-5[1m]",        "label": "Fable 5 (1M)",     "alias": "fable[1m]",   "contextWindow": 1000000 },
       { "id": "claude-opus-5[1m]",         "label": "Opus 5 (1M)",      "alias": "opus[1m]",    "contextWindow": 1000000 },
