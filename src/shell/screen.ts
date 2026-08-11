@@ -445,6 +445,39 @@ export class ScreenModel {
     return TUI_PROMPT_RE.test(this.text());
   }
 
+  /**
+   * The user's current input draft — the text sitting after the last `❯ ` caret,
+   * across any continuation lines, up to the surrounding border / status bar.
+   * Returns '' when the input is empty (a bare caret, or the dim "Try …"
+   * placeholder Claude shows at an empty prompt).
+   *
+   * Used by the wrapper to (a) clear a stale multi-line draft COMPLETELY before
+   * pasting a new turn — a single Ctrl+U clears only one input line, so a leftover
+   * draft (e.g. from a prior swallowed Enter) would otherwise concatenate with the
+   * next paste and merge two messages into one turn — and (b) detect a swallowed
+   * Enter (the pasted text is still on screen) independently of transcript records,
+   * which a prior overlapping turn can otherwise poison.
+   */
+  inputDraft(): string {
+    const lines = this.text().split('\n');
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) if (/❯ /.test(lines[i])) idx = i;
+    if (idx === -1) return '';
+    const parts: string[] = [];
+    const first = lines[idx].replace(/^.*?❯ ?/, '');
+    if (first.trim()) parts.push(first.trim());
+    for (let j = idx + 1; j < lines.length; j++) {
+      const l = lines[j].trim();
+      // Stop at a blank line, a box/rule border, or the status bar below the input.
+      if (l === '' || /^[─╭╮╰╯│]/.test(l) || /^(Model:|Context:|Session:|⏵)/.test(l)) break;
+      parts.push(l);
+    }
+    const draft = parts.join('\n').trim();
+    // The empty-input placeholder is dim helper text, never a real user draft.
+    if (draft.startsWith('Try "') || draft.startsWith('for shortcuts')) return '';
+    return draft;
+  }
+
   detectDialog(): DialogKind | null {
     // Scan only the bottom region: a real modal dialog renders there, while a
     // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the

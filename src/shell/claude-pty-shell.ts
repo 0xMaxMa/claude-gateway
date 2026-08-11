@@ -41,6 +41,13 @@ const HEARTBEAT_LIVENESS_QUIET_MS = 45_000;
 const SUBMIT_ENTER_DELAY_MS = 300;
 const SUBMIT_RETRY_AFTER_MS = 4000;
 const MAX_ENTER_RETRIES = 2;
+// Robust pre-paste input clear. A single Ctrl+U clears only ONE input line, so a
+// stale MULTI-line draft left by a prior swallowed Enter would survive partially
+// and concatenate with the next paste (two messages merged into one turn). We send
+// Ctrl+U in a bounded loop until the input draft reads empty. Each Ctrl+U at an
+// already-empty prompt is a harmless no-op.
+const INPUT_CLEAR_MAX_KEYS = 8;
+const INPUT_CLEAR_SETTLE_MS = 60;
 const FALLBACK_IDLE_QUIET_MS = 2000;
 const DIALOG_ACTION_COOLDOWN_MS = 2000;
 // An interactive select menu must be stable (no PTY output) this long before we
@@ -547,10 +554,14 @@ class Driver {
       return;
     }
     // Clear any stale text sitting in the input line first — e.g. history the
-    // probe's Up fallback recalled that an abandoned round couldn't restore —
-    // so it is never prepended to this message (review round 2, finding 3).
-    // A no-op at an empty idle prompt.
-    this.host.writeRaw('\x15');
+    // probe's Up fallback recalled that an abandoned round couldn't restore, or a
+    // prior turn's paste whose Enter was swallowed — so it is never prepended to
+    // this message (review round 2, finding 3; issue #296). A single Ctrl+U only
+    // clears one line, so a MULTI-line stale draft would survive partially and
+    // concatenate with the paste below — clearInput() loops until the input is
+    // empty. A no-op at an already-empty idle prompt.
+    await this.clearInput();
+    if (this.abortIfInterrupted()) return;
     if (NO_BRACKETED_PASTE) {
       // Fallback: sanitizeUserText() strips all CR, so '\r' below is the only
       // submit trigger — safe for multiline text without bracketed paste.
@@ -569,6 +580,36 @@ class Driver {
     if (this.abortIfInterrupted()) return;
     this.host.writeRaw('\r');
     if (this.turn) this.turn.submittedAt = Date.now();
+  }
+
+  /**
+   * Clear the PTY input line COMPLETELY before pasting a new turn. A single Ctrl+U
+   * clears only the current input line; a stale multi-line draft (left when a prior
+   * paste's Enter was swallowed) would otherwise keep its earlier line(s) and the
+   * next paste would land after them — merging two messages into one turn (#296).
+   *
+   * Sends Ctrl+U in a bounded loop, stopping as soon as the screen's input draft
+   * reads empty, or at INPUT_CLEAR_MAX_KEYS. Only the confirmed-empty read stops
+   * the loop — a keystroke whose redraw hasn't reached our screen model yet simply
+   * costs one more Ctrl+U (a harmless no-op at an empty prompt), never an early
+   * stop that leaves a remnant behind. At an already-empty prompt this sends a
+   * single no-op Ctrl+U and returns.
+   */
+  private async clearInput(): Promise<void> {
+    // Fast path (the common case): the input is already empty, so send a single
+    // Ctrl+U as a harmless no-op — exactly the pre-#296 behavior — and skip the
+    // settle loop entirely so a clean submit gains no latency.
+    if (this.screen.inputDraft() === '') {
+      this.host.writeRaw('\x15');
+      return;
+    }
+    // A draft is present: clear it a line at a time until the input reads empty.
+    for (let i = 0; i < INPUT_CLEAR_MAX_KEYS; i++) {
+      this.host.writeRaw('\x15'); // Ctrl+U: clear one input line
+      await new Promise((r) => setTimeout(r, INPUT_CLEAR_SETTLE_MS));
+      if (this.screen.inputDraft() === '') return; // input empty → done
+    }
+    logWarn(`clearInput: input still non-empty after ${INPUT_CLEAR_MAX_KEYS} Ctrl+U — proceeding`);
   }
 
   // Sends Ctrl+U to clear the PTY input line, drains the queue, and returns true.
@@ -750,9 +791,17 @@ class Driver {
         && this.screen.hasPrompt()
         && !(turn.fromMenuSelection && this.screen.interactivePromptBlocking())
         && this.screen.quietMs() > 1500
-        && this.tailer.seenRecords === turn.recordsAtStart) {
-      // Only retry if no new records have appeared since this turn started —
-      // a delta > 0 means claude already started writing output.
+        && (this.tailer.seenRecords === turn.recordsAtStart
+            || this.screen.inputDraft() !== '')) {
+      // Retry the swallowed Enter when either (a) no new records have appeared
+      // since this turn started — a delta > 0 normally means Claude began writing
+      // output — OR (b) the input draft is still visibly on screen. (b) is the
+      // definitive, record-independent signal: text sitting in the input has not
+      // been submitted, no matter what records say. The plain `seenRecords`
+      // equality alone self-disabled the retry whenever a PRIOR overlapping turn
+      // had written records (its count inflates seenRecords past recordsAtStart),
+      // leaving a genuinely-unsubmitted draft stuck until the watchdog or the next
+      // paste collided with it (#296).
       //
       // The interactivePromptBlocking() suppression applies ONLY to a
       // menu-selection turn: there a live menu genuinely can still be on
