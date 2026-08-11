@@ -4330,6 +4330,35 @@ describe('AgentRunner — channel coalescing (US-IMG-COALESCE)', () => {
     await runner.stop();
     expect(buffers.size).toBe(0);
   }, 15000);
+
+  // Regression (#292): an inbound channel image is staged at a path the app-agent
+  // container cannot see (LINE downloads to host /tmp; TG/Discord to
+  // <workspace>/.*-state). The runner already copies the file into the agent's
+  // MediaStore (bind-mounted at an identical absolute path inside the container) —
+  // it must surface THAT path to the agent, not the raw staging path.
+  // Pre-fix, the channel XML carried the raw staging path → this test fails.
+  it('surfaces the container-readable MediaStore path for an inbound image, not the raw staging path', async () => {
+    // Stage the image OUTSIDE the agent's media dir, mimicking LINE's host /tmp
+    // download (a location not bind-mounted into an app-agent container).
+    const rawStaging = path.join(tmpDir, 'raw-staging.jpg');
+    fs.writeFileSync(rawStaging, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postImage(port, 'chat:cl-mediapath', rawStaging, '', '1');
+    await new Promise(r => setTimeout(r, 450)); // let the debounce window flush
+
+    const turn = turnWritesOf().find(w => w.includes('image_path='));
+    expect(turn).toBeDefined();
+    // The agent is told the MediaStore copy (readable inside the container): it
+    // lives under media/<channel>-<chatId>/ with copyToMedia's timestamp prefix …
+    expect(turn).toContain(`${path.sep}media${path.sep}telegram-chat:cl-mediapath${path.sep}`);
+    expect(turn).toContain('raw-staging.jpg'); // basename preserved by copyToMedia
+    // … and NOT the raw host staging path the container cannot read.
+    expect(turn).not.toContain(`image_path="${rawStaging}"`);
+  }, 15000);
 });
 
 // ── line_image transcript history: gate on tool_result success ────────────────
