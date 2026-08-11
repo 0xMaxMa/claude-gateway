@@ -917,6 +917,87 @@ services:
       expect(readEnvFile(after!.installPath)['APP_SECRET']).toBe('keep-me');
     });
 
+    it('reclaims the old image without a compose-down that tears down the new container (issue #283)', async () => {
+      // The cleanup after a successful update must NOT run
+      // `compose -p <app> down --rmi all` on the backup dir: `down` selects by
+      // the project label, which the freshly-started new stack now shares, so it
+      // would remove the *new* container (leaving status 'running' with nothing
+      // up). It must instead reclaim only the *old* image via `docker image rm`.
+      const githubUrl = 'https://github.com/test/img-app';
+      const appName = 'img-app';
+      const port = 5405;
+      const state = { head: 'a'.repeat(40), version: '1.0.0' };
+      const dockerCalls: Array<{ args: string[]; cwd?: string }> = [];
+
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:${port}/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+          return { stdout: '', stderr: '', status: 0 };
+        }
+        if (cmd === 'docker') {
+          dockerCalls.push({ args, cwd: opts?.cwd });
+          // `docker compose -p <app> images --quiet` → a distinct image id per
+          // stack, keyed off the working dir (new stack builds under a
+          // `cg-update-*` tmp dir; the old stack lives under appsDir).
+          if (args.includes('images') && args.includes('--quiet')) {
+            const isNew = (opts?.cwd ?? '').includes('cg-update-');
+            return { stdout: `${isNew ? 'sha-new' : 'sha-old'}\n`, stderr: '', status: 0 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      const installer = makeInstaller(spawn);
+      state.head = 'a'.repeat(40);
+      state.version = '1.0.0';
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      dockerCalls.length = 0; // only inspect update-phase docker calls
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('completed');
+
+      // (a) No compose-down against the post-swap backup dir — the bug that tore
+      // down the freshly-started new container.
+      const downOnBackup = dockerCalls.filter(
+        (c) => c.args.includes('compose') && c.args.includes('down') && (c.cwd ?? '').includes('-old-'),
+      );
+      expect(downOnBackup).toHaveLength(0);
+      // …and no `--rmi`-bearing compose-down anywhere in the update.
+      expect(dockerCalls.some((c) => c.args.includes('down') && c.args.includes('--rmi'))).toBe(false);
+
+      // (b) The old image IS reclaimed, and the new stack's image is left alone.
+      const imageRmTargets = dockerCalls
+        .filter((c) => c.args[0] === 'image' && c.args[1] === 'rm')
+        .map((c) => c.args[2]);
+      expect(imageRmTargets).toContain('sha-old');
+      expect(imageRmTargets).not.toContain('sha-new');
+    });
+
     it('is a no-op when the custom app is already at HEAD', async () => {
       const githubUrl = 'https://github.com/test/steady-app';
       const { state, spawn } = makeGitState('steady-app', 5401);
