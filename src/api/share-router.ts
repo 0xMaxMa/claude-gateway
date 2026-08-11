@@ -274,12 +274,16 @@ export function createSharesPrivateRouter(
         return;
       }
       if (!dedupeRef) dedupeRef = `path:${validated.relativePath}`;
-      if (seen.has(dedupeRef)) {
-        res.status(400).json({ error: 'duplicate ref', code: 'duplicate_ref' });
-        return;
+      // Identical refs within one request are legitimate (e.g. line_image mints
+      // the same file for both originalContentUrl and previewImageUrl when no
+      // separate preview is given) — let store.mintShare's own dedupeRef
+      // idempotency (§17.4) collapse them to the same token instead of
+      // rejecting the request outright. Still count each unique file once
+      // toward the total-size limit.
+      if (!seen.has(dedupeRef)) {
+        seen.add(dedupeRef);
+        totalBytes += validated.size;
       }
-      seen.add(dedupeRef);
-      totalBytes += validated.size;
       resolved.push({ dedupeRef, relativePath: validated.relativePath, size: validated.size });
     }
     if (totalBytes > limits.maxTotalBytes) {

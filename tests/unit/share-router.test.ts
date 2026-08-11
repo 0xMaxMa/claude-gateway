@@ -224,17 +224,29 @@ describe('image share router', () => {
       expect(noAuth.status).toBe(401);
     });
 
-    test('rejects traversal, duplicates and over-count before minting', async () => {
+    test('rejects traversal and over-count before minting', async () => {
       const post = (refs: unknown[]) =>
         request().post('/api/v1/shares').set(AUTH_A1).send({ agent_id: AGENT, session_id: SESSION, refs });
 
       expect((await post([{ path: '../../etc/passwd' }])).status).toBe(400);
-      const dup = await post([{ path: `${SESSION}/ok.png` }, { path: `${SESSION}/ok.png` }]);
-      expect(dup.status).toBe(400);
-      expect(dup.body.code).toBe('duplicate_ref');
       const many = await post(Array.from({ length: 6 }, (_, i) => ({ path: `${SESSION}/x${i}.png` })));
       expect(many.status).toBe(400);
       expect(many.body.code).toBe('too_many_refs');
+    });
+
+    test('same ref twice in one request dedupes to the SAME token instead of rejecting', async () => {
+      const res = await request()
+        .post('/api/v1/shares')
+        .set(AUTH_A1)
+        .send({
+          agent_id: AGENT,
+          session_id: SESSION,
+          refs: [{ path: `${SESSION}/ok.png` }, { path: `${SESSION}/ok.png` }],
+        });
+      expect(res.status).toBe(201);
+      const [first, second] = res.body.items as Array<{ token: string; share_id: string }>;
+      expect(second.token).toBe(first.token);
+      expect(second.share_id).toBe(first.share_id);
     });
 
     test('registration persists the prompt, capped at 500 chars', async () => {

@@ -1311,6 +1311,11 @@ export class AgentRunner extends EventEmitter {
       // block id — otherwise one sent image lands in the transcript N times and
       // skews the session image catalog's "image N" ordinal.
       const seenLineImageIds = new Set<string>();
+      // A line_image call queued here (id -> media) is only written to history
+      // once its matching tool_result confirms the send succeeded — a failed
+      // attempt followed by a retried, successful one must not leave two copies
+      // of the same image in the transcript.
+      const pendingLineImageMedia = new Map<string, { lineMedia: string[]; channelSrcLine: string }>();
       // Set when an interactive-menu prompt was rendered to the channel this turn,
       // so the result's plain-text auto-forward is skipped (no duplicate message).
       let menuSentThisTurn = false;
@@ -1345,23 +1350,22 @@ export class AgentRunner extends EventEmitter {
                 if (block.type === 'tool_use' && block.name === 'mcp__gateway__line_image') {
                   const lineBlockId = (block as Record<string, unknown>)['id'];
                   const dedupeKey = typeof lineBlockId === 'string' ? lineBlockId : '';
-                  // Skip if this tool_use block was already persisted this turn
+                  // Skip if this tool_use block was already queued this turn
                   // (cumulative assistant snapshots re-emit completed blocks).
                   if (dedupeKey && seenLineImageIds.has(dedupeKey)) continue;
                   const imgPath = typeof block.input?.['image'] === 'string' ? block.input['image'] : '';
                   const mediaRootLine = path.join(this.agentsBaseDir, this.agentConfig.id, 'media') + path.sep;
                   const lineMedia = toRelMediaFiles(imgPath ? [imgPath] : [], mediaRootLine);
-                  if (lineMedia.length) {
-                    if (dedupeKey) seenLineImageIds.add(dedupeKey);
-                    const channelSrcLine = this.channelSourceMap.get(mapKey) ?? 'line';
-                    this.historyDb.insertMessage({
-                      chatId: `${channelSrcLine}-${mapKey}`,
-                      sessionId: actualSessionId,
-                      source: channelSrcLine as HistorySource,
-                      role: 'assistant',
-                      content: '',
-                      mediaFiles: lineMedia,
-                      ts: Date.now(),
+                  if (lineMedia.length && dedupeKey) {
+                    seenLineImageIds.add(dedupeKey);
+                    // Queue instead of writing now — the send can still fail (mint
+                    // error, LINE API error, transient socket blip). Only the
+                    // matching tool_result below commits it to history, so a
+                    // failed attempt followed by a retried success doesn't leave
+                    // two copies of the same image in the transcript.
+                    pendingLineImageMedia.set(dedupeKey, {
+                      lineMedia,
+                      channelSrcLine: this.channelSourceMap.get(mapKey) ?? 'line',
                     });
                   }
                 }
@@ -1408,6 +1412,31 @@ export class AgentRunner extends EventEmitter {
                 if (block.type === 'tool_result' && block.tool_use_id === replyToolUseId && block.is_error) {
                   replyCalled = false;
                   replyToolUseId = null;
+                }
+              }
+            }
+          }
+          // Commit a queued line_image send to history only once its tool_result
+          // confirms success — see the queuing comment above. A failed send is
+          // simply dropped, so a same-image retry never double-writes.
+          if (obj['type'] === 'user' && pendingLineImageMedia.size) {
+            const msg = obj['message'] as { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean }> } | undefined;
+            if (Array.isArray(msg?.content)) {
+              for (const block of msg!.content) {
+                if (block.type === 'tool_result' && block.tool_use_id && pendingLineImageMedia.has(block.tool_use_id)) {
+                  const pending = pendingLineImageMedia.get(block.tool_use_id)!;
+                  pendingLineImageMedia.delete(block.tool_use_id);
+                  if (!block.is_error) {
+                    this.historyDb.insertMessage({
+                      chatId: `${pending.channelSrcLine}-${mapKey}`,
+                      sessionId: actualSessionId,
+                      source: pending.channelSrcLine as HistorySource,
+                      role: 'assistant',
+                      content: '',
+                      mediaFiles: pending.lineMedia,
+                      ts: Date.now(),
+                    });
+                  }
                 }
               }
             }
@@ -1552,6 +1581,7 @@ export class AgentRunner extends EventEmitter {
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
             seenLineImageIds.clear();
+            pendingLineImageMedia.clear();
             menuSentThisTurn = false;
             menuPromptTextThisTurn = '';
             // In pty-shell mode, a `result` fires after every Claude API sub-turn
