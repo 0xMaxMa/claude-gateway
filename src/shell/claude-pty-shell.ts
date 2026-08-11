@@ -410,6 +410,13 @@ class Driver {
     }
     if (this.turn) {
       this.turn.sawAssistant = true;
+      // Transcript output is the authoritative "Claude is working" signal, and it
+      // is echo-immune (only Claude writes assistant records). Set sawBusy from it
+      // so the fallback end-of-turn (tick(): sawBusy && sawAssistant) and the
+      // swallowed-Enter retry stay correct even on Claude Code builds whose TUI no
+      // longer renders the "esc to interrupt" status text — verified absent on
+      // v2.1.227, where screen-scraped isBusy() reads false for the whole turn.
+      this.turn.sawBusy = true;
       this.turn.lastProgressAt = Date.now();
       if (text) this.turn.texts.push(text);
       if (usage) this.turn.usage = usage;

@@ -210,6 +210,8 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
     // redirects API calls to our mock server.
     process.env.CLAUDE_BIN = `node ${MOCK_CLAUDE_MCP_BIN}`
     process.env.TELEGRAM_API_ROOT = `http://127.0.0.1:${port}`
+    // Keep each step's message as its own turn (#290 coalesces bursts by default).
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '20'
 
     // Pre-pair USER_ID so messages are delivered (not dropped by gate)
     const access = {
@@ -251,6 +253,7 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
   afterAll(async () => {
     delete process.env.CLAUDE_BIN
     delete process.env.TELEGRAM_API_ROOT
+    delete process.env.CHANNEL_COALESCE_WINDOW_MS
     try { await runner?.stop() } catch {}
     await mock?.close()
     fs.rmSync(tmpDir, { recursive: true, force: true })

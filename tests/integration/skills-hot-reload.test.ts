@@ -207,6 +207,9 @@ describe('Skills hot-reload end-to-end', () => {
   let watcher: { close: () => Promise<void> | void };
 
   beforeEach(() => {
+    // Plain text is now coalesced too (#290) — shrink the debounce so a lone
+    // 'hello' spawns almost immediately, as these tests assume.
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '20';
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-hotreload-'));
     workspaceDir = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspaceDir, { recursive: true });
@@ -235,6 +238,7 @@ describe('Skills hot-reload end-to-end', () => {
     }
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     jest.clearAllMocks();
+    delete process.env.CHANNEL_COALESCE_WINDOW_MS;
   });
 
   async function bootRunnerWithIdleSession(chatId: string): Promise<SessionProcess> {

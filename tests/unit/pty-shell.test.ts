@@ -99,8 +99,15 @@ describe('pty-shell sanitizeUserText', () => {
 // Tests for TUI string constants — these catch Claude Code UI changes at the source.
 // If Claude Code changes its TUI text, these tests will fail and remind you to update screen.ts.
 describe('ScreenModel TUI constants (Claude Code v2.1.x)', () => {
-  it('BUSY_MARKER matches expected status bar text', () => {
-    expect(TUI_BUSY_MARKER).toBe('esc to interrupt');
+  it('BUSY_MARKER is retained but documented best-effort (often absent on v2.1.227+)', () => {
+    // The marker is kept as a fast supplementary hint (consumeBusySeen), but recent
+    // Claude Code builds render a randomized gerund instead of "esc to interrupt",
+    // so busy/turn detection must NOT depend on it — output-activity (quietMs) and
+    // the transcript are authoritative. See the "no busy marker" liveness cases
+    // below and the fallback-without-marker regression. This asserts the constant
+    // still exists so screen.ts stays the single source of truth for the matcher.
+    expect(typeof TUI_BUSY_MARKER).toBe('string');
+    expect(TUI_BUSY_MARKER.length).toBeGreaterThan(0);
   });
 
   it('BYPASS_PERMS includes both expected dialog markers', () => {

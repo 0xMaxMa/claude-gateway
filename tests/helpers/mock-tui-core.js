@@ -38,18 +38,26 @@ function getTranscriptPath(sessionId) {
 }
 
 /**
- * Returns a writeTranscript(text) that appends an assistant record (sets
+ * Returns a writeTranscript(text, opts?) that appends an assistant record (sets
  * sawAssistant in the Driver) plus a turn_duration record (triggers
  * onTurnEnd() → finishTurn()) to the Claude Code transcript JSONL.
+ *
+ * opts.assistantOnly=true writes ONLY the assistant record (no turn_duration), so
+ * the turn can end solely via the Driver's fallback end-of-turn heuristic — used
+ * to prove the fallback works without the "esc to interrupt" busy marker (#290).
  */
 function makeTranscriptWriter(sessionId) {
-  return function writeTranscript(text) {
+  return function writeTranscript(text, opts) {
     const txPath = getTranscriptPath(sessionId);
     if (!txPath) return;
     const assistant = JSON.stringify({
       type: 'assistant',
       message: { content: [{ type: 'text', text: text || '(processed)' }] },
     });
+    if (opts && opts.assistantOnly) {
+      fs.appendFileSync(txPath, assistant + '\n');
+      return;
+    }
     const duration = JSON.stringify({ type: 'system', subtype: 'turn_duration', duration_ms: 100 });
     fs.appendFileSync(txPath, assistant + '\n' + duration + '\n');
   };

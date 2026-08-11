@@ -2222,9 +2222,11 @@ describe('AgentRunner — typing persistence', () => {
 
     const port = getCallbackPort(runner);
 
-    await sendChannelPost(port, chatId, 'hello');
-    // Allow async session spawn to complete (must use real timer briefly)
+    // Coalesce now debounces text messages too (A1, #290), so the spawn happens
+    // on the coalesce timer — schedule it under real timers (before the POST) so
+    // it actually fires during the wait below rather than as an abandoned fake timer.
     jest.useRealTimers();
+    await sendChannelPost(port, chatId, 'hello');
     await new Promise(r => setTimeout(r, 150));
     jest.useFakeTimers();
 
@@ -2689,6 +2691,10 @@ describe('AgentRunner — restart before turn (US-003)', () => {
 
     const spawnCountBefore = (require('child_process').spawn as jest.Mock).mock.calls.length;
 
+    // First turn must end before the next injects (gateway turn queue, #290).
+    firstSession.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'ok' }));
+    await new Promise(r => setTimeout(r, 20));
+
     await sendChannelPost(port, 'chat:r02', 'second turn');
     await new Promise(r => setTimeout(r, 150));
 
@@ -2714,6 +2720,10 @@ describe('AgentRunner — restart before turn (US-003)', () => {
     await sendChannelPost(port, 'chat:r03', 'first turn');
     await new Promise(r => setTimeout(r, 150));
 
+    // First turn must end before the next injects (gateway turn queue, #290).
+    getSessions(runner).get('chat:r03')!.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'ok' }));
+    await new Promise(r => setTimeout(r, 20));
+
     (runner as any).pendingRestarts.add('chat:r03');
 
     await sendChannelPost(port, 'chat:r03', 'second turn');
@@ -2733,6 +2743,10 @@ describe('AgentRunner — restart before turn (US-003)', () => {
 
     await sendChannelPost(port, 'chat:r04', 'first turn');
     await new Promise(r => setTimeout(r, 150));
+
+    // First turn must end before the next injects (gateway turn queue, #290).
+    getSessions(runner).get('chat:r04')!.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'ok' }));
+    await new Promise(r => setTimeout(r, 20));
 
     (runner as any).pendingRestarts.add('chat:r04');
     (runner as any).imageSizePerChat.set('chat:r04', MAX_IMAGE_SIZE_BYTES + 100);
@@ -2778,6 +2792,10 @@ describe('AgentRunner — restart before turn (US-003)', () => {
 
     const firstSession = getSessions(runner).get('chat:r06')!;
     const stopSpy = jest.spyOn(firstSession, 'stop');
+
+    // First turn must end before the next injects (gateway turn queue, #290).
+    firstSession.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'ok' }));
+    await new Promise(r => setTimeout(r, 20));
 
     (runner as any).pendingRestarts.add('chat:r06');
 
@@ -4209,16 +4227,21 @@ describe('AgentRunner — channel coalescing (US-IMG-COALESCE)', () => {
     return proc ? proc.stdin!.write.mock.calls.map((c: unknown[]) => String(c[0])) : [];
   }
 
-  // CL-01: plain text takes the fast path — spawns immediately despite a wide window.
-  it('CL-01: plain text message is injected immediately (no debounce)', async () => {
+  // CL-01: plain text is now coalesced too (A1, Issue #290) — a lone text message
+  // is held for the debounce window, then flushed, so a rapid follow-up can merge
+  // into the same turn instead of racing in as a separate mid-turn message.
+  it('CL-01: plain text message is coalesced (held until the window elapses)', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
     const port = getCallbackPort(runner);
 
     await sendChannelPost(port, 'chat:cl01', 'hello there');
-    // Well under the 300ms window — a buffered message would NOT be here yet.
+    // Well under the 300ms window → a coalesced message is NOT flushed yet.
     await new Promise(r => setTimeout(r, 120));
+    expect(getSessions(runner).has('chat:cl01')).toBe(false);
 
+    // Past the window → flushed and spawned.
+    await new Promise(r => setTimeout(r, 350));
     expect(getSessions(runner).has('chat:cl01')).toBe(true);
   }, 15000);
 
@@ -4428,5 +4451,148 @@ describe('AgentRunner — line_image history gated on tool_result success', () =
     const rows = lineImageRows(chatId);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.mediaFiles).toEqual(['media/retry.png']);
+  }, 15000);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Gateway-layer turn queue + coalesce + /stop (Issue #290)
+// ────────────────────────────────────────────────────────────────────────────
+describe('AgentRunner — gateway turn queue, coalesce, and /stop', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-queue-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // Channel-XML writes into the (single, reused) subprocess stdin for this chat.
+  function channelWrites(): string[] {
+    const proc = allProcesses[allProcesses.length - 1];
+    if (!proc?.stdin) return [];
+    return (proc.stdin.write as jest.Mock).mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .filter((s: string) => s.includes('<channel'));
+  }
+
+  // U-AR-Q1: a message sent while a turn is in flight is QUEUED, not injected,
+  // and is delivered only after the turn's true end signal (headless: result).
+  it('U-AR-Q1: queues a mid-turn channel message and injects it only after result (headless)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:q1', 'first');
+    await waitForSession(runner, 'chat:q1');
+    await new Promise(r => setTimeout(r, 80)); // coalesce flush + inject turn 1
+    const session = getSessions(runner).get('chat:q1')!;
+    expect(channelWrites().length).toBe(1);
+    expect(channelWrites()[0]).toContain('first');
+
+    // Second message arrives WHILE turn 1 is still in flight (no result yet).
+    await sendChannelPost(port, 'chat:q1', 'second');
+    await new Promise(r => setTimeout(r, 80)); // its coalesce window closes...
+    // ...but the turn is active, so it must be QUEUED, not written to stdin.
+    expect(channelWrites().length).toBe(1);
+
+    // Turn 1 ends → the queued turn flushes.
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'done' }));
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(2);
+    expect(channelWrites()[1]).toContain('second');
+  }, 15000);
+
+  // U-AR-Q2: on pty-shell the flush waits for session_idle — a per-sub-turn
+  // `result` (fires many times across tool-call gaps) must NOT release the queue.
+  it('U-AR-Q2: pty-shell flushes on session_idle, not on per-sub-turn result', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:q2', 'first');
+    await waitForSession(runner, 'chat:q2');
+    await new Promise(r => setTimeout(r, 80));
+    const session = getSessions(runner).get('chat:q2')!;
+    (session as unknown as { backend: string }).backend = 'pty-shell';
+    expect(channelWrites().length).toBe(1);
+
+    await sendChannelPost(port, 'chat:q2', 'second');
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(1); // queued behind the active turn
+
+    // A per-sub-turn result must NOT flush on pty-shell.
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'sub-turn' }));
+    await new Promise(r => setTimeout(r, 60));
+    expect(channelWrites().length).toBe(1);
+
+    // session_idle is the true end of the user's turn → flush.
+    session.emit('output', JSON.stringify({ type: 'session_idle' }));
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(2);
+    expect(channelWrites()[1]).toContain('second');
+  }, 15000);
+
+  // U-AR-Q3: consecutive text messages within the coalesce window merge into ONE
+  // turn (A1) — each still individually written to permanent history upstream.
+  it('U-AR-Q3: coalesces consecutive text messages into a single turn', async () => {
+    process.env.CHANNEL_COALESCE_WINDOW_MS = '120';
+    try {
+      runner = new AgentRunner(agentConfig, gatewayConfig);
+      await runner.start();
+      const port = getCallbackPort(runner);
+
+      await sendChannelPost(port, 'chat:q3', 'part one');
+      await new Promise(r => setTimeout(r, 30)); // within the window
+      await sendChannelPost(port, 'chat:q3', 'part two');
+      await waitForSession(runner, 'chat:q3');
+      await new Promise(r => setTimeout(r, 220)); // window closes + inject
+
+      const writes = channelWrites();
+      expect(writes.length).toBe(1);
+      expect(writes[0]).toContain('part one');
+      expect(writes[0]).toContain('part two');
+    } finally {
+      process.env.CHANNEL_COALESCE_WINDOW_MS = '20';
+    }
+  }, 15000);
+
+  // U-AR-Q4: /stop cancels the turns queued behind the active one — after /stop,
+  // the active turn ending must NOT flush a cancelled message.
+  it('U-AR-Q4: /stop cancels queued turns (nothing flushes after the active turn ends)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:q4', 'first');
+    await waitForSession(runner, 'chat:q4');
+    await new Promise(r => setTimeout(r, 80));
+    const session = getSessions(runner).get('chat:q4')!;
+    const interruptSpy = jest.spyOn(session, 'interrupt');
+    expect(channelWrites().length).toBe(1);
+
+    await sendChannelPost(port, 'chat:q4', 'second'); // queued behind active turn
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(1);
+
+    await sendChannelPost(port, 'chat:q4', '/stop'); // cancel queued + interrupt
+    await new Promise(r => setTimeout(r, 80));
+    expect(interruptSpy).toHaveBeenCalled();
+
+    // The interrupted turn ends → the cancelled 'second' must NOT be injected.
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'interrupted' }));
+    await new Promise(r => setTimeout(r, 80));
+    expect(channelWrites().length).toBe(1);
   }, 15000);
 });

@@ -247,6 +247,29 @@ export class AgentRunner extends EventEmitter {
   // Overridable via the CHANNEL_COALESCE_WINDOW_MS env var (tests shrink it for speed).
   private readonly coalesceWindowMs: number;
 
+  // Gateway-layer turn queue (both backends). A chat is "active" from the moment
+  // we inject a turn until its TRUE end signal arrives — `result` on the headless
+  // backend (one per user message) or `session_idle` on pty-shell (fires only when
+  // the wrapper's `this.turn` is null, i.e. after turn_duration, so it never fires
+  // between PTY sub-turns). While active, further channel turns are enqueued here
+  // instead of being written straight to stdin, then flushed one at a time on the
+  // end signal. Without this, a mid-turn message is merged by the headless CLI as
+  // steering (2 messages → 1 result, non-deterministic) or races the PTY paste.
+  private readonly turnActive = new Set<string>();
+  private readonly turnQueue = new Map<
+    string,
+    Array<{
+      channelSource: 'telegram' | 'discord' | 'line';
+      entries: Array<{ content?: string; meta?: Record<string, string> }>;
+    }>
+  >();
+  // Per-chat monotonic epoch bumped by /stop. injectTurn() captures it at entry and
+  // re-checks just before submitting; a mismatch means /stop landed during the
+  // async spawn/persist window, so the injection aborts instead of submitting the
+  // very turn the user asked to cancel (spawn-race close). Using an epoch (not a
+  // boolean flag) avoids a stale /stop poisoning a turn the user starts afterwards.
+  private readonly stopEpoch = new Map<string, number>();
+
   // Buffers attachment file paths registered via api_reply tool for the current API session turn.
   private readonly pendingApiAttachments = new Map<string, string[]>();
 
@@ -393,32 +416,30 @@ export class AgentRunner extends EventEmitter {
             return;
           }
 
-          // Coalesce messages that carry an image (or that arrive while an image is
-          // already buffered) so a photo and its instruction text are injected as
-          // ONE turn — Telegram can split them across updates (long-caption split,
-          // album burst, or photo sent just before/after the text). Plain text with
-          // nothing buffered takes the fast path and is injected immediately.
-          const hasImage = !!meta['image_path'];
-          const pending = this.channelCoalesce.get(chatId);
-          if (hasImage || pending) {
-            const buf = pending ?? {
-              channelSource,
-              entries: [] as Array<{ content?: string; meta?: Record<string, string> }>,
-              timer: undefined as unknown as ReturnType<typeof setTimeout>,
-            };
-            buf.channelSource = channelSource;
-            buf.entries.push(params);
-            if (buf.timer) clearTimeout(buf.timer);
-            buf.timer = setTimeout(() => {
-              const flushed = this.channelCoalesce.get(chatId);
-              this.channelCoalesce.delete(chatId);
-              if (flushed) this.routeChannelTurn(chatId, flushed.channelSource, flushed.entries);
-            }, this.coalesceWindowMs);
-            this.channelCoalesce.set(chatId, buf);
-            return;
-          }
-
-          this.routeChannelTurn(chatId, channelSource, [params]);
+          // Coalesce channel messages that arrive close together into ONE turn:
+          // a photo and its caption (Telegram may split them across updates —
+          // long-caption split, album burst, or photo sent just before/after the
+          // text), OR consecutive text messages that are conceptually a single
+          // prompt (A1). Each message is still recorded individually in history
+          // by routeChannelTurn(); only the injected turn is merged. A
+          // trailing-edge timer flushes the buffer once the window passes with no
+          // new message; the gateway turn queue then serialises this merged turn
+          // behind any turn already in flight.
+          const buf = this.channelCoalesce.get(chatId) ?? {
+            channelSource,
+            entries: [] as Array<{ content?: string; meta?: Record<string, string> }>,
+            timer: undefined as unknown as ReturnType<typeof setTimeout>,
+          };
+          buf.channelSource = channelSource;
+          buf.entries.push(params);
+          if (buf.timer) clearTimeout(buf.timer);
+          buf.timer = setTimeout(() => {
+            const flushed = this.channelCoalesce.get(chatId);
+            this.channelCoalesce.delete(chatId);
+            if (flushed) this.routeChannelTurn(chatId, flushed.channelSource, flushed.entries);
+          }, this.coalesceWindowMs);
+          this.channelCoalesce.set(chatId, buf);
+          return;
         } catch (err) {
           this.logger.warn('Failed to parse channel callback body', {
             error: (err as Error).message,
@@ -925,6 +946,53 @@ export class AgentRunner extends EventEmitter {
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     if (entries.length === 0) return;
+    // Gateway turn queue: if a turn is already in flight for this chat, enqueue
+    // this one and return. It is injected when the active turn truly ends
+    // (flushNextTurn, wired to the backend-aware end signal). The check-and-set
+    // is synchronous, so two near-simultaneous routes cannot both inject, and
+    // the active flag stays set continuously across a flush (no re-entrancy gap).
+    if (this.turnActive.has(chatId)) {
+      const q = this.turnQueue.get(chatId) ?? [];
+      q.push({ channelSource, entries });
+      this.turnQueue.set(chatId, q);
+      this.logger.debug('Turn queued behind in-flight turn', { chatId, queued: q.length });
+      return;
+    }
+    this.turnActive.add(chatId);
+    this.injectTurn(chatId, channelSource, entries);
+  }
+
+  /**
+   * Inject the next queued turn for this chat, or release the active slot when the
+   * queue is empty. Called when a turn truly ends — `result` (headless), or
+   * `session_idle` (pty-shell), or on process exit. `turnActive` is kept set while
+   * a queued turn exists so no incoming message can inject concurrently.
+   */
+  private flushNextTurn(chatId: string): void {
+    const q = this.turnQueue.get(chatId);
+    if (q && q.length > 0) {
+      const next = q.shift()!;
+      if (q.length === 0) this.turnQueue.delete(chatId);
+      this.injectTurn(chatId, next.channelSource, next.entries);
+    } else {
+      this.turnActive.delete(chatId);
+      this.turnQueue.delete(chatId);
+    }
+  }
+
+  /**
+   * Inject one coalesced turn into the session immediately. The caller must have
+   * already marked the chat active in `turnActive`. Records each buffered message
+   * individually in history, then writes the merged turn to the subprocess.
+   */
+  private injectTurn(
+    chatId: string,
+    channelSource: 'telegram' | 'discord' | 'line',
+    entries: Array<{ content?: string; meta?: Record<string, string> }>,
+  ): void {
+    // Snapshot the stop epoch: if /stop bumps it during the async window below, we
+    // abort just before submitting (see the check before setProcessing/sendMessage).
+    const stopEpochAtStart = this.stopEpoch.get(chatId) ?? 0;
     this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource)
       .then(async (sessionId) => {
         // Record each buffered message individually (history + session context).
@@ -1002,6 +1070,16 @@ export class AgentRunner extends EventEmitter {
           }
         }
 
+        // Spawn-race close: if /stop bumped the stop epoch during the async
+        // getActiveSessionId/spawn window above, abort before submitting — do not
+        // inject the very turn the user just asked to cancel. flushNextTurn()
+        // releases the (now empty, /stop cleared it) queue and the active slot.
+        if ((this.stopEpoch.get(chatId) ?? 0) !== stopEpochAtStart) {
+          this.logger.info('Turn injection aborted — /stop landed during spawn', { chatId });
+          this.flushNextTurn(chatId);
+          return;
+        }
+
         session.setProcessing(true);
         const turnText = blocks.join('\n');
         session.sendMessage(turnText);
@@ -1023,6 +1101,10 @@ export class AgentRunner extends EventEmitter {
         });
         const code = (err as Error).message.includes('pool full') ? 'POOL_FULL' : 'SPAWN_FAILED';
         this.writeTypingError(chatId, code);
+        // This turn never reached the subprocess, so no end signal will fire —
+        // release the active slot and inject the next queued turn so the queue
+        // cannot wedge on a spawn error.
+        this.flushNextTurn(chatId);
       });
   }
 
@@ -1476,6 +1558,15 @@ export class AgentRunner extends EventEmitter {
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
+            // Gateway turn queue: on the headless backend `result` is the true end
+            // of the user's turn (exactly one per message), so flush the next
+            // queued turn here. On pty-shell `result` fires per sub-turn (across
+            // tool-call gaps), so its flush is driven by `session_idle` instead
+            // (below) — flushing on every sub-turn `result` would inject the next
+            // message mid-work.
+            if (proc.backend !== 'pty-shell') {
+              this.flushNextTurn(mapKey);
+            }
             // Telegram: accumulate image size via stat of local file (FIFO, one per turn)
             const queue = this.pendingImagePaths.get(mapKey);
             const imgPath = queue?.shift();
@@ -1601,6 +1692,10 @@ export class AgentRunner extends EventEmitter {
           // event. Start the typing-done timer here so the indicator stays alive
           // through multi-turn tool-call sequences and only stops when all work is done.
           if (obj['type'] === 'session_idle' && proc.backend === 'pty-shell') {
+            // Gateway turn queue: on pty-shell this is the true end of the user's
+            // turn (the wrapper only emits it when its own `this.turn` is null, so
+            // it never fires between sub-turns) — flush the next queued turn.
+            this.flushNextTurn(mapKey);
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
               typingDoneTimer = null;
@@ -1652,6 +1747,11 @@ export class AgentRunner extends EventEmitter {
           typingDoneTimer = null;
         }
         this.writeTypingDone(mapKey);
+        // Gateway turn queue: the in-flight turn's end signal will never arrive
+        // now, so release the active slot. If turns were queued behind it, deliver
+        // the next one (injectTurn respawns the session) so a crash mid-turn does
+        // not strand the messages the user already sent.
+        this.flushNextTurn(mapKey);
         // LINE: a process exit with a button whose answer never arrived (crash /
         // teardown mid-turn) → surface the interrupted notice so a tap returns it
         // instead of a stale "still thinking". markInterrupted no-ops on a READY
@@ -1808,12 +1908,33 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * /stop — interrupt the in-flight turn for this chat by sending SIGINT to the subprocess.
-   * Leaves session history and metadata intact. Queued messages still process afterwards.
+   * /stop — interrupt the in-flight turn for this chat and cancel anything queued
+   * behind it. Drops the coalesce buffer (messages not yet routed) and the turn
+   * queue (turns waiting behind the active one), bumps the per-chat stop epoch so
+   * a turn still mid-spawn aborts before it submits (closing the spawn-race), and
+   * sends SIGINT to interrupt an actively-processing turn. Session history/metadata
+   * are left intact. Reports Stopped whenever there was work to cancel — an active
+   * turn, a spawning turn, or queued/buffered messages — rather than the old
+   * "No turn in progress." that fired whenever interrupt() no-op'd mid-spawn.
    */
   private async handleCommandStop(chatId: string): Promise<void> {
+    // Cancel queued + buffered work first so nothing flushes in behind the interrupt.
+    const buffered = this.channelCoalesce.get(chatId);
+    if (buffered?.timer) clearTimeout(buffered.timer);
+    this.channelCoalesce.delete(chatId);
+    const hadQueued = (this.turnQueue.get(chatId)?.length ?? 0) > 0;
+    this.turnQueue.delete(chatId);
+    // Bump the stop epoch: any injectTurn() that began before this point detects
+    // the mismatch just before submitting and aborts (spawn-race close). The
+    // turnActive slot is released by that abort's flushNextTurn(), or by the
+    // interrupted turn's end signal — never cleared here, to avoid racing a
+    // stale end signal against a turn the user starts right after /stop.
+    const hadActive = this.turnActive.has(chatId);
+    this.stopEpoch.set(chatId, (this.stopEpoch.get(chatId) ?? 0) + 1);
+
     const session = this.sessions.get(chatId);
-    const stopped = session ? session.interrupt() : false;
+    const interrupted = session ? session.interrupt() : false;
+    const stopped = interrupted || hadActive || hadQueued || !!buffered;
     this.writeAutoForward(chatId, stopped ? 'Stopped.' : 'No turn in progress.');
   }
 

@@ -365,12 +365,15 @@ describe('AgentRunner — /stop command', () => {
     await runner.start();
 
     const port = getCallbackPort(runner);
-    // Spawn a session with a regular message — handler sets processing=true,
-    // but we manually clear it to simulate an idle session.
+    // Spawn a session with a regular message, then simulate the turn having ended:
+    // clear _processing AND the gateway turn queue's active-turn tracking (normally
+    // cleared by the result/session_idle signal) so the session is genuinely idle.
     await postChannelMessage(port, chatId, 'hello');
     await waitForSubprocess();
     const subprocess = getSessionSubprocess();
+    await new Promise(r => setTimeout(r, 60)); // let the turn finish injecting
     getActiveSession()!.setProcessing(false);
+    (runner as unknown as { turnActive: Set<string> }).turnActive.delete(chatId);
 
     try { fs.rmSync(getForwardFile(), { force: true }); } catch {}
 

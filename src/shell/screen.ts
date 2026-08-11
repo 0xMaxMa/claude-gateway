@@ -23,6 +23,20 @@ function normalize(text: string): string {
  *   BUSY_MARKER   status bar text during an active turn
  *   PROMPT_RE     idle input caret pattern
  *   BYPASS_PERMS  "Bypass Permissions" dialog markers
+ *
+ * ⚠️ BUSY_MARKER is BEST-EFFORT and often ABSENT on recent builds. Verified on
+ * Claude Code v2.1.227 (live xterm capture, both child-session and clean env):
+ * the busy status line is a RANDOMIZED gerund with no stable substring — e.g.
+ * "✶ Thundering…", "✢ Bunning… (2s · ↓ 57 tokens)" — and the literal string
+ * "esc to interrupt" never appears in the raw stream for an entire turn. So
+ * `isBusy()` can read false for a whole active turn. Do NOT rely on it as the
+ * sole "Claude is working" signal. The authoritative signals are:
+ *   - output activity — the spinner animates continuously, so the PTY keeps
+ *     emitting bytes (quietMs stays low); see isPtyActivelyWorking() below and
+ *     HEARTBEAT_LIVENESS_QUIET_MS in claude-pty-shell.ts.
+ *   - the transcript — assistant records and the turn_duration record drive
+ *     turn start/end (see TranscriptTailer + Driver.onAssistant/onTurnEnd).
+ * The marker is retained only as a fast supplementary hint (consumeBusySeen).
  */
 export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
@@ -408,7 +422,13 @@ export class ScreenModel {
     return normalize(lines.join('\n'));
   }
 
-  /** Claude is processing a turn (spinner area shows "esc to interrupt"). */
+  /**
+   * Best-effort "Claude is processing" read from screen text. ⚠️ Often false for
+   * an entire active turn on recent builds (v2.1.227 renders a randomized gerund,
+   * not "esc to interrupt" — see TUI_BUSY_MARKER). Callers must NOT treat a false
+   * here as "idle"; pair it with output-activity (quietMs / isPtyActivelyWorking)
+   * and the transcript signals, which are authoritative.
+   */
   isBusy(): boolean {
     return this.text().includes(TUI_BUSY_MARKER);
   }
