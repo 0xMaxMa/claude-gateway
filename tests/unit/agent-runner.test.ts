@@ -4308,3 +4308,125 @@ describe('AgentRunner — channel coalescing (US-IMG-COALESCE)', () => {
     expect(buffers.size).toBe(0);
   }, 15000);
 });
+
+// ── line_image transcript history: gate on tool_result success ────────────────
+// Regression coverage for PR #286 fix (2): a line_image tool_use is queued when
+// its assistant block streams in, and only committed to chat history once the
+// matching tool_result confirms the send succeeded. A failed attempt followed by
+// a same-image retry must leave exactly ONE row, not two. Pre-fix, the runner
+// wrote to history the moment the tool_use appeared, so a retry double-posted.
+describe('AgentRunner — line_image history gated on tool_result success', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-line-hist-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    agentConfig = makeAgentConfig(workspace);
+    fs.mkdirSync(workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // Absolute path to a media file the runner will accept (toRelMediaFiles requires
+  // the file to exist and live under <agentsBaseDir>/<agentId>/media/).
+  function writeMedia(name: string): string {
+    const abs = path.join(tmpDir, 'agents', 'alfred', 'media', name);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, 'fake-image');
+    return abs;
+  }
+
+  const assistantLineImage = (toolUseId: string, imageAbs: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: toolUseId,
+          name: 'mcp__gateway__line_image',
+          input: { chat_id: 'U123', image: imageAbs },
+        }],
+      },
+    });
+
+  const toolResult = (toolUseId: string, isError: boolean) =>
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: isError }],
+      },
+    });
+
+  async function startLineSession(chatId: string): Promise<SessionProcess> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, chatId, 'please send an image');
+    await new Promise(r => setTimeout(r, 150));
+    (runner as unknown as { channelSourceMap: Map<string, string> }).channelSourceMap.set(chatId, 'line');
+    const session = getSessions(runner).get(chatId);
+    expect(session).toBeDefined();
+    return session!;
+  }
+
+  function lineImageRows(chatId: string): Array<{ role: string; mediaFiles?: string[] }> {
+    const page = runner.getHistoryDb().getMessages(`line-${chatId}`);
+    return (page.messages as Array<{ role: string; mediaFiles?: string[] }>)
+      .filter(m => m.role === 'assistant' && (m.mediaFiles?.length ?? 0) > 0);
+  }
+
+  it('commits a line_image to history once its tool_result confirms success', async () => {
+    const chatId = 'ch:line-ok';
+    const session = await startLineSession(chatId);
+    const img = writeMedia('ok.png');
+
+    session.emit('output', assistantLineImage('toolu_ok', img));
+    session.emit('output', toolResult('toolu_ok', false));
+    await new Promise(r => setTimeout(r, 50));
+
+    const rows = lineImageRows(chatId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.mediaFiles).toEqual(['media/ok.png']);
+  }, 15000);
+
+  it('does NOT write a line_image whose tool_result reports failure', async () => {
+    const chatId = 'ch:line-fail';
+    const session = await startLineSession(chatId);
+    const img = writeMedia('fail.png');
+
+    session.emit('output', assistantLineImage('toolu_fail', img));
+    session.emit('output', toolResult('toolu_fail', true)); // send failed
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(lineImageRows(chatId)).toHaveLength(0);
+  }, 15000);
+
+  // The core regression: a failed send + a same-image retry must not double-post.
+  it('writes exactly one row when a failed send is retried successfully (no double-post)', async () => {
+    const chatId = 'ch:line-retry';
+    const session = await startLineSession(chatId);
+    const img = writeMedia('retry.png');
+
+    // First attempt fails …
+    session.emit('output', assistantLineImage('toolu_a', img));
+    session.emit('output', toolResult('toolu_a', true));
+    // … then the model retries the SAME image with a new tool_use id, and it succeeds.
+    session.emit('output', assistantLineImage('toolu_b', img));
+    session.emit('output', toolResult('toolu_b', false));
+    await new Promise(r => setTimeout(r, 50));
+
+    const rows = lineImageRows(chatId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.mediaFiles).toEqual(['media/retry.png']);
+  }, 15000);
+});
