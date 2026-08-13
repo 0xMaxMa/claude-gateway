@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.15",
+  "configVersion": "1.0.16",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -50,6 +50,11 @@
     "headless": true,
     "selfHealing": {
       "autoRecover": false
+    },
+    "appHousekeeping": {
+      "buildCachePrune": true,
+      "buildCacheMaxAgeHours": 168,
+      "danglingImagePrune": true
     }
   },
   "agents": [

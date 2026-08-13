@@ -53,5 +53,23 @@ describe('AppsModule', () => {
       const desc = (inspect!.description ?? '').toLowerCase();
       expect(desc).toContain('secret');
     });
+
+    // #302: a docker_housekeeping tool must exist with report/prune modes and
+    // must advertise the safety floor (no other-app image or volume deletion).
+    it('exposes a docker_housekeeping tool with report/prune modes', () => {
+      const tools = new AppsModule().getTools();
+      const hk = tools.find((t) => t.name === 'docker_housekeeping');
+      expect(hk).toBeDefined();
+
+      const props = (hk!.inputSchema as {
+        properties: Record<string, { enum?: string[] }>;
+      }).properties;
+      expect(props['mode']?.enum).toEqual(['report', 'prune']);
+
+      const desc = (hk!.description ?? '').toLowerCase();
+      expect(desc).toContain('build cache');
+      // must signal that volumes are never auto-deleted
+      expect(desc).toContain('volume');
+    });
   });
 });

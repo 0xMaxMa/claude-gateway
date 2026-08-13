@@ -635,4 +635,83 @@ services:
       expect(typeof res.body.jobId).toBe('string');
     });
   });
+
+  // ─── POST /api/v1/apps/housekeeping (#302) ────────────────────────────────
+  describe('POST /api/v1/apps/housekeeping', () => {
+    function reportSpawn() {
+      return jest.fn((_cmd: string, args: string[]) => {
+        if (args.includes('df')) {
+          return { stdout: 'Images\t0B\nBuild Cache\t1.457GB\n', stderr: '', status: 0 };
+        }
+        if (args.includes('volume') && args.includes('ls')) {
+          return { stdout: 'orphan_a\n', stderr: '', status: 0 };
+        }
+        if (args.includes('image') && args.includes('ls')) {
+          return { stdout: 'sha_1\nsha_2\n', stderr: '', status: 0 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    it('returns 403 for a non-admin key', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/housekeeping')
+        .set('Authorization', `Bearer ${READ_KEY.key}`)
+        .send({ mode: 'report' });
+      expect(res.status).toBe(403);
+    });
+
+    it('report mode returns a read-only reclaim report', async () => {
+      const spawn = reportSpawn();
+      const hkApp = makeApp(registry, registryClient, spawn);
+      const res = await request(hkApp)
+        .post('/api/v1/apps/housekeeping')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ mode: 'report' });
+      expect(res.status).toBe(200);
+      expect(res.body.mode).toBe('report');
+      expect(res.body.report.buildCacheReclaimable).toBe('1.457GB');
+      expect(res.body.report.danglingImageCount).toBe(2);
+      expect(res.body.report.orphanVolumes).toEqual(['orphan_a']);
+      // read-only: no prune issued
+      const args = spawn.mock.calls.map((c) => c[1] as string[]);
+      expect(args.some((a) => a.includes('prune'))).toBe(false);
+    });
+
+    it('defaults to report mode when no body is sent', async () => {
+      const spawn = reportSpawn();
+      const hkApp = makeApp(registry, registryClient, spawn);
+      const res = await request(hkApp)
+        .post('/api/v1/apps/housekeeping')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body.mode).toBe('report');
+    });
+
+    it('prune mode executes the safe reclaim only', async () => {
+      const spawn = reportSpawn();
+      const hkApp = makeApp(registry, registryClient, spawn);
+      const res = await request(hkApp)
+        .post('/api/v1/apps/housekeeping')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ mode: 'prune' });
+      expect(res.status).toBe(200);
+      expect(res.body.mode).toBe('prune');
+      expect(res.body.pruned).toEqual({ buildCache: true, danglingImages: true });
+      const args = spawn.mock.calls.map((c) => c[1] as string[]);
+      expect(args).toContainEqual(['builder', 'prune', '-f', '--filter', 'until=168h']);
+      expect(args).toContainEqual(['image', 'prune', '-f']);
+      // safety floor — never `-a`, never a volume prune
+      expect(args.some((a) => a.includes('-a'))).toBe(false);
+      expect(args.some((a) => a.includes('volume') && a.includes('prune'))).toBe(false);
+    });
+
+    it('rejects an invalid mode with 400', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/housekeeping')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ mode: 'nuke' });
+      expect(res.status).toBe(400);
+    });
+  });
 });
