@@ -411,6 +411,36 @@ describe('AppInstaller — backup/restore', () => {
     expect(meta.bindMounts).toEqual(['data/photos']); // only the present one
   });
 
+  it('U-BK-BIND-SYMLINK: a local-dev symlinked app dir captures binds resolved to the realpath', async () => {
+    const { calls } = makeCallLog();
+    // Local install symlinks appsDir/<name> → the real project dir, and the
+    // generated compose resolves bind sources against that realpath.
+    const realTarget = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'proj-')));
+    const appDir = path.join(appsDir, 'shop');
+    fs.symlinkSync(realTarget, appDir);
+    fs.writeFileSync(path.join(appDir, '.env'), 'DB_PASSWORD=secret\n');
+    fs.writeFileSync(path.join(appDir, 'app.yaml'), 'name: shop\nversion: 1.0.0\n');
+    const photoReal = path.join(realTarget, 'data', 'photos'); // realpath-based source
+    fs.mkdirSync(photoReal, { recursive: true });
+
+    const installer = makeInstaller(backupSpawn(calls, { volumes: [], bindSources: [photoReal] }));
+    await registry.upsert({
+      name: 'shop', version: '1.0.0', commit: 'a'.repeat(40), githubUrl: '',
+      installPath: appDir, ports: [], sockets: {},
+      installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'stopped', source: 'local', agentDeclaration: null,
+    });
+
+    const job = await waitForJob(installer, installer.backup('shop'));
+    expect(job.status).toBe('completed');
+    const meta = readSidecar('shop', job.backup!.id);
+    // realpath source under the symlink target is still recognized and recorded
+    expect(meta.bindMounts).toEqual(['data/photos']);
+    const flat = joinCalls(calls);
+    expect(flat.some((l) => l.includes('tar czf /backup/bind-0.tar.gz'))).toBe(true);
+    fs.rmSync(realTarget, { recursive: true, force: true });
+  });
+
   it('U-RS-BIND-1: restore wipes+untars each recorded bind dir into a read-write mount', async () => {
     const { calls } = makeCallLog();
     const appDir = path.join(appsDir, 'shop');

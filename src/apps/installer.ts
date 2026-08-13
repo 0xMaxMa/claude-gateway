@@ -938,14 +938,25 @@ export class AppInstaller {
       const parsed = JSON.parse(stdout) as {
         services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
       };
-      const base = appDir.endsWith(path.sep) ? appDir : appDir + path.sep;
+      // Local-dev installs symlink the app dir into appsDir, and the generated
+      // compose resolves bind sources against the symlink's *realpath*. Match a
+      // source that sits under either the symlink path or its target, so those
+      // bind mounts are not wrongly excluded.
+      const bases = [appDir];
+      try {
+        const real = fs.realpathSync(appDir);
+        if (real !== appDir) bases.push(real);
+      } catch {
+        /* app dir unreadable — fall back to the literal path */
+      }
       const rels = new Set<string>();
       for (const svc of Object.values(parsed.services ?? {})) {
         for (const vol of svc.volumes ?? []) {
           if (vol.type !== 'bind' || typeof vol.source !== 'string') continue;
           const abs = path.resolve(appDir, vol.source);
-          if (abs !== appDir && !abs.startsWith(base)) continue; // outside app dir
-          const rel = path.relative(appDir, abs);
+          const matched = bases.find((b) => abs === b || abs.startsWith(b + path.sep));
+          if (!matched) continue; // outside the app dir
+          const rel = path.relative(matched, abs);
           if (rel.length > 0) rels.add(rel.split(path.sep).join('/'));
         }
       }
