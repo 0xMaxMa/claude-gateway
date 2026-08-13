@@ -78,7 +78,7 @@ export class AppsModule implements ToolModule {
       },
       {
         name: 'inspect_app',
-        description: 'Preview an install source WITHOUT installing: fetch and parse the app.yaml and return the required secrets (secretKeys, must be provided) and auto-generated secrets (generatedKeys, filled by the gateway), plus name, version, ports, and warnings. Call this BEFORE install_app for a GitHub URL — such apps have no registry entry, so browse_registry cannot reveal their required secrets. Pass github_url (+ optional commit), registry_app (+ optional version), or local_path.',
+        description: 'Preview an install source WITHOUT installing: fetch and parse the app.yaml and return the required secrets (secretKeys, must be provided) and auto-generated secrets (generatedKeys, filled by the gateway), plus name, version, ports, and warnings. Also returns secretDefaults — defaults for prompt-with-default secrets declared as KEY=!default:<value>: the key is still in secretKeys (prompted/editable) but this default pre-fills the field and is written to .env when left blank. Call this BEFORE install_app for a GitHub URL — such apps have no registry entry, so browse_registry cannot reveal their required secrets. Pass github_url (+ optional commit), registry_app (+ optional version), or local_path.',
         inputSchema: {
           type: 'object',
           properties: {

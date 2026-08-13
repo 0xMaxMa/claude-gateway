@@ -376,6 +376,81 @@ services:
       expect(readEnv(newDir)['GEN_HEX']).toBe(original);
     });
 
+    // ── Prompt-with-default secrets (!default:) ──────────────────────────────
+    function makeDefaultAppDir(dir: string, appName: string, port = 5010): string {
+      const appDir = path.join(dir, appName);
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(appDir, 'app.yaml'),
+        `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - NEXTAUTH_URL=!default:http://localhost:3737
+      - PLAIN_KEY
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+`.trim(),
+        'utf-8',
+      );
+      return appDir;
+    }
+
+    it('writes the declared default to .env when no operator value is supplied', async () => {
+      const appDir = makeDefaultAppDir(srcDir, 'default-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const env = readEnv(appDir);
+      // URL default survives intact — the `:` and `/` are not truncated.
+      expect(env['NEXTAUTH_URL']).toBe('http://localhost:3737');
+      // A bare key with no default still writes an empty value (unchanged).
+      expect(env['PLAIN_KEY']).toBe('');
+    });
+
+    it('lets an operator-supplied value win over the default', async () => {
+      const appDir = makeDefaultAppDir(srcDir, 'default-app', 5011);
+      const installer = makeInstaller();
+      await waitForJob(
+        installer,
+        installer.install({ localPath: appDir, envVars: { NEXTAUTH_URL: 'https://prod.example.com' } }),
+        5000,
+      );
+
+      const env = readEnv(appDir);
+      expect(env['NEXTAUTH_URL']).toBe('https://prod.example.com');
+    });
+
+    it('falls back to the default when the operator value is blank', async () => {
+      const appDir = makeDefaultAppDir(srcDir, 'default-app', 5012);
+      const installer = makeInstaller();
+      await waitForJob(
+        installer,
+        installer.install({ localPath: appDir, envVars: { NEXTAUTH_URL: '' } }),
+        5000,
+      );
+
+      const env = readEnv(appDir);
+      expect(env['NEXTAUTH_URL']).toBe('http://localhost:3737');
+    });
+
+    it('reports a default key in job result secretKeys (still prompted)', async () => {
+      const appDir = makeDefaultAppDir(srcDir, 'default-app', 5013);
+      const installer = makeInstaller();
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const secretKeys = (job.result as { secretKeys: string[] }).secretKeys;
+      expect(secretKeys).toContain('NEXTAUTH_URL');
+    });
+
     it('fails when local_path has no app.yaml', async () => {
       const outsidePath = path.join(tmpDir, 'evil-app');
       fs.mkdirSync(outsidePath);

@@ -65,6 +65,13 @@ export interface InspectResult {
   commit: string;
   secretKeys: string[];
   generatedKeys: GeneratedKey[];
+  /**
+   * Default values for prompted secrets declared with `KEY=!default:<value>`.
+   * Surfaced so install UIs can pre-fill the editable field; keyed by env var
+   * name, only keys with a declared default appear. See
+   * {@link GeneratedCompose.secretDefaults}.
+   */
+  secretDefaults: Record<string, string>;
   ports: ComposePort[];
   agentDeclaration: AgentDeclaration | null;
   warnings: string[];
@@ -251,6 +258,7 @@ export class AppInstaller {
         commit,
         secretKeys: generated.secretKeys,
         generatedKeys: generated.generatedKeys,
+        secretDefaults: generated.secretDefaults,
         ports: generated.ports,
         agentDeclaration: generated.agentDeclaration,
         warnings: generated.warnings,
@@ -1328,7 +1336,10 @@ export class AppInstaller {
   private writeEnvFile(
     appDir: string,
     appName: string,
-    generated: Pick<GeneratedCompose, 'ports' | 'secretKeys' | 'generatedKeys'>,
+    generated: Pick<
+      GeneratedCompose,
+      'ports' | 'secretKeys' | 'generatedKeys' | 'secretDefaults'
+    >,
     envVars: Record<string, string>,
   ): string[] {
     const merged: Record<string, string> = { ...envVars };
@@ -1340,9 +1351,17 @@ export class AppInstaller {
     }
 
     const envLines: string[] = [];
+    const secretDefaults = generated.secretDefaults ?? {};
     for (const key of generated.secretKeys) {
-      const val = (merged[key] ?? '').replace(/[\r\n]/g, '');
-      envLines.push(`${key}=${val}`);
+      // Precedence: operator-supplied value → declared default → empty. An
+      // empty operator value (UI always sends the field, possibly blank) falls
+      // through to the default, matching how generated keys treat '' as unset.
+      const provided = merged[key];
+      const raw =
+        provided !== undefined && provided !== ''
+          ? provided
+          : secretDefaults[key] ?? '';
+      envLines.push(`${key}=${raw.replace(/[\r\n]/g, '')}`);
     }
     const generatedKeySet = new Set(generated.generatedKeys.map((g) => g.key));
     const generatedNames: string[] = [];
