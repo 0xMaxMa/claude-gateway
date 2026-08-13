@@ -164,6 +164,43 @@ export class AppsModule implements ToolModule {
           additionalProperties: false,
         },
       },
+      {
+        name: 'backup_app',
+        description: 'Back up an installed app — a permission-safe snapshot of its Docker named volumes + config (.env/app.yaml) into a single archive. The app is briefly stopped for a consistent snapshot and restarted afterward. Returns a jobId; poll with poll_install_job. Older backups beyond the retention limit are pruned automatically.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'App name to back up' },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'restore_app',
+        description: "Restore an app's volumes + config from a prior backup, then start it on the restored data. Restoring a backup from a different app version is allowed but may warn about schema/migration mismatch. Returns a jobId; poll with poll_install_job. Use list_backups to pick a backup_id.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'App name to restore' },
+            backup_id: { type: 'string', description: 'Backup id to restore (from list_backups)' },
+          },
+          required: ['name', 'backup_id'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'list_backups',
+        description: "List an app's backups, newest first: each entry has id, createdAt, sizeBytes, and appVersion. Use the id with restore_app.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'App name' },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      },
     ];
   }
 
@@ -245,6 +282,25 @@ export class AppsModule implements ToolModule {
       case 'docker_housekeeping': {
         const mode = (args['mode'] as 'report' | 'prune' | undefined) ?? 'report';
         const data = await client.housekeeping(mode);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'backup_app': {
+        const appName = args['name'] as string;
+        const data = await client.backup(appName);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'restore_app': {
+        const appName = args['name'] as string;
+        const backupId = args['backup_id'] as string;
+        const data = await client.restore(appName, backupId);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'list_backups': {
+        const appName = args['name'] as string;
+        const data = await client.listBackups(appName);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

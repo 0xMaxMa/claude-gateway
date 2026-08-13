@@ -47,6 +47,11 @@
       "cleanupHour": 0,
       "cleanupTimezone": "UTC"
     },
+    "appBackup": {
+      "retention": 10,
+      "autoBackupBeforeUninstall": true,
+      "autoBackupBeforeUpdate": true
+    },
     "headless": true,
     "selfHealing": {
       "autoRecover": false

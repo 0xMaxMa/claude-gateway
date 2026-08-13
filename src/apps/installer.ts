@@ -51,6 +51,38 @@ export interface InstallResult {
   agentDeclaration?: { path: string; name: string } | null;
 }
 
+/** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */
+export interface AppBackupConfig {
+  /** Keep the N most recent backups per app; older are pruned. Default 10. */
+  retention?: number;
+  /** Auto-snapshot before uninstall. Default true. */
+  autoBackupBeforeUninstall?: boolean;
+  /** Auto-snapshot before update. Default true. */
+  autoBackupBeforeUpdate?: boolean;
+}
+
+/**
+ * On-disk manifest stored inside every backup archive. `volumes` are the
+ * compose-level (logical) volume names; the actual Docker volume for each is
+ * `<appName>_<logical>`.
+ */
+export interface BackupMetadata {
+  id: string;
+  appName: string;
+  appVersion: string;
+  createdAt: string; // ISO 8601
+  volumes: string[];
+  sizeBytes: number;
+}
+
+/** Summary of one backup, as surfaced by `listBackups` / `GET …/backups`. */
+export interface BackupInfo {
+  id: string;
+  createdAt: string;
+  sizeBytes: number;
+  appVersion: string;
+}
+
 /**
  * Read-only preview of an install source, computed by fetching and parsing the
  * app.yaml BEFORE any install. Surfaces the secrets an operator must supply
@@ -82,6 +114,8 @@ export interface JobState {
   status: 'pending' | 'running' | 'completed' | 'failed';
   logs: string[];
   result?: InstallResult;
+  /** Populated by backup/restore jobs with the affected backup's summary. */
+  backup?: BackupInfo;
   error?: string;
   startedAt: number;
   updatedAt: number;
@@ -152,6 +186,22 @@ type AsyncSpawnFn = (
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
+// Backups live under `<appsDir>/.backups/<app>/`. A dot-prefixed dir here is
+// never mistaken for an installed app (the registry is driven by `apps.json`,
+// not by enumerating the apps directory), and — being a sibling of each app's
+// own dir rather than inside it — the archive survives that app's uninstall,
+// which removes only `<appsDir>/<app>/`.
+const APP_BACKUPS_DIRNAME = '.backups';
+// Default per-app backup ceiling when config omits it. The N most recent are
+// kept; older archives are pruned after each successful backup.
+const DEFAULT_BACKUP_RETENTION = 10;
+// Wall-clock ceiling for a single helper-container tar (backup or restore) of
+// one volume. A few hundred MB tars in seconds; this only bounds a pathological
+// hang so a stuck helper never wedges a backup job forever.
+const VOLUME_TAR_TIMEOUT_MS = 300_000;
+// OCI image used for the throwaway tar helper. Small, ubiquitous, already a
+// transitive dependency of most stacks, so it is almost always cache-warm.
+const BACKUP_HELPER_IMAGE = 'alpine';
 // Per-app ceiling for the boot-time `compose up --wait` during restore. Runs in
 // the background (non-blocking), so this only bounds how long a hung container
 // keeps its child process alive — not the gateway's responsiveness. Shorter than
@@ -171,6 +221,8 @@ const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.
 export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
+  private readonly backupsDir: string;
+  private readonly appBackupConfig: Required<AppBackupConfig>;
   /** Tracks app names currently being installed to prevent concurrent installs of the same name. */
   private readonly installingNames = new Set<string>();
 
@@ -183,8 +235,19 @@ export class AppInstaller {
     private readonly agentManager?: AgentManager,
     private readonly spawnAsync: AsyncSpawnFn = defaultAsyncSpawn,
     private readonly housekeepingConfig: AppHousekeepingConfig = {},
+    appBackupConfig?: AppBackupConfig,
+    backupsDir?: string,
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
+    this.backupsDir = backupsDir ?? path.join(this.appsDir, APP_BACKUPS_DIRNAME);
+    this.appBackupConfig = {
+      retention:
+        appBackupConfig?.retention !== undefined && appBackupConfig.retention >= 0
+          ? Math.floor(appBackupConfig.retention)
+          : DEFAULT_BACKUP_RETENTION,
+      autoBackupBeforeUninstall: appBackupConfig?.autoBackupBeforeUninstall ?? true,
+      autoBackupBeforeUpdate: appBackupConfig?.autoBackupBeforeUpdate ?? true,
+    };
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -394,6 +457,21 @@ export class AppInstaller {
 
     const appDir = entry.installPath;
 
+    // Safety hook: snapshot the app's data before tearing it down, so an
+    // accidental or regretted uninstall has a restore point. Best-effort — a
+    // backup failure must never block the uninstall the operator asked for.
+    if (this.appBackupConfig.autoBackupBeforeUninstall && fs.existsSync(appDir)) {
+      try {
+        await this.performBackup(entry);
+      } catch (err) {
+        console.warn(
+          `[apps] auto-backup before uninstall of "${appName}" failed (continuing): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     // docker compose down --rmi all (graceful fallback if dir is already gone)
     if (fs.existsSync(appDir)) {
       try {
@@ -427,6 +505,371 @@ export class AppInstaller {
     }
 
     await this.registry.remove(appName);
+  }
+
+  // ─── Backup / Restore ───────────────────────────────────────────────────────
+
+  /**
+   * Start an async backup job. Returns jobId immediately; poll {@link getJob}.
+   * A backup is a permission-safe snapshot of the app's Docker named volumes +
+   * config (`.env`/`app.yaml`/compose) into a single archive under
+   * `<backupsDir>/<app>/`. The app is stopped for the snapshot and restarted
+   * afterwards (see {@link performBackup}).
+   */
+  backup(appName: string): string {
+    this.pruneOldJobs();
+    if (this.installingNames.has(appName)) {
+      throw new Error(`App "${appName}" is busy (install/update/backup in progress)`);
+    }
+    this.installingNames.add(appName);
+
+    const jobId = crypto.randomUUID();
+    const job: JobState = {
+      id: jobId,
+      status: 'pending',
+      logs: [],
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.jobs.set(jobId, job);
+
+    void this.runBackup(job, appName)
+      .catch((err: unknown) => this.failJob(job, err instanceof Error ? err.message : String(err)))
+      .finally(() => this.installingNames.delete(appName));
+
+    return jobId;
+  }
+
+  /**
+   * Start an async restore job. Returns jobId immediately; poll {@link getJob}.
+   * Restores the app's volumes + config from a prior backup, then starts it.
+   */
+  restore(appName: string, backupId: string): string {
+    this.pruneOldJobs();
+    if (this.installingNames.has(appName)) {
+      throw new Error(`App "${appName}" is busy (install/update/backup in progress)`);
+    }
+    this.installingNames.add(appName);
+
+    const jobId = crypto.randomUUID();
+    const job: JobState = {
+      id: jobId,
+      status: 'pending',
+      logs: [],
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.jobs.set(jobId, job);
+
+    void this.runRestore(job, appName, backupId)
+      .catch((err: unknown) => this.failJob(job, err instanceof Error ? err.message : String(err)))
+      .finally(() => this.installingNames.delete(appName));
+
+    return jobId;
+  }
+
+  /** List an app's backups, newest first. Reads the sidecar manifests. */
+  listBackups(appName: string): BackupInfo[] {
+    const dir = this.appBackupDir(appName);
+    if (!fs.existsSync(dir)) return [];
+    const infos: BackupInfo[] = [];
+    for (const file of fs.readdirSync(dir)) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const meta = JSON.parse(
+          fs.readFileSync(path.join(dir, file), 'utf-8'),
+        ) as BackupMetadata;
+        // Only surface a backup whose archive is actually present.
+        if (!fs.existsSync(path.join(dir, `${meta.id}.tar.gz`))) continue;
+        infos.push({
+          id: meta.id,
+          createdAt: meta.createdAt,
+          sizeBytes: meta.sizeBytes,
+          appVersion: meta.appVersion,
+        });
+      } catch {
+        /* skip malformed manifest */
+      }
+    }
+    return infos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  /** Delete one backup (archive + sidecar). Idempotent. */
+  deleteBackup(appName: string, backupId: string): void {
+    if (!/^[\w.-]+$/.test(backupId)) throw new Error(`Invalid backup id "${backupId}"`);
+    const dir = this.appBackupDir(appName);
+    for (const ext of ['.tar.gz', '.json']) {
+      const p = path.join(dir, `${backupId}${ext}`);
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  private async runBackup(job: JobState, appName: string): Promise<void> {
+    job.status = 'running';
+    const entry = await this.registry.get(appName);
+    if (!entry) throw new Error(`App "${appName}" is not installed`);
+    const info = await this.performBackup(entry, (m) => this.log(job, m));
+    job.backup = info;
+    job.status = 'completed';
+    job.updatedAt = Date.now();
+  }
+
+  private async runRestore(job: JobState, appName: string, backupId: string): Promise<void> {
+    job.status = 'running';
+    const entry = await this.registry.get(appName);
+    if (!entry) throw new Error(`App "${appName}" is not installed`);
+    const info = await this.performRestore(entry, backupId, (m) => this.log(job, m));
+    job.backup = info;
+    job.status = 'completed';
+    job.updatedAt = Date.now();
+  }
+
+  /**
+   * Core backup routine (shared by the job path and the auto-backup hooks).
+   *
+   * Consistency: a running app is stopped for the snapshot so no writes land
+   * mid-tar, then ALWAYS restarted in a `finally` — a backup that throws never
+   * leaves the app stuck stopped.
+   *
+   * Permission safety: each named volume is tarred inside a throwaway root
+   * container (`docker run … tar czf`), so uid/gid/mode are preserved in the
+   * archive and no host `cp`/`chown`/sudo ever touches the volume data.
+   */
+  private async performBackup(
+    entry: AppEntry,
+    logSink?: (m: string) => void,
+  ): Promise<BackupInfo> {
+    const log = (m: string): void => logSink?.(m);
+    const appName = entry.name;
+    const appDir = entry.installPath;
+    if (!fs.existsSync(appDir)) {
+      throw new Error(`App "${appName}" directory is gone — cannot back up`);
+    }
+
+    const volumes = this.discoverVolumes(appName, appDir);
+    const wasRunning = (await this.queryRuntimeStatus(entry)) === 'running';
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), `bkp-${appName}-`));
+
+    try {
+      if (wasRunning) {
+        log(`Stopping "${appName}" for a consistent snapshot`);
+        this.run(['docker', 'compose', '-p', appName, 'stop'], appDir, 120_000);
+      }
+
+      const volDir = path.join(staging, 'volumes');
+      fs.mkdirSync(volDir, { recursive: true });
+      for (const vol of volumes) {
+        log(`Archiving volume "${vol}"`);
+        this.run(
+          [
+            'docker', 'run', '--rm',
+            '-v', `${appName}_${vol}:/data:ro`,
+            '-v', `${volDir}:/backup`,
+            BACKUP_HELPER_IMAGE,
+            'tar', 'czf', `/backup/${vol}.tar.gz`, '-C', '/data', '.',
+          ],
+          undefined,
+          VOLUME_TAR_TIMEOUT_MS,
+        );
+      }
+
+      // Config (owned by the gateway user, copied on the host).
+      const cfgDir = path.join(staging, 'config');
+      fs.mkdirSync(cfgDir, { recursive: true });
+      for (const f of ['.env', 'app.yaml', 'docker-compose.yml']) {
+        this.copyIfExists(path.join(appDir, f), path.join(cfgDir, f));
+      }
+
+      const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto
+        .randomUUID()
+        .slice(0, 8)}`;
+      const meta: BackupMetadata = {
+        id,
+        appName,
+        appVersion: entry.version,
+        createdAt: new Date().toISOString(),
+        volumes,
+        sizeBytes: 0,
+      };
+      fs.writeFileSync(path.join(staging, 'metadata.json'), JSON.stringify(meta, null, 2));
+
+      const outDir = this.appBackupDir(appName);
+      fs.mkdirSync(outDir, { recursive: true });
+      const archivePath = path.join(outDir, `${id}.tar.gz`);
+      // The gateway host tars the staging tree. Volume tarballs written by the
+      // root helper are world-readable (0644), so this read succeeds without sudo.
+      this.run(['tar', 'czf', archivePath, '-C', staging, '.'], undefined, VOLUME_TAR_TIMEOUT_MS);
+
+      let sizeBytes = 0;
+      try {
+        sizeBytes = fs.statSync(archivePath).size;
+      } catch {
+        /* archive stat failed — leave size 0 */
+      }
+      meta.sizeBytes = sizeBytes;
+      fs.writeFileSync(path.join(outDir, `${id}.json`), JSON.stringify(meta, null, 2));
+
+      this.pruneBackups(appName);
+      log(`Backup "${id}" complete (${sizeBytes} bytes, ${volumes.length} volume(s))`);
+      return { id, createdAt: meta.createdAt, sizeBytes, appVersion: meta.appVersion };
+    } finally {
+      try {
+        this.rmrf(staging);
+      } catch {
+        /* best-effort staging cleanup */
+      }
+      if (wasRunning) {
+        try {
+          log(`Restarting "${appName}"`);
+          this.composeUp(appName, appDir);
+        } catch (restartErr) {
+          log(
+            `WARNING: failed to restart "${appName}" after backup: ${
+              restartErr instanceof Error ? restartErr.message : String(restartErr)
+            }`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Core restore routine. Extracts the archive, wipes+repopulates each volume
+   * via the root helper (preserving inner ownership), restores `.env`, and
+   * starts the app on the restored data. Restoring across a differing
+   * appVersion is allowed but warns (possible schema/migration mismatch).
+   */
+  private async performRestore(
+    entry: AppEntry,
+    backupId: string,
+    logSink?: (m: string) => void,
+  ): Promise<BackupInfo> {
+    const log = (m: string): void => logSink?.(m);
+    if (!/^[\w.-]+$/.test(backupId)) throw new Error(`Invalid backup id "${backupId}"`);
+    const appName = entry.name;
+    const appDir = entry.installPath;
+    const archivePath = path.join(this.appBackupDir(appName), `${backupId}.tar.gz`);
+    if (!fs.existsSync(archivePath)) {
+      throw new Error(`Backup "${backupId}" not found for app "${appName}"`);
+    }
+
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), `rst-${appName}-`));
+    try {
+      this.run(['tar', 'xzf', archivePath, '-C', staging], undefined, VOLUME_TAR_TIMEOUT_MS);
+      const meta = JSON.parse(
+        fs.readFileSync(path.join(staging, 'metadata.json'), 'utf-8'),
+      ) as BackupMetadata;
+
+      if (meta.appVersion !== entry.version) {
+        log(
+          `WARNING: restoring backup from version "${meta.appVersion}" onto installed "${entry.version}" — possible schema/migration mismatch`,
+        );
+      }
+
+      log(`Stopping "${appName}" before restore`);
+      try {
+        this.run(['docker', 'compose', '-p', appName, 'stop'], appDir, 120_000);
+      } catch {
+        /* may already be stopped */
+      }
+
+      const volDir = path.join(staging, 'volumes');
+      for (const vol of meta.volumes) {
+        const tarball = path.join(volDir, `${vol}.tar.gz`);
+        if (!fs.existsSync(tarball)) {
+          log(`WARNING: volume "${vol}" missing from backup — skipping`);
+          continue;
+        }
+        log(`Restoring volume "${vol}"`);
+        this.run(
+          [
+            'docker', 'run', '--rm',
+            '-v', `${appName}_${vol}:/data`,
+            '-v', `${volDir}:/backup`,
+            BACKUP_HELPER_IMAGE,
+            'sh', '-c',
+            // Wipe the live volume, then untar the snapshot (uid/gid preserved).
+            `rm -rf /data/* /data/..?* 2>/dev/null; tar xzf /backup/${vol}.tar.gz -C /data`,
+          ],
+          undefined,
+          VOLUME_TAR_TIMEOUT_MS,
+        );
+      }
+
+      // Restore config that carries generated secrets, so the app boots with the
+      // same credentials the volume data was created under.
+      this.copyIfExists(path.join(staging, 'config', '.env'), path.join(appDir, '.env'));
+
+      log(`Starting "${appName}" on restored data`);
+      this.composeUp(appName, appDir);
+      await this.registry.updateStatus(appName, 'running').catch(() => {});
+
+      log(`Restore of "${backupId}" complete`);
+      return {
+        id: meta.id,
+        createdAt: meta.createdAt,
+        sizeBytes: meta.sizeBytes,
+        appVersion: meta.appVersion,
+      };
+    } finally {
+      try {
+        this.rmrf(staging);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  /**
+   * List an app's compose-level named volumes (the top-level `volumes:` keys).
+   * Returns [] when the app declares none or the query fails — a config-only
+   * backup is still useful (it captures `.env`).
+   */
+  private discoverVolumes(appName: string, appDir: string): string[] {
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'config', '--volumes'],
+        appDir,
+        30_000,
+      );
+      return stdout
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Keep the N most recent backups per app (by createdAt); prune older. */
+  private pruneBackups(appName: string): void {
+    const retention = this.appBackupConfig.retention;
+    if (retention <= 0) return; // 0 = unbounded
+    const all = this.listBackups(appName); // newest first
+    for (const stale of all.slice(retention)) {
+      this.deleteBackup(appName, stale.id);
+    }
+  }
+
+  private appBackupDir(appName: string): string {
+    // Never trust the name reaching the filesystem: an unvalidated value (e.g.
+    // a `%2F`-smuggled `../../x` from a route param) would let path.join escape
+    // the backups tree. Every backup op funnels through here, so this one guard
+    // covers backup/restore/list/delete.
+    if (!APP_NAME_RE.test(appName)) throw new Error(`Invalid app name "${appName}"`);
+    return path.join(this.backupsDir, appName);
+  }
+
+  private copyIfExists(src: string, dest: string): void {
+    try {
+      if (fs.existsSync(src)) fs.copyFileSync(src, dest);
+    } catch {
+      /* best-effort — a missing/unreadable optional file is not fatal */
+    }
   }
 
   async startStopRestart(
@@ -924,6 +1367,22 @@ export class AppInstaller {
     }
 
     this.log(job, `Updating ${appName} ${entry.commit.slice(0, 8)} → ${target.newCommit.slice(0, 8)}`);
+
+    // Safety hook: snapshot before the update so a bad new image can be rolled
+    // back. Best-effort — a backup failure must not block the update.
+    if (this.appBackupConfig.autoBackupBeforeUpdate) {
+      try {
+        const info = await this.performBackup(entry, (m) => this.log(job, m));
+        this.log(job, `Pre-update backup "${info.id}" created`);
+      } catch (err) {
+        this.log(
+          job,
+          `WARNING: pre-update backup failed (continuing): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${crypto.randomUUID()}`);
     try {

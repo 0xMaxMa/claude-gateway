@@ -195,6 +195,7 @@ export interface GatewayConfig {
       cleanupTimezone?: string;  // IANA timezone, default "UTC"
     };
     /**
+    /**
      * App-store Docker housekeeping (issue #302). Best-effort reclaim of the
      * build cache and dangling `<none>` images left behind by every app
      * install/update. Each toggle defaults on with a conservative time window;
@@ -211,6 +212,18 @@ export interface GatewayConfig {
       buildCacheMaxAgeHours?: number;
       /** Prune dangling `<none>` images with no container (safe subset — never `-a`). Default true. */
       danglingImagePrune?: boolean;
+    };
+    /**
+     * Per-app backup/restore policy. A backup is a permission-safe snapshot of
+     * an app's Docker named volumes + config (`.env`/`app.yaml`) into a single
+     * archive; restore returns exact inner ownership via helper-container tar.
+     * Absent = defaults below (feature on with a 10-backup ceiling and safety
+     * hooks enabled). Set the flags to false to opt out of the auto-hooks.
+     */
+    appBackup?: {
+      retention?: number;                 // keep N most recent per app, default 10
+      autoBackupBeforeUninstall?: boolean; // default true
+      autoBackupBeforeUpdate?: boolean;    // default true
     };
   };
   agents: AgentConfig[];
