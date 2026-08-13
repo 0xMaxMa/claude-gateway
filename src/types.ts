@@ -217,11 +217,15 @@ export interface GatewayConfig {
      * Per-app backup/restore policy. A backup is a permission-safe snapshot of
      * an app's Docker named volumes + config (`.env`/`app.yaml`) into a single
      * archive; restore returns exact inner ownership via helper-container tar.
-     * Absent = defaults below (feature on with a 10-backup ceiling and safety
-     * hooks enabled). Set the flags to false to opt out of the auto-hooks.
+     * Absent = defaults below (feature on with a 3-backup ceiling, a 30-day age
+     * cap, and safety hooks enabled). Set the flags to false to opt out of the
+     * auto-hooks.
      */
     appBackup?: {
-      retention?: number;                 // keep N most recent per app, default 10
+      retention?: number;                 // keep N most recent per app, default 3 (0 = unbounded)
+      maxAgeDays?: number;                // prune backups older than N days, default 30 (0 = disabled)
+      cleanupHour?: number;               // 0-23 daily prune hour, default 0
+      cleanupTimezone?: string;           // IANA timezone for cleanupHour, default "UTC"
       autoBackupBeforeUninstall?: boolean; // default true
       autoBackupBeforeUpdate?: boolean;    // default true
     };

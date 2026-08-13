@@ -16,6 +16,7 @@ import {
   AgentDeclaration,
 } from './compose-generator';
 import { AgentManager } from './agent-manager';
+import { msUntilNextHour } from '../history/cleanup';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,8 +54,14 @@ export interface InstallResult {
 
 /** Per-app backup policy (mirrors `gateway.appBackup` in the gateway config). */
 export interface AppBackupConfig {
-  /** Keep the N most recent backups per app; older are pruned. Default 10. */
+  /** Keep the N most recent backups per app; older are pruned. Default 3. 0 = unbounded. */
   retention?: number;
+  /** Prune backups older than N days. Default 30. 0 = disabled. */
+  maxAgeDays?: number;
+  /** Hour (0-23, in cleanupTimezone) the daily backup prune runs. Default 0. */
+  cleanupHour?: number;
+  /** IANA timezone for cleanupHour. Default "UTC". */
+  cleanupTimezone?: string;
   /** Auto-snapshot before uninstall. Default true. */
   autoBackupBeforeUninstall?: boolean;
   /** Auto-snapshot before update. Default true. */
@@ -199,8 +206,12 @@ const DEFAULT_APPS_DIR = path.join(os.homedir(), '.claude-gateway', 'apps');
 // which removes only `<appsDir>/<app>/`.
 const APP_BACKUPS_DIRNAME = '.backups';
 // Default per-app backup ceiling when config omits it. The N most recent are
-// kept; older archives are pruned after each successful backup.
-const DEFAULT_BACKUP_RETENTION = 10;
+// kept; older archives are pruned after each successful backup and by the daily
+// scheduler.
+const DEFAULT_BACKUP_RETENTION = 3;
+// Default age ceiling (days) when config omits it. Backups older than this are
+// pruned regardless of count. 0 disables age pruning.
+const DEFAULT_BACKUP_MAX_AGE_DAYS = 30;
 // Wall-clock ceiling for a single helper-container tar (backup or restore) of
 // one volume. A few hundred MB tars in seconds; this only bounds a pathological
 // hang so a stuck helper never wedges a backup job forever.
@@ -219,6 +230,22 @@ const RESTORE_COMPOSE_TIMEOUT_MS = 180_000;
 const RESTORE_MAX_CONCURRENCY = 4;
 const COMMIT_RE = /^[0-9a-f]{40}$/;
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/**
+ * Validate an IANA timezone from config before it reaches `Intl.DateTimeFormat`.
+ * An invalid string would otherwise throw a RangeError inside the daily-cleanup
+ * scheduler at boot — config is untrusted input, so a typo must degrade to UTC,
+ * never crash the gateway.
+ */
+function isValidTimezone(tz: string | undefined): tz is string {
+  if (typeof tz !== 'string' || tz.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Disallow '..' in owner/repo segments — prevents path traversal via edge-case git URL parsing.
 const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(\.git)?$/;
 
@@ -251,6 +278,18 @@ export class AppInstaller {
         appBackupConfig?.retention !== undefined && appBackupConfig.retention >= 0
           ? Math.floor(appBackupConfig.retention)
           : DEFAULT_BACKUP_RETENTION,
+      maxAgeDays:
+        appBackupConfig?.maxAgeDays !== undefined && appBackupConfig.maxAgeDays >= 0
+          ? Math.floor(appBackupConfig.maxAgeDays)
+          : DEFAULT_BACKUP_MAX_AGE_DAYS,
+      cleanupHour:
+        appBackupConfig?.cleanupHour !== undefined &&
+        Number.isInteger(appBackupConfig.cleanupHour) &&
+        appBackupConfig.cleanupHour >= 0 &&
+        appBackupConfig.cleanupHour <= 23
+          ? appBackupConfig.cleanupHour
+          : 0,
+      cleanupTimezone: isValidTimezone(appBackupConfig?.cleanupTimezone) ? appBackupConfig!.cleanupTimezone! : 'UTC',
       autoBackupBeforeUninstall: appBackupConfig?.autoBackupBeforeUninstall ?? true,
       autoBackupBeforeUpdate: appBackupConfig?.autoBackupBeforeUpdate ?? true,
     };
@@ -966,14 +1005,85 @@ export class AppInstaller {
     }
   }
 
-  /** Keep the N most recent backups per app (by createdAt); prune older. */
-  private pruneBackups(appName: string): void {
-    const retention = this.appBackupConfig.retention;
-    if (retention <= 0) return; // 0 = unbounded
+  /**
+   * Prune an app's backups by the union policy (issue #310): a backup is
+   * deleted when it is beyond the retention count **OR** older than
+   * `maxAgeDays` — whichever matches. `retention === 0` disables the count cap;
+   * `maxAgeDays === 0` disables the age cap. Runs after each successful backup
+   * and from the daily scheduler.
+   */
+  private pruneBackups(appName: string, now = Date.now()): void {
+    const { retention, maxAgeDays } = this.appBackupConfig;
+    if (retention <= 0 && maxAgeDays <= 0) return; // both caps disabled
     const all = this.listBackups(appName); // newest first
-    for (const stale of all.slice(retention)) {
-      this.deleteBackup(appName, stale.id);
+    const doomed = new Set<string>();
+    // Count cap: everything past the N newest.
+    if (retention > 0) {
+      for (const stale of all.slice(retention)) doomed.add(stale.id);
     }
+    // Age cap: anything older than the cutoff (union — dedupe via the set).
+    if (maxAgeDays > 0) {
+      const cutoff = now - maxAgeDays * 24 * 60 * 60 * 1000;
+      for (const b of all) {
+        const created = Date.parse(b.createdAt);
+        if (!Number.isNaN(created) && created < cutoff) doomed.add(b.id);
+      }
+    }
+    for (const id of doomed) this.deleteBackup(appName, id);
+  }
+
+  /**
+   * Prune **every** app's backups by the union policy. Enumerates the backup
+   * subdirs under `.backups/` (skipping anything that is not a valid app name),
+   * so it also reaches apps that are no longer being backed up. Best-effort:
+   * a failure on one app never aborts the sweep.
+   */
+  cleanupAllBackups(now = Date.now()): void {
+    const { retention, maxAgeDays } = this.appBackupConfig;
+    if (retention <= 0 && maxAgeDays <= 0) return; // both caps disabled
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(this.backupsDir, { withFileTypes: true });
+    } catch {
+      return; // no backups dir yet — nothing to prune
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (!APP_NAME_RE.test(entry.name)) continue; // skip stray dirs
+      try {
+        this.pruneBackups(entry.name, now);
+      } catch {
+        /* best-effort — one bad app must not abort the sweep */
+      }
+    }
+  }
+
+  /**
+   * Start the daily backup-cleanup scheduler (issue #310). Fires once per day at
+   * `cleanupHour` in `cleanupTimezone`, pruning all apps by the union policy.
+   * Returns a cancel function. No-op (returns a noop canceller) when both caps
+   * are disabled. The timer is `unref`'d so it never holds the event loop open.
+   */
+  startBackupCleanup(): () => void {
+    const { retention, maxAgeDays, cleanupHour, cleanupTimezone } = this.appBackupConfig;
+    if (retention <= 0 && maxAgeDays <= 0) return () => {};
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      const delay = msUntilNextHour(cleanupHour, cleanupTimezone);
+      timer = setTimeout(() => {
+        try {
+          this.cleanupAllBackups();
+        } catch {
+          /* best-effort */
+        }
+        schedule(); // reschedule for the next day
+      }, delay);
+      if (typeof (timer as NodeJS.Timeout).unref === 'function') {
+        (timer as NodeJS.Timeout).unref();
+      }
+    };
+    schedule();
+    return () => clearTimeout(timer);
   }
 
   private appBackupDir(appName: string): string {
