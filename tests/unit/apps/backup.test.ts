@@ -515,4 +515,110 @@ describe('AppInstaller — backup/restore', () => {
     expect(flat.some((l) => l.includes('bind-0.tar.gz'))).toBe(false); // no bind restore attempted
     expect(flat.some((l) => l.includes('tar xzf /backup/data.tar.gz'))).toBe(true); // volume still restored
   });
+
+  // ── Retention age/union cleanup (issue #310) ────────────────────────────────
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  /** Write a backup manifest + archive straight to disk with a chosen createdAt. */
+  function seedBackup(app: string, id: string, createdAt: string): void {
+    const dir = path.join(backupsDir, app);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${id}.tar.gz`), 'ARCHIVE');
+    fs.writeFileSync(
+      path.join(dir, `${id}.json`),
+      JSON.stringify({ id, appName: app, appVersion: '1.0.0', createdAt, volumes: [], sizeBytes: 8 }),
+    );
+  }
+
+  function backupIds(installer: AppInstaller, app: string): string[] {
+    return installer.listBackups(app).map((b) => b.id);
+  }
+
+  it('U-AGE-DEFAULT: retention defaults to 3 and maxAgeDays to 30', () => {
+    const installer = makeInstaller(jest.fn());
+    // 5 recent backups (all within 30 days) → count cap 3 keeps the 3 newest.
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    for (let i = 0; i < 5; i++) {
+      seedBackup('shop', `b${i}`, new Date(now - i * DAY_MS).toISOString());
+    }
+    installer.cleanupAllBackups(now);
+    expect(backupIds(installer, 'shop').sort()).toEqual(['b0', 'b1', 'b2']);
+  });
+
+  it('U-AGE-1: prunes backups older than maxAgeDays even under the count cap', () => {
+    const installer = makeInstaller(jest.fn(), { retention: 10, maxAgeDays: 30 });
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    seedBackup('shop', 'fresh', new Date(now - 5 * DAY_MS).toISOString());
+    seedBackup('shop', 'stale', new Date(now - 45 * DAY_MS).toISOString());
+    installer.cleanupAllBackups(now);
+    // retention=10 keeps all by count, but the 45-day-old one is age-expired.
+    expect(backupIds(installer, 'shop')).toEqual(['fresh']);
+  });
+
+  it('U-AGE-2: union — a backup beyond count OR older than maxAge is deleted, once', () => {
+    const installer = makeInstaller(jest.fn(), { retention: 2, maxAgeDays: 30 });
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    // newest→oldest: n0,n1 (fresh, within count) | n2 (fresh but past count) | old (past count AND age)
+    seedBackup('shop', 'n0', new Date(now - 1 * DAY_MS).toISOString());
+    seedBackup('shop', 'n1', new Date(now - 2 * DAY_MS).toISOString());
+    seedBackup('shop', 'n2', new Date(now - 3 * DAY_MS).toISOString()); // count overflow only
+    seedBackup('shop', 'old', new Date(now - 60 * DAY_MS).toISOString()); // count + age
+    installer.cleanupAllBackups(now);
+    // count cap keeps n0,n1; n2 dropped by count; old dropped by both (deleted once).
+    expect(backupIds(installer, 'shop').sort()).toEqual(['n0', 'n1']);
+    // Archive + manifest both gone for the doomed ids (no partial/double delete).
+    expect(fs.existsSync(path.join(backupsDir, 'shop', 'old.tar.gz'))).toBe(false);
+    expect(fs.existsSync(path.join(backupsDir, 'shop', 'old.json'))).toBe(false);
+  });
+
+  it('U-AGE-3: maxAgeDays=0 disables age pruning (count-only preserved)', () => {
+    const installer = makeInstaller(jest.fn(), { retention: 10, maxAgeDays: 0 });
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    seedBackup('shop', 'ancient', new Date(now - 400 * DAY_MS).toISOString());
+    installer.cleanupAllBackups(now);
+    // Age cap off, count cap not exceeded → the ancient backup survives.
+    expect(backupIds(installer, 'shop')).toEqual(['ancient']);
+  });
+
+  it('U-AGE-4: daily sweep prunes every app dir under .backups/', () => {
+    const installer = makeInstaller(jest.fn(), { retention: 1, maxAgeDays: 0 });
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    for (const app of ['shop', 'blog']) {
+      seedBackup(app, 'keep', new Date(now - 1 * DAY_MS).toISOString());
+      seedBackup(app, 'drop', new Date(now - 2 * DAY_MS).toISOString());
+    }
+    // A stray non-app-name dir must be skipped, not throw.
+    fs.mkdirSync(path.join(backupsDir, 'Not_An_App'), { recursive: true });
+    installer.cleanupAllBackups(now);
+    expect(backupIds(installer, 'shop')).toEqual(['keep']);
+    expect(backupIds(installer, 'blog')).toEqual(['keep']);
+  });
+
+  it('U-AGE-TZ: an invalid cleanupTimezone degrades to UTC instead of crashing the scheduler', () => {
+    // A typo'd IANA zone would make Intl.DateTimeFormat throw at boot; the guard
+    // must fall back to UTC so startBackupCleanup never throws.
+    const installer = makeInstaller(jest.fn(), {
+      retention: 3,
+      maxAgeDays: 30,
+      cleanupTimezone: 'Not/A_Zone',
+    });
+    let cancel: () => void = () => {};
+    expect(() => {
+      cancel = installer.startBackupCleanup();
+    }).not.toThrow();
+    cancel();
+  });
+
+  it('U-AGE-5: startBackupCleanup returns a no-op canceller when both caps are disabled', () => {
+    const installer = makeInstaller(jest.fn(), { retention: 0, maxAgeDays: 0 });
+    const now = Date.parse('2026-06-01T00:00:00.000Z');
+    seedBackup('shop', 'a', new Date(now - 999 * DAY_MS).toISOString());
+    const cancel = installer.startBackupCleanup();
+    expect(typeof cancel).toBe('function');
+    cancel(); // must not throw
+    // Nothing scheduled/pruned: both caps off → sweep is a no-op.
+    installer.cleanupAllBackups(now);
+    expect(backupIds(installer, 'shop')).toEqual(['a']);
+  });
 });

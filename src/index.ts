@@ -592,6 +592,11 @@ async function main(): Promise<void> {
     config.gateway?.appBackup,
   );
 
+  // Daily backup-cleanup scheduler (issue #310): prunes every app's backups by
+  // the retention-count + max-age union policy. Timer is unref'd, so it never
+  // keeps the process alive.
+  appInstaller.startBackupCleanup();
+
   // Start gateway router
   const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
   await router.start(PORT);

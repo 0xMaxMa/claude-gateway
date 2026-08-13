@@ -167,6 +167,8 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `DELETE` | `/api/v1/apps/:name/backups/:id` | Admin | Delete one backup |
 | `GET` | `/app/:name/:portName/*` | None | Reverse proxy to installed app |
 
+Backup retention (`gateway.appBackup`): backups are pruned by the **union** of a count cap and an age cap — a backup is removed when it exceeds `retention` (keep N newest per app, default **3**, `0` = unbounded) **or** is older than `maxAgeDays` (default **30**, `0` = disabled). Pruning runs after each successful backup and once per day via a scheduler at `cleanupHour` (0-23, default `0`) in `cleanupTimezone` (IANA, default `"UTC"`).
+
 ### Cron API
 
 | Method | Path | Auth | Description |
