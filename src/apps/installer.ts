@@ -943,7 +943,7 @@ export class AppInstaller {
       for (const svc of Object.values(parsed.services ?? {})) {
         for (const vol of svc.volumes ?? []) {
           if (vol.type !== 'bind' || typeof vol.source !== 'string') continue;
-          const abs = path.resolve(vol.source);
+          const abs = path.resolve(appDir, vol.source);
           if (abs !== appDir && !abs.startsWith(base)) continue; // outside app dir
           const rel = path.relative(appDir, abs);
           if (rel.length > 0) rels.add(rel.split(path.sep).join('/'));
