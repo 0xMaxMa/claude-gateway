@@ -161,6 +161,10 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → `jobId` |
 | `POST` | `/api/v1/apps/:name/reconfigure` | Admin | Start async env/host-port reconfigure (keeps volumes) → `jobId` |
 | `POST` | `/api/v1/apps/housekeeping` | Admin | Docker build-cache & orphan reclaim report (`mode:"report"`) or safe prune (`mode:"prune"`) |
+| `POST` | `/api/v1/apps/:name/backup` | Admin | Start async volume+config snapshot → `jobId` |
+| `POST` | `/api/v1/apps/:name/restore` | Admin | Restore volumes+config from a backup → `jobId` |
+| `GET` | `/api/v1/apps/:name/backups` | Key | List backups (newest first) |
+| `DELETE` | `/api/v1/apps/:name/backups/:id` | Admin | Delete one backup |
 | `GET` | `/app/:name/:portName/*` | None | Reverse proxy to installed app |
 
 ### Cron API

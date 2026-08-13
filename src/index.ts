@@ -589,6 +589,7 @@ async function main(): Promise<void> {
     agentManager,
     undefined,
     config.gateway.appHousekeeping,
+    config.gateway?.appBackup,
   );
 
   // Start gateway router

@@ -714,4 +714,68 @@ services:
       expect(res.status).toBe(400);
     });
   });
+
+  describe('backup/restore routes', () => {
+    it('POST /backup requires admin', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/backup')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('POST /backup 404s for an unknown app', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/nope/backup')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('POST /restore rejects a missing backupId with 400', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/restore')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it('POST /restore 404s for an unknown app', async () => {
+      const res = await request(app)
+        .post('/api/v1/apps/nope/restore')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ backupId: 'bk1' });
+      expect(res.status).toBe(404);
+    });
+
+    it('GET /backups returns an array (empty when none)', async () => {
+      await registry.upsert(makeEntry());
+      const res = await request(app)
+        .get('/api/v1/apps/test-app/backups')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('GET /backups 404s for an unknown app', async () => {
+      const res = await request(app)
+        .get('/api/v1/apps/nope/backups')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(404);
+    });
+
+    it('DELETE /backups/:id requires admin', async () => {
+      const res = await request(app)
+        .delete('/api/v1/apps/test-app/backups/bk1')
+        .set('Authorization', `Bearer ${READ_KEY.key}`);
+      expect(res.status).toBe(403);
+    });
+
+    it('DELETE /backups/:id rejects a path-traversal id with 400', async () => {
+      const res = await request(app)
+        .delete('/api/v1/apps/test-app/backups/..%2f..%2fetc')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(400);
+    });
+  });
 });

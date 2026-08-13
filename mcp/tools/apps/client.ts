@@ -83,4 +83,16 @@ export class AppsClient {
   async housekeeping(mode: 'report' | 'prune'): Promise<unknown> {
     return this.request('POST', '/housekeeping', { mode });
   }
+
+  async backup(name: string): Promise<unknown> {
+    return this.request('POST', `/${encodeURIComponent(name)}/backup`);
+  }
+
+  async restore(name: string, backupId: string): Promise<unknown> {
+    return this.request('POST', `/${encodeURIComponent(name)}/restore`, { backupId });
+  }
+
+  async listBackups(name: string): Promise<unknown> {
+    return this.request('GET', `/${encodeURIComponent(name)}/backups`);
+  }
 }

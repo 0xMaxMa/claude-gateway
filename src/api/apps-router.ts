@@ -417,5 +417,82 @@ export function createAppsRouter(
     }
   });
 
+  /** POST /api/v1/apps/:name/backup — async backup → { jobId } */
+  router.post('/v1/apps/:name/backup', async (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required to back up apps' });
+      return;
+    }
+    try {
+      const entry = await registry.get(req.params.name);
+      if (!entry) {
+        res.status(404).json({ error: `App "${req.params.name}" not found` });
+        return;
+      }
+      const jobId = installer.backup(req.params.name);
+      res.status(202).json({ jobId });
+    } catch (err) {
+      const msg = (err as Error).message;
+      res.status(msg.includes('busy') ? 409 : 500).json({ error: msg });
+    }
+  });
+
+  /** POST /api/v1/apps/:name/restore { backupId } — async restore → { jobId } */
+  router.post('/v1/apps/:name/restore', async (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required to restore apps' });
+      return;
+    }
+    const backupId = (req.body as Record<string, unknown>)?.backupId;
+    if (typeof backupId !== 'string' || backupId.length === 0) {
+      res.status(400).json({ error: 'backupId is required' });
+      return;
+    }
+    try {
+      const entry = await registry.get(req.params.name);
+      if (!entry) {
+        res.status(404).json({ error: `App "${req.params.name}" not found` });
+        return;
+      }
+      const jobId = installer.restore(req.params.name, backupId);
+      res.status(202).json({ jobId });
+    } catch (err) {
+      const msg = (err as Error).message;
+      res.status(msg.includes('busy') ? 409 : 500).json({ error: msg });
+    }
+  });
+
+  /** GET /api/v1/apps/:name/backups — list backups, newest first */
+  router.get('/v1/apps/:name/backups', async (req: Request, res: Response) => {
+    try {
+      const entry = await registry.get(req.params.name);
+      if (!entry) {
+        res.status(404).json({ error: `App "${req.params.name}" not found` });
+        return;
+      }
+      res.json(installer.listBackups(req.params.name));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /** DELETE /api/v1/apps/:name/backups/:id — remove one backup */
+  router.delete('/v1/apps/:name/backups/:id', async (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required to delete backups' });
+      return;
+    }
+    try {
+      installer.deleteBackup(req.params.name, req.params.id);
+      res.json({ deleted: true, name: req.params.name, backupId: req.params.id });
+    } catch (err) {
+      const msg = (err as Error).message;
+      res.status(msg.includes('Invalid') ? 400 : 500).json({ error: msg });
+    }
+  });
+
   return router;
 }
