@@ -1176,8 +1176,18 @@ export class AppInstaller {
     }
 
     // ── Write .env ────────────────────────────────────────────────────────
+    // Carry over an existing .env before writing (local reinstall). A local
+    // (symlinked) install can re-point at a source tree that still holds a
+    // prior .env alongside persisted data (e.g. a postgres pgdata bind mount).
+    // writeEnvFile treats an already-present generated secret as pinned, so
+    // reusing the existing .env keeps DB_PASSWORD/etc. stable and lets the app
+    // reconnect to that data instead of failing auth. A fresh registry/GitHub
+    // install has no .env in appDir, so readEnvFile returns {} and secrets are
+    // still generated. Operator-supplied envVars still win (spread order),
+    // mirroring the reconfigure path.
     this.log(job, 'Writing .env');
-    const generatedNames = this.writeEnvFile(appDir, appName, generated, options.envVars ?? {});
+    const mergedEnv = { ...this.readEnvFile(appDir), ...(options.envVars ?? {}) };
+    const generatedNames = this.writeEnvFile(appDir, appName, generated, mergedEnv);
     if (generatedNames.length > 0) {
       this.log(job, `Generated secrets: ${generatedNames.join(', ')}`);
     }

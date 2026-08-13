@@ -376,6 +376,47 @@ services:
       expect(readEnv(newDir)['GEN_HEX']).toBe(original);
     });
 
+    it('reinstall reuses a generated secret already present in the app dir .env', async () => {
+      // A local (symlinked) reinstall can re-point at a source tree that still
+      // holds a prior .env alongside persisted data (e.g. a postgres pgdata bind
+      // mount). If the install rotated the generated secret it would no longer
+      // match the password baked into that data and the app would fail auth.
+      // The install path must reuse an already-present .env, like reconfigure.
+      const appDir = makeGenAppDir(srcDir, 'gen-reinstall');
+      // Seed the .env a previous install left behind in the source tree.
+      fs.writeFileSync(
+        path.join(appDir, '.env'),
+        'GEN_HEX=pinned-from-prior-install\nGEN_URLSAFE=prior-urlsafe\n',
+        'utf-8',
+      );
+
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const env = readEnv(appDir);
+      expect(env['GEN_HEX']).toBe('pinned-from-prior-install');
+      expect(env['GEN_URLSAFE']).toBe('prior-urlsafe');
+    });
+
+    it('operator env_var still overrides a generated secret already in .env', async () => {
+      // Precedence must stay operator-supplied → existing .env → generate.
+      const appDir = makeGenAppDir(srcDir, 'gen-reinstall-override');
+      fs.writeFileSync(
+        path.join(appDir, '.env'),
+        'GEN_HEX=stale-value\n',
+        'utf-8',
+      );
+
+      const installer = makeInstaller();
+      await waitForJob(
+        installer,
+        installer.install({ localPath: appDir, envVars: { GEN_HEX: 'operator-wins' } }),
+        5000,
+      );
+
+      expect(readEnv(appDir)['GEN_HEX']).toBe('operator-wins');
+    });
+
     // ── Prompt-with-default secrets (!default:) ──────────────────────────────
     function makeDefaultAppDir(dir: string, appName: string, port = 5010): string {
       const appDir = path.join(dir, appName);
