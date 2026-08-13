@@ -160,6 +160,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/apps/:name/version` | Key | Check installed vs latest version |
 | `POST` | `/api/v1/apps/:name/update` | Admin | Start async update with rollback → `jobId` |
 | `POST` | `/api/v1/apps/:name/reconfigure` | Admin | Start async env/host-port reconfigure (keeps volumes) → `jobId` |
+| `POST` | `/api/v1/apps/housekeeping` | Admin | Docker build-cache & orphan reclaim report (`mode:"report"`) or safe prune (`mode:"prune"`) |
 | `GET` | `/app/:name/:portName/*` | None | Reverse proxy to installed app |
 
 ### Cron API
@@ -3153,6 +3154,80 @@ Poll the returned `jobId` with `GET /api/v1/apps/jobs/:jobId` to track progress.
 | 403 | Not an admin key |
 | 404 | App not installed |
 | 409 | App is already being installed / updated / reconfigured |
+
+---
+
+### POST /api/v1/apps/housekeeping
+
+Reclaim leaked Docker **build cache** and **dangling images** left behind by app install/update (issue #302). The gateway builds/pulls images on every install and update but never reclaimed the build cache or orphaned layers those operations leave, so a long-lived host leaks steadily. This endpoint surfaces and — on request — reclaims that junk, **safely**.
+
+**Body:** `{ "mode": "report" | "prune" }` (default `"report"`).
+
+- **`report`** — read-only. Returns the reclaimable build cache, the dangling-image count, and the orphaned-volume names. Mutates nothing.
+- **`prune`** — executes **only the safe reclaim**: `docker builder prune -f --filter until=<window>h` (time-filtered, so a concurrent build's fresh layers survive) and `docker image prune -f` (dangling `<none>` layers only — **never `-a`**). Returns which reclaims ran plus a fresh report.
+
+**Safety floor (always enforced, regardless of config):**
+
+- Never `docker system prune -a`, never `docker image/builder prune -a`.
+- **Never** an automatic `docker volume prune` — orphaned volumes can hold real app data, so they are **reported but never auto-deleted**.
+- Never touches another app's tagged images.
+
+```bash
+# Report only
+curl -s -X POST -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' -d '{"mode":"report"}' \
+  http://localhost:10850/api/v1/apps/housekeeping | jq
+
+# Safe prune (build cache + dangling images only)
+curl -s -X POST -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' -d '{"mode":"prune"}' \
+  http://localhost:10850/api/v1/apps/housekeeping | jq
+```
+
+**Report response:**
+
+```json
+{
+  "mode": "report",
+  "report": {
+    "buildCacheReclaimable": "1.457GB",
+    "danglingImageCount": 0,
+    "orphanVolumes": ["orphan_vol_a", "orphan_vol_b"]
+  }
+}
+```
+
+**Prune response:**
+
+```json
+{
+  "mode": "prune",
+  "pruned": { "buildCache": true, "danglingImages": true },
+  "report": { "buildCacheReclaimable": "0B", "danglingImageCount": 0, "orphanVolumes": ["orphan_vol_a"] }
+}
+```
+
+The same reclaim runs **automatically** after every successful install/update (best-effort — a prune failure never fails the parent operation). It is gated by `gateway.appHousekeeping` in the config:
+
+```jsonc
+"gateway": {
+  "appHousekeeping": {
+    "buildCachePrune": true,        // default on
+    "buildCacheMaxAgeHours": 168,   // 7-day window
+    "danglingImagePrune": true      // safe subset (no -a)
+    // volumes are report-only — no auto-delete key on purpose
+  }
+}
+```
+
+Set all toggles to `false` to make the automatic path issue **zero** prune calls. (The manual `prune` mode above is an explicit operator action and always runs the safe reclaim.)
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | `mode` is neither `report` nor `prune` |
+| 403 | Not an admin key |
 
 ---
 

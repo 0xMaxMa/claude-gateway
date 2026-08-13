@@ -1894,6 +1894,156 @@ services:
       expect(mapContainerStatesToAppStatus([{ state: 'created', exitCode: 0 }])).toBe('stopped');
     });
   });
+
+  // ─── Docker housekeeping (#302) ─────────────────────────────────────────────
+  describe('Docker housekeeping (#302)', () => {
+    /** A spawn mock that records every call and always succeeds. */
+    function recordingSpawn() {
+      return jest.fn((_cmd: string, _args: string[], _opts?: object) => ({
+        stdout: '',
+        stderr: '',
+        status: 0,
+      }));
+    }
+
+    /** All docker arg-arrays recorded by a spawn mock. */
+    function dockerArgs(spy: ReturnType<typeof recordingSpawn>): string[][] {
+      return spy.mock.calls
+        .filter((c) => c[0] === 'docker')
+        .map((c) => c[1] as string[]);
+    }
+
+    function makeHkInstaller(
+      spawnFn: ReturnType<typeof recordingSpawn>,
+      hk?: ConstructorParameters<typeof AppInstaller>[7],
+    ) {
+      return new AppInstaller(
+        registry,
+        new RegistryClient(),
+        callbacks,
+        spawnFn,
+        appsDir,
+        undefined,
+        successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+        hk,
+      );
+    }
+
+    // Regression (proven-red): the current code issues NO prune after a build.
+    it('prunes build cache + dangling images after a successful install (default config)', async () => {
+      const appDir = makeAppDir(srcDir, 'hk-app');
+      const spawn = recordingSpawn();
+      const installer = makeHkInstaller(spawn);
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect(job.status).toBe('completed');
+
+      const args = dockerArgs(spawn);
+      // build-cache prune, time-filtered to the default 168h window
+      expect(args).toContainEqual(['builder', 'prune', '-f', '--filter', 'until=168h']);
+      // dangling-image prune — the SAFE subset, never `-a`
+      expect(args).toContainEqual(['image', 'prune', '-f']);
+    });
+
+    // Safety floor — the destructive flags must appear NOWHERE.
+    it('never issues -a prune, system prune, or any volume prune', async () => {
+      const appDir = makeAppDir(srcDir, 'hk-safe');
+      const spawn = recordingSpawn();
+      const installer = makeHkInstaller(spawn);
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const args = dockerArgs(spawn);
+      const has = (pred: (a: string[]) => boolean) => args.some(pred);
+      // no `prune -a` anywhere (builder or image)
+      expect(has((a) => a.includes('prune') && a.includes('-a'))).toBe(false);
+      // no `docker system prune`
+      expect(has((a) => a.includes('system') && a.includes('prune'))).toBe(false);
+      // no automatic `docker volume prune`
+      expect(has((a) => a.includes('volume') && a.includes('prune'))).toBe(false);
+    });
+
+    it('honors the configured build-cache window', async () => {
+      const appDir = makeAppDir(srcDir, 'hk-window');
+      const spawn = recordingSpawn();
+      const installer = makeHkInstaller(spawn, { buildCacheMaxAgeHours: 24 });
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const args = dockerArgs(spawn);
+      expect(args).toContainEqual(['builder', 'prune', '-f', '--filter', 'until=24h']);
+    });
+
+    it('issues zero prune calls when the feature is fully disabled', async () => {
+      const appDir = makeAppDir(srcDir, 'hk-off');
+      const spawn = recordingSpawn();
+      const installer = makeHkInstaller(spawn, {
+        buildCachePrune: false,
+        danglingImagePrune: false,
+      });
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect(job.status).toBe('completed');
+
+      const args = dockerArgs(spawn);
+      expect(args.some((a) => a.includes('prune'))).toBe(false);
+    });
+
+    it('is best-effort: a prune failure never fails the install', async () => {
+      const appDir = makeAppDir(srcDir, 'hk-besteffort');
+      // Fail specifically on any `prune` command; everything else succeeds.
+      const spawn = jest.fn((_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('prune')) {
+          return { stdout: '', stderr: 'mocked prune failure', status: 1 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeHkInstaller(spawn as unknown as ReturnType<typeof recordingSpawn>);
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect(job.status).toBe('completed');
+      // the prune WAS attempted (proving the best-effort path executed)
+      expect(dockerArgs(spawn as unknown as ReturnType<typeof recordingSpawn>)
+        .some((a) => a.includes('prune'))).toBe(true);
+    });
+
+    it('housekeepingReport() returns a read-only report and issues no prune', () => {
+      const spawn = jest.fn((_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('df')) {
+          return { stdout: 'Images\t0B\nBuild Cache\t1.457GB\nLocal Volumes\t170MB\n', stderr: '', status: 0 };
+        }
+        if (args.includes('volume') && args.includes('ls')) {
+          return { stdout: 'orphan_a\norphan_b\n', stderr: '', status: 0 };
+        }
+        if (args.includes('image') && args.includes('ls')) {
+          return { stdout: 'sha_1\nsha_2\nsha_3\n', stderr: '', status: 0 };
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeHkInstaller(spawn as unknown as ReturnType<typeof recordingSpawn>);
+
+      const report = installer.housekeepingReport();
+      expect(report.buildCacheReclaimable).toBe('1.457GB');
+      expect(report.danglingImageCount).toBe(3);
+      expect(report.orphanVolumes).toEqual(['orphan_a', 'orphan_b']);
+
+      // report is read-only — no prune of any kind
+      const args = dockerArgs(spawn as unknown as ReturnType<typeof recordingSpawn>);
+      expect(args.some((a) => a.includes('prune'))).toBe(false);
+    });
+
+    it('housekeepingPrune() runs the safe reclaim only (build cache + dangling)', () => {
+      const spawn = recordingSpawn();
+      const installer = makeHkInstaller(spawn);
+
+      const result = installer.housekeepingPrune();
+      expect(result.mode).toBe('prune');
+      expect(result.pruned).toEqual({ buildCache: true, danglingImages: true });
+
+      const args = dockerArgs(spawn);
+      expect(args).toContainEqual(['builder', 'prune', '-f', '--filter', 'until=168h']);
+      expect(args).toContainEqual(['image', 'prune', '-f']);
+      // safety floor holds for the manual path too
+      expect(args.some((a) => a.includes('prune') && a.includes('-a'))).toBe(false);
+      expect(args.some((a) => a.includes('system') && a.includes('prune'))).toBe(false);
+      expect(args.some((a) => a.includes('volume') && a.includes('prune'))).toBe(false);
+    });
+  });
 });
 
 /** Minimal AppEntry for seeding a collision peer in the registry. */

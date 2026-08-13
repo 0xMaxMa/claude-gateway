@@ -387,5 +387,35 @@ export function createAppsRouter(
     }
   });
 
+  /**
+   * POST /api/v1/apps/housekeeping — Docker build-cache & orphan housekeeping (issue #302).
+   * Body: `{ mode?: 'report' | 'prune' }` (default 'report').
+   *   - report: read-only — reclaimable build cache, dangling image count, orphan volumes.
+   *   - prune:  executes ONLY the safe reclaim (build cache + dangling images). It never
+   *             removes another app's tagged images, and never deletes a volume.
+   * Orphan volumes are reported but NEVER auto-deleted. Admin-gated.
+   */
+  router.post('/v1/apps/housekeeping', (req: Request, res: Response) => {
+    const authed = req as AuthedRequest;
+    if (!isAdmin(authed.apiKey)) {
+      res.status(403).json({ error: 'Admin access required for housekeeping' });
+      return;
+    }
+    const mode = ((req.body as Record<string, unknown> | undefined)?.mode as string) ?? 'report';
+    if (mode !== 'report' && mode !== 'prune') {
+      res.status(400).json({ error: `Invalid mode "${mode}" — expected "report" or "prune"` });
+      return;
+    }
+    try {
+      if (mode === 'prune') {
+        res.json(installer.housekeepingPrune());
+      } else {
+        res.json({ mode: 'report', report: installer.housekeepingReport() });
+      }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   return router;
 }

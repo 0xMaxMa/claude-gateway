@@ -87,6 +87,36 @@ export interface JobState {
   updatedAt: number;
 }
 
+/**
+ * Docker housekeeping toggles (issue #302). Mirrors
+ * `GatewayConfig['gateway']['appHousekeeping']`; all fields optional so an
+ * absent config resolves to the conservative defaults in
+ * {@link AppInstaller.resolveHousekeeping}.
+ */
+export interface AppHousekeepingConfig {
+  buildCachePrune?: boolean;
+  buildCacheMaxAgeHours?: number;
+  danglingImagePrune?: boolean;
+}
+
+/** Read-only reclaim report (issue #302). Volumes are reported, never deleted. */
+export interface HousekeepingReport {
+  /** Human-readable reclaimable build cache from `docker system df` (e.g. "1.457GB"); '' if unknown. */
+  buildCacheReclaimable: string;
+  /** Count of dangling `<none>` images with no container. */
+  danglingImageCount: number;
+  /** Orphaned volume names (LINKS=0). Report-only — NEVER auto-deleted. */
+  orphanVolumes: string[];
+}
+
+/** Result of a manual housekeeping call. */
+export interface HousekeepingResult {
+  mode: 'report' | 'prune';
+  /** Which safe reclaims actually ran (prune mode only). */
+  pruned: { buildCache: boolean; danglingImages: boolean };
+  report: HousekeepingReport;
+}
+
 export interface InstallerCallbacks {
   registerRoutes(appName: string, ports: ComposePort[]): void;
   deregisterRoutes(appName: string): void;
@@ -152,6 +182,7 @@ export class AppInstaller {
     appsDir?: string,
     private readonly agentManager?: AgentManager,
     private readonly spawnAsync: AsyncSpawnFn = defaultAsyncSpawn,
+    private readonly housekeepingConfig: AppHousekeepingConfig = {},
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
   }
@@ -806,6 +837,10 @@ export class AppInstaller {
     await this.registry.updateStatus(appName, 'running');
     this.log(job, 'Containers healthy');
 
+    // ── Housekeeping: reclaim leaked build cache + dangling images ────────
+    // Best-effort, config-gated, after the new stack is up (issue #302).
+    this.pruneAfterBuild(job);
+
     // ── Register proxy routes ─────────────────────────────────────────────
     this.callbacks.registerRoutes(appName, generated.ports);
 
@@ -960,6 +995,9 @@ export class AppInstaller {
       // we can reclaim exactly those images after the update — without a
       // `compose down` that would collide with the new stack (issue #283).
       const oldImageIds = this.captureComposeImageIds(appName, entry.installPath);
+      // Also capture the app's declared image refs (repo:tag) so a superseded
+      // *pulled* tag can be reclaimed after the update (issue #302).
+      const oldImageRefs = this.captureComposeImageRefs(appName, entry.installPath);
 
       // ── Bring old containers down (keeps images for rollback) ─────────────
       this.log(job, 'Stopping old containers');
@@ -999,6 +1037,7 @@ export class AppInstaller {
       // below never removes an image the new containers depend on (e.g. when the
       // old and new versions happen to share a base/image).
       const newImageIds = this.captureComposeImageIds(appName, tmpDir);
+      const newImageRefs = this.captureComposeImageRefs(appName, tmpDir);
 
       // ── Swap dirs ─────────────────────────────────────────────────────────
       // Swap in place at the recorded install path — NOT path.join(appsDir, appName).
@@ -1055,7 +1094,15 @@ export class AppInstaller {
           this.run(['docker', 'image', 'rm', imageId], os.tmpdir(), 60_000);
         } catch { /* still in use or already gone — non-fatal */ }
       }
+      // Reclaim a superseded *pulled* tag the image-ID reclaim above can't
+      // (a pulled image with >1 repo tag isn't removable by ID) — only this
+      // app's own prior refs the new stack no longer uses (issue #302).
+      this.reclaimSupersededTags(job, oldImageRefs, newImageRefs);
       this.safeRmrf(oldBackupDir, job, 'old backup dir');
+
+      // ── Housekeeping: reclaim leaked build cache + dangling images ────────
+      // Best-effort, config-gated, after the image reclaim (issue #302).
+      this.pruneAfterBuild(job);
 
       // ── Build result ──────────────────────────────────────────────────────
       const proxyUrls: Record<string, string> = {};
@@ -1691,6 +1738,179 @@ export class AppInstaller {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Image references (repo:tag) an app's compose file declares, e.g.
+   * "ghcr.io/x/monitor:1.1". Used to reclaim a superseded *pulled* tag on
+   * update — a tag bump the image-ID reclaim misses, because a pulled image
+   * carrying more than one repo tag cannot be removed by ID (issue #302).
+   * Best-effort — returns [] on any error.
+   */
+  private captureComposeImageRefs(appName: string, dir: string): string[] {
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'config', '--images'],
+        dir,
+        15_000,
+      );
+      return [...new Set(
+        stdout.trim().split('\n').map((s) => s.trim()).filter(Boolean),
+      )];
+    } catch {
+      return [];
+    }
+  }
+
+  // ─── Docker housekeeping (issue #302) ───────────────────────────────────────
+
+  /** Resolve the housekeeping toggles against their conservative defaults. */
+  private resolveHousekeeping(): {
+    buildCachePrune: boolean;
+    buildCacheMaxAgeHours: number;
+    danglingImagePrune: boolean;
+  } {
+    const hk = this.housekeepingConfig ?? {};
+    return {
+      buildCachePrune: hk.buildCachePrune ?? true,
+      buildCacheMaxAgeHours: hk.buildCacheMaxAgeHours ?? 168,
+      danglingImagePrune: hk.danglingImagePrune ?? true,
+    };
+  }
+
+  /**
+   * Best-effort Docker housekeeping after a successful build (install + update).
+   * Reclaims ONLY provably-unreferenced junk:
+   *   - build cache older than the configured window — time-filtered on purpose
+   *     so a concurrent build's fresh layers are never evicted;
+   *   - dangling `<none>` images with no container (safe by definition).
+   * Gated by config (all toggles off ⇒ no prune calls). Every prune is wrapped
+   * so a failure NEVER fails the parent install/update. Enforces the safety
+   * floor: no `-a`, no `system prune`, no volume prune (issue #302).
+   */
+  private pruneAfterBuild(job: JobState): void {
+    const hk = this.resolveHousekeeping();
+    if (hk.buildCachePrune) {
+      try {
+        this.run(
+          ['docker', 'builder', 'prune', '-f', '--filter', `until=${hk.buildCacheMaxAgeHours}h`],
+          os.tmpdir(),
+          120_000,
+        );
+        this.log(job, `Build cache pruned (older than ${hk.buildCacheMaxAgeHours}h)`);
+      } catch (err) {
+        this.log(job, `Build-cache prune skipped (non-fatal): ${(err as Error).message}`);
+      }
+    }
+    if (hk.danglingImagePrune) {
+      try {
+        // `image prune -f` (NEVER `-a`) — removes only untagged <none> layers
+        // with no container, so tagged images of other stopped apps survive.
+        this.run(['docker', 'image', 'prune', '-f'], os.tmpdir(), 120_000);
+        this.log(job, 'Dangling images pruned');
+      } catch (err) {
+        this.log(job, `Dangling-image prune skipped (non-fatal): ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /**
+   * Reclaim this app's own superseded pulled tags after an update (issue #302).
+   * The image-ID reclaim misses a pulled-tag bump (e.g. monitor:1.1 → :1.2.0):
+   * a pulled image with more than one repo tag can't be removed by ID. Remove
+   * exactly the app's prior refs that the NEW stack no longer references.
+   * `image rm <ref>` fails safely (and is caught) when a container still uses
+   * the image, so an in-use image is never yanked. Only this app's own tags are
+   * ever touched — never a blanket prune.
+   */
+  private reclaimSupersededTags(
+    job: JobState,
+    oldImageRefs: string[],
+    newImageRefs: string[],
+  ): void {
+    const newRefSet = new Set(newImageRefs);
+    for (const ref of oldImageRefs) {
+      if (newRefSet.has(ref)) continue; // still used by new stack — keep
+      try {
+        this.run(['docker', 'image', 'rm', ref], os.tmpdir(), 60_000);
+        this.log(job, `Reclaimed superseded image tag ${ref}`);
+      } catch {
+        /* in use / already gone — non-fatal */
+      }
+    }
+  }
+
+  /** Read-only reclaim report (issue #302). Best-effort; never mutates state. */
+  housekeepingReport(): HousekeepingReport {
+    return this.buildHousekeepingReport();
+  }
+
+  /**
+   * Execute the SAFE reclaim (build cache + dangling images only) and return a
+   * fresh report. This is an explicit operator action, so it runs regardless of
+   * the auto-path config toggles — but it still honors the fixed safety floor:
+   * never `-a`, never `system prune`, never a volume/auto delete. The build-cache
+   * window uses the configured value (default 168h).
+   */
+  housekeepingPrune(): HousekeepingResult {
+    const hk = this.resolveHousekeeping();
+    const pruned = { buildCache: false, danglingImages: false };
+    try {
+      this.run(
+        ['docker', 'builder', 'prune', '-f', '--filter', `until=${hk.buildCacheMaxAgeHours}h`],
+        os.tmpdir(),
+        120_000,
+      );
+      pruned.buildCache = true;
+    } catch {
+      /* best-effort */
+    }
+    try {
+      this.run(['docker', 'image', 'prune', '-f'], os.tmpdir(), 120_000);
+      pruned.danglingImages = true;
+    } catch {
+      /* best-effort */
+    }
+    return { mode: 'prune', pruned, report: this.buildHousekeepingReport() };
+  }
+
+  private buildHousekeepingReport(): HousekeepingReport {
+    return {
+      buildCacheReclaimable: this.readBuildCacheReclaimable(),
+      danglingImageCount: this.splitLines(
+        this.safeRunStdout(['docker', 'image', 'ls', '--filter', 'dangling=true', '--quiet']),
+      ).length,
+      orphanVolumes: this.splitLines(
+        this.safeRunStdout(['docker', 'volume', 'ls', '--filter', 'dangling=true', '--quiet']),
+      ),
+    };
+  }
+
+  /** `docker` stdout, or '' on any error (report helpers must never throw). */
+  private safeRunStdout(args: string[], timeoutMs = 30_000): string {
+    try {
+      return this.run(args, os.tmpdir(), timeoutMs).stdout;
+    } catch {
+      return '';
+    }
+  }
+
+  private splitLines(s: string): string[] {
+    return s.trim().split('\n').map((x) => x.trim()).filter(Boolean);
+  }
+
+  /** Reclaimable build-cache size from the `docker system df` "Build Cache" row. */
+  private readBuildCacheReclaimable(): string {
+    const out = this.safeRunStdout([
+      'docker', 'system', 'df', '--format', '{{.Type}}\t{{.Reclaimable}}',
+    ]);
+    for (const line of this.splitLines(out)) {
+      const tab = line.indexOf('\t');
+      if (tab < 0) continue;
+      const type = line.slice(0, tab).trim().toLowerCase();
+      if (type.includes('build cache')) return line.slice(tab + 1).trim();
+    }
+    return '';
   }
 
   private run(

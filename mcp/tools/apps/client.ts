@@ -79,4 +79,8 @@ export class AppsClient {
   async startStop(name: string, action: 'start' | 'stop' | 'restart'): Promise<unknown> {
     return this.request('POST', `/${encodeURIComponent(name)}/${action}`);
   }
+
+  async housekeeping(mode: 'report' | 'prune'): Promise<unknown> {
+    return this.request('POST', '/housekeeping', { mode });
+  }
 }

@@ -194,6 +194,24 @@ export interface GatewayConfig {
       cleanupHour?: number;      // 0-23, default 0
       cleanupTimezone?: string;  // IANA timezone, default "UTC"
     };
+    /**
+     * App-store Docker housekeeping (issue #302). Best-effort reclaim of the
+     * build cache and dangling `<none>` images left behind by every app
+     * install/update. Each toggle defaults on with a conservative time window;
+     * set all toggles off to make the feature issue zero prune calls. There is
+     * deliberately NO volume auto-delete toggle — orphaned volumes can hold real
+     * app data and are report-only. The safety floor is fixed regardless of
+     * config: never `system prune`, never `image/builder prune -a`, never an
+     * automatic volume prune.
+     */
+    appHousekeeping?: {
+      /** Prune build cache older than the window after a successful build. Default true. */
+      buildCachePrune?: boolean;
+      /** Age window (hours) for the build-cache prune — only frees cache older than this, so a concurrent build's fresh layers survive. Default 168 (7d). */
+      buildCacheMaxAgeHours?: number;
+      /** Prune dangling `<none>` images with no container (safe subset — never `-a`). Default true. */
+      danglingImagePrune?: boolean;
+    };
   };
   agents: AgentConfig[];
 }

@@ -149,6 +149,21 @@ export class AppsModule implements ToolModule {
           additionalProperties: false,
         },
       },
+      {
+        name: 'docker_housekeeping',
+        description: 'Reclaim leaked Docker build cache and dangling images left behind by app install/update. mode "report" (default) returns a read-only reclaim report: reclaimable build cache, dangling image count, and orphan volume names. mode "prune" executes ONLY the safe reclaim (build cache older than the configured window + dangling <none> images) — it NEVER removes another app\'s tagged images, and NEVER deletes a volume. Orphan volumes are reported but never auto-deleted (they can hold real app data).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mode: {
+              type: 'string',
+              enum: ['report', 'prune'],
+              description: 'report (default) = read-only reclaim report; prune = execute the safe reclaim (build cache + dangling images only)',
+            },
+          },
+          additionalProperties: false,
+        },
+      },
     ];
   }
 
@@ -224,6 +239,12 @@ export class AppsModule implements ToolModule {
         const appName = args['name'] as string;
         const action = args['action'] as 'start' | 'stop' | 'restart';
         const data = await client.startStop(appName, action);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+
+      case 'docker_housekeeping': {
+        const mode = (args['mode'] as 'report' | 'prune' | undefined) ?? 'report';
+        const data = await client.housekeeping(mode);
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 

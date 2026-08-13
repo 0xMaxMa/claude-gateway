@@ -587,6 +587,8 @@ async function main(): Promise<void> {
     undefined,
     undefined,
     agentManager,
+    undefined,
+    config.gateway.appHousekeeping,
   );
 
   // Start gateway router
