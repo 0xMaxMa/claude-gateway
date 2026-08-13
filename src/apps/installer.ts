@@ -72,6 +72,12 @@ export interface BackupMetadata {
   appVersion: string;
   createdAt: string; // ISO 8601
   volumes: string[];
+  /**
+   * App-dir-relative bind-mount source directories captured in this backup
+   * (e.g. `data/photos`, `postgres/pgdata`). Optional for backward
+   * compatibility with backups taken before bind-mount capture existed.
+   */
+  bindMounts?: string[];
   sizeBytes: number;
 }
 
@@ -651,6 +657,7 @@ export class AppInstaller {
     }
 
     const volumes = this.discoverVolumes(appName, appDir);
+    const bindMounts = this.discoverBindMounts(appName, appDir);
     const wasRunning = (await this.queryRuntimeStatus(entry)) === 'running';
     const staging = fs.mkdtempSync(path.join(os.tmpdir(), `bkp-${appName}-`));
 
@@ -677,6 +684,34 @@ export class AppInstaller {
         );
       }
 
+      // Bind-mount data dirs under the app dir (not Docker named volumes).
+      // Archive each with the same root-helper tar so ownership (e.g. the
+      // postgres uid) survives without host-side cp/sudo. Indexed filenames
+      // avoid collisions between paths that flatten to the same name.
+      const bindDir = path.join(staging, 'binds');
+      fs.mkdirSync(bindDir, { recursive: true });
+      const capturedBinds: string[] = [];
+      for (const rel of bindMounts) {
+        const abs = path.join(appDir, rel);
+        if (!fs.existsSync(abs)) {
+          log(`Bind mount "${rel}" missing on disk — skipping`);
+          continue;
+        }
+        log(`Archiving bind mount "${rel}"`);
+        this.run(
+          [
+            'docker', 'run', '--rm',
+            '-v', `${abs}:/data:ro`,
+            '-v', `${bindDir}:/backup`,
+            BACKUP_HELPER_IMAGE,
+            'tar', 'czf', `/backup/bind-${capturedBinds.length}.tar.gz`, '-C', '/data', '.',
+          ],
+          undefined,
+          VOLUME_TAR_TIMEOUT_MS,
+        );
+        capturedBinds.push(rel);
+      }
+
       // Config (owned by the gateway user, copied on the host).
       const cfgDir = path.join(staging, 'config');
       fs.mkdirSync(cfgDir, { recursive: true });
@@ -693,6 +728,7 @@ export class AppInstaller {
         appVersion: entry.version,
         createdAt: new Date().toISOString(),
         volumes,
+        bindMounts: capturedBinds,
         sizeBytes: 0,
       };
       fs.writeFileSync(path.join(staging, 'metadata.json'), JSON.stringify(meta, null, 2));
@@ -714,7 +750,10 @@ export class AppInstaller {
       fs.writeFileSync(path.join(outDir, `${id}.json`), JSON.stringify(meta, null, 2));
 
       this.pruneBackups(appName);
-      log(`Backup "${id}" complete (${sizeBytes} bytes, ${volumes.length} volume(s))`);
+      log(
+        `Backup "${id}" complete (${sizeBytes} bytes, ${volumes.length} volume(s), ` +
+          `${capturedBinds.length} bind mount(s))`,
+      );
       return { id, createdAt: meta.createdAt, sizeBytes, appVersion: meta.appVersion };
     } finally {
       try {
@@ -800,6 +839,39 @@ export class AppInstaller {
         );
       }
 
+      // Restore bind-mount data dirs under the app dir. Indexed filenames match
+      // performBackup's capture order. Each restored path is re-checked to stay
+      // under the app dir (defense-in-depth against a tampered metadata path).
+      const bindDir = path.join(staging, 'binds');
+      const bindMounts = meta.bindMounts ?? [];
+      bindMounts.forEach((rel, i) => {
+        const abs = path.resolve(appDir, rel);
+        const base = appDir.endsWith(path.sep) ? appDir : appDir + path.sep;
+        if (abs !== appDir && !abs.startsWith(base)) {
+          log(`WARNING: bind mount "${rel}" escapes the app dir — skipping`);
+          return;
+        }
+        const tarball = path.join(bindDir, `bind-${i}.tar.gz`);
+        if (!fs.existsSync(tarball)) {
+          log(`WARNING: bind mount "${rel}" missing from backup — skipping`);
+          return;
+        }
+        log(`Restoring bind mount "${rel}"`);
+        this.run(
+          [
+            'docker', 'run', '--rm',
+            '-v', `${abs}:/data`,
+            '-v', `${bindDir}:/backup`,
+            BACKUP_HELPER_IMAGE,
+            'sh', '-c',
+            // Wipe the live bind dir, then untar the snapshot (uid/gid preserved).
+            `rm -rf /data/* /data/..?* 2>/dev/null; tar xzf /backup/bind-${i}.tar.gz -C /data`,
+          ],
+          undefined,
+          VOLUME_TAR_TIMEOUT_MS,
+        );
+      });
+
       // Restore config that carries generated secrets, so the app boots with the
       // same credentials the volume data was created under.
       this.copyIfExists(path.join(staging, 'config', '.env'), path.join(appDir, '.env'));
@@ -840,6 +912,55 @@ export class AppInstaller {
         .split('\n')
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Discover bind-mount source directories that live **under the app dir**
+   * (e.g. `./data/photos` → `data/photos`). These hold app-owned data that is
+   * not a Docker named volume, so {@link discoverVolumes} never reports them —
+   * yet they are deleted on uninstall and must be captured in a backup.
+   *
+   * Returns app-dir-relative POSIX paths, deduped and sorted. Bind mounts whose
+   * source resolves outside the app dir (shared host resources such as a
+   * read-only `~/.claude/projects`) are intentionally excluded. Best-effort:
+   * returns `[]` on any failure, mirroring {@link discoverVolumes}.
+   */
+  private discoverBindMounts(appName: string, appDir: string): string[] {
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'config', '--format', 'json'],
+        appDir,
+        30_000,
+      );
+      const parsed = JSON.parse(stdout) as {
+        services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
+      };
+      // Local-dev installs symlink the app dir into appsDir, and the generated
+      // compose resolves bind sources against the symlink's *realpath*. Match a
+      // source that sits under either the symlink path or its target, so those
+      // bind mounts are not wrongly excluded.
+      const bases = [appDir];
+      try {
+        const real = fs.realpathSync(appDir);
+        if (real !== appDir) bases.push(real);
+      } catch {
+        /* app dir unreadable — fall back to the literal path */
+      }
+      const rels = new Set<string>();
+      for (const svc of Object.values(parsed.services ?? {})) {
+        for (const vol of svc.volumes ?? []) {
+          if (vol.type !== 'bind' || typeof vol.source !== 'string') continue;
+          const abs = path.resolve(appDir, vol.source);
+          const matched = bases.find((b) => abs === b || abs.startsWith(b + path.sep));
+          if (!matched) continue; // outside the app dir
+          const rel = path.relative(matched, abs);
+          if (rel.length > 0) rels.add(rel.split(path.sep).join('/'));
+        }
+      }
+      return Array.from(rels).sort();
     } catch {
       return [];
     }

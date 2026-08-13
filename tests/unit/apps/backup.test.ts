@@ -46,7 +46,12 @@ function makeCallLog() {
 
 function backupSpawn(
   calls: string[][],
-  opts: { volumes?: string[]; failVolumeTar?: boolean; restoreMeta?: Record<string, unknown> } = {},
+  opts: {
+    volumes?: string[];
+    failVolumeTar?: boolean;
+    restoreMeta?: Record<string, unknown>;
+    bindSources?: string[]; // absolute bind-mount sources for `config --format json`
+  } = {},
 ) {
   const volumes = opts.volumes ?? ['data'];
   return jest.fn((cmd: string, args: string[], _o?: object) => {
@@ -55,6 +60,14 @@ function backupSpawn(
     // docker compose -p <app> config --volumes
     if (args.includes('config') && args.includes('--volumes')) {
       return { stdout: volumes.join('\n') + '\n', stderr: '', status: 0 };
+    }
+    // docker compose -p <app> config --format json  → bind-mount discovery
+    if (args.includes('config') && args.includes('json')) {
+      const services: Record<string, { volumes: Array<{ type: string; source: string }> }> = {};
+      (opts.bindSources ?? []).forEach((src, i) => {
+        services[`svc${i}`] = { volumes: [{ type: 'bind', source: src }] };
+      });
+      return { stdout: JSON.stringify({ services }), stderr: '', status: 0 };
     }
     // Volume helper backup: docker run … tar czf /backup/<vol>.tar.gz …
     const isVolumeHelperTar =
@@ -80,6 +93,13 @@ function backupSpawn(
       fs.writeFileSync(path.join(staging, 'metadata.json'), JSON.stringify(meta));
       for (const v of (meta.volumes as string[] | undefined) ?? volumes) {
         fs.writeFileSync(path.join(staging, 'volumes', `${v}.tar.gz`), 'V');
+      }
+      const binds = (meta.bindMounts as string[] | undefined) ?? [];
+      if (binds.length > 0) {
+        fs.mkdirSync(path.join(staging, 'binds'), { recursive: true });
+        binds.forEach((_rel, i) => {
+          fs.writeFileSync(path.join(staging, 'binds', `bind-${i}.tar.gz`), 'B');
+        });
       }
       fs.writeFileSync(path.join(staging, 'config', '.env'), 'SECRET=restored');
       return { stdout: '', stderr: '', status: 0 };
@@ -320,5 +340,179 @@ describe('AppInstaller — backup/restore', () => {
     await installer.uninstall('shop');
     const flat = joinCalls(calls);
     expect(flat.some((l) => l.includes('tar czf /backup/'))).toBe(false);
+  });
+
+  // ── Bind-mount capture (data dirs under the app dir, not named volumes) ──────
+
+  function readSidecar(app: string, id: string): Record<string, unknown> {
+    return JSON.parse(fs.readFileSync(path.join(backupsDir, app, `${id}.json`), 'utf-8'));
+  }
+
+  it('U-BK-BIND-1: backup helper-tars each bind-mount dir under the app dir and records them', async () => {
+    const { calls } = makeCallLog();
+    const appDir = path.join(appsDir, 'shop');
+    const photoSrc = path.join(appDir, 'data', 'photos');
+    const pgSrc = path.join(appDir, 'postgres', 'pgdata');
+    const installer = makeInstaller(
+      backupSpawn(calls, { volumes: [], bindSources: [photoSrc, pgSrc] }),
+    );
+    await seedApp('shop', 'stopped');
+    fs.mkdirSync(photoSrc, { recursive: true });
+    fs.mkdirSync(pgSrc, { recursive: true });
+
+    const job = await waitForJob(installer, installer.backup('shop'));
+    expect(job.status).toBe('completed');
+
+    const flat = joinCalls(calls);
+    // read-only helper mount of the ABSOLUTE bind source, tar into indexed file
+    expect(flat.some((l) => l.includes(`-v ${photoSrc}:/data:ro`) && l.includes('tar czf /backup/bind-0.tar.gz'))).toBe(true);
+    expect(flat.some((l) => l.includes(`-v ${pgSrc}:/data:ro`) && l.includes('tar czf /backup/bind-1.tar.gz'))).toBe(true);
+    // relative paths recorded in metadata (sorted)
+    const meta = readSidecar('shop', job.backup!.id);
+    expect(meta.bindMounts).toEqual(['data/photos', 'postgres/pgdata']);
+  });
+
+  it('U-BK-BIND-2: bind mounts OUTSIDE the app dir are excluded', async () => {
+    const { calls } = makeCallLog();
+    const appDir = path.join(appsDir, 'shop');
+    const inside = path.join(appDir, 'data', 'photos');
+    const outside = path.join(tmpDir, 'shared', 'claude-projects'); // sibling, not under appDir
+    const installer = makeInstaller(
+      backupSpawn(calls, { volumes: [], bindSources: [inside, outside] }),
+    );
+    await seedApp('shop', 'stopped');
+    fs.mkdirSync(inside, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+
+    const job = await waitForJob(installer, installer.backup('shop'));
+    expect(job.status).toBe('completed');
+
+    const flat = joinCalls(calls);
+    expect(flat.some((l) => l.includes(`-v ${inside}:/data:ro`))).toBe(true);
+    expect(flat.some((l) => l.includes(outside))).toBe(false); // never touched
+    const meta = readSidecar('shop', job.backup!.id);
+    expect(meta.bindMounts).toEqual(['data/photos']);
+  });
+
+  it('U-BK-BIND-3: a declared bind dir missing on disk is skipped, not fatal', async () => {
+    const { calls } = makeCallLog();
+    const appDir = path.join(appsDir, 'shop');
+    const present = path.join(appDir, 'data', 'photos');
+    const missing = path.join(appDir, 'postgres', 'pgdata'); // never created on disk
+    const installer = makeInstaller(
+      backupSpawn(calls, { volumes: [], bindSources: [present, missing] }),
+    );
+    await seedApp('shop', 'stopped');
+    fs.mkdirSync(present, { recursive: true });
+
+    const job = await waitForJob(installer, installer.backup('shop'));
+    expect(job.status).toBe('completed');
+    const meta = readSidecar('shop', job.backup!.id);
+    expect(meta.bindMounts).toEqual(['data/photos']); // only the present one
+  });
+
+  it('U-BK-BIND-SYMLINK: a local-dev symlinked app dir captures binds resolved to the realpath', async () => {
+    const { calls } = makeCallLog();
+    // Local install symlinks appsDir/<name> → the real project dir, and the
+    // generated compose resolves bind sources against that realpath.
+    const realTarget = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'proj-')));
+    const appDir = path.join(appsDir, 'shop');
+    fs.symlinkSync(realTarget, appDir);
+    fs.writeFileSync(path.join(appDir, '.env'), 'DB_PASSWORD=secret\n');
+    fs.writeFileSync(path.join(appDir, 'app.yaml'), 'name: shop\nversion: 1.0.0\n');
+    const photoReal = path.join(realTarget, 'data', 'photos'); // realpath-based source
+    fs.mkdirSync(photoReal, { recursive: true });
+
+    const installer = makeInstaller(backupSpawn(calls, { volumes: [], bindSources: [photoReal] }));
+    await registry.upsert({
+      name: 'shop', version: '1.0.0', commit: 'a'.repeat(40), githubUrl: '',
+      installPath: appDir, ports: [], sockets: {},
+      installedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'stopped', source: 'local', agentDeclaration: null,
+    });
+
+    const job = await waitForJob(installer, installer.backup('shop'));
+    expect(job.status).toBe('completed');
+    const meta = readSidecar('shop', job.backup!.id);
+    // realpath source under the symlink target is still recognized and recorded
+    expect(meta.bindMounts).toEqual(['data/photos']);
+    const flat = joinCalls(calls);
+    expect(flat.some((l) => l.includes('tar czf /backup/bind-0.tar.gz'))).toBe(true);
+    fs.rmSync(realTarget, { recursive: true, force: true });
+  });
+
+  it('U-RS-BIND-1: restore wipes+untars each recorded bind dir into a read-write mount', async () => {
+    const { calls } = makeCallLog();
+    const appDir = path.join(appsDir, 'shop');
+    const photoAbs = path.join(appDir, 'data', 'photos');
+    const installer = makeInstaller(
+      backupSpawn(calls, {
+        volumes: [],
+        restoreMeta: {
+          id: 'bk1', appName: 'shop', appVersion: '1.0.0',
+          createdAt: '2026-01-01T00:00:00.000Z', volumes: [],
+          bindMounts: ['data/photos'], sizeBytes: 5,
+        },
+      }),
+    );
+    await seedApp('shop', 'stopped');
+    const dir = path.join(backupsDir, 'shop');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'bk1.tar.gz'), 'ARCHIVE');
+
+    const job = await waitForJob(installer, installer.restore('shop', 'bk1'));
+    expect(job.status).toBe('completed');
+    const flat = joinCalls(calls);
+    // rw mount of the absolute path + wipe + untar of the indexed bind archive
+    expect(flat.some((l) => l.includes(`-v ${photoAbs}:/data `) && l.includes('tar xzf /backup/bind-0.tar.gz'))).toBe(true);
+    expect(flat.some((l) => l.includes('rm -rf /data/*') && l.includes('bind-0.tar.gz'))).toBe(true);
+  });
+
+  it('U-RS-BIND-SEC: a metadata bind path escaping the app dir is skipped (traversal guard)', async () => {
+    const { calls } = makeCallLog();
+    const installer = makeInstaller(
+      backupSpawn(calls, {
+        volumes: [],
+        restoreMeta: {
+          id: 'evil', appName: 'shop', appVersion: '1.0.0',
+          createdAt: '2026-01-01T00:00:00.000Z', volumes: [],
+          bindMounts: ['../../../../etc/cron.d'], sizeBytes: 5,
+        },
+      }),
+    );
+    await seedApp('shop', 'stopped');
+    const dir = path.join(backupsDir, 'shop');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'evil.tar.gz'), 'ARCHIVE');
+
+    const job = await waitForJob(installer, installer.restore('shop', 'evil'));
+    expect(job.status).toBe('completed');
+    expect(job.logs.join('\n')).toMatch(/escapes the app dir/i);
+    const flat = joinCalls(calls);
+    // no helper container ever mounted the escaping path
+    expect(flat.some((l) => l.includes('/etc/cron.d'))).toBe(false);
+  });
+
+  it('U-RS-BIND-BACKCOMPAT: an old backup without bindMounts restores with no bind step', async () => {
+    const { calls } = makeCallLog();
+    const installer = makeInstaller(
+      backupSpawn(calls, {
+        volumes: ['data'],
+        restoreMeta: {
+          id: 'old', appName: 'shop', appVersion: '1.0.0',
+          createdAt: '2026-01-01T00:00:00.000Z', volumes: ['data'], sizeBytes: 5,
+        }, // no bindMounts field at all
+      }),
+    );
+    await seedApp('shop', 'stopped');
+    const dir = path.join(backupsDir, 'shop');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'old.tar.gz'), 'ARCHIVE');
+
+    const job = await waitForJob(installer, installer.restore('shop', 'old'));
+    expect(job.status).toBe('completed');
+    const flat = joinCalls(calls);
+    expect(flat.some((l) => l.includes('bind-0.tar.gz'))).toBe(false); // no bind restore attempted
+    expect(flat.some((l) => l.includes('tar xzf /backup/data.tar.gz'))).toBe(true); // volume still restored
   });
 });
