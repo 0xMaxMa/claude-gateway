@@ -575,6 +575,46 @@ services:
     });
   });
 
+  describe('prompt-with-default secrets (!default:)', () => {
+    const yamlWithDefault = `
+apiVersion: apps.getpod.ai/v1
+name: my-app
+version: 1.0.0
+commit: "abc123def456abc123def456abc123def456abc1"
+services:
+  web:
+    image: nginx:1.25
+    environment:
+      - NEXTAUTH_URL=!default:http://localhost:3737
+      - PLAIN_SECRET
+      - APP_ENV=production
+`.trim();
+
+    it('prompts the default key (appears in secretKeys) and records its default', () => {
+      const result = generate(yamlWithDefault);
+      // Still prompted/visible like a bare key…
+      expect(result.secretKeys).toContain('NEXTAUTH_URL');
+      // …but carries the declared default. A URL keeps its `:` and `/` intact.
+      expect(result.secretDefaults['NEXTAUTH_URL']).toBe('http://localhost:3737');
+    });
+
+    it('keeps the default key out of the static compose environment block', () => {
+      generate(yamlWithDefault);
+      const compose = readCompose(outputPath);
+      const svc = (compose.services as Record<string, unknown>).web as Record<string, unknown>;
+      const env = (svc.environment as string[]) ?? [];
+      expect(env.some((e) => e.startsWith('NEXTAUTH_URL'))).toBe(false);
+      // a genuine static var still passes through
+      expect(env).toContain('APP_ENV=production');
+    });
+
+    it('leaves bare keys with no default out of secretDefaults', () => {
+      const result = generate(yamlWithDefault);
+      expect(result.secretKeys).toContain('PLAIN_SECRET');
+      expect(result.secretDefaults['PLAIN_SECRET']).toBeUndefined();
+    });
+  });
+
   describe('volumes', () => {
     it('declares named volumes in top-level volumes section', () => {
       const y = `

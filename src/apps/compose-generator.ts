@@ -115,6 +115,14 @@ export interface GeneratedCompose {
    * prompted for.
    */
   generatedKeys: GeneratedKey[];
+  /**
+   * Default values for prompted secrets declared in app.yaml as
+   * `KEY=!default:<value>`. The key is still pushed to {@link secretKeys} (so
+   * it is prompted and editable in the install UI), but carries a default that
+   * pre-fills the field and is written to `.env` when the installer supplies no
+   * value. Keyed by env var name; only keys with a declared default appear.
+   */
+  secretDefaults: Record<string, string>;
   agentDeclaration: AgentDeclaration | null;
   warnings: string[];
 }
@@ -162,6 +170,24 @@ const GENERATE_PREFIX = '!generate:';
 const GEN_ENCODINGS = new Set<GeneratorEncoding>(['hex', 'base64', 'base64url']);
 const GEN_MIN_BYTES = 8;
 const GEN_MAX_BYTES = 512;
+
+// An app.yaml env entry of the form `KEY=!default:<value>` declares a prompted
+// secret that carries a default. The key is still prompted (and editable) at
+// install, but the default pre-fills the field and is written to `.env` when
+// the installer supplies no value. `<value>` is taken verbatim — it may contain
+// `:` and `/` (e.g. a URL), so it is sliced, never split.
+const DEFAULT_PREFIX = '!default:';
+
+/**
+ * Parse a default marker value (`!default:<value>`). Returns the raw default
+ * (everything after the prefix, unmodified) or null when `value` is not a
+ * marker at all. The value is intentionally not validated or split so URLs and
+ * other colon/slash-bearing defaults survive intact.
+ */
+export function parseDefaultMarker(value: string): string | null {
+  if (!value.startsWith(DEFAULT_PREFIX)) return null;
+  return value.slice(DEFAULT_PREFIX.length);
+}
 
 /**
  * Parse a generator marker value (`!generate:<encoding>:<bytes>`).
@@ -293,6 +319,7 @@ export function generateCompose(
     sockets: [],
     secretKeys: [],
     generatedKeys: [],
+    secretDefaults: {},
     agentDeclaration: null,
     warnings: [],
   };
@@ -400,11 +427,20 @@ export function generateCompose(
         const key = envEntry.slice(0, eqIdx).trim();
         const value = envEntry.slice(eqIdx + 1);
         const gen = parseGeneratorMarker(svcName, key, value);
+        const def = gen === null ? parseDefaultMarker(value) : null;
         if (gen) {
           // Self-generating secret — filled at install, kept out of compose
           if (!result.generatedKeys.some((g) => g.key === key)) {
             result.generatedKeys.push({ key, encoding: gen.encoding, bytes: gen.bytes });
           }
+        } else if (def !== null) {
+          // Prompt-with-default secret — prompted like a bare key, but the
+          // default pre-fills the field and backfills .env when left blank.
+          // Kept out of the static compose environment block.
+          if (!result.secretKeys.includes(key)) {
+            result.secretKeys.push(key);
+          }
+          result.secretDefaults[key] = def;
         } else {
           staticEnv.push(envEntry);
         }

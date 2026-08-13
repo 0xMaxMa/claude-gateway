@@ -54,23 +54,32 @@ Call `inspect_app` with the same source you will install (`github_url` [+ `commi
 - `generatedKeys` — secrets the gateway **auto-generates** at install time
   (declared as `KEY=!generate:...`). Do **not** prompt for these; just note they
   will be generated.
+- `secretDefaults` — defaults for prompt-with-default secrets (declared as
+  `KEY=!default:<value>`). These keys still appear in `secretKeys`, so prompt for
+  them — but **pre-fill the default** and tell the user they can keep it. If they
+  leave it blank, the default is written to `.env` (operator value → default →
+  empty).
 
 This is essential for a **GitHub-URL** install: such apps have no registry entry,
 so `browse_registry` cannot reveal their secrets — only `inspect_app` can.
 
-If `inspect_app` reports `secretKeys`, prompt the user for each:
+If `inspect_app` reports `secretKeys`, prompt the user for each (showing the
+default from `secretDefaults` when one exists):
 
 ```
 This app requires the following environment variables:
   MY_API_KEY — (no default)
   SOME_TOKEN — (no default)
+  NEXTAUTH_URL — default: http://localhost:3737 (press enter to keep)
 
 Please provide values, e.g.:
   MY_API_KEY=xxx
   SOME_TOKEN=yyy
 ```
 
-Wait for the user's reply. Parse key=value pairs.
+Wait for the user's reply. Parse key=value pairs. For a key with a default, an
+omitted or blank value means "use the default" — do not send an empty string
+expecting the app to fail.
 
 If `secretKeys` is empty (only `generatedKeys`, or no secrets at all), proceed
 immediately — do not invent secrets or ask for ones the app did not declare.

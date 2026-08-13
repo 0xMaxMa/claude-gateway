@@ -298,6 +298,56 @@ services:
       // No install happened.
       expect(await registry.get('secretful-app')).toBeUndefined();
     });
+
+    /** Spawn whose app.yaml declares a prompt-with-default secret. */
+    function inspectSpawnWithDefault(head: string) {
+      return (cmd: string, args: string[], opts?: object) => {
+        const cwd = (opts as { cwd?: string } | undefined)?.cwd;
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && cwd) {
+          fs.writeFileSync(
+            path.join(cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: defaultful-app
+version: 1.0.0
+commit: "${head}"
+services:
+  app:
+    image: nginx:1.25
+    environment:
+      - NEXTAUTH_URL=!default:http://localhost:3737
+    ports:
+      - name: api
+        host: 5401
+        container: 5401
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5401/health
+      interval: 30s
+`.trim(),
+            'utf-8',
+          );
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      };
+    }
+
+    it('surfaces secretDefaults for a prompt-with-default secret', async () => {
+      const head = 'abcdef0123456789abcdef0123456789abcdef02';
+      const inspectApp = makeApp(registry, registryClient, inspectSpawnWithDefault(head));
+      const res = await request(inspectApp)
+        .post('/api/v1/apps/inspect')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`)
+        .send({ github_url: 'https://github.com/test/defaultful-app' });
+      expect(res.status).toBe(200);
+      // Still prompted (visible/editable)…
+      expect(res.body.secretKeys).toEqual(['NEXTAUTH_URL']);
+      // …and the default is surfaced for UI pre-fill, URL intact.
+      expect(res.body.secretDefaults).toEqual({ NEXTAUTH_URL: 'http://localhost:3737' });
+    });
   });
 
   // ── GET /api/v1/apps/jobs/:jobId ───────────────────────────────────────

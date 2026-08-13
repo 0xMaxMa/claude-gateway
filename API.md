@@ -2926,6 +2926,7 @@ curl -X POST \
   "commit": "abc123def456abc123def456abc123def456abc1",
   "secretKeys": ["DB_PASSWORD"],
   "generatedKeys": [{ "key": "SESSION_SECRET", "encoding": "hex", "bytes": 32 }],
+  "secretDefaults": { "NEXTAUTH_URL": "http://localhost:3737" },
   "ports": [{ "name": "web", "service": "app", "hostPort": 12000, "containerPort": 3000, "type": "web" }],
   "agentDeclaration": null,
   "warnings": []
@@ -2934,6 +2935,7 @@ curl -X POST \
 
 - `secretKeys` — env vars the operator **must** supply (declared as bare keys in `app.yaml`).
 - `generatedKeys` — secrets the gateway fills with a fresh random value at install (declared as `KEY=!generate:<encoding>:<bytes>`); never prompted for.
+- `secretDefaults` — defaults for prompted secrets declared as `KEY=!default:<value>`. The key is still listed in `secretKeys` (prompted and editable), but the value here pre-fills the field; if the operator leaves it blank the default is written to `.env`. Only keys with a declared default appear. Precedence at install: operator-supplied value → default → empty.
 
 **Error responses:**
 
