@@ -166,7 +166,7 @@ export class AppsModule implements ToolModule {
       },
       {
         name: 'backup_app',
-        description: 'Back up an installed app — a permission-safe snapshot of its Docker named volumes + config (.env/app.yaml) into a single archive. The app is briefly stopped for a consistent snapshot and restarted afterward. Returns a jobId; poll with poll_install_job. Older backups beyond the retention limit are pruned automatically.',
+        description: 'Back up an installed app — a permission-safe snapshot of its Docker named volumes, bind-mount data directories under the app dir, and config (.env/app.yaml) into a single archive. The app is briefly stopped for a consistent snapshot and restarted afterward. Returns a jobId; poll with poll_install_job. Older backups beyond the retention limit are pruned automatically.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -178,7 +178,7 @@ export class AppsModule implements ToolModule {
       },
       {
         name: 'restore_app',
-        description: "Restore an app's volumes + config from a prior backup, then start it on the restored data. Restoring a backup from a different app version is allowed but may warn about schema/migration mismatch. Returns a jobId; poll with poll_install_job. Use list_backups to pick a backup_id.",
+        description: "Restore an app's Docker named volumes, bind-mount data directories under the app dir, and config from a prior backup, then start it on the restored data. Restoring a backup from a different app version is allowed but may warn about schema/migration mismatch. Returns a jobId; poll with poll_install_job. Use list_backups to pick a backup_id.",
         inputSchema: {
           type: 'object',
           properties: {
