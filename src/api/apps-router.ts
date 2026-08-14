@@ -249,11 +249,12 @@ export function createAppsRouter(
         res.json({ name: req.params.name, action });
       } catch (err) {
         const msg = (err as Error).message;
-        if (msg.includes('not installed')) {
-          res.status(404).json({ error: msg });
-        } else {
-          res.status(500).json({ error: msg });
-        }
+        const status = msg.includes('not installed')
+          ? 404
+          : msg.includes('busy')
+            ? 409
+            : 500;
+        res.status(status).json({ error: msg });
       }
     },
   );

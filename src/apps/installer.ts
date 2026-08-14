@@ -1110,13 +1110,26 @@ export class AppInstaller {
     const entry = await this.registry.get(appName);
     if (!entry) throw new Error(`App "${appName}" is not installed`);
 
-    if (action === 'stop') {
-      this.run(['docker', 'compose', '-p', appName, 'stop'], entry.installPath, 60_000);
-      await this.registry.updateStatus(appName, 'stopped');
-    } else {
-      // start / restart: stop conflicting containers and wait for healthcheck
-      this.composeUp(appName, entry.installPath);
-      await this.registry.updateStatus(appName, 'running');
+    // Refuse while a mutating job (install/update/reconfigure/backup/restore)
+    // holds this app, and claim the same per-app mutex for the duration so those
+    // jobs cannot start mid-operation — otherwise `docker compose stop`/`up`
+    // here races the containers an install is bringing up. Mirrors the guard in
+    // backup()/restore(); the HTTP layer maps this "busy" message to 409.
+    if (this.installingNames.has(appName)) {
+      throw new Error(`App "${appName}" is busy (install/update/backup in progress)`);
+    }
+    this.installingNames.add(appName);
+    try {
+      if (action === 'stop') {
+        this.run(['docker', 'compose', '-p', appName, 'stop'], entry.installPath, 60_000);
+        await this.registry.updateStatus(appName, 'stopped');
+      } else {
+        // start / restart: stop conflicting containers and wait for healthcheck
+        this.composeUp(appName, entry.installPath);
+        await this.registry.updateStatus(appName, 'running');
+      }
+    } finally {
+      this.installingNames.delete(appName);
     }
   }
 

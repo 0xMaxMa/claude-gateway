@@ -619,6 +619,19 @@ services:
       const entry = await registry.get('my-app');
       expect(entry?.status).toBe('running');
     });
+
+    it('throws "busy" when a mutating job holds the app', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      const jobId = installer.install({ localPath: appDir });
+      await waitForJob(installer, jobId, 5000);
+
+      // Simulate an install/update/backup in flight on the same app.
+      (installer as unknown as { installingNames: Set<string> }).installingNames.add('my-app');
+      await expect(installer.startStopRestart('my-app', 'stop')).rejects.toThrow('busy');
+      // Guard rejected before touching the app — status is unchanged.
+      expect((await registry.get('my-app'))?.status).toBe('running');
+    });
   });
 
   // ─── restoreRunningApps() ─────────────────────────────────────────────────
