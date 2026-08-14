@@ -449,6 +449,52 @@ services:
         .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
       expect(res.status).toBe(404);
     });
+
+    it('stops a running app → 200 and registry status becomes stopped', async () => {
+      await registry.upsert(makeEntry({ status: 'running' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/stop')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ name: 'test-app', action: 'stop' });
+      expect((await registry.get('test-app'))?.status).toBe('stopped');
+    });
+
+    it('starts a stopped app → 200 and registry status becomes running', async () => {
+      await registry.upsert(makeEntry({ status: 'stopped' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/start')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ name: 'test-app', action: 'start' });
+      expect((await registry.get('test-app'))?.status).toBe('running');
+    });
+
+    it('restarts an app → 200 and registry status becomes running', async () => {
+      await registry.upsert(makeEntry({ status: 'stopped' }));
+      const res = await request(app)
+        .post('/api/v1/apps/test-app/restart')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ name: 'test-app', action: 'restart' });
+      expect((await registry.get('test-app'))?.status).toBe('running');
+    });
+
+    it('returns 409 when a mutating job holds the app', async () => {
+      await registry.upsert(makeEntry());
+      const { installer } = makeInstaller(registry);
+      const busyApp = express();
+      busyApp.use(express.json());
+      busyApp.use('/api', createAppsRouter(registry, installer, registryClient, API_KEYS));
+      // Simulate an install/update/backup holding the per-app mutex.
+      (installer as unknown as { installingNames: Set<string> }).installingNames.add('test-app');
+      const res = await request(busyApp)
+        .post('/api/v1/apps/test-app/stop')
+        .set('Authorization', `Bearer ${ADMIN_KEY.key}`);
+      expect(res.status).toBe(409);
+      // The app was never touched — status stays as it was.
+      expect((await registry.get('test-app'))?.status).toBe('running');
+    });
   });
 
   // ── GET /api/v1/apps/:name/version ─────────────────────────────────────

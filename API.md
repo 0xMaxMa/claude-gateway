@@ -3053,7 +3053,10 @@ curl -X DELETE \
 
 ### POST /api/v1/apps/:name/start|stop|restart
 
-Start, stop, or restart an installed app's containers.
+Start, stop, or restart an installed app's containers. Admin key required. Runs
+synchronously and responds `200` once `docker compose` completes — there is no
+`jobId` to poll. `stop`/`start` are idempotent (stopping an already-stopped app
+or starting an already-running one is a clean no-op).
 
 ```bash
 curl -X POST \
@@ -3064,6 +3067,11 @@ curl -X POST \
 ```json
 { "name": "agent-note", "action": "restart" }
 ```
+
+**Errors:** `403` if the key is not an admin key · `404` if the app is not
+installed (or `:action` is not one of `start`/`stop`/`restart`) · `409` if a
+mutating job (install/update/reconfigure/backup/restore) is currently in
+progress for the app · `500` on an underlying `docker compose` failure.
 
 ---
 
