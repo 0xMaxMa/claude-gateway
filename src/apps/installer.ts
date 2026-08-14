@@ -2673,6 +2673,14 @@ export interface ComposePsContainer {
   state: string;
   /** Process exit code (0 when still running or absent). */
   exitCode: number;
+  /**
+   * Last exit code of a `restarting` container, parsed from the human-readable
+   * `Status` string (`"Restarting (N) …"`). Undefined when the container is not
+   * restarting or the code could not be parsed. Docker leaves the structured
+   * `ExitCode` field at 0 while a container is restarting, so this is the only
+   * signal that separates a crash-loop (N≠0) from a healthy transient restart (N=0).
+   */
+  restartExitCode?: number;
 }
 
 /**
@@ -2688,11 +2696,19 @@ export function parseComposePs(stdout: string): ComposePsContainer[] {
   const out: ComposePsContainer[] = [];
   const push = (o: unknown): void => {
     if (o && typeof o === 'object' && typeof (o as { State?: unknown }).State === 'string') {
-      const rec = o as { State: string; ExitCode?: unknown };
-      out.push({
+      const rec = o as { State: string; ExitCode?: unknown; Status?: unknown };
+      const container: ComposePsContainer = {
         state: rec.State.toLowerCase(),
         exitCode: typeof rec.ExitCode === 'number' ? rec.ExitCode : 0,
-      });
+      };
+      // A restarting container's last exit code lives only in the Status string
+      // ("Restarting (N) …"); the ExitCode field reads 0 while restarting. Capture
+      // N so the status mapper can tell a crash-loop (N≠0) from a healthy restart.
+      if (typeof rec.Status === 'string') {
+        const m = /restarting \((\d+)\)/i.exec(rec.Status);
+        if (m) container.restartExitCode = Number(m[1]);
+      }
+      out.push(container);
     }
   };
   // Whole-string JSON array (older compose).
@@ -2723,14 +2739,28 @@ export function parseComposePs(stdout: string): ComposePsContainer[] {
 /**
  * Map an app's compose-project container states to a single AppEntry status:
  *   - no containers                                   → stopped
- *   - any running / restarting                        → running
+ *   - any restarting after a NON-ZERO exit (crash-loop) → error
+ *   - any running / restarting (clean/transient)      → running
  *   - any dead, or exited with a non-zero exit code   → error   (crash)
  *   - else (clean exit / created / paused)            → stopped
+ *
+ * The crash-loop check comes first and wins over a healthy sibling: a container
+ * stuck endlessly restarting on a non-zero exit is not serving, so surfacing it
+ * as `error` is more honest than reporting the app `running`. A single clean
+ * restart (`Restarting (0) …`) or a container that has already recovered to
+ * `running` stays `running` — no flicker for normal transient restarts.
  */
 export function mapContainerStatesToAppStatus(
   containers: ComposePsContainer[],
 ): AppEntry['status'] {
   if (containers.length === 0) return 'stopped';
+  if (
+    containers.some(
+      (c) => c.state === 'restarting' && c.restartExitCode !== undefined && c.restartExitCode !== 0,
+    )
+  ) {
+    return 'error';
+  }
   if (containers.some((c) => c.state === 'running' || c.state === 'restarting')) {
     return 'running';
   }
