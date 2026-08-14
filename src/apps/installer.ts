@@ -2750,18 +2750,36 @@ export function parseComposePs(stdout: string): ComposePsContainer[] {
 }
 
 /**
+ * Container exit codes produced by a signal kill rather than a crash: 137 =
+ * 128+9 (SIGKILL), 143 = 128+15 (SIGTERM). `docker compose stop` sends SIGTERM
+ * and, if a container doesn't self-terminate within the grace period, force-kills
+ * it with SIGKILL — so a plainly-`exited` container carrying one of these codes
+ * is the normal result of a stop, not evidence of a failure. Excluded from the
+ * plain-exited → `error` branch below so an explicit Stop reports `stopped`, not
+ * `error`. Genuine crash-loops (a `restarting` container with a non-zero
+ * `restartExitCode`) are caught earlier and are unaffected by this.
+ */
+const STOP_SIGNAL_EXIT_CODES = new Set([137, 143]);
+
+/**
  * Map an app's compose-project container states to a single AppEntry status:
  *   - no containers                                   → stopped
  *   - any restarting after a NON-ZERO exit (crash-loop) → error
  *   - any running / restarting (clean/transient)      → running
- *   - any dead, or exited with a non-zero exit code   → error   (crash)
- *   - else (clean exit / created / paused)            → stopped
+ *   - any dead, or exited with a non-signal non-zero exit code → error (crash)
+ *   - else (clean exit / signal-kill / created / paused) → stopped
  *
  * The crash-loop check comes first and wins over a healthy sibling: a container
  * stuck endlessly restarting on a non-zero exit is not serving, so surfacing it
  * as `error` is more honest than reporting the app `running`. A single clean
  * restart (`Restarting (0) …`) or a container that has already recovered to
  * `running` stays `running` — no flicker for normal transient restarts.
+ *
+ * A plainly-`exited` (non-restarting) container that was killed by a stop signal
+ * (137/143) is treated as stopped, not a crash: it's the expected outcome of an
+ * explicit `docker compose stop` force-killing a container that ignored SIGTERM.
+ * Only `dead`, or an exit with a non-signal non-zero code (a real crash under a
+ * `restart: no` policy), still maps to `error`. See {@link STOP_SIGNAL_EXIT_CODES}.
  */
 export function mapContainerStatesToAppStatus(
   containers: ComposePsContainer[],
@@ -2777,7 +2795,13 @@ export function mapContainerStatesToAppStatus(
   if (containers.some((c) => c.state === 'running' || c.state === 'restarting')) {
     return 'running';
   }
-  if (containers.some((c) => c.state === 'dead' || (c.state === 'exited' && c.exitCode !== 0))) {
+  if (
+    containers.some(
+      (c) =>
+        c.state === 'dead' ||
+        (c.state === 'exited' && c.exitCode !== 0 && !STOP_SIGNAL_EXIT_CODES.has(c.exitCode)),
+    )
+  ) {
     return 'error';
   }
   return 'stopped';
