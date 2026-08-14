@@ -1802,7 +1802,9 @@ services:
     }
 
     const runningPs = JSON.stringify({ State: 'running', ExitCode: 0 });
-    const crashedPs = JSON.stringify({ State: 'exited', ExitCode: 137 });
+    // A genuine crash under `restart: no`: a non-signal, non-zero exit. (137/143
+    // are stop-signal kills and map to `stopped`, not `error` — see #316.)
+    const crashedPs = JSON.stringify({ State: 'exited', ExitCode: 1 });
 
     it('flips a stale running → stopped when no containers exist (the reported bug)', async () => {
       await registry.upsert({ ...makeEntryFor('ghost-app', 6001), status: 'running' });
@@ -1942,10 +1944,35 @@ services:
           { state: 'running', exitCode: 0 },
         ]),
       ).toBe('running');
-      expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 137 }])).toBe('error');
+      // A real crash under `restart: no` (non-signal, non-zero exit) is error.
+      expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 1 }])).toBe('error');
       expect(mapContainerStatesToAppStatus([{ state: 'dead', exitCode: 0 }])).toBe('error');
       expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 0 }])).toBe('stopped');
       expect(mapContainerStatesToAppStatus([{ state: 'created', exitCode: 0 }])).toBe('stopped');
+    });
+
+    // ─── #316: an explicit Stop that force-kills a container must read `stopped` ──
+    it('treats a signal-killed (137/143) exited container as stopped, not error', () => {
+      // `docker compose stop` SIGKILLs (137) / SIGTERMs (143) a container that
+      // doesn't self-terminate in the grace period — the normal result of a stop,
+      // not a crash. Previously these mapped the app to `error` (bug #316).
+      expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 137 }])).toBe('stopped');
+      expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 143 }])).toBe('stopped');
+      // The exact repro: app+db exit cleanly, the stubborn agent is SIGKILLed.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'exited', exitCode: 0 },
+          { state: 'exited', exitCode: 0 },
+          { state: 'exited', exitCode: 137 },
+        ]),
+      ).toBe('stopped');
+      // A genuine crash sitting alongside a signal-kill still surfaces as error.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'exited', exitCode: 137 },
+          { state: 'exited', exitCode: 1 },
+        ]),
+      ).toBe('error');
     });
 
     // ─── #312: crash-loop must not read as `running` ──────────────────────────
