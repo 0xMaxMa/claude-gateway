@@ -1934,6 +1934,59 @@ services:
       expect(mapContainerStatesToAppStatus([{ state: 'exited', exitCode: 0 }])).toBe('stopped');
       expect(mapContainerStatesToAppStatus([{ state: 'created', exitCode: 0 }])).toBe('stopped');
     });
+
+    // ─── #312: crash-loop must not read as `running` ──────────────────────────
+    it('parses the restarting exit code out of the Status string', () => {
+      // Docker leaves ExitCode=0 while restarting; the real code is only in Status.
+      const ndjson = [
+        JSON.stringify({ State: 'restarting', ExitCode: 0, Status: 'Restarting (1) 3 seconds ago' }),
+        JSON.stringify({
+          State: 'restarting',
+          ExitCode: 0,
+          Status: 'Restarting (0) Less than a second ago',
+        }),
+        JSON.stringify({ State: 'running', ExitCode: 0, Status: 'Up 2 minutes' }),
+      ].join('\n');
+      expect(parseComposePs(ndjson)).toEqual([
+        { state: 'restarting', exitCode: 0, restartExitCode: 1 },
+        { state: 'restarting', exitCode: 0, restartExitCode: 0 },
+        { state: 'running', exitCode: 0 },
+      ]);
+    });
+
+    it('reports a crash-looping (restarting after non-zero exit) container as error', () => {
+      // The regression: a single container endlessly restarting on exit 1.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'restarting', exitCode: 0, restartExitCode: 1 },
+        ]),
+      ).toBe('error');
+      // The issue's live scenario: db + app both crash-looping.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'restarting', exitCode: 0, restartExitCode: 1 },
+          { state: 'restarting', exitCode: 0, restartExitCode: 1 },
+        ]),
+      ).toBe('error');
+      // A crash-looping dependency wins over a healthy sibling — surface the fault.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'running', exitCode: 0 },
+          { state: 'restarting', exitCode: 0, restartExitCode: 1 },
+        ]),
+      ).toBe('error');
+    });
+
+    it('keeps a clean/transient restart reported as running (no false error)', () => {
+      // Clean exit (0) being restarted by `restart: always` — still healthy.
+      expect(
+        mapContainerStatesToAppStatus([
+          { state: 'restarting', exitCode: 0, restartExitCode: 0 },
+        ]),
+      ).toBe('running');
+      // Restarting with no parseable code (first instant) falls back to running.
+      expect(mapContainerStatesToAppStatus([{ state: 'restarting', exitCode: 0 }])).toBe('running');
+    });
   });
 
   // ─── Docker housekeeping (#302) ─────────────────────────────────────────────

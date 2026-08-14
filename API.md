@@ -2813,7 +2813,7 @@ curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps | jq
 
 **`status` values:** `running` | `stopped` | `error` | `building`
 
-> **Live status:** `GET /api/v1/apps` and `GET /api/v1/apps/:name` reconcile the stored status against the live Docker runtime (`docker compose ps`) on read, so a container that crashed, was OOM-killed, or was stopped from outside the gateway reports `stopped`/`error` rather than a stale `running`. `running`/`restarting` containers → `running`; a non-zero exit or `dead` container → `error`; no containers or a clean exit → `stopped`. If Docker cannot be queried (daemon down, compose file missing) the last stored status is returned unchanged, and an app mid-install (`building`) is not reconciled.
+> **Live status:** `GET /api/v1/apps` and `GET /api/v1/apps/:name` reconcile the stored status against the live Docker runtime (`docker compose ps`) on read, so a container that crashed, was OOM-killed, was stopped from outside the gateway, or is stuck in a crash-restart loop reports `stopped`/`error` rather than a stale `running`. A `running` container (or one doing a clean/transient restart) → `running`; a container stuck `restarting` after a non-zero exit (crash-loop), a non-zero exit, or a `dead` container → `error`; no containers or a clean exit → `stopped`. If Docker cannot be queried (daemon down, compose file missing) the last stored status is returned unchanged, and an app mid-install (`building`) is not reconciled.
 
 **`source` values:** `registry` | `custom` | `local`
 
