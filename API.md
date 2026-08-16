@@ -141,6 +141,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/skills` | Write | Create a new skill |
 | `POST` | `/api/v1/agents/:agentId/skills/install` | Admin | Install a skill from a GitHub/raw URL |
 | `DELETE` | `/api/v1/agents/:agentId/skills/:name` | Write | Delete a skill |
+| `GET` | `/api/v1/agents/:agentId/skill-metrics` | Key | Skill self-improvement effectiveness rollup |
 
 ### App Store API
 
@@ -1978,6 +1979,39 @@ curl -X DELETE \
 ```json
 { "message": "Skill \"my-helper\" deleted from workspace" }
 ```
+
+---
+
+### GET /api/v1/agents/:agentId/skill-metrics
+
+Skill self-improvement (skill-learning) effectiveness rollup for the agent. Read-only; any key with access to the agent. Returns `404` if skill-learning is not active for the agent.
+
+The metrics all derive from durable per-turn telemetry (`turn_metrics`) and per-skill provenance/usage (`skill_stats`) captured in the agent's `history.db`:
+
+- **adoption** — funnel of auto-skills: created → loaded ≥1 → loaded ≥3 (`stickyPct` = % reaching ≥3 uses).
+- **costDelta** — median tool-calls / tokens for turns *before* a skill was loaded vs *after*, plus the number of intent clusters (directional).
+- **recovery** — recovery-triage rate for the earlier half vs the recent half of turns (should trend down).
+- **cohort** — the `enabled` on/off A/B: turn counts + median tool-calls per cohort (the causal signal).
+- **netTokens** — the bottom line: `savedByReuse − spentReviewing` (`net`). The feature is a win only when `net > 0`.
+
+```bash
+curl -H "X-Api-Key: my-secret-key-123" \
+  "http://localhost:10850/api/v1/agents/alfred/skill-metrics" | jq
+```
+
+```json
+{
+  "agentId": "alfred",
+  "generatedAt": 1723800000000,
+  "adoption": { "autoSkills": 4, "loadedAtLeast1": 3, "loadedAtLeast3": 2, "stickyPct": 50 },
+  "costDelta": { "clusters": 6, "medianToolCallsBefore": 9, "medianToolCallsAfter": 4, "medianTokensBefore": 12000, "medianTokensAfter": 6000 },
+  "recovery": { "ratePctRecent": 4, "ratePctEarlier": 11 },
+  "cohort": { "enabledTurns": 120, "disabledTurns": 40, "enabledMedianToolCalls": 5, "disabledMedianToolCalls": 8 },
+  "netTokens": { "savedByReuse": 48000, "spentReviewing": 9000, "net": 39000 }
+}
+```
+
+**Skill Learning (behavior).** When `gateway.skillLearning.enabled` is true (the shipped default, injected by config migration at `configVersion` `1.0.17`), after a *qualifying* session goes idle a **print-only** reviewer (`claude -p`, no tools, no `--dangerously-skip-permissions`, async spawn) distils the transcript into a skill *proposal*. The **gateway**, not the model, writes the file via a provenance-guarded writer: learned skills are stamped `origin: auto` in frontmatter and land in the agent's **workspace** `skills/` dir, live on the next turn via the existing hot-reload — `mode: "propose"` writes to a `skills/.pending/` review queue instead. A session qualifies when its peak tool-calls ≥ `minToolCalls`, or a recovery fired, or a user-correction heuristic matched — capped per day (`maxReviewsPerDay`). A **daily curator** prunes `origin: auto` skills that are both unused (`< minUsesToKeep`) and stale (`> maxAgeDays`), enforces `maxAutoSkills` (LRU), and never touches hand-authored or `pinned` skills. Telemetry capture is always-on (even when disabled) so the `enabled` on/off cohort remains computable. Config lives under `gateway.skillLearning` with per-agent overrides honored over the global default.
 
 ---
 

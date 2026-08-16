@@ -450,5 +450,35 @@ export function createSkillsRouter(
     }
   });
 
+  /**
+   * GET /api/v1/agents/:agentId/skill-metrics
+   * Skill self-improvement effectiveness rollup (planning-62): adoption funnel,
+   * per-cluster cost-to-complete deltas, recovery-rate trend, enabled/disabled
+   * cohort, and the net-token ledger. Read-only; any key with agent access.
+   */
+  router.get('/v1/agents/:agentId/skill-metrics', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+
+    const config = agentConfigs.get(agentId);
+    if (!config) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    const manager = agents?.get(agentId)?.getSkillLearning();
+    if (!manager) {
+      res.status(404).json({ error: `Skill-learning not active for agent '${agentId}'` });
+      return;
+    }
+
+    res.json(manager.rollup());
+  });
+
   return router;
 }

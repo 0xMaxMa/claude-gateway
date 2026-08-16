@@ -109,6 +109,8 @@ export interface AgentConfig {
   allow_tools?: boolean;
   /** Per-agent history retention override */
   history?: HistoryConfig;
+  /** Per-agent skill-learning override (wins over the global gateway default). */
+  skillLearning?: GatewayConfig['gateway']['skillLearning'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
 }
@@ -228,6 +230,27 @@ export interface GatewayConfig {
       cleanupTimezone?: string;           // IANA timezone for cleanupHour, default "UTC"
       autoBackupBeforeUninstall?: boolean; // default true
       autoBackupBeforeUpdate?: boolean;    // default true
+    };
+    /**
+     * Skill self-improvement (skill-learning). A closed Do → Learn → Improve
+     * loop: after a qualifying session goes idle, a print-only reviewer distils
+     * how the task was solved into a reusable workspace SKILL.md (provenance
+     * `origin:auto`), a curator prunes stale auto-skills, and effectiveness is
+     * captured in per-turn telemetry. Ships on by default via config migration;
+     * set `enabled:false` to keep only baseline telemetry capture. Per-agent
+     * overrides are honored over this global default (like history retention).
+     */
+    skillLearning?: {
+      enabled?: boolean;         // default true — reviewer + writer + curator active
+      mode?: 'propose' | 'auto'; // propose = review queue, auto = live write. default "auto"
+      minToolCalls?: number;     // gating threshold, default 5
+      reviewModel?: string;      // cheap model for the reviewer, default haiku
+      maxAutoSkills?: number;    // curator cap per agent, default 50 (0 = unbounded)
+      maxAgeDays?: number;       // prune auto-skills unused this long, default 30 (0 = disabled)
+      minUsesToKeep?: number;    // an auto-skill must load >= N times or it's pruned, default 2
+      maxReviewsPerDay?: number; // reviewer spawns per agent per day (cost cap), default 20 (0 = disabled)
+      pruneHour?: number;        // 0-23 daily curator hour, default 3
+      pruneTimezone?: string;    // IANA timezone for pruneHour, default "UTC"
     };
   };
   agents: AgentConfig[];
