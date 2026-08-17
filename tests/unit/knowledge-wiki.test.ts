@@ -46,6 +46,29 @@ describe('parseWikiPage / extractLinks', () => {
   test('extractLinks handles alias pipes and ignores empties', () => {
     expect(extractLinks('see [[a]] and [[ b | alias ]] and [[]]')).toEqual(['a', 'b']);
   });
+
+  test('UNQUOTED YAML date is coerced to YYYY-MM-DD (js-yaml parses it as a Date)', () => {
+    // Regression: `updatedAt: 2026-03-20` (unquoted — the natural way to write it)
+    // is parsed by js-yaml into a JS Date, not a string. Without coercion the field
+    // was dropped, silently disabling staleness for the page.
+    const p = parseWikiPage('rl.md', '---\ntitle: RL\nupdatedAt: 2026-03-20\n---\nbody [[x]]\n');
+    expect(p.updatedAt).toBe('2026-03-20');
+  });
+
+  test('unquoted-date page is flagged stale end-to-end via compileWiki', () => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-wiki-stale-'));
+    try {
+      fs.writeFileSync(
+        path.join(vault, 'old.md'),
+        '---\ntitle: Old\nupdatedAt: 2026-03-20\n---\nlinks [[x]]\n',
+      );
+      const res = compileWiki(vault, Date.parse('2026-08-17T00:00:00Z')); // 150d later
+      expect(res.stale).toBe(1);
+      expect(fs.readFileSync(path.join(vault, 'reports', 'stale-pages.md'), 'utf8')).toContain('old.md');
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('buildBacklinks', () => {

@@ -62,6 +62,16 @@ export interface WikiCompileResult {
 function toStr(v: unknown): string | undefined {
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
+/**
+ * Coerce a frontmatter date field to a `YYYY-MM-DD` string. js-yaml parses an
+ * UNQUOTED YAML date (`updatedAt: 2026-03-20`) into a JS `Date`, not a string, so
+ * a plain `toStr` would drop it and silently disable staleness for that page (the
+ * most natural way to write the field). Accept both a Date and an explicit string.
+ */
+function toDateStr(v: unknown): string | undefined {
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10);
+  return toStr(v);
+}
 function toNum(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
@@ -120,7 +130,7 @@ export function parseWikiPage(relPath: string, raw: string): WikiPage {
     title: toStr(fm.title) ?? relPath.replace(/\.md$/i, ''),
     claims: normalizeClaims(fm.claims),
     confidence: toNum(fm.confidence) ?? null,
-    updatedAt: toStr(fm.updatedAt) ?? null,
+    updatedAt: toDateStr(fm.updatedAt) ?? null,
     links: extractLinks(body),
   };
 }
