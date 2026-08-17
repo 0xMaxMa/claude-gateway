@@ -25,7 +25,7 @@ import * as os from 'os';
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
-import { resolveArchiveConfig } from './agent/knowledge';
+import { resolveArchiveConfig, resolveSharedConfig, writeSharedNote } from './agent/knowledge';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -331,6 +331,19 @@ async function startAgent(
       globalCfg: gatewayConfig.gateway.dreaming,
       agentCfg: agentConfig.dreaming,
       logger,
+      // K4 auto-applier net-negative gate uses the same soft budgets as compose.
+      memoryBudgetChars: memoryBudget.memoryBudgetChars,
+      userBudgetChars: memoryBudget.userBudgetChars,
+      // K3↔K4 promotion: only when the shared KB is enabled AND set to auto.
+      sharedPromote: (() => {
+        const sharedCfg = resolveSharedConfig(
+          agentConfig.knowledge?.shared,
+          gatewayConfig.gateway.knowledge?.shared,
+        );
+        if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
+        return (p: { reason: string; content?: string }) =>
+          writeSharedNote(sharedCfg, `${agentConfig.id}-${p.reason}`, p.content ?? '');
+      })(),
     });
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer
   } catch (err) {

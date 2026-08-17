@@ -395,12 +395,12 @@ The soft budget sits well under the hard per-file limit (still applied as a cont
 
 ### `gateway.dreaming`
 
-Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In the shipped **`propose`** mode the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — **no memory file is modified** (observe the loop before it writes). The `auto` applier is a follow-up.
+Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In **`propose`** mode (the default) the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — no memory file is modified. In **`auto`** mode a safe applier writes the ops to `MEMORY.md`/`USER.md` (rollback pre-image first; ordered apply with anchor re-resolution; bounded-loss + append-only fallback; net-negative when over budget) — a memory-only change, so no session is restarted.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
-| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops (follow-up) |
+| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative) |
 | `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |

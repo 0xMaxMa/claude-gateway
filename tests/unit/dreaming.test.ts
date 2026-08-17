@@ -222,7 +222,7 @@ describe('dreaming/audit: writeDreamAudit', () => {
     }
   });
 
-  it('D-AUD-1b: auto mode notes the applier is unavailable (fail-closed, no mutation)', () => {
+  it('D-AUD-1b: auto mode records how many ops the applier wrote (K4)', () => {
     const ws = mkWs();
     try {
       writeDreamAudit(ws, {
@@ -233,10 +233,11 @@ describe('dreaming/audit: writeDreamAudit', () => {
         proposals: [{ op: 'add', file: 'MEMORY.md', content: 'x', reason: 'r', score: 0.9, recallCount: 2 }],
         tokensSpent: 5,
         sessionCount: 1,
+        appliedCount: 1,
       });
       const diary = fs.readFileSync(path.join(ws, '.dreaming', 'DREAMS.md'), 'utf8');
-      expect(diary).toContain('applier not yet available');
-      expect(diary).toContain('memory not modified');
+      expect(diary).toContain('applied 1 op(s) to memory');
+      expect(diary).toContain('rollback pre-image');
     } finally {
       fs.rmSync(ws, { recursive: true });
     }
@@ -277,6 +278,59 @@ describe('dreaming/DreamingManager.dreamOnce', () => {
       // Diary + audit written.
       expect(fs.readFileSync(path.join(ws, '.dreaming', 'DREAMS.md'), 'utf8')).toContain('recurring');
       expect(fs.existsSync(path.join(ws, '.dreaming', 'promotions.jsonl'))).toBe(true);
+    } finally {
+      fs.rmSync(ws, { recursive: true });
+    }
+  });
+
+  it('D-MGR-1b: auto mode APPLIES ops to memory (K4) — with a backup pre-image', async () => {
+    const ws = mkWs({ 'MEMORY.md': '# Memory\n\n- existing fact\n', 'USER.md': 'u' });
+    try {
+      const db = makeDb([{ sessionId: 's1', lastActivity: NOW - 2 * HOUR }], {
+        s1: [{ role: 'user', content: 'remember the new deploy step', ts: NOW - 2 * HOUR }],
+      });
+      const spawn = scriptedSpawn({
+        summary: 'promote a durable fact',
+        proposals: [{ op: 'add', file: 'MEMORY.md', content: '- the deploy uses blue-green', reason: 'recurring', score: 0.95, recallCount: 4 }],
+      });
+      const mgr = new DreamingManager({ db, agentId: 'a', workspaceDir: ws, globalCfg: { mode: 'auto' }, spawnFn: spawn });
+      const res = await mgr.dreamOnce(NOW);
+
+      expect(res.mode).toBe('auto');
+      expect(res.appliedCount).toBe(1);
+      const mem = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');
+      expect(mem).toContain('existing fact'); // kept
+      expect(mem).toContain('the deploy uses blue-green'); // applied
+      // A rollback pre-image was captured before the write.
+      expect(fs.existsSync(path.join(ws, '.dreaming', 'backups', `MEMORY.md.${NOW}.bak`))).toBe(true);
+      // Diary reflects the applied count.
+      expect(fs.readFileSync(path.join(ws, '.dreaming', 'DREAMS.md'), 'utf8')).toContain('applied 1 op(s)');
+    } finally {
+      fs.rmSync(ws, { recursive: true });
+    }
+  });
+
+  it('D-MGR-1c: auto mode promotes durable adds to the shared vault via the hook', async () => {
+    const ws = mkWs({ 'MEMORY.md': '# Memory\n', 'USER.md': 'u' });
+    try {
+      const db = makeDb([{ sessionId: 's1', lastActivity: NOW - 2 * HOUR }], {
+        s1: [{ role: 'user', content: 'shared team convention', ts: NOW - 2 * HOUR }],
+      });
+      const spawn = scriptedSpawn({
+        summary: 's',
+        proposals: [
+          { op: 'add', file: 'MEMORY.md', content: '- team uses trunk-based dev', reason: 'convention', score: 0.9, recallCount: 3 },
+          { op: 'remove', file: 'MEMORY.md', target: 'nope', reason: 'r', score: 0.9, recallCount: 3 },
+        ],
+      });
+      const promoted: string[] = [];
+      const mgr = new DreamingManager({
+        db, agentId: 'a', workspaceDir: ws, globalCfg: { mode: 'auto' }, spawnFn: spawn,
+        sharedPromote: (p) => promoted.push(p.content ?? ''),
+      });
+      await mgr.dreamOnce(NOW);
+      // Only the `add` is promoted (not the remove).
+      expect(promoted).toEqual(['- team uses trunk-based dev']);
     } finally {
       fs.rmSync(ws, { recursive: true });
     }
