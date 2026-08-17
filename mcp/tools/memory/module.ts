@@ -10,10 +10,10 @@
  */
 
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
-import { searchArchive, getExcerpt, archiveDbPath } from './archive-reader';
+import { searchArchive, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
 
-/** Corpora this phase can serve. `shared`/`all` arrive with K3 — fail closed. */
-const SUPPORTED_CORPORA = new Set(['memory']);
+/** Corpora the tool can serve. */
+const SUPPORTED_CORPORA = new Set(['memory', 'shared', 'all']);
 
 export class MemoryModule implements ToolModule {
   id = 'memory';
@@ -40,8 +40,9 @@ export class MemoryModule implements ToolModule {
             },
             corpus: {
               type: 'string',
-              enum: ['memory'],
-              description: 'Which corpus to search. Only "memory" (this agent) is available. Default "memory".',
+              enum: ['memory', 'shared', 'all'],
+              description:
+                'Which corpus to search: "memory" (this agent, default), "shared" (the cross-agent shared KB), or "all" (both).',
             },
           },
           required: ['query'],
@@ -91,14 +92,31 @@ export class MemoryModule implements ToolModule {
           const rawMax = Number.isFinite(args.maxResults as number) ? (args.maxResults as number) : 6;
           const maxResults = Math.max(1, Math.min(20, Math.floor(rawMax)));
 
-          const results = searchArchive(archiveDbPath(workspaceDir), query, maxResults);
+          const personalDb = archiveDbPath(workspaceDir);
+          const sharedDb = sharedDbPathFromEnv();
+          let results;
+          if (corpus === 'memory') {
+            results = searchArchive(personalDb, query, maxResults).map((h) => ({ ...h, corpus: 'memory' }));
+          } else if (corpus === 'shared') {
+            if (!sharedDb) return this.json({ results: [], unavailable: true, warning: 'shared KB is not enabled.' });
+            results = searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }));
+          } else {
+            // "all": merge personal + shared, keep the best by bm25.
+            type Tagged = ReturnType<typeof searchArchive>[number] & { corpus: string };
+            const mine: Tagged[] = searchArchive(personalDb, query, maxResults).map((h) => ({ ...h, corpus: 'memory' }));
+            const shared: Tagged[] = sharedDb
+              ? searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }))
+              : [];
+            results = mergeHits(mine, shared, maxResults);
+          }
+
           if (results.length === 0) {
             return this.json({
               results: [],
               note: 'No matches (or the archive has not been indexed yet).',
             });
           }
-          return this.json({ results, corpus: 'memory' });
+          return this.json({ results, corpus });
         }
 
         case 'memory_get': {

@@ -28,6 +28,35 @@ export function archiveDbPath(workspaceDir: string): string {
   return path.join(path.dirname(workspaceDir), 'kb.sqlite');
 }
 
+/**
+ * Shared, cross-agent vault DB path from the gateway-provided env
+ * (`GATEWAY_SHARED_KB_DIR` = the resolved <root>/<project> dir), or null when
+ * shared KB is disabled / not configured (planning-64 K3).
+ */
+export function sharedDbPathFromEnv(): string | null {
+  const dir = process.env.GATEWAY_SHARED_KB_DIR;
+  if (!dir || !dir.trim()) return null;
+  return path.join(dir, 'kb.sqlite');
+}
+
+/**
+ * Merge hit lists (per-agent + shared), keeping the best `limit`. bm25 scores are
+ * corpus-relative — the value depends on each index's term/document statistics —
+ * so scores from two independent FTS indexes are NOT on a comparable scale and a
+ * global sort can spuriously rank one corpus over the other. Each list is already
+ * sorted best-first within its own corpus, so interleave them round-robin for a
+ * fair blend instead of a cross-corpus numeric sort.
+ */
+export function mergeHits<T extends SearchHit>(a: T[], b: T[], limit: number): T[] {
+  const out: T[] = [];
+  const max = Math.max(a.length, b.length);
+  for (let i = 0; i < max && out.length < limit; i++) {
+    if (i < a.length) out.push(a[i]);
+    if (out.length < limit && i < b.length) out.push(b[i]);
+  }
+  return out;
+}
+
 /** Build an FTS5 MATCH string: quote each token so punctuation can't inject syntax. */
 function toFtsMatch(query: string): string {
   return query

@@ -72,4 +72,6 @@ export interface DreamRunResult {
   proposalCount: number;
   tokensSpent: number;
   mode: DreamMode;
+  /** Ops actually applied to memory (auto mode only; 0 in propose mode). */
+  appliedCount?: number;
 }

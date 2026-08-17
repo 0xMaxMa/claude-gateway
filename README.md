@@ -395,12 +395,12 @@ The soft budget sits well under the hard per-file limit (still applied as a cont
 
 ### `gateway.dreaming`
 
-Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In the shipped **`propose`** mode the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — **no memory file is modified** (observe the loop before it writes). The `auto` applier is a follow-up.
+Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In **`propose`** mode (the default) the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — no memory file is modified. In **`auto`** mode a safe applier writes the ops to `MEMORY.md`/`USER.md` (rollback pre-image first; ordered apply with anchor re-resolution; bounded-loss + append-only fallback; net-negative when over budget) — a memory-only change, so no session is restarted.
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
-| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops (follow-up) |
+| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative) |
 | `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |
@@ -414,7 +414,7 @@ Per-agent overrides are supported under the agent's own `dreaming` block; unset 
 
 **Two-lane memory** — a per-agent searchable knowledge archive so an agent can recall what does not fit in the always-injected core. A SQLite/FTS5 index (`agents/<id>/kb.sqlite`, built on Node's built-in `node:sqlite` — no new dependency) covers the agent's `memory/*.md` notes plus the evergreen `MEMORY.md`/`USER.md`. Every chunk is tagged with **fail-closed provenance** (`owner`/`agent`/`untrusted`/`system`; unclassified ⇒ `untrusted`). The index is refreshed by a detached subprocess at session spawn, entirely **off the gateway event loop**.
 
-Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS5 → ranked snippets with file+line, provenance, importance) and **`memory_get`** (bounded, path-traversal-guarded excerpt of a memory-scoped file). When `MEMORY.md` grows past its `gateway.memory` soft budget, compose injects a compact **auto-generated section index** + a pointer to `memory_search` instead of the truncated full text (**core-shrink**) — the on-disk file is never modified and its full content stays searchable.
+Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS5 → ranked snippets with file+line, provenance, importance) and **`memory_get`** (bounded, path-traversal-guarded excerpt of a memory-scoped file). When `MEMORY.md` grows past its `gateway.memory` soft budget, compose injects a compact **auto-generated section index** + a pointer to `memory_search` instead of the truncated full text (**core-shrink**) — the on-disk file is never modified and its full content stays searchable. Whenever the archive is on, a short `--- MEMORY RETRIEVAL ---` note is also injected into every agent's system prompt so the tools stay discoverable at all times (not only when the file is over budget).
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -422,8 +422,13 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 | `archive.tokenizer` | `"unicode61"` | FTS5 tokenizer (`"trigram"` for CJK/Thai) |
 | `archive.chunkTokens` | `400` | Target chunk size in ~tokens |
 | `archive.chunkOverlap` | `80` | Overlap between chunks (clamped below `chunkTokens`) |
+| `shared.enabled` | `true` | Enable the cross-agent shared KB |
+| `shared.project` | `"global"` | Sharing partition key (one safe path segment) — agents with the same value share one vault; `"global"` ⇒ shared-by-default |
+| `shared.root` | `~/.claude-gateway/shared/kb` | Shared vault root dir (`<root>/<project>/`) |
+| `shared.mode` | `"propose"` | Per-agent→shared promotion mode; `propose` = dry-run, `auto` = promote durable dreamed facts |
+| `shared.graph` | `false` | Compile the memory-wiki graph + dashboards over the shared vault (opt-in) |
 
-Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
+**Shared KB.** A shared SQLite/FTS5 vault outside any single agent's workspace lets agents build a common knowledge base. Notes under `<root>/<project>/notes/*.md` are indexed and reachable via `memory_search` with `corpus:"shared"` (the shared vault) or `corpus:"all"` (this agent's memory + shared, merged by relevance). Concurrent writers are safe without a lock — atomic note writes (temp+rename) plus a cross-process `PRAGMA busy_timeout` on the index. Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
 
 ### `gateway.bind`
 

@@ -149,6 +149,32 @@ describe('config-migrator', () => {
       expect(archive.chunkTokens).toBe(400);
       expect(added.some((f) => f.startsWith('gateway.knowledge'))).toBe(true);
     });
+
+    it('adds gateway.knowledge.shared (planning-64 K3) to a predating config without clobbering overrides', () => {
+      const target: Record<string, unknown> = {
+        gateway: { logDir: '/logs', knowledge: { shared: { project: 'teamA' } } }, // user picked a project
+      };
+      const template: Record<string, unknown> = {
+        gateway: {
+          logDir: '/default',
+          knowledge: {
+            archive: { enabled: true, tokenizer: 'unicode61', chunkTokens: 400, chunkOverlap: 80 },
+            shared: { enabled: true, project: 'global', root: '~/.claude-gateway/shared/kb', mode: 'propose' },
+          },
+        },
+      };
+      const added: string[] = [];
+
+      deepMerge(target, template, '', added);
+
+      const knowledge = (target.gateway as Record<string, unknown>).knowledge as Record<string, unknown>;
+      const shared = knowledge.shared as Record<string, unknown>;
+      expect(shared.project).toBe('teamA'); // user override preserved
+      expect(shared.enabled).toBe(true);
+      expect(shared.mode).toBe('propose');
+      expect(knowledge.archive).toBeDefined(); // sibling archive block still injected
+      expect(added.some((f) => f.startsWith('gateway.knowledge.shared'))).toBe(true);
+    });
   });
 
   // ---------------------------------------------------------------------------

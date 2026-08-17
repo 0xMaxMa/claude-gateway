@@ -17,6 +17,7 @@ import { resolveDreamingConfig } from './config';
 import { gatherTranscript, type DreamHistoryDb } from './gather';
 import { runDreamReviewer } from './reviewer';
 import { writeDreamAudit } from './audit';
+import { applyDreamProposals } from './applier';
 import type {
   DreamingConfig,
   DreamOutcome,
@@ -37,6 +38,17 @@ export interface DreamingManagerDeps {
   };
   /** Injectable reviewer spawn for tests (defaults to a real print-only claude -p). */
   spawnFn?: ClaudeSpawnFn;
+  /** Soft memory budgets for the K4 auto-applier's net-negative gate (defaults 8000/3000). */
+  memoryBudgetChars?: number;
+  userBudgetChars?: number;
+  /**
+   * Optional per-agent→shared promotion hook (K3↔K4). When provided (the gateway
+   * wires it only when the shared KB is enabled AND `shared.mode:auto`), each
+   * durable `add` the dream promotes is also contributed to the shared vault.
+   * Injected as a callback so the manager stays decoupled from shared-config
+   * resolution and is easy to test. Best-effort; must not throw.
+   */
+  sharedPromote?: (proposal: DreamProposal) => void;
 }
 
 const MS_PER_MINUTE = 60 * 1000;
@@ -114,13 +126,48 @@ export class DreamingManager {
         ? 'proposed'
         : 'no-changes';
 
-    // PROPOSE MODE (P2): write diary + audit only — mutate NO memory file. The
-    // auto-apply path is a P3 follow-up; auto currently only proposes too.
-    this.audit(now, outcome, review.summary, proposals, review.tokensSpent, gathered.sessionCount);
+    // AUTO MODE (K4): apply the ops to memory through the safe applier (backup +
+    // ordered anchor re-resolution + bounded-loss + net-negative + append-only
+    // fallback). Writing MEMORY.md/USER.md is memory-only ⇒ no session restart
+    // (Part A). PROPOSE MODE mutates nothing — diary + audit only.
+    let appliedCount = 0;
+    if (cfg.mode === 'auto' && outcome === 'proposed') {
+      let appliedProposals: DreamProposal[] = [];
+      try {
+        const applied = applyDreamProposals(this.deps.workspaceDir, proposals, {
+          memoryBudgetChars: this.deps.memoryBudgetChars ?? 8_000,
+          userBudgetChars: this.deps.userBudgetChars ?? 3_000,
+        }, now);
+        appliedCount = applied.totalApplied;
+        appliedProposals = applied.appliedProposals;
+      } catch {
+        appliedCount = 0; // applier never throws, but stay a safe no-op regardless
+      }
+
+      // Per-agent→shared promotion (K3↔K4): contribute ONLY the `add`s the applier
+      // actually wrote to local memory — never a proposal that was skipped locally
+      // (net-negative / bounded-loss), so the shared vault can't gain content the
+      // agent's own memory refused. Gated + wired by the gateway (shared enabled +
+      // mode auto); best-effort — a promotion failure never affects the local dream.
+      if (this.deps.sharedPromote) {
+        for (const p of appliedProposals) {
+          if (p.op !== 'add' || !p.content) continue;
+          try {
+            this.deps.sharedPromote(p);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    }
+
+    this.audit(now, outcome, review.summary, proposals, review.tokensSpent, gathered.sessionCount, cfg.mode === 'auto' ? appliedCount : undefined);
     this.log('Dream run complete', {
       agentId: this.deps.agentId,
       outcome,
+      mode: cfg.mode,
       proposals: proposals.length,
+      applied: appliedCount,
       tokens: review.tokensSpent,
     });
 
@@ -129,6 +176,7 @@ export class DreamingManager {
       proposalCount: proposals.length,
       tokensSpent: review.tokensSpent,
       mode: cfg.mode,
+      appliedCount,
     };
   }
 
@@ -139,6 +187,7 @@ export class DreamingManager {
     proposals: DreamProposal[],
     tokensSpent: number,
     sessionCount: number,
+    appliedCount?: number,
   ): void {
     writeDreamAudit(this.deps.workspaceDir, {
       ts,
@@ -148,6 +197,7 @@ export class DreamingManager {
       proposals,
       tokensSpent,
       sessionCount,
+      appliedCount,
     });
   }
 

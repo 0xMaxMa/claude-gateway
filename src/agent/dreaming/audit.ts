@@ -20,6 +20,8 @@ export interface DreamAuditEntry {
   proposals: DreamProposal[];
   tokensSpent: number;
   sessionCount: number;
+  /** Ops the K4 applier actually wrote to memory (auto mode). Undefined ⇒ propose. */
+  appliedCount?: number;
 }
 
 function truncate(s: string, n: number): string {
@@ -50,7 +52,7 @@ export function writeDreamAudit(workspaceDir: string, entry: DreamAuditEntry): s
       lines.push(
         '',
         entry.mode === 'auto'
-          ? '_auto mode requested — applier not yet available; proposals logged only, memory not modified._'
+          ? `_auto mode: applied ${entry.appliedCount ?? 0} op(s) to memory — rollback pre-image kept in .dreaming/backups/._`
           : '_propose mode: proposals logged only — memory not modified._',
       );
     } else if (entry.outcome === 'no-changes') {

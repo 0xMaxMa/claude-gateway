@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
+import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
@@ -396,6 +397,9 @@ export class SessionProcess extends EventEmitter {
             GATEWAY_ORIGIN_CHANNEL: this.source,
             GATEWAY_WORKSPACE_DIR: this.agentConfig.workspace,
             GATEWAY_SHARED_SKILLS_DIR: path.join(os.homedir(), '.claude-gateway', 'shared-skills'),
+            // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
+            // can reach the cross-agent vault. Empty when shared KB is disabled.
+            GATEWAY_SHARED_KB_DIR: this.resolveSharedKbDir(),
             GATEWAY_SESSION_ID: this.sessionId,
             // For API sessions: absolute path to session media dir so browser screenshots land there
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
@@ -445,6 +449,15 @@ export class SessionProcess extends EventEmitter {
       k.admin
     );
     return match?.key ?? '';
+  }
+
+  /** Resolved shared-KB vault dir for this agent, or '' when shared KB is disabled. */
+  private resolveSharedKbDir(): string {
+    const cfg = resolveSharedConfig(
+      this.agentConfig.knowledge?.shared,
+      this.gatewayConfig.gateway.knowledge?.shared,
+    );
+    return cfg.enabled ? sharedVaultDir(cfg) : '';
   }
 
   private buildArgs(mcpConfigPath: string | null, model: string): string[] {

@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.21",
+  "configVersion": "1.0.23",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -100,6 +100,13 @@
         "tokenizer": "unicode61",
         "chunkTokens": 400,
         "chunkOverlap": 80
+      },
+      "shared": {
+        "enabled": true,
+        "project": "global",
+        "root": "~/.claude-gateway/shared/kb",
+        "mode": "propose",
+        "graph": false
       }
     }
   },

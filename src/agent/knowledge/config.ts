@@ -7,7 +7,14 @@
  * chunks with a NaN window.
  */
 
-import type { KnowledgeArchiveConfig, ResolvedKnowledgeArchiveCfg } from './types';
+import * as os from 'os';
+import * as path from 'path';
+import type {
+  KnowledgeArchiveConfig,
+  ResolvedKnowledgeArchiveCfg,
+  KnowledgeSharedConfig,
+  ResolvedKnowledgeSharedCfg,
+} from './types';
 
 export const ARCHIVE_DEFAULTS: ResolvedKnowledgeArchiveCfg = {
   enabled: true,
@@ -57,4 +64,69 @@ export function resolveArchiveConfig(
     chunkTokens,
     chunkOverlap: Math.min(rawOverlap, chunkTokens - 1),
   };
+}
+
+// ── Shared KB (planning-64 K3) ───────────────────────────────────────────────
+
+export const SHARED_DEFAULTS: ResolvedKnowledgeSharedCfg = {
+  enabled: true,
+  project: 'global',
+  root: path.join(os.homedir(), '.claude-gateway', 'shared', 'kb'),
+  mode: 'propose', // SAFE default: per-agent→shared promotion is dry-run (K4)
+  graph: false, // K5 graph/dashboards are opt-in
+};
+
+/**
+ * A project key safe to use as a single path segment (no traversal/separators).
+ * NOTE: `.` is a literal inside the class, so `'.'` and `'..'` also match the
+ * regex — they are rejected explicitly in `resolveSharedConfig` (a bare-dots key
+ * would resolve `<root>/..` outside the intended root).
+ */
+const PROJECT_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Reserved path segments that must never be used as a project key. */
+const RESERVED_PROJECT_KEYS = new Set(['.', '..']);
+
+/** Expand a leading `~` to the home dir (mirrors config path handling elsewhere). */
+function expandHome(p: string): string {
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+export function resolveSharedConfig(
+  agentCfg?: KnowledgeSharedConfig,
+  globalCfg?: KnowledgeSharedConfig,
+): ResolvedKnowledgeSharedCfg {
+  const d = SHARED_DEFAULTS;
+  const rawProject = pick(agentCfg?.project, globalCfg?.project, d.project);
+  const project =
+    typeof rawProject === 'string' && PROJECT_KEY_RE.test(rawProject) && !RESERVED_PROJECT_KEYS.has(rawProject)
+      ? rawProject
+      : d.project;
+  const rawRoot = pick(agentCfg?.root, globalCfg?.root, d.root);
+  const root = typeof rawRoot === 'string' && rawRoot.trim() ? expandHome(rawRoot.trim()) : d.root;
+  const mode = pick(agentCfg?.mode, globalCfg?.mode, d.mode);
+  return {
+    enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
+    project,
+    root,
+    mode: mode === 'auto' ? 'auto' : 'propose', // anything but 'auto' ⇒ propose
+    graph: pick(agentCfg?.graph, globalCfg?.graph, d.graph) === true,
+  };
+}
+
+/** Directory for a project's shared vault: <root>/<project>. */
+export function sharedVaultDir(cfg: ResolvedKnowledgeSharedCfg): string {
+  return path.join(cfg.root, cfg.project);
+}
+
+/** The shared vault's SQLite index path. */
+export function sharedDbPath(cfg: ResolvedKnowledgeSharedCfg): string {
+  return path.join(sharedVaultDir(cfg), 'kb.sqlite');
+}
+
+/** The shared vault's notes dir (agents drop shared `*.md` here; indexed to kb.sqlite). */
+export function sharedNotesDir(cfg: ResolvedKnowledgeSharedCfg): string {
+  return path.join(sharedVaultDir(cfg), 'notes');
 }

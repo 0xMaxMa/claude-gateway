@@ -10,24 +10,41 @@
  * Best-effort: any failure exits 0 without disturbing the gateway.
  */
 
-import { indexAgentArchive } from './indexer';
-import type { KnowledgeArchiveConfig } from './types';
+import { indexAgentArchive, indexSharedArchive } from './indexer';
+import type { KnowledgeArchiveConfig, KnowledgeSharedConfig } from './types';
+
+function parse<T>(arg: string | undefined, label: string): T | undefined {
+  if (arg === undefined) return undefined; // no arg → use defaults (expected)
+  try {
+    return JSON.parse(arg) as T;
+  } catch {
+    // A malformed (present) arg falls back to defaults, but is NOT silent — the
+    // gateway builds this JSON, so a parse failure is a real bug worth surfacing in
+    // the detached subprocess's captured output.
+    process.stderr.write(`[reindex-cli] ignoring malformed ${label} config arg; using defaults\n`);
+    return undefined;
+  }
+}
 
 function main(): void {
   const workspaceDir = process.argv[2];
   if (!workspaceDir) return;
 
-  let cfg: KnowledgeArchiveConfig | undefined;
-  try {
-    cfg = process.argv[3] ? (JSON.parse(process.argv[3]) as KnowledgeArchiveConfig) : undefined;
-  } catch {
-    cfg = undefined; // malformed arg → fall back to defaults
-  }
+  const archiveCfg = parse<KnowledgeArchiveConfig>(process.argv[3], 'archive');
+  const sharedCfg = parse<KnowledgeSharedConfig>(process.argv[4], 'shared');
 
+  // Each indexer is internally guarded by its own `enabled` flag, so a disabled
+  // lane is a no-op. Failures are swallowed independently — the shared reindex
+  // runs even if the per-agent one throws, and vice versa.
   try {
-    indexAgentArchive(workspaceDir, cfg);
+    indexAgentArchive(workspaceDir, archiveCfg);
   } catch {
-    /* best-effort: never surface a reindex error to the caller */
+    /* best-effort */
+  }
+  try {
+    indexSharedArchive(sharedCfg);
+  } catch {
+    /* best-effort */
   }
 }
 

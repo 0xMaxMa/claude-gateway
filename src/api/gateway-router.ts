@@ -705,6 +705,7 @@ export class GatewayRouter {
         this.configs,
         this.gatewayConfig.gateway.api.keys,
         this.agents,
+        this.gatewayConfig,
       );
       this.app.use('/api', skillsRouter);
     }
