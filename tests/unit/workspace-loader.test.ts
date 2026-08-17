@@ -9,6 +9,9 @@ import {
   MEMORY_FILES,
   IDENTITY_FILES,
   classifyWorkspaceRestart,
+  resolveMemoryBudget,
+  DEFAULT_MEMORY_BUDGET,
+  OverBudgetMode,
   MissingRequiredFileError,
 } from '../../src/agent/workspace-loader';
 import { waitFor } from '../helpers/wait-for';
@@ -53,6 +56,130 @@ describe('workspace-loader', () => {
     expect(result.files.memoryMd.length).toBeLessThanOrEqual(20_000 + 60); // +marker length
     expect(result.files.memoryMd).toContain('[TRUNCATED');
     expect(result.truncated).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Memory budget discipline (issue #323): an over-budget memory file gets a
+  // loud OVER BUDGET banner at compose instead of a silent truncation.
+  // -------------------------------------------------------------------------
+  const makeBudgetWs = (files: Record<string, string>): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-budget-'));
+    fs.writeFileSync(path.join(dir, 'AGENTS.md'), files['AGENTS.md'] ?? '# Agent');
+    for (const [name, content] of Object.entries(files)) {
+      if (name === 'AGENTS.md') continue;
+      fs.writeFileSync(path.join(dir, name), content);
+    }
+    return dir;
+  };
+
+  it('U-BUDGET-1: MEMORY.md over soft budget gets a loud OVER BUDGET banner (not silent truncate)', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': 'M'.repeat(9_000) }); // > 8000 soft, < 20000 hard
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 8_000 } });
+      expect(result.files.memoryMd).toContain('MEMORY.md OVER BUDGET');
+      expect(result.files.memoryMd).toContain('⚠️');
+      expect(result.files.memoryMd).toContain('consolidate');
+      // Under the hard 20k cap → not truncated; full content kept after the banner.
+      expect(result.files.memoryMd).not.toContain('[TRUNCATED');
+      expect(result.systemPrompt).toContain('MEMORY.md OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-2: MEMORY.md under budget composes clean (no banner)', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': 'a small curated memory' });
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 8_000 } });
+      expect(result.files.memoryMd).not.toContain('OVER BUDGET');
+      expect(result.files.memoryMd).toBe('a small curated memory');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-3: USER.md over its own (smaller) budget gets the banner', async () => {
+    const dir = makeBudgetWs({ 'USER.md': 'U'.repeat(4_000) }); // > 3000 soft
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { userBudgetChars: 3_000 } });
+      expect(result.files.userMd).toContain('USER.md OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-4: non-memory files never get a budget banner (only the hard truncate)', async () => {
+    // SOUL.md is larger than the memory budget but is NOT a memory file.
+    const dir = makeBudgetWs({ 'SOUL.md': 'S'.repeat(9_000) });
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 8_000 } });
+      expect(result.files.soulMd).not.toContain('OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-5: overBudget "error" mode uses the stronger banner', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': 'M'.repeat(9_000) });
+    try {
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000, overBudget: 'error' },
+      });
+      expect(result.files.memoryMd).toContain('🛑');
+      expect(result.files.memoryMd).toContain('MUST consolidate');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-6: budget 0 disables the banner (opt-out)', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': 'M'.repeat(9_000) });
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 0 } });
+      expect(result.files.memoryMd).not.toContain('OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-7: default budget (no opts) still banners a large MEMORY.md', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': 'M'.repeat(9_000) });
+    try {
+      const result = await loadWorkspace(dir); // no memoryBudget → defaults (8000)
+      expect(result.files.memoryMd).toContain('OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-BUDGET-8: resolveMemoryBudget fills defaults and rejects invalid values (fail-safe)', () => {
+    expect(resolveMemoryBudget(undefined)).toEqual(DEFAULT_MEMORY_BUDGET);
+    // Unknown overBudget → warn
+    expect(resolveMemoryBudget({ overBudget: 'nonsense' as OverBudgetMode }).overBudget).toBe('warn');
+    // Negative / NaN budgets → defaults
+    expect(resolveMemoryBudget({ memoryBudgetChars: -5 }).memoryBudgetChars).toBe(
+      DEFAULT_MEMORY_BUDGET.memoryBudgetChars,
+    );
+    expect(resolveMemoryBudget({ userBudgetChars: NaN }).userBudgetChars).toBe(
+      DEFAULT_MEMORY_BUDGET.userBudgetChars,
+    );
+    // Valid partial is honored
+    expect(resolveMemoryBudget({ overBudget: 'error', memoryBudgetChars: 100 })).toEqual({
+      memoryBudgetChars: 100,
+      userBudgetChars: 3_000,
+      overBudget: 'error',
+    });
+  });
+
+  it('U-BUDGET-9: per-agent override wins field-by-field over the global default', () => {
+    // Mirrors src/index.ts: `{ ...global, ...agent }` then resolveMemoryBudget.
+    const global = { memoryBudgetChars: 8_000, userBudgetChars: 3_000, overBudget: 'warn' as OverBudgetMode };
+    const agent = { memoryBudgetChars: 40_000 }; // an agent with a large curated memory
+    expect(resolveMemoryBudget({ ...global, ...agent })).toEqual({
+      memoryBudgetChars: 40_000, // agent wins
+      userBudgetChars: 3_000, // global fills the rest
+      overBudget: 'warn',
+    });
   });
 
   // -------------------------------------------------------------------------

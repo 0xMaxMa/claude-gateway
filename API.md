@@ -1773,6 +1773,16 @@ Read and write an agent's workspace identity files via the API. The gateway's fi
 | `SOUL.md`, `AGENTS.md`, `IDENTITY.md` (identity) | Busy sessions are skipped; idle sessions are **deferred** (respawn on their next message) — never SIGKILLed mid-idle. |
 | `HEARTBEAT.md` / other | Normal restart-or-defer (idle sessions restart now). |
 
+**Memory budget (`gateway.memory`).** Self-authored memory files (`MEMORY.md`, `USER.md`) that exceed a **soft char budget** get a loud, actionable over-budget banner prepended to their `CLAUDE.md` section at compose time — instead of a silent `[TRUNCATED]` — so the agent consolidates on its next spawn (frozen-at-spawn, no restart). The soft budget sits well under the hard per-file limit (still applied as a context safety net); the banner is the primary signal for memory files. Config (global, injected by migration at `configVersion` `1.0.19`):
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `memoryBudgetChars` | `8000` | Soft budget for `MEMORY.md` (`0` = disabled). |
+| `userBudgetChars` | `3000` | Soft budget for `USER.md` (`0` = disabled). |
+| `overBudget` | `"warn"` | Banner severity: `"warn"` (⚠️) or `"error"` (🛑, stronger wording). An unknown value falls back to `"warn"`. |
+
+A memory file under its budget composes cleanly (no banner). Non-memory files are unaffected. A hard-reject memory tool (refuse an over-budget write) is a planned follow-up; v1 is the compose banner only.
+
 ### GET /api/v1/agents/:agentId/files/:filename
 
 Read a workspace file. Returns empty `content` if the file does not exist yet (not a 404).

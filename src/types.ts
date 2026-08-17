@@ -111,6 +111,8 @@ export interface AgentConfig {
   history?: HistoryConfig;
   /** Per-agent skill-learning override (wins over the global gateway default). */
   skillLearning?: GatewayConfig['gateway']['skillLearning'];
+  /** Per-agent memory-budget override (field-level over the global gateway default). */
+  memory?: GatewayConfig['gateway']['memory'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
 }
@@ -252,6 +254,19 @@ export interface GatewayConfig {
       pruneHour?: number;        // 0-23 daily curator hour, default 3
       pruneTimezone?: string;    // IANA timezone for pruneHour, default "UTC"
       notify?: boolean;          // Telegram push when a skill is auto-written, default true (diary always on)
+    };
+    /**
+     * Memory budget discipline (issue #323). Self-authored memory files
+     * (MEMORY.md/USER.md) that exceed their SOFT char budget get a loud
+     * over-budget banner at compose time instead of a silent truncation, so the
+     * agent consolidates on its next spawn (frozen-at-spawn — no restart). Soft
+     * budgets sit well under the hard per-file limit; the banner is the primary
+     * signal for memory files.
+     */
+    memory?: {
+      memoryBudgetChars?: number;    // soft budget for MEMORY.md, default 8000 (0 = disabled)
+      userBudgetChars?: number;      // soft budget for USER.md, default 3000 (0 = disabled)
+      overBudget?: 'warn' | 'error'; // compose banner severity, default "warn"
     };
   };
   agents: AgentConfig[];
