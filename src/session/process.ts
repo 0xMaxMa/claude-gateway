@@ -19,6 +19,16 @@ import {
 
 export const MAX_HISTORY_MESSAGES = 50;
 
+// The MCP reply tools that deliver an agent's user-facing message to a channel.
+// Their text lives in the tool_use `input.text`, not in an assistant text block,
+// so it is never captured by `assistantBuffer` — the reply is delivered to the
+// user but was previously never mirrored into the resumable session store.
+const CHANNEL_REPLY_TOOLS = new Set([
+  'mcp__gateway__telegram_reply',
+  'mcp__gateway__discord_reply',
+  'mcp__gateway__line_reply',
+]);
+
 /**
  * Resolve the per-spawn history re-injection cap with precedence
  * per-agent → global → MAX_HISTORY_MESSAGES. Non-finite or negative values are
@@ -101,6 +111,10 @@ export class SessionProcess extends EventEmitter {
   // Real model from Claude stream, updated per turn. Persisted to SessionMeta.
   _lastModel = '';
   private thinkingRecoveryCount = 0;
+  // tool_use ids of channel replies already mirrored to sessionStore, so a reply
+  // is persisted exactly once even though its tool_use block can recur across the
+  // partial + final stream events of the same turn.
+  private persistedReplyToolIds = new Set<string>();
   // Binary path last spawned and the last non-empty stderr line, retained so a
   // fatal `Session max restarts reached` names what actually failed (e.g. an
   // unresolvable `claude` binary) instead of ending in silence. `stderrBuffer`
@@ -674,6 +688,10 @@ export class SessionProcess extends EventEmitter {
     // CODING_TOOLS and TOOL_LABELS imported from shared utility above
 
     let assistantBuffer = '';
+    // Reply-tool texts already mirrored to the store during the CURRENT turn, so
+    // the end-of-turn assistantBuffer persist can skip an identical narration
+    // text block and avoid writing the same message twice. Cleared each turn.
+    const replyTextsThisTurn = new Set<string>();
     // Track partial message text to avoid double-counting when --include-partial-messages is active.
     // Each partial `type: 'assistant'` event contains the FULL text so far, not a delta.
     let lastPartialText = '';
@@ -730,6 +748,36 @@ export class SessionProcess extends EventEmitter {
                 if (this.queryMode) { this._queryBuffer += delta; } else { assistantBuffer += delta; }
               }
               lastPartialText = '';
+            }
+
+            // Mirror channel replies (telegram_reply/discord_reply/line_reply) into
+            // the resumable session store at delivery time. The user-facing text is
+            // carried in the tool_use input, not a text block, so assistantBuffer
+            // never sees it — without this, a turn whose entire output is a reply
+            // tool call (e.g. a long synthesized report, or any background-event or
+            // reply-tool-only turn) is delivered to the user yet lost from the store
+            // and vanishes on resume. Persisting here — keyed off the tool_use event,
+            // not the end-of-turn 'result' — also survives a subprocess that exits
+            // before the turn completes. Only act on the final (non-partial) message,
+            // where the tool_use input is fully materialised.
+            if (!isPartial && !this.queryMode && this.source !== 'api') {
+              for (const block of obj.message.content) {
+                if (
+                  block.type === 'tool_use' &&
+                  typeof block.name === 'string' &&
+                  CHANNEL_REPLY_TOOLS.has(block.name) &&
+                  typeof block.id === 'string' &&
+                  !this.persistedReplyToolIds.has(block.id)
+                ) {
+                  const input = block.input as { text?: unknown } | undefined;
+                  const replyText = typeof input?.text === 'string' ? input.text.trim() : '';
+                  if (replyText) {
+                    this.persistedReplyToolIds.add(block.id);
+                    replyTextsThisTurn.add(replyText);
+                    this.appendToStore({ role: 'assistant', content: replyText, ts: Date.now() }).catch(() => {});
+                  }
+                }
+              }
             }
 
             if (!this.queryMode) {
@@ -810,12 +858,16 @@ export class SessionProcess extends EventEmitter {
               if (assistantBuffer.trim()) {
                 // For non-API sessions (Telegram/Discord), persist here via appendTelegramMessage.
                 // For API sessions, runner.ts already persists via appendMessage — skip to avoid double-write.
-                if (this.source !== 'api') {
+                // Skip when this exact text was already mirrored as a channel reply
+                // in this turn, so a narration text block that duplicates the reply
+                // is not stored twice.
+                if (this.source !== 'api' && !replyTextsThisTurn.has(assistantBuffer.trim())) {
                   const assistantMsg = { role: 'assistant' as const, content: assistantBuffer.trim(), ts: Date.now() };
                   this.appendToStore(assistantMsg).catch(() => {});
                 }
                 assistantBuffer = '';
               }
+              replyTextsThisTurn.clear();
               // Emit tokenUsage using message_start context (accurate per-call context window usage)
               // rather than result.usage which is cumulative across all sub-calls in the turn.
               const usage = obj.usage as { output_tokens?: number } | undefined;
