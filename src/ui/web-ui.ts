@@ -1001,8 +1001,8 @@ export function generateDashboardHtml(): string {
         tabs.forEach(function(t){ t.classList.remove('active'); });
         tab.classList.add('active');
         document.querySelectorAll('.view').forEach(function(v){ v.style.display = 'none'; });
-        var el = document.getElementById(tab.getAttribute('data-view'));
-        if (el) el.style.display = '';
+        var viewEl = document.getElementById(tab.getAttribute('data-view'));
+        if (viewEl) viewEl.style.display = '';
         if (tab.getAttribute('data-view') === 'view-kb' && !kbLoaded) { kbLoaded = true; loadGraph(); }
       });
     });
@@ -1069,7 +1069,9 @@ export function generateDashboardHtml(): string {
       });
       createEls();
       view = { x: 0, y: 0, k: 1 }; applyTransform();
-      alpha = 1; startSim();
+      // Only run the simulation when there is something to lay out — an empty
+      // graph would otherwise spin ~260 idle RAF frames before self-terminating.
+      if (nodes.length) { alpha = 1; startSim(); }
     }
 
     function createEls(){
@@ -1158,8 +1160,17 @@ export function generateDashboardHtml(): string {
       ev.stopPropagation(); dragNode = node;
       svg.setPointerCapture(ev.pointerId);
       var move = function(mv){ var p = evtGraphPoint(mv); node.x = p.x; node.y = p.y; render(); reheat(); };
-      var up = function(){ dragNode = null; svg.removeEventListener('pointermove', move); svg.removeEventListener('pointerup', up); };
-      svg.addEventListener('pointermove', move); svg.addEventListener('pointerup', up);
+      var up = function(){
+        dragNode = null;
+        svg.removeEventListener('pointermove', move);
+        svg.removeEventListener('pointerup', up);
+        svg.removeEventListener('pointercancel', up);
+      };
+      svg.addEventListener('pointermove', move);
+      svg.addEventListener('pointerup', up);
+      // pointercancel (touch palm-rejection / gesture interruption) must also clear
+      // dragNode — otherwise it stays non-null and silently disables panning.
+      svg.addEventListener('pointercancel', up);
     }
     svg.addEventListener('pointerdown', function(ev){
       if (dragNode) return;

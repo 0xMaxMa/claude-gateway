@@ -329,7 +329,7 @@ export function graphFromPages(pages: WikiPage[], now: number): GraphModel {
     for (const link of p.links) {
       const target = keyToPage.get(link.toLowerCase());
       if (!target || target === p.relPath) continue; // unresolved or self-loop
-      const key = `${p.relPath} ${target}`;
+      const key = `${p.relPath}\n${target}`; // \n can't occur in a path -> no dedup-key collision
       if (seen.has(key)) continue; // de-dupe repeated links to the same target
       seen.add(key);
       edges.push({ source: p.relPath, target });

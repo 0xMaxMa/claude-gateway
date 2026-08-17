@@ -77,6 +77,14 @@ describe('GET /knowledge/graph', () => {
       expect(res.body.edges).toEqual([]);
     });
 
+    it('empty vault + repeated ?demo=off (array query) still disables the demo', async () => {
+      // Express parses ?demo=off&demo=off into an array — the off-switch must
+      // still register (regression for the strict `!== "off"` scalar check).
+      const res = await supertest(buildApp(root)).get('/knowledge/graph?demo=off&demo=off').set('X-Api-Key', KEY);
+      expect(res.body.demo).toBe(false);
+      expect(res.body.nodes).toEqual([]);
+    });
+
     it('populated vault → real nodes/edges (demo:false)', async () => {
       const notes = path.join(root, 'test', 'notes');
       fs.mkdirSync(notes, { recursive: true });

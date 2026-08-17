@@ -924,7 +924,12 @@ export class GatewayRouter {
         const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
         const now = Date.now();
         const model = buildGraphModel(sharedVaultDir(shared), now);
-        if (model.nodes.length === 0 && req.query.demo !== 'off') {
+        // Normalize to a scalar first: Express parses a repeated/array query param
+        // (?demo=off&demo=off, ?demo[]=off) into an array, which a strict `!== 'off'`
+        // would treat as "not off" and wrongly keep the demo on.
+        const demoQ = req.query.demo;
+        const demoOff = (Array.isArray(demoQ) ? demoQ[demoQ.length - 1] : demoQ) === 'off';
+        if (model.nodes.length === 0 && !demoOff) {
           res.json({ ...demoGraphModel(now), demo: true });
           return;
         }
