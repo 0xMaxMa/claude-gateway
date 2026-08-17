@@ -23,6 +23,7 @@ import { ImageModule } from './tools/image/module';
 import { ShareImageModule } from './tools/share-image/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
+import { MemoryModule } from './tools/memory/module';
 import { buildChannelInstructions } from './instructions';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
 
@@ -46,6 +47,7 @@ const modules: AnyModule[] = [
   new ShareImageModule(),
   new AppsModule(),
   new ApiModule(),
+  new MemoryModule(),
 ];
 
 // Build tool-to-module mapping for enabled modules

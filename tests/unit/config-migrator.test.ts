@@ -126,6 +126,29 @@ describe('config-migrator', () => {
       expect(dreaming.dreamHour).toBe(3);
       expect(added.some((f) => f.startsWith('gateway.dreaming'))).toBe(true);
     });
+
+    it('adds gateway.knowledge.archive (planning-64 K0) to a predating config without clobbering overrides', () => {
+      const target: Record<string, unknown> = {
+        gateway: { logDir: '/logs', knowledge: { archive: { tokenizer: 'trigram' } } }, // user picked trigram
+      };
+      const template: Record<string, unknown> = {
+        gateway: {
+          logDir: '/default',
+          knowledge: { archive: { enabled: true, tokenizer: 'unicode61', chunkTokens: 400, chunkOverlap: 80 } },
+        },
+      };
+      const added: string[] = [];
+
+      deepMerge(target, template, '', added);
+
+      const gw = target.gateway as Record<string, unknown>;
+      const archive = (gw.knowledge as Record<string, unknown>).archive as Record<string, unknown>;
+      // user's tokenizer override preserved; missing sub-keys filled from template
+      expect(archive.tokenizer).toBe('trigram');
+      expect(archive.enabled).toBe(true);
+      expect(archive.chunkTokens).toBe(400);
+      expect(added.some((f) => f.startsWith('gateway.knowledge'))).toBe(true);
+    });
   });
 
   // ---------------------------------------------------------------------------
