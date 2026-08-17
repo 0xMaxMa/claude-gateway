@@ -142,6 +142,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `POST` | `/api/v1/agents/:agentId/skills/install` | Admin | Install a skill from a GitHub/raw URL |
 | `DELETE` | `/api/v1/agents/:agentId/skills/:name` | Write | Delete a skill |
 | `GET` | `/api/v1/agents/:agentId/skill-metrics` | Key | Skill self-improvement effectiveness rollup |
+| `GET` | `/api/v1/agents/:agentId/memory-metrics` | Key | Two-lane memory metrics: budget hygiene, archive/shared coverage, dreaming ledger, session-drop invariant |
 
 ### App Store API
 

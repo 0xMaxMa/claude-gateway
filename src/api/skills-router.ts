@@ -2,10 +2,11 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { AgentConfig, ApiKey } from '../types';
+import { AgentConfig, ApiKey, GatewayConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { loadSkills } from '../skills/loader';
 import { extractFrontmatter } from '../skills/parser';
+import { computeMemoryMetrics } from '../agent/memory-metrics';
 import type { AgentRunner } from '../agent/runner';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -105,6 +106,7 @@ export function createSkillsRouter(
   agentConfigs: Map<string, AgentConfig>,
   apiKeys: ApiKey[],
   agents?: Map<string, AgentRunner>,
+  gatewayConfig?: GatewayConfig,
 ): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
@@ -485,6 +487,34 @@ export function createSkillsRouter(
     }
 
     res.json(manager.rollup());
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/memory-metrics
+   * Two-lane memory metrics (planning-64): memory-budget hygiene, per-agent +
+   * shared archive coverage, the dreaming consolidation ledger, and the
+   * session-drop invariant. Read-only; any key with agent access.
+   */
+  router.get('/v1/agents/:agentId/memory-metrics', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+
+    const config = agentConfigs.get(agentId);
+    if (!config) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    try {
+      res.json(computeMemoryMetrics(config, gatewayConfig));
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   return router;
