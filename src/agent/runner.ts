@@ -2219,9 +2219,25 @@ export class AgentRunner extends EventEmitter {
    *   restarted so the change reaches them on their next spawn. The recomposed
    *   CLAUDE.md is already on disk, so a skipped busy session picks up the
    *   change on its own next natural spawn.
+   * @param opts.deferIdle When true, idle sessions are NOT `stop()`ed now.
+   *   Instead they are added to the runner-level `pendingRestarts` set, so each
+   *   respawns cleanly on its next message (the same lossless mechanism used for
+   *   the image-size-threshold restart) rather than being SIGKILLed mid-idle and
+   *   losing its in-context state. Since CLAUDE.md is frozen-at-spawn, an idle
+   *   bystander gains nothing from an immediate stop — the recomposed file
+   *   applies on its next spawn either way. Use for agent-writable/identity and
+   *   skills changes, where dropping an unrelated idle session is pure downside.
+   *   NB: idle sessions are deferred via `pendingRestarts`, NOT
+   *   `proc.markPendingRestart()` — the latter emits `deferredRestartReady`
+   *   synchronously on an idle process, which stops it immediately (no deferral).
+   * @returns Counts of sessions handled: `immediate` (stopped now), `deferred`
+   *   (armed to restart on next turn/message), `skipped` (left untouched).
    */
-  async restartOrDefer(opts?: { skipBusy?: boolean }): Promise<void> {
+  async restartOrDefer(
+    opts?: { skipBusy?: boolean; deferIdle?: boolean },
+  ): Promise<{ immediate: number; deferred: number; skipped: number }> {
     const skipBusy = opts?.skipBusy ?? false;
+    const deferIdle = opts?.deferIdle ?? false;
     let immediate = 0;
     let deferred = 0;
     let skipped = 0;
@@ -2233,6 +2249,13 @@ export class AgentRunner extends EventEmitter {
           continue;
         }
         proc.markPendingRestart();
+        deferred++;
+      } else if (deferIdle) {
+        // Lossless deferral: leave the idle process running and arm a restart on
+        // its next message (mirrors the image-size-threshold path). Do NOT call
+        // proc.markPendingRestart() here — on an idle process it fires
+        // deferredRestartReady immediately and stops the session.
+        this.pendingRestarts.add(id);
         deferred++;
       } else {
         toStopNow.push(id);
@@ -2246,6 +2269,7 @@ export class AgentRunner extends EventEmitter {
       immediate++;
     }
     this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred, skipped });
+    return { immediate, deferred, skipped };
   }
 
   /**

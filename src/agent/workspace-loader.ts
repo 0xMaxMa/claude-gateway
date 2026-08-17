@@ -171,19 +171,59 @@ const WATCH_DEBOUNCE_MS = 300;
 
 /**
  * Canonical workspace files the agent is authorized to write itself, per the
- * memory rule (see MEMORY_RULE above). When ONLY these change, a busy session
- * must not be force-restarted: the change most likely came from that very
- * session mid-turn, and a deferred restart would stop it the moment the turn
- * completes (the self-restart footgun). Idle sessions are still restarted so
- * the change reaches them on their next spawn, and the recomposed CLAUDE.md
- * carries the change into every future spawn regardless.
+ * memory rule (see MEMORY_RULE above), split into two tiers by how urgently a
+ * change needs to reach a running session — and, crucially, by the fact that
+ * CLAUDE.md is frozen-at-spawn (a live process never re-reads it; the recomposed
+ * file applies on the next natural spawn regardless).
+ *
+ * MEMORY_FILES — self-authored data the agent writes about itself/the user
+ *   (MEMORY.md, USER.md). A write here is almost always the running session
+ *   curating its own memory mid-work. Since the process already holds what it
+ *   just wrote and every future spawn reads the recomposed CLAUDE.md, restarting
+ *   ANY session (busy or idle) buys nothing — it only drops in-context state and
+ *   forces a SQLite-replay respawn. Memory-only changes therefore restart
+ *   nothing at all (see the watcher callback in src/index.ts).
+ *
+ * IDENTITY_FILES — operator-authored identity (SOUL.md, AGENTS.md). These want
+ *   to reach sessions "soon-ish", but still never justify SIGKILLing an idle
+ *   bystander: a deferred restart (respawn on next message) is lossless and
+ *   applies the change just as correctly.
+ */
+export const MEMORY_FILES = new Set<string>(['MEMORY.md', 'USER.md']);
+export const IDENTITY_FILES = new Set<string>(['SOUL.md', 'AGENTS.md']);
+
+/**
+ * Union of the two tiers — kept for callers that only need "did the agent write
+ * this itself?" (e.g. the busy-session skip guard).
  */
 export const AGENT_WRITABLE_FILES = new Set<string>([
-  'MEMORY.md',
-  'USER.md',
-  'SOUL.md',
-  'AGENTS.md',
+  ...MEMORY_FILES,
+  ...IDENTITY_FILES,
 ]);
+
+/**
+ * How a workspace change should affect already-running sessions. CLAUDE.md is
+ * always recomposed on disk regardless; this only decides the restart strategy.
+ *
+ *  - `none`        Restart nothing. Self-authored memory (MEMORY.md/USER.md):
+ *                  the writing session already holds the change and every future
+ *                  spawn reads the recomposed CLAUDE.md, so a restart is pure
+ *                  downside. A memory write can never drop a live session.
+ *  - `defer-idle`  Operator identity (SOUL.md/AGENTS.md), possibly mixed with
+ *                  memory files: skip busy sessions (self-restart footgun) and
+ *                  defer idle ones (lossless respawn on next message) — never
+ *                  SIGKILL an idle bystander.
+ *  - `restart`     Any non-agent-writable change (HEARTBEAT.md, operator config,
+ *                  etc.) or an empty change list: today's normal restart-or-defer.
+ */
+export type WorkspaceRestartAction = 'none' | 'defer-idle' | 'restart';
+
+export function classifyWorkspaceRestart(changedFiles: string[]): WorkspaceRestartAction {
+  if (changedFiles.length === 0) return 'restart';
+  if (changedFiles.every((f) => MEMORY_FILES.has(f))) return 'none';
+  if (changedFiles.every((f) => AGENT_WRITABLE_FILES.has(f))) return 'defer-idle';
+  return 'restart';
+}
 
 /**
  * Normalize a changed file path to its canonical uppercase basename, resolving

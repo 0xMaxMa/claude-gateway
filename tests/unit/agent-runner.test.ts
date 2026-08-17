@@ -641,7 +641,11 @@ describe('AgentRunner — restartOrDefer', () => {
     await runner.start();
 
     expect(getSessions(runner).size).toBe(0);
-    await expect(runner.restartOrDefer()).resolves.toBeUndefined();
+    await expect(runner.restartOrDefer()).resolves.toEqual({
+      immediate: 0,
+      deferred: 0,
+      skipped: 0,
+    });
     expect(getSessions(runner).size).toBe(0);
   }, 15000);
 
@@ -736,6 +740,67 @@ describe('AgentRunner — restartOrDefer', () => {
     sessB.setProcessing(false);
     await new Promise(r => setTimeout(r, 50));
     expect(getSessions(runner).has('chat:b')).toBe(true);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS8: deferIdle — idle session is NOT stopped now; it is armed in
+  //      pendingRestarts to respawn losslessly on its next message (issue #321).
+  // --------------------------------------------------------------------------
+  it('RS8: deferIdle defers idle sessions (armed, not stopped) instead of SIGKILL', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:idle')!;
+    sess.setProcessing(false); // idle bystander
+    const stopSpy = jest.spyOn(sess, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    const counts = await runner.restartOrDefer({ deferIdle: true });
+
+    // Idle session is neither stopped nor removed — it stays alive, armed.
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:idle')).toBe(true);
+    expect(pending.has('chat:idle')).toBe(true);
+    expect(counts).toEqual({ immediate: 0, deferred: 1, skipped: 0 });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS9: skipBusy + deferIdle (the memory/skills change combo) — busy skipped,
+  //      idle deferred; ZERO immediate stops. This is the acceptance shape for
+  //      "a memory/skills write drops no live session".
+  // --------------------------------------------------------------------------
+  it('RS9: skipBusy+deferIdle stops nothing (busy skipped, idle deferred)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:busy', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const idle = getSessions(runner).get('chat:idle')!;
+    const busy = getSessions(runner).get('chat:busy')!;
+    idle.setProcessing(false);
+    busy.setProcessing(true);
+    const idleStop = jest.spyOn(idle, 'stop');
+    const busyStop = jest.spyOn(busy, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    const counts = await runner.restartOrDefer({ skipBusy: true, deferIdle: true });
+
+    // Nothing SIGKILLed: idle deferred, busy skipped.
+    expect(idleStop).not.toHaveBeenCalled();
+    expect(busyStop).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:idle')).toBe(true);
+    expect(getSessions(runner).has('chat:busy')).toBe(true);
+    expect(pending.has('chat:idle')).toBe(true);
+    expect(pending.has('chat:busy')).toBe(false); // busy was skipped, not armed
+    expect(counts).toEqual({ immediate: 0, deferred: 1, skipped: 1 });
   }, 15000);
 });
 

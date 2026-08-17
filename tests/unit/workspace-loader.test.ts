@@ -6,6 +6,9 @@ import {
   migrateWorkspaceFiles,
   watchWorkspace,
   AGENT_WRITABLE_FILES,
+  MEMORY_FILES,
+  IDENTITY_FILES,
+  classifyWorkspaceRestart,
   MissingRequiredFileError,
 } from '../../src/agent/workspace-loader';
 import { waitFor } from '../helpers/wait-for';
@@ -297,6 +300,43 @@ describe('workspace-loader', () => {
     expect(AGENT_WRITABLE_FILES.has('HEARTBEAT.md')).toBe(false);
     expect(AGENT_WRITABLE_FILES.has('IDENTITY.md')).toBe(false);
     expect(AGENT_WRITABLE_FILES.has('CLAUDE.md')).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Tiered writable sets: memory vs identity (issue #321)
+  // -------------------------------------------------------------------------
+  it('MEMORY_FILES/IDENTITY_FILES: partition the writable set correctly', () => {
+    expect([...MEMORY_FILES].sort()).toEqual(['MEMORY.md', 'USER.md']);
+    expect([...IDENTITY_FILES].sort()).toEqual(['AGENTS.md', 'SOUL.md']);
+    // The two tiers are disjoint and their union is exactly AGENT_WRITABLE_FILES.
+    for (const f of MEMORY_FILES) expect(IDENTITY_FILES.has(f)).toBe(false);
+    expect([...AGENT_WRITABLE_FILES].sort()).toEqual(
+      [...MEMORY_FILES, ...IDENTITY_FILES].sort(),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // classifyWorkspaceRestart — the change-class → restart-strategy decision
+  // that fixes the memory-write session-drop bug (issue #321).
+  // -------------------------------------------------------------------------
+  it('classifyWorkspaceRestart: memory-only change restarts NOTHING (none)', () => {
+    expect(classifyWorkspaceRestart(['MEMORY.md'])).toBe('none');
+    expect(classifyWorkspaceRestart(['USER.md'])).toBe('none');
+    expect(classifyWorkspaceRestart(['MEMORY.md', 'USER.md'])).toBe('none');
+  });
+
+  it('classifyWorkspaceRestart: identity change (or mixed with memory) defers idle', () => {
+    expect(classifyWorkspaceRestart(['SOUL.md'])).toBe('defer-idle');
+    expect(classifyWorkspaceRestart(['AGENTS.md'])).toBe('defer-idle');
+    // A mix of memory + identity is NOT memory-only → must not restart nothing;
+    // identity presence pulls it into the deferred tier.
+    expect(classifyWorkspaceRestart(['MEMORY.md', 'SOUL.md'])).toBe('defer-idle');
+  });
+
+  it('classifyWorkspaceRestart: non-writable or empty change → normal restart', () => {
+    expect(classifyWorkspaceRestart(['HEARTBEAT.md'])).toBe('restart');
+    expect(classifyWorkspaceRestart(['MEMORY.md', 'HEARTBEAT.md'])).toBe('restart');
+    expect(classifyWorkspaceRestart([])).toBe('restart');
   });
 
   it('watchWorkspace: onChange receives canonical changed filename (MEMORY.md)', async () => {
