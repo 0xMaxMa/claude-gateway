@@ -9,15 +9,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { DatabaseSync } from 'node:sqlite';
 
 import type { AgentConfig, GatewayConfig } from '../types';
 import { resolveMemoryBudget } from './workspace-loader';
-import {
-  ArchiveDB,
-  archiveDbPath,
-  resolveSharedConfig,
-  sharedDbPath,
-} from './knowledge';
+import { archiveDbPath, resolveSharedConfig, sharedDbPath } from './knowledge';
 
 export interface FileHygiene {
   chars: number;
@@ -55,9 +51,13 @@ export interface MemoryMetrics {
 }
 
 function fileHygiene(filePath: string, budget: number): FileHygiene {
+  // Count STRING LENGTH (code points as JS sees them), NOT byte size — this must
+  // match the budget enforcement in workspace-loader (`content.length`). Byte size
+  // over-counts multi-byte text (e.g. Thai = 3 bytes/char) and would report a file
+  // as over budget while the live banner considers it fine.
   let chars = 0;
   try {
-    chars = fs.statSync(filePath).size;
+    chars = fs.readFileSync(filePath, 'utf8').length;
   } catch {
     chars = 0;
   }
@@ -69,14 +69,29 @@ function fileHygiene(filePath: string, budget: number): FileHygiene {
   };
 }
 
-/** Count sources + chunks in a kb.sqlite WITHOUT creating it if absent. */
-function archiveStats(dbPath: string, tokenizer = 'unicode61'): ArchiveStats {
+/**
+ * Count sources + chunks in a kb.sqlite WITHOUT creating it if absent and WITHOUT
+ * a writable handle. This runs on the HTTP read path (event loop), so it opens a
+ * short-lived READ-ONLY connection — no WAL/-shm sidecar creation, no schema DDL,
+ * no cached handle (the #277 anti-pattern) — and closes it immediately. A failure
+ * (locked/corrupt/read-only FS) degrades to `exists:false` and leaks nothing.
+ */
+function archiveStats(dbPath: string): ArchiveStats {
   if (!fs.existsSync(dbPath)) return { exists: false, sources: 0, chunks: 0 };
+  let db: DatabaseSync | undefined;
   try {
-    const db = ArchiveDB.forPath(dbPath, tokenizer);
-    return { exists: true, sources: db.listSourcePaths().length, chunks: db.chunkCount() };
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const s = db.prepare('SELECT count(*) AS n FROM kb_sources').get() as { n: number } | undefined;
+    const c = db.prepare('SELECT count(*) AS n FROM kb_chunks').get() as { n: number } | undefined;
+    return { exists: true, sources: Number(s?.n ?? 0), chunks: Number(c?.n ?? 0) };
   } catch {
     return { exists: false, sources: 0, chunks: 0 };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* best-effort */
+    }
   }
 }
 

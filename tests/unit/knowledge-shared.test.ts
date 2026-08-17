@@ -43,6 +43,15 @@ describe('resolveSharedConfig', () => {
     expect(resolveSharedConfig({ project: 'ok-key_1.2' }).project).toBe('ok-key_1.2');
   });
 
+  test('bare-dot project keys ("." / "..") are rejected → default "global" (no vault escape)', () => {
+    // `.` is a literal inside the regex class, so these PASS the regex — they must
+    // be rejected explicitly or the vault would resolve to <root>/.. or onto <root>.
+    expect(resolveSharedConfig({ project: '..' }).project).toBe('global');
+    expect(resolveSharedConfig({ project: '.' }).project).toBe('global');
+    // A global override of '..' is also rejected.
+    expect(resolveSharedConfig(undefined, { project: '..' }).project).toBe('global');
+  });
+
   test('~ in root is expanded', () => {
     expect(resolveSharedConfig({ root: '~/x/kb' }).root).toBe(path.join(os.homedir(), 'x/kb'));
   });
@@ -119,6 +128,25 @@ describe('indexSharedArchive', () => {
       const second = indexSharedArchive(cfg, undefined);
       expect(second.filesIndexed).toBe(0);
       expect(second.filesSkipped).toBe(1);
+      ArchiveDB.evict(sharedDbPath(cfg));
+    } finally {
+      fs.rmSync(cfg.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a crashed-write temp leftover (.tmp-*.part / dotfile) is NOT indexed as a note', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'real', 'a genuine shared note about postgres tuning');
+      // Simulate an orphaned temp from a crash between write and rename, plus a
+      // stray dot-.md file — neither must become a permanent junk note.
+      const notes = sharedNotesDir(cfg);
+      fs.writeFileSync(path.join(notes, '.tmp-999-1-abc.part'), 'orphaned partial write');
+      fs.writeFileSync(path.join(notes, '.hidden.md'), 'dotfile that must be ignored');
+      const res = indexSharedArchive(cfg, undefined);
+      expect(res.filesIndexed).toBe(1); // only real.md
+      const db = ArchiveDB.forPath(sharedDbPath(cfg));
+      expect(db.listSourcePaths()).toEqual(['real.md']);
       ArchiveDB.evict(sharedDbPath(cfg));
     } finally {
       fs.rmSync(cfg.root, { recursive: true, force: true });

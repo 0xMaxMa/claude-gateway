@@ -115,4 +115,18 @@ describe('compileWiki', () => {
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
+
+  test('skips a pathologically oversized note (DoS guard), still compiles the rest', () => {
+    const vault = mkVault({
+      'entities/normal.md': `---\ntitle: Normal\n---\nbody [[normal]]\n`,
+      // > 512 KiB — must be skipped rather than read + YAML-parsed.
+      'entities/huge.md': `---\ntitle: Huge\n---\n` + 'x'.repeat(600 * 1024),
+    });
+    try {
+      const res = compileWiki(vault, NOW);
+      expect(res.pages).toBe(1); // only normal.md; huge.md skipped
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
 });

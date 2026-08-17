@@ -76,8 +76,16 @@ export const SHARED_DEFAULTS: ResolvedKnowledgeSharedCfg = {
   graph: false, // K5 graph/dashboards are opt-in
 };
 
-/** A project key safe to use as a single path segment (no traversal/separators). */
+/**
+ * A project key safe to use as a single path segment (no traversal/separators).
+ * NOTE: `.` is a literal inside the class, so `'.'` and `'..'` also match the
+ * regex — they are rejected explicitly in `resolveSharedConfig` (a bare-dots key
+ * would resolve `<root>/..` outside the intended root).
+ */
 const PROJECT_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Reserved path segments that must never be used as a project key. */
+const RESERVED_PROJECT_KEYS = new Set(['.', '..']);
 
 /** Expand a leading `~` to the home dir (mirrors config path handling elsewhere). */
 function expandHome(p: string): string {
@@ -92,7 +100,10 @@ export function resolveSharedConfig(
 ): ResolvedKnowledgeSharedCfg {
   const d = SHARED_DEFAULTS;
   const rawProject = pick(agentCfg?.project, globalCfg?.project, d.project);
-  const project = typeof rawProject === 'string' && PROJECT_KEY_RE.test(rawProject) ? rawProject : d.project;
+  const project =
+    typeof rawProject === 'string' && PROJECT_KEY_RE.test(rawProject) && !RESERVED_PROJECT_KEYS.has(rawProject)
+      ? rawProject
+      : d.project;
   const rawRoot = pick(agentCfg?.root, globalCfg?.root, d.root);
   const root = typeof rawRoot === 'string' && rawRoot.trim() ? expandHome(rawRoot.trim()) : d.root;
   const mode = pick(agentCfg?.mode, globalCfg?.mode, d.mode);

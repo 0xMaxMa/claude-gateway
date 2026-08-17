@@ -138,12 +138,25 @@ test('sharedDbPathFromEnv: null when unset, <dir>/kb.sqlite when set (K3 corpus:
   }
 });
 
-test('mergeHits: merges two hit lists and keeps the best `limit` by bm25 (asc)', () => {
+test('mergeHits: round-robin interleave (bm25 not comparable across corpora), capped', () => {
   const mk = (path: string, score: number) => ({
     path, startLine: 1, endLine: 1, score, snippet: path, originClass: 'agent', importance: null,
   });
+  // Each list is already best-first within its own corpus. A cross-corpus numeric
+  // sort would mix incomparable bm25 scales; interleave a,c,b instead (personal
+  // first each round), capped at the limit.
   const merged = mergeHits([mk('a', -0.9), mk('b', -0.1)], [mk('c', -0.5), mk('d', -0.05)], 3);
-  expect(merged.map((h) => h.path)).toEqual(['a', 'c', 'b']); // lowest bm25 first, capped at 3
+  expect(merged.map((h) => h.path)).toEqual(['a', 'c', 'b']);
+});
+
+test('mergeHits: interleave preserves per-corpus order even when scales differ', () => {
+  const mk = (path: string, score: number) => ({
+    path, startLine: 1, endLine: 1, score, snippet: path, originClass: 'agent', importance: null,
+  });
+  // Shared scores numerically "better" (more negative) must NOT starve the personal
+  // corpus — round-robin gives p1, s1, p2, s2.
+  const merged = mergeHits([mk('p1', -0.2), mk('p2', -0.05)], [mk('s1', -9), mk('s2', -8)], 4);
+  expect(merged.map((h) => h.path)).toEqual(['p1', 's1', 'p2', 's2']);
 });
 
 test('getExcerpt: a symlink inside memory/ escaping the workspace is refused', () => {

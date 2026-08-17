@@ -39,9 +39,22 @@ export function sharedDbPathFromEnv(): string | null {
   return path.join(dir, 'kb.sqlite');
 }
 
-/** Merge hit lists (per-agent + shared) and keep the best `limit` by bm25 (asc). */
+/**
+ * Merge hit lists (per-agent + shared), keeping the best `limit`. bm25 scores are
+ * corpus-relative — the value depends on each index's term/document statistics —
+ * so scores from two independent FTS indexes are NOT on a comparable scale and a
+ * global sort can spuriously rank one corpus over the other. Each list is already
+ * sorted best-first within its own corpus, so interleave them round-robin for a
+ * fair blend instead of a cross-corpus numeric sort.
+ */
 export function mergeHits<T extends SearchHit>(a: T[], b: T[], limit: number): T[] {
-  return [...a, ...b].sort((x, y) => x.score - y.score).slice(0, limit);
+  const out: T[] = [];
+  const max = Math.max(a.length, b.length);
+  for (let i = 0; i < max && out.length < limit; i++) {
+    if (i < a.length) out.push(a[i]);
+    if (out.length < limit && i < b.length) out.push(b[i]);
+  }
+  return out;
 }
 
 /** Build an FTS5 MATCH string: quote each token so punctuation can't inject syntax. */

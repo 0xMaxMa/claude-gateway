@@ -36,6 +36,20 @@ describe('computeMemoryMetrics', () => {
     }
   });
 
+  test('hygiene: counts string length (code points), NOT UTF-8 byte size (Thai memory)', () => {
+    // 3000 Thai chars = 9000 UTF-8 bytes, but JS length 3000 (< 8000 budget). The
+    // metric must match the loader's `content.length` budget check (under budget),
+    // not the byte size (which would wrongly report over budget).
+    const { agentDir, config } = mkAgent({ 'MEMORY.md': 'ก'.repeat(3_000), 'USER.md': 'ok' });
+    try {
+      const m = computeMemoryMetrics(config, undefined);
+      expect(m.hygiene.memory.chars).toBe(3_000);
+      expect(m.hygiene.memory.overBudget).toBe(false);
+    } finally {
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
   test('archive: exists=false without a kb.sqlite (metrics never create one)', () => {
     const { agentDir, config } = mkAgent({ 'MEMORY.md': 'small' });
     try {

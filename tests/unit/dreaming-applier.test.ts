@@ -161,4 +161,147 @@ describe('applyDreamProposals', () => {
       fs.rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  // ── Review-fix regressions (PR #330) ──────────────────────────────────────
+
+  test('H1: `$` sequences in replace content are inserted literally, not as patterns', () => {
+    const ws = mkWs({ 'MEMORY.md': 'price is PLACEHOLDER today\n' });
+    try {
+      const res = applyDreamProposals(
+        ws,
+        [prop({ op: 'replace', target: 'PLACEHOLDER', content: '$5 for $$ and $& and $` end' })],
+        OPTS,
+        NOW,
+      );
+      expect(res.totalApplied).toBe(1);
+      // With String.replace, `$&`/`` $` ``/`$$` would expand against the match; the
+      // index-splice keeps them literal.
+      expect(fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8')).toContain(
+        'price is $5 for $$ and $& and $` end today',
+      );
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('H2: a remove+add consolidation that nets ~0 length is rejected (gross loss, not net)', () => {
+    // 500 'A' original + tail; remove all A's (gross 98% delete) then add 500 'B'.
+    const original = 'A'.repeat(500) + 'KEEPTAIL';
+    const ws = mkWs({ 'MEMORY.md': original });
+    try {
+      const res = applyDreamProposals(
+        ws,
+        [prop({ op: 'remove', target: 'A'.repeat(500) }), prop({ op: 'add', content: 'B'.repeat(500) })],
+        { memoryBudgetChars: 0, userBudgetChars: 0 }, // budget off so the add isn't net-negative-blocked
+        NOW,
+      );
+      const f = res.files.find((x) => x.file === 'MEMORY.md')!;
+      // Under the OLD net-length guard this passed as a full rewrite (net loss ≈ 0);
+      // the gross guard rejects it → append-only fallback preserves the original.
+      expect(f.mode).toBe('append-fallback');
+      const mem = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');
+      expect(mem).toContain('A'.repeat(500)); // original block preserved
+      expect(mem).toContain('B'.repeat(500)); // the safe add still appended
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('ambiguous anchor: a target occurring more than once is skipped, not applied to the first', () => {
+    // Large filler so removing one 14-char anchor is a tiny fraction — the ONLY thing
+    // that should prevent the mutation is the ambiguity guard, not bounded-loss.
+    const filler = 'padding content line\n'.repeat(200);
+    const ws = mkWs({ 'MEMORY.md': `## Important\nStatus: active\n${filler}## Stale\nStatus: active\n` });
+    try {
+      const res = applyDreamProposals(ws, [prop({ op: 'remove', target: 'Status: active' })], OPTS, NOW);
+      const f = res.files.find((x) => x.file === 'MEMORY.md')!;
+      expect(f.applied).toBe(0);
+      expect(f.skipped).toBe(1);
+      const mem = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');
+      expect(mem.match(/Status: active/g)!.length).toBe(2); // both occurrences untouched
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('shrink cliff: over budget, a single large legitimate removal (>25%) IS applied', () => {
+    const stale = 'STALE '.repeat(800); // 4800 chars
+    const original = stale + 'KEEP '.repeat(1200); // ~10800 > 8000 budget
+    const ws = mkWs({ 'MEMORY.md': original });
+    try {
+      const res = applyDreamProposals(ws, [prop({ op: 'remove', target: stale })], OPTS, NOW);
+      const f = res.files.find((x) => x.file === 'MEMORY.md')!;
+      expect(f.mode).toBe('rewrite');
+      expect(f.applied).toBe(1);
+      const mem = fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8');
+      expect(mem).not.toContain('STALE');
+      expect(mem).toContain('KEEP');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('over budget: a replace whose new content is longer than its target is skipped', () => {
+    const ws = mkWs({ 'MEMORY.md': 'TAG ' + 'x'.repeat(9000) }); // over 8000 budget
+    try {
+      const res = applyDreamProposals(
+        ws,
+        [prop({ op: 'replace', target: 'TAG', content: 'TAG' + 'y'.repeat(500) })],
+        OPTS,
+        NOW,
+      );
+      const f = res.files.find((x) => x.file === 'MEMORY.md')!;
+      expect(f.applied).toBe(0);
+      expect(f.skipped).toBe(1);
+      expect(fs.readFileSync(path.join(ws, 'MEMORY.md'), 'utf8')).not.toContain('yyyyy');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('rollback backups are pruned to the retention cap (no unbounded disk creep)', () => {
+    const ws = mkWs({ 'MEMORY.md': 'seed\n' });
+    try {
+      for (let i = 0; i < 25; i++) {
+        applyDreamProposals(ws, [prop({ op: 'add', content: `- fact ${i}` })], OPTS, NOW + i);
+      }
+      const baks = fs
+        .readdirSync(path.join(ws, '.dreaming', 'backups'))
+        .filter((n) => n.startsWith('MEMORY.md.') && n.endsWith('.bak'));
+      expect(baks.length).toBe(20);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('appliedProposals lists only the ops actually written (skipped ops excluded)', () => {
+    const ws = mkWs({ 'MEMORY.md': 'hello world\n' });
+    try {
+      const res = applyDreamProposals(
+        ws,
+        [
+          prop({ op: 'add', content: '- kept add' }),
+          prop({ op: 'replace', target: 'NOPE', content: 'x' }), // anchor gone → skipped
+        ],
+        OPTS,
+        NOW,
+      );
+      expect(res.appliedProposals.length).toBe(1);
+      expect(res.appliedProposals[0].op).toBe('add');
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  test('no-op run writes NO backup (backup is lazy — only on real mutation)', () => {
+    const ws = mkWs({ 'MEMORY.md': 'stable\n' });
+    try {
+      applyDreamProposals(ws, [prop({ op: 'replace', target: 'GONE', content: 'x' })], OPTS, NOW);
+      const backupsPath = path.join(ws, '.dreaming', 'backups');
+      const baks = fs.existsSync(backupsPath) ? fs.readdirSync(backupsPath) : [];
+      expect(baks.length).toBe(0);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });

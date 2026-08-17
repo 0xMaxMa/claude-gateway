@@ -5,6 +5,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { createHash } from 'crypto';
 
 // Load ~/.claude-gateway/.env so global installs pick up env vars without
 // needing shell exports or running via npm start.
@@ -341,8 +342,15 @@ async function startAgent(
           gatewayConfig.gateway.knowledge?.shared,
         );
         if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
-        return (p: { reason: string; content?: string }) =>
-          writeSharedNote(sharedCfg, `${agentConfig.id}-${p.reason}`, p.content ?? '');
+        return (p: { reason: string; content?: string }) => {
+          const content = p.content ?? '';
+          // Disambiguate by a short content hash so two proposals whose reasons
+          // slug to the same filename (or a recurring nightly reason) can't
+          // silently overwrite each other in the shared vault. Identical content
+          // maps to the same file (idempotent).
+          const hash = createHash('sha256').update(content).digest('hex').slice(0, 8);
+          writeSharedNote(sharedCfg, `${agentConfig.id}-${p.reason}-${hash}`, content);
+        };
       })(),
     });
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer

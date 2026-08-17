@@ -42,9 +42,21 @@ export function writeSharedNote(cfg: ResolvedKnowledgeSharedCfg, name: string, c
   const dir = sharedNotesDir(cfg);
   fs.mkdirSync(dir, { recursive: true });
   const target = path.join(dir, sharedNoteFilename(name));
-  // Unique temp in the SAME dir so the rename is atomic (same filesystem).
-  const tmp = path.join(dir, `.tmp-${process.pid}-${(tmpCounter += 1)}-${process.hrtime.bigint().toString(36)}.md`);
-  fs.writeFileSync(tmp, content, 'utf8');
-  fs.renameSync(tmp, target); // atomic replace
+  // Unique temp in the SAME dir so the rename is atomic (same filesystem). The
+  // suffix is `.part` (NOT `.md`) and dot-prefixed so that if the process crashes
+  // between write and rename, the orphan is NOT picked up by the `*.md` indexer as
+  // a permanent junk note (walkMarkdown also skips dotfiles as a second guard).
+  const tmp = path.join(dir, `.tmp-${process.pid}-${(tmpCounter += 1)}-${process.hrtime.bigint().toString(36)}.part`);
+  try {
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, target); // atomic replace
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
+  }
   return target;
 }

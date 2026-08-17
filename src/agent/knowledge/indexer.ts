@@ -53,7 +53,12 @@ function walkMarkdown(dir: string): string[] {
   } catch {
     return out;
   }
+  // Sort for deterministic index order across runs/platforms.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const e of entries) {
+    // Skip dotfiles — in particular a `.tmp-*` file left by a crashed shared-note
+    // write must never be indexed as a real note.
+    if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) out.push(...walkMarkdown(full));
     else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) out.push(full);

@@ -513,7 +513,9 @@ export function createSkillsRouter(
     try {
       res.json(computeMemoryMetrics(config, gatewayConfig));
     } catch (err: unknown) {
-      res.status(500).json({ error: (err as Error).message });
+      // Don't echo internal error text to the client; log it, return a generic 500.
+      console.error(`memory-metrics failed for agent '${agentId}':`, (err as Error).message);
+      res.status(500).json({ error: 'Failed to compute memory metrics' });
     }
   });
 

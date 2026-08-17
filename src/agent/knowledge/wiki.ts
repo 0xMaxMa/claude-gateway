@@ -21,6 +21,12 @@ import yaml from 'js-yaml';
 const WIKI_STALE_DAYS = 90;
 const LOW_CONFIDENCE = 0.5;
 const REPORTS_DIR = 'reports';
+// Guards against a pathological note (a multi-hundred-MB file or a YAML
+// anchor/alias "billion laughs" frontmatter) OOM-ing or hanging the reindex
+// subprocess: oversized notes are skipped, and the frontmatter block handed to
+// js-yaml is length-capped before parsing.
+const MAX_NOTE_BYTES = 512 * 1024;
+const MAX_FRONTMATTER_CHARS = 64 * 1024;
 const REPORT_NAMES = new Set([
   'relationship-graph.md',
   'backlinks.md',
@@ -64,6 +70,9 @@ function toNum(v: unknown): number | undefined {
 function splitFrontmatter(raw: string): { fm: Record<string, unknown>; body: string } {
   const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
   if (!m) return { fm: {}, body: raw };
+  // Cap the frontmatter block before parsing — a huge/alias-bomb block is treated
+  // as "no frontmatter" rather than fed to js-yaml.
+  if (m[1].length > MAX_FRONTMATTER_CHARS) return { fm: {}, body: m[2] };
   let fm: Record<string, unknown> = {};
   try {
     const loaded = yaml.load(m[1]);
@@ -228,7 +237,9 @@ function collectPages(vaultDir: string, dir: string, out: string[]): void {
   } catch {
     return;
   }
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)); // deterministic order
   for (const e of entries) {
+    if (e.name.startsWith('.')) continue; // skip dotfiles / `.tmp-*` write leftovers
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (path.relative(vaultDir, full) === REPORTS_DIR) continue; // never scan generated reports
@@ -252,6 +263,7 @@ export function compileWiki(vaultDir: string, now: number): WikiCompileResult {
     if (REPORT_NAMES.has(path.posix.basename(rel)) && rel.startsWith(`${REPORTS_DIR}/`)) continue;
     let raw: string;
     try {
+      if (fs.statSync(abs).size > MAX_NOTE_BYTES) continue; // oversized note — skip (DoS guard)
       raw = fs.readFileSync(abs, 'utf8');
     } catch {
       continue;

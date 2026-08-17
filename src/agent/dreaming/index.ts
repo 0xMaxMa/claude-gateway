@@ -132,21 +132,25 @@ export class DreamingManager {
     // (Part A). PROPOSE MODE mutates nothing — diary + audit only.
     let appliedCount = 0;
     if (cfg.mode === 'auto' && outcome === 'proposed') {
+      let appliedProposals: DreamProposal[] = [];
       try {
         const applied = applyDreamProposals(this.deps.workspaceDir, proposals, {
           memoryBudgetChars: this.deps.memoryBudgetChars ?? 8_000,
           userBudgetChars: this.deps.userBudgetChars ?? 3_000,
         }, now);
         appliedCount = applied.totalApplied;
+        appliedProposals = applied.appliedProposals;
       } catch {
         appliedCount = 0; // applier never throws, but stay a safe no-op regardless
       }
 
-      // Per-agent→shared promotion (K3↔K4): contribute the durable `add`s to the
-      // shared vault. Gated + wired by the gateway (shared enabled + mode auto);
-      // best-effort — a promotion failure never affects the local dream.
+      // Per-agent→shared promotion (K3↔K4): contribute ONLY the `add`s the applier
+      // actually wrote to local memory — never a proposal that was skipped locally
+      // (net-negative / bounded-loss), so the shared vault can't gain content the
+      // agent's own memory refused. Gated + wired by the gateway (shared enabled +
+      // mode auto); best-effort — a promotion failure never affects the local dream.
       if (this.deps.sharedPromote) {
-        for (const p of proposals) {
+        for (const p of appliedProposals) {
           if (p.op !== 'add' || !p.content) continue;
           try {
             this.deps.sharedPromote(p);
