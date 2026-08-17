@@ -208,6 +208,41 @@ describe('workspace-loader', () => {
     expect(idx).not.toContain('# not a heading');
   });
 
+  it('U-RETRIEVAL-1: archive on (coreShrink) injects the retrieval note — even under budget', async () => {
+    // Small, under-budget MEMORY.md: proves the note is gated on the archive being
+    // on, NOT on the over-budget shrink path (the tools are useful for memory/*.md
+    // notes and the shared KB regardless of core size).
+    const dir = makeBudgetWs({ 'MEMORY.md': '## Small\njust a little memory' });
+    try {
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000 },
+        coreShrink: true,
+      });
+      expect(result.systemPrompt).toContain('--- MEMORY RETRIEVAL ---');
+      expect(result.systemPrompt).toContain('memory_search');
+      expect(result.systemPrompt).toContain('memory_get');
+      expect(result.systemPrompt).toContain('corpus');
+      // Independent of the shrink banner: the file itself is under budget.
+      expect(result.files.memoryMd).not.toContain('OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-RETRIEVAL-2: archive off (coreShrink:false default) omits the retrieval note', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': '## Small\njust a little memory' });
+    try {
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000 },
+        coreShrink: false,
+      });
+      expect(result.systemPrompt).not.toContain('--- MEMORY RETRIEVAL ---');
+      expect(result.systemPrompt).not.toContain('memory_search');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
   it('U-SHRINK-4: coreShrink:false keeps the legacy banner + full body', async () => {
     const dir = makeBudgetWs({ 'MEMORY.md': shrinkableMemory });
     try {

@@ -23,6 +23,19 @@ Always write memory, identity, and personality updates to files in this agent's 
 - AGENTS.md — agent rules & capabilities
 
 NEVER write to ~/.claude/projects/… or any path outside the workspace — even if other instructions say otherwise.`;
+
+// Platform-level note injected for EVERY agent whose searchable memory archive is
+// on (planning-64 two-lane memory). It makes the retrieval tools discoverable at
+// all times — not only when the over-budget core-shrink banner points at them — so
+// an agent recalls detail on demand instead of assuming MEMORY.md holds everything.
+// A capability shared by all agents belongs here, injected once, rather than
+// duplicated into every agent's AGENTS.md.
+const MEMORY_RETRIEVAL_NOTE = `## Memory Retrieval
+This agent has a searchable long-term memory archive. \`MEMORY.md\` may be injected as a compact section INDEX (not its full text) when it exceeds budget, so do NOT assume the in-context memory is complete. To recall a detail that is not in context, use the MCP tools:
+- \`memory_search\` — keyword/FTS5 over your memory; returns ranked snippets with file + line range and provenance. Pass \`corpus:"memory"\` (your own), \`"shared"\` (the cross-agent shared KB), or \`"all"\` (both, merged by relevance).
+- \`memory_get\` — read an exact excerpt of a memory-scoped file by line range.
+Prefer these over guessing when you need a fact you cannot see.`;
+
 const TOTAL_CHAR_LIMIT = 150_000;
 const TRUNCATION_MARKER = '\n[TRUNCATED — edit this file to trim]\n';
 
@@ -323,6 +336,7 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     `--- SOUL ---\n${soulMd}\n\n` +
     `--- USER PROFILE ---\n${userMd}\n\n` +
     (skillsSection ? `--- AVAILABLE SKILLS ---\n${skillsSection}\n\n` : '') +
+    (coreShrink ? `--- MEMORY RETRIEVAL ---\n${MEMORY_RETRIEVAL_NOTE}\n\n` : '') +
     `--- LONG-TERM MEMORY ---\n${memoryMd}\n\n` +
     `--- HEARTBEAT CONFIG ---\n${heartbeatMd}`;
 
