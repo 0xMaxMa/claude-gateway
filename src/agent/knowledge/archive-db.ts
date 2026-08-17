@@ -53,6 +53,10 @@ export class ArchiveDB {
     this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA synchronous=NORMAL');
     this.db.exec('PRAGMA foreign_keys=ON');
+    // All sessions of an agent reindex the SAME kb.sqlite; concurrent reindex
+    // subprocesses would otherwise hit SQLITE_BUSY immediately. Wait instead of
+    // failing so a losing writer completes rather than silently no-opping.
+    this.db.exec('PRAGMA busy_timeout=5000');
     this._initSchema();
     this.stmts = {
       getSource: this.db.prepare('SELECT id, path, hash, mtime, size, source FROM kb_sources WHERE path = ?'),

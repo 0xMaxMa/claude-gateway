@@ -7,6 +7,7 @@ import { classifyOrigin } from '../../src/agent/knowledge/provenance';
 import { resolveArchiveConfig, ARCHIVE_DEFAULTS } from '../../src/agent/knowledge/config';
 import { indexAgentArchive, archiveDbPath } from '../../src/agent/knowledge/indexer';
 import { ArchiveDB } from '../../src/agent/knowledge/archive-db';
+import { shouldReindexNow, REINDEX_DEBOUNCE_MS } from '../../src/agent/knowledge/reindex-spawn';
 
 // Build a temp agent dir with workspace/ + optional memory files.
 // Returns { agentDir, workspaceDir } — the DB lands at agentDir/kb.sqlite.
@@ -124,6 +125,24 @@ describe('resolveArchiveConfig', () => {
 });
 
 // ---------------------------------------------------------------------------
+describe('reindex debounce', () => {
+  test('shouldReindexNow: first call passes, a call within the window is skipped, later passes', () => {
+    const ws = `/tmp/kb-debounce-${Math.floor(Math.abs(Math.sin(1) * 1e9))}`; // deterministic unique-ish key
+    const t0 = 1_000_000;
+    expect(shouldReindexNow(ws, t0)).toBe(true); // first → due
+    expect(shouldReindexNow(ws, t0 + 1_000)).toBe(false); // within window → skip
+    expect(shouldReindexNow(ws, t0 + REINDEX_DEBOUNCE_MS)).toBe(true); // window elapsed → due
+    expect(shouldReindexNow(ws, t0 + REINDEX_DEBOUNCE_MS + 5)).toBe(false); // window restarts
+  });
+
+  test('shouldReindexNow: distinct workspaces debounce independently', () => {
+    const t = 5_000_000;
+    expect(shouldReindexNow('/tmp/kb-a', t)).toBe(true);
+    expect(shouldReindexNow('/tmp/kb-b', t)).toBe(true); // different key → not blocked by /tmp/kb-a
+    expect(shouldReindexNow('/tmp/kb-a', t + 10)).toBe(false);
+  });
+});
+
 describe('indexAgentArchive (integration)', () => {
   test('AC1: indexes 100% of memory files + evergreen, searchable', () => {
     const { workspaceDir } = mkAgent({

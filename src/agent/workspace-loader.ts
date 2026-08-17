@@ -102,27 +102,43 @@ export function resolveMemoryBudget(cfg?: Partial<MemoryBudgetConfig>): MemoryBu
 
 /**
  * Build a compact, injectable INDEX of an over-budget MEMORY.md (planning-64 K2
- * core-shrink): the section headings, each top-level (`##`) section with a short
- * brief, plus a pointer telling the agent the full content lives on disk and is
- * reachable via the `memory_search` / `memory_get` tools. Derived deterministically
- * from the file structure — NO LLM and NO mutation of the on-disk file. Returns
- * `null` when the file has no headings to index (caller then keeps full content).
+ * core-shrink): the section headings, each top-level (`#`/`##`) section with a
+ * short brief, plus a pointer telling the agent the full content lives on disk and
+ * is reachable via the `memory_search` / `memory_get` tools. Derived
+ * deterministically from the file structure — NO LLM and NO mutation of the
+ * on-disk file. Fenced code blocks are skipped so a `# comment` inside ``` is not
+ * mistaken for a heading. Returns `null` when the file has no headings to index
+ * (caller then keeps full content).
  */
 export function buildMemoryIndex(content: string, maxChars = 4000): string | null {
   const lines = content.split('\n');
   const headings: string[] = [];
+  const isFence = (line: string): boolean => /^\s*(```|~~~)/.test(line);
+  let inFence = false;
   for (let i = 0; i < lines.length; i++) {
+    if (isFence(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const m = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[i]);
     if (!m) continue;
     headings.push(m[0].trim());
-    // A one-line brief for top-level (##) sections: first non-empty, non-heading line.
+    // A one-line brief for top-level (# / ##) sections: first non-empty,
+    // non-heading, non-fence line beneath the heading.
     if (m[1].length <= 2) {
+      let fenced = false;
       for (let j = i + 1; j < lines.length; j++) {
+        if (isFence(lines[j])) {
+          fenced = !fenced;
+          continue;
+        }
+        if (fenced) continue;
         const nx = lines[j].trim();
         if (!nx) continue;
         if (/^#{1,6}\s/.test(nx)) break;
-        const brief = nx.replace(/^[-*]\s+/, '').slice(0, 100);
-        headings.push(`    ${brief}${nx.length > 100 ? '…' : ''}`);
+        const body = nx.replace(/^[-*]\s+/, '');
+        headings.push(`    ${body.slice(0, 100)}${body.length > 100 ? '…' : ''}`);
         break;
       }
     }
@@ -161,12 +177,26 @@ function applyMemoryBudget(
     return { content, overBudget: false };
   }
   const icon = mode === 'error' ? '🛑' : '⚠️';
-  const action = mode === 'error' ? 'MUST consolidate now' : 'consolidate';
-  const banner =
-    `${icon} ${label} OVER BUDGET: ${content.length}/${budgetChars} chars — ${action}: ` +
-    `keep the highest-value facts, remove stale or duplicate entries. ` +
-    `Edits apply on the next session spawn (frozen-at-spawn), no restart.\n\n`;
   const shrunk = shrink ? shrink(content) : null;
+  let banner: string;
+  if (shrunk !== null) {
+    // Shrink mode: only the INDEX below is loaded — the agent does NOT see the
+    // actual entries, so it must not rewrite MEMORY.md from this prompt (that
+    // would clobber the un-shown full content on disk). Point it at the tools.
+    const must = mode === 'error' ? 'MUST ' : '';
+    banner =
+      `${icon} ${label} OVER BUDGET: ${content.length}/${budgetChars} chars — only the section INDEX ` +
+      `below is loaded; the full entries live on disk. ${must}consolidate by reading them with ` +
+      `memory_search / memory_get FIRST, then editing MEMORY.md on disk — never rewrite it from this ` +
+      `prompt (you would lose the entries not shown). Edits apply on the next session spawn ` +
+      `(frozen-at-spawn), no restart.\n\n`;
+  } else {
+    const action = mode === 'error' ? 'MUST consolidate now' : 'consolidate';
+    banner =
+      `${icon} ${label} OVER BUDGET: ${content.length}/${budgetChars} chars — ${action}: ` +
+      `keep the highest-value facts, remove stale or duplicate entries. ` +
+      `Edits apply on the next session spawn (frozen-at-spawn), no restart.\n\n`;
+  }
   return { content: banner + (shrunk ?? content), overBudget: true };
 }
 
@@ -212,11 +242,11 @@ export interface LoadWorkspaceOptions {
    */
   memoryBudget?: Partial<MemoryBudgetConfig>;
   /**
-   * K2 core-shrink (planning-64): when true (the default), an over-budget
-   * MEMORY.md is injected as a compact auto-generated index + a pointer to the
-   * memory_search tool, instead of the banner + truncated full text. Set false
-   * to keep the legacy banner+full behavior (e.g. during rollout, or when the
-   * knowledge archive is disabled so there is nothing to search).
+   * K2 core-shrink (planning-64): when true, an over-budget MEMORY.md is injected
+   * as a compact auto-generated index + a pointer to the memory_search tool,
+   * instead of the banner + truncated full text. Defaults to FALSE (opt-in) — the
+   * gateway sets it true only when the knowledge archive is enabled, so the index
+   * pointer never references a tool that isn't wired.
    */
   coreShrink?: boolean;
 }
@@ -254,10 +284,12 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // always leaves it intact. (An extreme TOTAL_CHAR_LIMIT overflow could still
   // slice it, but that path already truncates the whole prompt.)
   const budget = resolveMemoryBudget(opts?.memoryBudget);
-  // K2 core-shrink (default on): when MEMORY.md is over budget, inject a compact
-  // auto-generated index + a pointer to memory_search instead of the truncated
-  // full text. USER.md is small by design and is never index-shrunk.
-  const coreShrink = opts?.coreShrink !== false;
+  // K2 core-shrink (opt-in): when enabled AND MEMORY.md is over budget, inject a
+  // compact auto-generated index + a pointer to memory_search instead of the
+  // truncated full text. Defaults OFF so a caller that omits the flag never points
+  // the agent at a memory_search tool that may not be wired; the gateway enables
+  // it explicitly only when the knowledge archive is on. USER.md is never shrunk.
+  const coreShrink = opts?.coreShrink === true;
   const memoryBudgeted = applyMemoryBudget(
     rawMemory,
     budget.memoryBudgetChars,

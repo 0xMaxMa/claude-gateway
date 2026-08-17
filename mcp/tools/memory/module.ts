@@ -88,7 +88,7 @@ export class MemoryModule implements ToolModule {
             });
           }
 
-          const rawMax = typeof args.maxResults === 'number' ? args.maxResults : 6;
+          const rawMax = Number.isFinite(args.maxResults as number) ? (args.maxResults as number) : 6;
           const maxResults = Math.max(1, Math.min(20, Math.floor(rawMax)));
 
           const results = searchArchive(archiveDbPath(workspaceDir), query, maxResults);
@@ -103,8 +103,8 @@ export class MemoryModule implements ToolModule {
 
         case 'memory_get': {
           const p = typeof args.path === 'string' ? args.path : '';
-          const from = typeof args.from === 'number' ? args.from : 1;
-          const lines = typeof args.lines === 'number' ? args.lines : 200;
+          const from = Number.isFinite(args.from as number) ? (args.from as number) : 1;
+          const lines = Number.isFinite(args.lines as number) ? (args.lines as number) : 200;
           const excerpt = getExcerpt(workspaceDir, p, from, lines);
           if (!excerpt) {
             return this.err(`memory_get: "${p}" is not a readable memory-scoped file (memory/*.md, MEMORY.md, USER.md).`);

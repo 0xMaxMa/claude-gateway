@@ -122,3 +122,19 @@ test('getExcerpt: bounded line range; out-of-scope/missing → null', () => {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
 });
+
+test('getExcerpt: a symlink inside memory/ escaping the workspace is refused', () => {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb1-'));
+  const workspaceDir = path.join(agentDir, 'workspace');
+  fs.mkdirSync(path.join(workspaceDir, 'memory'), { recursive: true });
+  // A secret target OUTSIDE the workspace, and a memory/ symlink pointing at it.
+  const secret = path.join(agentDir, 'outside-secret.md');
+  fs.writeFileSync(secret, 'TOPSECRET outside the workspace');
+  fs.symlinkSync(secret, path.join(workspaceDir, 'memory', 'evil.md'));
+  try {
+    // Passes the string scope check (memory/*.md) but realpath escapes the ws → null.
+    expect(getExcerpt(workspaceDir, 'memory/evil.md', 1, 5)).toBeNull();
+  } finally {
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});

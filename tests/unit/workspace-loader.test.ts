@@ -182,19 +182,30 @@ describe('workspace-loader', () => {
     expect(buildMemoryIndex('M'.repeat(9_000))).toBeNull();
   });
 
-  it('U-SHRINK-3: over-budget MEMORY.md with headings is injected as the index (default on)', async () => {
+  it('U-SHRINK-3: over-budget MEMORY.md with headings is injected as the index (coreShrink on)', async () => {
     const dir = makeBudgetWs({ 'MEMORY.md': shrinkableMemory });
     try {
-      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 8_000 } });
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000 },
+        coreShrink: true,
+      });
       // Banner + index + pointer; the deep body markers are NOT in the prompt.
       expect(result.files.memoryMd).toContain('MEMORY.md OVER BUDGET');
       expect(result.files.memoryMd).toContain('memory_search');
       expect(result.files.memoryMd).toContain('## Section Alpha');
       expect(result.files.memoryMd).not.toContain('DEEPMARKERALPHA');
       expect(result.files.memoryMd).not.toContain('DEEPMARKERBETA');
+      // Shrink-aware banner steers away from rewriting from the prompt.
+      expect(result.files.memoryMd).toContain('never rewrite it from this');
     } finally {
       fs.rmSync(dir, { recursive: true });
     }
+  });
+
+  it('U-SHRINK-6: buildMemoryIndex ignores headings inside fenced code blocks', () => {
+    const idx = buildMemoryIndex('## Real Section\nBrief here.\n```bash\n# not a heading\nnpm i\n```\n');
+    expect(idx).toContain('## Real Section');
+    expect(idx).not.toContain('# not a heading');
   });
 
   it('U-SHRINK-4: coreShrink:false keeps the legacy banner + full body', async () => {

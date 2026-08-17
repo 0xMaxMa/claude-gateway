@@ -112,9 +112,22 @@ export function getExcerpt(
   from = 1,
   lines = 200,
 ): Excerpt | null {
-  if (!isMemoryScopedPath(relPath)) return null;
-  const abs = path.join(workspaceDir, relPath);
+  // Validate and read the SAME normalized path so the check can't diverge from
+  // what is actually opened.
+  const rel = relPath.replace(/\\/g, '/');
+  if (!isMemoryScopedPath(rel)) return null;
+  const abs = path.join(workspaceDir, rel);
   if (!fs.existsSync(abs)) return null;
+  // Containment against symlink escape: a memory/x.md symlink pointing outside
+  // the workspace passes the string check but must not be readable through the
+  // tool. Resolve real paths and require the target stays under the workspace.
+  try {
+    const realBase = fs.realpathSync(workspaceDir);
+    const realTarget = fs.realpathSync(abs);
+    if (realTarget !== realBase && !realTarget.startsWith(realBase + path.sep)) return null;
+  } catch {
+    return null; // realpath failed (broken symlink, race) → refuse
+  }
 
   const all = fs.readFileSync(abs, 'utf8').split('\n');
   const total = all.length;

@@ -13,6 +13,27 @@ import * as path from 'path';
 import { resolveArchiveConfig } from './config';
 import type { KnowledgeArchiveConfig } from './types';
 
+/**
+ * Per-workspace debounce so a burst of session spawns (interactive + subagent +
+ * cron + heartbeat) doesn't launch a stampede of reindex subprocesses all racing
+ * the same kb.sqlite. The indexer is hash-guarded, so skipping a redundant run
+ * within the window loses nothing.
+ */
+export const REINDEX_DEBOUNCE_MS = 30_000;
+const lastReindexAt = new Map<string, number>();
+
+/**
+ * Debounce gate (pure, exported for tests): returns true and records `now` when a
+ * reindex for `workspaceDir` is due, or false when one ran within the window.
+ * `now` is injected so tests are deterministic.
+ */
+export function shouldReindexNow(workspaceDir: string, now: number): boolean {
+  const last = lastReindexAt.get(workspaceDir);
+  if (last !== undefined && now - last < REINDEX_DEBOUNCE_MS) return false;
+  lastReindexAt.set(workspaceDir, now);
+  return true;
+}
+
 export function spawnArchiveReindex(
   workspaceDir: string,
   agentCfg?: KnowledgeArchiveConfig,
@@ -21,6 +42,7 @@ export function spawnArchiveReindex(
   try {
     const cfg = resolveArchiveConfig(agentCfg, globalCfg);
     if (!cfg.enabled) return;
+    if (!shouldReindexNow(workspaceDir, Date.now())) return;
     // The compiled CLI sits next to this file under dist/agent/knowledge/. Skip
     // silently when it isn't present (e.g. ts-jest/dev runs against source) so we
     // never attempt a doomed spawn.
