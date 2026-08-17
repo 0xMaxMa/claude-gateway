@@ -1761,9 +1761,17 @@ curl -X POST \
 
 ## Workspace File API
 
-Read and write an agent's workspace identity files via the API. The gateway's file watcher auto-reloads `CLAUDE.md` after a write.
+Read and write an agent's workspace identity files via the API. The gateway's file watcher recomposes `CLAUDE.md` on disk after a write.
 
 **Allowed filenames:** `SOUL.md`, `USER.md`, `MEMORY.md`, `AGENTS.md`, `HEARTBEAT.md`, `IDENTITY.md`
+
+**How a write reaches running sessions (frozen-at-spawn).** `CLAUDE.md` is read by a session only at spawn — a live process never re-reads it, so a change applies on the session's **next spawn**. The watcher therefore never SIGKILLs a live session just to push a change; it recomposes `CLAUDE.md` and tiers the restart by change class:
+
+| Changed file(s) | Effect on running sessions |
+|-----------------|----------------------------|
+| `MEMORY.md`, `USER.md` (memory) | **No session is restarted.** The change applies on each session's next natural spawn. A memory write can never drop a live session. |
+| `SOUL.md`, `AGENTS.md`, `IDENTITY.md` (identity) | Busy sessions are skipped; idle sessions are **deferred** (respawn on their next message) — never SIGKILLed mid-idle. |
+| `HEARTBEAT.md` / other | Normal restart-or-defer (idle sessions restart now). |
 
 ### GET /api/v1/agents/:agentId/files/:filename
 

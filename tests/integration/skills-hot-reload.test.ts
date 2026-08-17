@@ -147,8 +147,11 @@ function deleteSkillFile(dir: string, name: string): void {
 // Replicates the inline watcher callback in src/index.ts so the integration
 // test exercises the same sequence (reload -> setSkillRegistry ->
 // write CLAUDE.md -> restartOrDefer). Must stay a faithful mirror of the
-// production callback, including the skipBusy:true guard on the skills path
-// (skipping busy sessions avoids the self-restart footgun — see HR6).
+// production callback, including the { skipBusy: true, deferIdle: true } guard
+// on the skills path: skipBusy avoids the self-restart footgun for the busy
+// authoring session (see HR6), and deferIdle keeps idle bystanders alive
+// (armed for a lossless respawn on their next message) instead of SIGKILLing
+// them for zero benefit — CLAUDE.md's skills section is frozen-at-spawn.
 function wireSkillsWatcher(
   runner: AgentRunner,
   workspaceDir: string,
@@ -172,9 +175,15 @@ function wireSkillsWatcher(
         updated.systemPrompt,
         'utf8',
       );
-      await runner.restartOrDefer({ skipBusy: true });
+      await runner.restartOrDefer({ skipBusy: true, deferIdle: true });
     },
   });
+}
+
+// Read the runner's private pendingRestarts set (armed idle sessions that will
+// respawn on their next message). Used to assert deferral instead of stop.
+function hasPendingRestart(runner: AgentRunner, chatId: string): boolean {
+  return (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts.has(chatId);
 }
 
 async function waitForCondition(
@@ -255,9 +264,11 @@ describe('Skills hot-reload end-to-end', () => {
   }
 
   // --------------------------------------------------------------------------
-  // HR1 — add shared skill triggers restart of idle session
+  // HR1 — add shared skill DEFERS idle session (armed, not SIGKILLed) + updates
+  //       CLAUDE.md. The idle bystander stays in the pool and respawns on its
+  //       next message; killing it now would buy nothing (frozen-at-spawn).
   // --------------------------------------------------------------------------
-  it('HR1: adding a shared skill stops idle session and updates CLAUDE.md', async () => {
+  it('HR1: adding a shared skill defers idle session (not stopped) and updates CLAUDE.md', async () => {
     await bootRunnerWithIdleSession('chat:hr1');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
 
@@ -265,7 +276,10 @@ describe('Skills hot-reload end-to-end', () => {
     await new Promise((r) => setTimeout(r, 150));
     writeSkillFile(sharedSkillsDir, 'hr1-skill');
 
-    await waitForCondition(() => !getSessions(runner).has('chat:hr1'));
+    // The onChange armed a deferred restart rather than stopping the session.
+    await waitForCondition(() => hasPendingRestart(runner, 'chat:hr1'));
+    // Idle bystander is NOT dropped from the pool — it is still alive, armed.
+    expect(getSessions(runner).has('chat:hr1')).toBe(true);
 
     const claudeMd = fs.readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('/hr1-skill');
@@ -273,9 +287,9 @@ describe('Skills hot-reload end-to-end', () => {
   }, 10000);
 
   // --------------------------------------------------------------------------
-  // HR2 — modifying a shared skill triggers restart
+  // HR2 — modifying a shared skill defers idle session (not stopped)
   // --------------------------------------------------------------------------
-  it('HR2: modifying a shared skill stops idle session', async () => {
+  it('HR2: modifying a shared skill defers idle session (not stopped)', async () => {
     // Seed the skill BEFORE the watcher so the "add" event doesn't fire.
     writeSkillFile(sharedSkillsDir, 'hr2-skill');
 
@@ -290,16 +304,17 @@ describe('Skills hot-reload end-to-end', () => {
       `---\nname: hr2-skill\ndescription: updated description\nuser-invocable: true\n---\n\n# hr2-skill v2\n`,
     );
 
-    await waitForCondition(() => !getSessions(runner).has('chat:hr2'));
+    await waitForCondition(() => hasPendingRestart(runner, 'chat:hr2'));
+    expect(getSessions(runner).has('chat:hr2')).toBe(true);
 
     const claudeMd = fs.readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('updated description');
   }, 10000);
 
   // --------------------------------------------------------------------------
-  // HR3 — deleting a shared skill triggers restart
+  // HR3 — deleting a shared skill defers idle session + removes from CLAUDE.md
   // --------------------------------------------------------------------------
-  it('HR3: deleting a shared skill stops idle session and removes skill from CLAUDE.md', async () => {
+  it('HR3: deleting a shared skill defers idle session and removes skill from CLAUDE.md', async () => {
     writeSkillFile(sharedSkillsDir, 'hr3-skill');
 
     await bootRunnerWithIdleSession('chat:hr3');
@@ -308,7 +323,8 @@ describe('Skills hot-reload end-to-end', () => {
 
     deleteSkillFile(sharedSkillsDir, 'hr3-skill');
 
-    await waitForCondition(() => !getSessions(runner).has('chat:hr3'));
+    await waitForCondition(() => hasPendingRestart(runner, 'chat:hr3'));
+    expect(getSessions(runner).has('chat:hr3')).toBe(true);
 
     const claudeMd = fs.readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).not.toContain('/hr3-skill');
@@ -344,9 +360,9 @@ describe('Skills hot-reload end-to-end', () => {
   }, 10000);
 
   // --------------------------------------------------------------------------
-  // HR5 — workspace-dir skill change also triggers restart
+  // HR5 — workspace-dir skill change also defers the idle session
   // --------------------------------------------------------------------------
-  it('HR5: skill added under workspace skills dir also triggers restart', async () => {
+  it('HR5: skill added under workspace skills dir also defers idle session', async () => {
     await bootRunnerWithIdleSession('chat:hr5');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
     await new Promise((r) => setTimeout(r, 150));
@@ -355,7 +371,8 @@ describe('Skills hot-reload end-to-end', () => {
     const workspaceSkillsDir = path.join(workspaceDir, 'skills');
     writeSkillFile(workspaceSkillsDir, 'hr5-skill');
 
-    await waitForCondition(() => !getSessions(runner).has('chat:hr5'));
+    await waitForCondition(() => hasPendingRestart(runner, 'chat:hr5'));
+    expect(getSessions(runner).has('chat:hr5')).toBe(true);
 
     const claudeMd = fs.readFileSync(path.join(workspaceDir, 'CLAUDE.md'), 'utf8');
     expect(claudeMd).toContain('/hr5-skill');

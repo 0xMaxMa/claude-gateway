@@ -641,7 +641,11 @@ describe('AgentRunner — restartOrDefer', () => {
     await runner.start();
 
     expect(getSessions(runner).size).toBe(0);
-    await expect(runner.restartOrDefer()).resolves.toBeUndefined();
+    await expect(runner.restartOrDefer()).resolves.toEqual({
+      immediate: 0,
+      deferred: 0,
+      skipped: 0,
+    });
     expect(getSessions(runner).size).toBe(0);
   }, 15000);
 
@@ -736,6 +740,136 @@ describe('AgentRunner — restartOrDefer', () => {
     sessB.setProcessing(false);
     await new Promise(r => setTimeout(r, 50));
     expect(getSessions(runner).has('chat:b')).toBe(true);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS8: deferIdle — idle session is NOT stopped now; it is armed in
+  //      pendingRestarts to respawn losslessly on its next message (issue #321).
+  // --------------------------------------------------------------------------
+  it('RS8: deferIdle defers idle sessions (armed, not stopped) instead of SIGKILL', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:idle')!;
+    sess.setProcessing(false); // idle bystander
+    const stopSpy = jest.spyOn(sess, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    const counts = await runner.restartOrDefer({ deferIdle: true });
+
+    // Idle session is neither stopped nor removed — it stays alive, armed.
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:idle')).toBe(true);
+    expect(pending.has('chat:idle')).toBe(true);
+    expect(counts).toEqual({ immediate: 0, deferred: 1, skipped: 0 });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS9: skipBusy + deferIdle (the memory/skills change combo) — busy skipped,
+  //      idle deferred; ZERO immediate stops. This is the acceptance shape for
+  //      "a memory/skills write drops no live session".
+  // --------------------------------------------------------------------------
+  it('RS9: skipBusy+deferIdle stops nothing (busy skipped, idle deferred)', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:idle', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:busy', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const idle = getSessions(runner).get('chat:idle')!;
+    const busy = getSessions(runner).get('chat:busy')!;
+    idle.setProcessing(false);
+    busy.setProcessing(true);
+    const idleStop = jest.spyOn(idle, 'stop');
+    const busyStop = jest.spyOn(busy, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    const counts = await runner.restartOrDefer({ skipBusy: true, deferIdle: true });
+
+    // Nothing SIGKILLed: idle deferred, busy skipped.
+    expect(idleStop).not.toHaveBeenCalled();
+    expect(busyStop).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:idle')).toBe(true);
+    expect(getSessions(runner).has('chat:busy')).toBe(true);
+    expect(pending.has('chat:idle')).toBe(true);
+    expect(pending.has('chat:busy')).toBe(false); // busy was skipped, not armed
+    expect(counts).toEqual({ immediate: 0, deferred: 1, skipped: 1 });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS10: deferIdle must NOT arm api/__heartbeat__ sessions. Their key never
+  //       flows through injectTurn (the only pendingRestarts consumer), so an
+  //       entry there would leak forever and the change would never reach them.
+  //       They are stopped now instead, so they respawn fresh (as before #321).
+  // --------------------------------------------------------------------------
+  it('RS10: deferIdle stops an idle api session now (not armed) — key is never consumed', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:api', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:api')!;
+    sess.setProcessing(false); // idle
+    // Simulate an api/__heartbeat__ session (keyed by sessionId, not a chatId).
+    (sess as unknown as { source: string }).source = 'api';
+    const stopSpy = jest.spyOn(sess, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    const counts = await runner.restartOrDefer({ deferIdle: true });
+
+    // Stopped now (respawn fresh), NOT armed in pendingRestarts (no leak).
+    expect(stopSpy).toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:api')).toBe(false);
+    expect(pending.has('chat:api')).toBe(false);
+    expect(counts).toEqual({ immediate: 1, deferred: 0, skipped: 0 });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS11: consume guard — a deferred restart must NOT be consumed while the
+  //       session is mid-turn. The same chatId key can be streaming a web-UI
+  //       live-view turn (sendMessageToSession, which does not hold turnActive),
+  //       so an unguarded stop() at the injectTurn consume would truncate it.
+  //       The flag stays armed and is consumed on the next idle turn instead.
+  // --------------------------------------------------------------------------
+  it('RS11: an armed restart is not consumed mid-turn (web-UI live view), stays armed', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:web', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:web')!;
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+    const stopSpy = jest.spyOn(sess, 'stop');
+
+    // Arm a deferred restart and simulate a concurrent web-UI turn on this key
+    // (isProcessing = true, no turnActive).
+    pending.add('chat:web');
+    sess.setProcessing(true);
+
+    // Drive the consume path as an incoming channel message would (injectTurn is
+    // fire-and-forget/void).
+    (runner as unknown as {
+      injectTurn: (c: string, s: string, e: Array<{ content?: string; meta?: Record<string, string> }>) => void;
+    }).injectTurn('chat:web', 'telegram', [
+      { content: 'concurrent channel message', meta: { chat_id: 'chat:web', message_id: '9', user: 't', ts: new Date().toISOString() } },
+    ]);
+    await new Promise(r => setTimeout(r, 200));
+
+    // The mid-turn session was NOT stopped, and the restart is still armed.
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:web')).toBe(true);
+    expect(pending.has('chat:web')).toBe(true);
   }, 15000);
 });
 
