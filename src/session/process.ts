@@ -113,7 +113,8 @@ export class SessionProcess extends EventEmitter {
   private thinkingRecoveryCount = 0;
   // tool_use ids of channel replies already mirrored to sessionStore, so a reply
   // is persisted exactly once even though its tool_use block can recur across the
-  // partial + final stream events of the same turn.
+  // partial + final stream events of the same turn. Reset at every turn boundary
+  // (the 'result' handler), so it never grows without bound across a long session.
   private persistedReplyToolIds = new Set<string>();
   // Binary path last spawned and the last non-empty stderr line, retained so a
   // fatal `Session max restarts reached` names what actually failed (e.g. an
@@ -771,7 +772,11 @@ export class SessionProcess extends EventEmitter {
                 ) {
                   const input = block.input as { text?: unknown } | undefined;
                   const replyText = typeof input?.text === 'string' ? input.text.trim() : '';
-                  if (replyText) {
+                  // Skip an empty reply, and skip a reply whose exact text was
+                  // already mirrored earlier in THIS turn — e.g. a channel delivery
+                  // that failed and the model retried with a fresh tool_use id — so
+                  // the resume window shows the message once, not once per retry.
+                  if (replyText && !replyTextsThisTurn.has(replyText)) {
                     this.persistedReplyToolIds.add(block.id);
                     replyTextsThisTurn.add(replyText);
                     this.appendToStore({ role: 'assistant', content: replyText, ts: Date.now() }).catch(() => {});
@@ -867,7 +872,6 @@ export class SessionProcess extends EventEmitter {
                 }
                 assistantBuffer = '';
               }
-              replyTextsThisTurn.clear();
               // Emit tokenUsage using message_start context (accurate per-call context window usage)
               // rather than result.usage which is cumulative across all sub-calls in the turn.
               const usage = obj.usage as { output_tokens?: number } | undefined;
@@ -879,6 +883,15 @@ export class SessionProcess extends EventEmitter {
               }
               lastMessageStartContext = 0;
             }
+            // Both reply-dedup structures are per-turn and must reset at EVERY turn
+            // boundary — including the queryMode and corrupted-thinking result
+            // branches above, which previously left them populated. persistedReplyToolIds
+            // (an instance field surviving respawn) would otherwise grow without bound,
+            // and a reply text left in replyTextsThisTurn could suppress an identical
+            // narration in a later turn. The partial→final and narration-vs-reply
+            // dedups both only ever span a single turn, so turn-scoped reset is correct.
+            this.persistedReplyToolIds.clear();
+            replyTextsThisTurn.clear();
           }
         } catch {
           /* not JSON */
