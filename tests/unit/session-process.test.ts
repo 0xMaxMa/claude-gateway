@@ -1076,6 +1076,109 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-20: Channel reply-tool turns are mirrored to the resumable session store
+  //          (regression for #331 — reply text lives in tool_use.input, not a
+  //           text block, so assistantBuffer never captured it and the turn was
+  //           lost on resume).
+  // --------------------------------------------------------------------------
+  it('U-SP-20a: a reply-tool-only turn is persisted even with no result event', async () => {
+    const sp = new SessionProcess('chat:reply-only', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Final assistant message whose ONLY output is a telegram_reply tool call —
+    // no text block, and (critically) NO subsequent 'result' event, mirroring a
+    // long report delivered to the user right before the subprocess exits.
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_report_1', name: 'mcp__gateway__telegram_reply', input: { chat_id: '111', text: 'FULL REPORT: 2 HIGH + 4 MEDIUM findings…' } },
+        ],
+      },
+      stop_reason: 'tool_use',
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:reply-only', 'chat:reply-only');
+    const assistant = messages.filter(m => m.role === 'assistant');
+    expect(assistant.length).toBe(1);
+    expect(assistant[0].content).toBe('FULL REPORT: 2 HIGH + 4 MEDIUM findings…');
+  });
+
+  it('U-SP-20b: the same reply tool_use is persisted exactly once across partial + final events', async () => {
+    const sp = new SessionProcess('chat:reply-once', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Partial message carrying the reply tool_use (input still streaming)…
+    const partial = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_dup', name: 'mcp__gateway__telegram_reply', input: { text: 'hi there' } }] },
+      stop_reason: null,
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(partial + '\n'));
+    // …then the final message with the SAME tool_use id.
+    const final = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_dup', name: 'mcp__gateway__telegram_reply', input: { text: 'hi there' } }] },
+      stop_reason: 'tool_use',
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(final + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:reply-once', 'chat:reply-once');
+    expect(messages.filter(m => m.role === 'assistant' && m.content === 'hi there').length).toBe(1);
+  });
+
+  it('U-SP-20c: a narration text block that duplicates the reply text is not double-written', async () => {
+    const sp = new SessionProcess('chat:reply-dup', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Same text emitted BOTH as a visible text block and as the reply tool input.
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Done ✅' },
+          { type: 'tool_use', id: 'toolu_same', name: 'mcp__gateway__telegram_reply', input: { text: 'Done ✅' } },
+        ],
+      },
+      stop_reason: 'tool_use',
+    });
+    lastProcess!.stdout!.emit('data', Buffer.from(line + '\n'));
+    // Result event flushes assistantBuffer (the 'Done ✅' text block).
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: 'Done ✅' }) + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:reply-dup', 'chat:reply-dup');
+    expect(messages.filter(m => m.role === 'assistant' && m.content === 'Done ✅').length).toBe(1);
+  });
+
+  it('U-SP-20d: a normal text-only turn is still persisted exactly once (no regression)', async () => {
+    const sp = new SessionProcess('chat:plain', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'plain answer' }] },
+      stop_reason: 'end_turn',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: 'plain answer' }) + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:plain', 'chat:plain');
+    const assistant = messages.filter(m => m.role === 'assistant');
+    expect(assistant.length).toBe(1);
+    expect(assistant[0].content).toBe('plain answer');
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-19: Partial messages don't spam status file with "thinking"
   // --------------------------------------------------------------------------
   it('U-SP-19: partial text-only messages do not write thinking status', async () => {
