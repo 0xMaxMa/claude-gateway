@@ -74,9 +74,9 @@ describe('parseWikiPage / extractLinks', () => {
 describe('buildBacklinks', () => {
   test('reverse edges by relPath / stem / basename / title', () => {
     const pages: WikiPage[] = [
-      { relPath: 'a.md', title: 'Alpha', claims: [], confidence: null, updatedAt: null, links: ['b', 'Gamma'] },
-      { relPath: 'b.md', title: 'Beta', claims: [], confidence: null, updatedAt: null, links: [] },
-      { relPath: 'c.md', title: 'Gamma', claims: [], confidence: null, updatedAt: null, links: [] },
+      { relPath: 'a.md', title: 'Alpha', type: null, claims: [], confidence: null, updatedAt: null, links: ['b', 'Gamma'] },
+      { relPath: 'b.md', title: 'Beta', type: null, claims: [], confidence: null, updatedAt: null, links: [] },
+      { relPath: 'c.md', title: 'Gamma', type: null, claims: [], confidence: null, updatedAt: null, links: [] },
     ];
     const back = buildBacklinks(pages);
     expect(back.get('b.md')).toEqual(['a.md']); // matched by basename stem
@@ -86,9 +86,9 @@ describe('buildBacklinks', () => {
 
 describe('buildDashboards', () => {
   const pages: WikiPage[] = [
-    { relPath: 'p1.md', title: 'P1', confidence: 0.3, updatedAt: new Date(NOW - 120 * DAY).toISOString(), links: [],
+    { relPath: 'p1.md', title: 'P1', type: null, confidence: 0.3, updatedAt: new Date(NOW - 120 * DAY).toISOString(), links: [],
       claims: [{ id: 'shared', text: 'the API is REST', status: 'supported' }, { id: 'weak', text: 'maybe', confidence: 0.2 }] },
-    { relPath: 'p2.md', title: 'P2', confidence: 0.95, updatedAt: new Date(NOW - 5 * DAY).toISOString(), links: [],
+    { relPath: 'p2.md', title: 'P2', type: null, confidence: 0.95, updatedAt: new Date(NOW - 5 * DAY).toISOString(), links: [],
       claims: [{ id: 'shared', text: 'the API is GraphQL', status: 'supported' }] },
   ];
 
@@ -151,5 +151,80 @@ describe('compileWiki', () => {
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Graph model (buildGraphModel / graphFromPages) — the /knowledge/graph payload.
+// ---------------------------------------------------------------------------
+import {
+  graphFromPages,
+  buildGraphModel,
+  type GraphModel,
+} from '../../src/agent/knowledge/wiki';
+import { demoGraphModel } from '../../src/agent/knowledge/graph-demo';
+
+describe('graphFromPages', () => {
+  test('maps nodes (type/degree/stale/contradiction) and resolves [[link]] edges', () => {
+    const pages: WikiPage[] = [
+      parseWikiPage('notes/a.md', `---\ntitle: A\ntype: decision\n---\nlinks [[b]]\n`),
+      parseWikiPage('notes/b.md', `---\ntitle: B\ntype: evidence\n---\nno links\n`),
+      parseWikiPage('notes/old.md', `---\ntitle: Old\ntype: infra\nupdatedAt: "2023-01-01"\n---\nlinks [[a]]\n`),
+    ];
+    const g = graphFromPages(pages, NOW);
+    expect(g.nodes).toHaveLength(3);
+    const a = g.nodes.find((n) => n.id === 'notes/a.md')!;
+    expect(a.type).toBe('decision');
+    // a is linked-from old.md and links-to b.md → degree 2.
+    expect(a.degree).toBe(2);
+    // Edges: a→b and old→a (self-loops / unresolved dropped).
+    expect(g.edges).toHaveLength(2);
+    expect(g.edges).toContainEqual({ source: 'notes/a.md', target: 'notes/b.md' });
+    const old = g.nodes.find((n) => n.id === 'notes/old.md')!;
+    expect(old.stale).toBe(true); // 2023-01-01 is > 90d before NOW
+    expect(a.stale).toBe(false);
+  });
+
+  test('flags both pages of a contradicting claim; dedupes repeated links; drops self-loops', () => {
+    const pages: WikiPage[] = [
+      parseWikiPage('notes/x.md', `---\ntitle: X\nclaims:\n  - id: m\n    text: JWT\n---\n[[y]] [[y]] [[x]]\n`),
+      parseWikiPage('notes/y.md', `---\ntitle: Y\nclaims:\n  - id: m\n    text: sessions\n---\nbody\n`),
+    ];
+    const g = graphFromPages(pages, NOW);
+    // Repeated [[y]] de-duped to one edge; [[x]] self-loop dropped.
+    expect(g.edges).toEqual([{ source: 'notes/x.md', target: 'notes/y.md' }]);
+    expect(g.nodes.find((n) => n.id === 'notes/x.md')!.contradiction).toBe(true);
+    expect(g.nodes.find((n) => n.id === 'notes/y.md')!.contradiction).toBe(true);
+  });
+
+  test('buildGraphModel reads a real vault directory (skips reports/ and dotfiles)', () => {
+    const vault = mkVault({
+      'notes/a.md': `---\ntitle: A\n---\n[[b]]\n`,
+      'notes/b.md': `---\ntitle: B\n---\nbody\n`,
+      'reports/relationship-graph.md': `# generated — must be ignored\n[[a]]\n`,
+      'notes/.tmp-draft.md': `---\ntitle: leftover\n---\n[[a]]\n`,
+    });
+    try {
+      const g: GraphModel = buildGraphModel(vault, NOW);
+      expect(g.nodes.map((n) => n.id).sort()).toEqual(['notes/a.md', 'notes/b.md']);
+      expect(g.edges).toEqual([{ source: 'notes/a.md', target: 'notes/b.md' }]);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('demoGraphModel', () => {
+  const NOW_2026 = Date.parse('2026-08-01T00:00:00Z');
+  test('renders a meaningful demo graph with edges, a contradiction, and a stale node', () => {
+    const g = demoGraphModel(NOW_2026);
+    expect(g.nodes.length).toBeGreaterThanOrEqual(6);
+    expect(g.edges.length).toBeGreaterThan(0);
+    // auth-method contradiction (JWT vs server-side sessions) flags both pages.
+    const contradicting = g.nodes.filter((n) => n.contradiction).map((n) => n.id);
+    expect(contradicting).toContain('notes/auth-jwt.md');
+    expect(contradicting).toContain('notes/session-store.md');
+    // legacy-cache is dated 2025-01-01 → stale relative to 2026.
+    expect(g.nodes.find((n) => n.id === 'notes/legacy-cache.md')!.stale).toBe(true);
   });
 });

@@ -128,6 +128,17 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(() => new Function(body)).not.toThrow()
   })
 
+  test('U-UI-03b: the Knowledge base graph script is present and syntactically valid', () => {
+    const html = generateDashboardHtml()
+    const m = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)
+    expect(m).not.toBeNull()
+    const body = m![1]!
+    expect(body).toContain('loadGraph') // fetches /knowledge/graph
+    expect(body).toContain("apiUrl('/knowledge/graph')")
+    // Parse-only: a syntax error in the hand-rolled renderer would break the dashboard.
+    expect(() => new Function(body)).not.toThrow()
+  })
+
   test('U-UI-04: input-mode wiring references the shared send path', () => {
     const body = scriptBody(generateDashboardHtml())
     expect(body).toContain('setPtyInputMode')

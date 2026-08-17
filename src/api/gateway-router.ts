@@ -15,6 +15,7 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
+import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel } from '../agent/knowledge';
 import {
   generateCliDevicePage,
   generateCliViewerPage,
@@ -910,6 +911,28 @@ export class GatewayRouter {
           res.json({ processes, numCpus: GatewayRouter.NUM_CPUS });
         },
       );
+    });
+
+    // Knowledge Base graph — the shared-vault memory-wiki as a {nodes, edges}
+    // model for the dashboard's "Knowledge base" tab. Computed ON DEMAND from the
+    // vault's *.md notes (does NOT depend on gateway.knowledge.shared.graph or the
+    // nightly reindex). Auth: dashboard session cookie OR API key. When the vault
+    // is empty, serve a clearly-labelled demo dataset (demo: true) unless ?demo=off.
+    this.app.get('/knowledge/graph', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
+        const now = Date.now();
+        const model = buildGraphModel(sharedVaultDir(shared), now);
+        if (model.nodes.length === 0 && req.query.demo !== 'off') {
+          res.json({ ...demoGraphModel(now), demo: true });
+          return;
+        }
+        res.json({ ...model, demo: false });
+      } catch (err) {
+        process.stderr.write(`[knowledge/graph] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to build knowledge graph' });
+      }
     });
 
     // PTY screen snapshot — plain text, ANSI stripped. For agents that need to

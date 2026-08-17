@@ -72,7 +72,7 @@ export const SHARED_DEFAULTS: ResolvedKnowledgeSharedCfg = {
   enabled: true,
   project: 'global',
   root: path.join(os.homedir(), '.claude-gateway', 'shared', 'kb'),
-  mode: 'propose', // SAFE default: per-agent→shared promotion is dry-run (K4)
+  mode: 'auto', // default: promote applied add-memories to the shared vault. Set 'propose' for dry-run (log only).
   graph: false, // K5 graph/dashboards are opt-in
 };
 

@@ -217,6 +217,63 @@ export function generateDashboardHtml(): string {
       .proc-tree { font-size: 0.72rem; padding: 10px 12px; }
       /* On phones allow horizontal pan only — no vertical clipping. */
     }
+
+    /* --- Tabs (Sessions | Knowledge base) --- */
+    .tabs { display: flex; gap: 4px; margin: 14px 0 18px; border-bottom: 1px solid #2d3748; }
+    .tab {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      color: #a0aec0; font-size: 0.9rem; font-weight: 600; padding: 8px 16px;
+      cursor: pointer; margin-bottom: -1px;
+    }
+    .tab:hover { color: #e2e8f0; }
+    .tab.active { color: #63b3ed; border-bottom-color: #63b3ed; }
+
+    /* --- Knowledge Base graph view --- */
+    .kb-toolbar {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      margin-bottom: 10px; font-size: 0.8rem; color: #a0aec0;
+    }
+    .kb-toolbar button {
+      background: #2d3748; color: #e2e8f0; border: 1px solid #4a5568;
+      border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.8rem;
+    }
+    .kb-toolbar button:hover { background: #374151; }
+    .kb-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+    .kb-demo-badge {
+      background: #744210; color: #fbd38d; border: 1px solid #975a16;
+      border-radius: 4px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;
+    }
+    .kb-legend { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+    .kb-legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .kb-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .kb-stage {
+      position: relative; width: 100%; height: 620px;
+      background: #0f1523; border: 1px solid #2d3748; border-radius: 8px; overflow: hidden;
+    }
+    #kb-svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+    #kb-svg.panning { cursor: grabbing; }
+    .kb-edge { stroke: #4a5568; stroke-width: 1; }
+    .kb-edge.hl { stroke: #63b3ed; stroke-width: 2; }
+    .kb-node { cursor: pointer; }
+    .kb-node circle { stroke: #1a202c; stroke-width: 1.5; transition: opacity 0.15s; }
+    .kb-node.contradiction circle { stroke: #fc8181; stroke-width: 3; }
+    .kb-node text { fill: #cbd5e0; font-size: 11px; pointer-events: none; }
+    .kb-node.stale { opacity: 0.45; }
+    .kb-node.dim { opacity: 0.12; }
+    .kb-edge.dim { opacity: 0.06; }
+    .kb-empty {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #718096; font-size: 0.9rem; text-align: center; padding: 20px; pointer-events: none;
+    }
+    .kb-panel {
+      position: absolute; top: 10px; right: 10px; width: 280px; max-height: calc(100% - 20px);
+      overflow-y: auto; background: #1a202c; border: 1px solid #4a5568; border-radius: 8px;
+      padding: 14px; font-size: 0.8rem; color: #cbd5e0; box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    }
+    .kb-panel h3 { margin: 0 0 8px; font-size: 0.95rem; color: #e2e8f0; }
+    .kb-panel .kb-panel-close { float: right; cursor: pointer; color: #718096; }
+    .kb-panel dt { color: #718096; margin-top: 8px; }
+    .kb-panel dd { margin: 2px 0 0; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -227,6 +284,13 @@ export function generateDashboardHtml(): string {
     Last updated: <span id="last-updated">&mdash;</span>
   </div>
 
+  <!-- Tab switcher: Sessions (live PTY + table) | Knowledge base (shared-KB graph) -->
+  <div class="tabs">
+    <button class="tab active" id="tab-sessions" data-view="view-sessions">Sessions</button>
+    <button class="tab" id="tab-kb" data-view="view-kb">Knowledge base</button>
+  </div>
+
+  <div id="view-sessions" class="view">
   <!-- Row: Processes 70% | Agent badges 30% (collapses on narrow screens) -->
   <div class="top-grid">
     <div>
@@ -280,6 +344,29 @@ export function generateDashboardHtml(): string {
       </tbody>
     </table>
   </div>
+  </div><!-- /view-sessions -->
+
+  <!-- Knowledge base — Obsidian-style force-directed graph over the shared vault.
+       Zero external deps: the force simulation + SVG render are hand-rolled. -->
+  <div id="view-kb" class="view" style="display:none;">
+    <div class="kb-toolbar">
+      <button id="kb-refresh" title="Recompute the graph from the shared vault">&#x21bb; Refresh</button>
+      <label><input type="checkbox" id="kb-demo-toggle" checked> Show demo data when vault is empty</label>
+      <span id="kb-demo-badge" class="kb-demo-badge" style="display:none;">DEMO DATA</span>
+      <span id="kb-stats"></span>
+      <span class="kb-legend" id="kb-legend"></span>
+    </div>
+    <div class="kb-stage">
+      <svg id="kb-svg" xmlns="http://www.w3.org/2000/svg">
+        <g id="kb-viewport">
+          <g id="kb-edges"></g>
+          <g id="kb-nodes"></g>
+        </g>
+      </svg>
+      <div id="kb-empty" class="kb-empty" style="display:none;"></div>
+      <div id="kb-panel" class="kb-panel" style="display:none;"></div>
+    </div>
+  </div><!-- /view-kb -->
 
   <div id="error-msg" class="error" style="display:none;"></div>
 
@@ -900,6 +987,286 @@ export function generateDashboardHtml(): string {
     setInterval(refresh, 3000);
     // Process tree (with CPU/mem) is heavier (spawns ps) — refresh a bit slower.
     setInterval(refreshProcesses, 6000);
+  </script>
+
+  <!-- Knowledge base graph: tab switching + hand-rolled force-directed renderer.
+       No template literals here (this file is itself a template literal). -->
+  <script id="kb-graph">
+  (function(){
+    // ---------- Tab switching ----------
+    var tabs = document.querySelectorAll('.tab');
+    var kbLoaded = false;
+    tabs.forEach(function(tab){
+      tab.addEventListener('click', function(){
+        tabs.forEach(function(t){ t.classList.remove('active'); });
+        tab.classList.add('active');
+        document.querySelectorAll('.view').forEach(function(v){ v.style.display = 'none'; });
+        var el = document.getElementById(tab.getAttribute('data-view'));
+        if (el) el.style.display = '';
+        if (tab.getAttribute('data-view') === 'view-kb' && !kbLoaded) { kbLoaded = true; loadGraph(); }
+      });
+    });
+
+    // ---------- Graph elements + constants ----------
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    var svg = document.getElementById('kb-svg');
+    var gViewport = document.getElementById('kb-viewport');
+    var gEdges = document.getElementById('kb-edges');
+    var gNodes = document.getElementById('kb-nodes');
+    var elEmpty = document.getElementById('kb-empty');
+    var elPanel = document.getElementById('kb-panel');
+    var elStats = document.getElementById('kb-stats');
+    var elLegend = document.getElementById('kb-legend');
+    var elDemoBadge = document.getElementById('kb-demo-badge');
+    var demoToggle = document.getElementById('kb-demo-toggle');
+
+    var TYPE_COLORS = {
+      decision: '#63b3ed', evidence: '#68d391', claim: '#f6ad55',
+      policy: '#b794f4', infra: '#4fd1c5', fact: '#f687b3'
+    };
+    var DEFAULT_COLOR = '#a0aec0';
+    function colorFor(type){ return (type && TYPE_COLORS[type]) ? TYPE_COLORS[type] : DEFAULT_COLOR; }
+
+    // Force constants — tuned for the small KB (tens of nodes).
+    var REPULSE = 2600, SPRING_K = 0.03, REST = 95, CENTER = 0.011, DAMPING = 0.9, VMAX = 30;
+
+    var nodes = [], edges = [], nodeById = {};
+    var view = { x: 0, y: 0, k: 1 };
+    var raf = null, alpha = 0, dragNode = null, panning = false, panStart = null;
+
+    function w(){ return svg.clientWidth || 800; }
+    function h(){ return svg.clientHeight || 600; }
+    function applyTransform(){
+      gViewport.setAttribute('transform', 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')');
+    }
+
+    // ---------- Build model from API payload ----------
+    function buildModel(data){
+      stopSim();
+      gEdges.textContent = ''; gNodes.textContent = '';
+      nodes = []; edges = []; nodeById = {};
+      hidePanel();
+      var raw = (data && data.nodes) || [];
+      var rawEdges = (data && data.edges) || [];
+      var cx = w() / 2, cy = h() / 2, n = raw.length;
+      raw.forEach(function(nd, i){
+        var ang = (2 * Math.PI * i) / Math.max(1, n);
+        var node = {
+          id: nd.id, title: nd.title || nd.id, type: nd.type || null,
+          degree: nd.degree || 0, confidence: (nd.confidence === undefined ? null : nd.confidence),
+          updatedAt: nd.updatedAt || null, stale: !!nd.stale, contradiction: !!nd.contradiction,
+          x: cx + Math.cos(ang) * 180 + (Math.random() * 20 - 10),
+          y: cy + Math.sin(ang) * 180 + (Math.random() * 20 - 10),
+          vx: 0, vy: 0, neighbors: {}
+        };
+        nodes.push(node); nodeById[node.id] = node;
+      });
+      rawEdges.forEach(function(e){
+        var s = nodeById[e.source], t = nodeById[e.target];
+        if (!s || !t) return;
+        edges.push({ source: s, target: t });
+        s.neighbors[t.id] = true; t.neighbors[s.id] = true;
+      });
+      createEls();
+      view = { x: 0, y: 0, k: 1 }; applyTransform();
+      alpha = 1; startSim();
+    }
+
+    function createEls(){
+      edges.forEach(function(e){
+        var line = document.createElementNS(SVGNS, 'line');
+        line.setAttribute('class', 'kb-edge');
+        e.el = line; gEdges.appendChild(line);
+      });
+      nodes.forEach(function(node){
+        var g = document.createElementNS(SVGNS, 'g');
+        g.setAttribute('class', 'kb-node' + (node.stale ? ' stale' : '') + (node.contradiction ? ' contradiction' : ''));
+        var c = document.createElementNS(SVGNS, 'circle');
+        var r = Math.min(22, 6 + node.degree * 2);
+        c.setAttribute('r', r);
+        c.setAttribute('fill', colorFor(node.type));
+        var label = document.createElementNS(SVGNS, 'text');
+        label.setAttribute('x', r + 3); label.setAttribute('y', 4);
+        label.textContent = node.title;
+        g.appendChild(c); g.appendChild(label);
+        node.el = g; node.r = r;
+        g.addEventListener('pointerenter', function(){ highlight(node); });
+        g.addEventListener('pointerleave', function(){ clearHighlight(); });
+        g.addEventListener('pointerdown', function(ev){ startDrag(node, ev); });
+        g.addEventListener('click', function(ev){ ev.stopPropagation(); showPanel(node); });
+        gNodes.appendChild(g);
+      });
+    }
+
+    // ---------- Force simulation ----------
+    function tick(){
+      var i, j, a, b, dx, dy, d2, d, f, ux, uy;
+      for (i = 0; i < nodes.length; i++){ nodes[i].fx = 0; nodes[i].fy = 0; }
+      for (i = 0; i < nodes.length; i++){
+        for (j = i + 1; j < nodes.length; j++){
+          a = nodes[i]; b = nodes[j];
+          dx = a.x - b.x; dy = a.y - b.y; d2 = dx*dx + dy*dy + 0.01; d = Math.sqrt(d2);
+          f = REPULSE / d2; ux = dx / d; uy = dy / d;
+          a.fx += f*ux; a.fy += f*uy; b.fx -= f*ux; b.fy -= f*uy;
+        }
+      }
+      for (i = 0; i < edges.length; i++){
+        a = edges[i].source; b = edges[i].target;
+        dx = b.x - a.x; dy = b.y - a.y; d = Math.sqrt(dx*dx + dy*dy) + 0.01;
+        f = SPRING_K * (d - REST); ux = dx / d; uy = dy / d;
+        a.fx += f*ux; a.fy += f*uy; b.fx -= f*ux; b.fy -= f*uy;
+      }
+      var cx = w() / 2, cy = h() / 2;
+      for (i = 0; i < nodes.length; i++){
+        a = nodes[i];
+        a.fx += (cx - a.x) * CENTER; a.fy += (cy - a.y) * CENTER;
+        if (a === dragNode) continue;
+        a.vx = (a.vx + a.fx) * DAMPING; a.vy = (a.vy + a.fy) * DAMPING;
+        if (a.vx > VMAX) a.vx = VMAX; else if (a.vx < -VMAX) a.vx = -VMAX;
+        if (a.vy > VMAX) a.vy = VMAX; else if (a.vy < -VMAX) a.vy = -VMAX;
+        a.x += a.vx; a.y += a.vy;
+      }
+      render();
+      alpha *= 0.985;
+      if (alpha > 0.02) raf = requestAnimationFrame(tick); else raf = null;
+    }
+    function startSim(){ if (!raf) raf = requestAnimationFrame(tick); }
+    function stopSim(){ if (raf){ cancelAnimationFrame(raf); raf = null; } }
+    function reheat(){ alpha = Math.max(alpha, 0.5); startSim(); }
+
+    function render(){
+      for (var i = 0; i < edges.length; i++){
+        var e = edges[i];
+        e.el.setAttribute('x1', e.source.x); e.el.setAttribute('y1', e.source.y);
+        e.el.setAttribute('x2', e.target.x); e.el.setAttribute('y2', e.target.y);
+      }
+      for (var k = 0; k < nodes.length; k++){
+        var nd = nodes[k];
+        nd.el.setAttribute('transform', 'translate(' + nd.x + ',' + nd.y + ')');
+      }
+    }
+
+    // ---------- Interactions ----------
+    function evtGraphPoint(ev){
+      var rect = svg.getBoundingClientRect();
+      return {
+        x: (ev.clientX - rect.left - view.x) / view.k,
+        y: (ev.clientY - rect.top - view.y) / view.k
+      };
+    }
+    function startDrag(node, ev){
+      ev.stopPropagation(); dragNode = node;
+      svg.setPointerCapture(ev.pointerId);
+      var move = function(mv){ var p = evtGraphPoint(mv); node.x = p.x; node.y = p.y; render(); reheat(); };
+      var up = function(){ dragNode = null; svg.removeEventListener('pointermove', move); svg.removeEventListener('pointerup', up); };
+      svg.addEventListener('pointermove', move); svg.addEventListener('pointerup', up);
+    }
+    svg.addEventListener('pointerdown', function(ev){
+      if (dragNode) return;
+      panning = true; svg.classList.add('panning');
+      panStart = { x: ev.clientX - view.x, y: ev.clientY - view.y };
+    });
+    svg.addEventListener('pointermove', function(ev){
+      if (!panning) return;
+      view.x = ev.clientX - panStart.x; view.y = ev.clientY - panStart.y; applyTransform();
+    });
+    svg.addEventListener('pointerup', function(){ panning = false; svg.classList.remove('panning'); });
+    svg.addEventListener('pointerleave', function(){ panning = false; svg.classList.remove('panning'); });
+    svg.addEventListener('click', function(){ hidePanel(); });
+    svg.addEventListener('wheel', function(ev){
+      ev.preventDefault();
+      var rect = svg.getBoundingClientRect();
+      var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+      var factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
+      var nk = Math.min(3, Math.max(0.2, view.k * factor));
+      view.x = mx - (mx - view.x) * (nk / view.k);
+      view.y = my - (my - view.y) * (nk / view.k);
+      view.k = nk; applyTransform();
+    }, { passive: false });
+
+    function highlight(node){
+      for (var i = 0; i < nodes.length; i++){
+        var nd = nodes[i];
+        var on = (nd === node) || node.neighbors[nd.id];
+        nd.el.classList.toggle('dim', !on);
+      }
+      for (var j = 0; j < edges.length; j++){
+        var e = edges[j];
+        var touch = (e.source === node || e.target === node);
+        e.el.classList.toggle('hl', touch);
+        e.el.classList.toggle('dim', !touch);
+      }
+    }
+    function clearHighlight(){
+      nodes.forEach(function(nd){ nd.el.classList.remove('dim'); });
+      edges.forEach(function(e){ e.el.classList.remove('hl'); e.el.classList.remove('dim'); });
+    }
+
+    function el(tag, txt){ var e = document.createElement(tag); if (txt !== undefined) e.textContent = txt; return e; }
+    function showPanel(node){
+      elPanel.textContent = '';
+      var close = el('span', '✕'); close.setAttribute('class', 'kb-panel-close');
+      close.addEventListener('click', hidePanel);
+      elPanel.appendChild(close);
+      elPanel.appendChild(el('h3', node.title));
+      var dl = document.createElement('dl');
+      function row(k, v){ dl.appendChild(el('dt', k)); dl.appendChild(el('dd', v)); }
+      row('id', node.id);
+      row('type', node.type || '—');
+      row('links (degree)', String(node.degree));
+      row('confidence', node.confidence === null ? '—' : String(node.confidence));
+      row('updated', node.updatedAt || '—');
+      if (node.stale) row('status', 'stale (≥ 90d)');
+      if (node.contradiction) row('flag', 'in a contradiction');
+      elPanel.appendChild(dl);
+      elPanel.style.display = '';
+    }
+    function hidePanel(){ elPanel.style.display = 'none'; }
+
+    // ---------- Legend + stats ----------
+    function renderLegend(){
+      elLegend.textContent = '';
+      var present = {};
+      nodes.forEach(function(nd){ present[nd.type || 'other'] = true; });
+      Object.keys(present).forEach(function(type){
+        var s = el('span');
+        var dot = el('i'); dot.style.background = colorFor(type === 'other' ? null : type);
+        s.appendChild(dot); s.appendChild(el('span', type));
+        elLegend.appendChild(s);
+      });
+    }
+
+    // ---------- Load ----------
+    function loadGraph(){
+      var url = apiUrl('/knowledge/graph') + (demoToggle.checked ? '' : '?demo=off');
+      elStats.textContent = 'Loading…'; elEmpty.style.display = 'none';
+      fetch(url, { headers: { 'Accept': 'application/json' } }).then(function(res){
+        if (res.status === 401) { onUnauthorized(); return null; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }).then(function(data){
+        if (!data) return;
+        var isDemo = !!data.demo;
+        elDemoBadge.style.display = isDemo ? '' : 'none';
+        if (!data.nodes || data.nodes.length === 0){
+          buildModel({ nodes: [], edges: [] });
+          elStats.textContent = '';
+          elEmpty.textContent = 'No notes in the shared Knowledge Base yet. Notes appear here once agents promote memories to the shared vault (dreaming auto mode), or enable the demo toggle above.';
+          elEmpty.style.display = '';
+          elLegend.textContent = '';
+          return;
+        }
+        buildModel(data);
+        renderLegend();
+        elStats.textContent = data.nodes.length + ' notes, ' + data.edges.length + ' links';
+      }).catch(function(err){
+        elStats.textContent = ''; elEmpty.textContent = 'Failed to load graph: ' + err.message; elEmpty.style.display = '';
+      });
+    }
+
+    document.getElementById('kb-refresh').addEventListener('click', loadGraph);
+    demoToggle.addEventListener('change', loadGraph);
+  })();
   </script>
 </body>
 </html>`;

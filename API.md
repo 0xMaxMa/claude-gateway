@@ -15,7 +15,8 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
 | `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats + heartbeat history |
 | `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard |
-| `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (serves the login page when unauthenticated) |
+| `GET` | `/knowledge/graph` | Admin key or dashboard session¹ | Shared-KB memory-wiki as `{ nodes, edges, demo }` for the dashboard **Knowledge base** tab. Computed on-demand from the shared vault's notes (independent of `gateway.knowledge.shared.graph` and the nightly reindex). Serves a labelled demo dataset (`demo:true`) when the vault is empty; `?demo=off` returns the real (possibly empty) model |
+| `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (Sessions + Knowledge base tabs; serves the login page when unauthenticated) |
 | `POST` | `/dashboard/login` | None (validates an admin key) | Exchange an **admin** API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |

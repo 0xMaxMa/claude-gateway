@@ -45,6 +45,7 @@ export interface WikiClaim {
 export interface WikiPage {
   relPath: string; // vault-relative, POSIX
   title: string;
+  type: string | null; // frontmatter `type` (e.g. decision/evidence/claim) — used for graph coloring
   claims: WikiClaim[];
   confidence: number | null;
   updatedAt: string | null;
@@ -128,6 +129,7 @@ export function parseWikiPage(relPath: string, raw: string): WikiPage {
   return {
     relPath,
     title: toStr(fm.title) ?? relPath.replace(/\.md$/i, ''),
+    type: toStr(fm.type) ?? null,
     claims: normalizeClaims(fm.claims),
     confidence: toNum(fm.confidence) ?? null,
     updatedAt: toDateStr(fm.updatedAt) ?? null,
@@ -261,10 +263,12 @@ function collectPages(vaultDir: string, dir: string, out: string[]): void {
 }
 
 /**
- * Compile the wiki reports for a vault. Deterministic; `now` is injected. Writes
- * `<vault>/reports/*.md`. Best-effort per file. Returns summary counts.
+ * Read every source note in the vault into `WikiPage`s. Skips the generated
+ * `reports/` dir, dotfiles, and oversized notes (DoS guard). Deterministic
+ * order. Shared by `compileWiki` (report generation) and `buildGraphModel`
+ * (the on-demand dashboard graph endpoint).
  */
-export function compileWiki(vaultDir: string, now: number): WikiCompileResult {
+export function readVaultPages(vaultDir: string): WikiPage[] {
   const absFiles: string[] = [];
   collectPages(vaultDir, vaultDir, absFiles);
   const pages: WikiPage[] = [];
@@ -280,6 +284,87 @@ export function compileWiki(vaultDir: string, now: number): WikiCompileResult {
     }
     pages.push(parseWikiPage(rel, raw));
   }
+  return pages;
+}
+
+export interface GraphNode {
+  id: string; // vault-relative relPath — stable identity
+  title: string;
+  type: string | null;
+  degree: number; // in + out edges touching this node
+  confidence: number | null;
+  updatedAt: string | null;
+  stale: boolean;
+  contradiction: boolean; // this page participates in a contradicting claim
+}
+
+export interface GraphEdge {
+  source: string; // node id (relPath)
+  target: string; // node id (relPath)
+}
+
+export interface GraphModel {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/**
+ * Build the `{ nodes, edges }` graph model from already-parsed pages. Pure and
+ * deterministic (`now` injected) so it is unit-testable without disk. Edges are
+ * `[[link]]`s resolved to a real target page (same key resolution as backlinks),
+ * de-duplicated and self-loops dropped; `degree` counts both directions; `stale`
+ * reuses the dashboard staleness threshold.
+ */
+export function graphFromPages(pages: WikiPage[], now: number): GraphModel {
+  const keyToPage = new Map<string, string>();
+  for (const p of pages) for (const k of pageKeys(p)) keyToPage.set(k, p.relPath);
+
+  const edges: GraphEdge[] = [];
+  const seen = new Set<string>();
+  const degree = new Map<string, number>();
+  const bump = (id: string): void => {
+    degree.set(id, (degree.get(id) ?? 0) + 1);
+  };
+  for (const p of pages) {
+    for (const link of p.links) {
+      const target = keyToPage.get(link.toLowerCase());
+      if (!target || target === p.relPath) continue; // unresolved or self-loop
+      const key = `${p.relPath} ${target}`;
+      if (seen.has(key)) continue; // de-dupe repeated links to the same target
+      seen.add(key);
+      edges.push({ source: p.relPath, target });
+      bump(p.relPath);
+      bump(target);
+    }
+  }
+
+  const dash = buildDashboards(pages, now);
+  const staleSet = new Set(dash.stale.map((s) => s.page));
+  const contradictionSet = new Set(dash.contradictions.flatMap((c) => c.variants.map((v) => v.page)));
+  const nodes: GraphNode[] = pages.map((p) => ({
+    id: p.relPath,
+    title: p.title,
+    type: p.type,
+    degree: degree.get(p.relPath) ?? 0,
+    confidence: p.confidence,
+    updatedAt: p.updatedAt,
+    stale: staleSet.has(p.relPath),
+    contradiction: contradictionSet.has(p.relPath),
+  }));
+  return { nodes, edges };
+}
+
+/** Read the vault and build the on-demand graph model. `now` injected for determinism. */
+export function buildGraphModel(vaultDir: string, now: number): GraphModel {
+  return graphFromPages(readVaultPages(vaultDir), now);
+}
+
+/**
+ * Compile the wiki reports for a vault. Deterministic; `now` is injected. Writes
+ * `<vault>/reports/*.md`. Best-effort per file. Returns summary counts.
+ */
+export function compileWiki(vaultDir: string, now: number): WikiCompileResult {
+  const pages = readVaultPages(vaultDir);
 
   const back = buildBacklinks(pages);
   const dash = buildDashboards(pages, now);

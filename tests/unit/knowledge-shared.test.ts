@@ -26,14 +26,14 @@ describe('resolveSharedConfig', () => {
     const r = resolveSharedConfig();
     expect(r.enabled).toBe(true);
     expect(r.project).toBe('global');
-    expect(r.mode).toBe('propose');
+    expect(r.mode).toBe('auto'); // planning-64 flip: promote applied memories to the shared vault by default
     expect(r.root).toContain('.claude-gateway');
   });
 
   test('precedence agent > global > default; mode coerced', () => {
-    const r = resolveSharedConfig({ project: 'teamA' }, { project: 'teamB', mode: 'auto' });
+    const r = resolveSharedConfig({ project: 'teamA' }, { project: 'teamB', mode: 'propose' });
     expect(r.project).toBe('teamA'); // agent wins
-    expect(r.mode).toBe('auto'); // global wins over default
+    expect(r.mode).toBe('propose'); // global 'propose' overrides the 'auto' default
     expect(resolveSharedConfig({ mode: 'nonsense' as 'auto' }).mode).toBe('propose'); // coerce
   });
 
