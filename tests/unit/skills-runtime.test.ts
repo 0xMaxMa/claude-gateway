@@ -245,12 +245,12 @@ describe('SkillsModule', () => {
     expect(mod.isEnabled()).toBe(false);
   });
 
-  test('module exposes 3 tools', async () => {
+  test('module exposes 4 tools', async () => {
     const { SkillsModule } = await import('../../mcp/tools/skills/module');
     const mod = new SkillsModule();
     const tools = mod.getTools();
-    expect(tools).toHaveLength(3);
-    expect(tools.map((t) => t.name)).toEqual(['skill_create', 'skill_delete', 'skill_install']);
+    expect(tools).toHaveLength(4);
+    expect(tools.map((t) => t.name)).toEqual(['skill_create', 'skill_delete', 'skill_install', 'skill_metrics']);
   });
 
   test('handleTool routes skill_create correctly', async () => {

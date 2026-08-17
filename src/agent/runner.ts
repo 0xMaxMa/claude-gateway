@@ -27,6 +27,7 @@ import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource } from '../history/types';
+import type { SkillLearningManager } from './skill-learning';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -284,6 +285,10 @@ export class AgentRunner extends EventEmitter {
   // Skill registry for detecting /skill-name commands in user messages
   private skillRegistry: SkillRegistry = { skills: new Map() };
 
+  // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
+  // All calls are guarded (`this.skillLearning?.`) and best-effort.
+  private skillLearning?: SkillLearningManager;
+
   // Path to gateway config.json for persisting model changes
   private readonly configPath: string;
 
@@ -331,6 +336,15 @@ export class AgentRunner extends EventEmitter {
 
   getSkillRegistry(): SkillRegistry {
     return this.skillRegistry;
+  }
+
+  /** Wire the skill-learning manager (planning-62). Optional; unset = feature off. */
+  setSkillLearning(manager: SkillLearningManager | undefined): void {
+    this.skillLearning = manager;
+  }
+
+  getSkillLearning(): SkillLearningManager | undefined {
+    return this.skillLearning;
   }
 
   get workspacePath(): string {
@@ -501,6 +515,8 @@ export class AgentRunner extends EventEmitter {
       turnKey: body.turnKey ?? chatId,
     };
 
+    // Skill-learning: an incident-driven recovery attempt on this chat's turn.
+    this.skillLearning?.onRecoveryFired(chatId);
     try {
       const result = await runRecovery(req, {
         autoRecover,
@@ -1056,11 +1072,13 @@ export class AgentRunner extends EventEmitter {
         // Merge buffered messages into one turn: concat channel XML blocks, append
         // any skill context, and accumulate image paths for size tracking.
         const blocks: string[] = [];
+        const invokedSkills: string[] = [];
         for (const entry of entries) {
           let channelXml = AgentRunner.buildChannelXml(entry);
           const skillInvocation = detectSkillCommand(entry.content ?? '', this.skillRegistry);
           if (skillInvocation) {
             channelXml += formatSkillContext(skillInvocation);
+            invokedSkills.push(skillInvocation.skillKey);
             this.logger.info('Skill invoked', {
               skill: skillInvocation.skillKey,
               args: skillInvocation.args,
@@ -1089,6 +1107,8 @@ export class AgentRunner extends EventEmitter {
 
         session.setProcessing(true);
         const turnText = blocks.join('\n');
+        // Skill-learning: mark the start of a user turn (cheap, best-effort).
+        this.skillLearning?.onTurnStart(chatId, sessionId, entries[0]?.content ?? '', invokedSkills);
         session.sendMessage(turnText);
         // Remember this turn for the C1 guarded resend (Phase 3b): reset the
         // delivered/resent flags so a resend can only fire if this turn stalls
@@ -1433,6 +1453,12 @@ export class AgentRunner extends EventEmitter {
             const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
               for (const block of msg!.content) {
+                // Skill-learning: count every tool_use this turn (deduped by block
+                // id inside the manager, since cumulative assistant snapshots re-emit
+                // completed blocks). Cheap, best-effort.
+                if (block.type === 'tool_use') {
+                  this.skillLearning?.onToolUse(mapKey, (block as Record<string, unknown>)['id'] as string | undefined);
+                }
                 // LINE sends images through its own line_image tool (not the reply
                 // tool's `files`), so capture those sends into history too — the
                 // web transcript and the session image catalog key off mediaFiles.
@@ -1565,6 +1591,13 @@ export class AgentRunner extends EventEmitter {
           }
           if (obj['type'] === 'result') {
             proc.setProcessing(false);
+            // Skill-learning: on the headless backend `result` is the true
+            // end-of-user-turn (exactly one per message) — persist the turn metric
+            // here. pty-shell fires `result` per sub-turn, so its capture is driven
+            // by `session_idle` (below) to avoid over-counting.
+            if (proc.backend !== 'pty-shell') {
+              this.skillLearning?.onTurnEnd(mapKey, actualSessionId);
+            }
             // Gateway turn queue: on the headless backend `result` is the true end
             // of the user's turn (exactly one per message), so flush the next
             // queued turn here. On pty-shell `result` fires per sub-turn (across
@@ -1712,6 +1745,8 @@ export class AgentRunner extends EventEmitter {
             if (!proc.hasPendingRestart()) {
               this.flushNextTurn(mapKey);
             }
+            // Skill-learning: pty-shell session_idle is the true end-of-user-turn.
+            this.skillLearning?.onTurnEnd(mapKey, actualSessionId);
             typingDoneTimer = setTimeout(() => {
               this.writeTypingDone(mapKey);
               typingDoneTimer = null;
@@ -1724,6 +1759,7 @@ export class AgentRunner extends EventEmitter {
       // Use actualSessionId (captured at spawn time) — NOT getActiveSessionId() —
       // so tokens are attributed to the session that owns this process.
       proc.on('tokenUsage', async ({ inputTokens, totalTokens }: { inputTokens: number; totalTokens: number }) => {
+        this.skillLearning?.onTokenUsage(mapKey, inputTokens, totalTokens);
         try {
           const ch = this.channelFor(mapKey);
           const index = await this.sessionStore.listSessions(this.agentConfig.id, mapKey, ch);
@@ -2115,6 +2151,8 @@ export class AgentRunner extends EventEmitter {
    */
   private handleRequestTooLarge(mapKey: string, proc: SessionProcess): void {
     proc.setProcessing(false);
+    // Skill-learning: a recovery event this turn (feeds the trigger + recovery-rate measure).
+    this.skillLearning?.onRecoveryFired(mapKey);
     // Recovery steps through the ladder rungs strictly below the configured cap;
     // the number of those rungs is how many shrink attempts exist before even the
     // smallest (0-history) spawn has been tried and still trips 32MB.

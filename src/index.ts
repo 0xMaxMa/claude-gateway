@@ -29,6 +29,7 @@ import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
+import { SkillLearningManager } from './agent/skill-learning';
 import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
@@ -278,6 +279,32 @@ async function startAgent(
 
   agentRunners.set(agentConfig.id, runner);
   agentConfigs.set(agentConfig.id, agentConfig);
+
+  // Skill self-improvement (planning-62): wire the manager (telemetry capture +
+  // idle-review trigger + reviewer + writer) and start the daily curator. Shares
+  // the runner's history DB so telemetry and the reviewer read the same tables.
+  // Telemetry capture is always-on; the reviewer/writer/curator honor `enabled`.
+  try {
+    const skillLearning = new SkillLearningManager({
+      db: runner.getHistoryDb(),
+      agentId: agentConfig.id,
+      workspaceDir: agentConfig.workspace,
+      mcpToolsDir,
+      sharedSkillsDir,
+      globalCfg: gatewayConfig.gateway.skillLearning,
+      agentCfg: agentConfig.skillLearning,
+      logger,
+      channels: {
+        telegramBotToken: agentConfig.telegram?.botToken,
+        discordBotToken: agentConfig.discord?.botToken,
+        lineAccessToken: agentConfig.line?.channelAccessToken,
+      },
+    });
+    runner.setSkillLearning(skillLearning);
+    skillLearning.startCurator(); // unref'd self-rescheduling timer
+  } catch (err) {
+    logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });
+  }
 
   // Log startup status
   console.log(JSON.stringify({ id: agentConfig.id, status: 'started' }));
