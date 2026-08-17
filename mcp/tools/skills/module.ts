@@ -108,6 +108,15 @@ export class SkillsModule implements ToolModule {
           additionalProperties: false,
         },
       },
+      {
+        name: 'skill_metrics',
+        description: 'Read the skill self-improvement effectiveness rollup for this agent: adoption funnel (auto-skill stickiness), cost-to-complete deltas, recovery-rate trend, enabled/disabled cohort, and the net-token ledger (tokens saved by reuse minus tokens spent reviewing). Read-only.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+      },
     ];
   }
 
@@ -151,6 +160,25 @@ export class SkillsModule implements ToolModule {
           };
           const result = await installSkill(params);
           return { content: [{ type: 'text', text: result }] };
+        }
+        case 'skill_metrics': {
+          const apiUrl = (process.env.GATEWAY_API_URL || '').replace(/\/+$/, '');
+          const apiKey = process.env.GATEWAY_API_KEY;
+          const agentId = process.env.GATEWAY_AGENT_ID;
+          if (!apiUrl || !apiKey || !agentId) {
+            return {
+              content: [{ type: 'text', text: 'skill_metrics unavailable: gateway API env not configured' }],
+              isError: true,
+            };
+          }
+          const res = await fetch(`${apiUrl}/api/v1/agents/${encodeURIComponent(agentId)}/skill-metrics`, {
+            headers: { Authorization: `Bearer ${apiKey}` },
+          });
+          const body = await res.text();
+          if (!res.ok) {
+            return { content: [{ type: 'text', text: `skill_metrics failed (${res.status}): ${body}` }], isError: true };
+          }
+          return { content: [{ type: 'text', text: body }] };
         }
         default:
           return { content: [{ type: 'text', text: `unknown tool: ${name}` }], isError: true };

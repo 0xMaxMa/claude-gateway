@@ -338,6 +338,37 @@ Recovery actions are clamped to a per-stage whitelist and a per-turn budget, and
 }
 ```
 
+### `gateway.skillLearning`
+
+Controls [skill self-improvement](#skill-self-improvement) — agents learning reusable skills from their own work. Telemetry capture is always on; the reviewer/writer/curator honor `enabled`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch for the reviewer/writer/curator (telemetry is captured regardless) |
+| `mode` | `"auto"` | `auto` writes skills directly; `propose` queues them for approval instead |
+| `minToolCalls` | `5` | Minimum tool calls in a turn before it's eligible for review |
+| `reviewModel` | `claude-haiku-4-5-…` | Model used for the background review pass |
+| `maxAutoSkills` | `50` | Cap on the number of non-pinned `origin: auto` skills kept per agent (pinned skills are never evicted and don't count toward the cap) |
+| `maxAgeDays` | `30` | Curator prunes auto-skills older than this (with too few uses) |
+| `minUsesToKeep` | `2` | Auto-skills used fewer times than this are prune candidates |
+| `maxReviewsPerDay` | `20` | Per-day cap on background review runs |
+| `pruneHour` / `pruneTimezone` | `3` / `UTC` | When the daily curator runs |
+| `notify` | `true` | Push a per-write ping to every configured channel (see [notifications](#skill-self-improvement)); the `SKILLS_LEARNED.md` diary is written regardless |
+
+```json
+{
+  "gateway": {
+    "skillLearning": {
+      "enabled": true,
+      "mode": "auto",
+      "notify": true
+    }
+  }
+}
+```
+
+Per-agent overrides are supported under the agent's own `skillLearning` block; unset fields fall back to the gateway default.
+
 ### `gateway.bind`
 
 Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.
@@ -828,6 +859,18 @@ Skills placed in `~/.claude-gateway/shared-skills/` are automatically synced to 
 - **Cleanup** — each synced skill is tagged with a `.shared` marker file; if a skill is removed from `shared-skills/`, the marker is used to delete the stale copy from `~/.claude/skills/` automatically (user-installed skills without the marker are never touched)
 
 This means adding a skill to `shared-skills/` makes it available to **all agents** without per-agent setup or a gateway restart.
+
+### Skill self-improvement
+
+Agents can **learn skills from their own work**. Telemetry is captured for every turn; when a turn does enough substantive work (default ≥ 5 tool calls) and the session goes idle, a lightweight background reviewer reads the transcript and decides whether a reusable skill should be **created or updated**. Written skills are **hot-reloaded** — usable in the next turn without a restart. Controlled by [`gateway.skillLearning`](#gatewayskilllearning) (enabled by default).
+
+- **Provenance guard** — the writer only ever creates new `origin: auto` skills or edits skills it previously authored. Hand-written / user skills are never overwritten.
+- **Caps** — a per-day review cap and a maximum number of auto-skills bound the churn; a daily curator prunes the least-used auto-skills.
+- **Audit diary** — every automatic write appends a line to `<workspace>/SKILLS_LEARNED.md` (always on, offline, immutable).
+- **Notifications** — when `skillLearning.notify` is on (default), a short ping is fanned out to **every channel the agent has configured** (Telegram, Discord, and LINE when set up). Each channel resolves recipients from its own `.<channel>-state/access.json` allowlist. The web/`api` channel has no proactive push and is not notified. Bursts coalesce into a single digest.
+- **Progressive disclosure** — auto-skill descriptions are truncated in the CLAUDE.md skill menu to keep per-turn context small; the full skill body still loads on invoke.
+
+Metrics are exposed via `GET /api/v1/agents/:agentId/skill-metrics` and the `skill_metrics` MCP tool (adoption funnel, cost-to-complete deltas, net-token ledger).
 
 ---
 

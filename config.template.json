@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.16",
+  "configVersion": "1.0.18",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -63,6 +63,19 @@
       "buildCachePrune": true,
       "buildCacheMaxAgeHours": 168,
       "danglingImagePrune": true
+    },
+    "skillLearning": {
+      "enabled": true,
+      "mode": "auto",
+      "minToolCalls": 5,
+      "reviewModel": "claude-haiku-4-5-20251001",
+      "maxAutoSkills": 50,
+      "maxAgeDays": 30,
+      "minUsesToKeep": 2,
+      "maxReviewsPerDay": 20,
+      "pruneHour": 3,
+      "pruneTimezone": "UTC",
+      "notify": true
     }
   },
   "agents": [

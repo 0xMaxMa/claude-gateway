@@ -1,6 +1,31 @@
 import fs from 'fs';
 import path from 'path';
-import { parseSkill, type SkillDefinition, type ParseSkillOptions } from './parser';
+import { parseSkill, extractFrontmatter, type SkillDefinition, type ParseSkillOptions } from './parser';
+
+/**
+ * Progressive disclosure: auto-learned skills (`origin: auto`) can proliferate up
+ * to the curator cap (default 50), and each full description in the CLAUDE.md
+ * menu costs context on every turn. Truncate the menu line for auto skills to
+ * this many chars — the full body still loads when the skill is invoked.
+ * Human/module/shared skills are curated and bounded, so they are never trimmed.
+ */
+export const AUTO_SKILL_MENU_DESC_MAX = 80;
+
+/** Menu description for one skill — compacted only for auto-learned skills. */
+function menuDescription(skill: SkillDefinition): string {
+  if (skill.source !== 'workspace') return skill.description;
+  let isAuto = false;
+  try {
+    const fm = extractFrontmatter(skill.content)?.frontmatter;
+    isAuto = !!fm && fm['origin'] === 'auto';
+  } catch {
+    isAuto = false;
+  }
+  if (!isAuto) return skill.description;
+  const d = skill.description.trim();
+  if (d.length <= AUTO_SKILL_MENU_DESC_MAX) return d;
+  return d.slice(0, AUTO_SKILL_MENU_DESC_MAX - 1).trimEnd() + '…';
+}
 
 export interface SkillRegistry {
   skills: Map<string, SkillDefinition>;
@@ -168,7 +193,7 @@ export function renderSkillsSection(registry: SkillRegistry): string {
     if (!skill.userInvocable) continue;
 
     const emoji = skill.emoji ? ` [${skill.emoji}]` : '';
-    const line = `/${key}: ${skill.description}${emoji}`;
+    const line = `/${key}: ${menuDescription(skill)}${emoji}`;
 
     if (skill.source === 'workspace') workspace.push(line);
     else if (skill.source === 'module') module.push(line);

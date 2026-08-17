@@ -29,6 +29,42 @@ const PREVIEW_LENGTH = 120;
 // Singleton cache: one DB per (agentsBaseDir + agentId)
 const cache = new Map<string, HistoryDB>();
 
+// ---- Skill-learning persistence DTOs (planning-62) ----------------------------
+// Kept local to the history layer so it owns its own storage shape; the
+// skill-learning module maps to/from these rather than history importing upward.
+
+export interface TurnMetricRow {
+  sessionId: string;
+  turnIdx: number;
+  ts: number;
+  toolCalls: number;
+  durationMs: number;
+  tokensIn: number;
+  tokensOut: number;
+  recoveryFired: number;
+  skillsLoaded: string | null; // JSON array of names
+  intentHash: string | null;
+  enabled: number;
+}
+
+export interface SkillStatRow {
+  name: string;
+  origin: string; // 'auto' | 'user'
+  createdAt: number | null;
+  createdFromSession: string | null;
+  timesLoaded: number;
+  lastUsedAt: number | null;
+  pinned: number;
+}
+
+export interface ReviewRunRow {
+  sessionId: string | null;
+  ts: number;
+  triggerReason: string | null;
+  outcome: string | null;
+  tokensSpent: number;
+}
+
 export class HistoryDB {
   private readonly db: DatabaseSync;
   private readonly insertStmt: StatementSync;
@@ -115,6 +151,48 @@ export class HistoryDB {
         VALUES ('delete', old.id, old.content, old.sender_name);
       END;
 
+      -- Skill-learning telemetry (planning-62). Durable per-turn record — the
+      -- prerequisite for BOTH gating and effectiveness measurement.
+      CREATE TABLE IF NOT EXISTS turn_metrics (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id     TEXT    NOT NULL,
+        turn_idx       INTEGER NOT NULL,
+        ts             INTEGER NOT NULL,
+        tool_calls     INTEGER NOT NULL DEFAULT 0,
+        duration_ms    INTEGER NOT NULL DEFAULT 0,
+        tokens_in      INTEGER NOT NULL DEFAULT 0,
+        tokens_out     INTEGER NOT NULL DEFAULT 0,
+        recovery_fired INTEGER NOT NULL DEFAULT 0,
+        skills_loaded  TEXT,                     -- JSON array of skill names
+        intent_hash    TEXT,                     -- lightweight task-cluster key
+        enabled        INTEGER NOT NULL DEFAULT 0 -- cohort tag at capture
+      );
+      CREATE INDEX IF NOT EXISTS idx_turn_metrics_ts      ON turn_metrics(ts);
+      CREATE INDEX IF NOT EXISTS idx_turn_metrics_intent  ON turn_metrics(intent_hash);
+      CREATE INDEX IF NOT EXISTS idx_turn_metrics_session ON turn_metrics(session_id, turn_idx);
+
+      -- Per-skill provenance + usage. Only origin='auto' rows are ever pruned/edited.
+      CREATE TABLE IF NOT EXISTS skill_stats (
+        name                TEXT PRIMARY KEY,
+        origin              TEXT NOT NULL,        -- 'auto' | 'user'
+        created_at          INTEGER,
+        created_from_session TEXT,
+        times_loaded        INTEGER NOT NULL DEFAULT 0,
+        last_used_at        INTEGER,
+        pinned              INTEGER NOT NULL DEFAULT 0
+      );
+
+      -- Reviewer cost ledger: one row per reviewer spawn (daily budget + net-token measure).
+      CREATE TABLE IF NOT EXISTS skill_review_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id     TEXT,
+        ts             INTEGER NOT NULL,
+        trigger_reason TEXT,
+        outcome        TEXT,                      -- none | create | edit | error
+        tokens_spent   INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_skill_review_runs_ts ON skill_review_runs(ts);
+
     `);
 
     // image_refs (#74) postdates existing DBs: CREATE TABLE IF NOT EXISTS won't
@@ -146,6 +224,223 @@ export class HistoryDB {
       // Non-fatal — history is best-effort
       console.error(`[HistoryDB:${this.agentId}] insertMessage failed:`, err);
     }
+  }
+
+  // ---- Skill-learning telemetry (planning-62) --------------------------------
+  // All best-effort: telemetry must never break a turn. Errors are logged, not thrown.
+
+  /** Insert one durable per-turn metric row. */
+  insertTurnMetric(row: TurnMetricRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO turn_metrics
+             (session_id, turn_idx, ts, tool_calls, duration_ms, tokens_in, tokens_out, recovery_fired, skills_loaded, intent_hash, enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          row.sessionId,
+          row.turnIdx,
+          row.ts,
+          row.toolCalls,
+          row.durationMs,
+          row.tokensIn,
+          row.tokensOut,
+          row.recoveryFired,
+          row.skillsLoaded,
+          row.intentHash,
+          row.enabled,
+        );
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] insertTurnMetric failed:`, err);
+    }
+  }
+
+  /** All turn_metrics rows for a session, ascending by turn. */
+  getTurnMetricsForSession(sessionId: string): TurnMetricRow[] {
+    try {
+      const rows = this.db
+        .prepare(`SELECT * FROM turn_metrics WHERE session_id = ? ORDER BY turn_idx ASC`)
+        .all(sessionId) as Array<Record<string, unknown>>;
+      return rows.map(mapTurnMetricRow);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] getTurnMetricsForSession failed:`, err);
+      return [];
+    }
+  }
+
+  /**
+   * Most-recent messages for a session as {role, content}, oldest-first, capped.
+   * Used to build the reviewer's transcript input (planning-62).
+   */
+  getSessionTranscript(sessionId: string, limit = 200): Array<{ role: string; content: string; ts: number }> {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT role, content, ts FROM messages
+           WHERE session_id = ? ORDER BY ts DESC LIMIT ?`,
+        )
+        .all(sessionId, limit) as Array<Record<string, unknown>>;
+      return rows
+        .map((r) => ({
+          role: String(r['role'] ?? ''),
+          content: String(r['content'] ?? ''),
+          ts: Number(r['ts'] ?? 0),
+        }))
+        .reverse();
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] getSessionTranscript failed:`, err);
+      return [];
+    }
+  }
+
+  /** All turn_metrics rows since a timestamp (default: all), ascending by ts. */
+  listTurnMetrics(sinceTs = 0): TurnMetricRow[] {
+    try {
+      const rows = this.db
+        .prepare(`SELECT * FROM turn_metrics WHERE ts >= ? ORDER BY ts ASC`)
+        .all(sinceTs) as Array<Record<string, unknown>>;
+      return rows.map(mapTurnMetricRow);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] listTurnMetrics failed:`, err);
+      return [];
+    }
+  }
+
+  /** Record (or re-stamp provenance of) a created skill. Counters are preserved on conflict. */
+  recordSkillCreated(row: Omit<SkillStatRow, 'timesLoaded' | 'lastUsedAt'> & { timesLoaded?: number }): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO skill_stats (name, origin, created_at, created_from_session, times_loaded, last_used_at, pinned)
+           VALUES (?, ?, ?, ?, ?, NULL, ?)
+           ON CONFLICT(name) DO UPDATE SET
+             origin = excluded.origin,
+             created_at = excluded.created_at,
+             created_from_session = excluded.created_from_session,
+             pinned = excluded.pinned`,
+        )
+        .run(row.name, row.origin, row.createdAt, row.createdFromSession, row.timesLoaded ?? 0, row.pinned);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] recordSkillCreated failed:`, err);
+    }
+  }
+
+  /**
+   * Increment a skill's load counter. Upserts so loads are counted even if the
+   * create was never recorded; a brand-new row defaults to origin 'user' (never
+   * mis-tags an auto skill — its create row already set origin='auto').
+   */
+  bumpSkillLoaded(name: string, ts: number): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO skill_stats (name, origin, times_loaded, last_used_at, pinned)
+           VALUES (?, 'user', 1, ?, 0)
+           ON CONFLICT(name) DO UPDATE SET
+             times_loaded = times_loaded + 1,
+             last_used_at = excluded.last_used_at`,
+        )
+        .run(name, ts);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] bumpSkillLoaded failed:`, err);
+    }
+  }
+
+  setSkillPinned(name: string, pinned: boolean): void {
+    try {
+      this.db.prepare(`UPDATE skill_stats SET pinned = ? WHERE name = ?`).run(pinned ? 1 : 0, name);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] setSkillPinned failed:`, err);
+    }
+  }
+
+  deleteSkillStat(name: string): void {
+    try {
+      this.db.prepare(`DELETE FROM skill_stats WHERE name = ?`).run(name);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] deleteSkillStat failed:`, err);
+    }
+  }
+
+  getSkillStat(name: string): SkillStatRow | null {
+    try {
+      const row = this.db.prepare(`SELECT * FROM skill_stats WHERE name = ?`).get(name) as
+        | Record<string, unknown>
+        | undefined;
+      return row ? mapSkillStatRow(row) : null;
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] getSkillStat failed:`, err);
+      return null;
+    }
+  }
+
+  listSkillStats(): SkillStatRow[] {
+    try {
+      const rows = this.db.prepare(`SELECT * FROM skill_stats`).all() as Array<Record<string, unknown>>;
+      return rows.map(mapSkillStatRow);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] listSkillStats failed:`, err);
+      return [];
+    }
+  }
+
+  /** Append a reviewer-run row to the cost ledger. */
+  insertReviewRun(row: ReviewRunRow): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO skill_review_runs (session_id, ts, trigger_reason, outcome, tokens_spent)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(row.sessionId, row.ts, row.triggerReason, row.outcome, row.tokensSpent);
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] insertReviewRun failed:`, err);
+    }
+  }
+
+  /** Count reviewer spawns at or after a timestamp (for the daily budget). */
+  countReviewRunsSince(ts: number): number {
+    try {
+      const row = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM skill_review_runs WHERE ts >= ?`)
+        .get(ts) as { n: number } | undefined;
+      return row?.n ?? 0;
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] countReviewRunsSince failed:`, err);
+      return 0;
+    }
+  }
+
+  listReviewRuns(sinceTs = 0): ReviewRunRow[] {
+    try {
+      const rows = this.db
+        .prepare(`SELECT * FROM skill_review_runs WHERE ts >= ? ORDER BY ts ASC`)
+        .all(sinceTs) as Array<Record<string, unknown>>;
+      return rows.map((r) => ({
+        sessionId: (r['session_id'] as string) ?? null,
+        ts: Number(r['ts'] ?? 0),
+        triggerReason: (r['trigger_reason'] as string) ?? null,
+        outcome: (r['outcome'] as string) ?? null,
+        tokensSpent: Number(r['tokens_spent'] ?? 0),
+      }));
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] listReviewRuns failed:`, err);
+      return [];
+    }
+  }
+
+  /** Retention prune for telemetry tables (runs even when learning is disabled). Returns rows removed. */
+  pruneTelemetry(cutoffTs: number): number {
+    let removed = 0;
+    try {
+      removed += (this.db.prepare(`DELETE FROM turn_metrics WHERE ts < ?`).run(cutoffTs).changes as number) ?? 0;
+      removed +=
+        (this.db.prepare(`DELETE FROM skill_review_runs WHERE ts < ?`).run(cutoffTs).changes as number) ?? 0;
+    } catch (err) {
+      console.error(`[HistoryDB:${this.agentId}] pruneTelemetry failed:`, err);
+    }
+    return removed;
   }
 
   listChats(): ChatSummary[] {
@@ -493,4 +788,34 @@ export class HistoryDB {
       ts: r['ts'] as number,
     };
   }
+}
+
+// ---- Skill-learning row mappers (module scope) --------------------------------
+
+function mapTurnMetricRow(r: Record<string, unknown>): TurnMetricRow {
+  return {
+    sessionId: r['session_id'] as string,
+    turnIdx: Number(r['turn_idx'] ?? 0),
+    ts: Number(r['ts'] ?? 0),
+    toolCalls: Number(r['tool_calls'] ?? 0),
+    durationMs: Number(r['duration_ms'] ?? 0),
+    tokensIn: Number(r['tokens_in'] ?? 0),
+    tokensOut: Number(r['tokens_out'] ?? 0),
+    recoveryFired: Number(r['recovery_fired'] ?? 0),
+    skillsLoaded: (r['skills_loaded'] as string | null) ?? null,
+    intentHash: (r['intent_hash'] as string | null) ?? null,
+    enabled: Number(r['enabled'] ?? 0),
+  };
+}
+
+function mapSkillStatRow(r: Record<string, unknown>): SkillStatRow {
+  return {
+    name: r['name'] as string,
+    origin: (r['origin'] as string) ?? 'user',
+    createdAt: r['created_at'] != null ? Number(r['created_at']) : null,
+    createdFromSession: (r['created_from_session'] as string | null) ?? null,
+    timesLoaded: Number(r['times_loaded'] ?? 0),
+    lastUsedAt: r['last_used_at'] != null ? Number(r['last_used_at']) : null,
+    pinned: Number(r['pinned'] ?? 0),
+  };
 }

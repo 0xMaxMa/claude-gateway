@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { loadSkills, renderSkillsSection, type SkillRegistry } from '../../src/skills/loader';
+import { loadSkills, renderSkillsSection, AUTO_SKILL_MENU_DESC_MAX, type SkillRegistry } from '../../src/skills/loader';
 import type { SkillDefinition } from '../../src/skills/parser';
 
 function makeTmpDir(): string {
@@ -237,6 +237,58 @@ describe('Skill Loader', () => {
       const section = renderSkillsSection(registry);
       expect(section).toContain('/visible');
       expect(section).not.toContain('/hidden');
+    });
+
+    describe('progressive disclosure — auto-learned skills (planning-62)', () => {
+      const autoFM = (desc: string) => `---\nname: x\ndescription: "${desc}"\norigin: auto\n---\n\nbody`;
+      const humanFM = (desc: string) => `---\nname: x\ndescription: "${desc}"\n---\n\nbody`;
+      const longDesc = 'A'.repeat(200);
+
+      function lineFor(section: string, key: string): string {
+        return section.split('\n').find((l) => l.startsWith(`/${key}:`)) ?? '';
+      }
+
+      it('truncates a long auto (origin:auto) workspace skill description to the cap', () => {
+        const registry: SkillRegistry = {
+          skills: new Map([
+            ['auto-skill', makeSkill({ name: 'auto-skill', description: longDesc, source: 'workspace', content: autoFM(longDesc) })],
+          ]),
+        };
+        const line = lineFor(renderSkillsSection(registry), 'auto-skill');
+        expect(line).toContain('…');
+        expect(line.length).toBeLessThan(longDesc.length);
+        const body = line.slice('/auto-skill: '.length).replace(/…$/, '');
+        expect(body.length).toBeLessThanOrEqual(AUTO_SKILL_MENU_DESC_MAX);
+      });
+
+      it('does NOT truncate a human workspace skill even with a long description', () => {
+        const registry: SkillRegistry = {
+          skills: new Map([
+            ['human-skill', makeSkill({ name: 'human-skill', description: longDesc, source: 'workspace', content: humanFM(longDesc) })],
+          ]),
+        };
+        expect(renderSkillsSection(registry)).toContain(`/human-skill: ${longDesc}`);
+      });
+
+      it('leaves a short auto description unchanged (no ellipsis)', () => {
+        const registry: SkillRegistry = {
+          skills: new Map([
+            ['auto-skill', makeSkill({ name: 'auto-skill', description: 'quick runbook', source: 'workspace', content: autoFM('quick runbook') })],
+          ]),
+        };
+        const section = renderSkillsSection(registry);
+        expect(section).toContain('/auto-skill: quick runbook');
+        expect(section).not.toContain('…');
+      });
+
+      it('never truncates module/shared skills (auto provenance is workspace-only)', () => {
+        const registry: SkillRegistry = {
+          skills: new Map([
+            ['mod:auto', makeSkill({ name: 'auto', description: longDesc, source: 'module', modulePrefix: 'mod', content: autoFM(longDesc) })],
+          ]),
+        };
+        expect(renderSkillsSection(registry)).toContain(`/mod:auto: ${longDesc}`);
+      });
     });
   });
 });

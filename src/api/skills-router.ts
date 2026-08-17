@@ -443,11 +443,48 @@ export function createSkillsRouter(
 
     try {
       fs.rmSync(skillDir, { recursive: true, force: true });
+      // Reconcile the skill-learning provenance row so a deleted workspace skill
+      // does not leave an orphan `skill_stats` entry (which would inflate the
+      // autoSkills rollup and let a later re-created skill inherit a stale auto
+      // origin). No-op if there was no row. Shared skills have no per-agent row.
+      if (scope === 'workspace') {
+        agents?.get(agentId)?.getHistoryDb()?.deleteSkillStat(name);
+      }
       if (agents) reloadRunnerRegistry(agentId, config, agents);
       res.json({ message: `Skill "${name}" deleted from ${scope}` });
     } catch (err: unknown) {
       res.status(500).json({ error: (err as Error).message });
     }
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/skill-metrics
+   * Skill self-improvement effectiveness rollup (planning-62): adoption funnel,
+   * per-cluster cost-to-complete deltas, recovery-rate trend, enabled/disabled
+   * cohort, and the net-token ledger. Read-only; any key with agent access.
+   */
+  router.get('/v1/agents/:agentId/skill-metrics', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+
+    const config = agentConfigs.get(agentId);
+    if (!config) {
+      res.status(404).json({ error: `Agent '${agentId}' not found` });
+      return;
+    }
+
+    const manager = agents?.get(agentId)?.getSkillLearning();
+    if (!manager) {
+      res.status(404).json({ error: `Skill-learning not active for agent '${agentId}'` });
+      return;
+    }
+
+    res.json(manager.rollup());
   });
 
   return router;
