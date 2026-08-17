@@ -10,6 +10,7 @@
 export { ArchiveDB } from './archive-db';
 export type { ChunkWithMeta } from './archive-db';
 export { indexAgentArchive, archiveDbPath } from './indexer';
+export { spawnArchiveReindex } from './reindex-spawn';
 export { chunkMarkdown } from './chunk';
 export type { Chunk } from './chunk';
 export { classifyOrigin } from './provenance';
