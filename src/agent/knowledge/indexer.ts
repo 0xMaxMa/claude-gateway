@@ -18,8 +18,20 @@ import * as crypto from 'crypto';
 import { ArchiveDB, ChunkWithMeta } from './archive-db';
 import { chunkMarkdown } from './chunk';
 import { classifyOrigin } from './provenance';
-import { resolveArchiveConfig } from './config';
-import type { IndexResult, KnowledgeArchiveConfig, ResolvedKnowledgeArchiveCfg } from './types';
+import {
+  resolveArchiveConfig,
+  resolveSharedConfig,
+  sharedDbPath,
+  sharedNotesDir,
+  ARCHIVE_DEFAULTS,
+} from './config';
+import type {
+  IndexResult,
+  KnowledgeArchiveConfig,
+  ResolvedKnowledgeArchiveCfg,
+  KnowledgeSharedConfig,
+  OriginClass,
+} from './types';
 
 /** Evergreen core files (indexed even though they live at the workspace root). */
 const EVERGREEN_FILES = ['MEMORY.md', 'USER.md'];
@@ -91,12 +103,44 @@ export function indexAgentArchive(
   if (!cfg.enabled) return empty;
 
   const db = ArchiveDB.forPath(archiveDbPath(workspaceDir), cfg.tokenizer);
-  const result: IndexResult = { ...empty };
+  return reindexInto(db, {
+    baseDir: workspaceDir,
+    files: collectSourceFiles(workspaceDir),
+    chunkTokens: cfg.chunkTokens,
+    chunkOverlap: cfg.chunkOverlap,
+    originFn: classifyOrigin,
+    source: 'memory',
+    projectKey: null,
+  });
+}
 
-  const files = collectSourceFiles(workspaceDir);
+interface ReindexOpts {
+  baseDir: string; // base for workspace-relative paths + the prune existence check
+  files: string[]; // absolute file paths to index
+  chunkTokens: number;
+  chunkOverlap: number;
+  originFn: (rel: string) => OriginClass; // provenance for a file
+  source: string; // corpus tag: 'memory' | 'shared'
+  projectKey: string | null; // recall project scoping
+}
+
+/**
+ * Shared indexing core (used by both the per-agent and shared archives):
+ * hash-guarded chunk+provenance write of each file, then prune only files that
+ * genuinely disappeared. Deterministic (mtime-based) so unchanged input is a
+ * true no-op.
+ */
+function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
+  const result: IndexResult = {
+    filesSeen: 0,
+    filesIndexed: 0,
+    filesSkipped: 0,
+    filesRemoved: 0,
+    chunksWritten: 0,
+  };
   const seenRel = new Set<string>();
 
-  for (const abs of files) {
+  for (const abs of opts.files) {
     let content: string;
     let stat: fs.Stats;
     try {
@@ -105,7 +149,7 @@ export function indexAgentArchive(
     } catch {
       continue; // race: file vanished mid-walk — treat as not present
     }
-    const rel = relPosix(workspaceDir, abs);
+    const rel = relPosix(opts.baseDir, abs);
     seenRel.add(rel);
     result.filesSeen++;
 
@@ -117,8 +161,8 @@ export function indexAgentArchive(
     }
 
     const mtime = Math.floor(stat.mtimeMs);
-    const origin = classifyOrigin(rel);
-    const chunks = chunkMarkdown(content, cfg.chunkTokens, cfg.chunkOverlap);
+    const origin = opts.originFn(rel);
+    const chunks = chunkMarkdown(content, opts.chunkTokens, opts.chunkOverlap);
     const rows: ChunkWithMeta[] = chunks.map((c) => ({
       chunk: {
         id: `${rel}#${c.startLine}-${c.endLine}`,
@@ -128,19 +172,16 @@ export function indexAgentArchive(
         text: c.text,
         updatedAt: mtime,
       },
-      recall: { importance: null, triggers: null, projectKey: null },
+      recall: { importance: null, triggers: null, projectKey: opts.projectKey },
       provenance: {
         originClass: origin,
-        sessionKind: 'unknown', // file-indexed content carries no session context in K0
+        sessionKind: 'unknown', // file-indexed content carries no session context
         observedAt: mtime,
         supersedesKey: null,
       },
     }));
 
-    db.replaceSource(
-      { path: rel, hash, mtime, size: stat.size, source: 'memory' },
-      rows,
-    );
+    db.replaceSource({ path: rel, hash, mtime, size: stat.size, source: opts.source }, rows);
     result.filesIndexed++;
     result.chunksWritten += rows.length;
   }
@@ -151,10 +192,44 @@ export function indexAgentArchive(
   // its index between runs. Confirm real absence on disk before deleting.
   for (const rel of db.listSourcePaths()) {
     if (seenRel.has(rel)) continue;
-    if (fs.existsSync(path.join(workspaceDir, rel))) continue; // present but unreadable this run — keep
+    if (fs.existsSync(path.join(opts.baseDir, rel))) continue; // present but unreadable this run — keep
     db.deleteSource(rel);
     result.filesRemoved++;
   }
 
   return result;
+}
+
+/**
+ * Index the SHARED, cross-agent vault (planning-64 K3): every `*.md` under the
+ * project's `notes/` dir is chunked into the shared `kb.sqlite`. Shared notes are
+ * authored by the owner's own agents (same trust domain) → provenance `agent`.
+ * No-op when shared KB is disabled. Runs OFF the gateway event loop, same as the
+ * per-agent indexer.
+ */
+export function indexSharedArchive(
+  agentCfg?: KnowledgeSharedConfig,
+  globalCfg?: KnowledgeSharedConfig,
+): IndexResult {
+  const empty: IndexResult = {
+    filesSeen: 0,
+    filesIndexed: 0,
+    filesSkipped: 0,
+    filesRemoved: 0,
+    chunksWritten: 0,
+  };
+  const cfg = resolveSharedConfig(agentCfg, globalCfg);
+  if (!cfg.enabled) return empty;
+
+  const notesDir = sharedNotesDir(cfg);
+  const db = ArchiveDB.forPath(sharedDbPath(cfg), ARCHIVE_DEFAULTS.tokenizer);
+  return reindexInto(db, {
+    baseDir: notesDir,
+    files: walkMarkdown(notesDir),
+    chunkTokens: ARCHIVE_DEFAULTS.chunkTokens,
+    chunkOverlap: ARCHIVE_DEFAULTS.chunkOverlap,
+    originFn: () => 'agent',
+    source: 'shared',
+    projectKey: cfg.project,
+  });
 }

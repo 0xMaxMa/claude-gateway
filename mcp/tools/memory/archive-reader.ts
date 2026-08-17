@@ -28,6 +28,22 @@ export function archiveDbPath(workspaceDir: string): string {
   return path.join(path.dirname(workspaceDir), 'kb.sqlite');
 }
 
+/**
+ * Shared, cross-agent vault DB path from the gateway-provided env
+ * (`GATEWAY_SHARED_KB_DIR` = the resolved <root>/<project> dir), or null when
+ * shared KB is disabled / not configured (planning-64 K3).
+ */
+export function sharedDbPathFromEnv(): string | null {
+  const dir = process.env.GATEWAY_SHARED_KB_DIR;
+  if (!dir || !dir.trim()) return null;
+  return path.join(dir, 'kb.sqlite');
+}
+
+/** Merge hit lists (per-agent + shared) and keep the best `limit` by bm25 (asc). */
+export function mergeHits<T extends SearchHit>(a: T[], b: T[], limit: number): T[] {
+  return [...a, ...b].sort((x, y) => x.score - y.score).slice(0, limit);
+}
+
 /** Build an FTS5 MATCH string: quote each token so punctuation can't inject syntax. */
 function toFtsMatch(query: string): string {
   return query

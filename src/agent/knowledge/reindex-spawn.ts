@@ -10,8 +10,13 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { resolveArchiveConfig } from './config';
-import type { KnowledgeArchiveConfig } from './types';
+import { resolveArchiveConfig, resolveSharedConfig } from './config';
+
+/** The `gateway.knowledge` block shape this trigger reads (archive + shared). */
+interface KnowledgeBlock {
+  archive?: Parameters<typeof resolveArchiveConfig>[0];
+  shared?: Parameters<typeof resolveSharedConfig>[0];
+}
 
 /**
  * Per-workspace debounce so a burst of session spawns (interactive + subagent +
@@ -36,22 +41,25 @@ export function shouldReindexNow(workspaceDir: string, now: number): boolean {
 
 export function spawnArchiveReindex(
   workspaceDir: string,
-  agentCfg?: KnowledgeArchiveConfig,
-  globalCfg?: KnowledgeArchiveConfig,
+  agentKnowledge?: KnowledgeBlock,
+  globalKnowledge?: KnowledgeBlock,
 ): void {
   try {
-    const cfg = resolveArchiveConfig(agentCfg, globalCfg);
-    if (!cfg.enabled) return;
+    const archiveCfg = resolveArchiveConfig(agentKnowledge?.archive, globalKnowledge?.archive);
+    const sharedCfg = resolveSharedConfig(agentKnowledge?.shared, globalKnowledge?.shared);
+    // Spawn if EITHER lane is enabled; the CLI indexes whichever is on.
+    if (!archiveCfg.enabled && !sharedCfg.enabled) return;
     if (!shouldReindexNow(workspaceDir, Date.now())) return;
     // The compiled CLI sits next to this file under dist/agent/knowledge/. Skip
     // silently when it isn't present (e.g. ts-jest/dev runs against source) so we
     // never attempt a doomed spawn.
     const cliPath = path.join(__dirname, 'reindex-cli.js');
     if (!fs.existsSync(cliPath)) return;
-    const child = spawn(process.execPath, [cliPath, workspaceDir, JSON.stringify(cfg)], {
-      detached: true,
-      stdio: 'ignore',
-    });
+    const child = spawn(
+      process.execPath,
+      [cliPath, workspaceDir, JSON.stringify(archiveCfg), JSON.stringify(sharedCfg)],
+      { detached: true, stdio: 'ignore' },
+    );
     // A spawn failure (e.g. missing CLI in an odd build) must never affect the session.
     child.on('error', () => {
       /* swallowed */

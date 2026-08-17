@@ -422,8 +422,12 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 | `archive.tokenizer` | `"unicode61"` | FTS5 tokenizer (`"trigram"` for CJK/Thai) |
 | `archive.chunkTokens` | `400` | Target chunk size in ~tokens |
 | `archive.chunkOverlap` | `80` | Overlap between chunks (clamped below `chunkTokens`) |
+| `shared.enabled` | `true` | Enable the cross-agent shared KB |
+| `shared.project` | `"global"` | Sharing partition key (one safe path segment) — agents with the same value share one vault; `"global"` ⇒ shared-by-default |
+| `shared.root` | `~/.claude-gateway/shared/kb` | Shared vault root dir (`<root>/<project>/`) |
+| `shared.mode` | `"propose"` | Per-agent→shared promotion mode (a later phase); `propose` = dry-run |
 
-Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
+**Shared KB.** A shared SQLite/FTS5 vault outside any single agent's workspace lets agents build a common knowledge base. Notes under `<root>/<project>/notes/*.md` are indexed and reachable via `memory_search` with `corpus:"shared"` (the shared vault) or `corpus:"all"` (this agent's memory + shared, merged by relevance). Concurrent writers are safe without a lock — atomic note writes (temp+rename) plus a cross-process `PRAGMA busy_timeout` on the index. Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
 
 ### `gateway.bind`
 

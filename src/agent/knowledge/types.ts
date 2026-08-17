@@ -30,6 +30,22 @@ export interface ResolvedKnowledgeArchiveCfg {
   chunkOverlap: number;
 }
 
+/** Raw config shape under `gateway.knowledge.shared` (planning-64 K3). */
+export interface KnowledgeSharedConfig {
+  enabled?: boolean;
+  project?: string;
+  root?: string;
+  mode?: 'propose' | 'auto';
+}
+
+/** Resolved, sanitized shared-KB config (all fields present). */
+export interface ResolvedKnowledgeSharedCfg {
+  enabled: boolean;
+  project: string;
+  root: string;
+  mode: 'propose' | 'auto';
+}
+
 /** One indexed source file. */
 export interface ArchiveSourceRow {
   id: number;

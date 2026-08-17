@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { searchArchive, getExcerpt, isMemoryScopedPath, archiveDbPath } from './archive-reader';
+import { searchArchive, getExcerpt, isMemoryScopedPath, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
 
 // Build a temp agent dir with a kb.sqlite carrying the given chunks.
 function mkAgentWithArchive(
@@ -121,6 +121,29 @@ test('getExcerpt: bounded line range; out-of-scope/missing → null', () => {
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
+});
+
+test('sharedDbPathFromEnv: null when unset, <dir>/kb.sqlite when set (K3 corpus:shared)', () => {
+  const prev = process.env.GATEWAY_SHARED_KB_DIR;
+  try {
+    delete process.env.GATEWAY_SHARED_KB_DIR;
+    expect(sharedDbPathFromEnv()).toBeNull();
+    process.env.GATEWAY_SHARED_KB_DIR = '   ';
+    expect(sharedDbPathFromEnv()).toBeNull(); // blank → disabled
+    process.env.GATEWAY_SHARED_KB_DIR = '/tmp/shared/kb/global';
+    expect(sharedDbPathFromEnv()).toBe('/tmp/shared/kb/global/kb.sqlite');
+  } finally {
+    if (prev === undefined) delete process.env.GATEWAY_SHARED_KB_DIR;
+    else process.env.GATEWAY_SHARED_KB_DIR = prev;
+  }
+});
+
+test('mergeHits: merges two hit lists and keeps the best `limit` by bm25 (asc)', () => {
+  const mk = (path: string, score: number) => ({
+    path, startLine: 1, endLine: 1, score, snippet: path, originClass: 'agent', importance: null,
+  });
+  const merged = mergeHits([mk('a', -0.9), mk('b', -0.1)], [mk('c', -0.5), mk('d', -0.05)], 3);
+  expect(merged.map((h) => h.path)).toEqual(['a', 'c', 'b']); // lowest bm25 first, capped at 3
 });
 
 test('getExcerpt: a symlink inside memory/ escaping the workspace is refused', () => {

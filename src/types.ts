@@ -307,6 +307,19 @@ export interface GatewayConfig {
         chunkTokens?: number;  // target chunk size in ~tokens, default 400
         chunkOverlap?: number; // overlap between chunks in ~tokens, default 80
       };
+      /**
+       * Shared, cross-agent knowledge base (planning-64 K3). A shared SQLite/FTS5
+       * vault OUTSIDE any single agent's workspace so agents can build a common KB.
+       * The gateway has no built-in project concept, so sharing is keyed by an
+       * explicit `project` value: agents with the same `project` share one vault.
+       * `project` defaults to "global" ⇒ shared-by-default across all agents.
+       */
+      shared?: {
+        enabled?: boolean;  // default true
+        project?: string;   // sharing partition key, default "global"
+        root?: string;      // vault root dir, default ~/.claude-gateway/shared/kb
+        mode?: 'propose' | 'auto'; // per-agent→shared promotion mode (K4), default "propose"
+      };
     };
   };
   agents: AgentConfig[];

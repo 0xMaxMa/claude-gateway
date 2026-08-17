@@ -9,12 +9,22 @@
 
 export { ArchiveDB } from './archive-db';
 export type { ChunkWithMeta } from './archive-db';
-export { indexAgentArchive, archiveDbPath } from './indexer';
+export { indexAgentArchive, indexSharedArchive, archiveDbPath } from './indexer';
 export { spawnArchiveReindex } from './reindex-spawn';
+export {
+  resolveArchiveConfig,
+  ARCHIVE_DEFAULTS,
+  resolveSharedConfig,
+  SHARED_DEFAULTS,
+  sharedVaultDir,
+  sharedDbPath,
+  sharedNotesDir,
+} from './config';
+export type { KnowledgeSharedConfig, ResolvedKnowledgeSharedCfg } from './types';
+export { writeSharedNote, sharedNoteFilename } from './shared-writer';
 export { chunkMarkdown } from './chunk';
 export type { Chunk } from './chunk';
 export { classifyOrigin } from './provenance';
-export { resolveArchiveConfig, ARCHIVE_DEFAULTS } from './config';
 export type {
   KnowledgeArchiveConfig,
   ResolvedKnowledgeArchiveCfg,

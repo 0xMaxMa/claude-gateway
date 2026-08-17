@@ -1367,8 +1367,8 @@ export class AgentRunner extends EventEmitter {
     // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
     spawnArchiveReindex(
       this.agentConfig.workspace,
-      this.agentConfig.knowledge?.archive,
-      this.gatewayConfig.gateway.knowledge?.archive,
+      this.agentConfig.knowledge,
+      this.gatewayConfig.gateway.knowledge,
     );
 
     // Per-agent → global → MAX_HISTORY_MESSAGES: the configured cap on how many
