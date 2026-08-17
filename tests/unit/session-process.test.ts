@@ -1178,6 +1178,84 @@ describe('SessionProcess', () => {
     expect(assistant[0].content).toBe('plain answer');
   });
 
+  it('U-SP-20e: a same-text reply retried with a fresh tool_use id in one turn is stored once', async () => {
+    const sp = new SessionProcess('chat:retry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // First reply attempt (delivery is assumed to have failed downstream)…
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_try1', name: 'mcp__gateway__telegram_reply', input: { text: 'retry me' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    // …retried with the SAME text but a FRESH tool_use id, same turn (no result yet).
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_try2', name: 'mcp__gateway__telegram_reply', input: { text: 'retry me' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:retry', 'chat:retry');
+    expect(messages.filter(m => m.role === 'assistant' && m.content === 'retry me').length).toBe(1);
+  });
+
+  it('U-SP-20f: the same-text guard is per-turn — a genuine resend in a later turn is stored again', async () => {
+    const sp = new SessionProcess('chat:resend', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Turn 1: reply 'ping', then result (which must reset the per-turn dedup).
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_p1', name: 'mcp__gateway__telegram_reply', input: { text: 'ping' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+    // Turn 2: the model deliberately sends 'ping' again (fresh id) — a real message.
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_p2', name: 'mcp__gateway__telegram_reply', input: { text: 'ping' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:resend', 'chat:resend');
+    expect(messages.filter(m => m.role === 'assistant' && m.content === 'ping').length).toBe(2);
+  });
+
+  it('U-SP-20g: persistedReplyToolIds is reset each turn (a recurring id in a later turn is not swallowed)', async () => {
+    const sp = new SessionProcess('chat:idreset', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    // Turn 1: reply with id 'toolu_reused'.
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_reused', name: 'mcp__gateway__telegram_reply', input: { text: 'first' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+    // Turn 2: a DIFFERENT reply that (pathologically) reuses the same tool_use id.
+    // If the id set were not reset at the turn boundary, this second reply would be
+    // wrongly deduped and lost.
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_reused', name: 'mcp__gateway__telegram_reply', input: { text: 'second' } }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+
+    await new Promise(r => setTimeout(r, 200));
+
+    const messages = await sessionStore.loadTelegramSession('alfred', 'chat:idreset', 'chat:idreset');
+    const contents = messages.filter(m => m.role === 'assistant').map(m => m.content);
+    expect(contents).toContain('first');
+    expect(contents).toContain('second');
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-19: Partial messages don't spam status file with "thinking"
   // --------------------------------------------------------------------------
