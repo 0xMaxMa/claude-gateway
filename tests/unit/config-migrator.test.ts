@@ -103,6 +103,29 @@ describe('config-migrator', () => {
       expect((gw.skillLearning as Record<string, unknown>).enabled).toBe(false);
       expect(gw.logDir).toBe('/logs');
     });
+
+    it('adds gateway.dreaming (issue #325) to a predating config without clobbering overrides', () => {
+      const target: Record<string, unknown> = {
+        gateway: { logDir: '/logs', dreaming: { mode: 'auto' } }, // user opted into auto
+      };
+      const template: Record<string, unknown> = {
+        gateway: {
+          logDir: '/default',
+          dreaming: { enabled: true, mode: 'propose', dreamHour: 3, quietMinutes: 30 },
+        },
+      };
+      const added: string[] = [];
+
+      deepMerge(target, template, '', added);
+
+      const gw = target.gateway as Record<string, unknown>;
+      const dreaming = gw.dreaming as Record<string, unknown>;
+      // user's mode override preserved; missing sub-keys filled from template
+      expect(dreaming.mode).toBe('auto');
+      expect(dreaming.enabled).toBe(true);
+      expect(dreaming.dreamHour).toBe(3);
+      expect(added.some((f) => f.startsWith('gateway.dreaming'))).toBe(true);
+    });
   });
 
   // ---------------------------------------------------------------------------
