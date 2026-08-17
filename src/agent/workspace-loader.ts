@@ -101,16 +101,61 @@ export function resolveMemoryBudget(cfg?: Partial<MemoryBudgetConfig>): MemoryBu
 }
 
 /**
+ * Build a compact, injectable INDEX of an over-budget MEMORY.md (planning-64 K2
+ * core-shrink): the section headings, each top-level (`##`) section with a short
+ * brief, plus a pointer telling the agent the full content lives on disk and is
+ * reachable via the `memory_search` / `memory_get` tools. Derived deterministically
+ * from the file structure — NO LLM and NO mutation of the on-disk file. Returns
+ * `null` when the file has no headings to index (caller then keeps full content).
+ */
+export function buildMemoryIndex(content: string, maxChars = 4000): string | null {
+  const lines = content.split('\n');
+  const headings: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(#{1,6})\s+(.+?)\s*$/.exec(lines[i]);
+    if (!m) continue;
+    headings.push(m[0].trim());
+    // A one-line brief for top-level (##) sections: first non-empty, non-heading line.
+    if (m[1].length <= 2) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const nx = lines[j].trim();
+        if (!nx) continue;
+        if (/^#{1,6}\s/.test(nx)) break;
+        const brief = nx.replace(/^[-*]\s+/, '').slice(0, 100);
+        headings.push(`    ${brief}${nx.length > 100 ? '…' : ''}`);
+        break;
+      }
+    }
+  }
+  if (headings.length === 0) return null; // nothing to index → keep full content
+
+  let index = headings.join('\n');
+  if (index.length > maxChars) index = `${index.slice(0, maxChars)}\n…`;
+  const pointer =
+    `📇 This is an INDEX of your long-term memory — the full content is over budget so it lives ` +
+    `on disk (and in your searchable archive), NOT in this prompt. To recall a detail, use the ` +
+    `memory_search tool (keyword → snippets with file+line) or memory_get (read a section). ` +
+    `Section map:\n\n`;
+  return pointer + index;
+}
+
+/**
  * Prepend a loud over-budget banner to a memory file's composed content when it
  * exceeds its soft budget. Returns the content unchanged when under budget (or
  * when the budget is 0 / disabled). The hard FILE_CHAR_LIMIT truncation is
  * applied separately afterwards as a context safety net.
+ *
+ * `shrink` (K2, MEMORY.md only): when the file is over budget and this returns a
+ * non-null replacement (the compact index), the banner is prepended to THAT
+ * instead of the full content — so the bulk never enters the prompt. The on-disk
+ * file is untouched; the full content stays searchable via the archive tools.
  */
 function applyMemoryBudget(
   content: string,
   budgetChars: number,
   label: string,
   mode: OverBudgetMode,
+  shrink?: (content: string) => string | null,
 ): { content: string; overBudget: boolean } {
   if (budgetChars <= 0 || content.length <= budgetChars) {
     return { content, overBudget: false };
@@ -121,7 +166,8 @@ function applyMemoryBudget(
     `${icon} ${label} OVER BUDGET: ${content.length}/${budgetChars} chars — ${action}: ` +
     `keep the highest-value facts, remove stale or duplicate entries. ` +
     `Edits apply on the next session spawn (frozen-at-spawn), no restart.\n\n`;
-  return { content: banner + content, overBudget: true };
+  const shrunk = shrink ? shrink(content) : null;
+  return { content: banner + (shrunk ?? content), overBudget: true };
 }
 
 /**
@@ -165,6 +211,14 @@ export interface LoadWorkspaceOptions {
    * that don't pass it are unaffected.
    */
   memoryBudget?: Partial<MemoryBudgetConfig>;
+  /**
+   * K2 core-shrink (planning-64): when true (the default), an over-budget
+   * MEMORY.md is injected as a compact auto-generated index + a pointer to the
+   * memory_search tool, instead of the banner + truncated full text. Set false
+   * to keep the legacy banner+full behavior (e.g. during rollout, or when the
+   * knowledge archive is disabled so there is nothing to search).
+   */
+  coreShrink?: boolean;
 }
 
 /**
@@ -200,7 +254,17 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // always leaves it intact. (An extreme TOTAL_CHAR_LIMIT overflow could still
   // slice it, but that path already truncates the whole prompt.)
   const budget = resolveMemoryBudget(opts?.memoryBudget);
-  const memoryBudgeted = applyMemoryBudget(rawMemory, budget.memoryBudgetChars, 'MEMORY.md', budget.overBudget);
+  // K2 core-shrink (default on): when MEMORY.md is over budget, inject a compact
+  // auto-generated index + a pointer to memory_search instead of the truncated
+  // full text. USER.md is small by design and is never index-shrunk.
+  const coreShrink = opts?.coreShrink !== false;
+  const memoryBudgeted = applyMemoryBudget(
+    rawMemory,
+    budget.memoryBudgetChars,
+    'MEMORY.md',
+    budget.overBudget,
+    coreShrink ? (c) => buildMemoryIndex(c) : undefined,
+  );
   const userBudgeted = applyMemoryBudget(rawUser, budget.userBudgetChars, 'USER.md', budget.overBudget);
 
   const agentMd = truncateResult(rawAgent);

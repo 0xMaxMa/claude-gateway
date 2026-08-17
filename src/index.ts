@@ -25,6 +25,7 @@ import * as os from 'os';
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
+import { resolveArchiveConfig } from './agent/knowledge';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -187,6 +188,12 @@ async function startAgent(
   // (mirrors the skillLearning override). loadWorkspace defaults any unset
   // field, so a fully-absent config is safe.
   const memoryBudget = { ...gatewayConfig.gateway.memory, ...agentConfig.memory };
+  // K2 core-shrink is enabled only when the searchable archive is on — otherwise
+  // the injected index would point at a memory_search tool with nothing behind it.
+  const coreShrink = resolveArchiveConfig(
+    agentConfig.knowledge?.archive,
+    gatewayConfig.gateway.knowledge?.archive,
+  ).enabled;
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -239,6 +246,7 @@ async function startAgent(
   let workspace;
   try {
     workspace = await loadWorkspace(agentConfig.workspace, {
+      coreShrink,
       mcpToolsDir,
       sharedSkillsDir,
       logger,
@@ -349,6 +357,7 @@ async function startAgent(
         sharedSkillsDir,
         logger,
         memoryBudget,
+        coreShrink,
       });
       // Always rewrite CLAUDE.md so the next spawn picks up the new content.
       await fs.promises.writeFile(
@@ -405,6 +414,7 @@ async function startAgent(
           sharedSkillsDir,
           logger,
           memoryBudget,
+          coreShrink,
         });
         if (updated.skillRegistry) {
           runner.setSkillRegistry(updated.skillRegistry);
@@ -635,6 +645,10 @@ async function main(): Promise<void> {
           sharedSkillsDir: ctx.sharedSkillsDir,
           logger,
           memoryBudget: { ...config.gateway.memory, ...agentConfig.memory },
+          coreShrink: resolveArchiveConfig(
+            agentConfig.knowledge?.archive,
+            config.gateway.knowledge?.archive,
+          ).enabled,
         });
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
         await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
