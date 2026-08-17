@@ -94,6 +94,14 @@ function parseEnvelope(stdout: string): { resultText: string; tokens: number } {
 
 const VALID_OPS = new Set(['add', 'replace', 'remove']);
 const VALID_FILES = new Set(['MEMORY.md', 'USER.md']);
+// Per-field char cap on model-proposed strings. The transcript is untrusted, so
+// an injected prompt could try to coax an unbounded field into the audit files;
+// cap every free-text field defensively (the reviewer proposes small deltas).
+const FIELD_CAP = 4_000;
+
+function capStr(s: string, n: number = FIELD_CAP): string {
+  return s.length > n ? s.slice(0, n) : s;
+}
 
 /** Validate one raw proposal; return null if it is malformed or unusable. */
 function coerceProposal(raw: unknown): DreamProposal | null {
@@ -111,13 +119,14 @@ function coerceProposal(raw: unknown): DreamProposal | null {
   const scoreRaw = o['score'];
   const score = typeof scoreRaw === 'number' && scoreRaw >= 0 && scoreRaw <= 1 ? scoreRaw : 0;
   const recallRaw = o['recallCount'];
-  const recallCount = typeof recallRaw === 'number' && recallRaw >= 0 ? Math.floor(recallRaw) : 0;
+  const recallCount =
+    typeof recallRaw === 'number' && Number.isFinite(recallRaw) && recallRaw >= 0 ? Math.floor(recallRaw) : 0;
   return {
     op: op as DreamProposal['op'],
     file: file as DreamProposal['file'],
-    target,
-    content,
-    reason: typeof o['reason'] === 'string' ? o['reason'] : '',
+    target: target === undefined ? undefined : capStr(target),
+    content: content === undefined ? undefined : capStr(content),
+    reason: typeof o['reason'] === 'string' ? capStr(o['reason']) : '',
     score,
     recallCount,
   };
@@ -129,7 +138,7 @@ export function coerceReview(raw: unknown, tokensSpent: number): DreamReviewResu
     return { summary: '', proposals: [], tokensSpent };
   }
   const o = raw as Record<string, unknown>;
-  const summary = typeof o['summary'] === 'string' ? o['summary'] : '';
+  const summary = typeof o['summary'] === 'string' ? capStr(o['summary']) : '';
   const rawProposals = Array.isArray(o['proposals']) ? o['proposals'] : [];
   const proposals = rawProposals
     .map((p) => coerceProposal(p))

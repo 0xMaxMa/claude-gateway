@@ -30,6 +30,19 @@ function pick<T>(agent: T | undefined, global: T | undefined, fallback: T): T {
   return fallback;
 }
 
+/**
+ * Sanitize a resolved numeric config value: fall back to the default on
+ * anything non-finite (string/null/NaN/Infinity from untyped JSON config) or
+ * out of [min, max]. Critical for `dreamHour`, which feeds the scheduler delay —
+ * a NaN there would make `setTimeout` fire immediately and the async reviewer
+ * fan out in a tight reschedule loop.
+ */
+function numOr(value: number, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  if (value < min || value > max) return fallback;
+  return value;
+}
+
 export function resolveDreamingConfig(
   agentCfg?: DreamingConfig,
   globalCfg?: DreamingConfig,
@@ -40,13 +53,14 @@ export function resolveDreamingConfig(
   return {
     enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
     mode: mode === 'auto' ? 'auto' : 'propose', // anything but 'auto' is 'propose'
-    dreamHour: pick(agentCfg?.dreamHour, globalCfg?.dreamHour, d.dreamHour),
+    // dreamHour feeds the scheduler delay — must be a finite hour 0..23.
+    dreamHour: numOr(pick(agentCfg?.dreamHour, globalCfg?.dreamHour, d.dreamHour), d.dreamHour, 0, 23),
     dreamTimezone: isValidTimezone(rawTz) ? rawTz : 'UTC',
-    quietMinutes: pick(agentCfg?.quietMinutes, globalCfg?.quietMinutes, d.quietMinutes),
-    lookbackDays: pick(agentCfg?.lookbackDays, globalCfg?.lookbackDays, d.lookbackDays),
-    maxChangesPerRun: pick(agentCfg?.maxChangesPerRun, globalCfg?.maxChangesPerRun, d.maxChangesPerRun),
+    quietMinutes: numOr(pick(agentCfg?.quietMinutes, globalCfg?.quietMinutes, d.quietMinutes), d.quietMinutes, 0, Infinity),
+    lookbackDays: numOr(pick(agentCfg?.lookbackDays, globalCfg?.lookbackDays, d.lookbackDays), d.lookbackDays, 0, Infinity),
+    maxChangesPerRun: numOr(pick(agentCfg?.maxChangesPerRun, globalCfg?.maxChangesPerRun, d.maxChangesPerRun), d.maxChangesPerRun, 0, Infinity),
     reviewModel: pick(agentCfg?.reviewModel, globalCfg?.reviewModel, d.reviewModel),
-    promotionThreshold: pick(agentCfg?.promotionThreshold, globalCfg?.promotionThreshold, d.promotionThreshold),
-    minRecallCount: pick(agentCfg?.minRecallCount, globalCfg?.minRecallCount, d.minRecallCount),
+    promotionThreshold: numOr(pick(agentCfg?.promotionThreshold, globalCfg?.promotionThreshold, d.promotionThreshold), d.promotionThreshold, 0, 1),
+    minRecallCount: numOr(pick(agentCfg?.minRecallCount, globalCfg?.minRecallCount, d.minRecallCount), d.minRecallCount, 0, Infinity),
   };
 }

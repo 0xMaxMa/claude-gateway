@@ -63,6 +63,21 @@ describe('dreaming/config: resolveDreamingConfig', () => {
     expect(resolveDreamingConfig({ mode: 'nonsense' as 'propose' }).mode).toBe('propose');
     expect(resolveDreamingConfig({ mode: 'auto' }).mode).toBe('auto');
   });
+
+  it('D-CFG-5: invalid dreamHour (NaN/out-of-range/non-number) falls back to default (no NaN scheduler)', () => {
+    expect(resolveDreamingConfig({ dreamHour: NaN }).dreamHour).toBe(DREAMING_DEFAULTS.dreamHour);
+    expect(resolveDreamingConfig({ dreamHour: 25 }).dreamHour).toBe(DREAMING_DEFAULTS.dreamHour);
+    expect(resolveDreamingConfig({ dreamHour: -1 }).dreamHour).toBe(DREAMING_DEFAULTS.dreamHour);
+    expect(resolveDreamingConfig({ dreamHour: 'abc' as unknown as number }).dreamHour).toBe(DREAMING_DEFAULTS.dreamHour);
+    expect(resolveDreamingConfig({ dreamHour: 5 }).dreamHour).toBe(5); // valid preserved
+  });
+
+  it('D-CFG-6: negative/NaN numeric fields fall back; maxChangesPerRun:0 (disable) preserved', () => {
+    expect(resolveDreamingConfig({ lookbackDays: -3 }).lookbackDays).toBe(DREAMING_DEFAULTS.lookbackDays);
+    expect(resolveDreamingConfig({ quietMinutes: NaN }).quietMinutes).toBe(DREAMING_DEFAULTS.quietMinutes);
+    expect(resolveDreamingConfig({ promotionThreshold: 5 }).promotionThreshold).toBe(DREAMING_DEFAULTS.promotionThreshold);
+    expect(resolveDreamingConfig({ maxChangesPerRun: 0 }).maxChangesPerRun).toBe(0); // explicit disable kept
+  });
 });
 
 // ── gather ──────────────────────────────────────────────────────────────────
@@ -140,6 +155,21 @@ describe('dreaming/reviewer: coerceReview', () => {
   it('D-REV-3: non-object → empty proposals', () => {
     expect(coerceReview('nope', 0).proposals).toEqual([]);
     expect(coerceReview(null, 0).proposals).toEqual([]);
+  });
+
+  it('D-REV-3b: Infinity recallCount → 0; oversized fields are capped (untrusted-input defense)', () => {
+    const big = 'x'.repeat(10_000);
+    const r = coerceReview(
+      {
+        summary: big,
+        proposals: [{ op: 'add', file: 'MEMORY.md', content: big, reason: big, score: 0.5, recallCount: Infinity }],
+      },
+      0,
+    );
+    expect(r.summary.length).toBeLessThanOrEqual(4_000);
+    expect(r.proposals[0].recallCount).toBe(0); // Infinity rejected
+    expect(r.proposals[0].content!.length).toBeLessThanOrEqual(4_000);
+    expect(r.proposals[0].reason.length).toBeLessThanOrEqual(4_000);
   });
 });
 
