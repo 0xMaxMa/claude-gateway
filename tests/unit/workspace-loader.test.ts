@@ -290,15 +290,16 @@ describe('workspace-loader', () => {
   // -------------------------------------------------------------------------
   // Self-restart footgun guard: agent-writable files skip busy-session restart
   // -------------------------------------------------------------------------
-  it('AGENT_WRITABLE_FILES: contains all 4 memory-rule files, not HEARTBEAT/IDENTITY/CLAUDE', () => {
-    // Files the memory rule authorizes the agent to write
+  it('AGENT_WRITABLE_FILES: contains the memory + identity tiers (incl. IDENTITY.md), not HEARTBEAT/CLAUDE', () => {
+    // Memory-rule files the agent writes about itself/the user
     expect(AGENT_WRITABLE_FILES.has('MEMORY.md')).toBe(true);
     expect(AGENT_WRITABLE_FILES.has('USER.md')).toBe(true);
+    // Operator identity composed into CLAUDE.md — deferred, never SIGKILLed idle
     expect(AGENT_WRITABLE_FILES.has('SOUL.md')).toBe(true);
     expect(AGENT_WRITABLE_FILES.has('AGENTS.md')).toBe(true);
-    // Files NOT self-written → still trigger a normal restart-or-defer
+    expect(AGENT_WRITABLE_FILES.has('IDENTITY.md')).toBe(true);
+    // Files outside both tiers → still trigger a normal restart-or-defer
     expect(AGENT_WRITABLE_FILES.has('HEARTBEAT.md')).toBe(false);
-    expect(AGENT_WRITABLE_FILES.has('IDENTITY.md')).toBe(false);
     expect(AGENT_WRITABLE_FILES.has('CLAUDE.md')).toBe(false);
   });
 
@@ -307,7 +308,7 @@ describe('workspace-loader', () => {
   // -------------------------------------------------------------------------
   it('MEMORY_FILES/IDENTITY_FILES: partition the writable set correctly', () => {
     expect([...MEMORY_FILES].sort()).toEqual(['MEMORY.md', 'USER.md']);
-    expect([...IDENTITY_FILES].sort()).toEqual(['AGENTS.md', 'SOUL.md']);
+    expect([...IDENTITY_FILES].sort()).toEqual(['AGENTS.md', 'IDENTITY.md', 'SOUL.md']);
     // The two tiers are disjoint and their union is exactly AGENT_WRITABLE_FILES.
     for (const f of MEMORY_FILES) expect(IDENTITY_FILES.has(f)).toBe(false);
     expect([...AGENT_WRITABLE_FILES].sort()).toEqual(
@@ -328,6 +329,11 @@ describe('workspace-loader', () => {
   it('classifyWorkspaceRestart: identity change (or mixed with memory) defers idle', () => {
     expect(classifyWorkspaceRestart(['SOUL.md'])).toBe('defer-idle');
     expect(classifyWorkspaceRestart(['AGENTS.md'])).toBe('defer-idle');
+    // IDENTITY.md is API-writable + composed into CLAUDE.md exactly like
+    // SOUL/AGENTS, so it must defer idle sessions — not SIGKILL them (issue #321
+    // follow-up: it was previously omitted from the identity tier).
+    expect(classifyWorkspaceRestart(['IDENTITY.md'])).toBe('defer-idle');
+    expect(classifyWorkspaceRestart(['SOUL.md', 'IDENTITY.md'])).toBe('defer-idle');
     // A mix of memory + identity is NOT memory-only → must not restart nothing;
     // identity presence pulls it into the deferred tier.
     expect(classifyWorkspaceRestart(['MEMORY.md', 'SOUL.md'])).toBe('defer-idle');
@@ -357,6 +363,39 @@ describe('workspace-loader', () => {
         expect(all).toContain('MEMORY.md');
         // self-written-only change → every changed file is agent-writable
         expect(all.every((f) => AGENT_WRITABLE_FILES.has(f))).toBe(true);
+      } finally {
+        handle.close();
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it('watchWorkspace: a lowercase memory.md write reaches classify() as MEMORY.md → none (end-to-end)', async () => {
+    // Guards the full path: a lowercase alias write must be canonicalized to
+    // MEMORY.md before classifyWorkspaceRestart sees it, so it classifies 'none'
+    // (restart nothing) — not mis-routed to 'restart' because 'memory.md' is not
+    // a MEMORY_FILES member. Proves the two halves (canonicalize + classify)
+    // compose correctly through the real watcher.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-lc-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent');
+
+      const batches: string[][] = [];
+      const handle = watchWorkspace(tmpDir, (changed) => { batches.push(changed); });
+
+      try {
+        await handle.ready;
+        // Lowercase alias write — the watcher auto-renames to MEMORY.md.
+        fs.writeFileSync(path.join(tmpDir, 'memory.md'), 'a fact the agent learned');
+        await waitFor(() => batches.flat().includes('MEMORY.md'), 5000);
+
+        const changed = batches.flat();
+        // Canonicalized, not the raw lowercase name.
+        expect(changed).toContain('MEMORY.md');
+        expect(changed).not.toContain('memory.md');
+        // And the canonical batch classifies as a memory-only change (no restart).
+        expect(classifyWorkspaceRestart(changed)).toBe('none');
       } finally {
         handle.close();
       }

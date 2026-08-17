@@ -184,13 +184,16 @@ const WATCH_DEBOUNCE_MS = 300;
  *   forces a SQLite-replay respawn. Memory-only changes therefore restart
  *   nothing at all (see the watcher callback in src/index.ts).
  *
- * IDENTITY_FILES — operator-authored identity (SOUL.md, AGENTS.md). These want
- *   to reach sessions "soon-ish", but still never justify SIGKILLing an idle
- *   bystander: a deferred restart (respawn on next message) is lossless and
- *   applies the change just as correctly.
+ * IDENTITY_FILES — operator-authored identity (SOUL.md, AGENTS.md, IDENTITY.md).
+ *   These want to reach sessions "soon-ish", but still never justify SIGKILLing
+ *   an idle bystander: a deferred restart (respawn on next message) is lossless
+ *   and applies the change just as correctly. IDENTITY.md is API-writable and
+ *   composed into CLAUDE.md exactly like SOUL/AGENTS, so it belongs in this tier
+ *   for the same reason — omitting it would SIGKILL idle sessions on an
+ *   IDENTITY.md write while deferring the semantically identical SOUL write.
  */
 export const MEMORY_FILES = new Set<string>(['MEMORY.md', 'USER.md']);
-export const IDENTITY_FILES = new Set<string>(['SOUL.md', 'AGENTS.md']);
+export const IDENTITY_FILES = new Set<string>(['SOUL.md', 'AGENTS.md', 'IDENTITY.md']);
 
 /**
  * Union of the two tiers — kept for callers that only need "did the agent write
@@ -209,8 +212,8 @@ export const AGENT_WRITABLE_FILES = new Set<string>([
  *                  the writing session already holds the change and every future
  *                  spawn reads the recomposed CLAUDE.md, so a restart is pure
  *                  downside. A memory write can never drop a live session.
- *  - `defer-idle`  Operator identity (SOUL.md/AGENTS.md), possibly mixed with
- *                  memory files: skip busy sessions (self-restart footgun) and
+ *  - `defer-idle`  Operator identity (SOUL.md/AGENTS.md/IDENTITY.md), possibly
+ *                  mixed with memory files: skip busy sessions (self-restart footgun) and
  *                  defer idle ones (lossless respawn on next message) — never
  *                  SIGKILL an idle bystander.
  *  - `restart`     Any non-agent-writable change (HEARTBEAT.md, operator config,

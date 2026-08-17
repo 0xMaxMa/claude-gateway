@@ -1770,7 +1770,7 @@ Read and write an agent's workspace identity files via the API. The gateway's fi
 | Changed file(s) | Effect on running sessions |
 |-----------------|----------------------------|
 | `MEMORY.md`, `USER.md` (memory) | **No session is restarted.** The change applies on each session's next natural spawn. A memory write can never drop a live session. |
-| `SOUL.md`, `AGENTS.md` (identity) | Busy sessions are skipped; idle sessions are **deferred** (respawn on their next message) — never SIGKILLed mid-idle. |
+| `SOUL.md`, `AGENTS.md`, `IDENTITY.md` (identity) | Busy sessions are skipped; idle sessions are **deferred** (respawn on their next message) — never SIGKILLed mid-idle. |
 | `HEARTBEAT.md` / other | Normal restart-or-defer (idle sessions restart now). |
 
 ### GET /api/v1/agents/:agentId/files/:filename

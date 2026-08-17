@@ -1054,15 +1054,25 @@ export class AgentRunner extends EventEmitter {
           });
         }
 
-        // Restart session before this turn if accumulated image size exceeded threshold
+        // Consume a deferred restart before this turn (armed by the image-size
+        // threshold, or by a workspace/skills change that deferred this idle
+        // session). Guard on isProcessing: this same chatId key can be driven by
+        // a web-UI live-view turn (sendMessageToSession) that does NOT hold
+        // turnActive, so the session may be mid-stream here. Stopping it would
+        // truncate that live turn — instead leave the flag armed and consume it
+        // on the next idle turn. In the normal channel flow the session is idle
+        // at this point (turnActive serialises channel turns), so the guard is a
+        // no-op and the restart proceeds as before.
         if (this.pendingRestarts.has(chatId)) {
           const existingSession = this.sessions.get(chatId);
-          if (existingSession) {
-            await existingSession.stop();
-            this.sessions.delete(chatId);
+          if (!existingSession?.isProcessing) {
+            if (existingSession) {
+              await existingSession.stop();
+              this.sessions.delete(chatId);
+            }
+            this.pendingRestarts.delete(chatId);
+            this.imageSizePerChat.delete(chatId);
           }
-          this.pendingRestarts.delete(chatId);
-          this.imageSizePerChat.delete(chatId);
         }
 
         // Route to session process (map key = chatId, actual sessionId passed separately)
@@ -2250,11 +2260,19 @@ export class AgentRunner extends EventEmitter {
         }
         proc.markPendingRestart();
         deferred++;
-      } else if (deferIdle) {
-        // Lossless deferral: leave the idle process running and arm a restart on
-        // its next message (mirrors the image-size-threshold path). Do NOT call
-        // proc.markPendingRestart() here — on an idle process it fires
-        // deferredRestartReady immediately and stops the session.
+      } else if (deferIdle && proc.source !== 'api') {
+        // Lossless deferral for CHANNEL sessions only: leave the idle process
+        // running and arm a restart on its next message (mirrors the
+        // image-size-threshold path). Do NOT call proc.markPendingRestart() here
+        // — on an idle process it fires deferredRestartReady immediately and
+        // stops the session.
+        //
+        // Guard on source: `pendingRestarts` is consumed ONLY in injectTurn (the
+        // channel turn path, keyed by chatId). api / __heartbeat__ sessions are
+        // keyed by sessionId and never flow through injectTurn, so an entry armed
+        // for them would never be consumed — it would leak in the Set and the
+        // change would never reach the session. Fall through to an immediate stop
+        // so those respawn fresh on their next use, exactly as before deferIdle.
         this.pendingRestarts.add(id);
         deferred++;
       } else {
