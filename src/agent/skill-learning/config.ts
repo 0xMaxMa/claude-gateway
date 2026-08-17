@@ -20,6 +20,7 @@ export const SKILL_LEARNING_DEFAULTS: ResolvedSkillLearningCfg = {
   pruneHour: 3,
   pruneTimezone: 'UTC',
   maxReviewsPerDay: 20,
+  notify: true,
 };
 
 /** Pick the first defined value in precedence order, else the default. */
@@ -49,6 +50,7 @@ export function resolveSkillLearningConfig(
     pruneHour: pick(agentCfg?.pruneHour, globalCfg?.pruneHour, d.pruneHour),
     pruneTimezone: pick(agentCfg?.pruneTimezone, globalCfg?.pruneTimezone, d.pruneTimezone),
     maxReviewsPerDay: pick(agentCfg?.maxReviewsPerDay, globalCfg?.maxReviewsPerDay, d.maxReviewsPerDay),
+    notify: pick(agentCfg?.notify, globalCfg?.notify, d.notify),
   };
 }
 

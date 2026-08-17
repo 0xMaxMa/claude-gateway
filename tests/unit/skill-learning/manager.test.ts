@@ -103,6 +103,20 @@ describe('SkillLearningManager — review path', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('a successful live write appends the SKILLS_LEARNED.md diary (notifier wired)', async () => {
+    const { db, ws, mgr, dir } = setup({ minToolCalls: 3 }, createEnvelope('ship-flow'));
+    seedTranscript(db, 'sess1');
+    mgr.onTurnStart('chat1', 'sess1', 'deploy the thing', []);
+    for (let i = 0; i < 4; i++) mgr.onToolUse('chat1', `id-${i}`);
+    mgr.onTurnEnd('chat1', 'sess1');
+
+    await mgr.runReviewNow('chat1', 'sess1');
+
+    const diary = fs.readFileSync(path.join(ws, 'SKILLS_LEARNED.md'), 'utf-8');
+    expect(diary).toContain('**create** `ship-flow`');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('a non-qualifying session (below minToolCalls, no recovery) does NOT review', async () => {
     const spawn = jest.fn(createEnvelope('should-not-exist'));
     const { db, ws, mgr, dir } = setup({ minToolCalls: 5 }, spawn as unknown as ClaudeSpawnFn);

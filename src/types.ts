@@ -251,6 +251,7 @@ export interface GatewayConfig {
       maxReviewsPerDay?: number; // reviewer spawns per agent per day (cost cap), default 20 (0 = disabled)
       pruneHour?: number;        // 0-23 daily curator hour, default 3
       pruneTimezone?: string;    // IANA timezone for pruneHour, default "UTC"
+      notify?: boolean;          // Telegram push when a skill is auto-written, default true (diary always on)
     };
   };
   agents: AgentConfig[];

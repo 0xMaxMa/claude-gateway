@@ -61,6 +61,33 @@ describe('config migration — skillLearning injection (planning-62)', () => {
     expect(migrated.configVersion).toBe(templateVersion());
   });
 
+  it('injects new nested defaults (notify) into an older skillLearning block without clobbering set values', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    // A config from before `notify` existed: has skillLearning but no notify key.
+    const old = {
+      configVersion: '1.0.17',
+      gateway: {
+        logDir: '/logs',
+        skillLearning: { enabled: true, mode: 'auto', minToolCalls: 9 }, // custom value must survive
+      },
+      agents: [],
+    };
+    fs.writeFileSync(configPath, JSON.stringify(old, null, 2), 'utf-8');
+
+    const result = runRealUpgrade(configPath);
+    expect(result.needed).toBe(true);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.skillLearning.notify).toBe(true); // additive default injected
+    expect(migrated.gateway.skillLearning.minToolCalls).toBe(9); // preserved
+    expect(migrated.configVersion).toBe(templateVersion());
+  });
+
+  it('the shipped template carries skillLearning.notify', () => {
+    const tpl = JSON.parse(fs.readFileSync(REAL_TEMPLATE, 'utf-8'));
+    expect(tpl.gateway.skillLearning.notify).toBe(true);
+  });
+
   it('a config that already sets skillLearning is not clobbered', () => {
     const configPath = path.join(tmpDir, 'config.json');
     const existing = {

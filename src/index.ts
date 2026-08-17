@@ -294,6 +294,11 @@ async function startAgent(
       globalCfg: gatewayConfig.gateway.skillLearning,
       agentCfg: agentConfig.skillLearning,
       logger,
+      channels: {
+        telegramBotToken: agentConfig.telegram?.botToken,
+        discordBotToken: agentConfig.discord?.botToken,
+        lineAccessToken: agentConfig.line?.channelAccessToken,
+      },
     });
     runner.setSkillLearning(skillLearning);
     skillLearning.startCurator(); // unref'd self-rescheduling timer

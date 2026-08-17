@@ -34,6 +34,12 @@ describe('resolveSkillLearningConfig — precedence (agent > global > default)',
     expect(r.maxAutoSkills).toBe(10); // global
     expect(r.pruneHour).toBe(SKILL_LEARNING_DEFAULTS.pruneHour); // default
   });
+
+  it('notify defaults true and honors a false override at either level', () => {
+    expect(resolveSkillLearningConfig().notify).toBe(true);
+    expect(resolveSkillLearningConfig({ notify: false }, { notify: true }).notify).toBe(false); // agent wins
+    expect(resolveSkillLearningConfig(undefined, { notify: false }).notify).toBe(false); // global
+  });
 });
 
 describe('isValidTimezone', () => {

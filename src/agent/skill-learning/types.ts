@@ -30,6 +30,11 @@ export interface ResolvedSkillLearningCfg {
   pruneTimezone: string;
   /** Max reviewer spawns per agent per day (cost cap). */
   maxReviewsPerDay: number;
+  /**
+   * Push a channel notification (Telegram) when a skill is auto-written.
+   * Independent of the `SKILLS_LEARNED.md` diary, which is always appended.
+   */
+  notify: boolean;
 }
 
 /** Optional per-agent override + global default, shape stored in config. */
@@ -44,6 +49,7 @@ export interface SkillLearningConfig {
   pruneHour?: number;
   pruneTimezone?: string;
   maxReviewsPerDay?: number;
+  notify?: boolean;
 }
 
 /** One durable per-turn telemetry row (table `turn_metrics`). */

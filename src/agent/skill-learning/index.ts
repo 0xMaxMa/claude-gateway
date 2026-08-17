@@ -17,6 +17,7 @@ import { runReviewer, type ClaudeSpawnFn } from './reviewer';
 import { applyProposal, readSkillOrigin, type ExistingSkill } from './writer';
 import { startCurator, curateOnce, type CuratorResult } from './curator';
 import { computeRollup } from './metrics';
+import { SkillNotifier, buildChannelSend, type ChannelTokens } from './notifier';
 import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, SkillMetricsRollup } from './types';
 
 /** Debounce: fire the review this long after the last turn ends (session-idle proxy). */
@@ -56,6 +57,10 @@ export interface SkillLearningManagerOpts {
   reviewSpawn?: ClaudeSpawnFn;
   /** Injectable clock (tests). */
   now?: () => number;
+  /** Channel credentials for skill-write notifications (fan-out across all configured channels). */
+  channels?: ChannelTokens;
+  /** Injectable notifier (tests). Production builds one from `channels`. */
+  notifier?: SkillNotifier;
 }
 
 export class SkillLearningManager {
@@ -68,6 +73,7 @@ export class SkillLearningManager {
   private readonly logger?: SkillLearningManagerOpts['logger'];
   private readonly reviewSpawn?: ClaudeSpawnFn;
   private readonly now: () => number;
+  private readonly notifier: SkillNotifier;
 
   private readonly accum = new Map<string, Accum>();
   private readonly reviewInFlight = new Set<string>();
@@ -83,6 +89,14 @@ export class SkillLearningManager {
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
     this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg);
+    this.notifier =
+      opts.notifier ??
+      new SkillNotifier({
+        workspaceDir: this.workspaceDir,
+        notify: this.cfg.notify,
+        send: buildChannelSend(this.workspaceDir, opts.channels ?? {}, opts.logger),
+        logger: opts.logger,
+      });
   }
 
   isEnabled(): boolean {
@@ -243,6 +257,18 @@ export class SkillLearningManager {
         outcome: outcome.written ? outcome.action : proposal.action === 'none' ? 'none' : 'error',
         tokensSpent,
       });
+
+      // Tell the operator a skill changed — diary (always) + throttled channel
+      // push. Only for a genuine live write (not the propose review queue).
+      if (outcome.written && !outcome.queued && outcome.name &&
+          (outcome.action === 'create' || outcome.action === 'edit')) {
+        this.notifier.onSkillWritten({
+          name: outcome.name,
+          action: outcome.action,
+          sessionId,
+          now: this.now(),
+        });
+      }
 
       this.logger?.info(
         `[skill-learning:${this.agentId}] review (${decision.reason}) → ${
