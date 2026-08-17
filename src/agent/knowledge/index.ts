@@ -22,6 +22,14 @@ export {
 } from './config';
 export type { KnowledgeSharedConfig, ResolvedKnowledgeSharedCfg } from './types';
 export { writeSharedNote, sharedNoteFilename } from './shared-writer';
+export {
+  compileWiki,
+  parseWikiPage,
+  extractLinks,
+  buildBacklinks,
+  buildDashboards,
+} from './wiki';
+export type { WikiPage, WikiClaim, Dashboards, WikiCompileResult } from './wiki';
 export { chunkMarkdown } from './chunk';
 export type { Chunk } from './chunk';
 export { classifyOrigin } from './provenance';

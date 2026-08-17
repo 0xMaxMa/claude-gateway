@@ -23,8 +23,10 @@ import {
   resolveSharedConfig,
   sharedDbPath,
   sharedNotesDir,
+  sharedVaultDir,
   ARCHIVE_DEFAULTS,
 } from './config';
+import { compileWiki } from './wiki';
 import type {
   IndexResult,
   KnowledgeArchiveConfig,
@@ -223,7 +225,7 @@ export function indexSharedArchive(
 
   const notesDir = sharedNotesDir(cfg);
   const db = ArchiveDB.forPath(sharedDbPath(cfg), ARCHIVE_DEFAULTS.tokenizer);
-  return reindexInto(db, {
+  const result = reindexInto(db, {
     baseDir: notesDir,
     files: walkMarkdown(notesDir),
     chunkTokens: ARCHIVE_DEFAULTS.chunkTokens,
@@ -232,4 +234,17 @@ export function indexSharedArchive(
     source: 'shared',
     projectKey: cfg.project,
   });
+
+  // K5 (opt-in): compile the memory-wiki graph + dashboards over the whole vault.
+  // Best-effort — a compile failure never affects indexing. mtime-free determinism
+  // is not required here (reports are regenerated each run), so wall-clock `now` is
+  // used for the staleness dashboard.
+  if (cfg.graph) {
+    try {
+      compileWiki(sharedVaultDir(cfg), Date.now());
+    } catch {
+      /* best-effort */
+    }
+  }
+  return result;
 }

@@ -30,12 +30,13 @@ export interface ResolvedKnowledgeArchiveCfg {
   chunkOverlap: number;
 }
 
-/** Raw config shape under `gateway.knowledge.shared` (planning-64 K3). */
+/** Raw config shape under `gateway.knowledge.shared` (planning-64 K3/K5). */
 export interface KnowledgeSharedConfig {
   enabled?: boolean;
   project?: string;
   root?: string;
   mode?: 'propose' | 'auto';
+  graph?: boolean; // K5: compile the memory-wiki graph/dashboards over the vault
 }
 
 /** Resolved, sanitized shared-KB config (all fields present). */
@@ -44,6 +45,7 @@ export interface ResolvedKnowledgeSharedCfg {
   project: string;
   root: string;
   mode: 'propose' | 'auto';
+  graph: boolean;
 }
 
 /** One indexed source file. */

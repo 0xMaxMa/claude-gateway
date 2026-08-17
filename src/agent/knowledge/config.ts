@@ -73,6 +73,7 @@ export const SHARED_DEFAULTS: ResolvedKnowledgeSharedCfg = {
   project: 'global',
   root: path.join(os.homedir(), '.claude-gateway', 'shared', 'kb'),
   mode: 'propose', // SAFE default: per-agent→shared promotion is dry-run (K4)
+  graph: false, // K5 graph/dashboards are opt-in
 };
 
 /** A project key safe to use as a single path segment (no traversal/separators). */
@@ -100,6 +101,7 @@ export function resolveSharedConfig(
     project,
     root,
     mode: mode === 'auto' ? 'auto' : 'propose', // anything but 'auto' ⇒ propose
+    graph: pick(agentCfg?.graph, globalCfg?.graph, d.graph) === true,
   };
 }
 

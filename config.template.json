@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.22",
+  "configVersion": "1.0.23",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -105,7 +105,8 @@
         "enabled": true,
         "project": "global",
         "root": "~/.claude-gateway/shared/kb",
-        "mode": "propose"
+        "mode": "propose",
+        "graph": false
       }
     }
   },

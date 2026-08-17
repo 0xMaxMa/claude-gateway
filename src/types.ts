@@ -319,6 +319,7 @@ export interface GatewayConfig {
         project?: string;   // sharing partition key, default "global"
         root?: string;      // vault root dir, default ~/.claude-gateway/shared/kb
         mode?: 'propose' | 'auto'; // per-agent→shared promotion mode (K4), default "propose"
+        graph?: boolean;    // K5: compile memory-wiki graph/dashboards, default false
       };
     };
   };
