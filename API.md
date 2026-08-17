@@ -1783,6 +1783,8 @@ Read and write an agent's workspace identity files via the API. The gateway's fi
 
 A memory file under its budget composes cleanly (no banner). Non-memory files are unaffected. A hard-reject memory tool (refuse an over-budget write) is a planned follow-up; v1 is the compose banner only.
 
+**Nightly dreaming (`gateway.dreaming`).** A nightly background pass consolidates memory: a print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In the shipped **`propose`** mode (injected by migration at `configVersion` `1.0.20`) proposals are written **only** to `DREAMS.md` + JSONL audit under `<workspace>/.dreaming/` — **no memory file is mutated** (the `auto` applier is a follow-up). Runs on a nightly scheduler (`dreamHour`/`dreamTimezone`), skips when a session was active within `quietMinutes`, and is a no-op when `enabled:false` or `maxChangesPerRun:0`. See the README `gateway.dreaming` reference for all fields.
+
 ### GET /api/v1/agents/:agentId/files/:filename
 
 Read a workspace file. Returns empty `content` if the file does not exist yet (not a 404).
