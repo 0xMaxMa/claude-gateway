@@ -113,6 +113,8 @@ export interface AgentConfig {
   skillLearning?: GatewayConfig['gateway']['skillLearning'];
   /** Per-agent memory-budget override (field-level over the global gateway default). */
   memory?: GatewayConfig['gateway']['memory'];
+  /** Per-agent dreaming override (field-level over the global gateway default). */
+  dreaming?: GatewayConfig['gateway']['dreaming'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
 }
@@ -267,6 +269,26 @@ export interface GatewayConfig {
       memoryBudgetChars?: number;    // soft budget for MEMORY.md, default 8000 (0 = disabled)
       userBudgetChars?: number;      // soft budget for USER.md, default 3000 (0 = disabled)
       overBudget?: 'warn' | 'error'; // compose banner severity, default "warn"
+    };
+    /**
+     * Nightly memory "dreaming" (issue #325). A print-only reviewer reads a
+     * lookback window of the agent's own session transcripts and proposes memory
+     * consolidation ops. In `propose` mode (the shipped default) proposals are
+     * written only to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/`
+     * — no memory file is mutated (the `auto` applier is a follow-up). Runs on a
+     * nightly scheduler; `enabled:false` or `maxChangesPerRun:0` ⇒ no-op.
+     */
+    dreaming?: {
+      enabled?: boolean;            // default true
+      mode?: 'propose' | 'auto';    // default "propose" (diary-only dry-run)
+      dreamHour?: number;           // 0-23 nightly hour, default 3
+      dreamTimezone?: string;       // IANA tz, default "UTC"
+      quietMinutes?: number;        // skip if a session was active within this window, default 30
+      lookbackDays?: number;        // how far back to scan sessions, default 3
+      maxChangesPerRun?: number;    // cap on proposed ops, default 3 (0 = disabled)
+      reviewModel?: string;         // cheap model for the reviewer, default haiku
+      promotionThreshold?: number;  // min candidate score to promote, default 0.6
+      minRecallCount?: number;      // a fact must recur >= N times to promote, default 2
     };
   };
   agents: AgentConfig[];

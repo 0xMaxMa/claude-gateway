@@ -30,6 +30,7 @@ import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { SkillLearningManager } from './agent/skill-learning';
+import { DreamingManager } from './agent/dreaming';
 import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
@@ -311,6 +312,21 @@ async function startAgent(
     skillLearning.startCurator(); // unref'd self-rescheduling timer
   } catch (err) {
     logger.warn('Failed to wire skill-learning (continuing without it)', { error: (err as Error).message });
+  }
+
+  // ── Nightly memory dreaming (issue #325) — propose (dry-run) slice ──
+  try {
+    const dreaming = new DreamingManager({
+      db: runner.getHistoryDb(),
+      agentId: agentConfig.id,
+      workspaceDir: agentConfig.workspace,
+      globalCfg: gatewayConfig.gateway.dreaming,
+      agentCfg: agentConfig.dreaming,
+      logger,
+    });
+    dreaming.startDreaming(); // unref'd nightly self-rescheduling timer
+  } catch (err) {
+    logger.warn('Failed to wire dreaming (continuing without it)', { error: (err as Error).message });
   }
 
   // Log startup status

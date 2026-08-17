@@ -393,6 +393,23 @@ Memory budget discipline. Self-authored memory files (`MEMORY.md`, `USER.md`) th
 
 The soft budget sits well under the hard per-file limit (still applied as a context safety net); the banner is the primary over-budget signal for memory files.
 
+### `gateway.dreaming`
+
+Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In the shipped **`propose`** mode the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — **no memory file is modified** (observe the loop before it writes). The `auto` applier is a follow-up.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
+| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops (follow-up) |
+| `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
+| `quietMinutes` | `30` | Skip a run if a session was active within this window |
+| `lookbackDays` | `3` | How far back to scan sessions |
+| `maxChangesPerRun` | `3` | Cap on proposed ops per run (`0` ⇒ no-op) |
+| `reviewModel` | `claude-haiku-4-5-…` | Cheap model for the reviewer |
+| `promotionThreshold` / `minRecallCount` | `0.6` / `2` | Scoring thresholds for promoting a fact |
+
+Per-agent overrides are supported under the agent's own `dreaming` block; unset fields fall back to the gateway default. `enabled:false` or `maxChangesPerRun:0` makes a run a no-op.
+
 ### `gateway.bind`
 
 Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.
