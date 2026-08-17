@@ -410,6 +410,21 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 
 Per-agent overrides are supported under the agent's own `dreaming` block; unset fields fall back to the gateway default. `enabled:false` or `maxChangesPerRun:0` makes a run a no-op.
 
+### `gateway.knowledge`
+
+**Two-lane memory** — a per-agent searchable knowledge archive so an agent can recall what does not fit in the always-injected core. A SQLite/FTS5 index (`agents/<id>/kb.sqlite`, built on Node's built-in `node:sqlite` — no new dependency) covers the agent's `memory/*.md` notes plus the evergreen `MEMORY.md`/`USER.md`. Every chunk is tagged with **fail-closed provenance** (`owner`/`agent`/`untrusted`/`system`; unclassified ⇒ `untrusted`). The index is refreshed by a detached subprocess at session spawn, entirely **off the gateway event loop**.
+
+Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS5 → ranked snippets with file+line, provenance, importance) and **`memory_get`** (bounded, path-traversal-guarded excerpt of a memory-scoped file). When `MEMORY.md` grows past its `gateway.memory` soft budget, compose injects a compact **auto-generated section index** + a pointer to `memory_search` instead of the truncated full text (**core-shrink**) — the on-disk file is never modified and its full content stays searchable.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `archive.enabled` | `true` | Master switch (`false` ⇒ complete no-op, no DB created, no core-shrink) |
+| `archive.tokenizer` | `"unicode61"` | FTS5 tokenizer (`"trigram"` for CJK/Thai) |
+| `archive.chunkTokens` | `400` | Target chunk size in ~tokens |
+| `archive.chunkOverlap` | `80` | Overlap between chunks (clamped below `chunkTokens`) |
+
+Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
+
 ### `gateway.bind`
 
 Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.

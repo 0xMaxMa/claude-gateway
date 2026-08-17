@@ -28,6 +28,7 @@ import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
+import { spawnArchiveReindex } from './knowledge';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -1361,6 +1362,14 @@ export class AgentRunner extends EventEmitter {
 
     // Apply per-session model override (caller already normalized to undefined when == agent default)
     if (modelOverride) proc.modelOverride = modelOverride;
+
+    // Keep the searchable memory archive (planning-64) fresh for the memory_search
+    // tool. Fire-and-forget, detached, OFF the event loop — never blocks the spawn.
+    spawnArchiveReindex(
+      this.agentConfig.workspace,
+      this.agentConfig.knowledge?.archive,
+      this.gatewayConfig.gateway.knowledge?.archive,
+    );
 
     // Per-agent → global → MAX_HISTORY_MESSAGES: the configured cap on how many
     // history messages a healthy spawn re-injects. Lets an operator lower the

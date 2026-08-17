@@ -13,6 +13,7 @@ import {
   DEFAULT_MEMORY_BUDGET,
   OverBudgetMode,
   MissingRequiredFileError,
+  buildMemoryIndex,
 } from '../../src/agent/workspace-loader';
 import { waitFor } from '../helpers/wait-for';
 
@@ -51,7 +52,11 @@ describe('workspace-loader', () => {
   // U-WL-04: File exceeds 20,000 char limit
   // -------------------------------------------------------------------------
   it('U-WL-04: truncates files exceeding 20,000 characters', async () => {
-    const result = await loadWorkspace(path.join(FIXTURES, 'oversized'));
+    // coreShrink:false exercises the legacy full-content path so the hard 20k cap
+    // still applies to MEMORY.md (with K2 core-shrink on, an over-budget MEMORY.md
+    // is replaced by a small index long before the 20k cap — that path is covered
+    // by U-SHRINK-3). The safety-net truncation itself is unchanged.
+    const result = await loadWorkspace(path.join(FIXTURES, 'oversized'), { coreShrink: false });
     // MEMORY.md has 25,000+ chars — should be truncated
     expect(result.files.memoryMd.length).toBeLessThanOrEqual(20_000 + 60); // +marker length
     expect(result.files.memoryMd).toContain('[TRUNCATED');
@@ -147,6 +152,84 @@ describe('workspace-loader', () => {
     try {
       const result = await loadWorkspace(dir); // no memoryBudget → defaults (8000)
       expect(result.files.memoryMd).toContain('OVER BUDGET');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // K2 core-shrink (planning-64): an over-budget MEMORY.md is injected as a
+  // compact auto-index + a pointer to memory_search, not the truncated body.
+  // -------------------------------------------------------------------------
+  // A > 8000-char MEMORY.md with headings; each section's distinctive DEEPMARKER
+  // sits deep in padding (never in the first-line brief), so it must be absent
+  // from the shrunk index but present in the full-content (legacy) form.
+  const shrinkableMemory =
+    `## Section Alpha\nBrief for alpha.\n${'x'.repeat(5000)}\nDEEPMARKERALPHA\n\n` +
+    `## Section Beta\nBrief for beta.\n${'y'.repeat(5000)}\nDEEPMARKERBETA\n`;
+
+  it('U-SHRINK-1: buildMemoryIndex returns a pointer + heading map for a file with headings', () => {
+    const idx = buildMemoryIndex(shrinkableMemory);
+    expect(idx).not.toBeNull();
+    expect(idx).toContain('memory_search');
+    expect(idx).toContain('## Section Alpha');
+    expect(idx).toContain('## Section Beta');
+    expect(idx).toContain('Brief for alpha.');
+    expect(idx).not.toContain('DEEPMARKERALPHA'); // body stays out of the index
+  });
+
+  it('U-SHRINK-2: buildMemoryIndex returns null when there are no headings', () => {
+    expect(buildMemoryIndex('M'.repeat(9_000))).toBeNull();
+  });
+
+  it('U-SHRINK-3: over-budget MEMORY.md with headings is injected as the index (coreShrink on)', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': shrinkableMemory });
+    try {
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000 },
+        coreShrink: true,
+      });
+      // Banner + index + pointer; the deep body markers are NOT in the prompt.
+      expect(result.files.memoryMd).toContain('MEMORY.md OVER BUDGET');
+      expect(result.files.memoryMd).toContain('memory_search');
+      expect(result.files.memoryMd).toContain('## Section Alpha');
+      expect(result.files.memoryMd).not.toContain('DEEPMARKERALPHA');
+      expect(result.files.memoryMd).not.toContain('DEEPMARKERBETA');
+      // Shrink-aware banner steers away from rewriting from the prompt.
+      expect(result.files.memoryMd).toContain('never rewrite it from this');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-SHRINK-6: buildMemoryIndex ignores headings inside fenced code blocks', () => {
+    const idx = buildMemoryIndex('## Real Section\nBrief here.\n```bash\n# not a heading\nnpm i\n```\n');
+    expect(idx).toContain('## Real Section');
+    expect(idx).not.toContain('# not a heading');
+  });
+
+  it('U-SHRINK-4: coreShrink:false keeps the legacy banner + full body', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': shrinkableMemory });
+    try {
+      const result = await loadWorkspace(dir, {
+        memoryBudget: { memoryBudgetChars: 8_000 },
+        coreShrink: false,
+      });
+      expect(result.files.memoryMd).toContain('MEMORY.md OVER BUDGET');
+      expect(result.files.memoryMd).toContain('DEEPMARKERALPHA'); // full body retained
+      expect(result.files.memoryMd).not.toContain('memory_search');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('U-SHRINK-5: under-budget MEMORY.md is never shrunk (clean, no pointer)', async () => {
+    const dir = makeBudgetWs({ 'MEMORY.md': '## Small\njust a little memory' });
+    try {
+      const result = await loadWorkspace(dir, { memoryBudget: { memoryBudgetChars: 8_000 } });
+      expect(result.files.memoryMd).not.toContain('OVER BUDGET');
+      expect(result.files.memoryMd).not.toContain('memory_search');
+      expect(result.files.memoryMd).toContain('just a little memory');
     } finally {
       fs.rmSync(dir, { recursive: true });
     }

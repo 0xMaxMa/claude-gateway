@@ -115,6 +115,8 @@ export interface AgentConfig {
   memory?: GatewayConfig['gateway']['memory'];
   /** Per-agent dreaming override (field-level over the global gateway default). */
   dreaming?: GatewayConfig['gateway']['dreaming'];
+  /** Per-agent knowledge-archive override (field-level over the global gateway default). */
+  knowledge?: GatewayConfig['gateway']['knowledge'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
 }
@@ -289,6 +291,22 @@ export interface GatewayConfig {
       reviewModel?: string;         // cheap model for the reviewer, default haiku
       promotionThreshold?: number;  // min candidate score to promote, default 0.6
       minRecallCount?: number;      // a fact must recur >= N times to promote, default 2
+    };
+    /**
+     * Two-lane memory: per-agent searchable knowledge archive (planning-64 K0).
+     * A SQLite/FTS5 index over the agent's `memory/*.md` notes (+ evergreen
+     * MEMORY.md/USER.md), so later phases can retrieve on demand instead of
+     * injecting the whole file. K0 is dormant infrastructure — building the
+     * index changes nothing about the prompt and adds no tools yet.
+     * `archive.enabled:false` ⇒ complete no-op (no DB created).
+     */
+    knowledge?: {
+      archive?: {
+        enabled?: boolean;     // default true
+        tokenizer?: string;    // FTS5 tokenizer, default "unicode61" ("trigram" for CJK/Thai)
+        chunkTokens?: number;  // target chunk size in ~tokens, default 400
+        chunkOverlap?: number; // overlap between chunks in ~tokens, default 80
+      };
     };
   };
   agents: AgentConfig[];
