@@ -40,6 +40,12 @@ describe('resolveSkillLearningConfig — precedence (agent > global > default)',
     expect(resolveSkillLearningConfig({ notify: false }, { notify: true }).notify).toBe(false); // agent wins
     expect(resolveSkillLearningConfig(undefined, { notify: false }).notify).toBe(false); // global
   });
+
+  it('normalizes an invalid pruneTimezone to UTC (never passes garbage to consumers)', () => {
+    expect(resolveSkillLearningConfig({ pruneTimezone: 'Not/AZone' }).pruneTimezone).toBe('UTC');
+    expect(resolveSkillLearningConfig(undefined, { pruneTimezone: '' }).pruneTimezone).toBe('UTC');
+    expect(resolveSkillLearningConfig({ pruneTimezone: 'Asia/Bangkok' }).pruneTimezone).toBe('Asia/Bangkok'); // valid preserved
+  });
 });
 
 describe('isValidTimezone', () => {

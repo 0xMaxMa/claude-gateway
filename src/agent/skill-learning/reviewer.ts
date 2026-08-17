@@ -107,6 +107,11 @@ export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
       });
       child.on('error', () => finish({ stdout: '', timedOut: true }));
       child.on('close', () => finish({ stdout: out }));
+      // The stdin socket emits its own async 'error' (e.g. EPIPE if the child
+      // exits before we finish writing). `child.on('error')` does NOT cover the
+      // stream, so without this handler that event is unhandled and can crash
+      // the daemon — unacceptable for a component that must never wedge.
+      child.stdin?.on('error', () => {});
       try {
         child.stdin?.write(stdin);
         child.stdin?.end();

@@ -71,7 +71,15 @@ function buildSkillMd(opts: {
   createdAt: number;
   pinned: boolean;
 }): string {
-  const desc = opts.description.replace(/"/g, '\\"');
+  // YAML-safe double-quoted scalar: collapse newlines (desc is single-line),
+  // strip other control chars, then escape backslashes BEFORE quotes. A raw
+  // backslash/newline in the (transcript-derived) description would otherwise
+  // produce invalid frontmatter → the freshly written skill never parses/loads.
+  const desc = opts.description
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\x00-\x1f]/g, ' ')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
   return [
     '---',
     `name: ${opts.name}`,
@@ -185,8 +193,19 @@ export function applyProposal(proposal: ReviewProposal, ctx: WriterContext): Wri
     return { written: false, action, name, reason: `skill exceeds ${MAX_SKILL_SIZE} bytes` };
   }
 
+  // HARD provenance guard against the on-disk source of truth (not just the
+  // in-memory `ctx.existing` registry). A user file can occupy the exact target
+  // path while being invisible to `ctx.existing` — its frontmatter fails to
+  // parse, or its `name` field differs from its directory. Re-read the real
+  // target and refuse unless it is origin:auto. Skips the `.pending` queue
+  // (separate namespace, never a live user skill).
+  const targetPath = skillFilePath(ctx.workspaceDir, name, queued);
+  if (!queued && fs.existsSync(targetPath) && readSkillOrigin(targetPath) !== 'auto') {
+    return { written: false, action, name, reason: 'provenance guard: on-disk target is not origin:auto' };
+  }
+
   try {
-    atomicWrite(skillFilePath(ctx.workspaceDir, name, queued), skillMd);
+    atomicWrite(targetPath, skillMd);
   } catch (err) {
     return { written: false, action, name, reason: `write failed: ${(err as Error).message}` };
   }

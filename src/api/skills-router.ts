@@ -443,6 +443,13 @@ export function createSkillsRouter(
 
     try {
       fs.rmSync(skillDir, { recursive: true, force: true });
+      // Reconcile the skill-learning provenance row so a deleted workspace skill
+      // does not leave an orphan `skill_stats` entry (which would inflate the
+      // autoSkills rollup and let a later re-created skill inherit a stale auto
+      // origin). No-op if there was no row. Shared skills have no per-agent row.
+      if (scope === 'workspace') {
+        agents?.get(agentId)?.getHistoryDb()?.deleteSkillStat(name);
+      }
       if (agents) reloadRunnerRegistry(agentId, config, agents);
       res.json({ message: `Skill "${name}" deleted from ${scope}` });
     } catch (err: unknown) {

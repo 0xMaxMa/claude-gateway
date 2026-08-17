@@ -53,25 +53,34 @@ export interface SkillNotifierOpts {
  * (Telegram DM chat_id == user_id). Best-effort: any error ⇒ no recipients.
  */
 export function readTelegramRecipients(workspaceDir: string): string[] {
-  try {
-    const accessPath = path.join(workspaceDir, '.telegram-state', 'access.json');
-    const raw = fs.readFileSync(accessPath, 'utf-8');
-    const parsed = JSON.parse(raw) as { allowFrom?: unknown };
-    if (!Array.isArray(parsed.allowFrom)) return [];
-    return parsed.allowFrom.filter((x): x is string => typeof x === 'string' && x.length > 0);
-  } catch {
-    return [];
-  }
+  return readAllowFrom(workspaceDir, '.telegram-state');
 }
 
-/** POST a Telegram sendMessage. Best-effort; resolves even on HTTP failure. */
+/**
+ * Throw a descriptive error when an HTTP push failed, so the per-recipient
+ * `catch` in the transport logs a real status (an HTTP 401/429 is NOT a fetch
+ * throw). The response body is consumed either way (avoids leaking the undici
+ * stream). Bodies never contain the bot token (it lives in the URL path, not
+ * the payload), so this is safe to log.
+ */
+async function ensureOk(resp: Response, channel: string): Promise<void> {
+  if (resp.ok) {
+    await resp.text().catch(() => '');
+    return;
+  }
+  const body = await resp.text().catch(() => '');
+  throw new Error(`${channel} HTTP ${resp.status}${body ? ` ${body.slice(0, 200)}` : ''}`);
+}
+
+/** POST a Telegram sendMessage. Throws on HTTP failure so the caller can log it. */
 export async function pushTelegram(botToken: string, chatId: string, text: string): Promise<void> {
-  await fetch(`${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`, {
+  const resp = await fetch(`${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text }),
     signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
   });
+  await ensureOk(resp, 'telegram');
 }
 
 /**
@@ -170,22 +179,22 @@ export function readDiscordRecipients(workspaceDir: string): string[] {
  * Discord push targets a channel, not a user — a proactive DM needs this hop
  * first (unlike Telegram where chat_id == user_id). Returns undefined on failure.
  */
-async function openDiscordDmChannel(botToken: string, userId: string): Promise<string | undefined> {
+async function openDiscordDmChannel(botToken: string, userId: string): Promise<string> {
   const resp = await fetch(`${DISCORD_API_BASE}/users/@me/channels`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bot ${botToken}` },
     body: JSON.stringify({ recipient_id: userId }),
     signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
   });
-  if (!resp.ok) return undefined;
+  await ensureOk(resp, 'discord dm-open');
   const ch = (await resp.json()) as { id?: unknown };
-  return typeof ch.id === 'string' ? ch.id : undefined;
+  if (typeof ch.id !== 'string') throw new Error('discord dm-open: response had no channel id');
+  return ch.id;
 }
 
-/** DM a Discord user (open DM channel, then post chunked). Best-effort. */
+/** DM a Discord user (open DM channel, then post chunked). Throws on HTTP failure. */
 export async function pushDiscordDM(botToken: string, userId: string, text: string): Promise<void> {
   const channelId = await openDiscordDmChannel(botToken, userId);
-  if (!channelId) return;
   for (const content of chunkText(text, DISCORD_MAX_MESSAGE_LENGTH)) {
     const resp = await fetch(`${DISCORD_API_BASE}/channels/${channelId}/messages`, {
       method: 'POST',
@@ -193,7 +202,7 @@ export async function pushDiscordDM(botToken: string, userId: string, text: stri
       body: JSON.stringify({ content }),
       signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
     });
-    if (!resp.ok) return; // stop the burst for this recipient on the first failure
+    await ensureOk(resp, 'discord');
   }
 }
 
@@ -222,14 +231,15 @@ export function readLineRecipients(workspaceDir: string): string[] {
   return readAllowFrom(workspaceDir, '.line-state');
 }
 
-/** Push a LINE text message to a user. Best-effort; resolves even on HTTP failure. */
+/** Push a LINE text message to a user. Throws on HTTP failure so the caller can log it. */
 export async function pushLine(accessToken: string, to: string, text: string): Promise<void> {
-  await fetch(`${LINE_API_BASE}/v2/bot/message/push`, {
+  const resp = await fetch(`${LINE_API_BASE}/v2/bot/message/push`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ to, messages: [{ type: 'text', text: text.slice(0, LINE_MAX_MESSAGE_LENGTH) }] }),
     signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
   });
+  await ensureOk(resp, 'line');
 }
 
 /**
@@ -351,7 +361,9 @@ export class SkillNotifier {
       this.buffer = [];
       void this.safeSend(`🧠 ${n} more skill${n === 1 ? '' : 's'} learned (auto): ${list}`);
     }
-    this.recent = [];
+    // Do NOT reset `recent` here: pushThrottled already rolls the window forward
+    // by timestamp on every write, so wiping it would let a mid-life flush (or a
+    // shutdown flush) incorrectly re-open the immediate-ping budget.
   }
 
   // ---- internals -------------------------------------------------------------

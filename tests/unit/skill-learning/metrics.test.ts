@@ -52,13 +52,27 @@ describe('metrics.computeRollup', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('empty store yields a well-formed zeroed rollup', () => {
+  it('empty store yields a well-formed zeroed rollup with null (not 0) medians', () => {
     const { db, dir } = freshDb();
     const r = computeRollup(db, 'a', 123);
     expect(r.adoption.autoSkills).toBe(0);
     expect(r.adoption.stickyPct).toBe(0);
     expect(r.netTokens.net).toBe(0);
     expect(r.generatedAt).toBe(123);
+    // No turns ⇒ medians are null (distinct from a measured 0), so a consumer
+    // never reads "skills cut cost to zero" from an empty baseline.
+    expect(r.costDelta.medianTokensBefore).toBeNull();
+    expect(r.costDelta.medianTokensAfter).toBeNull();
+    expect(r.costDelta.medianToolCallsBefore).toBeNull();
+    expect(r.cohort.enabledMedianToolCalls).toBeNull();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a populated cohort still reports a numeric (non-null) median', () => {
+    const { db, dir } = freshDb();
+    db.insertTurnMetric(t({ enabled: 1, toolCalls: 4, skillsLoaded: JSON.stringify(['s']) }));
+    const r = computeRollup(db, 'a', 9999);
+    expect(r.costDelta.medianToolCallsAfter).toBe(4); // has data ⇒ number, not null
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -1989,7 +1989,7 @@ Skill self-improvement (skill-learning) effectiveness rollup for the agent. Read
 The metrics all derive from durable per-turn telemetry (`turn_metrics`) and per-skill provenance/usage (`skill_stats`) captured in the agent's `history.db`:
 
 - **adoption** — funnel of auto-skills: created → loaded ≥1 → loaded ≥3 (`stickyPct` = % reaching ≥3 uses).
-- **costDelta** — median tool-calls / tokens for turns *before* a skill was loaded vs *after*, plus the number of intent clusters (directional).
+- **costDelta** — median tool-calls / tokens for turns with **no skill loaded** vs turns with **a skill loaded** (a global cohort comparison, not a temporal per-skill before/after), plus the number of intent clusters (directional). Each median is `null` when its cohort has no turns yet (distinct from a measured `0`).
 - **recovery** — recovery-triage rate for the earlier half vs the recent half of turns (should trend down).
 - **cohort** — the `enabled` on/off A/B: turn counts + median tool-calls per cohort (the causal signal).
 - **netTokens** — the bottom line: `savedByReuse − spentReviewing` (`net`). The feature is a win only when `net > 0`.

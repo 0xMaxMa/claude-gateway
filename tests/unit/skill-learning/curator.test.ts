@@ -90,6 +90,34 @@ describe('curator.curateOnce', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('NEVER deletes an ADOPTED skill (stat row says auto, on-disk origin flipped to user)', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    // Auto skill the user later adopted: stat row still origin=auto, but the
+    // on-disk SKILL.md was edited to origin:user. It is stale + unused.
+    fs.mkdirSync(path.join(ws, 'skills', 'adopted'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'skills', 'adopted', 'SKILL.md'), '---\nname: adopted\ndescription: "x"\norigin: user\n---\nbody\n', 'utf-8');
+    db.recordSkillCreated({ name: 'adopted', origin: 'auto', createdAt: now - 45 * DAY, createdFromSession: 's', pinned: 0 });
+
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ minUsesToKeep: 2, maxAgeDays: 30 }), now });
+    expect(r.pruned).not.toContain('adopted');
+    expect(exists(ws, 'adopted')).toBe(true); // user's file survives
+    expect(db.getSkillStat('adopted')).toBeNull(); // stale stat row dropped
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('cap eviction does NOT evict a brand-new never-used skill before an old used one', () => {
+    const { db, ws, dir } = setup();
+    const now = 100 * DAY;
+    seedSkill(db, ws, 'newbie', { origin: 'auto', createdAt: now, timesLoaded: 0 }); // never used, just created
+    seedSkill(db, ws, 'veteran', { origin: 'auto', createdAt: now - 50 * DAY, timesLoaded: 1, lastUsedAt: now - 50 * DAY });
+    const r = curateOnce({ db, workspaceDir: ws, agentId: 'a', cfg: cfg({ maxAutoSkills: 1, minUsesToKeep: 0, maxAgeDays: 0 }), now });
+    expect(r.evicted).toEqual(['veteran']); // old-used evicted, new one kept
+    expect(exists(ws, 'newbie')).toBe(true);
+    expect(exists(ws, 'veteran')).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('disabled: no skill prune, but telemetry retention still runs', () => {
     const { db, ws, dir } = setup();
     const now = 200 * DAY;

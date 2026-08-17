@@ -143,13 +143,17 @@ export interface SkillMetricsRollup {
     loadedAtLeast3: number;
     stickyPct: number; // % of auto-skills reaching >= 3 uses
   };
-  /** Measure 2 — cost-to-complete delta per intent cluster (directional). */
+  /**
+   * Measure 2 — cost-to-complete delta per intent cluster (directional).
+   * Medians are `null` when the corresponding cohort has no turns yet, so a
+   * genuine "no baseline" is not confused with a measured zero.
+   */
   costDelta: {
     clusters: number;
-    medianToolCallsBefore: number;
-    medianToolCallsAfter: number;
-    medianTokensBefore: number;
-    medianTokensAfter: number;
+    medianToolCallsBefore: number | null;
+    medianToolCallsAfter: number | null;
+    medianTokensBefore: number | null;
+    medianTokensAfter: number | null;
   };
   /** Measure 3 — recovery-rate trend. */
   recovery: {
@@ -160,8 +164,8 @@ export interface SkillMetricsRollup {
   cohort: {
     enabledTurns: number;
     disabledTurns: number;
-    enabledMedianToolCalls: number;
-    disabledMedianToolCalls: number;
+    enabledMedianToolCalls: number | null;
+    disabledMedianToolCalls: number | null;
   };
   /** Measure 5 — net token economics (the bottom line). */
   netTokens: {

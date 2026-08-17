@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { intentHash, signalsFromTurns } from '../../../src/agent/skill-learning/telemetry';
+import { intentHash, signalsFromTurns, startOfDayMs } from '../../../src/agent/skill-learning/telemetry';
 
 function freshDb(): { db: HistoryDB; dir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-telemetry-'));
@@ -110,5 +110,27 @@ describe('telemetry helpers', () => {
     ]);
     expect(s.toolCalls).toBe(9);
     expect(s.recoveryFired).toBe(true);
+  });
+});
+
+describe('startOfDayMs — timezone-correct daily window', () => {
+  // 2026-08-16T20:00:00Z. In Asia/Bangkok (UTC+7) this is 2026-08-17T03:00 local,
+  // so the local day is the 17th and its midnight is 2026-08-16T17:00:00Z.
+  const now = Date.UTC(2026, 7, 16, 20, 0, 0);
+
+  it('returns true LOCAL midnight for a +7 timezone (not UTC midnight)', () => {
+    expect(startOfDayMs(now, 'Asia/Bangkok')).toBe(Date.UTC(2026, 7, 16, 17, 0, 0));
+  });
+
+  it('returns UTC midnight for UTC', () => {
+    expect(startOfDayMs(now, 'UTC')).toBe(Date.UTC(2026, 7, 16, 0, 0, 0));
+  });
+
+  it('is always <= now and within the last 24h', () => {
+    for (const tz of ['Asia/Bangkok', 'UTC', 'America/New_York']) {
+      const s = startOfDayMs(now, tz);
+      expect(s).toBeLessThanOrEqual(now);
+      expect(now - s).toBeLessThan(24 * 60 * 60 * 1000);
+    }
   });
 });

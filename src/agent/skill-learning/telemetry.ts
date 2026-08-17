@@ -51,6 +51,17 @@ export function signalsFromTurns(rows: TurnMetricRow[]): SessionSignals {
   return { toolCalls, recoveryFired, userCorrection: false };
 }
 
+/** Signed offset (ms) of `timezone` relative to UTC at instant `now`. +ve = ahead of UTC. */
+function tzOffsetMs(now: number, timezone: string): number {
+  const d = new Date(now);
+  // Parsing each localized wall-clock string back through `new Date` adds the
+  // server's own offset to both sides equally, so the difference is exactly the
+  // target tz's offset from UTC. Standard, dependency-free technique.
+  const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+  const local = new Date(d.toLocaleString('en-US', { timeZone: timezone })).getTime();
+  return local - utc;
+}
+
 /** Midnight-of-today epoch ms in a timezone (for daily budget windows). Falls back to UTC math. */
 export function startOfDayMs(now: number, timezone: string): number {
   try {
@@ -65,10 +76,11 @@ export function startOfDayMs(now: number, timezone: string): number {
     const m = parts.find((p) => p.type === 'month')?.value;
     const day = parts.find((p) => p.type === 'day')?.value;
     if (y && m && day) {
-      // Midnight in the target tz, expressed as UTC ms via Date.UTC then offset-correct
-      // by re-reading the tz offset. Cheap approximation adequate for a daily budget window.
-      const utcMidnight = Date.UTC(Number(y), Number(m) - 1, Number(day));
-      return utcMidnight;
+      // `Date.UTC(...)` is midnight of the tz-local date expressed as if it were
+      // UTC; subtract the tz offset to get the epoch ms of true LOCAL midnight.
+      // (e.g. UTC+7: local midnight is 07:00 earlier than the UTC-labelled one.)
+      const utcLabelledMidnight = Date.UTC(Number(y), Number(m) - 1, Number(day));
+      return utcLabelledMidnight - tzOffsetMs(now, timezone);
     }
   } catch {
     /* fall through to UTC */

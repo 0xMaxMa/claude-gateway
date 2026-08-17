@@ -275,6 +275,19 @@ describe('buildChannelSend (fan-out registry)', () => {
     expect(hosts).toContain('discord.com');
   });
 
+  it('logs an HTTP error (401) instead of failing silently, and never throws', async () => {
+    writeAccess(ws, '.telegram-state', ['tg-1']);
+    const warns: string[] = [];
+    const logger = { info: () => {}, warn: (m: string) => warns.push(m) };
+    fetchMock = jest.spyOn(global, 'fetch').mockImplementation(
+      async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' }) as unknown as Response,
+    );
+
+    const send = buildTelegramSend(ws, 'stale-token', logger)!;
+    await expect(send('x')).resolves.toBeUndefined(); // best-effort, no throw
+    expect(warns.some((w) => w.includes('401'))).toBe(true); // status surfaced
+  });
+
   it('one channel failing never blocks the others', async () => {
     writeAccess(ws, '.telegram-state', ['tg-1']);
     writeAccess(ws, '.discord-state', ['dc-1']);

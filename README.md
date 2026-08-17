@@ -348,7 +348,7 @@ Controls [skill self-improvement](#skill-self-improvement) — agents learning r
 | `mode` | `"auto"` | `auto` writes skills directly; `propose` queues them for approval instead |
 | `minToolCalls` | `5` | Minimum tool calls in a turn before it's eligible for review |
 | `reviewModel` | `claude-haiku-4-5-…` | Model used for the background review pass |
-| `maxAutoSkills` | `50` | Cap on the number of `origin: auto` skills kept per agent |
+| `maxAutoSkills` | `50` | Cap on the number of non-pinned `origin: auto` skills kept per agent (pinned skills are never evicted and don't count toward the cap) |
 | `maxAgeDays` | `30` | Curator prunes auto-skills older than this (with too few uses) |
 | `minUsesToKeep` | `2` | Auto-skills used fewer times than this are prune candidates |
 | `maxReviewsPerDay` | `20` | Per-day cap on background review runs |

@@ -106,6 +106,38 @@ describe('skill-learning writer.applyProposal', () => {
     expect(applyProposal({ action: 'create', name: 'x-skill', body: 'b' }, ctx()).written).toBe(false);
   });
 
+  it('PROVENANCE GUARD: create refuses a non-auto file on disk even when absent from ctx.existing', () => {
+    // Simulate a user skill the registry cannot see (unparseable frontmatter, or
+    // frontmatter name != dir name): it exists at the exact target path but is
+    // NOT in ctx.existing. The in-memory guard alone would miss it.
+    const dir = path.join(ws, 'skills', 'orphan');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: something-else\norigin: user\n---\n\nHAND WRITTEN\n', 'utf-8');
+
+    const out = applyProposal({ action: 'create', name: 'orphan', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(false);
+    expect(out.reason).toMatch(/on-disk target is not origin:auto/i);
+    expect(readSkill('orphan')).toContain('HAND WRITTEN'); // user content preserved
+  });
+
+  it('create still succeeds when the target path is free', () => {
+    const out = applyProposal({ action: 'create', name: 'fresh-skill', desc: 'd', body: 'b' }, ctx({ existing: [] }));
+    expect(out.written).toBe(true);
+  });
+
+  it('desc ending in a backslash (plus quotes/newlines) stays valid YAML and re-parses', () => {
+    // A trailing backslash is the sharp case: quote-only escaping emits
+    // `description: "...\"` where the \" escapes the CLOSING quote → unterminated
+    // scalar → js-yaml throws → the freshly written skill never loads.
+    const nasty = 'win path C:\\tmp\nsays "hi" \\';
+    const out = applyProposal({ action: 'create', name: 'nasty-desc', desc: nasty, body: 'b' }, ctx());
+    expect(out.written).toBe(true);
+    const parsed = extractFrontmatter(readSkill('nasty-desc'));
+    expect(parsed).not.toBeNull(); // frontmatter still parses
+    expect(typeof parsed!.frontmatter['description']).toBe('string');
+    expect(parsed!.frontmatter['description']).toContain('hi');
+  });
+
   it('mode:propose writes to the .pending review queue, not live', () => {
     const out = applyProposal({ action: 'create', name: 'queued-skill', desc: 'd', body: 'b' }, ctx({ mode: 'propose' }));
     expect(out).toMatchObject({ written: true, queued: true });

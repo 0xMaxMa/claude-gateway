@@ -17,6 +17,11 @@ function median(values: number[]): number {
   return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
 }
 
+/** Median for display, or `null` when there is no data (distinct from a real 0). */
+function medianOrNull(values: number[]): number | null {
+  return values.length === 0 ? null : median(values);
+}
+
 function turnTokens(r: TurnMetricRow): number {
   return r.tokensIn + r.tokensOut;
 }
@@ -71,17 +76,17 @@ export function computeRollup(db: HistoryDB, agentId: string, now: number): Skil
     adoption: { autoSkills, loadedAtLeast1, loadedAtLeast3, stickyPct },
     costDelta: {
       clusters,
-      medianToolCallsBefore: median(before.map((t) => t.toolCalls)),
-      medianToolCallsAfter: median(after.map((t) => t.toolCalls)),
-      medianTokensBefore: median(before.map(turnTokens)),
-      medianTokensAfter: median(after.map(turnTokens)),
+      medianToolCallsBefore: medianOrNull(before.map((t) => t.toolCalls)),
+      medianToolCallsAfter: medianOrNull(after.map((t) => t.toolCalls)),
+      medianTokensBefore: medianOrNull(before.map(turnTokens)),
+      medianTokensAfter: medianOrNull(after.map(turnTokens)),
     },
     recovery: { ratePctRecent: rate(recent), ratePctEarlier: rate(earlier) },
     cohort: {
       enabledTurns: enabledTurns.length,
       disabledTurns: disabledTurns.length,
-      enabledMedianToolCalls: median(enabledTurns.map((t) => t.toolCalls)),
-      disabledMedianToolCalls: median(disabledTurns.map((t) => t.toolCalls)),
+      enabledMedianToolCalls: medianOrNull(enabledTurns.map((t) => t.toolCalls)),
+      disabledMedianToolCalls: medianOrNull(disabledTurns.map((t) => t.toolCalls)),
     },
     netTokens: { savedByReuse, spentReviewing, net: savedByReuse - spentReviewing },
   };

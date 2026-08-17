@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { msUntilNextHour } from '../../history/cleanup';
 import { isValidTimezone } from './config';
+import { readSkillOrigin } from './writer';
 import { computeRollup } from './metrics';
 import type { HistoryDB } from '../../history/db';
 import type { ResolvedSkillLearningCfg } from './types';
@@ -71,8 +72,7 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
     const unused = s.timesLoaded < cfg.minUsesToKeep;
     const stale = cfg.maxAgeDays > 0 && ageMs > cfg.maxAgeDays * DAY_MS;
     if (unused && stale) {
-      pruneSkill(s.name, deps, remove);
-      result.pruned.push(s.name);
+      if (pruneSkill(s.name, deps, remove)) result.pruned.push(s.name);
     } else {
       survivors.push(s);
     }
@@ -82,11 +82,13 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
   if (cfg.maxAutoSkills > 0 && survivors.length > cfg.maxAutoSkills) {
     const lru = survivors
       .slice()
-      .sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0)); // oldest-used first
+      // Oldest-used first. Fall back to createdAt for never-used skills so a
+      // brand-new (lastUsedAt=null) skill is not treated as the stalest and
+      // evicted before it is ever loaded.
+      .sort((a, b) => (a.lastUsedAt ?? a.createdAt ?? 0) - (b.lastUsedAt ?? b.createdAt ?? 0));
     const overflow = survivors.length - cfg.maxAutoSkills;
     for (const s of lru.slice(0, overflow)) {
-      pruneSkill(s.name, deps, remove);
-      result.evicted.push(s.name);
+      if (pruneSkill(s.name, deps, remove)) result.evicted.push(s.name);
     }
   }
 
@@ -94,13 +96,28 @@ export function curateOnce(deps: CuratorDeps): CuratorResult {
   return result;
 }
 
-function pruneSkill(name: string, deps: CuratorDeps, remove: (dir: string) => void): void {
+/**
+ * Remove a skill dir + drop its stat row. Returns `true` if the directory was
+ * actually removed, `false` if it was preserved (adopted by the user). Re-verify
+ * provenance against the on-disk file, not the (possibly stale) stat row: a user
+ * who "adopts" an auto skill — editing SKILL.md and flipping `origin` away from
+ * `auto` — must never have it deleted, even though the skill_stats row still says
+ * origin:auto. Drop the stale row either way so it stops being tracked as auto.
+ */
+function pruneSkill(name: string, deps: CuratorDeps, remove: (dir: string) => void): boolean {
+  const skillDir = path.join(deps.workspaceDir, 'skills', name);
+  const skillFile = path.join(skillDir, 'SKILL.md');
+  if (fs.existsSync(skillFile) && readSkillOrigin(skillFile) !== 'auto') {
+    deps.db.deleteSkillStat(name);
+    return false;
+  }
   try {
-    remove(path.join(deps.workspaceDir, 'skills', name));
+    remove(skillDir);
   } catch {
     /* best-effort — still drop the stat row */
   }
   deps.db.deleteSkillStat(name);
+  return true;
 }
 
 function logRollup(deps: CuratorDeps): void {
