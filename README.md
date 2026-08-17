@@ -369,6 +369,30 @@ Controls [skill self-improvement](#skill-self-improvement) — agents learning r
 
 Per-agent overrides are supported under the agent's own `skillLearning` block; unset fields fall back to the gateway default.
 
+### `gateway.memory`
+
+Memory budget discipline. Self-authored memory files (`MEMORY.md`, `USER.md`) that exceed a **soft** char budget get a loud over-budget banner prepended to their `CLAUDE.md` section at compose time — instead of a silent `[TRUNCATED]` — nudging the agent to consolidate. The banner reaches the agent on its next spawn (frozen-at-spawn, no restart) and self-heals once the file is back under budget. The banner lives only in the composed `CLAUDE.md`; the source file on disk is never rewritten with it.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `memoryBudgetChars` | `8000` | Soft budget for `MEMORY.md` (`0` = disabled) |
+| `userBudgetChars` | `3000` | Soft budget for `USER.md` (`0` = disabled) |
+| `overBudget` | `"warn"` | Banner severity: `warn` (⚠️) or `error` (🛑, stronger wording); an unknown value falls back to `warn` |
+
+```json
+{
+  "gateway": {
+    "memory": {
+      "memoryBudgetChars": 8000,
+      "userBudgetChars": 3000,
+      "overBudget": "warn"
+    }
+  }
+}
+```
+
+The soft budget sits well under the hard per-file limit (still applied as a context safety net); the banner is the primary over-budget signal for memory files.
+
 ### `gateway.bind`
 
 Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (localhost-only), so the dashboard and API are **not** exposed to the local network out of the box. Set to `0.0.0.0` to listen on all interfaces (for example when a containerized reverse proxy needs to reach the gateway). The `GATEWAY_BIND` environment variable, when set, takes precedence over this field.

@@ -111,6 +111,8 @@ export interface AgentConfig {
   history?: HistoryConfig;
   /** Per-agent skill-learning override (wins over the global gateway default). */
   skillLearning?: GatewayConfig['gateway']['skillLearning'];
+  /** Per-agent memory-budget override (field-level over the global gateway default). */
+  memory?: GatewayConfig['gateway']['memory'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
 }

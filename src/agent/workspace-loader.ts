@@ -66,7 +66,10 @@ export type OverBudgetMode = 'warn' | 'error';
 export interface MemoryBudgetConfig {
   memoryBudgetChars: number; // soft budget for MEMORY.md
   userBudgetChars: number; // soft budget for USER.md
-  overBudget: OverBudgetMode; // banner severity at compose
+  // Compose-banner severity only in v1: 'warn' (⚠️) vs 'error' (🛑 + stronger
+  // wording). Neither rejects the write — a hard-reject memory tool is a planned
+  // follow-up; at compose there is nothing to reject.
+  overBudget: OverBudgetMode;
 }
 
 const DEFAULT_MEMORY_BUDGET_CHARS = 8_000;
@@ -193,7 +196,9 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   // Memory files (MEMORY.md/USER.md) get a loud over-budget banner at their soft
   // budget BEFORE the hard-limit truncation, so the agent gets an actionable
   // signal instead of a silent [TRUNCATED]. The banner sits at the top of the
-  // section, so it survives even if the hard cap later trims the tail.
+  // section, so the per-file FILE_CHAR_LIMIT truncation (which trims the tail)
+  // always leaves it intact. (An extreme TOTAL_CHAR_LIMIT overflow could still
+  // slice it, but that path already truncates the whole prompt.)
   const budget = resolveMemoryBudget(opts?.memoryBudget);
   const memoryBudgeted = applyMemoryBudget(rawMemory, budget.memoryBudgetChars, 'MEMORY.md', budget.overBudget);
   const userBudgeted = applyMemoryBudget(rawUser, budget.userBudgetChars, 'USER.md', budget.overBudget);

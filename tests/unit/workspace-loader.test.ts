@@ -171,6 +171,17 @@ describe('workspace-loader', () => {
     });
   });
 
+  it('U-BUDGET-9: per-agent override wins field-by-field over the global default', () => {
+    // Mirrors src/index.ts: `{ ...global, ...agent }` then resolveMemoryBudget.
+    const global = { memoryBudgetChars: 8_000, userBudgetChars: 3_000, overBudget: 'warn' as OverBudgetMode };
+    const agent = { memoryBudgetChars: 40_000 }; // an agent with a large curated memory
+    expect(resolveMemoryBudget({ ...global, ...agent })).toEqual({
+      memoryBudgetChars: 40_000, // agent wins
+      userBudgetChars: 3_000, // global fills the rest
+      overBudget: 'warn',
+    });
+  });
+
   // -------------------------------------------------------------------------
   // U-WL-05: Total context exceeds 150,000 chars
   // -------------------------------------------------------------------------

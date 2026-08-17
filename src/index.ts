@@ -182,9 +182,10 @@ async function startAgent(
   logger.info('Initialising agent', { id: agentConfig.id });
 
   // Soft memory budgets for MEMORY.md/USER.md compose banners (issue #323).
-  // loadWorkspace defaults these when undefined, so passing the raw config
-  // (possibly absent) is safe.
-  const memoryBudget = gatewayConfig.gateway.memory;
+  // Per-agent config wins field-by-field over the global gateway default
+  // (mirrors the skillLearning override). loadWorkspace defaults any unset
+  // field, so a fully-absent config is safe.
+  const memoryBudget = { ...gatewayConfig.gateway.memory, ...agentConfig.memory };
 
   // Ensure workspace directory exists (may be absent for newly created agents)
   try {
@@ -617,7 +618,7 @@ async function main(): Promise<void> {
           mcpToolsDir: ctx.mcpToolsDir,
           sharedSkillsDir: ctx.sharedSkillsDir,
           logger,
-          memoryBudget: config.gateway.memory,
+          memoryBudget: { ...config.gateway.memory, ...agentConfig.memory },
         });
         const claudeMdPath = path.join(agentConfig.workspace, 'CLAUDE.md');
         await fs.promises.writeFile(claudeMdPath, updated.systemPrompt, 'utf8');
