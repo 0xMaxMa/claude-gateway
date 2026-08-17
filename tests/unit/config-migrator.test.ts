@@ -79,6 +79,30 @@ describe('config-migrator', () => {
       expect(target.newField).toBe('value');
       expect(added).toContain('newField');
     });
+
+    it('adds gateway.memory (issue #323) to a predating config, preserving existing overrides', () => {
+      const target: Record<string, unknown> = {
+        gateway: { logDir: '/logs', skillLearning: { enabled: false } },
+      };
+      const template: Record<string, unknown> = {
+        gateway: {
+          logDir: '/default',
+          skillLearning: { enabled: true },
+          memory: { memoryBudgetChars: 8000, userBudgetChars: 3000, overBudget: 'warn' },
+        },
+      };
+      const added: string[] = [];
+
+      deepMerge(target, template, '', added);
+
+      const gw = target.gateway as Record<string, unknown>;
+      // memory block injected with template defaults
+      expect(gw.memory).toEqual({ memoryBudgetChars: 8000, userBudgetChars: 3000, overBudget: 'warn' });
+      expect(added.some((f) => f.startsWith('gateway.memory'))).toBe(true);
+      // existing user overrides are NOT clobbered
+      expect((gw.skillLearning as Record<string, unknown>).enabled).toBe(false);
+      expect(gw.logDir).toBe('/logs');
+    });
   });
 
   // ---------------------------------------------------------------------------

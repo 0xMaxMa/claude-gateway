@@ -54,6 +54,73 @@ function truncateFile(content: string): { content: string; truncated: boolean } 
   return { content, truncated: false };
 }
 
+// ── Memory budget discipline (issue #323) ────────────────────────────────────
+// Self-authored memory (MEMORY.md/USER.md) that grows past a SOFT budget gets a
+// loud, actionable over-budget banner at compose time instead of a silent
+// truncation, so the owning agent consolidates on its next spawn. The soft
+// budget is well under the hard FILE_CHAR_LIMIT (still applied as a context
+// safety net); the banner fires long before the hard cut.
+
+export type OverBudgetMode = 'warn' | 'error';
+
+export interface MemoryBudgetConfig {
+  memoryBudgetChars: number; // soft budget for MEMORY.md
+  userBudgetChars: number; // soft budget for USER.md
+  overBudget: OverBudgetMode; // banner severity at compose
+}
+
+const DEFAULT_MEMORY_BUDGET_CHARS = 8_000;
+const DEFAULT_USER_BUDGET_CHARS = 3_000;
+
+export const DEFAULT_MEMORY_BUDGET: MemoryBudgetConfig = {
+  memoryBudgetChars: DEFAULT_MEMORY_BUDGET_CHARS,
+  userBudgetChars: DEFAULT_USER_BUDGET_CHARS,
+  overBudget: 'warn',
+};
+
+/**
+ * Resolve a (possibly partial or malformed) memory-budget config into a complete
+ * one, falling back to the documented defaults. An unknown `overBudget` value or
+ * a non-numeric / negative budget is treated as "not set" and defaulted, so bad
+ * operator config never throws at compose (fail-safe, mirrors #310's tz guard).
+ */
+export function resolveMemoryBudget(cfg?: Partial<MemoryBudgetConfig>): MemoryBudgetConfig {
+  const overBudget: OverBudgetMode = cfg?.overBudget === 'error' ? 'error' : 'warn';
+  const memoryBudgetChars =
+    typeof cfg?.memoryBudgetChars === 'number' && cfg.memoryBudgetChars >= 0
+      ? cfg.memoryBudgetChars
+      : DEFAULT_MEMORY_BUDGET_CHARS;
+  const userBudgetChars =
+    typeof cfg?.userBudgetChars === 'number' && cfg.userBudgetChars >= 0
+      ? cfg.userBudgetChars
+      : DEFAULT_USER_BUDGET_CHARS;
+  return { memoryBudgetChars, userBudgetChars, overBudget };
+}
+
+/**
+ * Prepend a loud over-budget banner to a memory file's composed content when it
+ * exceeds its soft budget. Returns the content unchanged when under budget (or
+ * when the budget is 0 / disabled). The hard FILE_CHAR_LIMIT truncation is
+ * applied separately afterwards as a context safety net.
+ */
+function applyMemoryBudget(
+  content: string,
+  budgetChars: number,
+  label: string,
+  mode: OverBudgetMode,
+): { content: string; overBudget: boolean } {
+  if (budgetChars <= 0 || content.length <= budgetChars) {
+    return { content, overBudget: false };
+  }
+  const icon = mode === 'error' ? '🛑' : '⚠️';
+  const action = mode === 'error' ? 'MUST consolidate now' : 'consolidate';
+  const banner =
+    `${icon} ${label} OVER BUDGET: ${content.length}/${budgetChars} chars — ${action}: ` +
+    `keep the highest-value facts, remove stale or duplicate entries. ` +
+    `Edits apply on the next session spawn (frozen-at-spawn), no restart.\n\n`;
+  return { content: banner + content, overBudget: true };
+}
+
 /**
  * Migrate workspace files from legacy lowercase names to uppercase canonical names.
  * - If lowercase exists and uppercase does NOT: rename lowercase → uppercase
@@ -89,6 +156,12 @@ export interface LoadWorkspaceOptions {
   mcpToolsDir?: string;
   sharedSkillsDir?: string;
   logger?: { warn: (msg: string) => void };
+  /**
+   * Soft per-file char budgets for MEMORY.md/USER.md. When omitted, the
+   * documented defaults (DEFAULT_MEMORY_BUDGET) apply — so callers and tests
+   * that don't pass it are unaffected.
+   */
+  memoryBudget?: Partial<MemoryBudgetConfig>;
 }
 
 /**
@@ -117,12 +190,20 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
     return r.content;
   };
 
+  // Memory files (MEMORY.md/USER.md) get a loud over-budget banner at their soft
+  // budget BEFORE the hard-limit truncation, so the agent gets an actionable
+  // signal instead of a silent [TRUNCATED]. The banner sits at the top of the
+  // section, so it survives even if the hard cap later trims the tail.
+  const budget = resolveMemoryBudget(opts?.memoryBudget);
+  const memoryBudgeted = applyMemoryBudget(rawMemory, budget.memoryBudgetChars, 'MEMORY.md', budget.overBudget);
+  const userBudgeted = applyMemoryBudget(rawUser, budget.userBudgetChars, 'USER.md', budget.overBudget);
+
   const agentMd = truncateResult(rawAgent);
   const identityMd = truncateResult(rawIdentity);
   const soulMd = truncateResult(rawSoul);
-  const userMd = truncateResult(rawUser);
+  const userMd = truncateResult(userBudgeted.content);
   const heartbeatMd = truncateResult(rawHeartbeat);
-  const memoryMd = truncateResult(rawMemory);
+  const memoryMd = truncateResult(memoryBudgeted.content);
 
   // Load agent skills
   const skillRegistry = loadSkills({

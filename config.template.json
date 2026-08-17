@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.18",
+  "configVersion": "1.0.19",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -76,6 +76,11 @@
       "pruneHour": 3,
       "pruneTimezone": "UTC",
       "notify": true
+    },
+    "memory": {
+      "memoryBudgetChars": 8000,
+      "userBudgetChars": 3000,
+      "overBudget": "warn"
     }
   },
   "agents": [
