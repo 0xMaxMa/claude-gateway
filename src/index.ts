@@ -24,7 +24,7 @@ import * as os from 'os';
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
-import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, AGENT_WRITABLE_FILES } from './agent/workspace-loader';
+import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -335,22 +335,34 @@ async function startAgent(
       if (updated.skillRegistry) {
         runner.setSkillRegistry(updated.skillRegistry);
       }
-      // Recompose always (above). For the restart, distinguish self-written
-      // files: when ONLY agent-writable files changed (MEMORY/USER/SOUL/AGENTS),
-      // the change most likely came from the running session mid-turn, so skip
-      // restarting busy sessions to avoid the self-restart footgun. Idle
-      // sessions are still restarted; any non-agent-writable file (e.g.
-      // HEARTBEAT.md) restores the normal restart-or-defer behavior.
-      const agentWritableOnly =
-        changedFiles.length > 0 &&
-        changedFiles.every((f) => AGENT_WRITABLE_FILES.has(f));
-      logger.info(
-        agentWritableOnly
-          ? 'Updated CLAUDE.md (agent-writable change), restarting idle sessions only'
-          : 'Updated CLAUDE.md, restarting sessions',
-        { files: changedFiles },
-      );
-      await runner.restartOrDefer({ skipBusy: agentWritableOnly });
+      // CLAUDE.md is always recomposed on disk (above) and is frozen-at-spawn —
+      // a live process never re-reads it; every future spawn picks up the new
+      // content regardless. So the restart decision is purely about how urgently
+      // the change must reach *already-running* sessions, tiered by change class.
+      const restartAction = classifyWorkspaceRestart(changedFiles);
+      if (restartAction === 'none') {
+        // Self-authored memory (MEMORY.md/USER.md): the running session already
+        // holds what it just wrote, and every future spawn reads the recomposed
+        // CLAUDE.md. Restarting anything is pure downside (dropped in-context
+        // state + SQLite replay). Restart NOTHING — this is the whole bug fix:
+        // a memory write can never drop a live session again.
+        logger.info('Updated CLAUDE.md (memory-only change), no session restart', {
+          files: changedFiles,
+        });
+      } else if (restartAction === 'defer-idle') {
+        // Operator identity (SOUL.md/AGENTS.md): reach sessions soon-ish, but
+        // never SIGKILL an idle bystander. Skip busy (self-restart footgun) and
+        // defer idle (lossless respawn on next message).
+        logger.info('Updated CLAUDE.md (identity change), deferring restarts', {
+          files: changedFiles,
+        });
+        await runner.restartOrDefer({ skipBusy: true, deferIdle: true });
+      } else {
+        // Non-writable change (HEARTBEAT.md, operator config, anything else):
+        // keep the normal restart-or-defer behavior.
+        logger.info('Updated CLAUDE.md, restarting sessions', { files: changedFiles });
+        await runner.restartOrDefer({ skipBusy: false });
+      }
       scheduler.load(updated.files.heartbeatMd);
     } catch (err) {
       logger.error('Failed to reload workspace', { error: (err as Error).message });
@@ -378,14 +390,17 @@ async function startAgent(
           updated.systemPrompt,
           'utf8',
         );
-        // Stop idle subprocesses now so they pick up the new registry on
-        // next spawn. Busy sessions are left running (skipBusy) rather than
-        // marked for a deferred restart: a session that triggers a SKILL.md
-        // change mid-turn would otherwise stop itself the instant its turn
-        // completes (the self-restart footgun — same guard the workspace
-        // watcher applies above). The recomposed CLAUDE.md is already on disk,
-        // so a skipped busy session picks up the change on its next spawn.
-        await runner.restartOrDefer({ skipBusy: true });
+        // Refresh the skills registry for future spawns without dropping any
+        // live session. Busy sessions are left running (skipBusy) — a session
+        // that triggers a SKILL.md change mid-turn would otherwise stop itself
+        // the instant its turn completes (the self-restart footgun). Idle
+        // sessions are DEFERRED (deferIdle) rather than SIGKILLed: the skills
+        // section of CLAUDE.md is frozen-at-spawn and the registry applies on
+        // next spawn, so killing an idle bystander now buys nothing and only
+        // drops its in-context state. Auto skill-learning writes skills mid-work,
+        // so this keeps unrelated idle sessions alive. Both pick up the change
+        // on their next spawn (busy: next natural spawn; idle: next message).
+        await runner.restartOrDefer({ skipBusy: true, deferIdle: true });
         logger.info('Skills registry updated', {
           count: updated.skillRegistry?.skills.size ?? 0,
         });

@@ -1054,15 +1054,25 @@ export class AgentRunner extends EventEmitter {
           });
         }
 
-        // Restart session before this turn if accumulated image size exceeded threshold
+        // Consume a deferred restart before this turn (armed by the image-size
+        // threshold, or by a workspace/skills change that deferred this idle
+        // session). Guard on isProcessing: this same chatId key can be driven by
+        // a web-UI live-view turn (sendMessageToSession) that does NOT hold
+        // turnActive, so the session may be mid-stream here. Stopping it would
+        // truncate that live turn — instead leave the flag armed and consume it
+        // on the next idle turn. In the normal channel flow the session is idle
+        // at this point (turnActive serialises channel turns), so the guard is a
+        // no-op and the restart proceeds as before.
         if (this.pendingRestarts.has(chatId)) {
           const existingSession = this.sessions.get(chatId);
-          if (existingSession) {
-            await existingSession.stop();
-            this.sessions.delete(chatId);
+          if (!existingSession?.isProcessing) {
+            if (existingSession) {
+              await existingSession.stop();
+              this.sessions.delete(chatId);
+            }
+            this.pendingRestarts.delete(chatId);
+            this.imageSizePerChat.delete(chatId);
           }
-          this.pendingRestarts.delete(chatId);
-          this.imageSizePerChat.delete(chatId);
         }
 
         // Route to session process (map key = chatId, actual sessionId passed separately)
@@ -2219,9 +2229,25 @@ export class AgentRunner extends EventEmitter {
    *   restarted so the change reaches them on their next spawn. The recomposed
    *   CLAUDE.md is already on disk, so a skipped busy session picks up the
    *   change on its own next natural spawn.
+   * @param opts.deferIdle When true, idle sessions are NOT `stop()`ed now.
+   *   Instead they are added to the runner-level `pendingRestarts` set, so each
+   *   respawns cleanly on its next message (the same lossless mechanism used for
+   *   the image-size-threshold restart) rather than being SIGKILLed mid-idle and
+   *   losing its in-context state. Since CLAUDE.md is frozen-at-spawn, an idle
+   *   bystander gains nothing from an immediate stop — the recomposed file
+   *   applies on its next spawn either way. Use for agent-writable/identity and
+   *   skills changes, where dropping an unrelated idle session is pure downside.
+   *   NB: idle sessions are deferred via `pendingRestarts`, NOT
+   *   `proc.markPendingRestart()` — the latter emits `deferredRestartReady`
+   *   synchronously on an idle process, which stops it immediately (no deferral).
+   * @returns Counts of sessions handled: `immediate` (stopped now), `deferred`
+   *   (armed to restart on next turn/message), `skipped` (left untouched).
    */
-  async restartOrDefer(opts?: { skipBusy?: boolean }): Promise<void> {
+  async restartOrDefer(
+    opts?: { skipBusy?: boolean; deferIdle?: boolean },
+  ): Promise<{ immediate: number; deferred: number; skipped: number }> {
     const skipBusy = opts?.skipBusy ?? false;
+    const deferIdle = opts?.deferIdle ?? false;
     let immediate = 0;
     let deferred = 0;
     let skipped = 0;
@@ -2233,6 +2259,21 @@ export class AgentRunner extends EventEmitter {
           continue;
         }
         proc.markPendingRestart();
+        deferred++;
+      } else if (deferIdle && proc.source !== 'api') {
+        // Lossless deferral for CHANNEL sessions only: leave the idle process
+        // running and arm a restart on its next message (mirrors the
+        // image-size-threshold path). Do NOT call proc.markPendingRestart() here
+        // — on an idle process it fires deferredRestartReady immediately and
+        // stops the session.
+        //
+        // Guard on source: `pendingRestarts` is consumed ONLY in injectTurn (the
+        // channel turn path, keyed by chatId). api / __heartbeat__ sessions are
+        // keyed by sessionId and never flow through injectTurn, so an entry armed
+        // for them would never be consumed — it would leak in the Set and the
+        // change would never reach the session. Fall through to an immediate stop
+        // so those respawn fresh on their next use, exactly as before deferIdle.
+        this.pendingRestarts.add(id);
         deferred++;
       } else {
         toStopNow.push(id);
@@ -2246,6 +2287,7 @@ export class AgentRunner extends EventEmitter {
       immediate++;
     }
     this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred, skipped });
+    return { immediate, deferred, skipped };
   }
 
   /**
