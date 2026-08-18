@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.24",
+  "configVersion": "1.0.25",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -80,7 +80,9 @@
     "memory": {
       "memoryBudgetChars": 8000,
       "userBudgetChars": 3000,
-      "overBudget": "warn"
+      "overBudget": "warn",
+      "writeRouting": true,
+      "episodicArchiveDir": "memory"
     },
     "dreaming": {
       "enabled": true,

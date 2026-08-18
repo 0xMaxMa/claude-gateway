@@ -43,6 +43,14 @@ export interface DreamingManagerDeps {
   memoryBudgetChars?: number;
   userBudgetChars?: number;
   /**
+   * planning-65 write routing. When true, the reviewer is told the two-tier
+   * contract and may emit episodic ops; `episodicArchiveDir` is where those
+   * `memory/<topic>.md` notes are written. When false/absent, durable-only
+   * (exact prior behavior).
+   */
+  writeRouting?: boolean;
+  episodicArchiveDir?: string;
+  /**
    * Optional per-agent→shared promotion hook (K3↔K4). When provided (the gateway
    * wires it only when the shared KB is enabled AND `shared.mode:auto`), each
    * durable `add` the dream promotes is also contributed to the shared vault.
@@ -168,7 +176,14 @@ export class DreamingManager {
     let review;
     try {
       review = await runDreamReviewer(
-        { transcript: gathered.transcript, currentMemory, currentUser, memoryChars, memoryBudget },
+        {
+          transcript: gathered.transcript,
+          currentMemory,
+          currentUser,
+          memoryChars,
+          memoryBudget,
+          writeRouting: this.deps.writeRouting,
+        },
         cfg,
         this.deps.spawnFn,
       );
@@ -199,6 +214,10 @@ export class DreamingManager {
         const applied = applyDreamProposals(this.deps.workspaceDir, proposals, {
           memoryBudgetChars: memoryBudget,
           userBudgetChars: this.deps.userBudgetChars ?? 3_000,
+          // planning-65: route episodic ops to memory/<topic>.md only when routing is on.
+          episodicArchiveDir: this.deps.writeRouting
+            ? this.deps.episodicArchiveDir || 'memory'
+            : undefined,
         }, now);
         appliedCount = applied.totalApplied;
         appliedProposals = applied.appliedProposals;
@@ -213,7 +232,8 @@ export class DreamingManager {
       // mode auto); best-effort — a promotion failure never affects the local dream.
       if (this.deps.sharedPromote) {
         for (const p of appliedProposals) {
-          if (p.op !== 'add' || !p.content) continue;
+          // Only durable `add`s promote to shared; episodic task-log stays local.
+          if (p.op !== 'add' || !p.content || p.tier === 'episodic') continue;
           try {
             this.deps.sharedPromote(p);
           } catch {

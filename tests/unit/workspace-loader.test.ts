@@ -286,6 +286,7 @@ describe('workspace-loader', () => {
       memoryBudgetChars: 100,
       userBudgetChars: 3_000,
       overBudget: 'error',
+      writeRouting: false,
     });
   });
 
@@ -297,6 +298,7 @@ describe('workspace-loader', () => {
       memoryBudgetChars: 40_000, // agent wins
       userBudgetChars: 3_000, // global fills the rest
       overBudget: 'warn',
+      writeRouting: false,
     });
   });
 

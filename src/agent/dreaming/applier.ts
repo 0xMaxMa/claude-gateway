@@ -32,6 +32,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { DreamProposal, DreamFile } from './types';
+import { appendEpisodicNote, DEFAULT_EPISODIC_DIR, type EpisodicWriteResult } from './episodic';
 
 const DEFAULT_MAX_PRIOR_LOSS_FRACTION = 0.25; // openclaw default (replaces, and removes under budget)
 // When the file is ALREADY over budget, removals are the intended shrink lever, so
@@ -46,6 +47,12 @@ export interface ApplyOptions {
   memoryBudgetChars: number;
   userBudgetChars: number;
   maxPriorLossFraction?: number;
+  /**
+   * planning-65: when set, `tier:"episodic"` `add` ops are appended to
+   * `memory/<topic>.md` under this dir (relative to the workspace). Omitted ⇒
+   * episodic ops are ignored (durable-only behavior, back-compat).
+   */
+  episodicArchiveDir?: string;
 }
 
 export interface ApplyFileResult {
@@ -65,6 +72,8 @@ export interface ApplyResult {
   totalApplied: number;
   /** All proposals actually applied across files — the ONLY ones safe to promote. */
   appliedProposals: DreamProposal[];
+  /** Episodic notes appended to `memory/<topic>.md` (planning-65). Empty when routing off. */
+  episodic: EpisodicWriteResult[];
 }
 
 /** Backups dir for rollback pre-images. */
@@ -324,7 +333,9 @@ export function applyDreamProposals(
   let totalApplied = 0;
   const appliedProposals: DreamProposal[] = [];
   for (const file of MEMORY_FILES) {
-    const forFile = proposals.filter((p) => p.file === file);
+    // Durable ops only: episodic ops (tier:'episodic') route to memory/<topic>.md
+    // below, never into an evergreen file.
+    const forFile = proposals.filter((p) => (p.tier ?? 'durable') !== 'episodic' && p.file === file);
     const budget = file === 'MEMORY.md' ? opts.memoryBudgetChars : opts.userBudgetChars;
     try {
       const res = applyToFile(workspaceDir, file, forFile, budget, maxLoss, now);
@@ -344,5 +355,24 @@ export function applyDreamProposals(
       });
     }
   }
-  return { files, totalApplied, appliedProposals };
+
+  // planning-65 — episodic tier: append task-log notes to memory/<topic>.md. Only
+  // when an episodic dir is configured (routing on); each append is validated +
+  // realpath-confined in `appendEpisodicNote`. A note that writes OK counts toward
+  // totalApplied and joins appliedProposals (so audit/shared-promote see it).
+  const episodic: EpisodicWriteResult[] = [];
+  if (opts.episodicArchiveDir !== undefined) {
+    const dir = opts.episodicArchiveDir || DEFAULT_EPISODIC_DIR;
+    for (const p of proposals) {
+      if (p.tier !== 'episodic' || p.op !== 'add' || !p.topic || !p.content) continue;
+      const res = appendEpisodicNote(workspaceDir, dir, p.topic, p.content, now);
+      episodic.push(res);
+      if (res.ok) {
+        totalApplied++;
+        appliedProposals.push(p);
+      }
+    }
+  }
+
+  return { files, totalApplied, appliedProposals, episodic };
 }

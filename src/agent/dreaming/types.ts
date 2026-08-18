@@ -9,6 +9,13 @@
 export type DreamMode = 'propose' | 'auto';
 export type DreamOpKind = 'add' | 'replace' | 'remove';
 export type DreamFile = 'MEMORY.md' | 'USER.md';
+/**
+ * Which memory tier an op writes to (planning-65).
+ *   - `durable`  → an evergreen file (`MEMORY.md`/`USER.md`), injected every session.
+ *   - `episodic` → a `memory/<topic>.md` note, searched on demand (task-log).
+ * Absent ⇒ `durable` (back-compat with pre-routing proposals).
+ */
+export type DreamTier = 'durable' | 'episodic';
 
 /** Partial config as it appears under `gateway.dreaming` / a per-agent override. */
 export interface DreamingConfig {
@@ -41,7 +48,15 @@ export interface ResolvedDreamingCfg {
 /** One proposed memory-consolidation op (never applied in propose mode). */
 export interface DreamProposal {
   op: DreamOpKind;
-  file: DreamFile;
+  /**
+   * Target evergreen file for a `durable` op. Omitted for `episodic` ops, which
+   * route by `topic` into `memory/<topic>.md` instead.
+   */
+  file?: DreamFile;
+  /** Tier this op writes to; absent ⇒ 'durable' (back-compat). */
+  tier?: DreamTier;
+  /** For `episodic` ops: the `memory/<topic>.md` slug (`^[a-z0-9-]{1,64}$`). */
+  topic?: string;
   /** Substring anchor for `replace`/`remove`. */
   target?: string;
   /** New text for `add`/`replace`. */

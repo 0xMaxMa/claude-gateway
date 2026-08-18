@@ -271,6 +271,11 @@ export interface GatewayConfig {
       memoryBudgetChars?: number;    // soft budget for MEMORY.md, default 8000 (0 = disabled)
       userBudgetChars?: number;      // soft budget for USER.md, default 3000 (0 = disabled)
       overBudget?: 'warn' | 'error'; // compose banner severity, default "warn"
+      // planning-65 write routing: inject the two-tier contract into the Memory
+      // Rule (MEMORY.md = durable facts; task-log → memory/<topic>.md) and let the
+      // dreaming reviewer route episodic ops out. Default true; false = kill-switch.
+      writeRouting?: boolean;
+      episodicArchiveDir?: string;   // where episodic notes land (rel to workspace), default "memory"
     };
     /**
      * Nightly memory "dreaming" (issue #325). A print-only reviewer reads a
@@ -291,6 +296,24 @@ export interface GatewayConfig {
       reviewModel?: string;         // cheap model for the reviewer, default haiku
       promotionThreshold?: number;  // min candidate score to promote, default 0.6
       minRecallCount?: number;      // a fact must recur >= N times to promote, default 2
+      /**
+       * Archive staleness GC (planning-66). Nightly, deterministic pass (next to the
+       * compactor, auto mode) that keeps `memory_search` surfacing CURRENT truth: it
+       * soft-invalidates superseded / aged-out / low-recall archive entries by moving
+       * them to `memory/archive/stale.md` + stamping `invalid_at` — NEVER deletes, so
+       * every entry stays searchable — and promotes an invalidated entry back if it is
+       * retrieved again. A search-quality fix, not a prompt-budget one (planning-65
+       * already moved task-log off the prompt). Touches only the `memory/*.md` archive
+       * tier — never evergreen Lane-1 (MEMORY.md/USER.md) or pinned files.
+       */
+      staleness?: {
+        enabled?: boolean;         // default true; false ⇒ GC no-ops (archive grows as before)
+        staleTtlDays?: number;     // idle-since-last-retrieval before an unmarked entry ages out, default 90
+        keepImportance?: number;   // importance >= this is never GC'd, default 7
+        minRetrievalKeep?: number; // retrieved >= this in the window ⇒ keep regardless of age, default 1
+        supersession?: boolean;    // deterministic same-#id invalidation (no TTL), default true
+        recordRetrievals?: boolean; // read-path append to kb_retrieval_log (feeds LRU + feedback), default true
+      };
     };
     /**
      * Two-lane memory: per-agent searchable knowledge archive (planning-64 K0).

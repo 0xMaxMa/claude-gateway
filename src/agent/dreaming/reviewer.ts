@@ -10,7 +10,8 @@
  */
 
 import { makeClaudeSpawn, type ClaudeSpawnFn } from '../skill-learning/reviewer';
-import type { DreamProposal, DreamReviewResult, ResolvedDreamingCfg } from './types';
+import { isValidTopicSlug } from './episodic';
+import type { DreamProposal, DreamReviewResult, DreamTier, ResolvedDreamingCfg } from './types';
 
 export interface DreamReviewerInput {
   /** The lookback transcript slice to consolidate (already trimmed by the caller). */
@@ -26,6 +27,13 @@ export interface DreamReviewerInput {
    */
   memoryChars?: number;
   memoryBudget?: number;
+  /**
+   * Write routing (planning-65): when true, the reviewer is told the two-tier
+   * contract (durable → MEMORY.md/USER.md, episodic task-log → memory/<topic>.md)
+   * and may emit `tier:"episodic"` ops. When false/absent it behaves exactly as
+   * before (durable ops only) — a clean kill-switch.
+   */
+  writeRouting?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are a memory-consolidation reviewer for an AI agent ("dreaming"). You are given a slice of the agent's recent session transcripts and its current MEMORY.md and USER.md. Propose a SMALL set of edits that make the agent's long-term memory more useful per character — promote durable, recurring facts/preferences; replace stale or superseded entries; remove duplicates. Aim for FEWER, BETTER memories, not more.
@@ -42,6 +50,17 @@ Respond with STRICT JSON only (no prose, no markdown fences), matching:
 - proposals: [] when nothing is worth changing.
 - "add": provide file + content. "replace": provide file + target (existing substring) + content. "remove": provide file + target.
 - score: your confidence 0..1 this belongs in durable memory. recallCount: how many times the fact recurred in the transcript.`;
+
+// planning-65: appended to the system prompt ONLY when writeRouting is on. It
+// teaches the two-tier contract and the episodic op shape. Kept out of the base
+// prompt so writeRouting:false reproduces the exact prior behavior.
+const ROUTING_RULE = `
+
+MEMORY TIERS — route each op by what it is:
+- DURABLE semantic facts (user preferences, standing rules, identity, hard-won lessons — standing context needed in FUTURE unrelated sessions) → file "MEMORY.md" or "USER.md".
+- EPISODIC task-log (a record of what HAPPENED: completed work, PR/issue status, dated events) → tier "episodic". NEVER put task-log in MEMORY.md.
+- Litmus: "standing context for future unrelated sessions?" → MEMORY.md. "a record of a thing that happened?" → episodic.
+For an EPISODIC op use exactly: {"op":"add","tier":"episodic","topic":"<lowercase-kebab-slug>","content":"...","reason":"...","score":0.0-1.0,"recallCount":N}. topic MUST match ^[a-z0-9-]{1,64}$. Episodic ops are always "add" (never replace/remove). Durable ops keep the "file" form above (no "tier" needed).`;
 
 function buildPrompt(input: DreamReviewerInput): string {
   const overBudget =
@@ -63,7 +82,7 @@ function buildPrompt(input: DreamReviewerInput): string {
       ].join('\n')
     : '';
   return [
-    SYSTEM_PROMPT,
+    SYSTEM_PROMPT + (input.writeRouting ? ROUTING_RULE : ''),
     budgetBlock,
     '',
     '<current_memory>',
@@ -139,22 +158,45 @@ function coerceProposal(raw: unknown): DreamProposal | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const op = o['op'];
-  const file = o['file'];
   if (typeof op !== 'string' || !VALID_OPS.has(op)) return null;
-  if (typeof file !== 'string' || !VALID_FILES.has(file)) return null;
   const content = typeof o['content'] === 'string' ? o['content'] : undefined;
   const target = typeof o['target'] === 'string' ? o['target'] : undefined;
-  // add/replace need content; replace/remove need a target anchor.
-  if ((op === 'add' || op === 'replace') && !content) return null;
-  if ((op === 'replace' || op === 'remove') && !target) return null;
   const scoreRaw = o['score'];
   const score = typeof scoreRaw === 'number' && scoreRaw >= 0 && scoreRaw <= 1 ? scoreRaw : 0;
   const recallRaw = o['recallCount'];
   const recallCount =
     typeof recallRaw === 'number' && Number.isFinite(recallRaw) && recallRaw >= 0 ? Math.floor(recallRaw) : 0;
+
+  // planning-65: episodic ops route to memory/<topic>.md — add-only, need a valid
+  // topic slug + content. Validated defensively (topic comes from an untrusted
+  // transcript): a bad slug or missing content ⇒ drop the op.
+  const tier: DreamTier = o['tier'] === 'episodic' ? 'episodic' : 'durable';
+  if (tier === 'episodic') {
+    if (op !== 'add') return null;
+    const topic = o['topic'];
+    if (!isValidTopicSlug(topic)) return null;
+    if (!content) return null;
+    return {
+      op: op as DreamProposal['op'],
+      tier: 'episodic',
+      topic,
+      content: capStr(content),
+      reason: typeof o['reason'] === 'string' ? capStr(o['reason']) : '',
+      score,
+      recallCount,
+    };
+  }
+
+  // Durable op (unchanged contract): needs a valid evergreen file target.
+  const file = o['file'];
+  if (typeof file !== 'string' || !VALID_FILES.has(file)) return null;
+  // add/replace need content; replace/remove need a target anchor.
+  if ((op === 'add' || op === 'replace') && !content) return null;
+  if ((op === 'replace' || op === 'remove') && !target) return null;
   return {
     op: op as DreamProposal['op'],
     file: file as DreamProposal['file'],
+    tier: 'durable',
     target: target === undefined ? undefined : capStr(target),
     content: content === undefined ? undefined : capStr(content),
     reason: typeof o['reason'] === 'string' ? capStr(o['reason']) : '',
