@@ -318,6 +318,22 @@ export function generateDashboardHtml(): string {
     .dream-prop .reason { color: #a0aec0; margin-top: 3px; }
     .dream-prop .content { color: #cbd5e0; margin-top: 5px; white-space: pre-wrap; word-break: break-word;
       background: #070a12; border-radius: 4px; padding: 6px 8px; font-size: 0.78rem; max-height: 140px; overflow: auto; }
+    .dream-prop .anchor { color: #f6ad55; font-family: monospace; font-size: 0.72rem; margin-top: 3px; }
+    .dream-prop.accepted { border-color: #2f855a; }
+    .dream-prop-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    .dream-accept-btn { background: #22543d; color: #9ae6b4; border: 1px solid #2f855a; border-radius: 4px;
+      padding: 2px 10px; font-size: 0.74rem; font-weight: 600; cursor: pointer; }
+    .dream-accept-btn:hover { background: #276749; }
+    .dream-accept-btn:disabled { opacity: 0.55; cursor: default; }
+    .prop-status { font-size: 0.72rem; font-weight: 600; }
+    .prop-status.applied { color: #9ae6b4; }
+    .prop-status.applied-auto { color: #68d391; }
+    .prop-status.pending { color: #90cdf4; }
+    .prop-status.failed { color: #fc8181; }
+    .dream-accept-all { background: #22543d; color: #9ae6b4; border: 1px solid #2f855a; border-radius: 4px;
+      padding: 1px 9px; font-size: 0.7rem; font-weight: 600; cursor: pointer; }
+    .dream-accept-all:hover { background: #276749; }
+    .dream-accept-all:disabled { opacity: 0.55; cursor: default; }
     /* Note detail — full-width card below the graph. Shows the whole file. */
     .kb-note {
       margin-top: 12px; background: #131a2b; border: 1px solid #2d3748; border-radius: 8px;
@@ -1843,12 +1859,50 @@ export function generateDashboardHtml(): string {
       var refreshBtn = document.getElementById('dreams-refresh');
       var allRuns = [];
       var loaded = false;
+      // Notice to show once, after the next render (a reload overwrites statsEl,
+      // so an accept result set directly on statsEl would be lost immediately).
+      var pendingNotice = '';
 
       function el(tag, cls, text){
         var e = document.createElement(tag);
         if (cls) e.className = cls;
         if (text != null) e.textContent = text;
         return e;
+      }
+
+      // Apply one or more proposals of a run to the agent's memory via the K4
+      // applier. indexes === null ⇒ accept every pending proposal in the run.
+      function acceptDreams(agent, ts, indexes, btn){
+        var origText = btn ? btn.textContent : '';
+        if (btn){ btn.disabled = true; btn.textContent = 'Applying…'; }
+        var payload = { agentId: agent, ts: ts };
+        if (indexes) payload.indexes = indexes;
+        fetch(apiUrl('/knowledge/dreams/apply'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(function(res){
+          if (res.status === 401){ onUnauthorized(); return null; }
+          return res.json().then(function(data){ return { ok: res.ok, data: data || {} }; });
+        }).then(function(r){
+          if (!r) return;
+          if (!r.ok){
+            if (btn){ btn.disabled = false; btn.textContent = origText || 'Accept'; }
+            statsEl.textContent = 'Apply failed: ' + (r.data.error || 'error');
+            return;
+          }
+          // Reload so applied proposals show ✓ and any anchor-stale skips stay
+          // pending; the memory files themselves were already updated on disk.
+          // The message is stashed in pendingNotice because loadDreams → render
+          // rewrites statsEl.
+          pendingNotice = 'Applied ' + (r.data.applied || 0)
+            + (r.data.skipped ? ', skipped ' + r.data.skipped + ' (anchor changed / net-negative)' : '')
+            + (r.data.alreadyAccepted ? ', ' + r.data.alreadyAccepted + ' already applied' : '');
+          loadDreams(true);
+        }).catch(function(e){
+          if (btn){ btn.disabled = false; btn.textContent = origText || 'Accept'; }
+          statsEl.textContent = 'Apply error: ' + e.message;
+        });
       }
 
       function renderRun(run){
@@ -1859,6 +1913,18 @@ export function generateDashboardHtml(): string {
         head.appendChild(el('span', 'dream-badge ' + modeCls, run.mode));
         head.appendChild(el('span', 'dream-badge outcome', run.outcome));
         head.appendChild(el('span', 'when', run.iso));
+
+        // Pending = a propose-run proposal not yet manually accepted. Accept-all
+        // shows only when there is something to apply.
+        var pending = (run.proposals || []).filter(function(p){ return run.mode !== 'auto' && !p.accepted; });
+        if (pending.length){
+          var allBtn = el('button', 'dream-accept-all', 'Accept all (' + pending.length + ')');
+          allBtn.title = 'Apply every pending proposal in this run to memory';
+          allBtn.addEventListener('click', function(){
+            acceptDreams(run.agent, run.ts, pending.map(function(p){ return p.index; }), allBtn);
+          });
+          head.appendChild(allBtn);
+        }
         box.appendChild(head);
 
         if (run.summary) box.appendChild(el('div', 'dream-summary', run.summary));
@@ -1866,14 +1932,32 @@ export function generateDashboardHtml(): string {
         if (run.proposals && run.proposals.length){
           var props = el('div', 'dream-props');
           run.proposals.forEach(function(p){
-            var pe = el('div', 'dream-prop');
+            var pe = el('div', 'dream-prop' + (p.accepted ? ' accepted' : ''));
             var top = el('div');
             top.appendChild(el('span', 'op ' + (p.op || ''), p.op || '?'));
             top.appendChild(el('span', 'file', p.file || ''));
             top.appendChild(el('span', 'score', 'score ' + (p.score != null ? p.score : '?') + ' · recall ' + (p.recallCount != null ? p.recallCount : '?')));
             pe.appendChild(top);
             if (p.reason) pe.appendChild(el('div', 'reason', p.reason));
+            if (p.target) pe.appendChild(el('div', 'anchor', 'anchor: ' + p.target));
             if (p.content) pe.appendChild(el('div', 'content', p.content));
+
+            // Per-proposal status + accept action.
+            var actions = el('div', 'dream-prop-actions');
+            if (p.accepted){
+              actions.appendChild(el('span', 'prop-status applied', '✓ applied'));
+            } else if (run.mode === 'auto'){
+              actions.appendChild(el('span', 'prop-status applied-auto', '✓ applied (auto)'));
+            } else {
+              actions.appendChild(el('span', 'prop-status pending', 'pending'));
+              var accBtn = el('button', 'dream-accept-btn', 'Accept');
+              accBtn.title = 'Apply this proposal to ' + (p.file || 'memory');
+              accBtn.addEventListener('click', function(){
+                acceptDreams(run.agent, run.ts, [p.index], accBtn);
+              });
+              actions.appendChild(accBtn);
+            }
+            pe.appendChild(actions);
             props.appendChild(pe);
           });
           box.appendChild(props);
@@ -1895,7 +1979,17 @@ export function generateDashboardHtml(): string {
           return;
         }
         emptyEl.style.display = 'none';
-        statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's');
+        var pendingTotal = 0;
+        runs.forEach(function(r){
+          if (r.mode === 'auto') return;
+          (r.proposals || []).forEach(function(p){ if (!p.accepted) pendingTotal++; });
+        });
+        statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's')
+          + (pendingTotal ? ' · ' + pendingTotal + ' pending' : '');
+        if (pendingNotice){
+          statsEl.textContent += ' — ' + pendingNotice;
+          pendingNotice = '';
+        }
         runs.forEach(function(r){ listEl.appendChild(renderRun(r)); });
       }
 

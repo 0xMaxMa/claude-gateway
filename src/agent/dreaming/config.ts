@@ -12,7 +12,7 @@ import type { DreamingConfig, ResolvedDreamingCfg } from './types';
 
 export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   enabled: true,
-  mode: 'propose', // SAFE default: diary-only dry-run (auto mutates memory — P3)
+  mode: 'auto', // apply consolidation to memory; gated by the K4 applier (#330). Set 'propose' for dry-run.
   dreamHour: 3,
   dreamTimezone: 'UTC',
   quietMinutes: 30,

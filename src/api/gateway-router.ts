@@ -15,8 +15,10 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
-import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages } from '../agent/knowledge';
+import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages, makeSharedPromoter } from '../agent/knowledge';
 import { parseDreamReport } from '../agent/dreaming/report';
+import { acceptDreamProposals } from '../agent/dreaming/accept';
+import { resolveMemoryBudget } from '../agent/workspace-loader';
 import { DREAMING_DIR } from '../agent/dreaming/audit';
 import {
   generateCliDevicePage,
@@ -1098,7 +1100,13 @@ export class GatewayRouter {
           } catch {
             promos = '';
           }
-          const parsed = parseDreamReport(dreams, promos);
+          let accepted = '';
+          try {
+            accepted = fs.readFileSync(path.join(dir, 'accepted.jsonl'), 'utf8');
+          } catch {
+            accepted = '';
+          }
+          const parsed = parseDreamReport(dreams, promos, accepted);
           if (!parsed.length) continue;
           agents.push(id);
           for (const r of parsed) {
@@ -1117,6 +1125,77 @@ export class GatewayRouter {
       } catch (err) {
         process.stderr.write(`[knowledge/dreams] ${(err as Error).message}\n`);
         res.status(500).json({ error: 'Failed to build dreaming report' });
+      }
+    });
+
+    // Accept (apply) one or more dreaming proposals from a `propose`-mode run.
+    // Applies the selected proposals to the agent's MEMORY.md/USER.md through the
+    // SAME K4 safe applier the nightly auto mode uses (backup + bounded-loss +
+    // net-negative + CAS + never-empty; memory-only ⇒ no session restart), records
+    // them to `.dreaming/accepted.jsonl` for idempotency, and — when the shared KB
+    // is `auto` — promotes each applied `add` to the shared vault.
+    // Auth: dashboard session cookie OR API key (never public).
+    // Body: { agentId: string, ts: number, indexes?: number[] } (omit indexes ⇒ whole run).
+    this.app.post('/knowledge/dreams/apply', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const agentId = typeof body.agentId === 'string' ? body.agentId : '';
+        const ts = Number(body.ts);
+
+        // agentId must be a known agent — this both authorizes the target and
+        // guards the workspace path from traversal (id is never joined raw).
+        if (!agentId || !this.agents.has(agentId)) {
+          res.status(404).json({ error: 'Unknown agent' });
+          return;
+        }
+        if (!Number.isFinite(ts)) {
+          res.status(400).json({ error: 'ts must be a finite number' });
+          return;
+        }
+        let indexes: number[] | null = null;
+        if (body.indexes !== undefined) {
+          if (
+            !Array.isArray(body.indexes) ||
+            !body.indexes.every((n) => Number.isInteger(n) && (n as number) >= 0)
+          ) {
+            res.status(400).json({ error: 'indexes must be an array of non-negative integers' });
+            return;
+          }
+          indexes = body.indexes as number[];
+        }
+
+        const workspaceDir = path.join(this.agentsRoot(), agentId, 'workspace');
+        const budget = resolveMemoryBudget({
+          ...this.gatewayConfig?.gateway?.memory,
+          ...this.configs.get(agentId)?.memory,
+        });
+        const sharedPromote = makeSharedPromoter(
+          agentId,
+          this.configs.get(agentId)?.knowledge?.shared,
+          this.gatewayConfig?.gateway?.knowledge?.shared,
+        );
+
+        const result = acceptDreamProposals(workspaceDir, ts, indexes, {
+          memoryBudgetChars: budget.memoryBudgetChars,
+          userBudgetChars: budget.userBudgetChars,
+          sharedPromote,
+        });
+
+        if (result.requested === 0) {
+          res.status(404).json({ error: 'No matching proposals for that run' });
+          return;
+        }
+        res.json({
+          applied: result.applied,
+          skipped: result.skipped,
+          alreadyAccepted: result.alreadyAccepted,
+          requested: result.requested,
+          backups: result.backups,
+        });
+      } catch (err) {
+        process.stderr.write(`[knowledge/dreams/apply] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to apply dreaming proposals' });
       }
     });
 

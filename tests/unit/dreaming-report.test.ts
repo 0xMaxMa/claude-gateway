@@ -83,4 +83,26 @@ describe('parseDreamReport', () => {
   it('returns [] for empty inputs', () => {
     expect(parseDreamReport('', '')).toEqual([]);
   });
+
+  it('assigns a per-run proposal index starting at 0', () => {
+    const runs = parseDreamReport(DREAMS_MD, PROMOTIONS);
+    const propose = runs[1];
+    expect(propose.proposals.map((p) => p.index)).toEqual([0, 1]);
+    // Every proposal defaults to not-accepted without an accepted.jsonl.
+    expect(propose.proposals.every((p) => p.accepted === false)).toBe(true);
+  });
+
+  it('marks a proposal accepted when accepted.jsonl carries its ts:index', () => {
+    const accepted =
+      JSON.stringify({ ts: TS_OLD, index: 1, file: 'MEMORY.md', op: 'add', acceptedAt: TS_OLD }) + '\n';
+    const runs = parseDreamReport(DREAMS_MD, PROMOTIONS, accepted);
+    const propose = runs.find((r) => r.ts === TS_OLD)!;
+    expect(propose.proposals[0].accepted).toBe(false); // index 0 not accepted
+    expect(propose.proposals[1].accepted).toBe(true); // index 1 accepted
+  });
+
+  it('ignores malformed accepted.jsonl lines (no proposal marked)', () => {
+    const runs = parseDreamReport(DREAMS_MD, PROMOTIONS, 'not json\n{"ts":"nope"}\n');
+    expect(runs.every((r) => r.proposals.every((p) => p.accepted === false))).toBe(true);
+  });
 });

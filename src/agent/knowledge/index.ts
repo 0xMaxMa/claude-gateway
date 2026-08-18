@@ -22,6 +22,7 @@ export {
 } from './config';
 export type { KnowledgeSharedConfig, ResolvedKnowledgeSharedCfg } from './types';
 export { writeSharedNote, sharedNoteFilename } from './shared-writer';
+export { makeSharedPromoter } from './shared-promote';
 export {
   compileWiki,
   parseWikiPage,

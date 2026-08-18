@@ -26,7 +26,7 @@ describe('resolveSharedConfig', () => {
     const r = resolveSharedConfig();
     expect(r.enabled).toBe(true);
     expect(r.project).toBe('global');
-    expect(r.mode).toBe('propose');
+    expect(r.mode).toBe('auto'); // planning-64 Part B: auto by default (#341)
     expect(r.root).toContain('.claude-gateway');
   });
 

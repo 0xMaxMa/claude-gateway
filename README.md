@@ -395,12 +395,12 @@ The soft budget sits well under the hard per-file limit (still applied as a cont
 
 ### `gateway.dreaming`
 
-Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In **`propose`** mode (the default) the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — no memory file is modified. In **`auto`** mode a safe applier writes the ops to `MEMORY.md`/`USER.md` (rollback pre-image first; ordered apply with anchor re-resolution; bounded-loss + append-only fallback; net-negative when over budget) — a memory-only change, so no session is restarted.
+Nightly memory **dreaming** — background consolidation of an agent's long-term memory. A print-only `claude -p` reviewer (no tools, no `--dangerously-skip-permissions`) reads a lookback window of the agent's own session transcripts and proposes memory-consolidation ops. In **`auto`** mode (the default) a safe applier writes the ops to `MEMORY.md`/`USER.md` (rollback pre-image first; ordered apply with anchor re-resolution; bounded-loss + append-only fallback; net-negative when over budget) — a memory-only change, so no session is restarted. In **`propose`** mode the proposals are written **only** to a `DREAMS.md` diary + JSONL audit under `<workspace>/.dreaming/` — no memory file is modified (set `mode: "propose"` to keep this dry-run behavior).
 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
-| `mode` | `"propose"` | `propose` = diary-only dry-run; `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative) |
+| `mode` | `"auto"` | `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative); `propose` = diary-only dry-run |
 | `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |
@@ -409,6 +409,8 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 | `promotionThreshold` / `minRecallCount` | `0.6` / `2` | Scoring thresholds for promoting a fact |
 
 Per-agent overrides are supported under the agent's own `dreaming` block; unset fields fall back to the gateway default. `enabled:false` or `maxChangesPerRun:0` makes a run a no-op.
+
+> **⚠️ Upgrade note:** the default `mode` for both `gateway.dreaming` and `gateway.knowledge.shared` changed from `propose` (dry-run) to `auto` (configVersion 1.0.24). Once the K4 applier landed (backup + net-negative + bounded-loss + CAS + never-empty; memory-only write ⇒ no session restart), `auto` became the intended default: nightly dreaming now applies consolidation to `MEMORY.md`/`USER.md` and promotes durable memories to the shared vault. Like the `gateway.bind` migration, the migrator upgrades the *retired* `propose` default to `auto` once and logs a one-time warning; an explicit `mode` you set at 1.0.24+ is never touched. To keep dry-run, set `mode: "propose"` explicitly.
 
 **Keeping `MEMORY.md` near budget (`auto` mode).** Two mechanisms stop the on-disk `MEMORY.md` from growing unbounded while preserving recall:
 
@@ -430,14 +432,14 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 | `shared.enabled` | `true` | Enable the cross-agent shared KB |
 | `shared.project` | `"global"` | Sharing partition key (one safe path segment) — agents with the same value share one vault; `"global"` ⇒ shared-by-default |
 | `shared.root` | `~/.claude-gateway/shared/kb` | Shared vault root dir (`<root>/<project>/`) |
-| `shared.mode` | `"propose"` | Per-agent→shared promotion mode; `propose` = dry-run, `auto` = promote durable dreamed facts |
+| `shared.mode` | `"auto"` | Per-agent→shared promotion mode; `auto` = promote durable dreamed facts, `propose` = dry-run |
 | `shared.graph` | `false` | Compile the memory-wiki graph + dashboards over the shared vault to `<vault>/reports/*.md` (opt-in). Independent of the dashboard **Knowledge base** tab, which computes its graph on-demand |
 
 **Shared KB.** A shared SQLite/FTS5 vault outside any single agent's workspace lets agents build a common knowledge base. Notes under `<root>/<project>/notes/*.md` are indexed and reachable via `memory_search` with `corpus:"shared"` (the shared vault) or `corpus:"all"` (this agent's memory + shared, merged by relevance). Concurrent writers are safe without a lock — atomic note writes (temp+rename) plus a cross-process `PRAGMA busy_timeout` on the index. Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
 
 **Knowledge base viewer.** The web dashboard's **Knowledge base** tab renders the shared vault as an Obsidian-style force-directed graph (nodes = notes sized by link degree and coloured by `type`; edges = `[[wiki-links]]`; contradicting claims and stale notes are flagged). It is fed by `GET /knowledge/graph`, which computes the model **on-demand** from the vault (no dependency on `shared.graph` or the nightly reindex). When the vault is empty it shows a clearly-labelled demo dataset (with a size selector for scale testing). A **source** selector switches the graph between the cross-agent Shared KB and any single agent's own Lane-2 memory (`workspace/memory`), a node **search** box filters the graph, and clicking a node opens its full note (fetched via `GET /knowledge/note`) rendered as Markdown below the graph.
 
-**Nightly dreaming viewer.** A **Nightly dreaming** tab renders each agent's memory-consolidation audit trail (`.dreaming/DREAMS.md` + `promotions.jsonl`) as a newest-first timeline of runs — mode (propose/auto), outcome, the proposed/applied changes with scores, and per-run token/session counts — fed by `GET /knowledge/dreams` and filterable by agent.
+**Nightly dreaming viewer.** A **Nightly dreaming** tab renders each agent's memory-consolidation audit trail (`.dreaming/DREAMS.md` + `promotions.jsonl`) as a newest-first timeline of runs — mode (propose/auto), outcome, the proposed/applied changes with scores + anchors, and per-run token/session counts — fed by `GET /knowledge/dreams` and filterable by agent. For a `propose`-mode run you can **accept** proposals directly from the tab: an **Accept** button per proposal (and **Accept all** per run) POSTs to `POST /knowledge/dreams/apply`, which applies the selected ops to `MEMORY.md`/`USER.md` through the same K4 safe applier auto mode uses (backup + bounded-loss + net-negative + CAS; memory-only ⇒ no restart) and — when the shared KB is `auto` — promotes applied `add`s to the shared vault. Accepts are idempotent (recorded to `.dreaming/accepted.jsonl`); applied proposals show ✓ and a proposal whose anchor has since drifted is safely skipped and stays pending for a later retry.
 
 ### `gateway.bind`
 

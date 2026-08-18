@@ -13,6 +13,7 @@ import {
   repairInjectedAgentFields,
   AGENT_CREDENTIAL_FIELDS,
   BIND_PRESERVED_WARNING,
+  MEMORY_MODE_AUTO_WARNING,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -1089,6 +1090,127 @@ describe('config-migrator', () => {
       expect(result.needed).toBe(false);
       expect(result.addedFields).not.toContain('gateway.bind');
       expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // memory `mode` retired-default upgrade propose → auto (Issue #341)
+  // ---------------------------------------------------------------------------
+  // planning-64 shipped dreaming/shared-KB promotion with a SAFE dry-run default
+  // (mode: "propose") written literally into every config. Now that the K4
+  // applier (#330) has landed, the intended default is "auto". A one-time,
+  // version-gated migration flips the retired literal "propose" ⇒ "auto";
+  // explicit non-"propose" values and configs already at 1.0.24+ are untouched.
+  describe('memory mode retired-default upgrade (propose → auto)', () => {
+    // Mirror config.template.json: the template ships mode "auto" at 1.0.24.
+    const template = (): string =>
+      writeJson('template.json', {
+        configVersion: '1.0.24',
+        gateway: {
+          timezone: 'UTC',
+          bind: '127.0.0.1',
+          dreaming: { enabled: true, mode: 'auto' },
+          knowledge: { shared: { enabled: true, mode: 'auto' } },
+        },
+      });
+
+    it('flips both retired propose defaults to auto when migrating a pre-1.0.24 config', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.23',
+        gateway: {
+          bind: '127.0.0.1', // explicit, so the bind migration stays out of the way
+          dreaming: { enabled: true, mode: 'propose' },
+          knowledge: { shared: { enabled: true, mode: 'propose' } },
+        },
+      });
+      const result = migrateConfig(configPath, template(), '1.0.24');
+
+      expect(result.migrated).toBe(true);
+      expect(result.addedFields).toContain('gateway.dreaming.mode');
+      expect(result.addedFields).toContain('gateway.knowledge.shared.mode');
+      expect(result.warnings).toContain(MEMORY_MODE_AUTO_WARNING);
+
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.dreaming.mode).toBe('auto');
+      expect(updated.gateway.knowledge.shared.mode).toBe('auto');
+      expect(updated.configVersion).toBe('1.0.24');
+    });
+
+    it('never overwrites an explicit non-propose value (auto stays auto, no warning)', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.23',
+        gateway: {
+          bind: '127.0.0.1',
+          dreaming: { enabled: true, mode: 'auto' },
+          knowledge: { shared: { enabled: true, mode: 'auto' } },
+        },
+      });
+      const result = migrateConfig(configPath, template(), '1.0.24');
+
+      expect(result.addedFields).not.toContain('gateway.dreaming.mode');
+      expect(result.addedFields).not.toContain('gateway.knowledge.shared.mode');
+      expect(result.warnings).not.toContain(MEMORY_MODE_AUTO_WARNING);
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.dreaming.mode).toBe('auto');
+      expect(updated.gateway.knowledge.shared.mode).toBe('auto');
+    });
+
+    it('does not run for a config already at 1.0.24 — a later propose is preserved', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.24',
+        gateway: {
+          bind: '127.0.0.1',
+          dreaming: { enabled: true, mode: 'propose' }, // user re-pinned dry-run
+          knowledge: { shared: { enabled: true, mode: 'propose' } },
+        },
+      });
+      const result = migrateConfig(configPath, template(), '1.0.24');
+
+      expect(result.migrated).toBe(false); // 1.0.24 >= template → no migration
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.dreaming.mode).toBe('propose');
+      expect(updated.gateway.knowledge.shared.mode).toBe('propose');
+    });
+
+    it('detectMigration dry-run reports the changed mode fields without writing', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.23',
+        gateway: {
+          bind: '127.0.0.1',
+          dreaming: { enabled: true, mode: 'propose' },
+          knowledge: { shared: { enabled: true, mode: 'propose' } },
+        },
+      });
+      const result = detectMigration(configPath, template(), '1.0.24');
+
+      expect(result.needed).toBe(true);
+      expect(result.addedFields).toContain('gateway.dreaming.mode');
+      expect(result.addedFields).toContain('gateway.knowledge.shared.mode');
+      expect(result.warnings).toContain(MEMORY_MODE_AUTO_WARNING);
+
+      // Dry-run must not mutate the file on disk.
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(onDisk.configVersion).toBe('1.0.23');
+      expect(onDisk.gateway.dreaming.mode).toBe('propose');
+      expect(onDisk.gateway.knowledge.shared.mode).toBe('propose');
+    });
+
+    it('flips a pre-existing dreaming block even when the shared block is absent', () => {
+      const configPath = writeJson('config.json', {
+        configVersion: '1.0.23',
+        gateway: {
+          bind: '127.0.0.1',
+          dreaming: { enabled: true, mode: 'propose' },
+          // no knowledge block at all — template merge injects it at "auto"
+        },
+      });
+      const result = migrateConfig(configPath, template(), '1.0.24');
+
+      expect(result.addedFields).toContain('gateway.dreaming.mode');
+      const updated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(updated.gateway.dreaming.mode).toBe('auto');
+      // shared block came from the template default, already "auto"
+      expect(updated.gateway.knowledge.shared.mode).toBe('auto');
     });
   });
 });

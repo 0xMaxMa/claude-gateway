@@ -5,7 +5,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { createHash } from 'crypto';
 
 // Load ~/.claude-gateway/.env so global installs pick up env vars without
 // needing shell exports or running via npm start.
@@ -26,7 +25,7 @@ import { createHash } from 'crypto';
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
-import { resolveArchiveConfig, resolveSharedConfig, writeSharedNote } from './agent/knowledge';
+import { resolveArchiveConfig, makeSharedPromoter } from './agent/knowledge';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -336,22 +335,11 @@ async function startAgent(
       memoryBudgetChars: memoryBudget.memoryBudgetChars,
       userBudgetChars: memoryBudget.userBudgetChars,
       // K3↔K4 promotion: only when the shared KB is enabled AND set to auto.
-      sharedPromote: (() => {
-        const sharedCfg = resolveSharedConfig(
-          agentConfig.knowledge?.shared,
-          gatewayConfig.gateway.knowledge?.shared,
-        );
-        if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
-        return (p: { reason: string; content?: string }) => {
-          const content = p.content ?? '';
-          // Disambiguate by a short content hash so two proposals whose reasons
-          // slug to the same filename (or a recurring nightly reason) can't
-          // silently overwrite each other in the shared vault. Identical content
-          // maps to the same file (idempotent).
-          const hash = createHash('sha256').update(content).digest('hex').slice(0, 8);
-          writeSharedNote(sharedCfg, `${agentConfig.id}-${p.reason}-${hash}`, content);
-        };
-      })(),
+      sharedPromote: makeSharedPromoter(
+        agentConfig.id,
+        agentConfig.knowledge?.shared,
+        gatewayConfig.gateway.knowledge?.shared,
+      ),
     });
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer
   } catch (err) {

@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.23",
+  "configVersion": "1.0.24",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -84,7 +84,7 @@
     },
     "dreaming": {
       "enabled": true,
-      "mode": "propose",
+      "mode": "auto",
       "dreamHour": 3,
       "dreamTimezone": "UTC",
       "quietMinutes": 30,
@@ -105,7 +105,7 @@
         "enabled": true,
         "project": "global",
         "root": "~/.claude-gateway/shared/kb",
-        "mode": "propose",
+        "mode": "auto",
         "graph": false
       }
     }

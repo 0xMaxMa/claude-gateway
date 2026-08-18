@@ -298,4 +298,80 @@ describe('GET /knowledge/graph', () => {
       expect(unauth.status).toBe(401);
     });
   });
+
+  describe('POST /knowledge/dreams/apply', () => {
+    const TS = 1_700_000_000_000;
+    const PROMOS = JSON.stringify({
+      ts: TS, mode: 'propose', op: 'add', file: 'MEMORY.md',
+      content: '- accepted from dashboard', reason: 'durable', score: 0.9, recallCount: 3,
+    }) + '\n';
+    const DREAMS = `## ${new Date(TS).toISOString()} — proposed (propose)\n\nA run\n\n- **add** \`MEMORY.md\` — durable _(score 0.90, recall 3)_\n\n_propose mode: proposals logged only — memory not modified._\n\n_tokens: 100, sessions: 1_\n\n---\n`;
+
+    function seedMemory(id: string, body: string): void {
+      const wsDir = path.join(root, 'agents', id, 'workspace');
+      fs.mkdirSync(wsDir, { recursive: true });
+      fs.writeFileSync(path.join(wsDir, 'MEMORY.md'), body);
+    }
+
+    it('requires auth (401 without a credential)', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).post('/knowledge/dreams/apply').send({ agentId: 'alpha', ts: TS });
+      expect(res.status).toBe(401);
+    });
+
+    it('404 for an unknown agent (also guards path traversal)', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).post('/knowledge/dreams/apply')
+        .set('X-Api-Key', KEY).send({ agentId: '../../etc', ts: TS });
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when ts is not a finite number', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).post('/knowledge/dreams/apply')
+        .set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: 'soon' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 when indexes is not an array of non-negative integers', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).post('/knowledge/dreams/apply')
+        .set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: TS, indexes: [-1] });
+      expect(res.status).toBe(400);
+    });
+
+    it('applies a proposal to MEMORY.md and marks it accepted in the report', async () => {
+      seedMemory('alpha', '# Memory\n\n- existing\n');
+      seedAgentDreams(root, 'alpha', DREAMS, PROMOS);
+      const app = buildAppWithAgents(root, root, ['alpha']);
+
+      const res = await supertest(app).post('/knowledge/dreams/apply')
+        .set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: TS, indexes: [0] });
+      expect(res.status).toBe(200);
+      expect(res.body.applied).toBe(1);
+
+      const mem = fs.readFileSync(path.join(root, 'agents', 'alpha', 'workspace', 'MEMORY.md'), 'utf8');
+      expect(mem).toContain('accepted from dashboard');
+
+      // The report now reflects the accepted proposal.
+      const report = await supertest(app).get('/knowledge/dreams').set('X-Api-Key', KEY);
+      const run = report.body.runs.find((r: { ts: number }) => r.ts === TS);
+      expect(run.proposals[0].accepted).toBe(true);
+    });
+
+    it('is idempotent — re-accepting reports alreadyAccepted and does not double-write', async () => {
+      seedMemory('alpha', '# Memory\n');
+      seedAgentDreams(root, 'alpha', DREAMS, PROMOS);
+      const app = buildAppWithAgents(root, root, ['alpha']);
+
+      await supertest(app).post('/knowledge/dreams/apply').set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: TS });
+      const res2 = await supertest(app).post('/knowledge/dreams/apply').set('X-Api-Key', KEY).send({ agentId: 'alpha', ts: TS });
+      expect(res2.status).toBe(200);
+      expect(res2.body.applied).toBe(0);
+      expect(res2.body.alreadyAccepted).toBe(1);
+
+      const mem = fs.readFileSync(path.join(root, 'agents', 'alpha', 'workspace', 'MEMORY.md'), 'utf8');
+      expect((mem.match(/accepted from dashboard/g) || []).length).toBe(1);
+    });
+  });
 });
