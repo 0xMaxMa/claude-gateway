@@ -118,6 +118,74 @@ describe('dreaming/compactor: planCompaction (pure)', () => {
   });
 });
 
+describe('dreaming/compactor: domain-agnostic markers (#337, not just dev)', () => {
+  it('C-19: archives generic done markers — DONE / RESOLVED / CANCELLED / ✅ / [x] / ~~strike~~', () => {
+    const mem = `## Tasks
+
+- Book the venue — **DONE** 2026-08-01
+- Ticket refund — RESOLVED by support
+- Team offsite — CANCELLED, budget cut
+- ✅ Renew the domain for the year
+- [x] Submit the tax form
+- ~~Old landing-page copy~~ replaced
+- Buy milk and eggs for the week
+- [ ] Draft the Q4 plan
+`;
+    const plan = planCompaction(mem, NOW);
+    expect(plan.archivedCount).toBe(6); // the 6 done entries
+    // The two live entries stay (a plain todo + an UNCHECKED box).
+    expect(plan.nextMemory).toContain('- Buy milk and eggs for the week');
+    expect(plan.nextMemory).toContain('- [ ] Draft the Q4 plan');
+    // Archived bodies are recallable.
+    expect(plan.archiveAppend).toContain('Book the venue');
+    expect(plan.archiveAppend).toContain('Old landing-page copy');
+  });
+
+  it('C-20: lowercase status words are NOT matched (precision — prose is safe)', () => {
+    const mem = `## Notes
+
+- we are not done yet with the redesign
+- the shop closed early yesterday
+- meeting resolved nothing, reschedule
+`;
+    const plan = planCompaction(mem, NOW);
+    expect(plan.archivedCount).toBe(0); // lowercase done/closed/resolved = prose, untouched
+    expect(plan.nextMemory).toBe(mem);
+  });
+
+  it('C-21: h3+ entry headers are archived (founder-style ### ✅ … MERGED), section h2 is never touched', () => {
+    const mem = `## Projects
+
+### Free-Plan Docker Runtime (active, do not touch)
+- point A
+- point B
+
+### ✅ #316 — explicit Stop status — PR #317 MERGED squash abc123
+
+### ✅ #313 — start/stop REST API — issue #313 CLOSED
+`;
+    const plan = planCompaction(mem, NOW);
+    expect(plan.archivedCount).toBe(2); // the two ### ✅ … entries
+    // The h2 section header + the active project + its bullets remain.
+    expect(plan.nextMemory).toContain('## Projects');
+    expect(plan.nextMemory).toContain('### Free-Plan Docker Runtime (active, do not touch)');
+    expect(plan.nextMemory).toContain('- point A');
+    // Archived header entries become an h3 pointer (structure kept), full text in archive.
+    expect(plan.nextMemory).toMatch(/### #316 — explicit Stop status .*archived .* → memory\/archive\/completed\.md/);
+    expect(plan.nextMemory).not.toContain('PR #317 MERGED squash abc123');
+    expect(plan.archiveAppend).toContain('PR #317 MERGED squash abc123');
+  });
+
+  it('C-22: idempotent across markers + headers (second pass archives nothing)', () => {
+    const mem = `## X\n\n- ✅ a task\n- item — DONE\n\n### ✅ #9 — a thing CLOSED\n`;
+    const once = planCompaction(mem, NOW);
+    expect(once.archivedCount).toBe(3);
+    const twice = planCompaction(once.nextMemory, NOW);
+    expect(twice.archivedCount).toBe(0);
+    expect(twice.nextMemory).toBe(once.nextMemory);
+  });
+});
+
 describe('dreaming/compactor: compactCompletedEntries (I/O)', () => {
   it('C-6: writes searchable archive under memory/, shrinks MEMORY.md, keeps open items + backup', () => {
     const ws = mkWs({ 'MEMORY.md': MIXED });

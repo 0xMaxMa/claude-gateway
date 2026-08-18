@@ -35,17 +35,34 @@ import * as path from 'path';
 /** Where archived completed-log entries are stored (indexed + searchable). */
 export const ARCHIVE_REL_PATH = 'memory/archive/completed.md';
 
-/** Uppercase terminal-status markers. Case-SENSITIVE so "Closes #" never matches. */
-const TERMINAL_RE = /\b(MERGED|CLOSED)\b/;
+const STATUS_WORDS =
+  'MERGED|CLOSED|DONE|COMPLETED|FINISHED|RESOLVED|CANCELLED|CANCELED|ARCHIVED|SUPERSEDED|OBSOLETE|DEPRECATED|EXPIRED|SHIPPED';
+/**
+ * A "done / terminal" marker, domain-agnostic (not just dev): an UPPERCASE status
+ * word (case-sensitive, so prose like "Closes #12" or lowercase "closed early"
+ * never matches), a checked task box `[x]`/`[X]`, a ✅ check mark, or a
+ * ~~strikethrough~~. Covers any topic the agent marks done while keeping false
+ * positives low.
+ */
+const TERMINAL_RE = new RegExp(`(?:\\b(?:${STATUS_WORDS})\\b|✅|\\[[xX]\\]|~~[^~]+~~)`);
+/** Leading done-marker to strip from a pointer label (checkbox / check / strike open). */
+const LEAD_MARKER_RE = /^(?:✅|\[[xX]\]|~~)\s*/;
 const TOP_BULLET_RE = /^[-*] /;
 const HEADER_RE = /^#{1,6} /;
+/** h1/h2 are structural sections; h3–h6 can be a completed *entry* header. */
+const SECTION_RE = /^#{1,2} /;
+const ENTRY_HEADER_RE = /^#{3,6} /;
 const BLANK_RE = /^\s*$/;
 
-/** A parsed block: a top-level bullet plus its contiguous continuation lines. */
+/** A parsed block: a lead line (bullet or h3+ header) plus its continuation lines. */
 interface Block {
   lines: string[];
   /** The nearest preceding `## ` section title (for archive provenance). */
   section: string;
+  /** How the pointer is re-emitted: keep a bullet, or keep the header prefix. */
+  lead: 'bullet' | 'header';
+  /** For header blocks, the `### ` prefix to preserve on the pointer. */
+  headerPrefix: string;
 }
 
 /** Result of the pure planning step — no I/O. */
@@ -75,40 +92,43 @@ function isTerminalHead(head: string): boolean {
 }
 
 /**
- * Extract a compact identity label for the pointer line. Preference order:
+ * Extract a compact identity label for the pointer line, from a lead line whose
+ * bullet/header prefix has already been stripped (`body`). Preference order:
  *   1. An existing markdown link `[text](url)` — kept verbatim so the entry's own
  *      per-record memory/*.md link (if any) survives.
- *   2. The identity text BEFORE the terminal status marker (`#<num> — <title>`),
- *      so status/detail stays in the archive and only the name lands in the pointer.
- *   3. The first ~70 chars of the bullet text, markdown stripped.
+ *   2. The identity text BEFORE the terminal marker, so status/detail stays in the
+ *      archive and only the name lands in the pointer.
+ *   3. The first ~70 chars, markdown stripped.
  */
-function extractLabel(head: string): string {
-  const body = head.replace(TOP_BULLET_RE, '').trim();
-  const link = body.match(/\[[^\]]+\]\([^)]+\)/);
+function extractLabel(body: string): string {
+  const trimmed = body.replace(LEAD_MARKER_RE, '').trim();
+  const link = trimmed.match(/\[[^\]]+\]\([^)]+\)/);
   if (link) return link[0];
-  // Everything from the terminal marker onward is detail bound for the archive;
-  // the label is just the identity that precedes it.
-  const cut = body.search(TERMINAL_RE);
-  let ident = (cut > 0 ? body.slice(0, cut) : body).trim();
+  // Everything from the terminal marker onward is detail bound for the archive.
+  const cut = trimmed.search(TERMINAL_RE);
+  let ident = (cut > 0 ? trimmed.slice(0, cut) : trimmed).trim();
   ident = ident
-    .replace(/[\s—–\-:,(]+$/, '') // trailing separators left by the cut
-    .replace(/[*_`]/g, '') // markdown emphasis
+    .replace(/[\s—–\-:,(~]+$/, '') // trailing separators / open strike left by the cut
+    .replace(/[*_`~]/g, '') // markdown emphasis / strike marks
     .replace(/\s+/g, ' ')
     .trim();
-  if (!ident) ident = body.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
+  if (!ident) ident = trimmed.replace(/[*_`~]/g, '').replace(/\s+/g, ' ').trim();
   return ident.length > 70 ? ident.slice(0, 70).replace(/\s+\S*$/, '') + '…' : ident;
 }
 
-/** Which terminal status matched (for the pointer suffix). */
+/** Which terminal marker matched (for the pointer suffix); non-word markers ⇒ DONE. */
 function statusOf(head: string): string {
   const m = head.match(TERMINAL_RE);
-  return m ? m[1] : 'DONE';
+  if (!m) return 'DONE';
+  return /^[A-Z]+$/.test(m[0]) ? m[0] : 'DONE';
 }
 
 /**
  * Parse MEMORY.md into an ordered list of items. Each item is either a raw line
- * (headers, blanks, prose, non-bullet lines) or a Block (a top-level bullet plus
- * its contiguous, non-blank, non-header, non-bullet continuation lines).
+ * (h1/h2 section headers, blanks, prose) or a Block:
+ *   - a top-level bullet (`- `/`* `) plus its contiguous non-blank continuation lines, or
+ *   - an h3–h6 entry header (`### …`) plus its body up to the next header/blank.
+ * h1/h2 headers are structural section titles — never archivable entries.
  */
 type Item = { kind: 'raw'; line: string } | { kind: 'block'; block: Block };
 
@@ -118,15 +138,30 @@ function parseItems(memory: string): Item[] {
   let section = '';
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (HEADER_RE.test(line)) {
-      if (line.startsWith('## ')) section = line.replace(/^#{1,6}\s+/, '').trim();
+    // h1/h2 = structural section title (updates provenance, never a block).
+    if (SECTION_RE.test(line)) {
+      section = line.replace(/^#{1,6}\s+/, '').trim();
       items.push({ kind: 'raw', line });
+      continue;
+    }
+    // h3–h6 = a completed-entry header candidate; absorb its body until the next
+    // header (any level) or a blank line.
+    if (ENTRY_HEADER_RE.test(line)) {
+      const blockLines = [line];
+      let j = i + 1;
+      while (j < lines.length && !BLANK_RE.test(lines[j]) && !HEADER_RE.test(lines[j])) {
+        blockLines.push(lines[j]);
+        j++;
+      }
+      const headerPrefix = (line.match(/^#{3,6}\s+/) ?? ['### '])[0];
+      items.push({ kind: 'block', block: { lines: blockLines, section, lead: 'header', headerPrefix } });
+      i = j - 1;
       continue;
     }
     if (TOP_BULLET_RE.test(line)) {
       const blockLines = [line];
-      // Absorb continuation lines: indented or otherwise non-structural lines that
-      // are neither blank, nor a header, nor the next top-level bullet.
+      // Absorb continuation lines: non-blank lines that are neither a header nor
+      // the next top-level bullet.
       let j = i + 1;
       while (
         j < lines.length &&
@@ -137,7 +172,7 @@ function parseItems(memory: string): Item[] {
         blockLines.push(lines[j]);
         j++;
       }
-      items.push({ kind: 'block', block: { lines: blockLines, section } });
+      items.push({ kind: 'block', block: { lines: blockLines, section, lead: 'bullet', headerPrefix: '' } });
       i = j - 1;
       continue;
     }
@@ -148,8 +183,8 @@ function parseItems(memory: string): Item[] {
 
 /**
  * Plan a compaction over `memory`. Pure (no I/O) so it is exhaustively testable.
- * Terminal-state bullet blocks are replaced with a one-line pointer; their full
- * original text is collected into `archiveAppend`.
+ * Terminal-state blocks (bullets or h3+ entry headers) are replaced with a
+ * one-line pointer; their full original text is collected into `archiveAppend`.
  */
 export function planCompaction(memory: string, now: number): CompactionPlan {
   const items = parseItems(memory);
@@ -169,11 +204,14 @@ export function planCompaction(memory: string, now: number): CompactionPlan {
       outLines.push(...block.lines);
       continue;
     }
-    // Archive the full original block; leave a compact pointer behind.
+    // Archive the full original block; leave a compact pointer behind. The pointer
+    // keeps the block's lead form (a bullet, or the same `### ` header level).
     const original = block.lines.join('\n');
-    const label = extractLabel(head);
+    const prefix = block.lead === 'header' ? block.headerPrefix : '- ';
+    const body = head.replace(block.lead === 'header' ? ENTRY_HEADER_RE : TOP_BULLET_RE, '').trim();
+    const label = extractLabel(body);
     const status = statusOf(head);
-    outLines.push(`- ${label} — ${status}, archived ${date} → ${ARCHIVE_REL_PATH}`);
+    outLines.push(`${prefix}${label} — ${status}, archived ${date} → ${ARCHIVE_REL_PATH}`);
     archiveChunks.push(
       `<!-- archived ${date} from MEMORY.md · ## ${block.section} -->\n${original.trim()}\n`,
     );
