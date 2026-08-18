@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.25",
+  "configVersion": "1.0.26",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -94,7 +94,15 @@
       "maxChangesPerRun": 3,
       "reviewModel": "claude-haiku-4-5-20251001",
       "promotionThreshold": 0.6,
-      "minRecallCount": 2
+      "minRecallCount": 2,
+      "staleness": {
+        "enabled": true,
+        "staleTtlDays": 90,
+        "keepImportance": 7,
+        "minRetrievalKeep": 1,
+        "supersession": true,
+        "recordRetrievals": true
+      }
     },
     "knowledge": {
       "archive": {

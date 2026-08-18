@@ -94,16 +94,20 @@ export class MemoryModule implements ToolModule {
 
           const personalDb = archiveDbPath(workspaceDir);
           const sharedDb = sharedDbPathFromEnv();
+          // Recall counter (planning-66): record retrievals ONLY against the
+          // per-agent archive (the GC tier). Gated by the gateway via env, mirroring
+          // GATEWAY_SHARED_KB_DIR — off unless dreaming.staleness.recordRetrievals.
+          const rec = { recordRetrievals: process.env.GATEWAY_RECORD_RETRIEVALS === '1' };
           let results;
           if (corpus === 'memory') {
-            results = searchArchive(personalDb, query, maxResults).map((h) => ({ ...h, corpus: 'memory' }));
+            results = searchArchive(personalDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'memory' }));
           } else if (corpus === 'shared') {
             if (!sharedDb) return this.json({ results: [], unavailable: true, warning: 'shared KB is not enabled.' });
             results = searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }));
           } else {
             // "all": merge personal + shared, keep the best by bm25.
             type Tagged = ReturnType<typeof searchArchive>[number] & { corpus: string };
-            const mine: Tagged[] = searchArchive(personalDb, query, maxResults).map((h) => ({ ...h, corpus: 'memory' }));
+            const mine: Tagged[] = searchArchive(personalDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'memory' }));
             const shared: Tagged[] = sharedDb
               ? searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }))
               : [];

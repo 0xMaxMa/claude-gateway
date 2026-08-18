@@ -12,6 +12,7 @@
 import { Database } from 'bun:sqlite';
 import * as fs from 'fs';
 import * as path from 'path';
+import { recordRetrievalHits } from './retrieval-recorder';
 
 export interface SearchHit {
   path: string;
@@ -21,6 +22,8 @@ export interface SearchHit {
   snippet: string;
   originClass: string | null;
   importance: number | null;
+  /** Stable archive-entry identity (planning-66); null outside any entry block. */
+  entryHash: string | null;
 }
 
 /** Archive DB path for an agent: sibling of history.db at agents/<id>/kb.sqlite. */
@@ -69,18 +72,30 @@ function toFtsMatch(query: string): string {
 /**
  * Keyword search over the archive (FTS5 BM25). Returns [] when the index does
  * not exist yet or the query has no usable tokens. Read-only; never creates a DB.
+ *
+ * When `recordRetrievals` is set (planning-66), each returned entry's stable
+ * `entry_hash` is appended to `kb_retrieval_log` through a SEPARATE, dedicated
+ * writable handle AFTER the results are built — append-only and fire-and-forget,
+ * so the read path never read-modify-writes chunk rows and never blocks/locks the
+ * search response. The Node side folds this log into per-entry recency at GC time.
  */
-export function searchArchive(dbPath: string, query: string, maxResults: number): SearchHit[] {
+export function searchArchive(
+  dbPath: string,
+  query: string,
+  maxResults: number,
+  opts?: { recordRetrievals?: boolean; now?: number },
+): SearchHit[] {
   if (!fs.existsSync(dbPath)) return [];
   const match = toFtsMatch(query);
   if (!match) return [];
 
   const db = new Database(dbPath, { readonly: true });
+  let hits: SearchHit[];
   try {
     const rows = db
       .query(
         `SELECT c.id AS id, c.path AS path, c.start_line AS startLine, c.end_line AS endLine,
-                c.text AS text, bm25(kb_chunks_fts) AS score,
+                c.text AS text, c.entry_hash AS entryHash, bm25(kb_chunks_fts) AS score,
                 p.origin_class AS originClass, r.importance AS importance
          FROM kb_chunks_fts f
          JOIN kb_chunks c ON c.rowid_id = f.rowid
@@ -95,11 +110,12 @@ export function searchArchive(dbPath: string, query: string, maxResults: number)
       startLine: number;
       endLine: number;
       text: string;
+      entryHash: string | null;
       score: number;
       originClass: string | null;
       importance: number | null;
     }>;
-    return rows.map((r) => ({
+    hits = rows.map((r) => ({
       path: r.path,
       startLine: r.startLine,
       endLine: r.endLine,
@@ -107,10 +123,34 @@ export function searchArchive(dbPath: string, query: string, maxResults: number)
       snippet: r.text.length > 500 ? `${r.text.slice(0, 500)}…` : r.text,
       originClass: r.originClass,
       importance: r.importance,
+      entryHash: r.entryHash,
     }));
   } finally {
     db.close();
   }
+
+  // Recall counter (planning-66): fire-and-forget, append-only, best-effort. A
+  // dedicated writable handle (WAL + busy_timeout so it never fails a concurrent
+  // reindex) logs the retrieved entries AFTER the read handle is closed. Any error
+  // is swallowed inside recordRetrievalHits — telemetry never fails a search.
+  if (opts?.recordRetrievals && hits.length > 0) {
+    try {
+      const w = new Database(dbPath);
+      try {
+        w.exec('PRAGMA busy_timeout=2000');
+        recordRetrievalHits(
+          { run: (sql, params = []) => void w.query(sql).run(...(params as never[])) },
+          hits.map((h) => h.entryHash),
+          opts.now ?? Date.now(),
+        );
+      } finally {
+        w.close();
+      }
+    } catch {
+      /* best-effort telemetry — never affect the search response */
+    }
+  }
+  return hits;
 }
 
 /** A memory-scoped path: MEMORY.md, USER.md, or memory/**.md — no traversal. */

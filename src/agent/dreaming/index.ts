@@ -19,6 +19,7 @@ import { runDreamReviewer } from './reviewer';
 import { writeDreamAudit } from './audit';
 import { applyDreamProposals } from './applier';
 import { compactCompletedEntries } from './compactor';
+import { runStalenessGc } from './staleness';
 import type {
   DreamingConfig,
   DreamOutcome,
@@ -159,6 +160,19 @@ export class DreamingManager {
         compactedCount = compactCompletedEntries(this.deps.workspaceDir, now).archivedCount;
       } catch {
         compactedCount = 0;
+      }
+    }
+
+    // ARCHIVE STALENESS GC (planning-66): after the compactor, keep the Lane-2
+    // archive's SEARCH quality high — soft-invalidate superseded / aged-out /
+    // low-recall entries (move to memory/archive/stale.md, never delete) and
+    // promote back anything retrieved after invalidation. Deterministic, memory-
+    // only (no session restart), best-effort. Auto mode only; injectable clock.
+    if (cfg.mode === 'auto' && cfg.staleness.enabled) {
+      try {
+        runStalenessGc(this.deps.workspaceDir, cfg.staleness, { now });
+      } catch {
+        /* best-effort — never blocks the dream */
       }
     }
 

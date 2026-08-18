@@ -30,6 +30,25 @@ export interface ChunkWithMeta {
   chunk: ArchiveChunkRow;
   recall: ArchiveRecallRow;
   provenance: ArchiveProvenanceRow;
+  /**
+   * Stable, reindex-surviving identity of the archive ENTRY (markdown block) this
+   * chunk belongs to (planning-66). `null` for content outside any entry block
+   * (evergreen prose, section headers). Keyed to `kb_entry_lifecycle`.
+   */
+  entryHash?: string | null;
+}
+
+/** One archive-entry lifecycle row (planning-66), joined with its max importance. */
+export interface LifecycleRow {
+  entryHash: string;
+  path: string;
+  firstSeen: number;
+  lastRetrieved: number | null;
+  retrievalCount: number;
+  supersededBy: string | null;
+  invalidAt: number | null;
+  /** MAX importance across the chunks carrying this entry_hash (null = none set). */
+  importance: number | null;
 }
 
 export class ArchiveDB {
@@ -43,6 +62,7 @@ export class ArchiveDB {
     insertChunk: StatementSync;
     insertRecall: StatementSync;
     insertProvenance: StatementSync;
+    upsertLifecycle: StatementSync;
   };
 
   private constructor(dbPath: string, tokenizer: string) {
@@ -66,7 +86,7 @@ export class ArchiveDB {
       ),
       deleteSource: this.db.prepare('DELETE FROM kb_sources WHERE path = ?'),
       insertChunk: this.db.prepare(
-        `INSERT INTO kb_chunks (id, path, start_line, end_line, text, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO kb_chunks (id, path, start_line, end_line, text, updated_at, entry_hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ),
       insertRecall: this.db.prepare(
         `INSERT INTO kb_chunk_recall (chunk_id, importance, triggers, project_key) VALUES (?, ?, ?, ?)`,
@@ -74,6 +94,12 @@ export class ArchiveDB {
       insertProvenance: this.db.prepare(
         `INSERT INTO kb_chunk_provenance (chunk_id, origin_class, session_kind, observed_at, supersedes_key)
          VALUES (?, ?, ?, ?, ?)`,
+      ),
+      // Age survives reindex: first_seen is written ONCE (never reset); a later
+      // reindex of the same entry only refreshes its current path (planning-66).
+      upsertLifecycle: this.db.prepare(
+        `INSERT INTO kb_entry_lifecycle (entry_hash, path, first_seen) VALUES (?, ?, ?)
+         ON CONFLICT(entry_hash) DO UPDATE SET path = excluded.path`,
       ),
     };
   }
@@ -114,9 +140,11 @@ export class ArchiveDB {
         start_line INTEGER NOT NULL,
         end_line   INTEGER NOT NULL,
         text       TEXT    NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        entry_hash TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_kb_chunks_path ON kb_chunks(path);
+      CREATE INDEX IF NOT EXISTS idx_kb_chunks_entry_hash ON kb_chunks(entry_hash);
 
       CREATE TABLE IF NOT EXISTS kb_chunk_recall (
         chunk_id    TEXT PRIMARY KEY,
@@ -133,6 +161,34 @@ export class ArchiveDB {
         observed_at    INTEGER NOT NULL,
         supersedes_key TEXT,
         FOREIGN KEY (chunk_id) REFERENCES kb_chunks(id) ON DELETE CASCADE
+      );
+
+      -- Per-ENTRY lifecycle (planning-66). Deliberately NOT a FK-cascade child of
+      -- kb_chunks: reindex does delete-then-insert of chunks, which would wipe any
+      -- cascade child — so age/recall/invalidation must live in a standalone table
+      -- keyed by the stable entry_hash (sha256 of normalized block text), which
+      -- survives re-chunking. NULL invalid_at = live; a stamp = soft-invalidated
+      -- (Zep bi-temporal: still indexed + searchable, never hard-deleted).
+      CREATE TABLE IF NOT EXISTS kb_entry_lifecycle (
+        entry_hash      TEXT PRIMARY KEY,
+        path            TEXT NOT NULL,
+        first_seen      INTEGER NOT NULL,
+        last_retrieved  INTEGER,
+        retrieval_count INTEGER NOT NULL DEFAULT 0,
+        superseded_by   TEXT,
+        invalid_at      INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_invalid ON kb_entry_lifecycle(invalid_at);
+      CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_superseded ON kb_entry_lifecycle(superseded_by);
+
+      -- Append-only retrieval log (planning-66). The Bun read path appends a row
+      -- per memory_search hit (fire-and-forget); the Node side folds it into
+      -- kb_entry_lifecycle.last_retrieved/retrieval_count at GC time, then clears
+      -- the folded rows. Keyed by the stable entry_hash, never the line-based id.
+      CREATE TABLE IF NOT EXISTS kb_retrieval_log (
+        rowid_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_hash   TEXT    NOT NULL,
+        retrieved_at INTEGER NOT NULL
       );
 
       CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(
@@ -175,6 +231,17 @@ export class ArchiveDB {
         UPDATE kb_index_state SET revision = revision + 1 WHERE id = 1;
       END;
     `);
+
+    // Idempotent column migration (planning-66): a kb.sqlite built before the
+    // entry_hash column exists keeps its rows via CREATE TABLE IF NOT EXISTS, but
+    // the new column is absent. Add it in place (nullable, no default) so the
+    // insert/read statements below don't fail on an upgraded DB. The lifecycle +
+    // retrieval-log tables above are new, so IF NOT EXISTS creates them cleanly.
+    const cols = this.db.prepare(`PRAGMA table_info(kb_chunks)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'entry_hash')) {
+      this.db.exec(`ALTER TABLE kb_chunks ADD COLUMN entry_hash TEXT`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_kb_chunks_entry_hash ON kb_chunks(entry_hash)`);
+    }
   }
 
   /** Look up an indexed source by its workspace-relative path. */
@@ -193,19 +260,26 @@ export class ArchiveDB {
 
   /**
    * Replace a file's index atomically: delete its old chunks, upsert the source
-   * row, insert the fresh chunks (+ recall + provenance). Runs in a transaction
-   * so a failure never leaves a half-indexed file.
+   * row, insert the fresh chunks (+ recall + provenance), then upsert the entry
+   * lifecycle rows for ALL of the file's blocks. Runs in a transaction so a
+   * failure never leaves a half-indexed file.
+   *
+   * `entryBlocks` (planning-66) is the FULL set of archive-entry blocks in the file
+   * — one lifecycle row each — NOT derived from chunks: a single FTS chunk can span
+   * several blocks, so per-chunk upsert would miss the inner ones. Empty for
+   * non-archive-tier files (evergreen/pinned/shared get no lifecycle).
    */
   replaceSource(
     source: Omit<ArchiveSourceRow, 'id'>,
     chunks: ChunkWithMeta[],
+    entryBlocks: Array<{ entryHash: string; firstSeen: number }> = [],
   ): void {
     this.db.exec('BEGIN');
     try {
       // Drop old chunks for this path first (cascades recall + provenance + FTS).
       this._deleteChunksForPath(source.path);
       this.stmts.upsertSource.run(source.path, source.hash, source.mtime, source.size, source.source);
-      for (const { chunk, recall, provenance } of chunks) {
+      for (const { chunk, recall, provenance, entryHash } of chunks) {
         this.stmts.insertChunk.run(
           chunk.id,
           chunk.path,
@@ -213,6 +287,7 @@ export class ArchiveDB {
           chunk.endLine,
           chunk.text,
           chunk.updatedAt,
+          entryHash ?? null,
         );
         this.stmts.insertRecall.run(chunk.id, recall.importance, recall.triggers, recall.projectKey);
         this.stmts.insertProvenance.run(
@@ -222,6 +297,13 @@ export class ArchiveDB {
           provenance.observedAt,
           provenance.supersedesKey,
         );
+      }
+      // Entry lifecycle (planning-66): upsert-once first_seen per BLOCK keyed by the
+      // stable entry_hash; a re-index only refreshes the current path. Age therefore
+      // survives edits and re-chunking (kb_chunks is delete-then-insert, but this
+      // standalone table is not a cascade child, so its first_seen is preserved).
+      for (const b of entryBlocks) {
+        this.stmts.upsertLifecycle.run(b.entryHash, source.path, b.firstSeen);
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -295,6 +377,118 @@ export class ArchiveDB {
       supersedesKey: (row.supersedes_key as string | null) ?? null,
     };
   }
+
+  // ── Entry lifecycle / staleness GC (planning-66) ──────────────────────────
+
+  /** Append a retrieval event (Node-side seed for tests + aggregation symmetry). */
+  logRetrieval(entryHash: string, retrievedAt: number): void {
+    this.db
+      .prepare('INSERT INTO kb_retrieval_log (entry_hash, retrieved_at) VALUES (?, ?)')
+      .run(entryHash, retrievedAt);
+  }
+
+  /**
+   * Fold the append-only retrieval log into per-entry lifecycle: bump each entry's
+   * `last_retrieved` to the newest hit and add the hit count, then delete the
+   * folded rows (bounded by the max rowid read, so a concurrent append after this
+   * read survives to the next GC). Returns how many log rows were folded. A hit for
+   * an entry_hash no longer in lifecycle (its text changed → new hash) updates 0
+   * rows and is harmlessly dropped.
+   */
+  aggregateRetrievalLog(): number {
+    const rows = this.db
+      .prepare('SELECT rowid_id, entry_hash, retrieved_at FROM kb_retrieval_log ORDER BY rowid_id')
+      .all() as Array<{ rowid_id: number; entry_hash: string; retrieved_at: number }>;
+    if (rows.length === 0) return 0;
+    const agg = new Map<string, { max: number; count: number }>();
+    let maxRowId = 0;
+    for (const r of rows) {
+      maxRowId = Math.max(maxRowId, r.rowid_id);
+      const cur = agg.get(r.entry_hash);
+      if (cur) {
+        cur.max = Math.max(cur.max, r.retrieved_at);
+        cur.count += 1;
+      } else {
+        agg.set(r.entry_hash, { max: r.retrieved_at, count: 1 });
+      }
+    }
+    const upd = this.db.prepare(
+      `UPDATE kb_entry_lifecycle
+       SET last_retrieved = MAX(COALESCE(last_retrieved, 0), ?), retrieval_count = retrieval_count + ?
+       WHERE entry_hash = ?`,
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (const [hash, { max, count }] of agg) upd.run(max, count, hash);
+      this.db.prepare('DELETE FROM kb_retrieval_log WHERE rowid_id <= ?').run(maxRowId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* txn already unwound */
+      }
+      throw err;
+    }
+    return rows.length;
+  }
+
+  /** All lifecycle rows, joined with the MAX importance across their chunks. */
+  listLifecycle(): LifecycleRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT l.entry_hash, l.path, l.first_seen, l.last_retrieved, l.retrieval_count,
+                l.superseded_by, l.invalid_at,
+                (SELECT MAX(r.importance) FROM kb_chunks c JOIN kb_chunk_recall r ON r.chunk_id = c.id
+                 WHERE c.entry_hash = l.entry_hash) AS importance
+         FROM kb_entry_lifecycle l`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      entryHash: r.entry_hash as string,
+      path: r.path as string,
+      firstSeen: r.first_seen as number,
+      lastRetrieved: (r.last_retrieved as number | null) ?? null,
+      retrievalCount: (r.retrieval_count as number) ?? 0,
+      supersededBy: (r.superseded_by as string | null) ?? null,
+      invalidAt: (r.invalid_at as number | null) ?? null,
+      importance: (r.importance as number | null) ?? null,
+    }));
+  }
+
+  /** Read one lifecycle row (test/introspection helper). */
+  getLifecycle(entryHash: string): LifecycleRow | undefined {
+    return this.listLifecycle().find((l) => l.entryHash === entryHash);
+  }
+
+  /** Mark `entryHash` superseded by `bySpec` (or clear when null). */
+  setSuperseded(entryHash: string, bySpec: string | null): void {
+    this.db
+      .prepare('UPDATE kb_entry_lifecycle SET superseded_by = ? WHERE entry_hash = ?')
+      .run(bySpec, entryHash);
+  }
+
+  /**
+   * Populate the (previously inert) provenance `supersedes_key` for every chunk of
+   * a superseded entry — so the search-side provenance reflects supersession too,
+   * not just the lifecycle table. Best-effort mirror of {@link setSuperseded}.
+   */
+  setSupersedesKeyForEntry(entryHash: string, key: string): void {
+    this.db
+      .prepare(
+        `UPDATE kb_chunk_provenance SET supersedes_key = ?
+         WHERE chunk_id IN (SELECT id FROM kb_chunks WHERE entry_hash = ?)`,
+      )
+      .run(key, entryHash);
+  }
+
+  /** Stamp (soft-invalidate) or clear an entry's invalidation. */
+  stampInvalid(entryHash: string, invalidAt: number | null): void {
+    this.db
+      .prepare('UPDATE kb_entry_lifecycle SET invalid_at = ? WHERE entry_hash = ?')
+      .run(invalidAt, entryHash);
+  }
+
 
   /**
    * Keyword search over chunk text (FTS5 BM25). K0 helper for tests/introspection;

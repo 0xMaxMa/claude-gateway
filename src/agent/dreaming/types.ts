@@ -17,6 +17,26 @@ export type DreamFile = 'MEMORY.md' | 'USER.md';
  */
 export type DreamTier = 'durable' | 'episodic';
 
+/** Raw archive-staleness-GC config under `gateway.dreaming.staleness` (planning-66). */
+export interface StalenessConfig {
+  enabled?: boolean;
+  staleTtlDays?: number;
+  keepImportance?: number;
+  minRetrievalKeep?: number;
+  supersession?: boolean;
+  recordRetrievals?: boolean;
+}
+
+/** Fully-resolved staleness config (defaults applied, values sanitized). */
+export interface ResolvedStalenessCfg {
+  enabled: boolean;
+  staleTtlDays: number;
+  keepImportance: number;
+  minRetrievalKeep: number;
+  supersession: boolean;
+  recordRetrievals: boolean;
+}
+
 /** Partial config as it appears under `gateway.dreaming` / a per-agent override. */
 export interface DreamingConfig {
   enabled?: boolean;
@@ -29,6 +49,7 @@ export interface DreamingConfig {
   reviewModel?: string;
   promotionThreshold?: number;
   minRecallCount?: number;
+  staleness?: StalenessConfig;
 }
 
 /** Fully-resolved config (defaults applied, timezone normalized). */
@@ -43,6 +64,7 @@ export interface ResolvedDreamingCfg {
   reviewModel: string;
   promotionThreshold: number;
   minRecallCount: number;
+  staleness: ResolvedStalenessCfg;
 }
 
 /** One proposed memory-consolidation op (never applied in propose mode). */
