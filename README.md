@@ -426,9 +426,13 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 | `shared.project` | `"global"` | Sharing partition key (one safe path segment) — agents with the same value share one vault; `"global"` ⇒ shared-by-default |
 | `shared.root` | `~/.claude-gateway/shared/kb` | Shared vault root dir (`<root>/<project>/`) |
 | `shared.mode` | `"propose"` | Per-agent→shared promotion mode; `propose` = dry-run, `auto` = promote durable dreamed facts |
-| `shared.graph` | `false` | Compile the memory-wiki graph + dashboards over the shared vault (opt-in) |
+| `shared.graph` | `false` | Compile the memory-wiki graph + dashboards over the shared vault to `<vault>/reports/*.md` (opt-in). Independent of the dashboard **Knowledge base** tab, which computes its graph on-demand |
 
 **Shared KB.** A shared SQLite/FTS5 vault outside any single agent's workspace lets agents build a common knowledge base. Notes under `<root>/<project>/notes/*.md` are indexed and reachable via `memory_search` with `corpus:"shared"` (the shared vault) or `corpus:"all"` (this agent's memory + shared, merged by relevance). Concurrent writers are safe without a lock — atomic note writes (temp+rename) plus a cross-process `PRAGMA busy_timeout` on the index. Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`.
+
+**Knowledge base viewer.** The web dashboard's **Knowledge base** tab renders the shared vault as an Obsidian-style force-directed graph (nodes = notes sized by link degree and coloured by `type`; edges = `[[wiki-links]]`; contradicting claims and stale notes are flagged). It is fed by `GET /knowledge/graph`, which computes the model **on-demand** from the vault (no dependency on `shared.graph` or the nightly reindex). When the vault is empty it shows a clearly-labelled demo dataset (with a size selector for scale testing). A **source** selector switches the graph between the cross-agent Shared KB and any single agent's own Lane-2 memory (`workspace/memory`), a node **search** box filters the graph, and clicking a node opens its full note (fetched via `GET /knowledge/note`) rendered as Markdown below the graph.
+
+**Nightly dreaming viewer.** A **Nightly dreaming** tab renders each agent's memory-consolidation audit trail (`.dreaming/DREAMS.md` + `promotions.jsonl`) as a newest-first timeline of runs — mode (propose/auto), outcome, the proposed/applied changes with scores, and per-run token/session counts — fed by `GET /knowledge/dreams` and filterable by agent.
 
 ### `gateway.bind`
 

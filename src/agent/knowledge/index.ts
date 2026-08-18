@@ -28,8 +28,20 @@ export {
   extractLinks,
   buildBacklinks,
   buildDashboards,
+  readVaultPages,
+  graphFromPages,
+  buildGraphModel,
 } from './wiki';
-export type { WikiPage, WikiClaim, Dashboards, WikiCompileResult } from './wiki';
+export type {
+  WikiPage,
+  WikiClaim,
+  Dashboards,
+  WikiCompileResult,
+  GraphNode,
+  GraphEdge,
+  GraphModel,
+} from './wiki';
+export { demoGraphModel, demoGraphModelSized, DEMO_MAX_SIZE } from './graph-demo';
 export { chunkMarkdown } from './chunk';
 export type { Chunk } from './chunk';
 export { classifyOrigin } from './provenance';

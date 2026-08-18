@@ -15,6 +15,9 @@ import { getWatcherHealth } from '../watch/factory';
 import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
+import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages } from '../agent/knowledge';
+import { parseDreamReport } from '../agent/dreaming/report';
+import { DREAMING_DIR } from '../agent/dreaming/audit';
 import {
   generateCliDevicePage,
   generateCliViewerPage,
@@ -360,6 +363,13 @@ export class GatewayRouter {
    * disabled (open) — a keyless install has no credential to check and must not
    * lock itself out. Writes 401 and returns false when unauthorized.
    */
+  /** Filesystem root holding per-agent workspaces: <config-dir>/agents (or ~/.claude-gateway/agents). */
+  private agentsRoot(): string {
+    return this.configPath
+      ? path.join(path.dirname(this.configPath), 'agents')
+      : path.join(os.homedir(), '.claude-gateway', 'agents');
+  }
+
   private requireDashOrApiKey(req: Request, res: Response): boolean {
     const keys = this.apiKeys;
     if (keys.length === 0) {
@@ -626,10 +636,7 @@ export class GatewayRouter {
         process.env.IMAGE_SHARE_DB_PATH ||
         path.join(os.homedir(), '.claude-gateway', 'shares.db');
       const store = new ShareStore(dbPath);
-      const agentsBaseDir = this.configPath
-        ? path.join(path.dirname(this.configPath), 'agents')
-        : path.join(os.homedir(), '.claude-gateway', 'agents');
-      this.app.use(createSharesPublicRouter(store, agentsBaseDir));
+      this.app.use(createSharesPublicRouter(store, this.agentsRoot()));
       if (this.gatewayConfig?.gateway?.api?.keys?.length) {
         const publicUrl = normalizePublicUrl(this.gatewayConfig?.gateway?.publicUrl) ?? undefined;
         this.app.use(
@@ -637,7 +644,7 @@ export class GatewayRouter {
           createSharesPrivateRouter(
             store,
             this.gatewayConfig.gateway.api.keys,
-            agentsBaseDir,
+            this.agentsRoot(),
             publicUrl,
           ),
         );
@@ -910,6 +917,207 @@ export class GatewayRouter {
           res.json({ processes, numCpus: GatewayRouter.NUM_CPUS });
         },
       );
+    });
+
+    // Knowledge Base graph — a memory-wiki as a {nodes, edges} model for the
+    // dashboard's "Knowledge base" tab. Computed ON DEMAND from *.md notes (does
+    // NOT depend on gateway.knowledge.shared.graph or the nightly reindex).
+    // Auth: dashboard session cookie OR API key.
+    //   ?scope=shared      (default) cross-agent Shared KB vault
+    //   ?scope=agent:<id>  that agent's Lane-2 memory graph (workspace/memory/*.md)
+    // Shared scope serves a labelled demo (demo:true) when the vault is empty
+    // (unless ?demo=off); ?demo=<N> stress-tests with N synthetic nodes.
+    this.app.get('/knowledge/graph', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const now = Date.now();
+        const scopeQ = req.query.scope;
+        const scope = String((Array.isArray(scopeQ) ? scopeQ[scopeQ.length - 1] : scopeQ) || 'shared');
+
+        // Per-agent Lane-2 memory graph. The agent id is validated against the
+        // known-agents map (allowlist) BEFORE building any path — never trust the
+        // raw query value for filesystem access (no traversal).
+        if (scope.startsWith('agent:')) {
+          const id = scope.slice('agent:'.length);
+          if (!this.agents.has(id)) {
+            res.status(404).json({ error: 'Unknown agent' });
+            return;
+          }
+          const memDir = path.join(this.agentsRoot(), id, 'workspace', 'memory');
+          res.json({ ...buildGraphModel(memDir, now), demo: false, scope });
+          return;
+        }
+
+        // Shared KB vault (default).
+        const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
+        const model = buildGraphModel(sharedVaultDir(shared), now);
+        // Normalize to a scalar first: Express parses a repeated/array query param
+        // (?demo=off&demo=off, ?demo[]=off) into an array, which a strict comparison
+        // would treat as "not off" and wrongly keep the demo on.
+        const demoQ = req.query.demo;
+        const demoRaw = Array.isArray(demoQ) ? demoQ[demoQ.length - 1] : demoQ;
+        const demoOff = demoRaw === 'off';
+        // ?demo=<N> renders a synthetic clustered graph of N nodes for stress-
+        // testing the viewer at scale (dashboard size selector). Only honoured when
+        // the real vault is empty — real notes always take precedence.
+        const demoSize = typeof demoRaw === 'string' && /^\d+$/.test(demoRaw) ? Number(demoRaw) : 0;
+        if (model.nodes.length === 0 && !demoOff) {
+          const demo = demoSize > 0 ? demoGraphModelSized(now, demoSize) : demoGraphModel(now);
+          res.json({ ...demo, demo: true, scope: 'shared' });
+          return;
+        }
+        res.json({ ...model, demo: false, scope: 'shared' });
+      } catch (err) {
+        process.stderr.write(`[knowledge/graph] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to build knowledge graph' });
+      }
+    });
+
+    // Full markdown body of a single note, for the KB tab's detail section (which
+    // renders the WHOLE file, not the truncated graph excerpt). Auth as above.
+    //   ?scope=shared | agent:<id>   (same allowlist guard as /knowledge/graph)
+    //   ?id=<relPath>.md             the note file, resolved INSIDE the vault only
+    // The id is never trusted for filesystem access: it must be a `.md` path that
+    // resolves within the scope's vault dir (no traversal, no absolute path).
+    this.app.get('/knowledge/note', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const scopeQ = req.query.scope;
+        const scope = String((Array.isArray(scopeQ) ? scopeQ[scopeQ.length - 1] : scopeQ) || 'shared');
+        const idQ = req.query.id;
+        const id = String((Array.isArray(idQ) ? idQ[idQ.length - 1] : idQ) || '');
+
+        // Resolve the vault dir for the scope (agent id gated by the allowlist).
+        let vaultDir: string;
+        if (scope.startsWith('agent:')) {
+          const agentId = scope.slice('agent:'.length);
+          if (!this.agents.has(agentId)) {
+            res.status(404).json({ error: 'Unknown agent' });
+            return;
+          }
+          vaultDir = path.join(this.agentsRoot(), agentId, 'workspace', 'memory');
+        } else {
+          const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
+          vaultDir = sharedVaultDir(shared);
+        }
+
+        // Validate the note id: a `.md` file that stays inside the vault. Reject
+        // NUL, non-.md, and any path that escapes the vault root (traversal).
+        if (!id || id.includes('\0') || !/\.md$/i.test(id)) {
+          res.status(400).json({ error: 'Invalid note id' });
+          return;
+        }
+        const root = path.resolve(vaultDir);
+        const abs = path.resolve(root, id);
+        if (abs !== root && !abs.startsWith(root + path.sep)) {
+          res.status(400).json({ error: 'Invalid note id' });
+          return;
+        }
+
+        let raw: string;
+        try {
+          raw = fs.readFileSync(abs, 'utf8');
+        } catch {
+          res.status(404).json({ error: 'Note not found' });
+          return;
+        }
+        // Strip the YAML frontmatter block so the client renders just the body.
+        const m = /^---\n[\s\S]*?\n---\n?([\s\S]*)$/.exec(raw);
+        const body = (m ? m[1] : raw).slice(0, 20000); // bound the payload
+        // Last-modified time (from the file itself — notes carry no reliable date
+        // in frontmatter) and a readable path relative to the gateway root, so the
+        // note header can show WHERE the note lives and WHEN it last changed.
+        let updated: string | null = null;
+        let displayPath = id;
+        try {
+          updated = fs.statSync(abs).mtime.toISOString();
+        } catch {
+          /* stat may race a delete — leave updated null */
+        }
+        try {
+          const rel = path.relative(path.dirname(this.agentsRoot()), abs);
+          if (rel && !rel.startsWith('..')) displayPath = rel;
+        } catch {
+          /* keep the bare id as the fallback path */
+        }
+        res.json({ id, scope, path: displayPath, updated, body });
+      } catch (err) {
+        process.stderr.write(`[knowledge/note] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to read note' });
+      }
+    });
+
+    // Available graph sources for the KB tab's source selector: the Shared KB
+    // plus every agent that has at least one Lane-2 memory note. Auth as above.
+    this.app.get('/knowledge/sources', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const sources: Array<{ id: string; label: string; count: number }> = [];
+        const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
+        sources.push({ id: 'shared', label: 'Shared Knowledge Base', count: readVaultPages(sharedVaultDir(shared)).length });
+        const root = this.agentsRoot();
+        for (const id of this.agents.keys()) {
+          let count = 0;
+          try {
+            count = readVaultPages(path.join(root, id, 'workspace', 'memory')).length;
+          } catch {
+            count = 0; // missing/unreadable memory dir → just skip this agent
+          }
+          if (count > 0) sources.push({ id: `agent:${id}`, label: id, count });
+        }
+        res.json({ sources });
+      } catch (err) {
+        process.stderr.write(`[knowledge/sources] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to list knowledge sources' });
+      }
+    });
+
+    // Nightly dreaming report — parses every agent's `.dreaming/` audit trail
+    // (DREAMS.md + promotions.jsonl) into newest-first runs for the dashboard's
+    // "Nightly dreaming" tab. Auth: dashboard session cookie OR API key. Payload is
+    // bounded (newest runs; proposal `content` truncated) to stay small.
+    this.app.get('/knowledge/dreams', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const MAX_RUNS = 200;
+        const MAX_CONTENT = 2000;
+        const root = this.agentsRoot();
+        const runs: Array<Record<string, unknown>> = [];
+        const agents: string[] = [];
+        for (const id of this.agents.keys()) {
+          const dir = path.join(root, id, 'workspace', DREAMING_DIR);
+          let dreams: string;
+          try {
+            dreams = fs.readFileSync(path.join(dir, 'DREAMS.md'), 'utf8');
+          } catch {
+            continue; // agent has never dreamed
+          }
+          let promos = '';
+          try {
+            promos = fs.readFileSync(path.join(dir, 'promotions.jsonl'), 'utf8');
+          } catch {
+            promos = '';
+          }
+          const parsed = parseDreamReport(dreams, promos);
+          if (!parsed.length) continue;
+          agents.push(id);
+          for (const r of parsed) {
+            runs.push({
+              agent: id,
+              ...r,
+              proposals: r.proposals.map((p) => ({
+                ...p,
+                content: typeof p.content === 'string' && p.content.length > MAX_CONTENT ? p.content.slice(0, MAX_CONTENT) + '…' : p.content,
+              })),
+            });
+          }
+        }
+        runs.sort((a, b) => (b.ts as number) - (a.ts as number));
+        res.json({ runs: runs.slice(0, MAX_RUNS), agents: agents.sort() });
+      } catch (err) {
+        process.stderr.write(`[knowledge/dreams] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to build dreaming report' });
+      }
     });
 
     // PTY screen snapshot — plain text, ANSI stripped. For agents that need to
