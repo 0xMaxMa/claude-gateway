@@ -156,6 +156,20 @@ describe('generate_image action="list_refs"', () => {
     expect(def.description).toContain('list_refs');
   });
 
+  test('tool definition declares continue_from as an optional string', () => {
+    const tools = new ImageModule().getTools();
+    const def = tools.find((t) => t.name === 'generate_image')!;
+    const schema = JSON.parse(JSON.stringify(def.inputSchema)) as {
+      properties: { continue_from?: { type: string } };
+      required: string[];
+    };
+    expect(schema.properties.continue_from?.type).toBe('string');
+    expect(schema.required).not.toContain('continue_from');
+    // …and the description tells the agent the guardrails for when to set it.
+    expect(def.description).toContain('continue_from');
+    expect(def.description).toContain('no OTHER model has generated any image');
+  });
+
   test('an unknown action still errors and lists list_refs among the valid ones', async () => {
     const res = await new ImageModule().handleTool('generate_image', { action: 'nope' });
     expect(res.isError).toBe(true);

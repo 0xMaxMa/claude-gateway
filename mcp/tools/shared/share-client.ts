@@ -12,7 +12,26 @@ const REQUEST_TIMEOUT_MS = 15_000;
 
 export type ShareRef = { artifact_id?: string; path?: string };
 
-export type ShareItem = { share_id: string; token: string; url?: string; expires_at: string };
+export type ShareItem = {
+  share_id: string;
+  token: string;
+  url?: string;
+  expires_at: string;
+  /** Present only when this share was minted from an artifact_id ref whose
+   *  generation recorded a provider task id — the hook a resume-capable
+   *  provider needs to continue that generation's session. Duplicated from
+   *  ArtifactRow
+   *  (src/share/share-store.ts) rather than imported — this file must stay
+   *  self-contained (see the module comment above). */
+  task_id?: string;
+  provider?: string;
+  /** The prompt that produced this artifact, when recorded
+   *  (handoff-on-model-switch) — deterministic reuse source for continuing
+   *  an edit across a model switch where session resume isn't possible.
+   *  Independent of task_id: present even when resume isn't. Duplicated from
+   *  ArtifactRow rather than imported — see the module comment above. */
+  prior_prompt?: string;
+};
 
 export type ArtifactItem = { artifact_id: string; artifact_ref: string; index: number; path: string };
 

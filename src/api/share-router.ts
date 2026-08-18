@@ -235,7 +235,17 @@ export function createSharesPrivateRouter(
     }
 
     // Resolve + validate every ref BEFORE minting anything, preserving order.
-    type Resolved = { dedupeRef: string; relativePath: string; size: number };
+    // taskId/provider/priorPrompt are only ever set for artifact_id refs
+    // — a path ref has no provider-side generation behind
+    // it to resume or hand off from.
+    type Resolved = {
+      dedupeRef: string;
+      relativePath: string;
+      size: number;
+      taskId?: string;
+      provider?: string;
+      priorPrompt?: string;
+    };
     const resolved: Resolved[] = [];
     const seen = new Set<string>();
     let totalBytes = 0;
@@ -247,6 +257,9 @@ export function createSharesPrivateRouter(
       const ref = raw as { artifact_id?: unknown; path?: unknown };
       let dedupeRef: string;
       let candidatePath: string;
+      let taskId: string | undefined;
+      let refProvider: string | undefined;
+      let priorPrompt: string | undefined;
       if (typeof ref.artifact_id === 'string' && ref.artifact_id.trim()) {
         const artifact = store.resolveArtifact(agentId, sessionId, ref.artifact_id.trim());
         if (!artifact) {
@@ -255,6 +268,9 @@ export function createSharesPrivateRouter(
         }
         dedupeRef = `artifact:${artifact.artifactId}`;
         candidatePath = artifact.relativePath;
+        if (artifact.taskId) taskId = artifact.taskId;
+        refProvider = artifact.provider;
+        if (artifact.prompt) priorPrompt = artifact.prompt;
       } else if (typeof ref.path === 'string' && ref.path.trim()) {
         candidatePath = ref.path.trim();
         dedupeRef = ''; // filled after validation with the canonical relative path
@@ -284,7 +300,14 @@ export function createSharesPrivateRouter(
         seen.add(dedupeRef);
         totalBytes += validated.size;
       }
-      resolved.push({ dedupeRef, relativePath: validated.relativePath, size: validated.size });
+      resolved.push({
+        dedupeRef,
+        relativePath: validated.relativePath,
+        size: validated.size,
+        taskId,
+        provider: refProvider,
+        priorPrompt,
+      });
     }
     if (totalBytes > limits.maxTotalBytes) {
       res.status(413).json({ error: `total reference size exceeds ${limits.maxTotalBytes} bytes`, code: 'total_size_exceeded' });
@@ -306,6 +329,17 @@ export function createSharesPrivateRouter(
         token: mint.token,
         ...(publicBaseUrl ? { url: `${publicBaseUrl}/shared/${mint.token}` } : {}),
         expires_at: new Date(mint.expiresAtMs).toISOString(),
+        // only present for refs resolved from an artifact_id
+        // whose generation recorded a provider task id — the hook a
+        // resume-capable provider needs. Absent for path refs and artifacts
+        // with no known task_id.
+        ...(r.taskId ? { task_id: r.taskId, provider: r.provider } : {}),
+        // Handoff-on-model-switch: the prompt that produced
+        // this artifact, when recorded — deterministic reuse source for a
+        // caller that can't resume the provider session (model switched) but
+        // still wants continuity context. Independent of task_id: present
+        // even when resume isn't possible.
+        ...(r.priorPrompt ? { prior_prompt: r.priorPrompt } : {}),
       };
     });
     res.status(201).json({ items });
