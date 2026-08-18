@@ -32,6 +32,9 @@ import { createWatcher } from './watch/factory';
 import { AgentRunner } from './agent/runner';
 import { SkillLearningManager } from './agent/skill-learning';
 import { DreamingManager } from './agent/dreaming';
+import { makeRouteOut } from './agent/dreaming/migrate';
+import { resolveDreamingConfig } from './agent/dreaming/config';
+import { makeClaudeSpawn } from './agent/skill-learning/reviewer';
 import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
@@ -340,6 +343,18 @@ async function startAgent(
       // that hasn't merged the key yet (exact prior behavior).
       writeRouting: memoryBudget.writeRouting === true,
       episodicArchiveDir: memoryBudget.episodicArchiveDir,
+      // planning-67: back the embedded auto-migrate route-out with a print-only
+      // reviewer spawn (same model as the dreaming reviewer). Only when routing is
+      // on; the manager gates it further on auto mode + over-budget + autoRouteOut.
+      routeOutFn:
+        memoryBudget.writeRouting === true
+          ? makeRouteOut(
+              makeClaudeSpawn(
+                resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming)
+                  .reviewModel,
+              ),
+            )
+          : undefined,
       // K3↔K4 promotion: only when the shared KB is enabled AND set to auto.
       sharedPromote: makeSharedPromoter(
         agentConfig.id,

@@ -31,6 +31,7 @@ export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   reviewModel: 'claude-haiku-4-5-20251001',
   promotionThreshold: 0.6,
   minRecallCount: 2,
+  autoRouteOut: true,
   staleness: STALENESS_DEFAULTS,
 };
 
@@ -96,6 +97,10 @@ export function resolveDreamingConfig(
     reviewModel: pick(agentCfg?.reviewModel, globalCfg?.reviewModel, d.reviewModel),
     promotionThreshold: numOr(pick(agentCfg?.promotionThreshold, globalCfg?.promotionThreshold, d.promotionThreshold), d.promotionThreshold, 0, 1),
     minRecallCount: numOr(pick(agentCfg?.minRecallCount, globalCfg?.minRecallCount, d.minRecallCount), d.minRecallCount, 0, Infinity),
+    // planning-67: boolean-safe (ignore non-boolean JSON), default true.
+    autoRouteOut:
+      [agentCfg?.autoRouteOut, globalCfg?.autoRouteOut].find((v) => typeof v === 'boolean') ??
+      d.autoRouteOut,
     staleness: resolveStalenessConfig(agentCfg?.staleness, globalCfg?.staleness),
   };
 }

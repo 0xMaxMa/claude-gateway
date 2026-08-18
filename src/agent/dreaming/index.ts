@@ -20,6 +20,7 @@ import { writeDreamAudit } from './audit';
 import { applyDreamProposals } from './applier';
 import { compactCompletedEntries } from './compactor';
 import { runStalenessGc } from './staleness';
+import { migrateMemory } from './migrate';
 import type {
   DreamingConfig,
   DreamOutcome,
@@ -51,6 +52,13 @@ export interface DreamingManagerDeps {
    */
   writeRouting?: boolean;
   episodicArchiveDir?: string;
+  /**
+   * planning-67: injected route-out classifier for the embedded auto-migrate
+   * stage. Given the current MEMORY.md, returns episodic-move proposals. The
+   * gateway wires it (reviewer-backed spawn) only when write routing is on;
+   * tests inject a stub. Absent ⇒ the stage is skipped (durable-only behavior).
+   */
+  routeOutFn?: (memory: string) => Promise<DreamProposal[]> | DreamProposal[];
   /**
    * Optional per-agent→shared promotion hook (K3↔K4). When provided (the gateway
    * wires it only when the shared KB is enabled AND `shared.mode:auto`), each
@@ -176,6 +184,39 @@ export class DreamingManager {
       }
     }
 
+    // EMBEDDED ROUTE-OUT (planning-67): when MEMORY.md is over budget, drain its
+    // episodic task-log to memory/<topic>.md automatically — archive-first, so
+    // every moved block stays searchable (no manual `dreaming:migrate` per agent).
+    // Runs auto-mode + routing-on + over-budget only; transcript-independent (like
+    // the compactor) so a quiet agent still self-drains; idempotent (skips once
+    // under budget); pinned sections excluded inside migrateMemory. Best-effort.
+    let routedOut = 0;
+    if (
+      cfg.mode === 'auto' &&
+      this.deps.writeRouting &&
+      cfg.autoRouteOut &&
+      this.deps.routeOutFn
+    ) {
+      const chars = readFileSafe(memoryPath).length;
+      if (chars > memoryBudget) {
+        try {
+          const res = await migrateMemory(this.deps.workspaceDir, {
+            mode: 'apply',
+            skipTerminalSweep: true, // the compactor already ran this tick
+            episodicArchiveDir: this.deps.episodicArchiveDir || 'memory',
+            routeOut: this.deps.routeOutFn,
+            now,
+          });
+          routedOut = res.episodicMoved;
+        } catch {
+          /* best-effort — never blocks the dream */
+        }
+      }
+    }
+    if (routedOut > 0) {
+      this.log('dream: embedded route-out drained episodic task-log', { routedOut });
+    }
+
     if (!gathered.transcript.trim()) {
       this.audit(now, 'skipped-empty', '', [], 0, 0, cfg.mode === 'auto' ? 0 : undefined, compactedCount);
       return { outcome: 'skipped-empty', ...base, compactedCount };
@@ -232,6 +273,9 @@ export class DreamingManager {
           episodicArchiveDir: this.deps.writeRouting
             ? this.deps.episodicArchiveDir || 'memory'
             : undefined,
+          // planning-67: relocate net-shrink `remove`s to a searchable archive
+          // (never silently delete) when routing is on.
+          archivePrunedRemovals: this.deps.writeRouting === true,
         }, now);
         appliedCount = applied.totalApplied;
         appliedProposals = applied.appliedProposals;

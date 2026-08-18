@@ -296,6 +296,10 @@ export interface GatewayConfig {
       reviewModel?: string;         // cheap model for the reviewer, default haiku
       promotionThreshold?: number;  // min candidate score to promote, default 0.6
       minRecallCount?: number;      // a fact must recur >= N times to promote, default 2
+      // planning-67: auto-drain an over-budget MEMORY.md by routing episodic
+      // task-log to memory/<topic>.md during the nightly dream (archive-safe),
+      // instead of a manual per-agent `dreaming:migrate`. Default true; kill-switch.
+      autoRouteOut?: boolean;
       /**
        * Archive staleness GC (planning-66). Nightly, deterministic pass (next to the
        * compactor, auto mode) that keeps `memory_search` surfacing CURRENT truth: it
