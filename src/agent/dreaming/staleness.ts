@@ -234,9 +234,11 @@ function markSupersessions(workspaceDir: string, db: ArchiveDB): number {
   for (const rel of walkArchiveFiles(workspaceDir)) {
     blocks.push(...parseEntryBlocks(readOnDisk(path.join(workspaceDir, rel))));
   }
+  // Snapshot lifecycle once (getLifecycle re-scans the table on each call).
+  const byHash = new Map(db.listLifecycle().map((l) => [l.entryHash, l]));
   let n = 0;
   for (const { targetHash, bySpec } of detectSupersessions(blocks)) {
-    const life = db.getLifecycle(targetHash);
+    const life = byHash.get(targetHash);
     if (!life || life.invalidAt != null || life.supersededBy) continue; // only newly-mark live entries
     db.setSuperseded(targetHash, bySpec);
     db.setSupersedesKeyForEntry(targetHash, `superseded_by:${bySpec.slice(0, 12)}`);

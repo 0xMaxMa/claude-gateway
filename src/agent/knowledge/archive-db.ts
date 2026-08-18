@@ -489,21 +489,6 @@ export class ArchiveDB {
       .run(invalidAt, entryHash);
   }
 
-  /**
-   * Set the recall `importance` (1..10) on every chunk of an entry — the
-   * non-decaying keep-axis the GC honors (`keepImportance`). Archive-indexed
-   * content has null importance by default; this is how a caller (or a test)
-   * marks an entry important enough to never age out.
-   */
-  setImportanceForEntry(entryHash: string, importance: number | null): void {
-    this.db
-      .prepare(
-        `UPDATE kb_chunk_recall SET importance = ?
-         WHERE chunk_id IN (SELECT id FROM kb_chunks WHERE entry_hash = ?)`,
-      )
-      .run(importance, entryHash);
-  }
-
 
   /**
    * Keyword search over chunk text (FTS5 BM25). K0 helper for tests/introspection;
