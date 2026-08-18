@@ -19,6 +19,13 @@ export interface DreamReviewerInput {
   currentMemory: string;
   /** Current USER.md content. */
   currentUser: string;
+  /**
+   * TRUE on-disk size of MEMORY.md in chars (NOT the truncated context above) and
+   * its soft budget. When present and over budget, the reviewer is told to enter
+   * net-shrink mode (#337). Optional so callers/tests can omit budget signalling.
+   */
+  memoryChars?: number;
+  memoryBudget?: number;
 }
 
 const SYSTEM_PROMPT = `You are a memory-consolidation reviewer for an AI agent ("dreaming"). You are given a slice of the agent's recent session transcripts and its current MEMORY.md and USER.md. Propose a SMALL set of edits that make the agent's long-term memory more useful per character — promote durable, recurring facts/preferences; replace stale or superseded entries; remove duplicates. Aim for FEWER, BETTER memories, not more.
@@ -37,8 +44,27 @@ Respond with STRICT JSON only (no prose, no markdown fences), matching:
 - score: your confidence 0..1 this belongs in durable memory. recallCount: how many times the fact recurred in the transcript.`;
 
 function buildPrompt(input: DreamReviewerInput): string {
+  const overBudget =
+    typeof input.memoryChars === 'number' &&
+    typeof input.memoryBudget === 'number' &&
+    input.memoryBudget > 0 &&
+    input.memoryChars > input.memoryBudget;
+  const budgetBlock = overBudget
+    ? [
+        '',
+        '<budget_status>',
+        `MEMORY.md is ${input.memoryChars} chars against a soft budget of ${input.memoryBudget} chars ` +
+          `(${(input.memoryChars! / input.memoryBudget!).toFixed(1)}× over budget).`,
+        'NET-SHRINK MODE: this run MUST reduce total characters. Propose ONLY "remove" and',
+        'length-reducing "replace" ops that prune stale, superseded, or completed entries.',
+        'Do NOT propose "add" ops or any "replace" whose new content is longer than its target.',
+        'Target the heaviest, least-useful sections; prune the most-stale entries first.',
+        '</budget_status>',
+      ].join('\n')
+    : '';
   return [
     SYSTEM_PROMPT,
+    budgetBlock,
     '',
     '<current_memory>',
     input.currentMemory || '(empty)',
@@ -54,6 +80,11 @@ function buildPrompt(input: DreamReviewerInput): string {
     '',
     'Output the JSON proposal now:',
   ].join('\n');
+}
+
+/** Exposed for tests: the exact prompt fed to the reviewer for a given input. */
+export function buildDreamPrompt(input: DreamReviewerInput): string {
+  return buildPrompt(input);
 }
 
 /** Extract the first balanced top-level JSON object from a string. */

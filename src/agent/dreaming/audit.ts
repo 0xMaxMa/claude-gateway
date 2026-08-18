@@ -22,6 +22,8 @@ export interface DreamAuditEntry {
   sessionCount: number;
   /** Ops the K4 applier actually wrote to memory (auto mode). Undefined ⇒ propose. */
   appliedCount?: number;
+  /** Terminal-state entries the deterministic compactor archived this run (#337). */
+  compactedCount?: number;
 }
 
 function truncate(s: string, n: number): string {
@@ -61,6 +63,12 @@ export function writeDreamAudit(workspaceDir: string, entry: DreamAuditEntry): s
       lines.push('', '_No sessions in the lookback window._');
     } else if (entry.outcome === 'error') {
       lines.push('', '_Reviewer produced no usable output (timeout or malformed) — no-op._');
+    }
+    if (entry.compactedCount && entry.compactedCount > 0) {
+      lines.push(
+        '',
+        `_compaction: archived ${entry.compactedCount} completed entr${entry.compactedCount === 1 ? 'y' : 'ies'} to memory/archive/ (still searchable)._`,
+      );
     }
     lines.push('', `_tokens: ${entry.tokensSpent}, sessions: ${entry.sessionCount}_`, '', '---', '');
 

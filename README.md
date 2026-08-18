@@ -410,6 +410,11 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 
 Per-agent overrides are supported under the agent's own `dreaming` block; unset fields fall back to the gateway default. `enabled:false` or `maxChangesPerRun:0` makes a run a no-op.
 
+**Keeping `MEMORY.md` near budget (`auto` mode).** Two mechanisms stop the on-disk `MEMORY.md` from growing unbounded while preserving recall:
+
+- **Deterministic compaction** — before the LLM reviewer, every `auto` run moves terminal-state log entries (bullets marked `MERGED` / `CLOSED`) out of `MEMORY.md` into `memory/archive/completed.md`, leaving a one-line pointer. The archive lives under `memory/` so it is still indexed and **searchable via `memory_search`** — the agent recalls completed work on demand instead of carrying its full changelog in-prompt. It is conservative (uppercase status words only, so prose like "Closes #123" is never archived), idempotent, and never drops an open/active item.
+- **Budget-scaled pruning** — when `MEMORY.md` is over its soft budget, the reviewer is put in an explicit net-shrink mode (propose only length-reducing ops) and `maxChangesPerRun` scales up **for removals** (the add cap stays tight), so an over-budget file converges toward budget instead of trickling at a few edits per night.
+
 ### `gateway.knowledge`
 
 **Two-lane memory** — a per-agent searchable knowledge archive so an agent can recall what does not fit in the always-injected core. A SQLite/FTS5 index (`agents/<id>/kb.sqlite`, built on Node's built-in `node:sqlite` — no new dependency) covers the agent's `memory/*.md` notes plus the evergreen `MEMORY.md`/`USER.md`. Every chunk is tagged with **fail-closed provenance** (`owner`/`agent`/`untrusted`/`system`; unclassified ⇒ `untrusted`). The index is refreshed by a detached subprocess at session spawn, entirely **off the gateway event loop**.
