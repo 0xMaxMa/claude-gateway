@@ -164,6 +164,19 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(body).toContain("'?scope='")
   })
 
+  test('U-UI-03f: the Nightly dreaming tab ships an accept action wired to the apply endpoint', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-dreams">([\s\S]*?)<\/script>/)![1]!
+    // The accept action POSTs the run + selected indexes to the apply endpoint.
+    expect(body).toContain('function acceptDreams')
+    expect(body).toContain("apiUrl('/knowledge/dreams/apply')")
+    expect(body).toContain('run.ts') // targets a specific run
+    expect(body).toContain('p.accepted') // renders per-proposal accepted state
+    expect(body).toContain('Accept all') // bulk action per run
+    // Parse-only: a syntax error in the hand-rolled renderer would break the dashboard.
+    expect(() => new Function(body)).not.toThrow()
+  })
+
   test('U-UI-03e: the graph is a 3D canvas that auto-spins and drag-rotates (no pan / no center button)', () => {
     const html = generateDashboardHtml()
     const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!

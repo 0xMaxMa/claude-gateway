@@ -13,6 +13,8 @@
  */
 
 export interface DreamProposalView {
+  /** Position within its run's proposal list — the accept target the UI sends back. */
+  index: number;
   op: string;
   file: string;
   target?: string;
@@ -20,6 +22,8 @@ export interface DreamProposalView {
   reason: string;
   score: number;
   recallCount: number;
+  /** True when this proposal was applied to memory via a manual dashboard accept. */
+  accepted: boolean;
 }
 
 export interface DreamRunReport {
@@ -34,7 +38,10 @@ export interface DreamRunReport {
   proposals: DreamProposalView[];
 }
 
-function groupPromotionsByTs(jsonl: string): Map<number, DreamProposalView[]> {
+function groupPromotionsByTs(
+  jsonl: string,
+  acceptedKeys: Set<string>,
+): Map<number, DreamProposalView[]> {
   const byTs = new Map<number, DreamProposalView[]>();
   for (const raw of jsonl.split('\n')) {
     const line = raw.trim();
@@ -47,7 +54,10 @@ function groupPromotionsByTs(jsonl: string): Map<number, DreamProposalView[]> {
     }
     const ts = Number(o.ts);
     if (!Number.isFinite(ts)) continue;
+    const arr = byTs.get(ts) ?? [];
+    const index = arr.length; // position within this run — the accept target
     const view: DreamProposalView = {
+      index,
       op: String(o.op ?? ''),
       file: String(o.file ?? ''),
       target: typeof o.target === 'string' ? o.target : undefined,
@@ -55,12 +65,30 @@ function groupPromotionsByTs(jsonl: string): Map<number, DreamProposalView[]> {
       reason: String(o.reason ?? ''),
       score: Number(o.score) || 0,
       recallCount: Number(o.recallCount) || 0,
+      accepted: acceptedKeys.has(`${ts}:${index}`),
     };
-    const arr = byTs.get(ts) ?? [];
     arr.push(view);
     byTs.set(ts, arr);
   }
   return byTs;
+}
+
+/** Parse `accepted.jsonl` into a set of `"<ts>:<index>"` keys. */
+function parseAcceptedKeys(acceptedJsonl: string): Set<string> {
+  const keys = new Set<string>();
+  for (const raw of acceptedJsonl.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      const o = JSON.parse(line) as Record<string, unknown>;
+      const ts = Number(o.ts);
+      const idx = Number(o.index);
+      if (Number.isFinite(ts) && Number.isFinite(idx)) keys.add(`${ts}:${idx}`);
+    } catch {
+      /* skip malformed line */
+    }
+  }
+  return keys;
 }
 
 /** First meaningful prose line(s) after the header, before the first bullet / italic / rule. */
@@ -78,8 +106,13 @@ function extractSummary(sectionLines: string[]): string {
   return out.join(' ');
 }
 
-export function parseDreamReport(dreamsMd: string, promotionsJsonl: string): DreamRunReport[] {
-  const byTs = groupPromotionsByTs(promotionsJsonl);
+export function parseDreamReport(
+  dreamsMd: string,
+  promotionsJsonl: string,
+  acceptedJsonl = '',
+): DreamRunReport[] {
+  const acceptedKeys = parseAcceptedKeys(acceptedJsonl);
+  const byTs = groupPromotionsByTs(promotionsJsonl, acceptedKeys);
   const runs: DreamRunReport[] = [];
   // Each run is a "## <iso> — <outcome> (<mode>)" section.
   const sections = dreamsMd.split(/\n(?=## )/);
