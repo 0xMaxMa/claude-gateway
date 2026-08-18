@@ -239,6 +239,10 @@ export function generateDashboardHtml(): string {
     }
     .kb-toolbar button:hover { background: #374151; }
     .kb-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+    #kb-demo-size, #kb-source {
+      background: #1a2333; color: #cbd5e0; border: 1px solid #2d3748;
+      border-radius: 4px; padding: 2px 4px; font-size: 0.78rem; cursor: pointer;
+    }
     .kb-demo-badge {
       background: #744210; color: #fbd38d; border: 1px solid #975a16;
       border-radius: 4px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;
@@ -247,24 +251,78 @@ export function generateDashboardHtml(): string {
     .kb-legend span { display: inline-flex; align-items: center; gap: 4px; }
     .kb-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     .kb-stage {
-      position: relative; width: 100%; height: 620px;
-      background: #0f1523; border: 1px solid #2d3748; border-radius: 8px; overflow: hidden;
+      position: relative; width: 100%; height: 620px; overflow: hidden;
+      border: 1px solid #2d3748; border-radius: 8px;
+      /* Deep-space radial backdrop makes the node glow read as light. */
+      background: radial-gradient(ellipse 70% 62% at 50% 42%, #16203a 0%, #0d1322 55%, #070a12 100%);
     }
     #kb-svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
     #kb-svg.panning { cursor: grabbing; }
-    .kb-edge { stroke: #4a5568; stroke-width: 1; }
-    .kb-edge.hl { stroke: #63b3ed; stroke-width: 2; }
+    /* Curved links: calm and thin at rest; energised with a flowing dash on hover. */
+    .kb-edge { fill: none; stroke: #34405c; stroke-width: 1.1; stroke-linecap: round;
+      transition: stroke 0.15s ease, opacity 0.15s ease; }
+    .kb-edge.hl { stroke: #7cc4ff; stroke-width: 2.2; stroke-dasharray: 3 7;
+      animation: kb-flow 0.55s linear infinite; }
+    .kb-edge.dim { opacity: 0.05; }
+    @keyframes kb-flow { to { stroke-dashoffset: -20; } }
+    /* #kb-halos is a blurred layer (filter below) giving each node an Obsidian-style bloom. */
+    #kb-halos circle { pointer-events: none; }
+    #kb-halos circle.dim { opacity: 0.04; }
     .kb-node { cursor: pointer; }
-    .kb-node circle { stroke: #1a202c; stroke-width: 1.5; transition: opacity 0.15s; }
-    .kb-node.contradiction circle { stroke: #fc8181; stroke-width: 3; }
-    .kb-node text { fill: #cbd5e0; font-size: 11px; pointer-events: none; }
-    .kb-node.stale { opacity: 0.45; }
-    .kb-node.dim { opacity: 0.12; }
-    .kb-edge.dim { opacity: 0.06; }
+    .kb-node circle { stroke: rgba(255,255,255,0.35); stroke-width: 1; transition: opacity 0.15s; }
+    .kb-node.contradiction circle { stroke: #fc8181; stroke-width: 2.5; }
+    /* paint-order draws the dark stroke UNDER the glyph so labels stay legible over glow. */
+    .kb-node text { fill: #d5deec; font-size: 11px; pointer-events: none;
+      paint-order: stroke; stroke: #070a12; stroke-width: 3px; stroke-linejoin: round; }
+    /* Declutter at scale: hide labels until a node is focused (hover) or a search hit. */
+    #kb-nodes.declutter .kb-node text { opacity: 0; transition: opacity 0.12s; }
+    #kb-nodes.declutter .kb-node.focus text,
+    #kb-nodes.declutter .kb-node.search-hit text { opacity: 1; }
+    .kb-node.stale { opacity: 0.4; }
+    .kb-node.dim { opacity: 0.1; }
+    /* Search: dim non-matches (independent of hover 'dim'), ring the matches. */
+    .kb-node.search-dim { opacity: 0.08; }
+    #kb-halos circle.search-dim { opacity: 0.02; }
+    .kb-edge.search-dim { opacity: 0.03; }
+    .kb-node.search-hit circle { stroke: #f6e05e; stroke-width: 3; }
+    .kb-node.search-hit text { fill: #f6e05e; }
+    .kb-search-wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+    #kb-search {
+      background: #0d1117; color: #e2e8f0; border: 1px solid #4a5568; border-radius: 4px;
+      padding: 3px 8px; font-size: 0.8rem; width: 160px; outline: none;
+    }
+    #kb-search:focus { border-color: #63b3ed; }
+    .kb-search-count { color: #718096; font-size: 0.75rem; min-width: 42px; }
     .kb-empty {
       position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
       color: #718096; font-size: 0.9rem; text-align: center; padding: 20px; pointer-events: none;
     }
+    /* --- Nightly dreaming report --- */
+    .dreams-list { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 20px; }
+    .dreams-empty { color: #718096; font-size: 0.9rem; text-align: center; padding: 40px 20px; }
+    .dream-run {
+      background: #131a2b; border: 1px solid #222c40; border-radius: 8px; padding: 12px 14px;
+    }
+    .dream-run-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+    .dream-run-head .agent { color: #63b3ed; font-weight: 600; }
+    .dream-run-head .when { color: #718096; font-size: 0.78rem; font-family: monospace; }
+    .dream-badge { border-radius: 4px; padding: 1px 7px; font-size: 0.7rem; font-weight: 600; }
+    .dream-badge.auto { background: #22543d; color: #9ae6b4; border: 1px solid #2f855a; }
+    .dream-badge.propose { background: #2a4365; color: #90cdf4; border: 1px solid #2b6cb0; }
+    .dream-badge.outcome { background: #2d3748; color: #cbd5e0; border: 1px solid #4a5568; }
+    .dream-summary { color: #cbd5e0; font-size: 0.86rem; margin: 4px 0 8px; }
+    .dream-meta { color: #718096; font-size: 0.75rem; margin-top: 8px; }
+    .dream-props { display: flex; flex-direction: column; gap: 6px; }
+    .dream-prop {
+      background: #0e1420; border: 1px solid #1e2740; border-radius: 6px; padding: 7px 9px; font-size: 0.82rem;
+    }
+    .dream-prop .op { font-weight: 600; text-transform: uppercase; font-size: 0.7rem; margin-right: 6px; }
+    .dream-prop .op.add { color: #68d391; } .dream-prop .op.replace { color: #f6ad55; } .dream-prop .op.remove { color: #fc8181; }
+    .dream-prop .file { color: #90cdf4; font-family: monospace; font-size: 0.76rem; }
+    .dream-prop .score { color: #718096; font-size: 0.72rem; float: right; }
+    .dream-prop .reason { color: #a0aec0; margin-top: 3px; }
+    .dream-prop .content { color: #cbd5e0; margin-top: 5px; white-space: pre-wrap; word-break: break-word;
+      background: #070a12; border-radius: 4px; padding: 6px 8px; font-size: 0.78rem; max-height: 140px; overflow: auto; }
     .kb-panel {
       position: absolute; top: 10px; right: 10px; width: 280px; max-height: calc(100% - 20px);
       overflow-y: auto; background: #1a202c; border: 1px solid #4a5568; border-radius: 8px;
@@ -274,6 +332,13 @@ export function generateDashboardHtml(): string {
     .kb-panel .kb-panel-close { float: right; cursor: pointer; color: #718096; }
     .kb-panel dt { color: #718096; margin-top: 8px; }
     .kb-panel dd { margin: 2px 0 0; word-break: break-word; }
+    .kb-panel-note-h {
+      margin-top: 12px; padding-top: 10px; border-top: 1px solid #2d3748;
+      color: #718096; text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em;
+    }
+    .kb-panel-note {
+      margin-top: 6px; color: #cbd5e0; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    }
   </style>
 </head>
 <body>
@@ -288,6 +353,7 @@ export function generateDashboardHtml(): string {
   <div class="tabs">
     <button class="tab active" id="tab-sessions" data-view="view-sessions">Sessions</button>
     <button class="tab" id="tab-kb" data-view="view-kb">Knowledge base</button>
+    <button class="tab" id="tab-dreams" data-view="view-dreams">Nightly dreaming</button>
   </div>
 
   <div id="view-sessions" class="view">
@@ -350,15 +416,39 @@ export function generateDashboardHtml(): string {
        Zero external deps: the force simulation + SVG render are hand-rolled. -->
   <div id="view-kb" class="view" style="display:none;">
     <div class="kb-toolbar">
-      <button id="kb-refresh" title="Recompute the graph from the shared vault">&#x21bb; Refresh</button>
+      <label id="kb-source-wrap" title="Which memory graph to view: the cross-agent Shared KB, or one agent's own memory">Source
+        <select id="kb-source"><option value="shared">Shared KB</option></select>
+      </label>
+      <button id="kb-refresh" title="Recompute the graph from the selected source">&#x21bb; Refresh</button>
+      <span class="kb-search-wrap">
+        <input id="kb-search" type="search" placeholder="Search notes&hellip;" autocomplete="off" spellcheck="false">
+        <span id="kb-search-count" class="kb-search-count"></span>
+      </span>
       <label><input type="checkbox" id="kb-demo-toggle" checked> Show demo data when vault is empty</label>
+      <label id="kb-demo-size-wrap" title="Synthetic node count for the demo (stress-test the viewer at scale)">Demo size
+        <select id="kb-demo-size">
+          <option value="0">8 (sample)</option>
+          <option value="100">100</option>
+          <option value="300">300</option>
+          <option value="600">600</option>
+        </select>
+      </label>
       <span id="kb-demo-badge" class="kb-demo-badge" style="display:none;">DEMO DATA</span>
       <span id="kb-stats"></span>
       <span class="kb-legend" id="kb-legend"></span>
     </div>
     <div class="kb-stage">
       <svg id="kb-svg" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <filter id="kb-glow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="6"></feGaussianBlur>
+          </filter>
+        </defs>
+        <!-- Full-bleed transparent surface (screen-space, OUTSIDE the panned viewport)
+             so empty-area drags reliably hit the SVG for panning in every browser. -->
+        <rect id="kb-bg" x="0" y="0" width="100%" height="100%" fill="transparent" pointer-events="all"></rect>
         <g id="kb-viewport">
+          <g id="kb-halos" filter="url(#kb-glow)"></g>
           <g id="kb-edges"></g>
           <g id="kb-nodes"></g>
         </g>
@@ -367,6 +457,19 @@ export function generateDashboardHtml(): string {
       <div id="kb-panel" class="kb-panel" style="display:none;"></div>
     </div>
   </div><!-- /view-kb -->
+
+  <!-- Nightly dreaming — the memory-consolidation audit trail (.dreaming/) per agent. -->
+  <div id="view-dreams" class="view" style="display:none;">
+    <div class="kb-toolbar">
+      <button id="dreams-refresh" title="Reload the dreaming audit trail">&#x21bb; Refresh</button>
+      <label id="dreams-agent-wrap">Agent
+        <select id="dreams-agent"><option value="">All agents</option></select>
+      </label>
+      <span id="dreams-stats"></span>
+    </div>
+    <div id="dreams-list" class="dreams-list"></div>
+    <div id="dreams-empty" class="dreams-empty" style="display:none;"></div>
+  </div><!-- /view-dreams -->
 
   <div id="error-msg" class="error" style="display:none;"></div>
 
@@ -1003,7 +1106,8 @@ export function generateDashboardHtml(): string {
         document.querySelectorAll('.view').forEach(function(v){ v.style.display = 'none'; });
         var viewEl = document.getElementById(tab.getAttribute('data-view'));
         if (viewEl) viewEl.style.display = '';
-        if (tab.getAttribute('data-view') === 'view-kb' && !kbLoaded) { kbLoaded = true; loadGraph(); }
+        if (tab.getAttribute('data-view') === 'view-kb' && !kbLoaded) { kbLoaded = true; loadSources(); }
+        if (tab.getAttribute('data-view') === 'view-dreams' && window.__loadDreams) { window.__loadDreams(); }
       });
     });
 
@@ -1011,6 +1115,7 @@ export function generateDashboardHtml(): string {
     var SVGNS = 'http://www.w3.org/2000/svg';
     var svg = document.getElementById('kb-svg');
     var gViewport = document.getElementById('kb-viewport');
+    var gHalos = document.getElementById('kb-halos');
     var gEdges = document.getElementById('kb-edges');
     var gNodes = document.getElementById('kb-nodes');
     var elEmpty = document.getElementById('kb-empty');
@@ -1018,7 +1123,13 @@ export function generateDashboardHtml(): string {
     var elStats = document.getElementById('kb-stats');
     var elLegend = document.getElementById('kb-legend');
     var elDemoBadge = document.getElementById('kb-demo-badge');
+    var sourceSel = document.getElementById('kb-source');
     var demoToggle = document.getElementById('kb-demo-toggle');
+    var demoToggleWrap = demoToggle ? demoToggle.closest('label') : null;
+    var demoSize = document.getElementById('kb-demo-size');
+    var demoSizeWrap = document.getElementById('kb-demo-size-wrap');
+    var elSearch = document.getElementById('kb-search');
+    var elSearchCount = document.getElementById('kb-search-count');
 
     var TYPE_COLORS = {
       decision: '#63b3ed', evidence: '#68d391', claim: '#f6ad55',
@@ -1027,12 +1138,25 @@ export function generateDashboardHtml(): string {
     var DEFAULT_COLOR = '#a0aec0';
     function colorFor(type){ return (type && TYPE_COLORS[type]) ? TYPE_COLORS[type] : DEFAULT_COLOR; }
 
-    // Force constants — tuned for the small KB (tens of nodes).
-    var REPULSE = 2600, SPRING_K = 0.03, REST = 95, CENTER = 0.011, DAMPING = 0.9, VMAX = 30;
+    // Force constants — tuned for the small KB (tens of nodes). Wider REST + REPULSE
+    // give an airy, un-clumped layout; higher friction (lower DAMPING) + low VMAX kill
+    // the "bouncy" overshoot so the graph settles instead of jiggling.
+    var REPULSE = 4200, SPRING_K = 0.025, REST = 135, CENTER = 0.02, DAMPING = 0.82, VMAX = 18;
+    var PRESOLVE_TICKS = 220; // lay the graph out off-screen so it opens already-settled
+    var LABEL_LIMIT = 60; // above this node count, labels are hidden until hover/search (declutter)
 
     var nodes = [], edges = [], nodeById = {};
     var view = { x: 0, y: 0, k: 1 };
     var raf = null, alpha = 0, dragNode = null, panning = false, panStart = null;
+    var autoFitPending = false; // true from buildModel until the first settle-fit; user pan/zoom cancels it
+    // Unified pointer gesture state (one active pointer at a time). A gesture is
+    // classified on pointerdown as 'node' (press started on a node) or 'pan' (empty
+    // space); a tap that never crosses DRAG_THRESH opens/closes the panel instead of
+    // dragging. Deriving tap-vs-drag ourselves — rather than the synthetic click
+    // event — is immune to pointer-capture click retargeting, which made node clicks
+    // open the panel only intermittently.
+    var activePointer = null, gestureMode = null, downX = 0, downY = 0, moved = false;
+    var DRAG_THRESH = 4; // px in screen space before a press counts as a drag
 
     function w(){ return svg.clientWidth || 800; }
     function h(){ return svg.clientHeight || 600; }
@@ -1043,7 +1167,7 @@ export function generateDashboardHtml(): string {
     // ---------- Build model from API payload ----------
     function buildModel(data){
       stopSim();
-      gEdges.textContent = ''; gNodes.textContent = '';
+      gHalos.textContent = ''; gEdges.textContent = ''; gNodes.textContent = '';
       nodes = []; edges = []; nodeById = {};
       hidePanel();
       var raw = (data && data.nodes) || [];
@@ -1055,6 +1179,7 @@ export function generateDashboardHtml(): string {
           id: nd.id, title: nd.title || nd.id, type: nd.type || null,
           degree: nd.degree || 0, confidence: (nd.confidence === undefined ? null : nd.confidence),
           updatedAt: nd.updatedAt || null, stale: !!nd.stale, contradiction: !!nd.contradiction,
+          excerpt: nd.excerpt || null,
           x: cx + Math.cos(ang) * 180 + (Math.random() * 20 - 10),
           y: cy + Math.sin(ang) * 180 + (Math.random() * 20 - 10),
           vx: 0, vy: 0, neighbors: {}
@@ -1067,41 +1192,67 @@ export function generateDashboardHtml(): string {
         edges.push({ source: s, target: t });
         s.neighbors[t.id] = true; t.neighbors[s.id] = true;
       });
+      // Adapt the physics to the graph size: more nodes need stronger mutual
+      // repulsion (and a few more settle ticks) so clusters separate instead of
+      // collapsing into one hairball. Small graphs keep the airy hand-tuned look.
+      var spread = Math.max(1, Math.sqrt(n / 30));
+      REPULSE = 4200 * spread;
+      PRESOLVE_TICKS = n > 120 ? 340 : 220;
+      // Declutter: hide labels by default past a threshold; hover/search reveals them.
+      gNodes.classList.toggle('declutter', n > LABEL_LIMIT);
       createEls();
       view = { x: 0, y: 0, k: 1 }; applyTransform();
       // Only run the simulation when there is something to lay out — an empty
       // graph would otherwise spin ~260 idle RAF frames before self-terminating.
-      if (nodes.length) { alpha = 1; startSim(); }
+      // Pre-solve off-screen first so the view opens on an already-settled layout,
+      // then auto-fit the whole graph into the viewport (large graphs would else
+      // spill off-screen), and a low alpha lets it ease gently into place.
+      autoFitPending = true;
+      if (nodes.length) { presolve(); fitView(); alpha = 0.35; startSim(); }
+      // Re-apply an active search filter to the freshly-built node set (refresh/toggle).
+      if (elSearch && elSearch.value.trim()) runSearch(); else clearSearch();
     }
 
     function createEls(){
       edges.forEach(function(e){
-        var line = document.createElementNS(SVGNS, 'line');
-        line.setAttribute('class', 'kb-edge');
-        e.el = line; gEdges.appendChild(line);
+        var p = document.createElementNS(SVGNS, 'path');
+        p.setAttribute('class', 'kb-edge');
+        e.el = p; gEdges.appendChild(p);
       });
       nodes.forEach(function(node){
+        // sqrt keeps hub nodes prominent without dwarfing the rest (linear grew too fast).
+        var r = Math.min(24, 5 + Math.sqrt(node.degree) * 5);
+        node.r = r;
+        // Blurred colour halo in the #kb-halos layer → soft bloom behind the crisp node.
+        var halo = document.createElementNS(SVGNS, 'circle');
+        halo.setAttribute('r', r * 1.9);
+        halo.setAttribute('fill', colorFor(node.type));
+        halo.setAttribute('opacity', node.stale ? '0.18' : '0.5');
+        node.halo = halo; gHalos.appendChild(halo);
+
         var g = document.createElementNS(SVGNS, 'g');
         g.setAttribute('class', 'kb-node' + (node.stale ? ' stale' : '') + (node.contradiction ? ' contradiction' : ''));
         var c = document.createElementNS(SVGNS, 'circle');
-        var r = Math.min(22, 6 + node.degree * 2);
         c.setAttribute('r', r);
         c.setAttribute('fill', colorFor(node.type));
         var label = document.createElementNS(SVGNS, 'text');
-        label.setAttribute('x', r + 3); label.setAttribute('y', 4);
+        label.setAttribute('x', r + 4); label.setAttribute('y', 4);
         label.textContent = node.title;
         g.appendChild(c); g.appendChild(label);
-        node.el = g; node.r = r;
-        g.addEventListener('pointerenter', function(){ highlight(node); });
-        g.addEventListener('pointerleave', function(){ clearHighlight(); });
-        g.addEventListener('pointerdown', function(ev){ startDrag(node, ev); });
-        g.addEventListener('click', function(ev){ ev.stopPropagation(); showPanel(node); });
+        node.el = g;
+        g.__node = node; // DOM -> model back-reference for hit-testing in the pointer model
+        // Hover highlight only — press/drag/tap are handled by the unified pointer
+        // model on the SVG (a captured gesture routes pointer events to the SVG, so
+        // per-node handlers would fire inconsistently and fight the pan/drag logic).
+        g.addEventListener('pointerenter', function(){ if (activePointer === null) highlight(node); });
+        g.addEventListener('pointerleave', function(){ if (activePointer === null) clearHighlight(); });
         gNodes.appendChild(g);
       });
     }
 
     // ---------- Force simulation ----------
-    function tick(){
+    // One integration step (no paint): repulsion (all pairs) + spring (edges) + centering.
+    function simStep(){
       var i, j, a, b, dx, dy, d2, d, f, ux, uy;
       for (i = 0; i < nodes.length; i++){ nodes[i].fx = 0; nodes[i].fy = 0; }
       for (i = 0; i < nodes.length; i++){
@@ -1128,23 +1279,56 @@ export function generateDashboardHtml(): string {
         if (a.vy > VMAX) a.vy = VMAX; else if (a.vy < -VMAX) a.vy = -VMAX;
         a.x += a.vx; a.y += a.vy;
       }
+    }
+    // Settle the layout off-screen before the first paint (kills the "bouncy" intro).
+    function presolve(){ for (var s = 0; s < PRESOLVE_TICKS; s++) simStep(); render(); }
+    // Zoom/pan the viewport so the whole settled graph fits with a margin. Essential
+    // at scale — a 300-node layout is far larger than the viewport at k=1.
+    function fitView(){
+      if (!nodes.length) return;
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (var i = 0; i < nodes.length; i++){
+        var n = nodes[i];
+        if (n.x < minX) minX = n.x; if (n.y < minY) minY = n.y;
+        if (n.x > maxX) maxX = n.x; if (n.y > maxY) maxY = n.y;
+      }
+      var pad = 50, gw = (maxX - minX) || 1, gh = (maxY - minY) || 1;
+      var k = Math.min((w() - pad * 2) / gw, (h() - pad * 2) / gh, 1.5);
+      if (!isFinite(k) || k <= 0) k = 1;
+      view.k = k;
+      view.x = (w() - k * (minX + maxX)) / 2;
+      view.y = (h() - k * (minY + maxY)) / 2;
+      applyTransform();
+    }
+    function tick(){
+      simStep();
       render();
       alpha *= 0.985;
-      if (alpha > 0.02) raf = requestAnimationFrame(tick); else raf = null;
+      // Re-fit once the layout has settled so post-presolve easing can't leave a
+      // large graph drifted partly off-screen. (User pan/zoom after this is kept.)
+      if (alpha > 0.02) raf = requestAnimationFrame(tick);
+      else { raf = null; if (autoFitPending && nodes.length > LABEL_LIMIT) fitView(); autoFitPending = false; }
     }
     function startSim(){ if (!raf) raf = requestAnimationFrame(tick); }
     function stopSim(){ if (raf){ cancelAnimationFrame(raf); raf = null; } }
     function reheat(){ alpha = Math.max(alpha, 0.5); startSim(); }
 
+    // Curved link: a quadratic bézier bowed perpendicular to the chord (organic, un-tangled).
+    function edgePath(e){
+      var s = e.source, t = e.target;
+      var dx = t.x - s.x, dy = t.y - s.y;
+      var len = Math.sqrt(dx*dx + dy*dy) || 1;
+      var off = 0.12 * len;
+      var mx = (s.x + t.x) / 2 + (-dy / len) * off;
+      var my = (s.y + t.y) / 2 + (dx / len) * off;
+      return 'M' + s.x + ' ' + s.y + ' Q' + mx + ' ' + my + ' ' + t.x + ' ' + t.y;
+    }
     function render(){
-      for (var i = 0; i < edges.length; i++){
-        var e = edges[i];
-        e.el.setAttribute('x1', e.source.x); e.el.setAttribute('y1', e.source.y);
-        e.el.setAttribute('x2', e.target.x); e.el.setAttribute('y2', e.target.y);
-      }
+      for (var i = 0; i < edges.length; i++){ edges[i].el.setAttribute('d', edgePath(edges[i])); }
       for (var k = 0; k < nodes.length; k++){
         var nd = nodes[k];
         nd.el.setAttribute('transform', 'translate(' + nd.x + ',' + nd.y + ')');
+        nd.halo.setAttribute('cx', nd.x); nd.halo.setAttribute('cy', nd.y);
       }
     }
 
@@ -1156,36 +1340,56 @@ export function generateDashboardHtml(): string {
         y: (ev.clientY - rect.top - view.y) / view.k
       };
     }
-    function startDrag(node, ev){
-      ev.stopPropagation(); dragNode = node;
-      svg.setPointerCapture(ev.pointerId);
-      var move = function(mv){ var p = evtGraphPoint(mv); node.x = p.x; node.y = p.y; render(); reheat(); };
-      var up = function(){
-        dragNode = null;
-        svg.removeEventListener('pointermove', move);
-        svg.removeEventListener('pointerup', up);
-        svg.removeEventListener('pointercancel', up);
-      };
-      svg.addEventListener('pointermove', move);
-      svg.addEventListener('pointerup', up);
-      // pointercancel (touch palm-rejection / gesture interruption) must also clear
-      // dragNode — otherwise it stays non-null and silently disables panning.
-      svg.addEventListener('pointercancel', up);
+    // Resolve the node whose element (or a child of it) is under an event, if any.
+    function nodeFromEvent(ev){
+      var t = ev.target;
+      var g = t && t.closest ? t.closest('.kb-node') : null;
+      return (g && g.__node) ? g.__node : null;
     }
+    // ---- Unified pointer model: one capture drives pan, node-drag, and tap ----
     svg.addEventListener('pointerdown', function(ev){
-      if (dragNode) return;
-      panning = true; svg.classList.add('panning');
-      panStart = { x: ev.clientX - view.x, y: ev.clientY - view.y };
+      if (activePointer !== null) return; // ignore secondary pointers (e.g. 2nd finger)
+      autoFitPending = false; // user is interacting — don't stomp their view on settle
+      activePointer = ev.pointerId;
+      try { svg.setPointerCapture(ev.pointerId); } catch (e) {}
+      downX = ev.clientX; downY = ev.clientY; moved = false;
+      var node = nodeFromEvent(ev);
+      if (node){
+        gestureMode = 'node'; dragNode = node;
+      } else {
+        gestureMode = 'pan'; panning = true; svg.classList.add('panning');
+        panStart = { x: ev.clientX - view.x, y: ev.clientY - view.y };
+      }
     });
     svg.addEventListener('pointermove', function(ev){
-      if (!panning) return;
-      view.x = ev.clientX - panStart.x; view.y = ev.clientY - panStart.y; applyTransform();
+      if (ev.pointerId !== activePointer) return;
+      if (!moved){
+        var ddx = ev.clientX - downX, ddy = ev.clientY - downY;
+        if (ddx * ddx + ddy * ddy > DRAG_THRESH * DRAG_THRESH) moved = true;
+      }
+      if (gestureMode === 'pan'){
+        view.x = ev.clientX - panStart.x; view.y = ev.clientY - panStart.y; applyTransform();
+      } else if (gestureMode === 'node' && moved && dragNode){
+        var p = evtGraphPoint(ev); dragNode.x = p.x; dragNode.y = p.y; render(); reheat();
+      }
     });
-    svg.addEventListener('pointerup', function(){ panning = false; svg.classList.remove('panning'); });
-    svg.addEventListener('pointerleave', function(){ panning = false; svg.classList.remove('panning'); });
-    svg.addEventListener('click', function(){ hidePanel(); });
+    function endGesture(ev, cancelled){
+      if (ev.pointerId !== activePointer) return;
+      try { svg.releasePointerCapture(ev.pointerId); } catch (e) {}
+      // A press that never became a drag is a tap: on a node -> open its panel;
+      // on empty space -> dismiss the panel. Deterministic (no reliance on click).
+      if (!cancelled && !moved){
+        if (gestureMode === 'node' && dragNode) showPanel(dragNode);
+        else if (gestureMode === 'pan') hidePanel();
+      }
+      activePointer = null; gestureMode = null; dragNode = null;
+      panning = false; svg.classList.remove('panning');
+    }
+    svg.addEventListener('pointerup', function(ev){ endGesture(ev, false); });
+    svg.addEventListener('pointercancel', function(ev){ endGesture(ev, true); });
     svg.addEventListener('wheel', function(ev){
       ev.preventDefault();
+      autoFitPending = false; // user zoomed — keep their view on settle
       var rect = svg.getBoundingClientRect();
       var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
       var factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -1200,6 +1404,8 @@ export function generateDashboardHtml(): string {
         var nd = nodes[i];
         var on = (nd === node) || node.neighbors[nd.id];
         nd.el.classList.toggle('dim', !on);
+        nd.el.classList.toggle('focus', on); // reveals label while decluttered
+        nd.halo.classList.toggle('dim', !on);
       }
       for (var j = 0; j < edges.length; j++){
         var e = edges[j];
@@ -1209,8 +1415,46 @@ export function generateDashboardHtml(): string {
       }
     }
     function clearHighlight(){
-      nodes.forEach(function(nd){ nd.el.classList.remove('dim'); });
+      nodes.forEach(function(nd){ nd.el.classList.remove('dim', 'focus'); nd.halo.classList.remove('dim'); });
       edges.forEach(function(e){ e.el.classList.remove('hl'); e.el.classList.remove('dim'); });
+    }
+
+    // ---------- Search ----------
+    // Filter nodes by title/type/excerpt. Uses its own 'search-*' classes so it never
+    // fights the hover highlight ('dim'/'hl'). Empty query restores the full graph.
+    function clearSearch(){
+      nodes.forEach(function(nd){ nd.el.classList.remove('search-dim', 'search-hit'); nd.halo.classList.remove('search-dim'); });
+      edges.forEach(function(e){ e.el.classList.remove('search-dim'); });
+      if (elSearchCount) elSearchCount.textContent = '';
+    }
+    function runSearch(){
+      if (!elSearch) return;
+      var q = elSearch.value.trim().toLowerCase();
+      if (!q){ clearSearch(); return; }
+      var hits = [];
+      nodes.forEach(function(nd){
+        var hay = (nd.title + ' ' + (nd.type || '') + ' ' + (nd.excerpt || '')).toLowerCase();
+        var on = hay.indexOf(q) >= 0;
+        nd.match = on;
+        if (on) hits.push(nd);
+        nd.el.classList.toggle('search-hit', on);
+        nd.el.classList.toggle('search-dim', !on);
+        nd.halo.classList.toggle('search-dim', !on);
+      });
+      // An edge stays lit only when BOTH ends match, so the highlighted set reads as a subgraph.
+      edges.forEach(function(e){ e.el.classList.toggle('search-dim', !(e.source.match && e.target.match)); });
+      if (elSearchCount) elSearchCount.textContent = hits.length + ' / ' + nodes.length;
+      return hits;
+    }
+    // Enter → recentre the view on the first match so it is easy to find in a big graph.
+    function focusFirstMatch(){
+      var hits = runSearch();
+      if (!hits || !hits.length) return;
+      var n0 = hits[0];
+      view.k = Math.max(view.k, 1);
+      view.x = w() / 2 - n0.x * view.k;
+      view.y = h() / 2 - n0.y * view.k;
+      applyTransform();
     }
 
     function el(tag, txt){ var e = document.createElement(tag); if (txt !== undefined) e.textContent = txt; return e; }
@@ -1230,6 +1474,12 @@ export function generateDashboardHtml(): string {
       if (node.stale) row('status', 'stale (≥ 90d)');
       if (node.contradiction) row('flag', 'in a contradiction');
       elPanel.appendChild(dl);
+      // Readable note body preview — the "open and read" part of the panel.
+      if (node.excerpt){
+        var h = el('div'); h.setAttribute('class', 'kb-panel-note-h'); h.textContent = 'note';
+        var body = el('div', node.excerpt); body.setAttribute('class', 'kb-panel-note');
+        elPanel.appendChild(h); elPanel.appendChild(body);
+      }
       elPanel.style.display = '';
     }
     function hidePanel(){ elPanel.style.display = 'none'; }
@@ -1248,8 +1498,51 @@ export function generateDashboardHtml(): string {
     }
 
     // ---------- Load ----------
+    function currentScope(){ return (sourceSel && sourceSel.value) || 'shared'; }
+    // Demo controls (toggle/size/badge) only make sense for the Shared KB — an
+    // agent's own memory has no synthetic demo. Hide them when an agent is picked.
+    function syncSourceControls(){
+      var isShared = currentScope() === 'shared';
+      if (demoToggleWrap) demoToggleWrap.style.display = isShared ? '' : 'none';
+      if (demoSizeWrap) demoSizeWrap.style.display = (isShared && demoToggle.checked) ? '' : 'none';
+      if (!isShared) elDemoBadge.style.display = 'none';
+    }
+
+    // Populate the source selector from /knowledge/sources (Shared KB + agents that
+    // have Lane-2 memory notes), preserving the current selection, then load.
+    function loadSources(){
+      fetch(apiUrl('/knowledge/sources'), { headers: { 'Accept': 'application/json' } }).then(function(res){
+        if (res.status === 401) { onUnauthorized(); return null; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }).then(function(data){
+        if (!data || !sourceSel) { loadGraph(); return; }
+        var prev = sourceSel.value || 'shared';
+        sourceSel.textContent = '';
+        (data.sources || [{ id: 'shared', label: 'Shared KB', count: 0 }]).forEach(function(s){
+          var o = document.createElement('option');
+          o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + s.count + ')' : '');
+          sourceSel.appendChild(o);
+        });
+        // Restore prior selection if it still exists, else fall back to Shared KB.
+        sourceSel.value = prev;
+        if (sourceSel.value !== prev) sourceSel.value = 'shared';
+        loadGraph();
+      }).catch(function(){ loadGraph(); }); // selector best-effort — the graph still loads
+    }
+
     function loadGraph(){
-      var url = apiUrl('/knowledge/graph') + (demoToggle.checked ? '' : '?demo=off');
+      syncSourceControls();
+      var scope = currentScope();
+      var q = '';
+      if (scope !== 'shared') {
+        q = '?scope=' + encodeURIComponent(scope);
+      } else if (!demoToggle.checked) {
+        q = '?demo=off';
+      } else if (demoSize && demoSize.value !== '0') {
+        q = '?demo=' + encodeURIComponent(demoSize.value);
+      }
+      var url = apiUrl('/knowledge/graph') + q;
       elStats.textContent = 'Loading…'; elEmpty.style.display = 'none';
       fetch(url, { headers: { 'Accept': 'application/json' } }).then(function(res){
         if (res.status === 401) { onUnauthorized(); return null; }
@@ -1262,7 +1555,9 @@ export function generateDashboardHtml(): string {
         if (!data.nodes || data.nodes.length === 0){
           buildModel({ nodes: [], edges: [] });
           elStats.textContent = '';
-          elEmpty.textContent = 'No notes in the shared Knowledge Base yet. Notes appear here once agents promote memories to the shared vault (dreaming auto mode), or enable the demo toggle above.';
+          elEmpty.textContent = scope === 'shared'
+            ? 'No notes in the shared Knowledge Base yet. Notes appear here once agents promote memories to the shared vault (dreaming auto mode), or enable the demo toggle above.'
+            : 'This agent has no memory notes yet.';
           elEmpty.style.display = '';
           elLegend.textContent = '';
           return;
@@ -1276,8 +1571,118 @@ export function generateDashboardHtml(): string {
     }
 
     document.getElementById('kb-refresh').addEventListener('click', loadGraph);
+    if (sourceSel) sourceSel.addEventListener('change', loadGraph);
     demoToggle.addEventListener('change', loadGraph);
+    if (demoSize) demoSize.addEventListener('change', loadGraph);
+    if (elSearch){
+      elSearch.addEventListener('input', runSearch);
+      elSearch.addEventListener('keydown', function(ev){
+        if (ev.key === 'Enter') focusFirstMatch();
+        else if (ev.key === 'Escape') { elSearch.value = ''; clearSearch(); }
+      });
+    }
   })();
+  </script>
+
+  <script id="kb-dreams">
+    // Nightly dreaming report renderer. Fetches /knowledge/dreams (parsed audit
+    // trail across all agents), renders a newest-first timeline with per-run
+    // proposals, and an agent filter. All text goes through textContent (no HTML
+    // injection). Uses the global apiUrl/onUnauthorized helpers.
+    (function(){
+      var listEl = document.getElementById('dreams-list');
+      var emptyEl = document.getElementById('dreams-empty');
+      var statsEl = document.getElementById('dreams-stats');
+      var agentSel = document.getElementById('dreams-agent');
+      var refreshBtn = document.getElementById('dreams-refresh');
+      var allRuns = [];
+      var loaded = false;
+
+      function el(tag, cls, text){
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      }
+
+      function renderRun(run){
+        var box = el('div', 'dream-run');
+        var head = el('div', 'dream-run-head');
+        if (run.agent) head.appendChild(el('span', 'agent', run.agent));
+        var modeCls = run.mode === 'auto' ? 'auto' : 'propose';
+        head.appendChild(el('span', 'dream-badge ' + modeCls, run.mode));
+        head.appendChild(el('span', 'dream-badge outcome', run.outcome));
+        head.appendChild(el('span', 'when', run.iso));
+        box.appendChild(head);
+
+        if (run.summary) box.appendChild(el('div', 'dream-summary', run.summary));
+
+        if (run.proposals && run.proposals.length){
+          var props = el('div', 'dream-props');
+          run.proposals.forEach(function(p){
+            var pe = el('div', 'dream-prop');
+            var top = el('div');
+            top.appendChild(el('span', 'op ' + (p.op || ''), p.op || '?'));
+            top.appendChild(el('span', 'file', p.file || ''));
+            top.appendChild(el('span', 'score', 'score ' + (p.score != null ? p.score : '?') + ' · recall ' + (p.recallCount != null ? p.recallCount : '?')));
+            pe.appendChild(top);
+            if (p.reason) pe.appendChild(el('div', 'reason', p.reason));
+            if (p.content) pe.appendChild(el('div', 'content', p.content));
+            props.appendChild(pe);
+          });
+          box.appendChild(props);
+        }
+
+        var applied = (run.applied != null) ? (', applied ' + run.applied) : '';
+        box.appendChild(el('div', 'dream-meta', 'tokens ' + (run.tokens||0) + ' · sessions ' + (run.sessions||0) + applied));
+        return box;
+      }
+
+      function render(){
+        var filter = agentSel ? agentSel.value : '';
+        var runs = filter ? allRuns.filter(function(r){ return r.agent === filter; }) : allRuns;
+        listEl.textContent = '';
+        if (!runs.length){
+          emptyEl.textContent = allRuns.length ? 'No dream runs for this agent.' : 'No dream runs yet. The nightly dreaming pass writes here after it first runs (auto or propose mode).';
+          emptyEl.style.display = '';
+          statsEl.textContent = '';
+          return;
+        }
+        emptyEl.style.display = 'none';
+        statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's');
+        runs.forEach(function(r){ listEl.appendChild(renderRun(r)); });
+      }
+
+      function loadDreams(force){
+        if (loaded && !force) return;
+        loaded = true;
+        statsEl.textContent = 'Loading…';
+        fetch(apiUrl('/knowledge/dreams'), { headers: { 'Accept': 'application/json' } }).then(function(res){
+          if (res.status === 401) { onUnauthorized(); return null; }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function(data){
+          if (!data) return;
+          allRuns = data.runs || [];
+          // Populate the agent filter, preserving the current pick.
+          if (agentSel){
+            var prev = agentSel.value;
+            agentSel.textContent = '';
+            agentSel.appendChild(el('option', null, 'All agents')); agentSel.lastChild.value = '';
+            (data.agents || []).forEach(function(a){ var o = el('option', null, a); o.value = a; agentSel.appendChild(o); });
+            agentSel.value = prev; if (agentSel.value !== prev) agentSel.value = '';
+          }
+          render();
+        }).catch(function(err){
+          statsEl.textContent = ''; emptyEl.textContent = 'Failed to load dreams: ' + err.message; emptyEl.style.display = '';
+        });
+      }
+
+      if (agentSel) agentSel.addEventListener('change', render);
+      if (refreshBtn) refreshBtn.addEventListener('click', function(){ loadDreams(true); });
+      // Exposed so the tab switcher (in the kb-graph script) can lazy-load on first open.
+      window.__loadDreams = loadDreams;
+    })();
   </script>
 </body>
 </html>`;

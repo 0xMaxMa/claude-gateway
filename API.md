@@ -15,8 +15,10 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
 | `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats + heartbeat history |
 | `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard |
-| `GET` | `/knowledge/graph` | Admin key or dashboard session¹ | Shared-KB memory-wiki as `{ nodes, edges, demo }` for the dashboard **Knowledge base** tab. Computed on-demand from the shared vault's notes (independent of `gateway.knowledge.shared.graph` and the nightly reindex). Serves a labelled demo dataset (`demo:true`) when the vault is empty; `?demo=off` returns the real (possibly empty) model |
-| `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (Sessions + Knowledge base tabs; serves the login page when unauthenticated) |
+| `GET` | `/knowledge/graph` | Admin key or dashboard session¹ | Memory-wiki as `{ nodes, edges, demo, scope }` for the dashboard **Knowledge base** tab. `?scope=shared` (default) = the cross-agent Shared KB; `?scope=agent:<id>` = that agent's Lane-2 memory (`workspace/memory/*.md`, id validated against the known-agents allowlist). Computed on-demand (independent of `gateway.knowledge.shared.graph` and the nightly reindex). Shared scope serves a labelled demo (`demo:true`) when empty; `?demo=off` returns the real model; `?demo=<N>` a synthetic N-node graph for scale testing |
+| `GET` | `/knowledge/sources` | Admin key or dashboard session¹ | Graph sources for the KB tab's selector: `{ sources: [{ id, label, count }] }` — the Shared KB plus every agent with ≥1 Lane-2 memory note |
+| `GET` | `/knowledge/dreams` | Admin key or dashboard session¹ | Nightly-dreaming audit trail for the **Nightly dreaming** tab: `{ runs, agents }`, newest-first, parsed from each agent's `.dreaming/DREAMS.md` + `promotions.jsonl`. Bounded (≤200 runs; proposal `content` truncated) |
+| `GET` | `/dashboard` | Session cookie¹ | Web UI dashboard (Sessions + Knowledge base + Nightly dreaming tabs; serves the login page when unauthenticated) |
 | `POST` | `/dashboard/login` | None (validates an admin key) | Exchange an **admin** API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |

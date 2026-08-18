@@ -139,6 +139,46 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(() => new Function(body)).not.toThrow()
   })
 
+  test('U-UI-03c: the Knowledge base graph ships a node search control', () => {
+    const html = generateDashboardHtml()
+    // The search input lives in the toolbar…
+    expect(html).toContain('id="kb-search"')
+    expect(html).toContain('id="kb-search-count"')
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // …and is wired to a filter that uses its own classes (never the hover 'dim').
+    expect(body).toContain('function runSearch')
+    expect(body).toContain('search-hit')
+    expect(body).toContain('search-dim')
+    expect(body).toContain("elSearch.addEventListener('input', runSearch)")
+    // Enter recentres on the first match; the filter is re-applied after a rebuild.
+    expect(body).toContain('function focusFirstMatch')
+  })
+
+  test('U-UI-03d: the Knowledge base graph ships a source selector (shared / per-agent)', () => {
+    const html = generateDashboardHtml()
+    expect(html).toContain('id="kb-source"')
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // Populates from /knowledge/sources and threads ?scope= into the graph fetch.
+    expect(body).toContain("apiUrl('/knowledge/sources')")
+    expect(body).toContain('function loadSources')
+    expect(body).toContain("'?scope='")
+  })
+
+  test('U-UI-06: the Nightly dreaming report script is present and valid', () => {
+    const html = generateDashboardHtml()
+    // Third tab + its view container.
+    expect(html).toContain('id="tab-dreams"')
+    expect(html).toContain('id="view-dreams"')
+    const m = html.match(/<script id="kb-dreams">([\s\S]*?)<\/script>/)
+    expect(m).not.toBeNull()
+    const body = m![1]!
+    expect(body).toContain("apiUrl('/knowledge/dreams')") // fetches the audit trail
+    expect(body).toContain('function loadDreams')
+    expect(body).toContain('window.__loadDreams') // exposed for the tab switcher
+    // Parse-only guard against a syntax error breaking the dashboard.
+    expect(() => new Function(body)).not.toThrow()
+  })
+
   test('U-UI-04: input-mode wiring references the shared send path', () => {
     const body = scriptBody(generateDashboardHtml())
     expect(body).toContain('setPtyInputMode')

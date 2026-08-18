@@ -50,6 +50,7 @@ export interface WikiPage {
   confidence: number | null;
   updatedAt: string | null;
   links: string[]; // [[targets]] found in the body
+  excerpt: string | null; // short, plain-text preview of the body (for the graph panel)
 }
 
 export interface WikiCompileResult {
@@ -94,6 +95,27 @@ function splitFrontmatter(raw: string): { fm: Record<string, unknown>; body: str
   return { fm, body: m[2] };
 }
 
+const EXCERPT_MAX = 480;
+/**
+ * Plain-text preview of a note body for the graph side-panel. Strips fenced code,
+ * unwraps `[[link|alias]]` to its display text, drops the most common Markdown
+ * punctuation, collapses whitespace, and caps the length. Returns null for an
+ * empty body so the panel can omit the section rather than show a blank line.
+ */
+function toExcerpt(body: string): string | null {
+  const t = body
+    .replace(/```[\s\S]*?```/g, ' ') // fenced code blocks
+    .replace(/`[^`]*`/g, ' ') // inline code
+    .replace(/\[\[[^\]|]*\|([^\]]+)\]\]/g, '$1') // [[target|alias]] -> alias
+    .replace(/\[\[([^\]]+)\]\]/g, '$1') // [[target]] -> target
+    .replace(/^\s*[#>\-*+]\s?/gm, '') // leading heading/list/quote markers
+    .replace(/[*_~]/g, '') // emphasis marks
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return null;
+  return t.length > EXCERPT_MAX ? t.slice(0, EXCERPT_MAX).replace(/\s+\S*$/, '') + '…' : t;
+}
+
 /** Extract `[[target]]` link targets from a body (code spans not masked — v1). */
 export function extractLinks(body: string): string[] {
   const out: string[] = [];
@@ -134,6 +156,7 @@ export function parseWikiPage(relPath: string, raw: string): WikiPage {
     confidence: toNum(fm.confidence) ?? null,
     updatedAt: toDateStr(fm.updatedAt) ?? null,
     links: extractLinks(body),
+    excerpt: toExcerpt(body),
   };
 }
 
@@ -296,6 +319,7 @@ export interface GraphNode {
   updatedAt: string | null;
   stale: boolean;
   contradiction: boolean; // this page participates in a contradicting claim
+  excerpt: string | null; // short plain-text body preview (for the side-panel)
 }
 
 export interface GraphEdge {
@@ -350,6 +374,7 @@ export function graphFromPages(pages: WikiPage[], now: number): GraphModel {
     updatedAt: p.updatedAt,
     stale: staleSet.has(p.relPath),
     contradiction: contradictionSet.has(p.relPath),
+    excerpt: p.excerpt ?? null,
   }));
   return { nodes, edges };
 }

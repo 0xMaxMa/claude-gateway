@@ -33,6 +33,38 @@ function buildApp(sharedRoot: string) {
   return router.getApp();
 }
 
+// Build an app whose agents-root resolves under `configDir` (via configPath), with
+// the given agent ids registered. Lets scope=agent:<id> / sources tests seed real
+// per-agent memory dirs in isolation.
+function buildAppWithAgents(sharedRoot: string, configDir: string, agentIds: string[]) {
+  const gatewayConfig: GatewayConfig = {
+    gateway: {
+      logDir: '/tmp',
+      timezone: 'UTC',
+      api: { keys: WITH_KEYS },
+      knowledge: { shared: { enabled: true, project: 'test', root: sharedRoot } },
+    },
+    agents: [],
+  } as unknown as GatewayConfig;
+  const agents = new Map(agentIds.map((id) => [id, {} as never]));
+  const configPath = path.join(configDir, 'config.json');
+  const router = new GatewayRouter(agents, new Map<string, AgentConfig>(), undefined, gatewayConfig, undefined, configPath);
+  return router.getApp();
+}
+
+function seedAgentMemory(configDir: string, id: string, files: Record<string, string>) {
+  const memDir = path.join(configDir, 'agents', id, 'workspace', 'memory');
+  fs.mkdirSync(memDir, { recursive: true });
+  for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(memDir, name), body);
+}
+
+function seedAgentDreams(configDir: string, id: string, dreamsMd: string, promotions: string) {
+  const dir = path.join(configDir, 'agents', id, 'workspace', '.dreaming');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'DREAMS.md'), dreamsMd);
+  if (promotions) fs.writeFileSync(path.join(dir, 'promotions.jsonl'), promotions);
+}
+
 describe('GET /knowledge/graph', () => {
   let root: string;
   beforeEach(() => {
@@ -85,6 +117,23 @@ describe('GET /knowledge/graph', () => {
       expect(res.body.nodes).toEqual([]);
     });
 
+    it('empty vault + ?demo=300 → synthetic sized demo (demo:true, 300 nodes)', async () => {
+      const res = await supertest(buildApp(root)).get('/knowledge/graph?demo=300').set('X-Api-Key', KEY);
+      expect(res.body.demo).toBe(true);
+      expect(res.body.nodes.length).toBe(300);
+      expect(res.body.edges.length).toBeGreaterThan(0);
+    });
+
+    it('populated vault ignores ?demo=300 (real notes win)', async () => {
+      const notes = path.join(root, 'test', 'notes');
+      fs.mkdirSync(notes, { recursive: true });
+      fs.writeFileSync(path.join(notes, 'a.md'), `---\ntitle: A\ntype: decision\n---\n[[b]]\n`);
+      fs.writeFileSync(path.join(notes, 'b.md'), `---\ntitle: B\ntype: evidence\n---\nbody\n`);
+      const res = await supertest(buildApp(root)).get('/knowledge/graph?demo=300').set('X-Api-Key', KEY);
+      expect(res.body.demo).toBe(false);
+      expect(res.body.nodes.length).toBe(2);
+    });
+
     it('populated vault → real nodes/edges (demo:false)', async () => {
       const notes = path.join(root, 'test', 'notes');
       fs.mkdirSync(notes, { recursive: true });
@@ -94,6 +143,85 @@ describe('GET /knowledge/graph', () => {
       expect(res.body.demo).toBe(false);
       expect(res.body.nodes.map((n: { id: string }) => n.id).sort()).toEqual(['notes/a.md', 'notes/b.md']);
       expect(res.body.edges).toEqual([{ source: 'notes/a.md', target: 'notes/b.md' }]);
+    });
+  });
+
+  describe('scope=agent (Lane-2 per-agent memory)', () => {
+    it('builds the graph from that agent workspace/memory/*.md', async () => {
+      seedAgentMemory(root, 'alpha', {
+        'x.md': `---\ntitle: X\ntype: decision\n---\nlinks [[y]]\n`,
+        'y.md': `---\ntitle: Y\ntype: evidence\n---\nbody\n`,
+      });
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).get('/knowledge/graph?scope=agent:alpha').set('X-Api-Key', KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.scope).toBe('agent:alpha');
+      expect(res.body.demo).toBe(false);
+      expect(res.body.nodes.map((n: { id: string }) => n.id).sort()).toEqual(['x.md', 'y.md']);
+      expect(res.body.edges).toEqual([{ source: 'x.md', target: 'y.md' }]);
+    });
+
+    it('rejects an unknown agent id with 404 (no filesystem access for un-allowlisted ids)', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).get('/knowledge/graph?scope=agent:../../etc').set('X-Api-Key', KEY);
+      expect(res.status).toBe(404);
+    });
+
+    it('still requires auth', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).get('/knowledge/graph?scope=agent:alpha');
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('GET /knowledge/sources', () => {
+    it('lists Shared KB plus agents that have memory notes', async () => {
+      seedAgentMemory(root, 'alpha', { 'x.md': `---\ntitle: X\n---\n[[y]]\n`, 'y.md': `---\ntitle: Y\n---\nb\n` });
+      // beta has an empty memory dir → must be omitted from sources.
+      fs.mkdirSync(path.join(root, 'agents', 'beta', 'workspace', 'memory'), { recursive: true });
+      const app = buildAppWithAgents(root, root, ['alpha', 'beta']);
+      const res = await supertest(app).get('/knowledge/sources').set('X-Api-Key', KEY);
+      expect(res.status).toBe(200);
+      const ids = res.body.sources.map((s: { id: string }) => s.id);
+      expect(ids).toContain('shared');
+      expect(ids).toContain('agent:alpha');
+      expect(ids).not.toContain('agent:beta');
+      const alpha = res.body.sources.find((s: { id: string }) => s.id === 'agent:alpha');
+      expect(alpha.count).toBe(2);
+    });
+
+    it('requires auth', async () => {
+      const res = await supertest(buildApp(root)).get('/knowledge/sources');
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('GET /knowledge/dreams', () => {
+    const DREAMS = `## 2026-08-17T05:19:23.664Z — proposed (propose)\n\nA summary\n\n- **add** \`MEMORY.md\` [x] — reason _(score 0.85, recall 3)_\n\n_propose mode: proposals logged only — memory not modified._\n\n_tokens: 6351, sessions: 2_\n\n---\n`;
+    const PROMOS = JSON.stringify({ ts: Date.parse('2026-08-17T05:19:23.664Z'), mode: 'propose', op: 'add', file: 'MEMORY.md', target: 'x', content: 'body', reason: 'reason', score: 0.85, recallCount: 3 });
+
+    it('returns parsed runs per agent, newest first', async () => {
+      seedAgentDreams(root, 'alpha', DREAMS, PROMOS);
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).get('/knowledge/dreams').set('X-Api-Key', KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.agents).toContain('alpha');
+      expect(res.body.runs.length).toBe(1);
+      const run = res.body.runs[0];
+      expect(run.agent).toBe('alpha');
+      expect(run.mode).toBe('propose');
+      expect(run.tokens).toBe(6351);
+      expect(run.proposals[0]).toMatchObject({ op: 'add', file: 'MEMORY.md', content: 'body' });
+    });
+
+    it('omits agents that have never dreamed and requires auth', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']); // no .dreaming seeded
+      const ok = await supertest(app).get('/knowledge/dreams').set('X-Api-Key', KEY);
+      expect(ok.status).toBe(200);
+      expect(ok.body.runs).toEqual([]);
+      expect(ok.body.agents).toEqual([]);
+      const unauth = await supertest(app).get('/knowledge/dreams');
+      expect(unauth.status).toBe(401);
     });
   });
 });

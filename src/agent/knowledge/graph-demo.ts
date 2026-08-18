@@ -52,3 +52,84 @@ export function demoGraphModel(now: number): GraphModel {
   const pages = DEMO_NOTES.map(([rel, raw]) => parseWikiPage(rel, raw));
   return graphFromPages(pages, now);
 }
+
+/** Largest synthetic graph the sized demo will build — guards the endpoint from an abusive ?demo=99999. */
+export const DEMO_MAX_SIZE = 1000;
+
+/** Deterministic PRNG (mulberry32) — a given size always yields the same graph (stable for tests + caching). */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const DEMO_TYPES = ['decision', 'policy', 'infra', 'evidence', 'claim'];
+
+/**
+ * Build a synthetic *clustered* graph of `size` notes for stress-testing the
+ * viewer at scale (the dashboard's 100 / 300 size selector) without a populated
+ * vault. Notes are generated as real markdown with [[wikilinks]] and run through
+ * the SAME parse + graph pipeline as live notes, so degree / stale / contradiction
+ * flags are genuinely derived — not hand-faked. Deterministic per `size` (seeded
+ * PRNG). Sizes <= the hand-written demo fall back to it. Clamped to DEMO_MAX_SIZE.
+ */
+export function demoGraphModelSized(now: number, size: number): GraphModel {
+  const n = Math.max(1, Math.min(DEMO_MAX_SIZE, Math.floor(size)));
+  if (n <= DEMO_NOTES.length) return demoGraphModel(now);
+
+  const rnd = mulberry32(n);
+  const clusters = Math.max(3, Math.round(Math.sqrt(n)));
+  const id = (i: number): string => 'n' + String(i).padStart(4, '0');
+  const notes: Array<[string, string]> = [];
+
+  for (let i = 0; i < n; i++) {
+    const c = i % clusters; // round-robin keeps clusters balanced
+    const hub = c; // first node of each cluster is its hub (nodes 0..clusters-1)
+    const isHub = i < clusters;
+    const links: string[] = [];
+    if (!isHub) links.push(id(hub)); // spoke -> hub (hub gains high degree = big node)
+    // 1-2 intra-cluster neighbours for local structure
+    const nbr = clusters + Math.floor(rnd() * Math.max(1, n - clusters));
+    if (nbr < n && nbr !== i) links.push(id(nbr));
+    // ~12% cross-cluster bridge to another hub (keeps the graph one connected mass)
+    if (rnd() < 0.12) {
+      const other = Math.floor(rnd() * clusters);
+      if (other !== hub) links.push(id(other));
+    }
+
+    const type = DEMO_TYPES[i % DEMO_TYPES.length];
+    const confidence = (0.35 + rnd() * 0.6).toFixed(2); // spread of low..high confidence
+    const stale = rnd() < 0.15 ? '\nupdatedAt: "2024-06-01"' : ''; // ~15% old -> stale flag
+    // ~4% of nodes take part in a shared claim with alternating status -> contradiction flag
+    const claim =
+      rnd() < 0.04
+        ? '\nclaims:\n  - id: scale-choice\n    text: partition strategy\n    status: ' +
+          (i % 2 === 0 ? 'adopted' : 'proposed')
+        : '';
+    const linkLine = links.map((l) => '[[' + l + ']]').join(' ');
+    const raw =
+      '---\ntitle: Node ' +
+      String(i) +
+      '\ntype: ' +
+      type +
+      '\nconfidence: ' +
+      confidence +
+      stale +
+      claim +
+      '\n---\nSynthetic note ' +
+      i +
+      ' in cluster ' +
+      c +
+      '. ' +
+      linkLine +
+      '\n';
+    notes.push(['notes/' + id(i) + '.md', raw]);
+  }
+
+  const pages = notes.map(([rel, raw]) => parseWikiPage(rel, raw));
+  return graphFromPages(pages, now);
+}

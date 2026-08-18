@@ -41,7 +41,7 @@ export type {
   GraphEdge,
   GraphModel,
 } from './wiki';
-export { demoGraphModel } from './graph-demo';
+export { demoGraphModel, demoGraphModelSized, DEMO_MAX_SIZE } from './graph-demo';
 export { chunkMarkdown } from './chunk';
 export type { Chunk } from './chunk';
 export { classifyOrigin } from './provenance';

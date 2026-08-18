@@ -74,9 +74,9 @@ describe('parseWikiPage / extractLinks', () => {
 describe('buildBacklinks', () => {
   test('reverse edges by relPath / stem / basename / title', () => {
     const pages: WikiPage[] = [
-      { relPath: 'a.md', title: 'Alpha', type: null, claims: [], confidence: null, updatedAt: null, links: ['b', 'Gamma'] },
-      { relPath: 'b.md', title: 'Beta', type: null, claims: [], confidence: null, updatedAt: null, links: [] },
-      { relPath: 'c.md', title: 'Gamma', type: null, claims: [], confidence: null, updatedAt: null, links: [] },
+      { relPath: 'a.md', title: 'Alpha', type: null, claims: [], confidence: null, updatedAt: null, links: ['b', 'Gamma'], excerpt: null },
+      { relPath: 'b.md', title: 'Beta', type: null, claims: [], confidence: null, updatedAt: null, links: [], excerpt: null },
+      { relPath: 'c.md', title: 'Gamma', type: null, claims: [], confidence: null, updatedAt: null, links: [], excerpt: null },
     ];
     const back = buildBacklinks(pages);
     expect(back.get('b.md')).toEqual(['a.md']); // matched by basename stem
@@ -86,9 +86,9 @@ describe('buildBacklinks', () => {
 
 describe('buildDashboards', () => {
   const pages: WikiPage[] = [
-    { relPath: 'p1.md', title: 'P1', type: null, confidence: 0.3, updatedAt: new Date(NOW - 120 * DAY).toISOString(), links: [],
+    { relPath: 'p1.md', title: 'P1', type: null, confidence: 0.3, updatedAt: new Date(NOW - 120 * DAY).toISOString(), links: [], excerpt: null,
       claims: [{ id: 'shared', text: 'the API is REST', status: 'supported' }, { id: 'weak', text: 'maybe', confidence: 0.2 }] },
-    { relPath: 'p2.md', title: 'P2', type: null, confidence: 0.95, updatedAt: new Date(NOW - 5 * DAY).toISOString(), links: [],
+    { relPath: 'p2.md', title: 'P2', type: null, confidence: 0.95, updatedAt: new Date(NOW - 5 * DAY).toISOString(), links: [], excerpt: null,
       claims: [{ id: 'shared', text: 'the API is GraphQL', status: 'supported' }] },
   ];
 
@@ -162,7 +162,7 @@ import {
   buildGraphModel,
   type GraphModel,
 } from '../../src/agent/knowledge/wiki';
-import { demoGraphModel } from '../../src/agent/knowledge/graph-demo';
+import { demoGraphModel, demoGraphModelSized, DEMO_MAX_SIZE } from '../../src/agent/knowledge/graph-demo';
 
 describe('graphFromPages', () => {
   test('maps nodes (type/degree/stale/contradiction) and resolves [[link]] edges', () => {
@@ -226,5 +226,39 @@ describe('demoGraphModel', () => {
     expect(contradicting).toContain('notes/session-store.md');
     // legacy-cache is dated 2025-01-01 → stale relative to 2026.
     expect(g.nodes.find((n) => n.id === 'notes/legacy-cache.md')!.stale).toBe(true);
+  });
+});
+
+describe('demoGraphModelSized', () => {
+  const NOW = Date.parse('2026-08-01T00:00:00Z');
+
+  test('generates the requested node count with a connected, clustered structure', () => {
+    const g = demoGraphModelSized(NOW, 300);
+    expect(g.nodes.length).toBe(300);
+    expect(g.edges.length).toBeGreaterThan(200); // spokes + neighbours + bridges
+    // Every edge references real nodes (link resolution held) — no dangling ids.
+    const ids = new Set(g.nodes.map((n) => n.id));
+    for (const e of g.edges) {
+      expect(ids.has(e.source)).toBe(true);
+      expect(ids.has(e.target)).toBe(true);
+    }
+    // Hubs accrue high degree → the graph is not a uniform mesh.
+    expect(Math.max(...g.nodes.map((n) => n.degree))).toBeGreaterThan(5);
+    // Derived flags are genuinely produced by the pipeline, not faked.
+    expect(g.nodes.some((n) => n.stale)).toBe(true);
+    expect(g.nodes.some((n) => n.contradiction)).toBe(true);
+  });
+
+  test('is deterministic for a given size', () => {
+    expect(demoGraphModelSized(NOW, 100)).toEqual(demoGraphModelSized(NOW, 100));
+  });
+
+  test('falls back to the hand-written demo for small sizes', () => {
+    expect(demoGraphModelSized(NOW, 5)).toEqual(demoGraphModel(NOW));
+  });
+
+  test('clamps an abusive size to DEMO_MAX_SIZE', () => {
+    const g = demoGraphModelSized(NOW, 999999);
+    expect(g.nodes.length).toBe(DEMO_MAX_SIZE);
   });
 });
