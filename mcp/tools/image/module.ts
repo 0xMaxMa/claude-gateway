@@ -308,7 +308,9 @@ export class ImageModule implements ToolModule {
       // a match with no recorded task id (path ref, or an artifact with none)
       // → silently omitted, exactly like any other unresolved resume signal
       // downstream; never an error.
-      const continueFrom = typeof args.continue_from === 'string' ? args.continue_from.trim() : '';
+      // Defensively strip a leading "artifact:" — the schema asks for the bare
+      // id, but tolerate the prefixed form rather than silently failing to match.
+      const continueFrom = (typeof args.continue_from === 'string' ? args.continue_from.trim() : '').replace(/^artifact:/i, '');
       if (continueFrom) {
         const idx = refsList.findIndex((r) => r.trim() === `artifact:${continueFrom}`);
         const resumeTaskId = idx !== -1 ? normalized.taskIds[idx] : undefined;

@@ -216,6 +216,19 @@ describe('generate_image share-bridge normalization (#70)', () => {
         expect(submitCall()!.body!.resume_task_id).toBe('task-abc');
       });
 
+      test('tolerates a leading "artifact:" prefix on continue_from → still resolves', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          task_id: 'task-abc',
+          provider: 'codex-image',
+        }];
+        // Schema asks for the bare id, but a prefixed form must not silently fail.
+        await generate({ image: 'artifact:img_abc123', continue_from: 'artifact:img_abc123' });
+        expect(submitCall()!.body!.resume_task_id).toBe('task-abc');
+      });
+
       test('not present in image/images → omitted, no error', async () => {
         const res = await generate({ image: 'artifact:img_abc123', continue_from: 'img_some_other_id' });
         expect(res.isError).toBeUndefined();
