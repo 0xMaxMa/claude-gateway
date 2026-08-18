@@ -145,12 +145,12 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(html).toContain('id="kb-search"')
     expect(html).toContain('id="kb-search-count"')
     const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
-    // …and is wired to a filter that uses its own classes (never the hover 'dim').
+    // …and is wired to a filter that marks matching notes (canvas render dims the rest).
     expect(body).toContain('function runSearch')
-    expect(body).toContain('search-hit')
-    expect(body).toContain('search-dim')
+    expect(body).toContain('function clearSearch')
+    expect(body).toContain('o.hit') // per-node match flag the renderer reads
     expect(body).toContain("elSearch.addEventListener('input', runSearch)")
-    // Enter recentres on the first match; the filter is re-applied after a rebuild.
+    // Enter focuses the first match (rotates it to the front); re-applied after a rebuild.
     expect(body).toContain('function focusFirstMatch')
   })
 
@@ -162,6 +162,51 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(body).toContain("apiUrl('/knowledge/sources')")
     expect(body).toContain('function loadSources')
     expect(body).toContain("'?scope='")
+  })
+
+  test('U-UI-03e: the graph is a 3D canvas that auto-spins and drag-rotates (no pan / no center button)', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // The graph renders to a <canvas>, not an SVG plane.
+    expect(html).toContain('id="kb-canvas"')
+    expect(html).not.toContain('id="kb-svg"')
+    // It auto-spins continuously (the reference "หมุนวนไปเรื่อย ๆ" behaviour) via a
+    // named baseline speed constant applied every frame…
+    expect(body).toContain('SPIN = 0.0025')
+    expect(body).toContain('rotY += SPIN')
+    // …and dragging empty space ROTATES the sphere (X drag → spin, Y drag → tilt),
+    // which a flat-SVG pan could never do. A drag adjusts both rotation axes.
+    expect(body).toContain('(e.clientX - lastX) * 0.01')
+    expect(body).toContain('(e.clientY - lastY) * 0.01')
+    expect(body).toContain('rotY += dY')
+    expect(body).toContain('rotX += dX')
+    // Always centred by projection → the old "Center" button + pan are gone for good.
+    expect(html).not.toContain('id="kb-center"')
+    expect(body).not.toContain('onPointerMove')
+    // Wheel still zooms.
+    expect(body).toContain("addEventListener('wheel'")
+  })
+
+  test('U-UI-11: release momentum, +/- zoom buttons + wider clamp, renamed source, 300 default demo, styled agent select', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // (1) Releasing a drag keeps the sphere orbiting — the last drag speed is captured
+    // as angular momentum, then decayed frame-by-frame instead of freezing dead.
+    expect(body).toContain('velY = dY')          // capture drag speed
+    expect(body).toContain('velY *= 0.95')       // decay after release
+    expect(body).toContain('if (dragging) auto = true') // resume orbit on release
+    // (4) Wider zoom range + on-screen +/- buttons sharing one clamped zoomBy().
+    expect(body).toContain('MAX_ZOOM = 8')
+    expect(body).toContain('function zoomBy')
+    expect(html).toContain('id="kb-zoom-in"')
+    expect(html).toContain('id="kb-zoom-out"')
+    // (2) Source label spelled out in full.
+    expect(html).toContain('>Shared Knowledge Base</option>')
+    expect(html).not.toContain('>Shared KB<')
+    // (3) Demo size defaults to 300 nodes.
+    expect(html).toContain('<option value="300" selected>300</option>')
+    // (5) The dreaming Agent <select> shares the dark control styling of the KB selects.
+    expect(html).toContain('#kb-demo-size, #kb-source, #dreams-agent')
   })
 
   test('U-UI-06: the Nightly dreaming report script is present and valid', () => {
@@ -176,6 +221,85 @@ describe('dashboard HTML — mode toggle + embedded JS (Issue #201)', () => {
     expect(body).toContain('function loadDreams')
     expect(body).toContain('window.__loadDreams') // exposed for the tab switcher
     // Parse-only guard against a syntax error breaking the dashboard.
+    expect(() => new Function(body)).not.toThrow()
+  })
+
+  test('U-UI-07: nodes render as a soft additive glow (fuzzy light, not a hard disc)', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // A radial gradient fading to transparent, painted additively so glows bloom.
+    expect(body).toContain('createRadialGradient')
+    expect(body).toContain("globalCompositeOperation = 'lighter'")
+    expect(body).toContain("addColorStop(1, 'rgba(0,0,0,0)')")
+  })
+
+  test('U-UI-08: the Logout button is grouped beside the auto-refresh indicator', () => {
+    const html = generateDashboardHtml()
+    // Both live in the same top-right cluster (Logout, then the refresh status).
+    const cluster = html.match(/<span id="top-right">([\s\S]*?)<\/span><\/h1>/)
+    expect(cluster).not.toBeNull()
+    expect(cluster![1]).toContain('id="logout-btn"')
+    expect(cluster![1]).toContain('id="refresh-indicator"')
+    // The old float:right inline style on the button is gone (styled via CSS now).
+    expect(html).not.toContain('<button id="logout-btn" style="float:right')
+  })
+
+  test('U-UI-09: node type colours cover real memory types + a distinct hash fallback', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // The real memory vocabulary (user/feedback/project/reference) — the bug was a
+    // KB ontology (decision/evidence…) that matched nothing, so all tags went grey.
+    expect(body).toContain('feedback:')
+    expect(body).toContain('project:')
+    expect(body).toContain('reference:')
+    // Any unlisted type still gets its own stable colour (no single-grey collapse).
+    expect(body).toContain('function hashHue')
+    expect(body).toContain("'hsl(' + hashHue(type)")
+  })
+
+  test('U-UI-10: the note detail is a full-width Markdown section below the graph (no floating panel)', () => {
+    const html = generateDashboardHtml()
+    // Full-width note section replaces the old floating side panel.
+    expect(html).toContain('id="kb-note"')
+    expect(html).not.toContain('id="kb-panel"')
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // It fetches the WHOLE file and renders it as Markdown (no truncation).
+    expect(body).toContain("apiUrl('/knowledge/note')")
+    expect(body).toContain('function renderMarkdown')
+    expect(body).toContain('function showNote')
+    // XSS-safe: builds DOM via textContent and blocks javascript: hrefs.
+    expect(body).toContain('function sanitizeHref')
+    expect(body).not.toContain('innerHTML')
+    // The emitted script must be syntactically valid (doubled-backslash regex trap).
+    expect(() => new Function(body)).not.toThrow()
+  })
+
+  test('U-UI-12: note header shows the file path + last-modified date', () => {
+    const html = generateDashboardHtml()
+    const body = html.match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // A full-path line (populated from the endpoint) and an "updated" date chip.
+    expect(html).toContain('kb-note-path')
+    expect(body).toContain('kb-note-path')
+    expect(body).toContain("chip('updated'")
+    // Both come from the backend note payload, not the graph node.
+    expect(body).toContain('data.path')
+    expect(body).toContain('data.updated')
+    expect(() => new Function(body)).not.toThrow()
+  })
+
+  test('U-UI-13: Markdown renderer supports tables, nested lists, task boxes, strikethrough', () => {
+    const body = generateDashboardHtml().match(/<script id="kb-graph">([\s\S]*?)<\/script>/)![1]!
+    // GFM pipe tables (wrapped for horizontal scroll).
+    expect(body).toContain('kb-table-wrap')
+    expect(body).toContain('function tableCells')
+    // Indent-nested lists via a stack (not the old flat single-list).
+    expect(body).toContain('function listTarget')
+    expect(body).not.toContain('listOrdered') // old flat-list state is gone
+    // Task-list checkboxes and strikethrough.
+    expect(body).toContain('kb-task')
+    expect(body).toContain("el('del'")
+    // Still XSS-safe — DOM built via textContent, never innerHTML.
+    expect(body).not.toContain('innerHTML')
     expect(() => new Function(body)).not.toThrow()
   })
 

@@ -99,8 +99,10 @@ const EXCERPT_MAX = 480;
 /**
  * Plain-text preview of a note body for the graph side-panel. Strips fenced code,
  * unwraps `[[link|alias]]` to its display text, drops the most common Markdown
- * punctuation, collapses whitespace, and caps the length. Returns null for an
- * empty body so the panel can omit the section rather than show a blank line.
+ * punctuation, and caps the length. Paragraph/line breaks are PRESERVED (only
+ * horizontal whitespace is collapsed) so the panel — which renders with
+ * `white-space: pre-wrap` — shows readable lines instead of one run-on wall of
+ * text. Returns null for an empty body so the panel can omit the section.
  */
 function toExcerpt(body: string): string | null {
   const t = body
@@ -110,7 +112,9 @@ function toExcerpt(body: string): string | null {
     .replace(/\[\[([^\]]+)\]\]/g, '$1') // [[target]] -> target
     .replace(/^\s*[#>\-*+]\s?/gm, '') // leading heading/list/quote markers
     .replace(/[*_~]/g, '') // emphasis marks
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t]+/g, ' ') // collapse horizontal whitespace ONLY (keep newlines)
+    .replace(/[ \t]*\n[ \t]*/g, '\n') // trim spaces hugging each line break
+    .replace(/\n{3,}/g, '\n\n') // cap blank runs to a single blank line
     .trim();
   if (!t) return null;
   return t.length > EXCERPT_MAX ? t.slice(0, EXCERPT_MAX).replace(/\s+\S*$/, '') + '…' : t;

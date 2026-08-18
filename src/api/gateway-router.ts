@@ -973,6 +973,80 @@ export class GatewayRouter {
       }
     });
 
+    // Full markdown body of a single note, for the KB tab's detail section (which
+    // renders the WHOLE file, not the truncated graph excerpt). Auth as above.
+    //   ?scope=shared | agent:<id>   (same allowlist guard as /knowledge/graph)
+    //   ?id=<relPath>.md             the note file, resolved INSIDE the vault only
+    // The id is never trusted for filesystem access: it must be a `.md` path that
+    // resolves within the scope's vault dir (no traversal, no absolute path).
+    this.app.get('/knowledge/note', (req: Request, res: Response) => {
+      if (!this.requireDashOrApiKey(req, res)) return;
+      try {
+        const scopeQ = req.query.scope;
+        const scope = String((Array.isArray(scopeQ) ? scopeQ[scopeQ.length - 1] : scopeQ) || 'shared');
+        const idQ = req.query.id;
+        const id = String((Array.isArray(idQ) ? idQ[idQ.length - 1] : idQ) || '');
+
+        // Resolve the vault dir for the scope (agent id gated by the allowlist).
+        let vaultDir: string;
+        if (scope.startsWith('agent:')) {
+          const agentId = scope.slice('agent:'.length);
+          if (!this.agents.has(agentId)) {
+            res.status(404).json({ error: 'Unknown agent' });
+            return;
+          }
+          vaultDir = path.join(this.agentsRoot(), agentId, 'workspace', 'memory');
+        } else {
+          const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
+          vaultDir = sharedVaultDir(shared);
+        }
+
+        // Validate the note id: a `.md` file that stays inside the vault. Reject
+        // NUL, non-.md, and any path that escapes the vault root (traversal).
+        if (!id || id.includes('\0') || !/\.md$/i.test(id)) {
+          res.status(400).json({ error: 'Invalid note id' });
+          return;
+        }
+        const root = path.resolve(vaultDir);
+        const abs = path.resolve(root, id);
+        if (abs !== root && !abs.startsWith(root + path.sep)) {
+          res.status(400).json({ error: 'Invalid note id' });
+          return;
+        }
+
+        let raw: string;
+        try {
+          raw = fs.readFileSync(abs, 'utf8');
+        } catch {
+          res.status(404).json({ error: 'Note not found' });
+          return;
+        }
+        // Strip the YAML frontmatter block so the client renders just the body.
+        const m = /^---\n[\s\S]*?\n---\n?([\s\S]*)$/.exec(raw);
+        const body = (m ? m[1] : raw).slice(0, 20000); // bound the payload
+        // Last-modified time (from the file itself — notes carry no reliable date
+        // in frontmatter) and a readable path relative to the gateway root, so the
+        // note header can show WHERE the note lives and WHEN it last changed.
+        let updated: string | null = null;
+        let displayPath = id;
+        try {
+          updated = fs.statSync(abs).mtime.toISOString();
+        } catch {
+          /* stat may race a delete — leave updated null */
+        }
+        try {
+          const rel = path.relative(path.dirname(this.agentsRoot()), abs);
+          if (rel && !rel.startsWith('..')) displayPath = rel;
+        } catch {
+          /* keep the bare id as the fallback path */
+        }
+        res.json({ id, scope, path: displayPath, updated, body });
+      } catch (err) {
+        process.stderr.write(`[knowledge/note] ${(err as Error).message}\n`);
+        res.status(500).json({ error: 'Failed to read note' });
+      }
+    });
+
     // Available graph sources for the KB tab's source selector: the Shared KB
     // plus every agent that has at least one Lane-2 memory note. Auth as above.
     this.app.get('/knowledge/sources', (req: Request, res: Response) => {
@@ -980,7 +1054,7 @@ export class GatewayRouter {
       try {
         const sources: Array<{ id: string; label: string; count: number }> = [];
         const shared = resolveSharedConfig(undefined, this.gatewayConfig?.gateway?.knowledge?.shared);
-        sources.push({ id: 'shared', label: 'Shared KB', count: readVaultPages(sharedVaultDir(shared)).length });
+        sources.push({ id: 'shared', label: 'Shared Knowledge Base', count: readVaultPages(sharedVaultDir(shared)).length });
         const root = this.agentsRoot();
         for (const id of this.agents.keys()) {
           let count = 0;

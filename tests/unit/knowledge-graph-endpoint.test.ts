@@ -196,6 +196,80 @@ describe('GET /knowledge/graph', () => {
     });
   });
 
+  describe('GET /knowledge/note', () => {
+    it('returns the full markdown body (frontmatter stripped) for an agent note', async () => {
+      seedAgentMemory(root, 'alpha', {
+        'x.md': `---\ntitle: X\ntype: project\n---\n# Heading\n\nBody **bold** line.\n`,
+      });
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app)
+        .get('/knowledge/note?scope=agent:alpha&id=x.md')
+        .set('X-Api-Key', KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe('x.md');
+      expect(res.body.body).toContain('# Heading');
+      expect(res.body.body).toContain('Body **bold** line.');
+      // Frontmatter must not leak into the rendered body.
+      expect(res.body.body).not.toContain('title: X');
+      // Header enrichments: an ISO last-modified date + a readable path that ends
+      // in the note id (so the panel can show WHERE + WHEN).
+      expect(typeof res.body.updated).toBe('string');
+      expect(res.body.updated).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(typeof res.body.path).toBe('string');
+      expect(res.body.path).toMatch(/x\.md$/);
+    });
+
+    it('reads a Shared KB note by default scope', async () => {
+      const notes = path.join(root, 'test', 'notes');
+      fs.mkdirSync(notes, { recursive: true });
+      fs.writeFileSync(path.join(notes, 'n.md'), `---\ntitle: N\n---\nshared body\n`);
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app).get('/knowledge/note?id=notes/n.md').set('X-Api-Key', KEY);
+      expect(res.status).toBe(200);
+      expect(res.body.body).toContain('shared body');
+    });
+
+    it('rejects a traversal id with 400 (never escapes the vault)', async () => {
+      // A `.md` id that tries to climb out of the vault — must be blocked by the
+      // path-escape guard (not merely the extension check). Seed a real .md file
+      // outside the vault so a broken guard would actually leak it.
+      fs.writeFileSync(path.join(root, 'secret.md'), `---\ntitle: S\n---\ntop secret\n`);
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app)
+        .get('/knowledge/note?scope=agent:alpha&id=' + encodeURIComponent('../../../../secret.md'))
+        .set('X-Api-Key', KEY);
+      expect(res.status).toBe(400);
+      // Also a non-.md traversal is rejected by the extension guard.
+      const res2 = await supertest(app)
+        .get('/knowledge/note?scope=agent:alpha&id=' + encodeURIComponent('../../../../etc/passwd'))
+        .set('X-Api-Key', KEY);
+      expect(res2.status).toBe(400);
+    });
+
+    it('rejects a non-.md id with 400', async () => {
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const res = await supertest(app)
+        .get('/knowledge/note?scope=agent:alpha&id=x.txt')
+        .set('X-Api-Key', KEY);
+      expect(res.status).toBe(400);
+    });
+
+    it('404s for an unknown agent and for a missing note; requires auth', async () => {
+      seedAgentMemory(root, 'alpha', { 'x.md': `---\ntitle: X\n---\nb\n` });
+      const app = buildAppWithAgents(root, root, ['alpha']);
+      const unknownAgent = await supertest(app)
+        .get('/knowledge/note?scope=agent:ghost&id=x.md')
+        .set('X-Api-Key', KEY);
+      expect(unknownAgent.status).toBe(404);
+      const missing = await supertest(app)
+        .get('/knowledge/note?scope=agent:alpha&id=nope.md')
+        .set('X-Api-Key', KEY);
+      expect(missing.status).toBe(404);
+      const unauth = await supertest(app).get('/knowledge/note?scope=agent:alpha&id=x.md');
+      expect(unauth.status).toBe(401);
+    });
+  });
+
   describe('GET /knowledge/dreams', () => {
     const DREAMS = `## 2026-08-17T05:19:23.664Z — proposed (propose)\n\nA summary\n\n- **add** \`MEMORY.md\` [x] — reason _(score 0.85, recall 3)_\n\n_propose mode: proposals logged only — memory not modified._\n\n_tokens: 6351, sessions: 2_\n\n---\n`;
     const PROMOS = JSON.stringify({ ts: Date.parse('2026-08-17T05:19:23.664Z'), mode: 'propose', op: 'add', file: 'MEMORY.md', target: 'x', content: 'body', reason: 'reason', score: 0.85, recallCount: 3 });

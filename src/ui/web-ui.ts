@@ -74,7 +74,14 @@ export function generateDashboardHtml(): string {
     .badge-fable { background: #553052; color: #f687b3; }
     .badge-model { background: #2d3748; color: #cbd5e0; }
     .ts { color: #718096; font-size: 0.8rem; }
-    #refresh-indicator { float: right; font-size: 0.75rem; color: #4a5568; }
+    /* Top-right cluster: the Logout button sits beside the auto-refresh status. */
+    #top-right { float: right; display: inline-flex; align-items: center; gap: 10px; }
+    #refresh-indicator { font-size: 0.75rem; color: #4a5568; }
+    #logout-btn {
+      font-size: 0.7rem; background: #2d3748; color: #a0aec0; border: 1px solid #4a5568;
+      border-radius: 4px; padding: 2px 8px; cursor: pointer;
+    }
+    #logout-btn:hover { background: #374151; }
     .error { color: #fc8181; font-size: 0.85rem; margin-top: 8px; }
     .btn-stream {
       background: #44337a;
@@ -213,7 +220,7 @@ export function generateDashboardHtml(): string {
       h1 { font-size: 1.2rem; }
       h2 { font-size: 1rem; }
       .meta { font-size: 0.78rem; }
-      #refresh-indicator { float: none; display: block; margin-top: 4px; }
+      #top-right { float: none; display: flex; margin-top: 4px; }
       .proc-tree { font-size: 0.72rem; padding: 10px 12px; }
       /* On phones allow horizontal pan only — no vertical clipping. */
     }
@@ -239,7 +246,7 @@ export function generateDashboardHtml(): string {
     }
     .kb-toolbar button:hover { background: #374151; }
     .kb-toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-    #kb-demo-size, #kb-source {
+    #kb-demo-size, #kb-source, #dreams-agent {
       background: #1a2333; color: #cbd5e0; border: 1px solid #2d3748;
       border-radius: 4px; padding: 2px 4px; font-size: 0.78rem; cursor: pointer;
     }
@@ -256,36 +263,24 @@ export function generateDashboardHtml(): string {
       /* Deep-space radial backdrop makes the node glow read as light. */
       background: radial-gradient(ellipse 70% 62% at 50% 42%, #16203a 0%, #0d1322 55%, #070a12 100%);
     }
-    #kb-svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
-    #kb-svg.panning { cursor: grabbing; }
-    /* Curved links: calm and thin at rest; energised with a flowing dash on hover. */
-    .kb-edge { fill: none; stroke: #34405c; stroke-width: 1.1; stroke-linecap: round;
-      transition: stroke 0.15s ease, opacity 0.15s ease; }
-    .kb-edge.hl { stroke: #7cc4ff; stroke-width: 2.2; stroke-dasharray: 3 7;
-      animation: kb-flow 0.55s linear infinite; }
-    .kb-edge.dim { opacity: 0.05; }
-    @keyframes kb-flow { to { stroke-dashoffset: -20; } }
-    /* #kb-halos is a blurred layer (filter below) giving each node an Obsidian-style bloom. */
-    #kb-halos circle { pointer-events: none; }
-    #kb-halos circle.dim { opacity: 0.04; }
-    .kb-node { cursor: pointer; }
-    .kb-node circle { stroke: rgba(255,255,255,0.35); stroke-width: 1; transition: opacity 0.15s; }
-    .kb-node.contradiction circle { stroke: #fc8181; stroke-width: 2.5; }
-    /* paint-order draws the dark stroke UNDER the glyph so labels stay legible over glow. */
-    .kb-node text { fill: #d5deec; font-size: 11px; pointer-events: none;
-      paint-order: stroke; stroke: #070a12; stroke-width: 3px; stroke-linejoin: round; }
-    /* Declutter at scale: hide labels until a node is focused (hover) or a search hit. */
-    #kb-nodes.declutter .kb-node text { opacity: 0; transition: opacity 0.12s; }
-    #kb-nodes.declutter .kb-node.focus text,
-    #kb-nodes.declutter .kb-node.search-hit text { opacity: 1; }
-    .kb-node.stale { opacity: 0.4; }
-    .kb-node.dim { opacity: 0.1; }
-    /* Search: dim non-matches (independent of hover 'dim'), ring the matches. */
-    .kb-node.search-dim { opacity: 0.08; }
-    #kb-halos circle.search-dim { opacity: 0.02; }
-    .kb-edge.search-dim { opacity: 0.03; }
-    .kb-node.search-hit circle { stroke: #f6e05e; stroke-width: 3; }
-    .kb-node.search-hit text { fill: #f6e05e; }
+    /* The graph is a 3D sphere rendered on <canvas> (auto-spins; drag rotates the view;
+       always centred by projection). Node/edge/label styling lives in the canvas paint
+       code, not CSS. */
+    #kb-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+    #kb-canvas.drag { cursor: grabbing; }
+    /* Zoom controls, pinned bottom-right of the graph stage. */
+    .kb-zoom {
+      position: absolute; right: 12px; bottom: 12px; display: flex; flex-direction: column;
+      gap: 6px; z-index: 3;
+    }
+    .kb-zoom button {
+      width: 32px; height: 32px; padding: 0; font-size: 1.15rem; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(26, 35, 51, 0.82); color: #e2e8f0; border: 1px solid #2d3748;
+      border-radius: 6px; cursor: pointer; backdrop-filter: blur(3px); user-select: none;
+    }
+    .kb-zoom button:hover { background: rgba(45, 55, 72, 0.92); border-color: #4a5568; }
+    .kb-zoom button:active { background: #374151; }
     .kb-search-wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; }
     #kb-search {
       background: #0d1117; color: #e2e8f0; border: 1px solid #4a5568; border-radius: 4px;
@@ -323,26 +318,74 @@ export function generateDashboardHtml(): string {
     .dream-prop .reason { color: #a0aec0; margin-top: 3px; }
     .dream-prop .content { color: #cbd5e0; margin-top: 5px; white-space: pre-wrap; word-break: break-word;
       background: #070a12; border-radius: 4px; padding: 6px 8px; font-size: 0.78rem; max-height: 140px; overflow: auto; }
-    .kb-panel {
-      position: absolute; top: 10px; right: 10px; width: 280px; max-height: calc(100% - 20px);
-      overflow-y: auto; background: #1a202c; border: 1px solid #4a5568; border-radius: 8px;
-      padding: 14px; font-size: 0.8rem; color: #cbd5e0; box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    /* Note detail — full-width card below the graph. Shows the whole file. */
+    .kb-note {
+      margin-top: 12px; background: #131a2b; border: 1px solid #2d3748; border-radius: 8px;
+      padding: 16px 18px; font-size: 0.85rem; color: #cbd5e0;
     }
-    .kb-panel h3 { margin: 0 0 8px; font-size: 0.95rem; color: #e2e8f0; }
-    .kb-panel .kb-panel-close { float: right; cursor: pointer; color: #718096; }
-    .kb-panel dt { color: #718096; margin-top: 8px; }
-    .kb-panel dd { margin: 2px 0 0; word-break: break-word; }
-    .kb-panel-note-h {
-      margin-top: 12px; padding-top: 10px; border-top: 1px solid #2d3748;
-      color: #718096; text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.06em;
+    .kb-note-head { display: flex; align-items: flex-start; gap: 10px; }
+    .kb-note-head h3 { margin: 0; font-size: 1.02rem; color: #e2e8f0; flex: 1; word-break: break-word; }
+    .kb-note-close {
+      cursor: pointer; color: #718096; background: #1a202c; border: 1px solid #2d3748;
+      border-radius: 4px; padding: 1px 8px; font-size: 0.9rem; line-height: 1.4;
     }
-    .kb-panel-note {
-      margin-top: 6px; color: #cbd5e0; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    .kb-note-close:hover { color: #e2e8f0; background: #2d3748; }
+    /* Metadata chips row. */
+    .kb-note-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+    .kb-note-chip {
+      display: inline-flex; align-items: center; gap: 5px; background: #0e1420;
+      border: 1px solid #1e2740; border-radius: 999px; padding: 2px 10px; font-size: 0.72rem; color: #a0aec0;
     }
+    .kb-note-chip b { color: #cbd5e0; font-weight: 600; }
+    .kb-note-chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    /* File path line under the chips — full width, monospace, wraps on long paths. */
+    .kb-note-path {
+      margin: 6px 0 2px; font-size: 0.72rem; font-family: ui-monospace, monospace;
+      color: #718096; word-break: break-all;
+    }
+    .kb-note-path b { color: #a0aec0; font-weight: 600; }
+    /* Rendered Markdown body. */
+    .kb-md {
+      margin-top: 12px; padding-top: 12px; border-top: 1px solid #222c40;
+      line-height: 1.62; color: #cbd5e0; word-break: break-word;
+    }
+    .kb-md > :first-child { margin-top: 0; }
+    .kb-md h1, .kb-md h2, .kb-md h3, .kb-md h4 { color: #e2e8f0; line-height: 1.3; margin: 18px 0 8px; }
+    .kb-md h1 { font-size: 1.25rem; border-bottom: 1px solid #222c40; padding-bottom: 5px; }
+    .kb-md h2 { font-size: 1.1rem; border-bottom: 1px solid #1e2740; padding-bottom: 4px; }
+    .kb-md h3 { font-size: 1rem; } .kb-md h4 { font-size: 0.9rem; color: #a0aec0; }
+    .kb-md p { margin: 8px 0; }
+    .kb-md ul, .kb-md ol { margin: 8px 0; padding-left: 22px; }
+    .kb-md li { margin: 3px 0; }
+    .kb-md a { color: #63b3ed; text-decoration: none; } .kb-md a:hover { text-decoration: underline; }
+    .kb-md code {
+      background: #0d1117; border: 1px solid #1e2740; border-radius: 4px;
+      padding: 1px 5px; font-size: 0.82em; font-family: ui-monospace, monospace; color: #e2e8f0;
+    }
+    .kb-md pre {
+      background: #0a0e17; border: 1px solid #1e2740; border-radius: 6px; padding: 10px 12px;
+      overflow-x: auto; margin: 10px 0;
+    }
+    .kb-md pre code { background: none; border: none; padding: 0; font-size: 0.8rem; line-height: 1.5; }
+    .kb-md blockquote {
+      margin: 10px 0; padding: 2px 14px; border-left: 3px solid #2d3748; color: #a0aec0;
+    }
+    .kb-md hr { border: none; border-top: 1px solid #222c40; margin: 14px 0; }
+    .kb-md strong { color: #e2e8f0; } .kb-md table { border-collapse: collapse; margin: 0; width: 100%; font-size: 0.82rem; }
+    .kb-md th, .kb-md td { border: 1px solid #222c40; padding: 5px 10px; text-align: left; }
+    .kb-md th { background: #0e1420; color: #e2e8f0; font-weight: 600; }
+    .kb-md tbody tr:nth-child(even) { background: #0e1420; }
+    /* Wide tables scroll horizontally instead of breaking the panel. */
+    .kb-table-wrap { overflow-x: auto; margin: 10px 0; border-radius: 6px; }
+    .kb-md del { color: #718096; }
+    /* Task-list items: bullet replaced by a real (disabled) checkbox. */
+    .kb-md li.kb-task { list-style: none; margin-left: -18px; }
+    .kb-md li.kb-task input { margin-right: 7px; vertical-align: middle; accent-color: #63b3ed; }
+    .kb-note-loading { color: #718096; font-size: 0.82rem; margin-top: 12px; }
   </style>
 </head>
 <body>
-  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="refresh-indicator">refreshing...</span> <button id="logout-btn" style="float:right;font-size:0.7rem;background:#2d3748;color:#a0aec0;border:1px solid #4a5568;border-radius:4px;padding:2px 8px;cursor:pointer;">Logout</button></h1>
+  <h1><span class="rainbow">Claude Gateway</span> <span id="gateway-version" style="font-size:0.75rem;color:#718096;"></span> <span id="top-right"><button id="logout-btn">Logout</button><span id="refresh-indicator">refreshing...</span></span></h1>
   <div class="meta">
     Uptime: <span id="uptime">&mdash;</span> &nbsp;|&nbsp;
     Started: <span id="started-at">&mdash;</span> &nbsp;|&nbsp;
@@ -412,12 +455,12 @@ export function generateDashboardHtml(): string {
   </div>
   </div><!-- /view-sessions -->
 
-  <!-- Knowledge base — Obsidian-style force-directed graph over the shared vault.
-       Zero external deps: the force simulation + SVG render are hand-rolled. -->
+  <!-- Knowledge base — a 3D force-directed graph over the shared vault / an agent's memory.
+       Zero external deps: the spherical layout + canvas render + rotation are hand-rolled. -->
   <div id="view-kb" class="view" style="display:none;">
     <div class="kb-toolbar">
       <label id="kb-source-wrap" title="Which memory graph to view: the cross-agent Shared KB, or one agent's own memory">Source
-        <select id="kb-source"><option value="shared">Shared KB</option></select>
+        <select id="kb-source"><option value="shared">Shared Knowledge Base</option></select>
       </label>
       <button id="kb-refresh" title="Recompute the graph from the selected source">&#x21bb; Refresh</button>
       <span class="kb-search-wrap">
@@ -429,7 +472,7 @@ export function generateDashboardHtml(): string {
         <select id="kb-demo-size">
           <option value="0">8 (sample)</option>
           <option value="100">100</option>
-          <option value="300">300</option>
+          <option value="300" selected>300</option>
           <option value="600">600</option>
         </select>
       </label>
@@ -438,24 +481,19 @@ export function generateDashboardHtml(): string {
       <span class="kb-legend" id="kb-legend"></span>
     </div>
     <div class="kb-stage">
-      <svg id="kb-svg" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <filter id="kb-glow" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="6"></feGaussianBlur>
-          </filter>
-        </defs>
-        <!-- Full-bleed transparent surface (screen-space, OUTSIDE the panned viewport)
-             so empty-area drags reliably hit the SVG for panning in every browser. -->
-        <rect id="kb-bg" x="0" y="0" width="100%" height="100%" fill="transparent" pointer-events="all"></rect>
-        <g id="kb-viewport">
-          <g id="kb-halos" filter="url(#kb-glow)"></g>
-          <g id="kb-edges"></g>
-          <g id="kb-nodes"></g>
-        </g>
-      </svg>
+      <!-- 3D knowledge graph: a sphere of notes rendered on canvas. Auto-spins; drag
+           empty space to rotate the view; wheel to zoom. Centred by projection, so there
+           is no pan and no "center" button — the graph can never drift off-screen. -->
+      <canvas id="kb-canvas"></canvas>
       <div id="kb-empty" class="kb-empty" style="display:none;"></div>
-      <div id="kb-panel" class="kb-panel" style="display:none;"></div>
+      <div class="kb-zoom">
+        <button id="kb-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">&plus;</button>
+        <button id="kb-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+      </div>
     </div>
+    <!-- Note detail — full width BELOW the graph so the whole file shows (no
+         truncation), rendered as formatted Markdown. Populated on node click. -->
+    <div id="kb-note" class="kb-note" style="display:none;"></div>
   </div><!-- /view-kb -->
 
   <!-- Nightly dreaming — the memory-consolidation audit trail (.dreaming/) per agent. -->
@@ -1111,15 +1149,10 @@ export function generateDashboardHtml(): string {
       });
     });
 
-    // ---------- Graph elements + constants ----------
-    var SVGNS = 'http://www.w3.org/2000/svg';
-    var svg = document.getElementById('kb-svg');
-    var gViewport = document.getElementById('kb-viewport');
-    var gHalos = document.getElementById('kb-halos');
-    var gEdges = document.getElementById('kb-edges');
-    var gNodes = document.getElementById('kb-nodes');
+    // ---------- Graph elements + refs ----------
+    var canvas = document.getElementById('kb-canvas');
     var elEmpty = document.getElementById('kb-empty');
-    var elPanel = document.getElementById('kb-panel');
+    var elNote = document.getElementById('kb-note');
     var elStats = document.getElementById('kb-stats');
     var elLegend = document.getElementById('kb-legend');
     var elDemoBadge = document.getElementById('kb-demo-badge');
@@ -1131,364 +1164,576 @@ export function generateDashboardHtml(): string {
     var elSearch = document.getElementById('kb-search');
     var elSearchCount = document.getElementById('kb-search-count');
 
+    // Curated colours for the memory type: vocabulary that ACTUALLY appears in
+    // notes (user / feedback / project / reference / …) — the old map keyed on a
+    // KB ontology (decision/evidence/claim…) that never matched, so every node
+    // fell to one grey. Any type not listed gets a stable, distinct hue from a
+    // hash so tags never collapse to a single colour again.
     var TYPE_COLORS = {
+      user: '#63b3ed', feedback: '#f6ad55', project: '#68d391',
+      reference: '#b794f4', session: '#4fd1c5', fact: '#f687b3',
       decision: '#63b3ed', evidence: '#68d391', claim: '#f6ad55',
-      policy: '#b794f4', infra: '#4fd1c5', fact: '#f687b3'
+      policy: '#b794f4', infra: '#4fd1c5'
     };
-    var DEFAULT_COLOR = '#a0aec0';
-    function colorFor(type){ return (type && TYPE_COLORS[type]) ? TYPE_COLORS[type] : DEFAULT_COLOR; }
+    var DEFAULT_COLOR = '#7d8fb3';
+    function hashHue(s){ var h = 0; for (var i = 0; i < s.length; i++){ h = (h * 31 + s.charCodeAt(i)) & 0xffffffff; } return Math.abs(h) % 360; }
+    function colorFor(type){
+      if (!type || type === 'other') return DEFAULT_COLOR;
+      if (TYPE_COLORS[type]) return TYPE_COLORS[type];
+      // Deterministic distinct colour for any unlisted type (mid tone, readable on the dark stage).
+      return 'hsl(' + hashHue(type) + ', 62%, 62%)';
+    }
 
-    // Force constants — tuned for the small KB (tens of nodes). Wider REST + REPULSE
-    // give an airy, un-clumped layout; higher friction (lower DAMPING) + low VMAX kill
-    // the "bouncy" overshoot so the graph settles instead of jiggling.
-    var REPULSE = 4200, SPRING_K = 0.025, REST = 135, CENTER = 0.02, DAMPING = 0.82, VMAX = 18;
-    var PRESOLVE_TICKS = 220; // lay the graph out off-screen so it opens already-settled
-    var LABEL_LIMIT = 60; // above this node count, labels are hidden until hover/search (declutter)
+    // ---------- 3D graph engine (canvas) ----------
+    // Notes are laid out on the surface of a unit sphere (Fibonacci seed + a short 3D
+    // force relax) centred at the origin. Every frame the whole sphere is rotated by
+    // (rotY, rotX) and perspective-projected to the canvas centre — so the graph is
+    // ALWAYS centred by construction: no pan, no "center" button, it cannot drift off
+    // screen. It auto-spins; dragging empty space rotates the view. This 3D rotation is
+    // the "หมุน" a flat 2D SVG (which could only pan) was never able to do.
+    var LABEL_MIN_DEG = 3;      // hubs keep their label; others reveal on hover/search
+    var G = null;               // { nodes:[{nd,x,y,z,deg,i,hit}], edges:[{a,b}] }
+    var rotY = 0.6, rotX = -0.25, zoom = 1;
+    var dragging = false, moved = false, downX = 0, downY = 0, lastX = 0, lastY = 0;
+    // Angular momentum: the last drag speed carries the sphere on after release so it
+    // keeps orbiting (decays toward the gentle baseline auto-spin) instead of freezing.
+    var velY = 0, velX = 0;
+    var MIN_ZOOM = 0.25, MAX_ZOOM = 8, SPIN = 0.0025;   // zoom clamp + baseline orbit speed
+    var hover = null, selected = null, auto = true;
+    var cvW = 0, cvH = 0, cvDpr = 1, needRender = true, lastFrame = 0;
+    var P = [];                 // last projected screen coords, for hit-testing
 
-    var nodes = [], edges = [], nodeById = {};
-    var view = { x: 0, y: 0, k: 1 };
-    var raf = null, alpha = 0, dragNode = null, panning = false, panStart = null;
-    var autoFitPending = false; // true from buildModel until the first settle-fit; user pan/zoom cancels it
-    // Unified pointer gesture state (one active pointer at a time). A gesture is
-    // classified on pointerdown as 'node' (press started on a node) or 'pan' (empty
-    // space); a tap that never crosses DRAG_THRESH opens/closes the panel instead of
-    // dragging. Deriving tap-vs-drag ourselves — rather than the synthetic click
-    // event — is immune to pointer-capture click retargeting, which made node clicks
-    // open the panel only intermittently.
-    var activePointer = null, gestureMode = null, downX = 0, downY = 0, moved = false;
-    var DRAG_THRESH = 4; // px in screen space before a press counts as a drag
-
-    function w(){ return svg.clientWidth || 800; }
-    function h(){ return svg.clientHeight || 600; }
-    function applyTransform(){
-      gViewport.setAttribute('transform', 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')');
+    function invalidate(){ needRender = true; }
+    function sizeCanvas(){
+      if (!canvas) return;
+      cvDpr = window.devicePixelRatio || 1;
+      cvW = canvas.clientWidth; cvH = canvas.clientHeight;
+      canvas.width = cvW * cvDpr; canvas.height = cvH * cvDpr;
+      invalidate();
     }
 
     // ---------- Build model from API payload ----------
+    // Seed nodes on a Fibonacci sphere, then relax with a 3D repulsion + spring pass so
+    // linked notes pull together into clusters while the whole set stays on the sphere.
     function buildModel(data){
-      stopSim();
-      gHalos.textContent = ''; gEdges.textContent = ''; gNodes.textContent = '';
-      nodes = []; edges = []; nodeById = {};
-      hidePanel();
+      hideNote(); hover = null; selected = null;
       var raw = (data && data.nodes) || [];
       var rawEdges = (data && data.edges) || [];
-      var cx = w() / 2, cy = h() / 2, n = raw.length;
-      raw.forEach(function(nd, i){
-        var ang = (2 * Math.PI * i) / Math.max(1, n);
-        var node = {
-          id: nd.id, title: nd.title || nd.id, type: nd.type || null,
-          degree: nd.degree || 0, confidence: (nd.confidence === undefined ? null : nd.confidence),
-          updatedAt: nd.updatedAt || null, stale: !!nd.stale, contradiction: !!nd.contradiction,
-          excerpt: nd.excerpt || null,
-          x: cx + Math.cos(ang) * 180 + (Math.random() * 20 - 10),
-          y: cy + Math.sin(ang) * 180 + (Math.random() * 20 - 10),
-          vx: 0, vy: 0, neighbors: {}
+      var N = raw.length || 1;
+      var byId = {};
+      var nodes = raw.map(function(nd, i){
+        var t = Math.acos(1 - 2 * (i + 0.5) / N), p = Math.PI * (1 + Math.sqrt(5)) * i;
+        return {
+          nd: {
+            id: nd.id, title: nd.title || nd.id, type: nd.type || null,
+            degree: nd.degree || 0,
+            confidence: (nd.confidence === undefined ? null : nd.confidence),
+            updatedAt: nd.updatedAt || null, stale: !!nd.stale,
+            contradiction: !!nd.contradiction, excerpt: nd.excerpt || null
+          },
+          x: Math.sin(t) * Math.cos(p), y: Math.sin(t) * Math.sin(p), z: Math.cos(t),
+          deg: 0, i: i, hit: true
         };
-        nodes.push(node); nodeById[node.id] = node;
       });
+      nodes.forEach(function(o){ byId[o.nd.id] = o; });
+      var edges = [];
       rawEdges.forEach(function(e){
-        var s = nodeById[e.source], t = nodeById[e.target];
-        if (!s || !t) return;
-        edges.push({ source: s, target: t });
-        s.neighbors[t.id] = true; t.neighbors[s.id] = true;
+        var a = byId[e.source], b = byId[e.target];
+        if (a && b){ edges.push({ a: a, b: b }); a.deg++; b.deg++; }
       });
-      // Adapt the physics to the graph size: more nodes need stronger mutual
-      // repulsion (and a few more settle ticks) so clusters separate instead of
-      // collapsing into one hairball. Small graphs keep the airy hand-tuned look.
-      var spread = Math.max(1, Math.sqrt(n / 30));
-      REPULSE = 4200 * spread;
-      PRESOLVE_TICKS = n > 120 ? 340 : 220;
-      // Declutter: hide labels by default past a threshold; hover/search reveals them.
-      gNodes.classList.toggle('declutter', n > LABEL_LIMIT);
-      createEls();
-      view = { x: 0, y: 0, k: 1 }; applyTransform();
-      // Only run the simulation when there is something to lay out — an empty
-      // graph would otherwise spin ~260 idle RAF frames before self-terminating.
-      // Pre-solve off-screen first so the view opens on an already-settled layout,
-      // then auto-fit the whole graph into the viewport (large graphs would else
-      // spill off-screen), and a low alpha lets it ease gently into place.
-      autoFitPending = true;
-      if (nodes.length) { presolve(); fitView(); alpha = 0.35; startSim(); }
-      // Re-apply an active search filter to the freshly-built node set (refresh/toggle).
+      relax(nodes, edges);
+      G = { nodes: nodes, edges: edges };
+      rotY = 0.6; rotX = -0.25; zoom = 1; auto = true; velY = 0; velX = 0;
+      sizeCanvas(); invalidate();
+      // Re-apply an active search to the freshly-built set (refresh / source switch).
       if (elSearch && elSearch.value.trim()) runSearch(); else clearSearch();
     }
 
-    function createEls(){
-      edges.forEach(function(e){
-        var p = document.createElementNS(SVGNS, 'path');
-        p.setAttribute('class', 'kb-edge');
-        e.el = p; gEdges.appendChild(p);
-      });
-      nodes.forEach(function(node){
-        // sqrt keeps hub nodes prominent without dwarfing the rest (linear grew too fast).
-        var r = Math.min(24, 5 + Math.sqrt(node.degree) * 5);
-        node.r = r;
-        // Blurred colour halo in the #kb-halos layer → soft bloom behind the crisp node.
-        var halo = document.createElementNS(SVGNS, 'circle');
-        halo.setAttribute('r', r * 1.9);
-        halo.setAttribute('fill', colorFor(node.type));
-        halo.setAttribute('opacity', node.stale ? '0.18' : '0.5');
-        node.halo = halo; gHalos.appendChild(halo);
-
-        var g = document.createElementNS(SVGNS, 'g');
-        g.setAttribute('class', 'kb-node' + (node.stale ? ' stale' : '') + (node.contradiction ? ' contradiction' : ''));
-        var c = document.createElementNS(SVGNS, 'circle');
-        c.setAttribute('r', r);
-        c.setAttribute('fill', colorFor(node.type));
-        var label = document.createElementNS(SVGNS, 'text');
-        label.setAttribute('x', r + 4); label.setAttribute('y', 4);
-        label.textContent = node.title;
-        g.appendChild(c); g.appendChild(label);
-        node.el = g;
-        g.__node = node; // DOM -> model back-reference for hit-testing in the pointer model
-        // Hover highlight only — press/drag/tap are handled by the unified pointer
-        // model on the SVG (a captured gesture routes pointer events to the SVG, so
-        // per-node handlers would fire inconsistently and fight the pan/drag logic).
-        g.addEventListener('pointerenter', function(){ if (activePointer === null) highlight(node); });
-        g.addEventListener('pointerleave', function(){ if (activePointer === null) clearHighlight(); });
-        gNodes.appendChild(g);
-      });
-    }
-
-    // ---------- Force simulation ----------
-    // One integration step (no paint): repulsion (all pairs) + spring (edges) + centering.
-    function simStep(){
-      var i, j, a, b, dx, dy, d2, d, f, ux, uy;
-      for (i = 0; i < nodes.length; i++){ nodes[i].fx = 0; nodes[i].fy = 0; }
-      for (i = 0; i < nodes.length; i++){
-        for (j = i + 1; j < nodes.length; j++){
-          a = nodes[i]; b = nodes[j];
-          dx = a.x - b.x; dy = a.y - b.y; d2 = dx*dx + dy*dy + 0.01; d = Math.sqrt(d2);
-          f = REPULSE / d2; ux = dx / d; uy = dy / d;
-          a.fx += f*ux; a.fy += f*uy; b.fx -= f*ux; b.fy -= f*uy;
+    // Short 3D force relax: all-pairs repulsion keeps nodes apart, edge springs pull
+    // linked notes together, then recentre at the origin and renormalise to the unit
+    // sphere so projection stays centred. Iterations scale down for large demo sets.
+    function relax(nodes, edges){
+      var N = nodes.length || 1;
+      var iters = N > 400 ? 60 : 110;
+      for (var it = 0; it < iters; it++){
+        for (var i = 0; i < nodes.length; i++){
+          for (var k = i + 1; k < nodes.length; k++){
+            var dx = nodes[i].x - nodes[k].x, dy = nodes[i].y - nodes[k].y, dz = nodes[i].z - nodes[k].z;
+            var d2 = dx*dx + dy*dy + dz*dz + 0.01, f = 0.018 / d2, inv = 1 / Math.sqrt(d2);
+            dx *= inv; dy *= inv; dz *= inv;
+            nodes[i].x += dx*f; nodes[i].y += dy*f; nodes[i].z += dz*f;
+            nodes[k].x -= dx*f; nodes[k].y -= dy*f; nodes[k].z -= dz*f;
+          }
+        }
+        for (var e = 0; e < edges.length; e++){
+          var A = edges[e].a, B = edges[e].b;
+          var ex = B.x - A.x, ey = B.y - A.y, ez = B.z - A.z, sf = 0.012;
+          A.x += ex*sf; A.y += ey*sf; A.z += ez*sf; B.x -= ex*sf; B.y -= ey*sf; B.z -= ez*sf;
         }
       }
-      for (i = 0; i < edges.length; i++){
-        a = edges[i].source; b = edges[i].target;
-        dx = b.x - a.x; dy = b.y - a.y; d = Math.sqrt(dx*dx + dy*dy) + 0.01;
-        f = SPRING_K * (d - REST); ux = dx / d; uy = dy / d;
-        a.fx += f*ux; a.fy += f*uy; b.fx -= f*ux; b.fy -= f*uy;
-      }
-      var cx = w() / 2, cy = h() / 2;
-      for (i = 0; i < nodes.length; i++){
-        a = nodes[i];
-        a.fx += (cx - a.x) * CENTER; a.fy += (cy - a.y) * CENTER;
-        if (a === dragNode) continue;
-        a.vx = (a.vx + a.fx) * DAMPING; a.vy = (a.vy + a.fy) * DAMPING;
-        if (a.vx > VMAX) a.vx = VMAX; else if (a.vx < -VMAX) a.vx = -VMAX;
-        if (a.vy > VMAX) a.vy = VMAX; else if (a.vy < -VMAX) a.vy = -VMAX;
-        a.x += a.vx; a.y += a.vy;
-      }
+      var cx = 0, cy = 0, cz = 0;
+      nodes.forEach(function(n){ cx += n.x; cy += n.y; cz += n.z; });
+      cx /= N; cy /= N; cz /= N;
+      var R = 0;
+      nodes.forEach(function(n){ n.x -= cx; n.y -= cy; n.z -= cz; R = Math.max(R, Math.hypot(n.x, n.y, n.z)); });
+      R = R || 1;
+      nodes.forEach(function(n){ n.x /= R; n.y /= R; n.z /= R; });
     }
-    // Settle the layout off-screen before the first paint (kills the "bouncy" intro).
-    function presolve(){ for (var s = 0; s < PRESOLVE_TICKS; s++) simStep(); render(); }
-    // Zoom/pan the viewport so the whole settled graph fits with a margin. Essential
-    // at scale — a 300-node layout is far larger than the viewport at k=1.
-    function fitView(){
-      if (!nodes.length) return;
-      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (var i = 0; i < nodes.length; i++){
-        var n = nodes[i];
-        if (n.x < minX) minX = n.x; if (n.y < minY) minY = n.y;
-        if (n.x > maxX) maxX = n.x; if (n.y > maxY) maxY = n.y;
-      }
-      var pad = 50, gw = (maxX - minX) || 1, gh = (maxY - minY) || 1;
-      var k = Math.min((w() - pad * 2) / gw, (h() - pad * 2) / gh, 1.5);
-      if (!isFinite(k) || k <= 0) k = 1;
-      view.k = k;
-      view.x = (w() - k * (minX + maxX)) / 2;
-      view.y = (h() - k * (minY + maxY)) / 2;
-      applyTransform();
-    }
-    function tick(){
-      simStep();
-      render();
-      alpha *= 0.985;
-      // Re-fit once the layout has settled so post-presolve easing can't leave a
-      // large graph drifted partly off-screen. (User pan/zoom after this is kept.)
-      if (alpha > 0.02) raf = requestAnimationFrame(tick);
-      else { raf = null; if (autoFitPending && nodes.length > LABEL_LIMIT) fitView(); autoFitPending = false; }
-    }
-    function startSim(){ if (!raf) raf = requestAnimationFrame(tick); }
-    function stopSim(){ if (raf){ cancelAnimationFrame(raf); raf = null; } }
-    function reheat(){ alpha = Math.max(alpha, 0.5); startSim(); }
 
-    // Curved link: a quadratic bézier bowed perpendicular to the chord (organic, un-tangled).
-    function edgePath(e){
-      var s = e.source, t = e.target;
-      var dx = t.x - s.x, dy = t.y - s.y;
-      var len = Math.sqrt(dx*dx + dy*dy) || 1;
-      var off = 0.12 * len;
-      var mx = (s.x + t.x) / 2 + (-dy / len) * off;
-      var my = (s.y + t.y) / 2 + (dx / len) * off;
-      return 'M' + s.x + ' ' + s.y + ' Q' + mx + ' ' + my + ' ' + t.x + ' ' + t.y;
-    }
+    // ---------- Render ----------
+    // Rotate each node by (rotY around the vertical axis, rotX around the horizontal),
+    // perspective-divide, and paint. Depth (post-rotation z) drives alpha and paint
+    // order so the near hemisphere reads brighter and overpaints the far one.
     function render(){
-      for (var i = 0; i < edges.length; i++){ edges[i].el.setAttribute('d', edgePath(edges[i])); }
-      for (var k = 0; k < nodes.length; k++){
-        var nd = nodes[k];
-        nd.el.setAttribute('transform', 'translate(' + nd.x + ',' + nd.y + ')');
-        nd.halo.setAttribute('cx', nd.x); nd.halo.setAttribute('cy', nd.y);
-      }
+      if (!canvas || !G || !cvW) return;
+      var ctx = canvas.getContext('2d');
+      ctx.setTransform(cvDpr, 0, 0, cvDpr, 0, 0);
+      ctx.clearRect(0, 0, cvW, cvH);
+      var nodes = G.nodes;
+      if (!nodes.length){ P = []; return; }
+      var cyw = Math.cos(rotY), syw = Math.sin(rotY), cxp = Math.cos(rotX), sxp = Math.sin(rotX);
+      var scale = Math.min(cvW, cvH) * 0.34 * zoom, ox = cvW / 2, oy = cvH / 2, cam = 3;
+      var searching = !!(elSearch && elSearch.value.trim());
+      P = nodes.map(function(o){
+        var x = o.x * cyw - o.z * syw, z = o.x * syw + o.z * cyw;
+        var y = o.y * cxp - z * sxp; z = o.y * sxp + z * cxp;
+        var q = cam / (cam - z);
+        return { sx: ox + x * scale * q, sy: oy + y * scale * q, z: z,
+                 r: Math.max(2.5, (4 + Math.sqrt(o.deg) * 2.2) * q), o: o };
+      });
+      // Edges first, depth-shaded (far side dimmer); dimmed hard when searching unless
+      // both ends match the query, so the hit set reads as a connected subgraph.
+      ctx.lineWidth = 1;
+      G.edges.forEach(function(ed){
+        var a = P[ed.a.i], b = P[ed.b.i];
+        var depth = ((a.z + b.z) / 2 + 1) / 2;
+        var lit = !searching || (ed.a.hit && ed.b.hit);
+        ctx.strokeStyle = 'rgba(120,150,210,' + (lit ? (0.10 + 0.32 * depth) : 0.03) + ')';
+        ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+      });
+      // Nodes back-to-front so near nodes overpaint far ones.
+      var order = P.map(function(_, i){ return i; }).sort(function(i, k){ return P[i].z - P[k].z; });
+      order.forEach(function(i){
+        var p = P[i], o = p.o, nd = o.nd, near = (p.z + 1) / 2;
+        var isHov = hover === i, isSel = selected === i;
+        var dim = searching && !o.hit;
+        var alpha = dim ? 0.08 : (0.4 + 0.6 * near);
+        var col = colorFor(nd.type); // keep the node's own type colour, even when hovered/selected
+        // Soft additive bloom so each node reads as a point of LIGHT (fuzzy halo),
+        // not a flat disc with a hard edge. Radial gradient fading to transparent,
+        // painted with 'lighter' so overlapping glows accumulate like real light.
+        if (!dim){
+          var glowR = p.r * ((isHov || isSel) ? 6.5 : 4.2);
+          var gi = ((isHov || isSel) ? 0.55 : 0.26) * (0.45 + 0.55 * near);
+          var grad = ctx.createRadialGradient(p.sx, p.sy, 0, p.sx, p.sy, glowR);
+          grad.addColorStop(0, col);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = gi;
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, glowR, 0, 7); ctx.fill();
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = 1;
+        }
+        // Bright solid core on top of its glow.
+        ctx.beginPath(); ctx.arc(p.sx, p.sy, p.r, 0, 7);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        if (searching && o.hit){ ctx.strokeStyle = '#f6e05e'; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1; }
+        else if (nd.contradiction){ ctx.strokeStyle = '#fc8181'; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1; }
+        else if (nd.stale){ ctx.strokeStyle = '#f0883e'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.lineWidth = 1; }
+        // Hover / selection ring: a white halo OUTSIDE the node so the node keeps
+        // its own type colour. Selected = bright + thick, hover = softer + thinner.
+        if ((isSel || isHov) && !dim){
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, p.r + 3, 0, 7);
+          ctx.strokeStyle = isSel ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = isSel ? 2 : 1.4; ctx.stroke(); ctx.lineWidth = 1;
+        }
+        // Labels: hubs always; hovered / selected / search-hit reveal on demand.
+        var showLabel = (o.deg >= LABEL_MIN_DEG) || isHov || isSel || (searching && o.hit);
+        if (showLabel && !dim){
+          ctx.fillStyle = (isHov || isSel) ? '#e6edf3' : 'rgba(213,222,236,' + (0.25 + 0.6 * near) + ')';
+          ctx.font = (isHov || isSel ? '12px ' : '11px ') + 'ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText(nd.title, p.sx + p.r + 4, p.sy + 3);
+        }
+      });
     }
 
-    // ---------- Interactions ----------
-    function evtGraphPoint(ev){
-      var rect = svg.getBoundingClientRect();
-      return {
-        x: (ev.clientX - rect.left - view.x) / view.k,
-        y: (ev.clientY - rect.top - view.y) / view.k
-      };
+    // ---------- Hit-testing + interactions ----------
+    function hitTest(mx, my){
+      var best = null, bd = 16;
+      for (var i = 0; i < P.length; i++){
+        var p = P[i]; var d = Math.hypot(p.sx - mx, p.sy - my);
+        if (d < bd && d < p.r + 8){ bd = d; best = i; }
+      }
+      return best;
     }
-    // Resolve the node whose element (or a child of it) is under an event, if any.
-    function nodeFromEvent(ev){
-      var t = ev.target;
-      var g = t && t.closest ? t.closest('.kb-node') : null;
-      return (g && g.__node) ? g.__node : null;
-    }
-    // ---- Unified pointer model: one capture drives pan, node-drag, and tap ----
-    svg.addEventListener('pointerdown', function(ev){
-      if (activePointer !== null) return; // ignore secondary pointers (e.g. 2nd finger)
-      autoFitPending = false; // user is interacting — don't stomp their view on settle
-      activePointer = ev.pointerId;
-      try { svg.setPointerCapture(ev.pointerId); } catch (e) {}
-      downX = ev.clientX; downY = ev.clientY; moved = false;
-      var node = nodeFromEvent(ev);
-      if (node){
-        gestureMode = 'node'; dragNode = node;
-      } else {
-        gestureMode = 'pan'; panning = true; svg.classList.add('panning');
-        panStart = { x: ev.clientX - view.x, y: ev.clientY - view.y };
+    function stopSpin(){ auto = false; }
+    function initInteractions(){
+      if (!canvas) return;
+      sizeCanvas();
+      window.addEventListener('resize', sizeCanvas);
+      canvas.addEventListener('mousedown', function(e){
+        dragging = true; moved = false; downX = lastX = e.clientX; downY = lastY = e.clientY;
+        velY = 0; velX = 0;   // grabbing halts any residual momentum
+        canvas.classList.add('drag');
+      });
+      // A press that never crossed the drag threshold is a tap: on a node open its
+      // panel, on empty space dismiss it. Bound on window so a drag that leaves the
+      // canvas still ends cleanly.
+      window.addEventListener('mouseup', function(e){
+        if (dragging && !moved && G){
+          var r = canvas.getBoundingClientRect();
+          var hit = hitTest(e.clientX - r.left, e.clientY - r.top);
+          if (hit != null){ selected = hit; showNote(G.nodes[hit].nd); }
+          else { selected = null; hideNote(); }
+          invalidate();
+        }
+        // Releasing after a rotate resumes the orbit — the sphere keeps spinning,
+        // carried on by the momentum captured during the drag (see the frame loop).
+        if (dragging) auto = true;
+        dragging = false; canvas.classList.remove('drag');
+      });
+      canvas.addEventListener('mousemove', function(e){
+        var r = canvas.getBoundingClientRect();
+        if (dragging){
+          // Empty-space drag ROTATES the sphere (X drag → spin, Y drag → tilt); this is
+          // the interaction the old flat-SVG pan could never provide.
+          if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4){ moved = true; }
+          var dY = (e.clientX - lastX) * 0.01, dX = (e.clientY - lastY) * 0.01;
+          rotY += dY; rotX += dX;
+          velY = dY; velX = dX;   // remember the latest speed → release momentum
+          if (rotX > 1.5) rotX = 1.5; else if (rotX < -1.5) rotX = -1.5;
+          lastX = e.clientX; lastY = e.clientY; invalidate();
+        } else {
+          var hit = hitTest(e.clientX - r.left, e.clientY - r.top);
+          if (hit !== hover){ hover = hit; canvas.style.cursor = (hit != null) ? 'pointer' : 'grab'; invalidate(); }
+        }
+      });
+      // Touch: one-finger drag rotates.
+      canvas.addEventListener('touchstart', function(e){
+        if (e.touches.length === 1){ dragging = true; moved = false; velY = 0; velX = 0;
+          var t = e.touches[0]; downX = lastX = t.clientX; downY = lastY = t.clientY; }
+      }, { passive: true });
+      canvas.addEventListener('touchmove', function(e){
+        if (dragging && e.touches.length === 1){
+          var t = e.touches[0];
+          var dY = (t.clientX - lastX) * 0.01, dX = (t.clientY - lastY) * 0.01;
+          rotY += dY; rotX += dX; velY = dY; velX = dX;
+          if (rotX > 1.5) rotX = 1.5; else if (rotX < -1.5) rotX = -1.5;
+          lastX = t.clientX; lastY = t.clientY; moved = true;
+          invalidate(); e.preventDefault();
+        }
+      }, { passive: false });
+      canvas.addEventListener('touchend', function(){ if (dragging) auto = true; dragging = false; });
+      // Zoom: wheel + the on-screen +/- buttons share one clamp. Range widened so the
+      // sphere can be pushed much closer / further than before.
+      function zoomBy(f){
+        zoom *= f;
+        if (zoom < MIN_ZOOM) zoom = MIN_ZOOM; else if (zoom > MAX_ZOOM) zoom = MAX_ZOOM;
+        invalidate();
       }
-    });
-    svg.addEventListener('pointermove', function(ev){
-      if (ev.pointerId !== activePointer) return;
-      if (!moved){
-        var ddx = ev.clientX - downX, ddy = ev.clientY - downY;
-        if (ddx * ddx + ddy * ddy > DRAG_THRESH * DRAG_THRESH) moved = true;
+      canvas.addEventListener('wheel', function(e){
+        e.preventDefault();
+        zoomBy(e.deltaY < 0 ? 1.1 : 0.9);
+      }, { passive: false });
+      var zin = document.getElementById('kb-zoom-in'), zout = document.getElementById('kb-zoom-out');
+      if (zin) zin.addEventListener('click', function(){ zoomBy(1.25); });
+      if (zout) zout.addEventListener('click', function(){ zoomBy(0.8); });
+      // Single throttled rAF loop: ~30fps, pauses when hidden or nothing changed. Also
+      // recovers the canvas size the first time the tab becomes visible (clientWidth is
+      // 0 while the view is display:none, so the initial sizeCanvas() reads nothing).
+      function frame(t){
+        requestAnimationFrame(frame);
+        if (document.hidden || !G) return;
+        if (!cvW){ sizeCanvas(); if (!cvW) return; }
+        if (!dragging && G.nodes.length){
+          // Post-release momentum decays smoothly; the baseline auto-spin keeps the
+          // sphere orbiting forever once the fling has bled off.
+          if (Math.abs(velY) > 0.00008 || Math.abs(velX) > 0.00008){
+            rotY += velY; rotX += velX;
+            if (rotX > 1.5) rotX = 1.5; else if (rotX < -1.5) rotX = -1.5;
+            velY *= 0.95; velX *= 0.95; needRender = true;
+          } else { velY = 0; velX = 0; }
+          if (auto){ rotY += SPIN; needRender = true; }
+        }
+        if (!needRender || t - lastFrame < 28) return;
+        lastFrame = t; needRender = false; render();
       }
-      if (gestureMode === 'pan'){
-        view.x = ev.clientX - panStart.x; view.y = ev.clientY - panStart.y; applyTransform();
-      } else if (gestureMode === 'node' && moved && dragNode){
-        var p = evtGraphPoint(ev); dragNode.x = p.x; dragNode.y = p.y; render(); reheat();
-      }
-    });
-    function endGesture(ev, cancelled){
-      if (ev.pointerId !== activePointer) return;
-      try { svg.releasePointerCapture(ev.pointerId); } catch (e) {}
-      // A press that never became a drag is a tap: on a node -> open its panel;
-      // on empty space -> dismiss the panel. Deterministic (no reliance on click).
-      if (!cancelled && !moved){
-        if (gestureMode === 'node' && dragNode) showPanel(dragNode);
-        else if (gestureMode === 'pan') hidePanel();
-      }
-      activePointer = null; gestureMode = null; dragNode = null;
-      panning = false; svg.classList.remove('panning');
-    }
-    svg.addEventListener('pointerup', function(ev){ endGesture(ev, false); });
-    svg.addEventListener('pointercancel', function(ev){ endGesture(ev, true); });
-    svg.addEventListener('wheel', function(ev){
-      ev.preventDefault();
-      autoFitPending = false; // user zoomed — keep their view on settle
-      var rect = svg.getBoundingClientRect();
-      var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-      var factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
-      var nk = Math.min(3, Math.max(0.2, view.k * factor));
-      view.x = mx - (mx - view.x) * (nk / view.k);
-      view.y = my - (my - view.y) * (nk / view.k);
-      view.k = nk; applyTransform();
-    }, { passive: false });
-
-    function highlight(node){
-      for (var i = 0; i < nodes.length; i++){
-        var nd = nodes[i];
-        var on = (nd === node) || node.neighbors[nd.id];
-        nd.el.classList.toggle('dim', !on);
-        nd.el.classList.toggle('focus', on); // reveals label while decluttered
-        nd.halo.classList.toggle('dim', !on);
-      }
-      for (var j = 0; j < edges.length; j++){
-        var e = edges[j];
-        var touch = (e.source === node || e.target === node);
-        e.el.classList.toggle('hl', touch);
-        e.el.classList.toggle('dim', !touch);
-      }
-    }
-    function clearHighlight(){
-      nodes.forEach(function(nd){ nd.el.classList.remove('dim', 'focus'); nd.halo.classList.remove('dim'); });
-      edges.forEach(function(e){ e.el.classList.remove('hl'); e.el.classList.remove('dim'); });
+      requestAnimationFrame(frame);
     }
 
     // ---------- Search ----------
-    // Filter nodes by title/type/excerpt. Uses its own 'search-*' classes so it never
-    // fights the hover highlight ('dim'/'hl'). Empty query restores the full graph.
+    // Mark matching notes (title / type / excerpt). render() dims the rest and rings the
+    // hits; a hit's label is revealed even under the declutter threshold.
     function clearSearch(){
-      nodes.forEach(function(nd){ nd.el.classList.remove('search-dim', 'search-hit'); nd.halo.classList.remove('search-dim'); });
-      edges.forEach(function(e){ e.el.classList.remove('search-dim'); });
+      if (G) G.nodes.forEach(function(o){ o.hit = true; });
       if (elSearchCount) elSearchCount.textContent = '';
+      invalidate();
     }
     function runSearch(){
-      if (!elSearch) return;
+      if (!elSearch || !G) return [];
       var q = elSearch.value.trim().toLowerCase();
-      if (!q){ clearSearch(); return; }
+      if (!q){ clearSearch(); return []; }
       var hits = [];
-      nodes.forEach(function(nd){
+      G.nodes.forEach(function(o){
+        var nd = o.nd;
         var hay = (nd.title + ' ' + (nd.type || '') + ' ' + (nd.excerpt || '')).toLowerCase();
-        var on = hay.indexOf(q) >= 0;
-        nd.match = on;
-        if (on) hits.push(nd);
-        nd.el.classList.toggle('search-hit', on);
-        nd.el.classList.toggle('search-dim', !on);
-        nd.halo.classList.toggle('search-dim', !on);
+        o.hit = hay.indexOf(q) >= 0;
+        if (o.hit) hits.push(o);
       });
-      // An edge stays lit only when BOTH ends match, so the highlighted set reads as a subgraph.
-      edges.forEach(function(e){ e.el.classList.toggle('search-dim', !(e.source.match && e.target.match)); });
-      if (elSearchCount) elSearchCount.textContent = hits.length + ' / ' + nodes.length;
+      if (elSearchCount) elSearchCount.textContent = hits.length + ' / ' + G.nodes.length;
+      invalidate();
       return hits;
     }
-    // Enter → recentre the view on the first match so it is easy to find in a big graph.
+    // Enter → rotate the sphere so the first match faces the camera (front & centre) and
+    // open its panel — the 3D analogue of "recentre on the first hit".
     function focusFirstMatch(){
       var hits = runSearch();
-      if (!hits || !hits.length) return;
+      if (!hits.length) return;
       var n0 = hits[0];
-      view.k = Math.max(view.k, 1);
-      view.x = w() / 2 - n0.x * view.k;
-      view.y = h() / 2 - n0.y * view.k;
-      applyTransform();
+      stopSpin(); velY = 0; velX = 0;
+      rotY = Math.atan2(n0.x, n0.z);
+      var z1 = Math.hypot(n0.x, n0.z);
+      rotX = Math.atan2(n0.y, z1);
+      if (rotX > 1.5) rotX = 1.5; else if (rotX < -1.5) rotX = -1.5;
+      selected = n0.i; showNote(n0.nd);
+      invalidate();
     }
 
+    // ---------- Detail note (full-width, below the graph) ----------
     function el(tag, txt){ var e = document.createElement(tag); if (txt !== undefined) e.textContent = txt; return e; }
-    function showPanel(node){
-      elPanel.textContent = '';
-      var close = el('span', '✕'); close.setAttribute('class', 'kb-panel-close');
-      close.addEventListener('click', hidePanel);
-      elPanel.appendChild(close);
-      elPanel.appendChild(el('h3', node.title));
-      var dl = document.createElement('dl');
-      function row(k, v){ dl.appendChild(el('dt', k)); dl.appendChild(el('dd', v)); }
-      row('id', node.id);
-      row('type', node.type || '—');
-      row('links (degree)', String(node.degree));
-      row('confidence', node.confidence === null ? '—' : String(node.confidence));
-      row('updated', node.updatedAt || '—');
-      if (node.stale) row('status', 'stale (≥ 90d)');
-      if (node.contradiction) row('flag', 'in a contradiction');
-      elPanel.appendChild(dl);
-      // Readable note body preview — the "open and read" part of the panel.
-      if (node.excerpt){
-        var h = el('div'); h.setAttribute('class', 'kb-panel-note-h'); h.textContent = 'note';
-        var body = el('div', node.excerpt); body.setAttribute('class', 'kb-panel-note');
-        elPanel.appendChild(h); elPanel.appendChild(body);
-      }
-      elPanel.style.display = '';
+    function chip(label, value, dotColor){
+      var c = el('span'); c.setAttribute('class', 'kb-note-chip');
+      if (dotColor){ var i = el('i'); i.style.background = dotColor; c.appendChild(i); }
+      c.appendChild(el('span', label + ' ')); c.appendChild(el('b', value));
+      return c;
     }
-    function hidePanel(){ elPanel.style.display = 'none'; }
+
+    // ---------- Minimal, XSS-safe Markdown renderer ----------
+    // Builds DOM nodes only (textContent everywhere — never assigns raw HTML), so
+    // an untrusted note body cannot inject markup. Handles headings, fenced/inline
+    // code, lists, blockquotes, hr, and inline bold/italic/code/links.
+    // NOTE: this whole script lives inside a TS template literal, so every regex
+    // backslash MUST be doubled (\\s not \s) — a single backslash is stripped at
+    // build time. Literal backticks are written as \` (kept single).
+    function sanitizeHref(h){
+      var s = String(h || '').trim();
+      // Allow only http(s), mailto, and in-vault relative links; block javascript:, data:, etc.
+      if (/^https?:\\/\\//i.test(s) || /^mailto:/i.test(s)) return s;
+      if (/^[\\w./#?=&%-]+$/.test(s) && !/^[a-z]+:/i.test(s)) return s;
+      return null;
+    }
+    function renderInline(container, text){
+      // Tokenise on: inline code, bold, strikethrough, italic, and [label](href) links.
+      var re = /(\`[^\`]+\`)|(\\*\\*[^*]+\\*\\*)|(~~[^~]+~~)|(\\*[^*]+\\*|_[^_]+_)|(\\[[^\\]]+\\]\\([^)]+\\))/;
+      var rest = String(text);
+      while (rest.length){
+        var m = re.exec(rest);
+        if (!m){ container.appendChild(document.createTextNode(rest)); break; }
+        if (m.index > 0) container.appendChild(document.createTextNode(rest.slice(0, m.index)));
+        var tok = m[0];
+        if (tok.charAt(0) === '\`'){
+          container.appendChild(el('code', tok.slice(1, -1)));
+        } else if (tok.slice(0, 2) === '**'){
+          container.appendChild(el('strong', tok.slice(2, -2)));
+        } else if (tok.slice(0, 2) === '~~'){
+          container.appendChild(el('del', tok.slice(2, -2)));
+        } else if (tok.charAt(0) === '*' || tok.charAt(0) === '_'){
+          container.appendChild(el('em', tok.slice(1, -1)));
+        } else {
+          var lm = /^\\[([^\\]]+)\\]\\(([^)]+)\\)$/.exec(tok);
+          var href = lm ? sanitizeHref(lm[2]) : null;
+          if (lm && href){
+            var a = el('a', lm[1]); a.setAttribute('href', href);
+            a.setAttribute('target', '_blank'); a.setAttribute('rel', 'noopener noreferrer');
+            container.appendChild(a);
+          } else {
+            container.appendChild(document.createTextNode(tok));
+          }
+        }
+        rest = rest.slice(m.index + tok.length);
+      }
+    }
+    function renderMarkdown(root, md){
+      root.textContent = '';
+      var lines = String(md).replace(/\\r\\n?/g, '\\n').split('\\n');
+      var i = 0;
+      // Nested-list stack: each entry = { list:<ul|ol>, ordered, indent }.
+      var stack = [];
+      function endList(){ stack.length = 0; }
+      function listTarget(indent, ordered){
+        while (stack.length && stack[stack.length - 1].indent > indent) stack.pop();
+        var top = stack.length ? stack[stack.length - 1] : null;
+        if (top && top.indent === indent){
+          if (top.ordered === ordered) return top.list;
+          stack.pop(); top = stack.length ? stack[stack.length - 1] : null;
+        }
+        var listEl = el(ordered ? 'ol' : 'ul');
+        if (top && top.indent < indent && top.list.lastChild) top.list.lastChild.appendChild(listEl);
+        else root.appendChild(listEl);
+        stack.push({ list: listEl, ordered: ordered, indent: indent });
+        return listEl;
+      }
+      // Split a table row into trimmed cells (drop the optional edge pipes).
+      function tableCells(row){
+        return row.trim().replace(/^\\|/, '').replace(/\\|$/, '').split('|').map(function(s){ return s.trim(); });
+      }
+      while (i < lines.length){
+        var line = lines[i];
+        // Fenced code block.
+        var fence = /^\\s*\`\`\`(.*)$/.exec(line);
+        if (fence){
+          endList(); i++;
+          var buf = [];
+          while (i < lines.length && !/^\\s*\`\`\`\\s*$/.test(lines[i])){ buf.push(lines[i]); i++; }
+          i++; // closing fence
+          var pre = el('pre'); pre.appendChild(el('code', buf.join('\\n')));
+          root.appendChild(pre); continue;
+        }
+        // Horizontal rule.
+        if (/^\\s*([-*_])(\\s*\\1){2,}\\s*$/.test(line)){ endList(); root.appendChild(el('hr')); i++; continue; }
+        // Heading.
+        var h = /^(#{1,6})\\s+(.*)$/.exec(line);
+        if (h){ endList(); var hEl = el('h' + h[1].length); renderInline(hEl, h[2].trim()); root.appendChild(hEl); i++; continue; }
+        // Blockquote (collapse consecutive > lines).
+        if (/^\\s*>\\s?/.test(line)){
+          endList(); var q = el('blockquote'); var qbuf = [];
+          while (i < lines.length && /^\\s*>\\s?/.test(lines[i])){ qbuf.push(lines[i].replace(/^\\s*>\\s?/, '')); i++; }
+          renderInline(q, qbuf.join(' ')); root.appendChild(q); continue;
+        }
+        // GFM pipe table: a header row immediately followed by a |---|:--:| separator.
+        if (/\\|/.test(line) && i + 1 < lines.length &&
+            /^\\s*\\|?\\s*:?-+:?\\s*(\\|\\s*:?-+:?\\s*)*\\|?\\s*$/.test(lines[i + 1])){
+          endList();
+          var aligns = tableCells(lines[i + 1]).map(function(s){
+            var lft = s.charAt(0) === ':', rgt = s.charAt(s.length - 1) === ':';
+            return (lft && rgt) ? 'center' : rgt ? 'right' : lft ? 'left' : '';
+          });
+          var table = el('table'); var thead = el('thead'); var htr = el('tr');
+          tableCells(line).forEach(function(c, idx){
+            var th = el('th'); if (aligns[idx]) th.style.textAlign = aligns[idx];
+            renderInline(th, c); htr.appendChild(th);
+          });
+          thead.appendChild(htr); table.appendChild(thead);
+          var tbody = el('tbody'); i += 2;
+          while (i < lines.length && /\\|/.test(lines[i]) && lines[i].trim() !== ''){
+            var tr = el('tr');
+            tableCells(lines[i]).forEach(function(c, idx){
+              var td = el('td'); if (aligns[idx]) td.style.textAlign = aligns[idx];
+              renderInline(td, c); tr.appendChild(td);
+            });
+            tbody.appendChild(tr); i++;
+          }
+          table.appendChild(tbody);
+          var wrap = el('div'); wrap.setAttribute('class', 'kb-table-wrap'); wrap.appendChild(table);
+          root.appendChild(wrap); continue;
+        }
+        // List item (ordered/unordered), indent-nested, with optional task checkbox.
+        var li = /^(\\s*)(?:([-*+])|(\\d+)[.)])\\s+(.*)$/.exec(line);
+        if (li){
+          var indent = li[1].length;
+          var ordered = li[3] !== undefined;
+          var content = li[4];
+          var target = listTarget(indent, ordered);
+          var item = el('li');
+          var task = /^\\[([ xX])\\]\\s+(.*)$/.exec(content);
+          if (task){
+            item.setAttribute('class', 'kb-task');
+            var box = el('input'); box.setAttribute('type', 'checkbox'); box.setAttribute('disabled', '');
+            if (task[1] !== ' ') box.setAttribute('checked', '');
+            item.appendChild(box);
+            renderInline(item, ' ' + task[2]);
+          } else {
+            renderInline(item, content);
+          }
+          target.appendChild(item); i++; continue;
+        }
+        // Blank line ends a list / paragraph.
+        if (/^\\s*$/.test(line)){ endList(); i++; continue; }
+        // Paragraph: gather consecutive plain lines.
+        endList(); var pbuf = [line];
+        i++;
+        while (i < lines.length && !/^\\s*$/.test(lines[i]) &&
+               !/^(#{1,6})\\s/.test(lines[i]) && !/^\\s*>\\s?/.test(lines[i]) &&
+               !/^\\s*(?:[-*+]|\\d+[.)])\\s+/.test(lines[i]) && !/^\\s*\`\`\`/.test(lines[i])){
+          pbuf.push(lines[i]); i++;
+        }
+        var p = el('p'); renderInline(p, pbuf.join('\\n')); root.appendChild(p);
+      }
+      if (!root.childNodes.length) root.appendChild(el('p', '(empty note)'));
+    }
+
+    var noteReq = 0; // guards against out-of-order fetch responses
+    function showNote(nd){
+      noteReq++;
+      var myReq = noteReq;
+      elNote.textContent = '';
+      // Head: title + close.
+      var head = el('div'); head.setAttribute('class', 'kb-note-head');
+      head.appendChild(el('h3', nd.title));
+      var close = el('button', '✕'); close.setAttribute('class', 'kb-note-close'); close.setAttribute('title', 'Close');
+      close.addEventListener('click', function(){ selected = null; hideNote(); invalidate(); });
+      head.appendChild(close);
+      elNote.appendChild(head);
+      // Metadata chips.
+      var meta = el('div'); meta.setAttribute('class', 'kb-note-meta');
+      meta.appendChild(chip('type', nd.type || '—', colorFor(nd.type)));
+      meta.appendChild(chip('links', String(nd.degree)));
+      if (nd.confidence !== null && nd.confidence !== undefined) meta.appendChild(chip('confidence', String(nd.confidence)));
+      if (nd.updatedAt) meta.appendChild(chip('updated', nd.updatedAt));
+      if (nd.stale) meta.appendChild(chip('status', 'stale ≥ 90d'));
+      if (nd.contradiction) meta.appendChild(chip('flag', 'contradiction'));
+      meta.appendChild(chip('id', nd.id));
+      elNote.appendChild(meta);
+      // File path line (full location) — filled once the note fetch returns.
+      var pathLine = el('div'); pathLine.setAttribute('class', 'kb-note-path');
+      pathLine.style.display = 'none'; elNote.appendChild(pathLine);
+      // Body — start from the excerpt, then fetch and render the FULL file.
+      var body = el('div'); body.setAttribute('class', 'kb-md');
+      if (nd.excerpt) renderMarkdown(body, nd.excerpt);
+      var loading = el('div', 'Loading full note…'); loading.setAttribute('class', 'kb-note-loading');
+      elNote.appendChild(body); elNote.appendChild(loading);
+      elNote.style.display = '';
+      elNote.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // Fetch the whole markdown body for the current source scope.
+      var url = apiUrl('/knowledge/note') + '?scope=' + encodeURIComponent(currentScope()) +
+                '&id=' + encodeURIComponent(nd.id);
+      fetch(url, { headers: { 'Accept': 'application/json' } }).then(function(res){
+        if (res.status === 401){ onUnauthorized(); return null; }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }).then(function(data){
+        if (myReq !== noteReq) return; // a newer note was opened — ignore
+        if (loading.parentNode) loading.parentNode.removeChild(loading);
+        if (!data) return;
+        // Header enrichments from the backend: last-modified date + full path.
+        if (typeof data.updated === 'string' && data.updated){
+          meta.appendChild(chip('updated', String(data.updated).slice(0, 10)));
+        }
+        if (typeof data.path === 'string' && data.path){
+          pathLine.textContent = '';
+          pathLine.appendChild(el('span', '📄 ')); // page icon
+          pathLine.appendChild(el('b', data.path));
+          pathLine.style.display = '';
+        }
+        if (typeof data.body === 'string' && data.body.trim()) renderMarkdown(body, data.body);
+      }).catch(function(){
+        if (myReq !== noteReq) return;
+        // Demo/synthetic ids have no file — keep the excerpt, just drop the spinner.
+        if (loading.parentNode) loading.parentNode.removeChild(loading);
+        if (!nd.excerpt) renderMarkdown(body, '(full note unavailable)');
+      });
+    }
+    function hideNote(){ noteReq++; elNote.style.display = 'none'; elNote.textContent = ''; }
 
     // ---------- Legend + stats ----------
     function renderLegend(){
       elLegend.textContent = '';
       var present = {};
-      nodes.forEach(function(nd){ present[nd.type || 'other'] = true; });
+      G.nodes.forEach(function(o){ present[o.nd.type || 'other'] = true; });
       Object.keys(present).forEach(function(type){
         var s = el('span');
         var dot = el('i'); dot.style.background = colorFor(type === 'other' ? null : type);
@@ -1497,10 +1742,10 @@ export function generateDashboardHtml(): string {
       });
     }
 
-    // ---------- Load ----------
+    // ---------- Load (data layer — unchanged) ----------
     function currentScope(){ return (sourceSel && sourceSel.value) || 'shared'; }
-    // Demo controls (toggle/size/badge) only make sense for the Shared KB — an
-    // agent's own memory has no synthetic demo. Hide them when an agent is picked.
+    // Demo controls only make sense for the Shared KB — an agent's own memory has no
+    // synthetic demo. Hide them when an agent is picked.
     function syncSourceControls(){
       var isShared = currentScope() === 'shared';
       if (demoToggleWrap) demoToggleWrap.style.display = isShared ? '' : 'none';
@@ -1519,7 +1764,7 @@ export function generateDashboardHtml(): string {
         if (!data || !sourceSel) { loadGraph(); return; }
         var prev = sourceSel.value || 'shared';
         sourceSel.textContent = '';
-        (data.sources || [{ id: 'shared', label: 'Shared KB', count: 0 }]).forEach(function(s){
+        (data.sources || [{ id: 'shared', label: 'Shared Knowledge Base', count: 0 }]).forEach(function(s){
           var o = document.createElement('option');
           o.value = s.id; o.textContent = s.label + (typeof s.count === 'number' ? ' (' + s.count + ')' : '');
           sourceSel.appendChild(o);
@@ -1581,6 +1826,7 @@ export function generateDashboardHtml(): string {
         else if (ev.key === 'Escape') { elSearch.value = ''; clearSearch(); }
       });
     }
+    initInteractions();
   })();
   </script>
 
