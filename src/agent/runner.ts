@@ -2743,8 +2743,13 @@ export class AgentRunner extends EventEmitter {
       let quietTimer: ReturnType<typeof setTimeout> | undefined;
       // Track partial message text for delta computation (--include-partial-messages)
       let lastPartialText = '';
+      // Guards done/fail against a double-fire — e.g. onExit racing a 'result'
+      // line that already settled this turn (see onExit below).
+      let settled = false;
 
       const done = (result: string) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         const attachments = this.popApiAttachments(sessionId);
         // Persist assistant reply. Image-only replies (empty text but attachments
@@ -2772,6 +2777,8 @@ export class AgentRunner extends EventEmitter {
       };
 
       const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
         // Terminal close for a turn that produced no result (#75): record it so
         // history does not end on a dangling user message, and drain the
         // attachment buffer so nothing leaks into the next turn.
@@ -2780,11 +2787,23 @@ export class AgentRunner extends EventEmitter {
         reject(err); // no-op when the soft timeout already rejected
       };
 
+      // The subprocess died without ever emitting a final `result` line (crash,
+      // an unexpected signal — distinct from a graceful /stop, whose SIGINT
+      // handler still emits a terminal result before exiting, so `done()` wins
+      // that race and this is a no-op). Without this, a mid-turn crash left
+      // pendingApiSessions — and the caller's pending-response spinner — stuck
+      // until the up-to-15-minute opts.timeoutMs + API_TIMEOUT_HARD_CAP_EXTRA_MS
+      // safety net finally fired.
+      const onExit = () => {
+        fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+      };
+
       const cleanup = () => {
         clearTimeout(globalTimer);
         if (hardCapTimer) clearTimeout(hardCapTimer);
         if (quietTimer) clearTimeout(quietTimer);
         session.off('output', onOutput);
+        session.off('exit', onExit);
         this.pendingApiSessions.delete(sessionId);
       };
 
@@ -2850,6 +2869,7 @@ export class AgentRunner extends EventEmitter {
       }, opts.timeoutMs);
 
       session.on('output', onOutput);
+      session.on('exit', onExit);
       session.setProcessing(true);
       session.sendMessage(channelXml);
       // Do NOT call resetQuiet() here — the quiet timer should only start
@@ -2993,10 +3013,22 @@ export class AgentRunner extends EventEmitter {
       notifyError(err);
     };
 
+    // The subprocess died without ever emitting a final `result` line (crash,
+    // an unexpected signal — distinct from a graceful /stop, whose SIGINT
+    // handler still emits a terminal result before exiting, so `done()` wins
+    // that race and this is a no-op via the `settled` guard in fail()).
+    // Without this, a mid-turn crash left pendingApiSessions — and the web's
+    // pending-response spinner — stuck until the up-to-15-minute
+    // opts.timeoutMs + API_TIMEOUT_HARD_CAP_EXTRA_MS safety net finally fired.
+    const onExit = () => {
+      fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+    };
+
     const cleanup = () => {
       clearTimeout(globalTimer);
       if (hardCapTimer) clearTimeout(hardCapTimer);
       session.off('output', onOutput);
+      session.off('exit', onExit);
       this.pendingApiSessions.delete(sessionId);
     };
 
@@ -3099,6 +3131,7 @@ export class AgentRunner extends EventEmitter {
     }, opts.timeoutMs);
 
     session.on('output', onOutput);
+    session.on('exit', onExit);
 
     // Image paths only work when allowTools:true — Claude needs the Read tool to access them
     const allowToolsStream = opts.allowTools ?? false;
