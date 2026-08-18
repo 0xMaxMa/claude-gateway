@@ -1859,6 +1859,9 @@ export function generateDashboardHtml(): string {
       var refreshBtn = document.getElementById('dreams-refresh');
       var allRuns = [];
       var loaded = false;
+      // Notice to show once, after the next render (a reload overwrites statsEl,
+      // so an accept result set directly on statsEl would be lost immediately).
+      var pendingNotice = '';
 
       function el(tag, cls, text){
         var e = document.createElement(tag);
@@ -1890,9 +1893,11 @@ export function generateDashboardHtml(): string {
           }
           // Reload so applied proposals show ✓ and any anchor-stale skips stay
           // pending; the memory files themselves were already updated on disk.
-          if (r.data.skipped){
-            statsEl.textContent = 'Applied ' + r.data.applied + ', skipped ' + r.data.skipped + ' (anchor changed / net-negative)';
-          }
+          // The message is stashed in pendingNotice because loadDreams → render
+          // rewrites statsEl.
+          pendingNotice = 'Applied ' + (r.data.applied || 0)
+            + (r.data.skipped ? ', skipped ' + r.data.skipped + ' (anchor changed / net-negative)' : '')
+            + (r.data.alreadyAccepted ? ', ' + r.data.alreadyAccepted + ' already applied' : '');
           loadDreams(true);
         }).catch(function(e){
           if (btn){ btn.disabled = false; btn.textContent = origText || 'Accept'; }
@@ -1981,6 +1986,10 @@ export function generateDashboardHtml(): string {
         });
         statsEl.textContent = runs.length + ' run' + (runs.length === 1 ? '' : 's')
           + (pendingTotal ? ' · ' + pendingTotal + ' pending' : '');
+        if (pendingNotice){
+          statsEl.textContent += ' — ' + pendingNotice;
+          pendingNotice = '';
+        }
         runs.forEach(function(r){ listEl.appendChild(renderRun(r)); });
       }
 
