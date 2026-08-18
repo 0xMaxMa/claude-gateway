@@ -6,6 +6,7 @@ import * as path from 'path';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
+import { resolveDreamingConfig } from '../agent/dreaming/config';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
@@ -401,6 +402,10 @@ export class SessionProcess extends EventEmitter {
             // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
             // can reach the cross-agent vault. Empty when shared KB is disabled.
             GATEWAY_SHARED_KB_DIR: this.resolveSharedKbDir(),
+            // planning-66: gate the read-path retrieval recorder (memory_search →
+            // kb_retrieval_log) so the staleness GC's LRU/feedback signal is only
+            // collected when the agent actually runs the GC.
+            GATEWAY_RECORD_RETRIEVALS: this.resolveRecordRetrievals(),
             GATEWAY_SESSION_ID: this.sessionId,
             // For API sessions: absolute path to session media dir so browser screenshots land there
             GATEWAY_SESSION_MEDIA_DIR: this.source === 'api'
@@ -459,6 +464,20 @@ export class SessionProcess extends EventEmitter {
       this.gatewayConfig.gateway.knowledge?.shared,
     );
     return cfg.enabled ? sharedVaultDir(cfg) : '';
+  }
+
+  /**
+   * "1" when the read-path retrieval recorder should log memory_search hits into
+   * kb_retrieval_log (planning-66) — the LRU/feedback signal the nightly staleness
+   * GC folds into per-entry recency. Off unless staleness AND recordRetrievals are
+   * both enabled. Mirrors resolveSharedKbDir's env-gate pattern.
+   */
+  private resolveRecordRetrievals(): string {
+    const s = resolveDreamingConfig(
+      this.agentConfig.dreaming,
+      this.gatewayConfig.gateway.dreaming,
+    ).staleness;
+    return s.enabled && s.recordRetrievals ? '1' : '';
   }
 
   private buildArgs(mcpConfigPath: string | null, model: string): string[] {

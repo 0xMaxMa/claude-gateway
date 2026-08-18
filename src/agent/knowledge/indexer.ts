@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { ArchiveDB, ChunkWithMeta } from './archive-db';
 import { chunkMarkdown } from './chunk';
 import { classifyOrigin } from './provenance';
+import { parseEntryBlocks, isArchiveTierPath, type EntryBlock } from './lifecycle';
 import {
   resolveArchiveConfig,
   resolveSharedConfig,
@@ -84,6 +85,14 @@ function sha256(content: string): string {
 /** Workspace-relative POSIX path (for storage + provenance classification). */
 function relPosix(workspaceDir: string, absFile: string): string {
   return path.relative(workspaceDir, absFile).split(path.sep).join('/');
+}
+
+/** The entry_hash of the block a chunk starts in, or null if it starts outside any. */
+function blockHashForLine(blocks: EntryBlock[], line: number): string | null {
+  for (const b of blocks) {
+    if (line >= b.startLine && line <= b.endLine) return b.entryHash;
+  }
+  return null;
 }
 
 /**
@@ -170,6 +179,12 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
     const mtime = Math.floor(stat.mtimeMs);
     const origin = opts.originFn(rel);
     const chunks = chunkMarkdown(content, opts.chunkTokens, opts.chunkOverlap);
+    // Entry-lifecycle identity (planning-66): only archive-tier files get an
+    // entry_hash (evergreen Lane-1, pinned files and the shared vault are exempt,
+    // so the GC can never consider them). Each FTS chunk inherits the entry_hash of
+    // the markdown block it starts in; blocks are the clean, movable unit the GC
+    // operates on (chunks are overlapping token windows and must never be moved).
+    const blocks = opts.source === 'memory' && isArchiveTierPath(rel) ? parseEntryBlocks(content) : [];
     const rows: ChunkWithMeta[] = chunks.map((c) => ({
       chunk: {
         id: `${rel}#${c.startLine}-${c.endLine}`,
@@ -186,9 +201,14 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
         observedAt: mtime,
         supersedesKey: null,
       },
+      entryHash: blocks.length ? blockHashForLine(blocks, c.startLine) : null,
     }));
 
-    db.replaceSource({ path: rel, hash, mtime, size: stat.size, source: opts.source }, rows);
+    db.replaceSource(
+      { path: rel, hash, mtime, size: stat.size, source: opts.source },
+      rows,
+      blocks.map((b) => ({ entryHash: b.entryHash, firstSeen: mtime })),
+    );
     result.filesIndexed++;
     result.chunksWritten += rows.length;
   }

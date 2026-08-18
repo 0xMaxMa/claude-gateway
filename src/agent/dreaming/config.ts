@@ -8,7 +8,17 @@
  */
 
 import { isValidTimezone } from '../skill-learning/config';
-import type { DreamingConfig, ResolvedDreamingCfg } from './types';
+import type { DreamingConfig, ResolvedDreamingCfg, ResolvedStalenessCfg, StalenessConfig } from './types';
+
+/** Built-in staleness-GC defaults (planning-66). */
+export const STALENESS_DEFAULTS: ResolvedStalenessCfg = {
+  enabled: true,
+  staleTtlDays: 90,
+  keepImportance: 7,
+  minRetrievalKeep: 1,
+  supersession: true,
+  recordRetrievals: true,
+};
 
 export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   enabled: true,
@@ -21,6 +31,7 @@ export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   reviewModel: 'claude-haiku-4-5-20251001',
   promotionThreshold: 0.6,
   minRecallCount: 2,
+  staleness: STALENESS_DEFAULTS,
 };
 
 /** Pick the first defined value in precedence order, else the default. */
@@ -43,6 +54,29 @@ function numOr(value: number, fallback: number, min: number, max: number): numbe
   return value;
 }
 
+/**
+ * Resolve the staleness-GC sub-config (planning-66). Booleans fall back to the
+ * default when absent/non-boolean; numerics are sanitized like the parent config.
+ */
+export function resolveStalenessConfig(
+  agentCfg?: StalenessConfig,
+  globalCfg?: StalenessConfig,
+): ResolvedStalenessCfg {
+  const d = STALENESS_DEFAULTS;
+  const bool = (a?: boolean, g?: boolean, fb = false): boolean => {
+    const v = pick(a, g, fb);
+    return typeof v === 'boolean' ? v : fb;
+  };
+  return {
+    enabled: bool(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
+    staleTtlDays: numOr(pick(agentCfg?.staleTtlDays, globalCfg?.staleTtlDays, d.staleTtlDays), d.staleTtlDays, 0, Infinity),
+    keepImportance: numOr(pick(agentCfg?.keepImportance, globalCfg?.keepImportance, d.keepImportance), d.keepImportance, 0, 10),
+    minRetrievalKeep: numOr(pick(agentCfg?.minRetrievalKeep, globalCfg?.minRetrievalKeep, d.minRetrievalKeep), d.minRetrievalKeep, 0, Infinity),
+    supersession: bool(agentCfg?.supersession, globalCfg?.supersession, d.supersession),
+    recordRetrievals: bool(agentCfg?.recordRetrievals, globalCfg?.recordRetrievals, d.recordRetrievals),
+  };
+}
+
 export function resolveDreamingConfig(
   agentCfg?: DreamingConfig,
   globalCfg?: DreamingConfig,
@@ -62,5 +96,6 @@ export function resolveDreamingConfig(
     reviewModel: pick(agentCfg?.reviewModel, globalCfg?.reviewModel, d.reviewModel),
     promotionThreshold: numOr(pick(agentCfg?.promotionThreshold, globalCfg?.promotionThreshold, d.promotionThreshold), d.promotionThreshold, 0, 1),
     minRecallCount: numOr(pick(agentCfg?.minRecallCount, globalCfg?.minRecallCount, d.minRecallCount), d.minRecallCount, 0, Infinity),
+    staleness: resolveStalenessConfig(agentCfg?.staleness, globalCfg?.staleness),
   };
 }
