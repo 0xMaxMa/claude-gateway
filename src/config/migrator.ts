@@ -264,50 +264,6 @@ function preserveBindDefault(config: Record<string, unknown>): string | null {
   return 'gateway.bind';
 }
 
-/** Warning surfaced when a migration flips the retired `propose` memory defaults to `auto`. */
-export const MODE_AUTO_UPGRADE_WARNING =
-  'Memory dreaming and shared-KB promotion were upgraded from "propose" (dry-run) to "auto": ' +
-  'agents will now apply memory consolidation to MEMORY.md nightly and promote memories to the shared vault ' +
-  '(guarded by the K4 applier: backup + net-negative + bounded-loss). ' +
-  'Set gateway.dreaming.mode / gateway.knowledge.shared.mode to "propose" in config.json to keep dry-run behavior.';
-
-/**
- * Flip the retired `propose` default to `auto` for the two memory "mode" keys
- * during an upgrade (planning-64's "then flip to auto" step, now that the K4
- * applier is merged). config.template.json shipped `mode: "propose"` as the SAFE
- * first-rollout default and the migrator copied it into every config as an
- * EXPLICIT value, so changing the code default alone is not enough — the explicit
- * "propose" would win. Like preserveBindDefault, this runs ONLY inside a migration
- * (configVersion older than the template), so a fresh install (which copies the
- * template's new "auto" verbatim) is never touched.
- *
- * Only flips a value that is exactly the retired default "propose"; an explicit
- * "auto" or any other value is left untouched. Mutates `config` in place. Returns
- * the changed field paths.
- */
-function upgradeMemoryModeDefaults(config: Record<string, unknown>): string[] {
-  const changed: string[] = [];
-  const gateway = config.gateway;
-  if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return changed;
-  const g = gateway as Record<string, unknown>;
-
-  const flip = (obj: unknown, fieldPath: string): void => {
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
-    const rec = obj as Record<string, unknown>;
-    if (rec.mode === 'propose') {
-      rec.mode = 'auto';
-      changed.push(fieldPath);
-    }
-  };
-
-  flip(g.dreaming, 'gateway.dreaming.mode');
-  const knowledge = g.knowledge;
-  if (knowledge && typeof knowledge === 'object' && !Array.isArray(knowledge)) {
-    flip((knowledge as Record<string, unknown>).shared, 'gateway.knowledge.shared.mode');
-  }
-  return changed;
-}
-
 /**
  * Load a template file, extract the _migration metadata, strip it,
  * and return the clean template along with the ignorePaths set.
@@ -440,13 +396,6 @@ export function detectMigration(
     warnings.push(BIND_PRESERVED_WARNING);
   }
 
-  // Flip the retired `propose` memory defaults to `auto` (planning-64 follow-up).
-  const modeFields = upgradeMemoryModeDefaults(configClone);
-  if (modeFields.length) {
-    added.push(...modeFields);
-    warnings.push(MODE_AUTO_UPGRADE_WARNING);
-  }
-
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
   delete templateWithoutAgents.agents;
@@ -527,13 +476,6 @@ export function applyMigration(
   if (bindField) {
     added.push(bindField);
     warnings.push(BIND_PRESERVED_WARNING);
-  }
-
-  // Flip the retired `propose` memory defaults to `auto` (planning-64 follow-up).
-  const modeFields = upgradeMemoryModeDefaults(config);
-  if (modeFields.length) {
-    added.push(...modeFields);
-    warnings.push(MODE_AUTO_UPGRADE_WARNING);
   }
 
   // Deep-merge top-level keys (except agents)

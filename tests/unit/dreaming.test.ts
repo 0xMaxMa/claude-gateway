@@ -44,7 +44,7 @@ const cfg = (over: Partial<ResolvedDreamingCfg> = {}): ResolvedDreamingCfg => ({
 describe('dreaming/config: resolveDreamingConfig', () => {
   it('D-CFG-1: undefined → defaults', () => {
     expect(resolveDreamingConfig()).toEqual(DREAMING_DEFAULTS);
-    expect(DREAMING_DEFAULTS.mode).toBe('auto'); // default: apply (K4 applier guards it); planning-64 flip
+    expect(DREAMING_DEFAULTS.mode).toBe('propose'); // safe default
   });
 
   it('D-CFG-2: per-agent override wins field-by-field over global', () => {
@@ -267,8 +267,7 @@ describe('dreaming/DreamingManager.dreamOnce', () => {
         summary: 'found a durable preference',
         proposals: [{ op: 'add', file: 'USER.md', content: 'prefers dark mode', reason: 'recurring', score: 0.9, recallCount: 3 }],
       });
-      // Default mode is now 'auto' (planning-64 flip); pin propose to test dry-run.
-      const mgr = new DreamingManager({ db, agentId: 'a', workspaceDir: ws, globalCfg: { mode: 'propose' }, spawnFn: spawn });
+      const mgr = new DreamingManager({ db, agentId: 'a', workspaceDir: ws, spawnFn: spawn });
       const res = await mgr.dreamOnce(NOW);
 
       expect(res.outcome).toBe('proposed');

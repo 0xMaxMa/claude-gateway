@@ -13,7 +13,6 @@ import {
   repairInjectedAgentFields,
   AGENT_CREDENTIAL_FIELDS,
   BIND_PRESERVED_WARNING,
-  MODE_AUTO_UPGRADE_WARNING,
 } from '../../src/config/migrator';
 
 describe('config-migrator', () => {
@@ -1091,92 +1090,5 @@ describe('config-migrator', () => {
       expect(result.addedFields).not.toContain('gateway.bind');
       expect(result.warnings).not.toContain(BIND_PRESERVED_WARNING);
     });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// planning-64 follow-up: retired `propose` memory defaults flip to `auto` on
-// upgrade (version-gated, mirrors the bind-preservation migration).
-// ---------------------------------------------------------------------------
-describe('memory mode default upgrade (propose → auto)', () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'migrate-mode-'));
-  });
-  afterEach(() => {
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
-  function writeJson(name: string, data: unknown): string {
-    const p = path.join(dir, name);
-    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
-    return p;
-  }
-
-  const template = {
-    configVersion: '1.0.24',
-    gateway: {
-      dreaming: { enabled: true, mode: 'auto' },
-      knowledge: { shared: { enabled: true, mode: 'auto' } },
-    },
-  };
-
-  it('detect: flips explicit propose on an older config and warns', () => {
-    const configPath = writeJson('config.json', {
-      configVersion: '1.0.23',
-      gateway: {
-        dreaming: { enabled: true, mode: 'propose' },
-        knowledge: { shared: { enabled: true, mode: 'propose' } },
-      },
-    });
-    const templatePath = writeJson('template.json', template);
-    const result = detectMigration(configPath, templatePath, '1.0.24');
-
-    expect(result.needed).toBe(true);
-    expect(result.addedFields).toContain('gateway.dreaming.mode');
-    expect(result.addedFields).toContain('gateway.knowledge.shared.mode');
-    expect(result.warnings).toContain(MODE_AUTO_UPGRADE_WARNING);
-    // Dry-run must not write.
-    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).gateway.dreaming.mode).toBe('propose');
-  });
-
-  it('apply: writes auto to disk for both keys', () => {
-    const config = {
-      configVersion: '1.0.23',
-      gateway: {
-        dreaming: { enabled: true, mode: 'propose' },
-        knowledge: { shared: { enabled: true, mode: 'propose' } },
-      },
-    };
-    const configPath = writeJson('config.json', config);
-    applyMigration(configPath, config, template, '1.0.24');
-    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    expect(onDisk.gateway.dreaming.mode).toBe('auto');
-    expect(onDisk.gateway.knowledge.shared.mode).toBe('auto');
-  });
-
-  it('preserves an explicit auto (no change, no warning)', () => {
-    const configPath = writeJson('config.json', {
-      configVersion: '1.0.23',
-      gateway: {
-        dreaming: { enabled: true, mode: 'auto' },
-        knowledge: { shared: { enabled: true, mode: 'auto' } },
-      },
-    });
-    const templatePath = writeJson('template.json', template);
-    const result = detectMigration(configPath, templatePath, '1.0.24');
-    expect(result.addedFields).not.toContain('gateway.dreaming.mode');
-    expect(result.warnings).not.toContain(MODE_AUTO_UPGRADE_WARNING);
-  });
-
-  it('does not touch a config already at the template version (no migration)', () => {
-    const configPath = writeJson('config.json', {
-      configVersion: '1.0.24',
-      gateway: { dreaming: { mode: 'propose' }, knowledge: { shared: { mode: 'propose' } } },
-    });
-    const templatePath = writeJson('template.json', template);
-    const result = detectMigration(configPath, templatePath, '1.0.24');
-    expect(result.needed).toBe(false);
-    // Value stays propose — a user who deliberately set it after upgrading keeps it.
-    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).gateway.dreaming.mode).toBe('propose');
   });
 });
