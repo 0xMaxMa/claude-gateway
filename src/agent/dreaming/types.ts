@@ -42,6 +42,8 @@ export interface DreamingConfig {
   enabled?: boolean;
   mode?: DreamMode;
   dreamHour?: number;
+  /** Minute-of-hour (0–59, default 0) the dream fires at, paired with `dreamHour`. */
+  dreamMinute?: number;
   dreamTimezone?: string;
   quietMinutes?: number;
   lookbackDays?: number;
@@ -71,6 +73,7 @@ export interface ResolvedDreamingCfg {
   enabled: boolean;
   mode: DreamMode;
   dreamHour: number;
+  dreamMinute: number;
   dreamTimezone: string;
   quietMinutes: number;
   lookbackDays: number;

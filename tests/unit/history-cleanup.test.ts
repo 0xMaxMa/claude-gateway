@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../src/history/db';
-import { scheduleCleanup, resolveRetentionDays, msUntilNextHour } from '../../src/history/cleanup';
+import { scheduleCleanup, resolveRetentionDays, msUntilNextHour, msUntilNextTime } from '../../src/history/cleanup';
 import { HistoryMessage } from '../../src/history/types';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -82,6 +82,36 @@ describe('msUntilNextHour', () => {
     const now = new Date('2026-01-01T00:00:00Z');
     const ms = msUntilNextHour(0, 'UTC', now);
     expect(ms).toBeGreaterThan(0);
+  });
+});
+
+// ── msUntilNextTime (minute-precision sibling, #351) ─────────────────────────
+
+describe('msUntilNextTime', () => {
+  it('targets hour:minute later today', () => {
+    // 08:00 UTC — target 08:30 UTC → 30min wait
+    const now = new Date('2026-01-01T08:00:00Z');
+    const ms = msUntilNextTime(8, 30, 'UTC', now);
+    expect(ms).toBe(30 * 60 * 1000);
+  });
+
+  it('wraps to next day when hour:minute already passed', () => {
+    // 08:31 UTC — target 08:30 UTC → ~24h wait (just under)
+    const now = new Date('2026-01-01T08:31:00Z');
+    const ms = msUntilNextTime(8, 30, 'UTC', now);
+    expect(ms).toBeGreaterThan(23 * 60 * 60 * 1000);
+    expect(ms).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+  });
+
+  it('minute=0 matches msUntilNextHour for the same hour', () => {
+    const now = new Date('2026-01-01T01:30:00Z');
+    expect(msUntilNextTime(3, 0, 'UTC', now)).toBe(msUntilNextHour(3, 'UTC', now));
+  });
+
+  it('is never zero or negative when target == now', () => {
+    const now = new Date('2026-01-01T08:00:00Z');
+    // exactly 08:00 → fire tomorrow, not 0
+    expect(msUntilNextTime(8, 0, 'UTC', now)).toBe(24 * 60 * 60 * 1000);
   });
 });
 

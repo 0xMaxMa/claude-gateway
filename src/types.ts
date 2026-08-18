@@ -289,6 +289,7 @@ export interface GatewayConfig {
       enabled?: boolean;            // default true
       mode?: 'propose' | 'auto';    // default "auto" (apply via safe applier); "propose" = diary-only dry-run
       dreamHour?: number;           // 0-23 nightly hour, default 3
+      dreamMinute?: number;         // 0-59 minute-of-hour, default 0 (pairs with dreamHour)
       dreamTimezone?: string;       // IANA tz, default "UTC"
       quietMinutes?: number;        // skip if a session was active within this window, default 30
       lookbackDays?: number;        // how far back to scan sessions, default 3

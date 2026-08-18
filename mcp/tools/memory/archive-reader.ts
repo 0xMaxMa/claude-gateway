@@ -79,6 +79,38 @@ function toFtsMatch(query: string): string {
  * so the read path never read-modify-writes chunk rows and never blocks/locks the
  * search response. The Node side folds this log into per-entry recency at GC time.
  */
+/** True when kb_chunks carries the planning-66 `entry_hash` column. */
+function hasEntryHashColumn(db: Database): boolean {
+  const cols = db.query(`PRAGMA table_info(kb_chunks)`).all() as Array<{ name: string }>;
+  return cols.some((c) => c.name === 'entry_hash');
+}
+
+/**
+ * Idempotent, best-effort heal for a pre-#346 archive DB. The `entry_hash`
+ * column is only added by the writer (`ArchiveDb` constructor migration); a
+ * `kb.sqlite` that has not been reindexed since #346 still lacks it, so the
+ * read-only search query below crashes with `no such column: entry_hash`. Add
+ * the column in place via a short writable handle (mirroring the recall-logging
+ * handle further down). A read-only filesystem simply skips — the column-aware
+ * query then falls back to a NULL `entryHash` so search still returns hits.
+ */
+function ensureEntryHashColumn(dbPath: string): void {
+  try {
+    const w = new Database(dbPath);
+    try {
+      w.exec('PRAGMA busy_timeout=2000');
+      if (!hasEntryHashColumn(w)) {
+        w.exec(`ALTER TABLE kb_chunks ADD COLUMN entry_hash TEXT`);
+        w.exec(`CREATE INDEX IF NOT EXISTS idx_kb_chunks_entry_hash ON kb_chunks(entry_hash)`);
+      }
+    } finally {
+      w.close();
+    }
+  } catch {
+    /* read-only / locked DB — the column-aware query below degrades gracefully */
+  }
+}
+
 export function searchArchive(
   dbPath: string,
   query: string,
@@ -89,13 +121,19 @@ export function searchArchive(
   const match = toFtsMatch(query);
   if (!match) return [];
 
+  // Heal pre-#346 DBs in place so the query never crashes on a missing column.
+  ensureEntryHashColumn(dbPath);
+
   const db = new Database(dbPath, { readonly: true });
+  // If the heal above could not run (read-only FS), select a NULL entry_hash
+  // rather than referencing a column that does not exist.
+  const entryHashSelect = hasEntryHashColumn(db) ? 'c.entry_hash' : 'NULL';
   let hits: SearchHit[];
   try {
     const rows = db
       .query(
         `SELECT c.id AS id, c.path AS path, c.start_line AS startLine, c.end_line AS endLine,
-                c.text AS text, c.entry_hash AS entryHash, bm25(kb_chunks_fts) AS score,
+                c.text AS text, ${entryHashSelect} AS entryHash, bm25(kb_chunks_fts) AS score,
                 p.origin_class AS originClass, r.importance AS importance
          FROM kb_chunks_fts f
          JOIN kb_chunks c ON c.rowid_id = f.rowid

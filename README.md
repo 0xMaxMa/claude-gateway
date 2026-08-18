@@ -408,6 +408,7 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
 | `mode` | `"auto"` | `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative); `propose` = diary-only dry-run |
 | `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
+| `dreamMinute` | `0` | Minute-of-hour the dream fires at, paired with `dreamHour` (0–59). Set with `staggerWindowMinutes: 0` to fire at an exact `HH:MM` (e.g. for a controlled re-test) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |
 | `maxChangesPerRun` | `3` | Cap on proposed ops per run (`0` ⇒ no-op) |

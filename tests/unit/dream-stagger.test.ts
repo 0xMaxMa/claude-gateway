@@ -53,3 +53,23 @@ describe('planning-68 — staggerWindowMinutes config', () => {
     expect(resolveDreamingConfig({ staggerWindowMinutes: -5 }).staggerWindowMinutes).toBe(30);
   });
 });
+
+describe('#351 — dreamMinute config', () => {
+  it('MIN-1: default is 0', () => {
+    expect(DREAMING_DEFAULTS.dreamMinute).toBe(0);
+    expect(resolveDreamingConfig().dreamMinute).toBe(0);
+  });
+
+  it('MIN-2: honored 0..59; per-agent wins over global', () => {
+    expect(resolveDreamingConfig({ dreamMinute: 30 }).dreamMinute).toBe(30);
+    expect(resolveDreamingConfig({ dreamMinute: 59 }).dreamMinute).toBe(59);
+    expect(resolveDreamingConfig({ dreamMinute: 15 }, { dreamMinute: 45 }).dreamMinute).toBe(15);
+  });
+
+  it('MIN-3: out-of-range / non-number falls back to 0 (no NaN scheduler)', () => {
+    expect(resolveDreamingConfig({ dreamMinute: 60 }).dreamMinute).toBe(0);
+    expect(resolveDreamingConfig({ dreamMinute: -1 }).dreamMinute).toBe(0);
+    expect(resolveDreamingConfig({ dreamMinute: NaN }).dreamMinute).toBe(0);
+    expect(resolveDreamingConfig({ dreamMinute: 'abc' as unknown as number }).dreamMinute).toBe(0);
+  });
+});

@@ -24,6 +24,7 @@ export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   enabled: true,
   mode: 'auto', // apply consolidation to memory; gated by the K4 applier (#330). Set 'propose' for dry-run.
   dreamHour: 3,
+  dreamMinute: 0,
   dreamTimezone: 'UTC',
   quietMinutes: 30,
   lookbackDays: 3,
@@ -91,6 +92,8 @@ export function resolveDreamingConfig(
     mode: mode === 'auto' ? 'auto' : 'propose', // anything but 'auto' is 'propose'
     // dreamHour feeds the scheduler delay — must be a finite hour 0..23.
     dreamHour: numOr(pick(agentCfg?.dreamHour, globalCfg?.dreamHour, d.dreamHour), d.dreamHour, 0, 23),
+    // dreamMinute pairs with dreamHour for minute-level scheduling — clamp 0..59.
+    dreamMinute: numOr(pick(agentCfg?.dreamMinute, globalCfg?.dreamMinute, d.dreamMinute), d.dreamMinute, 0, 59),
     dreamTimezone: isValidTimezone(rawTz) ? rawTz : 'UTC',
     quietMinutes: numOr(pick(agentCfg?.quietMinutes, globalCfg?.quietMinutes, d.quietMinutes), d.quietMinutes, 0, Infinity),
     lookbackDays: numOr(pick(agentCfg?.lookbackDays, globalCfg?.lookbackDays, d.lookbackDays), d.lookbackDays, 0, Infinity),
