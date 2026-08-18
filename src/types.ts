@@ -282,7 +282,7 @@ export interface GatewayConfig {
      */
     dreaming?: {
       enabled?: boolean;            // default true
-      mode?: 'propose' | 'auto';    // default "propose" (diary-only dry-run)
+      mode?: 'propose' | 'auto';    // default "auto" (apply via safe applier); "propose" = diary-only dry-run
       dreamHour?: number;           // 0-23 nightly hour, default 3
       dreamTimezone?: string;       // IANA tz, default "UTC"
       quietMinutes?: number;        // skip if a session was active within this window, default 30
@@ -318,7 +318,7 @@ export interface GatewayConfig {
         enabled?: boolean;  // default true
         project?: string;   // sharing partition key, default "global"
         root?: string;      // vault root dir, default ~/.claude-gateway/shared/kb
-        mode?: 'propose' | 'auto'; // per-agent→shared promotion mode (K4), default "propose"
+        mode?: 'propose' | 'auto'; // per-agent→shared promotion mode (K4), default "auto"
         graph?: boolean;    // K5: compile memory-wiki graph/dashboards, default false
       };
     };
