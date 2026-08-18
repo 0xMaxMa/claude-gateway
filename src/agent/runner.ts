@@ -73,6 +73,11 @@ const MAX_API_IMAGES = 5;
  *  CLI turn is still producing a result that must reach history, exactly like
  *  the client-disconnect path. This cap bounds a genuinely hung turn. */
 const API_TIMEOUT_HARD_CAP_EXTRA_MS = 600_000;
+// Bound on getOrSpawnSession's wait for a crash-triggered auto-restart to land
+// (session/process.ts's AUTO_RESTART_DELAY_MS is 5s, plus real CLI spawn time
+// observed up to a few seconds more) — generous, but must not be the long
+// API_TIMEOUT_HARD_CAP_EXTRA_MS chain: this is a pre-turn gap, not a turn.
+const SESSION_RESTART_WAIT_TIMEOUT_MS = 20_000;
 // Hard timeout for the one-shot local `claude -p` triage during recovery
 // (Epic #195, Phase 3b). A slow/hung triage collapses to a safe notify-only.
 const RECOVERY_TRIAGE_TIMEOUT_MS = 15_000;
@@ -1277,6 +1282,37 @@ export class AgentRunner extends EventEmitter {
     );
   }
 
+  /**
+   * Await a SessionProcess's in-flight crash-triggered auto-restart
+   * (scheduleRestart's setTimeout → spawnProcess) instead of handing back a
+   * process whose sendMessage() will silently no-op. Resolves once the new
+   * child is attached ('restarted'); rejects on a definitive restart failure
+   * ('restartFailed', or 'failed' once MAX_RESTARTS is exhausted) or, as a
+   * last resort, on SESSION_RESTART_WAIT_TIMEOUT_MS so a caller is never left
+   * hanging past that bound.
+   */
+  private waitForSessionRestart(proc: SessionProcess): Promise<void> {
+    if (proc.isRunning()) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Session restart did not complete in time'));
+      }, SESSION_RESTART_WAIT_TIMEOUT_MS);
+      const onRestarted = () => { cleanup(); resolve(); };
+      const onRestartFailed = (err: Error) => { cleanup(); reject(err); };
+      const onFailed = () => { cleanup(); reject(new Error('Session failed permanently (max restarts exceeded)')); };
+      const cleanup = () => {
+        clearTimeout(timer);
+        proc.off('restarted', onRestarted);
+        proc.off('restartFailed', onRestartFailed);
+        proc.off('failed', onFailed);
+      };
+      proc.once('restarted', onRestarted);
+      proc.once('restartFailed', onRestartFailed);
+      proc.once('failed', onFailed);
+    });
+  }
+
   private async getOrSpawnSession(
     mapKey: string,              // Map lookup key (chatId for telegram/discord, sessionId for API)
     source: 'telegram' | 'discord' | 'line' | 'api',
@@ -1296,6 +1332,19 @@ export class AgentRunner extends EventEmitter {
 
     const existing = this.sessions.get(mapKey);
     if (existing) {
+      // The mapped SessionProcess can be mid auto-restart (its child crashed —
+      // see the 'exit'/scheduleRestart cycle in session/process.ts — and the
+      // AUTO_RESTART_DELAY_MS timer hasn't fired the replacement child yet).
+      // existing.sendMessage() silently no-ops while .process is null (only a
+      // warning log, no error, no event), which previously left the caller's
+      // pendingApiSessions entry stuck until the long timeout chain (the same
+      // failure mode this whole area was already patched for — see the
+      // session.on('exit', onExit) fix in sendApiMessage/sendApiMessageStream —
+      // but THIS gap is hit before a turn even starts, so that fix can't see
+      // it). Wait for the pending respawn to actually land before handing the
+      // session back.
+      if (!existing.isRunning()) await this.waitForSessionRestart(existing);
+
       // Restart if model changed (including switching back to the agent default)
       if (existing.modelOverride !== effectiveOverride) {
         this.logger.info('Model changed, restarting session', { mapKey, oldModel: existing.modelOverride, newModel: effectiveOverride ?? agentDefaultModel });

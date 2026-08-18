@@ -69,6 +69,7 @@ jest.mock('child_process', () => ({
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import { AgentRunner } from '../../src/agent/runner';
+import { SessionProcess } from '../../src/session/process';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
 function makeAgentConfig(workspace: string): AgentConfig {
@@ -162,4 +163,81 @@ describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => 
     expect(onError).not.toHaveBeenCalled();
     expect(runner.hasActiveApiSession(sessionId)).toBe(false);
   });
+
+  it('a send during the ~5s auto-restart window waits for the respawn instead of silently no-op-ing (getOrSpawnSession)', async () => {
+    // Real timers throughout (accepts the real ~5s AUTO_RESTART_DELAY_MS
+    // cost) — deliberately NOT jest.useFakeTimers(). An earlier version tried
+    // controlling this with fake timers + counted microtask drains and it
+    // passed identically with the fix present AND reverted: this call chain
+    // also does real, unmocked SessionStore filesystem I/O (ensureApiSession)
+    // ahead of getOrSpawnSession, whose completion isn't ordered by fake
+    // timers or by counting Promise.resolve() ticks — only genuine wall-clock
+    // waiting reproduces the actual race deterministically. Verified this
+    // version DOES discriminate: reverting the runner.ts/process.ts fix while
+    // keeping this test makes it fail exactly as expected below.
+    //
+    // Also spies on SessionProcess.prototype.sendMessage to record
+    // isRunning() at the INSTANT each call happens, rather than inferring
+    // correctness from stdin content after the fact — content-based checks
+    // were fooled by a stale onOutput listener surviving the restart (see the
+    // git history of this test for that dead end too).
+    const sendMessageRunningStates: boolean[] = [];
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        sendMessageRunningStates.push(this.isRunning());
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      // Turn 1: gets a process, then crashes with no result line (same shape
+      // as the first test above — this also exercises the onExit fix,
+      // confirming turn 1 fails promptly rather than hanging).
+      const turn1Error = jest.fn();
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'turn 1',
+        { onChunk: jest.fn(), onDone: jest.fn(), onError: turn1Error },
+        { timeoutMs: 60_000 },
+      );
+      const proc1 = lastProcess!;
+      expect(proc1).not.toBeNull();
+
+      proc1.emit('exit', null, 'SIGKILL'); // crash — no result line, triggers scheduleRestart
+      await Promise.resolve();
+      expect(turn1Error).toHaveBeenCalledTimes(1);
+      expect(runner.hasActiveApiSession(sessionId)).toBe(false); // the earlier fix already covers this
+
+      // Turn 2 fires IMMEDIATELY — well inside the real ~5s auto-restart
+      // window, since sendApiMessageStream's own pre-getOrSpawnSession work
+      // (ensureApiSession etc.) takes milliseconds, not seconds.
+      const turn2Done = jest.fn();
+      const turn2Error = jest.fn();
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'turn 2',
+        { onChunk: jest.fn(), onDone: turn2Done, onError: turn2Error },
+        { timeoutMs: 60_000 },
+      );
+
+      // The whole point: sendMessage is NEVER called while the process is
+      // down. Turn 1's own call (index 0) was on a live process too — the
+      // second entry is turn 2's, and it must be true, not false.
+      expect(sendMessageSpy).toHaveBeenCalledTimes(2);
+      expect(sendMessageRunningStates).toEqual([true, true]);
+
+      const proc2 = lastProcess!;
+      expect(proc2).not.toBe(proc1);
+
+      // Let turn 2 complete normally to confirm the session is fully healthy again.
+      proc2.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'turn 2 reply' }) + '\n'));
+      proc2.emit('exit', 0, null);
+      await new Promise((r) => setImmediate(r));
+
+      expect(turn2Done).toHaveBeenCalledTimes(1);
+      expect(turn2Done.mock.calls[0][0]).toBe('turn 2 reply');
+      expect(turn2Error).not.toHaveBeenCalled();
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  }, 15_000);
 });

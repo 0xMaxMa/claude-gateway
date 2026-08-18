@@ -1005,9 +1005,17 @@ export class SessionProcess extends EventEmitter {
     });
     setTimeout(() => {
       if (!this.stopping) {
-        this.spawnProcess().catch(err =>
-          this.logger.error('restart failed', { error: err.message }),
-        );
+        this.spawnProcess()
+          // Tell anyone waiting on this SessionProcess (getOrSpawnSession's
+          // !isRunning() gap, below) that a new child is attached and
+          // sendMessage() will no longer silently no-op. Emitted on every
+          // successful crash-triggered respawn — cheap, and nothing currently
+          // listens outside that one call site.
+          .then(() => this.emit('restarted'))
+          .catch(err => {
+            this.logger.error('restart failed', { error: err.message });
+            this.emit('restartFailed', err);
+          });
       }
     }, AUTO_RESTART_DELAY_MS);
   }
