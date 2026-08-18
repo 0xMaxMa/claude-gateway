@@ -2843,7 +2843,16 @@ export class AgentRunner extends EventEmitter {
       // pendingApiSessions — and the caller's pending-response spinner — stuck
       // until the up-to-15-minute opts.timeoutMs + API_TIMEOUT_HARD_CAP_EXTRA_MS
       // safety net finally fired.
+      //
+      // If the exit followed a /stop (the CLI's SIGINT handler fell through to
+      // default termination instead of flushing a result line), that's a
+      // successful stop, not a crash — resolve like the graceful path instead
+      // of surfacing "process exited unexpectedly" for a stop the user asked for.
       const onExit = () => {
+        if (session.consumeInterruptFlag()) {
+          done(buffer.join(''));
+          return;
+        }
         fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
       };
 
@@ -3069,7 +3078,16 @@ export class AgentRunner extends EventEmitter {
     // Without this, a mid-turn crash left pendingApiSessions — and the web's
     // pending-response spinner — stuck until the up-to-15-minute
     // opts.timeoutMs + API_TIMEOUT_HARD_CAP_EXTRA_MS safety net finally fired.
+    //
+    // If the exit followed a /stop (the CLI's SIGINT handler fell through to
+    // default termination instead of flushing a result line), that's a
+    // successful stop, not a crash — resolve like the graceful path instead
+    // of surfacing "process exited unexpectedly" for a stop the user asked for.
     const onExit = () => {
+      if (session.consumeInterruptFlag()) {
+        done(buffer.join(''));
+        return;
+      }
       fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
     };
 

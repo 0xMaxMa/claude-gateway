@@ -98,6 +98,12 @@ export class SessionProcess extends EventEmitter {
   private restartRequested = false;
   private _processing = false;
   private _pendingRestart = false;
+  // Set by interrupt() right before SIGINT, cleared at the start of the next
+  // sendMessage(). Lets a caller's process-exit handler tell a /stop-triggered
+  // exit (CLI's SIGINT handler fell through to default termination instead of
+  // flushing a terminal `result` line) apart from a genuine crash — see
+  // consumeInterruptFlag().
+  private interruptRequested = false;
   private restartWatcher: chokidar.FSWatcher | null = null;
   private readonly sessionStore: SessionStore;
   private readonly agentConfig: AgentConfig;
@@ -1062,6 +1068,9 @@ export class SessionProcess extends EventEmitter {
       });
       return;
     }
+    // A new turn starting means any prior interrupt() is no longer "the last
+    // thing that happened" — don't let it misattribute a future crash.
+    this.interruptRequested = false;
     // Signal queued state + ensure typing signal file exists for this turn.
     // If the previous turn already called stop() and cleared the typing loop,
     // re-creating the signal file here lets stop() restart the loop for queued turns.
@@ -1184,8 +1193,22 @@ export class SessionProcess extends EventEmitter {
   interrupt(): boolean {
     if (!this.process || this.process.killed) return false;
     if (!this._processing) return false;
+    this.interruptRequested = true;
     this.process.kill('SIGINT');
     return true;
+  }
+
+  /**
+   * Reads and clears the interrupt() flag. True means the process exit a
+   * caller is currently handling followed a /stop SIGINT rather than an
+   * unrelated crash — e.g. so the exit can resolve the turn the same way a
+   * gracefully-flushed interrupted `result` line would, instead of surfacing
+   * a "process exited unexpectedly" error for something the user asked for.
+   */
+  consumeInterruptFlag(): boolean {
+    const requested = this.interruptRequested;
+    this.interruptRequested = false;
+    return requested;
   }
 
   markPendingRestart(): void {

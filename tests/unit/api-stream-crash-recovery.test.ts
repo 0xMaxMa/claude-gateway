@@ -240,4 +240,57 @@ describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => 
       sendMessageSpy.mockRestore();
     }
   }, 15_000);
+
+  it('a subprocess exit caused by /stop (interrupt()) resolves gracefully, not as a PROCESS_EXITED error', async () => {
+    // Same subprocess-exit-without-a-result shape as the first test, but this
+    // time the exit is the direct, expected result of the user pressing Stop
+    // (SessionProcess.interrupt() sending SIGINT) rather than an unrelated
+    // crash. Regression: before consumeInterruptFlag(), onExit couldn't tell
+    // the difference and surfaced "Session process exited unexpectedly before
+    // responding." to the chat UI for a stop the user asked for.
+    let liveSession: SessionProcess | undefined;
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        liveSession = this;
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      const onDone = jest.fn();
+      const onError = jest.fn();
+
+      await runner.sendApiMessageStream(
+        sessionId,
+        chatId,
+        'hello',
+        { onChunk: jest.fn(), onDone, onError },
+        { timeoutMs: 60_000 },
+      );
+
+      expect(liveSession).toBeDefined();
+      expect(lastProcess).not.toBeNull();
+
+      // Some partial text streamed in before the user hit Stop.
+      lastProcess!.stdout!.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'text', text: 'partial reply' }) + '\n'),
+      );
+
+      // The user presses Stop. The CLI's SIGINT handler, in this scenario,
+      // falls through to default termination instead of flushing a result
+      // line — exactly the case that previously had no way to distinguish
+      // itself from a crash.
+      expect(liveSession!.interrupt()).toBe(true);
+      await new Promise((r) => setImmediate(r));
+
+      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(onDone.mock.calls[0][0]).toBe('partial reply');
+      expect(onError).not.toHaveBeenCalled();
+      expect(runner.hasActiveApiSession(sessionId)).toBe(false);
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  });
 });
