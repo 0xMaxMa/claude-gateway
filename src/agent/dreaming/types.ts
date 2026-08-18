@@ -49,6 +49,13 @@ export interface DreamingConfig {
   reviewModel?: string;
   promotionThreshold?: number;
   minRecallCount?: number;
+  /**
+   * planning-67: when true (default), the nightly dream (auto mode) drains an
+   * over-budget MEMORY.md by routing episodic task-log to `memory/<topic>.md`
+   * automatically (archive-safe), instead of relying on manual `dreaming:migrate`.
+   * A clean kill-switch: false ⇒ prior behavior (manual CLI only).
+   */
+  autoRouteOut?: boolean;
   staleness?: StalenessConfig;
 }
 
@@ -64,6 +71,7 @@ export interface ResolvedDreamingCfg {
   reviewModel: string;
   promotionThreshold: number;
   minRecallCount: number;
+  autoRouteOut: boolean;
   staleness: ResolvedStalenessCfg;
 }
 

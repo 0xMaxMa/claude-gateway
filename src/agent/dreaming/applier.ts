@@ -33,6 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DreamProposal, DreamFile } from './types';
 import { appendEpisodicNote, DEFAULT_EPISODIC_DIR, type EpisodicWriteResult } from './episodic';
+import { isTargetPinned } from './migrate';
 
 const DEFAULT_MAX_PRIOR_LOSS_FRACTION = 0.25; // openclaw default (replaces, and removes under budget)
 // When the file is ALREADY over budget, removals are the intended shrink lever, so
@@ -41,6 +42,9 @@ const DEFAULT_MAX_PRIOR_LOSS_FRACTION = 0.25; // openclaw default (replaces, and
 const OVER_BUDGET_MAX_REMOVE_FRACTION = 0.9;
 const MAX_BACKUPS = 20; // retained rollback pre-images per file (prevents disk creep)
 const MEMORY_FILES: DreamFile[] = ['MEMORY.md', 'USER.md'];
+// planning-67: where net-shrink `remove`d blocks are relocated (archive-first) so
+// no dream op ever deletes recall. Distinct from completed.md (terminal) / stale.md (GC).
+const PRUNED_ARCHIVE_REL = 'memory/archive/pruned.md';
 
 export interface ApplyOptions {
   /** Soft budget for MEMORY.md; USER.md uses userBudgetChars. 0 ⇒ no budget gate. */
@@ -53,6 +57,13 @@ export interface ApplyOptions {
    * episodic ops are ignored (durable-only behavior, back-compat).
    */
   episodicArchiveDir?: string;
+  /**
+   * planning-67: when true (write routing on), a net-shrink `remove` of a MEMORY.md
+   * block is relocated to `memory/archive/pruned.md` (searchable) BEFORE it is cut,
+   * and a `remove` of a pinned block is skipped entirely. Off ⇒ prior behavior
+   * (remove deletes without archiving).
+   */
+  archivePrunedRemovals?: boolean;
 }
 
 export interface ApplyFileResult {
@@ -107,6 +118,24 @@ function atomicWrite(filePath: string, content: string): void {
     }
     throw err;
   }
+}
+
+/**
+ * planning-67: append `remove`d MEMORY.md blocks to the searchable pruned archive
+ * BEFORE they are cut, so a net-shrink prune never loses recall. Archive-first
+ * mirrors the compactor: on a crash between this and the MEMORY.md rewrite the text
+ * lives in both files (harmless duplicate), never nowhere. Best-effort.
+ */
+function archivePrunedBlocks(workspaceDir: string, blocks: string[], now: number): void {
+  if (blocks.length === 0) return;
+  const archivePath = path.join(workspaceDir, PRUNED_ARCHIVE_REL);
+  const existing = readOnDisk(archivePath);
+  const header = existing
+    ? existing.replace(/\s*$/, '') + '\n\n'
+    : '# Pruned memory entries\n\nRemoved from MEMORY.md by nightly net-shrink (planning-67). Still searchable via `memory_search`.\n\n';
+  const stamp = new Date(now).toISOString().slice(0, 10);
+  const body = blocks.map((b) => `<!-- pruned ${stamp} -->\n${b.trim()}`).join('\n\n');
+  atomicWrite(archivePath, header + body + '\n');
 }
 
 /** Keep only the newest `keep` `<file>.<ts>.bak` pre-images; delete the rest. */
@@ -197,11 +226,16 @@ function applyToFile(
   budgetChars: number,
   maxLossFraction: number,
   now: number,
+  archivePruned: boolean,
 ): ApplyFileResult {
   const filePath = path.join(workspaceDir, file);
   const original = readOnDisk(filePath);
   const before = original.length;
   const overBudget = budgetChars > 0 && before > budgetChars;
+  // planning-67: relocate `remove`d blocks to a searchable archive (and never prune
+  // a pinned block) — only for MEMORY.md when write routing is on.
+  const pruneActive = archivePruned && file === 'MEMORY.md';
+  const prunedBlocks: string[] = [];
 
   const base: ApplyFileResult = {
     file,
@@ -242,6 +276,12 @@ function applyToFile(
         continue;
       }
     }
+    // planning-67: never prune a pinned block (durable prefs/identity) out of the
+    // injected core — skip the remove entirely rather than relocate it.
+    if (pruneActive && p.op === 'remove' && isTargetPinned(original, p.target ?? '')) {
+      skipped++;
+      continue;
+    }
     const r = applyOp(content, p);
     if (r === null) {
       skipped++;
@@ -251,6 +291,8 @@ function applyToFile(
     const t = p.target ?? '';
     if (p.op === 'remove') {
       if (t && original.includes(t)) deletedOriginal += t.length;
+      // planning-67: stage the removed block for the searchable pruned archive.
+      if (pruneActive && t) prunedBlocks.push(t);
     } else if (p.op === 'replace') {
       const repl = (p.content ?? '').trim();
       if (t && original.includes(t)) deletedOriginal += Math.max(0, t.length - repl.length);
@@ -312,6 +354,16 @@ function applyToFile(
   if (readOnDisk(filePath) !== original) {
     return { ...base, applied: 0, skipped: proposals.length, mode: 'none', backupPath: null };
   }
+  // planning-67: archive-first — relocate the removed blocks to the searchable
+  // pruned archive BEFORE cutting them from MEMORY.md (recall never lost). Best-
+  // effort; a failed archive must not abort the shrink.
+  if (pruneActive && prunedBlocks.length > 0) {
+    try {
+      archivePrunedBlocks(workspaceDir, prunedBlocks, now);
+    } catch {
+      /* best-effort — never blocks the rewrite */
+    }
+  }
   const backupPath = writeBackup(workspaceDir, file, original, now);
   atomicWrite(filePath, content);
   return { ...base, applied, skipped, mode: 'rewrite', backupPath, bytesAfter: content.length, appliedProposals };
@@ -338,7 +390,15 @@ export function applyDreamProposals(
     const forFile = proposals.filter((p) => (p.tier ?? 'durable') !== 'episodic' && p.file === file);
     const budget = file === 'MEMORY.md' ? opts.memoryBudgetChars : opts.userBudgetChars;
     try {
-      const res = applyToFile(workspaceDir, file, forFile, budget, maxLoss, now);
+      const res = applyToFile(
+        workspaceDir,
+        file,
+        forFile,
+        budget,
+        maxLoss,
+        now,
+        opts.archivePrunedRemovals === true,
+      );
       files.push(res);
       totalApplied += res.applied;
       appliedProposals.push(...res.appliedProposals);

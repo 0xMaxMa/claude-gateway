@@ -24,8 +24,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { compactCompletedEntries } from './compactor';
-import { appendEpisodicNote, DEFAULT_EPISODIC_DIR } from './episodic';
+import { appendEpisodicNote, DEFAULT_EPISODIC_DIR, isValidTopicSlug } from './episodic';
 import { DREAMING_DIR } from './audit';
+import type { ClaudeSpawnFn } from '../skill-learning/reviewer';
 import type { DreamProposal } from './types';
 
 /** h2 sections whose entries are durable and must NEVER be routed to episodic. */
@@ -45,6 +46,12 @@ export interface MigrateOptions {
   routeOut?: (memory: string) => Promise<DreamProposal[]> | DreamProposal[];
   /** Episodic archive dir (relative to workspace). Default "memory". */
   episodicArchiveDir?: string;
+  /**
+   * planning-67: skip Pass 1 (terminal sweep). The nightly dream already runs
+   * the compactor before this call, so re-running it would be a redundant no-op;
+   * the embedded route-out stage sets this to go straight to Pass 2.
+   */
+  skipTerminalSweep?: boolean;
   now?: number;
 }
 
@@ -87,7 +94,7 @@ function atomicWrite(filePath: string, content: string): void {
 }
 
 /** Char range [start,end) of each pinned section in `memory` (heading → next h1/h2). */
-function pinnedRanges(memory: string): Array<[number, number]> {
+export function pinnedRanges(memory: string): Array<[number, number]> {
   const lines = memory.split('\n');
   const ranges: Array<[number, number]> = [];
   let offset = 0;
@@ -110,6 +117,14 @@ function pinnedRanges(memory: string): Array<[number, number]> {
 
 function inPinned(index: number, ranges: Array<[number, number]>): boolean {
   return ranges.some(([s, e]) => index >= s && index < e);
+}
+
+/** True iff the block at `original.indexOf(target)` sits inside a pinned section. */
+export function isTargetPinned(memory: string, target: string): boolean {
+  if (!target) return false;
+  const at = memory.indexOf(target);
+  if (at === -1) return false;
+  return inPinned(at, pinnedRanges(memory));
 }
 
 interface PlannedMove {
@@ -165,12 +180,15 @@ export async function migrateMemory(
   const memPath = path.join(workspaceDir, 'MEMORY.md');
   const before = readOnDisk(memPath).length;
 
-  // Pass 1 — deterministic terminal sweep (always safe, idempotent).
+  // Pass 1 — deterministic terminal sweep (always safe, idempotent). Skipped by
+  // the nightly dream, which already ran the compactor this tick (planning-67).
   let terminalArchived = 0;
-  try {
-    terminalArchived = compactCompletedEntries(workspaceDir, now).archivedCount;
-  } catch {
-    terminalArchived = 0;
+  if (!opts.skipTerminalSweep) {
+    try {
+      terminalArchived = compactCompletedEntries(workspaceDir, now).archivedCount;
+    } catch {
+      terminalArchived = 0;
+    }
   }
 
   // Pass 2 — episodic route-out (gated on an injected classifier).
@@ -254,5 +272,99 @@ export async function migrateMemory(
     episodicPlanned: planned.length,
     memoryCharsBefore: before,
     memoryCharsAfter: readOnDisk(memPath).length,
+  };
+}
+
+// ── Route-out classifier (shared by the migrate CLI and the nightly dream) ──────
+
+const ROUTE_OUT_PROMPT = `You migrate an AI agent's MEMORY.md. MEMORY.md is injected into every prompt, so it must hold ONLY durable facts (user preferences, standing rules, identity, lessons). EPISODIC task-log — a record of what happened (completed/merged work, PR/issue status, dated progress notes) — must move to a searchable archive.
+
+You are given the current MEMORY.md. Identify the blocks that are EPISODIC task-log and should move out. For each, return the EXACT block text to remove (verbatim, so it can be located) and the note to archive.
+
+NEVER move blocks under a "## User", "## Feedback", or "## Preferences" section — those are durable and pinned.
+
+Respond with STRICT JSON only (no prose/fences):
+{"moves":[{"target":"<exact block text from MEMORY.md to remove>","topic":"<lowercase-kebab-slug>","content":"<text to archive>","reason":"<why episodic>"}]}
+- topic MUST match ^[a-z0-9-]{1,64}$. moves: [] if nothing should move.`;
+
+/** Extract the first balanced top-level JSON object from free text (fence-safe). */
+function extractJson(text: string): string | null {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** Unwrap a `claude -p --output-format json` envelope, else return stdout as-is. */
+function parseEnvelope(stdout: string): string {
+  try {
+    const env = JSON.parse(stdout) as Record<string, unknown>;
+    return typeof env['result'] === 'string' ? (env['result'] as string) : stdout;
+  } catch {
+    return stdout;
+  }
+}
+
+/**
+ * Build the injected route-out classifier that `migrateMemory` consumes, backed by
+ * a print-only claude spawn (no tools, untrusted input — same safety model as the
+ * dreaming reviewer). Injectable `spawn` keeps it fully testable without a model.
+ */
+export function makeRouteOut(spawn: ClaudeSpawnFn): (memory: string) => Promise<DreamProposal[]> {
+  return async (memory: string): Promise<DreamProposal[]> => {
+    const prompt = `${ROUTE_OUT_PROMPT}\n\n<current_memory>\n${memory}\n</current_memory>\n\nOutput the JSON now:`;
+    let stdout = '';
+    try {
+      const r = await spawn([], prompt);
+      if (r.timedOut) return [];
+      stdout = r.stdout;
+    } catch {
+      return [];
+    }
+    const jsonStr = extractJson(parseEnvelope(stdout));
+    if (!jsonStr) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonStr);
+    } catch {
+      return [];
+    }
+    const moves = (parsed as Record<string, unknown>)?.['moves'];
+    if (!Array.isArray(moves)) return [];
+    const out: DreamProposal[] = [];
+    for (const m of moves) {
+      if (!m || typeof m !== 'object') continue;
+      const o = m as Record<string, unknown>;
+      const target = typeof o['target'] === 'string' ? o['target'] : '';
+      const content = typeof o['content'] === 'string' ? o['content'] : '';
+      const topic = o['topic'];
+      if (!target || !content || !isValidTopicSlug(topic)) continue;
+      out.push({
+        op: 'add',
+        tier: 'episodic',
+        topic,
+        content,
+        target,
+        reason: typeof o['reason'] === 'string' ? o['reason'] : '',
+        score: 1,
+        recallCount: 0,
+      });
+    }
+    return out;
   };
 }

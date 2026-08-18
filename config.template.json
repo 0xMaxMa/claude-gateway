@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.26",
+  "configVersion": "1.0.27",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -95,6 +95,7 @@
       "reviewModel": "claude-haiku-4-5-20251001",
       "promotionThreshold": 0.6,
       "minRecallCount": 2,
+      "autoRouteOut": true,
       "staleness": {
         "enabled": true,
         "staleTtlDays": 90,
