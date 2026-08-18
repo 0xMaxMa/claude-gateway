@@ -47,7 +47,14 @@ describe('generate_image share-bridge normalization (#70)', () => {
   const saved: Record<string, string | undefined> = {};
   let mediaDir: string;
   let calls: Captured[];
-  let shareItems: Array<{ share_id: string; url: string; expires_at: string }>;
+  let shareItems: Array<{
+    share_id: string;
+    url: string;
+    expires_at: string;
+    task_id?: string;
+    provider?: string;
+    prior_prompt?: string;
+  }>;
   let shareStatus: number;
   let shareErrorBody: Record<string, unknown>;
   let submitStatus: number;
@@ -192,6 +199,110 @@ describe('generate_image share-bridge normalization (#70)', () => {
       ]);
     });
 
+    // continue_from is the LLM's explicit signal that a
+    // referenced own-generation should resume, not just visually inform, the
+    // next generation. Resolved via the mint response's task_id — never
+    // invented, never enforced beyond "does it resolve."
+    describe('continue_from', () => {
+      test('matches an attached artifact with a task_id → resume_task_id forwarded', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          task_id: 'task-abc',
+          provider: 'codex-image',
+        }];
+        await generate({ image: 'artifact:img_abc123', continue_from: 'img_abc123' });
+        expect(submitCall()!.body!.resume_task_id).toBe('task-abc');
+      });
+
+      test('tolerates a leading "artifact:" prefix on continue_from → still resolves', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          task_id: 'task-abc',
+          provider: 'codex-image',
+        }];
+        // Schema asks for the bare id, but a prefixed form must not silently fail.
+        await generate({ image: 'artifact:img_abc123', continue_from: 'artifact:img_abc123' });
+        expect(submitCall()!.body!.resume_task_id).toBe('task-abc');
+      });
+
+      test('not present in image/images → omitted, no error', async () => {
+        const res = await generate({ image: 'artifact:img_abc123', continue_from: 'img_some_other_id' });
+        expect(res.isError).toBeUndefined();
+        expect(submitCall()!.body!.resume_task_id).toBeUndefined();
+      });
+
+      test('attached artifact resolved with no task_id → omitted, no error', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          // no task_id — e.g. a path ref, or an artifact registered without one
+        }];
+        const res = await generate({ image: 'artifact:img_abc123', continue_from: 'img_abc123' });
+        expect(res.isError).toBeUndefined();
+        expect(submitCall()!.body!.resume_task_id).toBeUndefined();
+      });
+
+      test('omitted entirely → no resume_task_id, unchanged from today', async () => {
+        await generate({ image: 'artifact:img_abc123' });
+        expect(submitCall()!.body!.resume_task_id).toBeUndefined();
+      });
+    });
+
+    // Handoff-on-model-switch: when continue_from can't
+    // resolve to a resume_task_id (typically a model switch broke the
+    // resumable session), fall back to deterministically reusing the prior
+    // artifact's own prompt — never re-derived from the LLM, never
+    // accumulated across more than one prior step.
+    describe('handoff-on-model-switch', () => {
+      test('no task_id but a prior_prompt → prepended to the outgoing prompt', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          prior_prompt: 'a red cube on a white background',
+        }];
+        await generate({ image: 'artifact:img_abc123', continue_from: 'img_abc123', prompt: 'now make it blue' });
+        expect(submitCall()!.body!.prompt).toBe(
+          '(Continuing from a prior edit: "a red cube on a white background") now make it blue',
+        );
+        expect(submitCall()!.body!.resume_task_id).toBeUndefined();
+      });
+
+      test('task_id resolves (resume works) → prompt is NOT modified even if prior_prompt is also present', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+          task_id: 'task-abc',
+          prior_prompt: 'a red cube on a white background',
+        }];
+        await generate({ image: 'artifact:img_abc123', continue_from: 'img_abc123', prompt: 'now make it blue' });
+        expect(submitCall()!.body!.resume_task_id).toBe('task-abc');
+        expect(submitCall()!.body!.prompt).toBe('now make it blue');
+      });
+
+      test('neither task_id nor prior_prompt → prompt unchanged, no error', async () => {
+        shareItems = [{
+          share_id: 'shr_1',
+          url: 'https://vm.example.com/gateway/shared/tok1',
+          expires_at: '2099-01-01T00:00:00Z',
+        }];
+        const res = await generate({ image: 'artifact:img_abc123', continue_from: 'img_abc123', prompt: 'now make it blue' });
+        expect(res.isError).toBeUndefined();
+        expect(submitCall()!.body!.prompt).toBe('now make it blue');
+      });
+
+      test('continue_from does not match any attached ref → prompt unchanged', async () => {
+        await generate({ image: 'artifact:img_abc123', continue_from: 'img_some_other_id', prompt: 'now make it blue' });
+        expect(submitCall()!.body!.prompt).toBe('now make it blue');
+      });
+    });
+
     test('image AND images together → rejected before ANY network call', async () => {
       const res = await generate({ image: 'a.png', images: ['b.png'] });
       expect(res.isError).toBe(true);
@@ -237,7 +348,13 @@ describe('generate_image share-bridge normalization (#70)', () => {
   });
 
   describe('artifact registration after delivery (§8)', () => {
+    // a live E2E test caught that this job's OWN task_id
+    // (the image service's own job id, 't-1' in this fixture) is NOT the id a
+    // resume-capable provider's Store recognizes — registration must persist
+    // job.provider_task_id instead. Using a DIFFERENT value here than the
+    // outer task_id proves the fix reads the right field, not a coincidence.
     test('done job registers written files and returns artifact refs', async () => {
+      jobResult = { status: 'done', task_id: 't-1', provider_task_id: 'inner-ptid-1', images: [PNG_B64] };
       const res = await generate({});
       expect(res.isError).toBeUndefined();
       const payload = JSON.parse(res.content[0]!.text) as {
@@ -261,9 +378,18 @@ describe('generate_image share-bridge normalization (#70)', () => {
         session_id: 'session-1',
         provider: 'codex-image',
         model: 'gpt-image',
-        task_id: 't-1',
+        task_id: 'inner-ptid-1',
         files: payload.files,
       });
+    }, 20000);
+
+    test('done job with no provider_task_id (provider has no resume concept) → registration omits task_id', async () => {
+      jobResult = { status: 'done', task_id: 't-1', images: [PNG_B64] };
+      const res = await generate({});
+      expect(res.isError).toBeUndefined();
+      const reg = calls.find((c) => c.url === `${GATEWAY}/api/v1/image-artifacts`);
+      expect(reg).toBeDefined();
+      expect(reg!.body!.task_id).toBeUndefined();
     }, 20000);
 
     test('no gateway context → done job returns files with NO artifacts field (regression)', async () => {

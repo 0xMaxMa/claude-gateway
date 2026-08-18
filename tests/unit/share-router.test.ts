@@ -296,6 +296,66 @@ describe('image share router', () => {
       expect(wrongSession.status).toBe(404);
       expect(wrongSession.body.code).toBe('image_ref_not_found');
     });
+
+    // a mint from an artifact_id ref whose registration
+    // carried a task_id must echo it (+ provider) back — the hook a
+    // resume-capable provider needs. A plain path ref never has one.
+    test('mint from an artifact_id ref carries task_id/provider; a path ref does not', async () => {
+      const reg = await request()
+        .post('/api/v1/image-artifacts')
+        .set(AUTH_A1)
+        .send({
+          agent_id: AGENT,
+          session_id: SESSION,
+          provider: 'codex-image',
+          model: 'gemini-image',
+          task_id: 'task-resume-1',
+          files: [`${SESSION}/ok.png`],
+        });
+      expect(reg.status).toBe(201);
+      const artifact = reg.body.items[0] as { artifact_id: string };
+
+      const viaArtifact = await request()
+        .post('/api/v1/shares')
+        .set(AUTH_A1)
+        .send({ agent_id: AGENT, session_id: SESSION, refs: [{ artifact_id: artifact.artifact_id }] });
+      expect(viaArtifact.status).toBe(201);
+      expect(viaArtifact.body.items[0].task_id).toBe('task-resume-1');
+      expect(viaArtifact.body.items[0].provider).toBe('codex-image');
+
+      const viaPath = (await mintOne()) as unknown as { task_id?: string; provider?: string };
+      expect(viaPath.task_id).toBeUndefined();
+      expect(viaPath.provider).toBeUndefined();
+    });
+
+    // Handoff-on-model-switch: prior_prompt travels
+    // independently of task_id — an artifact can carry a reusable prompt even
+    // when it has no (or an unrelated) resume-capable task id.
+    test('mint from an artifact_id ref carries prior_prompt; a path ref does not', async () => {
+      const reg = await request()
+        .post('/api/v1/image-artifacts')
+        .set(AUTH_A1)
+        .send({
+          agent_id: AGENT,
+          session_id: SESSION,
+          provider: 'codex-image',
+          model: 'gpt-image',
+          prompt: 'a red cube on a white background',
+          files: [`${SESSION}/ok.png`],
+        });
+      expect(reg.status).toBe(201);
+      const artifact = reg.body.items[0] as { artifact_id: string };
+
+      const viaArtifact = await request()
+        .post('/api/v1/shares')
+        .set(AUTH_A1)
+        .send({ agent_id: AGENT, session_id: SESSION, refs: [{ artifact_id: artifact.artifact_id }] });
+      expect(viaArtifact.status).toBe(201);
+      expect(viaArtifact.body.items[0].prior_prompt).toBe('a red cube on a white background');
+
+      const viaPath = (await mintOne()) as unknown as { prior_prompt?: string };
+      expect(viaPath.prior_prompt).toBeUndefined();
+    });
   });
 
   describe('public endpoint (§11)', () => {

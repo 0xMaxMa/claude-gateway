@@ -162,6 +162,17 @@ export type ArtifactRow = {
   relativePath: string;
   provider: string;
   model: string;
+  /** The provider-side task id that produced this artifact, if known — the
+   *  key a resume-capable provider needs to continue that generation's
+   *  session. Empty for artifacts registered without one (older rows, or
+   *  providers with no resume concept). */
+  taskId: string;
+  /** The prompt used to produce this artifact, if recorded
+   *  (handoff-on-model-switch) — deterministic reuse source for continuing an
+   *  edit across a model switch where session resume isn't possible. Already
+   *  length-capped at registration time (registerArtifact). Empty if none was
+   *  recorded. */
+  prompt: string;
 };
 
 export class ShareStore {
@@ -254,10 +265,19 @@ export class ShareStore {
    *  cross-session lookups return null (uniform "not found", §8). */
   resolveArtifact(agentId: string, sessionId: string, artifactId: string): ArtifactRow | null {
     const row = this.db.prepare(
-      `SELECT id, agent_id, session_id, relative_path, provider, model
+      `SELECT id, agent_id, session_id, relative_path, provider, model, task_id, prompt
        FROM image_artifacts WHERE id = ? AND agent_id = ? AND session_id = ?`,
     ).get(artifactId, agentId, sessionId) as
-      | { id: string; agent_id: string; session_id: string; relative_path: string; provider: string; model: string }
+      | {
+          id: string;
+          agent_id: string;
+          session_id: string;
+          relative_path: string;
+          provider: string;
+          model: string;
+          task_id: string | null;
+          prompt: string | null;
+        }
       | undefined;
     if (!row) return null;
     return {
@@ -267,6 +287,8 @@ export class ShareStore {
       relativePath: row.relative_path,
       provider: row.provider,
       model: row.model,
+      taskId: row.task_id ?? '',
+      prompt: row.prompt ?? '',
     };
   }
 

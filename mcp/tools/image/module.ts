@@ -60,6 +60,20 @@ const ERROR_HINTS: Record<string, string> = {
 type JobResponse = {
   task_id?: string;
   status?: 'queued' | 'running' | 'done' | 'failed';
+  // What actually generated (or is generating) the image — the image service now
+  // echoes these on every poll, so a status re-poll in a LATER turn (which no
+  // longer has the original generate call's "model" argument in scope) can
+  // still recover them instead of falling back to "unknown".
+  provider?: string;
+  model?: string;
+  // The upstream provider's OWN task id — distinct from this job's own
+  // task_id (the image service's own job id, used for polling). A live E2E test
+  // caught that these are two separate id spaces: the image provider's own
+  // Store is keyed by ITS OWN ids, so a later resume request naming the wrong
+  // (outer) id silently fails to resolve. THIS is the id that must be
+  // persisted for continue_from to ever work. Absent for providers with no
+  // resume concept.
+  provider_task_id?: string;
   byok?: boolean;
   cost?: number;
   images?: string[];
@@ -279,11 +293,44 @@ export class ImageModule implements ToolModule {
       if (rawImage && rawImages) {
         return { content: [{ type: 'text', text: 'generate_image: pass either "image" or "images", not both.' }], isError: true };
       }
-      const normalized = await this.normalizeRefs(rawImage ? [rawImage] : rawImages!);
+      const refsList = rawImage ? [rawImage] : rawImages!;
+      const normalized = await this.normalizeRefs(refsList);
       if ('error' in normalized) return normalized.error;
       mintedShareIds = normalized.mintedShareIds;
       if (rawImage) reqBody.image = normalized.urls[0];
       else reqBody.images = normalized.urls;
+
+      // continue_from is the LLM's sole judgment call on
+      // whether this is a true continuation of a prior own-generation, not
+      // just a visual reference. Resolve it to that ref's provider task id —
+      // found ONLY by locating a matching artifact: entry among the refs just
+      // normalized above (never invented, never taken on faith). No match, or
+      // a match with no recorded task id (path ref, or an artifact with none)
+      // → silently omitted, exactly like any other unresolved resume signal
+      // downstream; never an error.
+      // Defensively strip a leading "artifact:" — the schema asks for the bare
+      // id, but tolerate the prefixed form rather than silently failing to match.
+      const continueFrom = (typeof args.continue_from === 'string' ? args.continue_from.trim() : '').replace(/^artifact:/i, '');
+      if (continueFrom) {
+        const idx = refsList.findIndex((r) => r.trim() === `artifact:${continueFrom}`);
+        const resumeTaskId = idx !== -1 ? normalized.taskIds[idx] : undefined;
+        if (resumeTaskId) {
+          reqBody.resume_task_id = resumeTaskId;
+        } else {
+          // Handoff-on-model-switch : resume isn't possible
+          // (no provider task id resolved — most commonly because a
+          // different model generated something since), but continue_from
+          // still signals a genuine continuation. Deterministically prepend
+          // the prompt that produced the referenced artifact — reused from
+          // stored data, not re-derived from the LLM's own memory, so it
+          // can't drift or balloon across a long edit chain (only ever ONE
+          // prior step is pulled in, never accumulated).
+          const priorPrompt = idx !== -1 ? normalized.priorPrompts[idx] : undefined;
+          if (priorPrompt) {
+            reqBody.prompt = `(Continuing from a prior edit: "${priorPrompt}") ${prompt}`;
+          }
+        }
+      }
     } else {
       if (rawImage) reqBody.image = rawImage;
       if (rawImages) reqBody.images = rawImages;
@@ -385,7 +432,15 @@ export class ImageModule implements ToolModule {
    */
   private async normalizeRefs(
     refs: string[],
-  ): Promise<{ urls: string[]; mintedShareIds: string[] } | { error: McpToolResult }> {
+  ): Promise<
+    | {
+        urls: string[];
+        mintedShareIds: string[];
+        taskIds: Array<string | undefined>;
+        priorPrompts: Array<string | undefined>;
+      }
+    | { error: McpToolResult }
+  > {
     const fail = (text: string): { error: McpToolResult } => ({
       error: { content: [{ type: 'text', text }], isError: true },
     });
@@ -445,10 +500,27 @@ export class ImageModule implements ToolModule {
         return fail('generate_image: image reference sharing requires gateway.publicUrl to be configured.');
       }
     }
-    // Merge back preserving the caller's order.
+    // Merge back preserving the caller's order. taskIds/priorPrompts are
+    // index-aligned with refs/urls — undefined for
+    // raw-URL entries and any local ref whose resolved artifact carries
+    // neither.
     let next = 0;
-    const urls = entries.map((e) => (e.kind === 'url' ? e.url : minted[next++]!.url!));
-    return { urls, mintedShareIds: minted.map((m) => m.share_id) };
+    const urls: string[] = [];
+    const taskIds: Array<string | undefined> = [];
+    const priorPrompts: Array<string | undefined> = [];
+    for (const e of entries) {
+      if (e.kind === 'url') {
+        urls.push(e.url);
+        taskIds.push(undefined);
+        priorPrompts.push(undefined);
+      } else {
+        const m = minted[next++]!;
+        urls.push(m.url!);
+        taskIds.push(m.task_id);
+        priorPrompts.push(m.prior_prompt);
+      }
+    }
+    return { urls, mintedShareIds: minted.map((m) => m.share_id), taskIds, priorPrompts };
   }
 
   private pollTimeoutMs(): number {
@@ -552,10 +624,19 @@ export class ImageModule implements ToolModule {
     // artifacts — file delivery is unaffected.
     let artifacts: Array<Record<string, unknown>> | undefined;
     if (shareBridgeEnabled() && files.length) {
+      // `model` (the caller's "provider/model" arg) is only known on the
+      // generate path (same-turn poll) — same limitation as `prompt` above.
+      // On an action="status" re-entry, fall back to job.provider/job.model,
+      // which the image service now echoes on every poll response for exactly
+      // this reason, instead of silently mislabeling the artifact "unknown".
       const slash = (model ?? '').indexOf('/');
-      const provider = slash > 0 ? (model as string).slice(0, slash) : 'unknown';
-      const modelName = slash > 0 ? (model as string).slice(slash + 1) : (model || 'unknown');
-      const registered = await registerArtifacts(files, { provider, model: modelName, taskId, prompt });
+      const provider = slash > 0 ? (model as string).slice(0, slash) : (job.provider || 'unknown');
+      const modelName = slash > 0 ? (model as string).slice(slash + 1) : (job.model || model || 'unknown');
+      // taskId (this job's own id, used for polling above) is NOT what
+      // gets persisted here — a resumable artifact must be keyed by the
+      // PROVIDER's own task id (job.provider_task_id), the id its Store
+      // actually recognizes. See the JobResponse.provider_task_id comment.
+      const registered = await registerArtifacts(files, { provider, model: modelName, taskId: job.provider_task_id, prompt });
       if (registered) {
         artifacts = registered.map((item, index) => ({
           artifact_id: item.artifact_id,
@@ -799,6 +880,14 @@ const imageToolDefs: McpToolDefinition[] = [
       'attach it with your reply tool and answer in one or two short sentences. Every extra step risks pushing ' +
       'the request past its timeout. ' +
       'action="status" polls a previously returned task_id. ' +
+      'PATIENCE: image generation can legitimately take several minutes — a "running" status (including the ' +
+      '"still generating, call again with action=status" note you get back when the local poll budget runs out) ' +
+      'is normal, not stuck. Keep calling action="status" with the SAME task_id until it resolves to done/failed. ' +
+      'Do NOT submit a new action="generate" call (on the same or a different model) for the same request while ' +
+      'an earlier task_id for it is still running — the earlier job may finish moments later, and you will have ' +
+      'generated and charged for the image twice while delivering only one. If you are genuinely considering ' +
+      'giving up after a long wait, say so to the user first in a normal reply and let them decide, instead of ' +
+      'silently abandoning the task_id and starting over. ' +
       'action="list" returns every available image model with its supported_qualities, supported_sizes, cost, and ' +
       'the capability flags supports_image_ref (image-to-image / edit) and supports_style_ref. Call it FIRST when ' +
       'choosing a model or when you need to know what a provider can do — you are NOT limited to the composer ' +
@@ -817,7 +906,15 @@ const imageToolDefs: McpToolDefinition[] = [
       'been reset while the chat history still has them): never answer "no images attached" to such a ' +
       'request before list_refs has returned an empty catalog. If the catalog makes the request ambiguous ' +
       '(or the requested index does not exist), ask the user which image they mean instead of guessing. ' +
-      'When the user selected options in the composer (an <image-params .../> tag in the turn), honor those values.',
+      'When the user selected options in the composer (an <image-params .../> tag in the turn), honor those values. ' +
+      'CONTINUING AN EDIT: some providers can resume the exact generation session behind an image instead of ' +
+      'treating it as a fresh visual reference. Set "continue_from" to that image\'s artifact id ONLY when ALL of ' +
+      'these hold: (1) you generated that image yourself earlier in this session (not something the user uploaded ' +
+      'or an external URL), (2) that same artifact id is also included in this call\'s "image"/"images", (3) this ' +
+      'call uses the SAME "model" that produced it, and (4) no OTHER model has generated any image in this session ' +
+      'since that image was made — even if you are back on the original model now, a model switch in between ' +
+      'breaks the continuation. If any of these do not hold, omit "continue_from" and rely on the plain image ' +
+      'reference instead — this is safe by default; the resume is a bonus when it applies, not a requirement.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -838,6 +935,14 @@ const imageToolDefs: McpToolDefinition[] = [
         image: { type: 'string', description: 'Optional reference image for image-to-image/edit: a media path (e.g. "media/xxx.png"), an "artifact:<id>" ref from a previous generate_image result, or an https URL. Local/artifact refs are converted to short-lived URLs automatically. ONLY pass this to a model whose supports_image_ref is true (check action="list"); for any other model, describe the reference image in the prompt instead of sending it here. Do not pass both "image" and "images".' },
         images: { type: 'array', items: { type: 'string' }, description: 'Optional multiple reference images (max 5; media paths, artifact:<id> refs, or https URLs — same supports_image_ref rule as "image"). Order is preserved.' },
         style: { type: 'string', description: 'Optional native style parameter (e.g. "vivid") — only for models whose supports_style_ref is true.' },
+        continue_from: {
+          type: 'string',
+          description:
+            'Optional artifact id (no "artifact:" prefix) of an image YOU generated earlier in THIS session, ' +
+            'also present in this call\'s "image"/"images", made with the SAME model as this call, with no OTHER ' +
+            'model generating any image since — see "CONTINUING AN EDIT" above for the full rule. Omit unless all ' +
+            'conditions clearly hold.',
+        },
         task_id: { type: 'string', description: 'Job id to poll (required for action="status").' },
       },
       required: [],

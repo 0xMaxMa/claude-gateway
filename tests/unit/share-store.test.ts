@@ -161,6 +161,61 @@ describe('image share store', () => {
       expect(store.resolveArtifact('other-agent', SESSION, id)).toBeNull();
       expect(store.resolveArtifact(AGENT, SESSION, 'img_missing')).toBeNull();
     });
+
+    // resolveArtifact must surface task_id — the hook a
+    // resume-capable provider needs.
+    test('resolveArtifact returns the taskId it was registered with', () => {
+      const id = store.registerArtifact({
+        agentId: AGENT,
+        sessionId: SESSION,
+        relativePath: `${SESSION}/resume.png`,
+        provider: 'codex-image',
+        model: 'gemini-image',
+        taskId: 'task-xyz-123',
+      });
+      expect(store.resolveArtifact(AGENT, SESSION, id)?.taskId).toBe('task-xyz-123');
+      expect(store.resolveArtifact(AGENT, SESSION, id)?.provider).toBe('codex-image');
+    });
+
+    // Handoff-on-model-switch: resolveArtifact must also
+    // surface the prompt that produced the artifact — the deterministic reuse
+    // source for continuing an edit across a model switch when resume isn't
+    // possible.
+    test('resolveArtifact returns the prompt it was registered with', () => {
+      const id = store.registerArtifact({
+        agentId: AGENT,
+        sessionId: SESSION,
+        relativePath: `${SESSION}/handoff.png`,
+        provider: 'codex-image',
+        model: 'gpt-image',
+        prompt: 'a red cube on a white background',
+      });
+      expect(store.resolveArtifact(AGENT, SESSION, id)?.prompt).toBe('a red cube on a white background');
+    });
+
+    test('resolveArtifact returns an empty prompt (not undefined/null) when none was registered', () => {
+      const id = store.registerArtifact({
+        agentId: AGENT,
+        sessionId: SESSION,
+        relativePath: `${SESSION}/no-prompt.png`,
+        provider: 'openai',
+        model: 'gpt-image-1',
+        // no prompt
+      });
+      expect(store.resolveArtifact(AGENT, SESSION, id)?.prompt).toBe('');
+    });
+
+    test('resolveArtifact returns an empty taskId (not undefined/null) when none was registered', () => {
+      const id = store.registerArtifact({
+        agentId: AGENT,
+        sessionId: SESSION,
+        relativePath: `${SESSION}/no-task.png`,
+        provider: 'openai',
+        model: 'gpt-image-1',
+        // no taskId
+      });
+      expect(store.resolveArtifact(AGENT, SESSION, id)?.taskId).toBe('');
+    });
   });
 
   describe('validateShareFile (§12)', () => {
