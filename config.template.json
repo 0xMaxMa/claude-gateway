@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.27",
+  "configVersion": "1.0.28",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -96,6 +96,7 @@
       "promotionThreshold": 0.6,
       "minRecallCount": 2,
       "autoRouteOut": true,
+      "staggerWindowMinutes": 30,
       "staleness": {
         "enabled": true,
         "staleTtlDays": 90,

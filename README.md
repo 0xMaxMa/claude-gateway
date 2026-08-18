@@ -414,6 +414,7 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 | `reviewModel` | `claude-haiku-4-5-…` | Cheap model for the reviewer |
 | `promotionThreshold` / `minRecallCount` | `0.6` / `2` | Scoring thresholds for promoting a fact |
 | `autoRouteOut` | `true` | planning-67: in `auto` mode, drain an **over-budget** `MEMORY.md` by routing its episodic task-log to `memory/<topic>.md` automatically each night (archive-safe, pinned excluded, idempotent) instead of a manual per-agent `migrate-cli`. `false` = kill-switch |
+| `staggerWindowMinutes` | `30` | planning-68: spread agents' nightly runs across a window (a deterministic per-agent jitter is added to the delay) so they don't all fire at `dreamHour:00` together. Clamped `[0,55]`; `0` = disabled (all fire at `dreamHour:00`) |
 | `staleness` | *(object)* | Archive staleness GC sub-config (planning-66) — see below |
 
 Per-agent overrides are supported under the agent's own `dreaming` block; unset fields fall back to the gateway default. `enabled:false` or `maxChangesPerRun:0` makes a run a no-op.

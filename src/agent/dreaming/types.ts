@@ -56,6 +56,13 @@ export interface DreamingConfig {
    * A clean kill-switch: false ⇒ prior behavior (manual CLI only).
    */
   autoRouteOut?: boolean;
+  /**
+   * planning-68: spread agents' nightly runs across a window instead of all
+   * firing at `dreamHour:00`. A deterministic per-agent jitter in
+   * `[0, staggerWindowMinutes*60s)` is added to the scheduled delay. Default 30;
+   * clamped to `[0,55]` so the offset never crosses the next hour. 0 = disabled.
+   */
+  staggerWindowMinutes?: number;
   staleness?: StalenessConfig;
 }
 
@@ -72,6 +79,7 @@ export interface ResolvedDreamingCfg {
   promotionThreshold: number;
   minRecallCount: number;
   autoRouteOut: boolean;
+  staggerWindowMinutes: number;
   staleness: ResolvedStalenessCfg;
 }
 

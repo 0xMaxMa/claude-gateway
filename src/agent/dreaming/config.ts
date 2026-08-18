@@ -32,6 +32,7 @@ export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
   promotionThreshold: 0.6,
   minRecallCount: 2,
   autoRouteOut: true,
+  staggerWindowMinutes: 30,
   staleness: STALENESS_DEFAULTS,
 };
 
@@ -101,6 +102,13 @@ export function resolveDreamingConfig(
     autoRouteOut:
       [agentCfg?.autoRouteOut, globalCfg?.autoRouteOut].find((v) => typeof v === 'boolean') ??
       d.autoRouteOut,
+    // planning-68: clamp to [0,55] so the jitter never crosses into the next hour.
+    staggerWindowMinutes: numOr(
+      pick(agentCfg?.staggerWindowMinutes, globalCfg?.staggerWindowMinutes, d.staggerWindowMinutes),
+      d.staggerWindowMinutes,
+      0,
+      55,
+    ),
     staleness: resolveStalenessConfig(agentCfg?.staleness, globalCfg?.staleness),
   };
 }
