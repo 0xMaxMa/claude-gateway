@@ -334,6 +334,12 @@ async function startAgent(
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
       memoryBudgetChars: memoryBudget.memoryBudgetChars,
       userBudgetChars: memoryBudget.userBudgetChars,
+      // planning-65: route episodic task-log to memory/<topic>.md when enabled.
+      // Opt-in (=== true) to match compose; the template ships true so the migrator
+      // turns it on for existing configs, and it stays off for anything pre-1.0.25
+      // that hasn't merged the key yet (exact prior behavior).
+      writeRouting: memoryBudget.writeRouting === true,
+      episodicArchiveDir: memoryBudget.episodicArchiveDir,
       // K3↔K4 promotion: only when the shared KB is enabled AND set to auto.
       sharedPromote: makeSharedPromoter(
         agentConfig.id,

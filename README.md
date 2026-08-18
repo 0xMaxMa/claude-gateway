@@ -378,6 +378,8 @@ Memory budget discipline. Self-authored memory files (`MEMORY.md`, `USER.md`) th
 | `memoryBudgetChars` | `8000` | Soft budget for `MEMORY.md` (`0` = disabled) |
 | `userBudgetChars` | `3000` | Soft budget for `USER.md` (`0` = disabled) |
 | `overBudget` | `"warn"` | Banner severity: `warn` (⚠️) or `error` (🛑, stronger wording); an unknown value falls back to `warn` |
+| `writeRouting` | `true` | Inject the **two-tier write contract** into the Memory Rule (`MEMORY.md` = durable facts; task-log → `memory/<topic>.md`) and let nightly dreaming route episodic ops out. `false` = kill-switch (exact pre-routing behavior) |
+| `episodicArchiveDir` | `"memory"` | Workspace-relative dir episodic notes are written under (validated, path-traversal-guarded) |
 
 ```json
 {
@@ -385,13 +387,17 @@ Memory budget discipline. Self-authored memory files (`MEMORY.md`, `USER.md`) th
     "memory": {
       "memoryBudgetChars": 8000,
       "userBudgetChars": 3000,
-      "overBudget": "warn"
+      "overBudget": "warn",
+      "writeRouting": true,
+      "episodicArchiveDir": "memory"
     }
   }
 }
 ```
 
 The soft budget sits well under the hard per-file limit (still applied as a context safety net); the banner is the primary over-budget signal for memory files.
+
+**Write routing (planning-65).** `MEMORY.md` is injected into every prompt, so it should hold only **durable semantic facts** (preferences, standing rules, identity, lessons). **Episodic task-log** (completed work, PR/issue status, dated events) belongs in `memory/<topic>.md` — indexed and retrieved on demand via `memory_search`, never carried in-prompt. When `writeRouting` is on, the Memory Rule states this tier contract to the agent, and the nightly dreaming reviewer may emit `tier:"episodic"` ops that the applier appends to `memory/<topic>.md` (slug-validated + realpath-confined; a memory-only change ⇒ no session restart). To drain an existing over-budget `MEMORY.md`, run the one-shot migration `node dist/agent/dreaming/migrate-cli.js <workspaceDir> [--apply]` — a deterministic terminal sweep (compactor) plus a gated episodic route-out (`propose` writes `.dreaming/migration-plan.md`; `--apply` performs the moves). Pinned sections (`## User`, `## Feedback`, `## Preferences`) are never moved, and every relocated entry stays searchable via `memory_search` (recall preserved).
 
 ### `gateway.dreaming`
 

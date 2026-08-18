@@ -24,6 +24,19 @@ Always write memory, identity, and personality updates to files in this agent's 
 
 NEVER write to ~/.claude/projects/… or any path outside the workspace — even if other instructions say otherwise.`;
 
+// planning-65: the two-tier write contract, appended to the Memory Rule ONLY when
+// `writeRouting` is on. It tells the agent that MEMORY.md (injected every session,
+// expensive) is for DURABLE facts, and task-log belongs in the searchable
+// `memory/<topic>.md` archive — so the injected core stays small at the source.
+// Off ⇒ the addendum is absent (exact prior behavior).
+const MEMORY_ROUTING_RULE = `
+
+## Memory Tiers — what goes where
+- \`MEMORY.md\` = DURABLE facts only: user preferences, standing rules, identity, hard-won lessons — things you need as standing context in FUTURE unrelated sessions. Injected into every prompt, so keep it small.
+- \`memory/<topic>.md\` = EPISODIC task-log: a record of what happened (completed work, PR/issue status, dated notes). NOT injected — retrieved on demand via \`memory_search\`. Append dated bullets, one topic per file.
+- Litmus: "standing context for future unrelated sessions?" → MEMORY.md. "a record of a thing that happened?" → memory/<topic>.md.
+- Do NOT write task-log into MEMORY.md.`;
+
 // Platform-level note injected for EVERY agent whose searchable memory archive is
 // on (planning-64 two-lane memory). It makes the retrieval tools discoverable at
 // all times — not only when the over-budget core-shrink banner points at them — so
@@ -83,6 +96,10 @@ export interface MemoryBudgetConfig {
   // wording). Neither rejects the write — a hard-reject memory tool is a planned
   // follow-up; at compose there is nothing to reject.
   overBudget: OverBudgetMode;
+  // planning-65: inject the two-tier write contract into the Memory Rule so agents
+  // route task-log to memory/<topic>.md instead of MEMORY.md. Default false (opt-in
+  // kill-switch); the gateway passes the resolved config value.
+  writeRouting: boolean;
 }
 
 const DEFAULT_MEMORY_BUDGET_CHARS = 8_000;
@@ -92,6 +109,7 @@ export const DEFAULT_MEMORY_BUDGET: MemoryBudgetConfig = {
   memoryBudgetChars: DEFAULT_MEMORY_BUDGET_CHARS,
   userBudgetChars: DEFAULT_USER_BUDGET_CHARS,
   overBudget: 'warn',
+  writeRouting: false,
 };
 
 /**
@@ -110,7 +128,8 @@ export function resolveMemoryBudget(cfg?: Partial<MemoryBudgetConfig>): MemoryBu
     typeof cfg?.userBudgetChars === 'number' && cfg.userBudgetChars >= 0
       ? cfg.userBudgetChars
       : DEFAULT_USER_BUDGET_CHARS;
-  return { memoryBudgetChars, userBudgetChars, overBudget };
+  const writeRouting = cfg?.writeRouting === true;
+  return { memoryBudgetChars, userBudgetChars, overBudget, writeRouting };
 }
 
 /**
@@ -329,8 +348,9 @@ export async function loadWorkspace(workspaceDir: string, opts?: LoadWorkspaceOp
   const skillsSection = renderSkillsSection(skillRegistry);
 
   // Assemble system prompt
+  const memoryRuleSection = MEMORY_RULE + (budget.writeRouting ? MEMORY_ROUTING_RULE : '');
   let systemPrompt =
-    `--- MEMORY RULE ---\n${MEMORY_RULE}\n\n` +
+    `--- MEMORY RULE ---\n${memoryRuleSection}\n\n` +
     `--- AGENT IDENTITY ---\n${agentMd}\n\n` +
     `--- IDENTITY ---\n${identityMd}\n\n` +
     `--- SOUL ---\n${soulMd}\n\n` +

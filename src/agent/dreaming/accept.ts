@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DREAMING_DIR } from './audit';
 import { applyDreamProposals, type ApplyFileResult } from './applier';
+import { isValidTopicSlug } from './episodic';
 import type { DreamProposal, DreamOpKind, DreamFile } from './types';
 
 const OP_KINDS = new Set<DreamOpKind>(['add', 'replace', 'remove']);
@@ -28,6 +29,8 @@ const DREAM_FILES = new Set<DreamFile>(['MEMORY.md', 'USER.md']);
 export interface AcceptOptions {
   memoryBudgetChars: number;
   userBudgetChars: number;
+  /** planning-65: episodic archive dir (relative to workspace) so accepted episodic ops append to memory/<topic>.md. */
+  episodicArchiveDir?: string;
   /** Promote each applied `add` to the shared vault (only when shared KB is auto). */
   sharedPromote?: (p: DreamProposal) => void;
 }
@@ -50,22 +53,25 @@ export interface AcceptResult {
 /** One promotions.jsonl object → a valid DreamProposal, or null if unusable. */
 function coerceProposal(o: Record<string, unknown>): DreamProposal | null {
   const op = String(o.op ?? '') as DreamOpKind;
-  const file = String(o.file ?? '') as DreamFile;
-  if (!OP_KINDS.has(op) || !DREAM_FILES.has(file)) return null;
+  if (!OP_KINDS.has(op)) return null;
   const content = typeof o.content === 'string' ? o.content : undefined;
   const target = typeof o.target === 'string' ? o.target : undefined;
-  // add needs content; replace/remove need an anchor — drop the rest.
+  const reason = String(o.reason ?? '');
+  const score = Number(o.score) || 0;
+  const recallCount = Number(o.recallCount) || 0;
+
+  // planning-65: episodic ops (add-only, memory/<topic>.md) recorded in propose mode.
+  if (o.tier === 'episodic') {
+    if (op !== 'add' || !isValidTopicSlug(o.topic) || !content) return null;
+    return { op, tier: 'episodic', topic: o.topic, content, reason, score, recallCount };
+  }
+
+  // Durable op (unchanged): needs a valid evergreen file + the right fields.
+  const file = String(o.file ?? '') as DreamFile;
+  if (!DREAM_FILES.has(file)) return null;
   if (op === 'add' && !content) return null;
   if ((op === 'replace' || op === 'remove') && !target) return null;
-  return {
-    op,
-    file,
-    target,
-    content,
-    reason: String(o.reason ?? ''),
-    score: Number(o.score) || 0,
-    recallCount: Number(o.recallCount) || 0,
-  };
+  return { op, file, tier: 'durable', target, content, reason, score, recallCount };
 }
 
 /**
@@ -165,7 +171,11 @@ export function acceptDreamProposals(
   const res = applyDreamProposals(
     workspaceDir,
     fresh.map((x) => x.proposal),
-    { memoryBudgetChars: opts.memoryBudgetChars, userBudgetChars: opts.userBudgetChars },
+    {
+      memoryBudgetChars: opts.memoryBudgetChars,
+      userBudgetChars: opts.userBudgetChars,
+      episodicArchiveDir: opts.episodicArchiveDir,
+    },
     now,
   );
 
@@ -179,13 +189,19 @@ export function acceptDreamProposals(
       JSON.stringify({
         ts,
         index: x.index,
-        file: x.proposal.file,
+        file: x.proposal.tier === 'episodic' ? `memory/${x.proposal.topic}.md` : x.proposal.file,
         op: x.proposal.op,
         acceptedAt: now,
       }),
     );
-    // Shared promotion mirrors the nightly auto path: only applied `add`s.
-    if (opts.sharedPromote && x.proposal.op === 'add' && x.proposal.content) {
+    // Shared promotion mirrors the nightly auto path: only applied DURABLE `add`s.
+    // Episodic task-log is per-agent local history — never auto-promoted to shared.
+    if (
+      opts.sharedPromote &&
+      x.proposal.op === 'add' &&
+      x.proposal.content &&
+      x.proposal.tier !== 'episodic'
+    ) {
       try {
         opts.sharedPromote(x.proposal);
       } catch {

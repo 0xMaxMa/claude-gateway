@@ -46,8 +46,9 @@ export function writeDreamAudit(workspaceDir: string, entry: DreamAuditEntry): s
       lines.push('');
       for (const p of entry.proposals) {
         const anchor = p.target ? ` [${truncate(p.target, 40)}]` : '';
+        const dest = p.tier === 'episodic' ? `memory/${p.topic}.md` : (p.file ?? '?');
         lines.push(
-          `- **${p.op}** \`${p.file}\`${anchor} — ${p.reason} ` +
+          `- **${p.op}** \`${dest}\`${anchor} — ${p.reason} ` +
             `_(score ${p.score.toFixed(2)}, recall ${p.recallCount})_`,
         );
       }

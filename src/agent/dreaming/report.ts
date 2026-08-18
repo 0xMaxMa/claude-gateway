@@ -59,7 +59,10 @@ function groupPromotionsByTs(
     const view: DreamProposalView = {
       index,
       op: String(o.op ?? ''),
-      file: String(o.file ?? ''),
+      file:
+        o.tier === 'episodic' && typeof o.topic === 'string'
+          ? `memory/${o.topic}.md`
+          : String(o.file ?? ''),
       target: typeof o.target === 'string' ? o.target : undefined,
       content: typeof o.content === 'string' ? o.content : undefined,
       reason: String(o.reason ?? ''),
