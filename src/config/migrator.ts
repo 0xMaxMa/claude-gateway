@@ -264,6 +264,64 @@ function preserveBindDefault(config: Record<string, unknown>): string | null {
   return 'gateway.bind';
 }
 
+/** Warning surfaced when a migration flips the retired memory `mode: "propose"` default to `"auto"` (Issue #341). */
+export const MEMORY_MODE_AUTO_WARNING =
+  'gateway.dreaming.mode / gateway.knowledge.shared.mode were upgraded from the retired "propose" default to "auto": ' +
+  'nightly dreaming now applies memory consolidation to MEMORY.md and promotes durable memories to the shared vault, ' +
+  'guarded by the backup + net-negative + bounded-loss applier. ' +
+  'Set the relevant mode back to "propose" in config.json to keep the dry-run behavior.';
+
+/**
+ * One-time upgrade of the retired memory `mode` default from `"propose"` to
+ * `"auto"` (Issue #341, planning-64 "Part B").
+ *
+ * planning-64 shipped nightly dreaming and per-agent→shared promotion with a
+ * SAFE dry-run default (`mode: "propose"`), written literally into every config
+ * by `config.template.json`. Now that the K4 applier (#330 — backup pre-image +
+ * net-negative-when-over-budget + bounded-loss + CAS + never-empty, memory-only
+ * write ⇒ no session restart) has landed, the intended default is `"auto"`.
+ *
+ * Like {@link preserveBindDefault}, this runs ONLY inside a migration, which
+ * fires only when the config's `configVersion` is OLDER than the template's
+ * (now 1.0.24). It therefore flips the retired default exactly once and never
+ * touches a config already stamped 1.0.24+. It changes ONLY the retired literal
+ * value `"propose"` ⇒ `"auto"`; any other value (already `"auto"`, or a value
+ * a user re-pinned at 1.0.24+) is left untouched. A pre-1.0.24 config that
+ * deliberately set `"propose"` is indistinguishable from the retired default and
+ * is flipped with the loud {@link MEMORY_MODE_AUTO_WARNING} (the same trade-off
+ * the bind-preservation migration accepts). Only the global gateway defaults are
+ * touched — explicit per-agent `mode` overrides are the user's and left as-is.
+ *
+ * Must run BEFORE the template deep-merge: deepMerge only adds missing keys, so
+ * flipping the existing value here means the merge leaves our `"auto"` in place.
+ *
+ * Mutates `config` in place. Returns the list of changed field paths (empty if
+ * nothing was flipped).
+ */
+function upgradeRetiredMemoryModeDefault(config: Record<string, unknown>): string[] {
+  const gateway = config.gateway;
+  if (!gateway || typeof gateway !== 'object' || Array.isArray(gateway)) return [];
+  const g = gateway as Record<string, unknown>;
+  const changed: string[] = [];
+
+  const flip = (block: unknown, fieldPath: string): void => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return;
+    const b = block as Record<string, unknown>;
+    if (b.mode === 'propose') {
+      b.mode = 'auto';
+      changed.push(fieldPath);
+    }
+  };
+
+  flip(g.dreaming, 'gateway.dreaming.mode');
+  const knowledge = g.knowledge;
+  if (knowledge && typeof knowledge === 'object' && !Array.isArray(knowledge)) {
+    flip((knowledge as Record<string, unknown>).shared, 'gateway.knowledge.shared.mode');
+  }
+
+  return changed;
+}
+
 /**
  * Load a template file, extract the _migration metadata, strip it,
  * and return the clean template along with the ignorePaths set.
@@ -396,6 +454,15 @@ export function detectMigration(
     warnings.push(BIND_PRESERVED_WARNING);
   }
 
+  // Flip the retired memory `mode: "propose"` default to "auto" (Issue #341)
+  // BEFORE the merge, mirroring applyMigration so the dry-run reports the same
+  // changed fields the write path will apply.
+  const modeFields = upgradeRetiredMemoryModeDefault(configClone);
+  if (modeFields.length > 0) {
+    added.push(...modeFields);
+    warnings.push(MEMORY_MODE_AUTO_WARNING);
+  }
+
   // Deep-merge top-level keys (except agents which need special handling)
   const templateWithoutAgents = { ...template };
   delete templateWithoutAgents.agents;
@@ -476,6 +543,16 @@ export function applyMigration(
   if (bindField) {
     added.push(bindField);
     warnings.push(BIND_PRESERVED_WARNING);
+  }
+
+  // Flip the retired memory `mode: "propose"` default to "auto" (Issue #341)
+  // BEFORE the template merge: deepMerge only adds missing keys, so flipping the
+  // existing value here keeps our "auto" after the merge. Explicit non-"propose"
+  // values (and per-agent overrides) are untouched.
+  const modeFields = upgradeRetiredMemoryModeDefault(config);
+  if (modeFields.length > 0) {
+    added.push(...modeFields);
+    warnings.push(MEMORY_MODE_AUTO_WARNING);
   }
 
   // Deep-merge top-level keys (except agents)
