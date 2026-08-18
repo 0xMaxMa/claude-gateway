@@ -102,7 +102,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: visibleTools,
 }));
 
-mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const toolName = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 
@@ -114,7 +114,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   }
 
-  return mod.handleTool(toolName, args);
+  // extra.signal fires on notifications/cancelled for THIS call (the SDK matches
+  // it by requestId) — the CLI sends that when a user Stop/Ctrl-C interrupts an
+  // in-flight tool call. Threaded through so a long-running module (image
+  // generation's poll loop) can react instead of running to its full timeout.
+  return mod.handleTool(toolName, args, extra.signal);
 });
 
 // Connect MCP transport

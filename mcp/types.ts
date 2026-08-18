@@ -77,8 +77,13 @@ export interface ChannelModule {
   /** MCP tools exposed by this module */
   getTools(): McpToolDefinition[];
 
-  /** Execute a tool call */
-  handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  /**
+   * Execute a tool call. `signal` fires when the MCP client cancels this specific
+   * call (e.g. the CLI sends notifications/cancelled after a user Stop/Ctrl-C
+   * interrupts an in-flight tool call) — optional so existing modules that don't
+   * need it are unaffected.
+   */
+  handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult>;
 
   /** Initialize bot client for tool calls (non-blocking) */
   initBot?(): Promise<void>;
@@ -99,7 +104,8 @@ export interface ToolModule {
   toolVisibility: ToolVisibility;
   isEnabled(): boolean;
   getTools(): McpToolDefinition[];
-  handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  /** See ChannelModule.handleTool's `signal` doc — same optional-cancellation contract. */
+  handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult>;
   skillsDir?: string;
 }
 

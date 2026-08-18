@@ -109,14 +109,17 @@ export class ImageModule implements ToolModule {
     return imageToolDefs;
   }
 
-  async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
+  async handleTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
     if (name !== 'generate_image') {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
     const action = typeof args.action === 'string' ? args.action : 'generate';
     switch (action) {
       case 'generate':
-        return this.handleGenerate(args);
+        // Only "generate" gets the signal — it's the one action with a multi-second
+        // poll loop worth reacting to a Stop mid-flight (#2216 follow-up on the
+        // getpod side). status/list/list_refs are single bounded requests already.
+        return this.handleGenerate(args, signal);
       case 'status':
         return this.handleStatus(args);
       case 'list':
@@ -257,7 +260,7 @@ export class ImageModule implements ToolModule {
     };
   }
 
-  private async handleGenerate(args: Record<string, unknown>): Promise<McpToolResult> {
+  private async handleGenerate(args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
     const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
     const model = typeof args.model === 'string' ? args.model.trim() : '';
     if (!prompt) {
@@ -369,11 +372,16 @@ export class ImageModule implements ToolModule {
       return { content: [{ type: 'text', text: 'generate_image: image service did not return a task_id' }], isError: true };
     }
 
-    // Poll (E2) until done/failed or budget exceeded.
+    // Poll (E2) until done/failed, budget exceeded, or the caller cancels this call
+    // (Stop mid-generation — #2216 follow-up). Checked at the top of every
+    // iteration AND inside the sleep itself, so a cancel lands within one wakeup
+    // instead of waiting out the full poll interval.
     const deadline = Date.now() + this.pollTimeoutMs();
     let last: JobResponse = submit;
     while (Date.now() < deadline) {
-      await sleep(DEFAULT_POLL_INTERVAL_MS);
+      if (signal?.aborted) return this.cancelledResult(taskId);
+      await sleep(DEFAULT_POLL_INTERVAL_MS, signal);
+      if (signal?.aborted) return this.cancelledResult(taskId);
       const polled = await this.fetchJob(taskId);
       if (polled.__transportError) {
         // transient transport error — keep polling until deadline
@@ -526,6 +534,36 @@ export class ImageModule implements ToolModule {
   private pollTimeoutMs(): number {
     const raw = Number(process.env.IMAGE_POLL_TIMEOUT_MS);
     return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_POLL_TIMEOUT_MS;
+  }
+
+  /**
+   * Best-effort E3 cancel — fires and never throws, so a failed cancel call can
+   * never break the caller's own (already-cancelled) tool response. The api-side
+   * cancel is itself idempotent/no-op-safe on an already-terminal or unknown task,
+   * so no need to track whether this actually reached a still-running job.
+   */
+  private async cancelJob(taskId: string): Promise<void> {
+    try {
+      await fetch(`${this.baseUrl()}/v1/images/jobs/${encodeURIComponent(taskId)}/cancel`, {
+        method: 'POST',
+        headers: this.headers(),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      // non-fatal — the local tool call already reports itself cancelled either way
+    }
+  }
+
+  /** Tool result for a Stop-triggered cancellation, firing the E3 cancel first. */
+  private cancelledResult(taskId: string): McpToolResult {
+    void this.cancelJob(taskId);
+    return {
+      content: [{
+        type: 'text',
+        text: `generate_image: cancelled (task_id ${taskId}).`,
+      }],
+      isError: true,
+    };
   }
 
   /** Fetch a job (E2), classifying transport vs HTTP errors so the poller can retry transient ones. */
@@ -720,8 +758,13 @@ export class ImageModule implements ToolModule {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+// Resolves early (without rejecting) on abort — the poll loop re-checks
+// signal.aborted itself right after, so this only needs to shorten the wait.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    const t = setTimeout(r, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+  });
 }
 
 function sanitize(s: string): string {
