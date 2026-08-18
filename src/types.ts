@@ -300,6 +300,10 @@ export interface GatewayConfig {
       // task-log to memory/<topic>.md during the nightly dream (archive-safe),
       // instead of a manual per-agent `dreaming:migrate`. Default true; kill-switch.
       autoRouteOut?: boolean;
+      // planning-68: spread agents' nightly runs across a window (deterministic
+      // per-agent jitter added to the delay) to avoid a dreamHour thundering-herd.
+      // Default 30 min; clamped [0,55]; 0 = disabled (all fire at dreamHour:00).
+      staggerWindowMinutes?: number;
       /**
        * Archive staleness GC (planning-66). Nightly, deterministic pass (next to the
        * compactor, auto mode) that keeps `memory_search` surfacing CURRENT truth: it

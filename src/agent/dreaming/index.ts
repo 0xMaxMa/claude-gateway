@@ -121,6 +121,24 @@ function readFileSafe(filePath: string): string {
   }
 }
 
+/**
+ * planning-68 — deterministic per-agent jitter (ms) added to the nightly delay so
+ * agents don't all fire at `dreamHour:00` together (thundering herd → concurrent
+ * `claude -p` spawns). A stable string hash of `agentId` mapped into
+ * `[0, windowMinutes*60_000)`; NOT `Math.random`, so the offset is the same across
+ * reschedules and is unit-testable. Non-finite or `<= 0` window ⇒ 0 (feature off).
+ */
+export function agentJitterMs(agentId: string, windowMinutes: number): number {
+  if (!Number.isFinite(windowMinutes)) return 0;
+  const windowMs = Math.max(0, Math.floor(windowMinutes)) * 60_000;
+  if (windowMs <= 0) return 0;
+  let h = 0;
+  for (let i = 0; i < agentId.length; i++) {
+    h = (Math.imul(h, 31) + agentId.charCodeAt(i)) >>> 0;
+  }
+  return h % windowMs;
+}
+
 export class DreamingManager {
   readonly cfg: ResolvedDreamingCfg;
   private readonly deps: DreamingManagerDeps;
@@ -354,7 +372,11 @@ export class DreamingManager {
     if (!this.cfg.enabled || this.cfg.maxChangesPerRun <= 0) return;
     const tz = isValidTimezone(this.cfg.dreamTimezone) ? this.cfg.dreamTimezone : 'UTC';
     const schedule = (): void => {
-      const delay = msUntilNextHour(this.cfg.dreamHour, tz);
+      // planning-68: spread agents across a window so they don't all fire at
+      // dreamHour:00 together (deterministic per-agent offset, stable per reschedule).
+      const delay =
+        msUntilNextHour(this.cfg.dreamHour, tz) +
+        agentJitterMs(this.deps.agentId, this.cfg.staggerWindowMinutes);
       this.timer = setTimeout(() => {
         void this.dreamOnce(Date.now()).catch(() => {
           /* best-effort */
