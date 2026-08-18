@@ -251,7 +251,17 @@ export function compactCompletedEntries(
     const plan = planCompaction(original, now);
     if (plan.archivedCount === 0) return none;
 
-    // 1) Archive first (append to the searchable archive file).
+    // Early CAS: if a live agent edited MEMORY.md since we read it, abort BEFORE
+    // touching the archive — otherwise we would append entries that then can't be
+    // removed from MEMORY.md (the late CAS below would block the rewrite), and the
+    // next run would archive them again. Concurrent edits are rare (dreams run in a
+    // quiet window) but this keeps the common case duplicate-free.
+    const memPathNow = readOnDisk(memPath);
+    if (memPathNow !== original) return none;
+
+    // 1) Archive first (append to the searchable archive file). If a crash happens
+    // between this and the rewrite below, entries live in BOTH files (a harmless
+    // duplicate), never lost.
     const archivePath = path.join(workspaceDir, ARCHIVE_REL_PATH);
     const existingArchive = readOnDisk(archivePath);
     const header = existingArchive
@@ -259,7 +269,8 @@ export function compactCompletedEntries(
       : '# Archived completed log entries\n\nMoved out of MEMORY.md by nightly compaction (#337). Still searchable via `memory_search`.\n\n';
     atomicWrite(archivePath, header + plan.archiveAppend);
 
-    // 2) CAS: only rewrite MEMORY.md if it has not changed since our read.
+    // 2) Late CAS: re-check immediately before the rewrite (guards the tiny window
+    // between the early check and here).
     if (readOnDisk(memPath) !== original) return { ...none, archivePath };
     writeBackup(workspaceDir, original, now);
     atomicWrite(memPath, plan.nextMemory);
