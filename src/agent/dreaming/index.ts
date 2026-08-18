@@ -18,6 +18,7 @@ import { gatherTranscript, type DreamHistoryDb } from './gather';
 import { runDreamReviewer } from './reviewer';
 import { writeDreamAudit } from './audit';
 import { applyDreamProposals } from './applier';
+import { compactCompletedEntries } from './compactor';
 import type {
   DreamingConfig,
   DreamOutcome,
@@ -55,6 +56,45 @@ const MS_PER_MINUTE = 60 * 1000;
 // Cap the current-memory context fed to the reviewer so a large MEMORY.md (which
 // is exactly what dreaming exists to shrink) can't blow up the prompt.
 const REVIEWER_CONTEXT_CAP = 12_000;
+// Hard ceiling on shrink ops per run so a runaway over-budget reviewer can't thrash.
+const MAX_SHRINK_OPS_PER_RUN = 30;
+
+/** A proposal that reduces (or does not grow) MEMORY.md length. */
+function isShrinkOp(p: DreamProposal): boolean {
+  if (p.op === 'remove') return true;
+  if (p.op === 'replace') return (p.content ?? '').trim().length <= (p.target ?? '').length;
+  return false;
+}
+
+/**
+ * Select which proposals to apply this run (#337). Under budget: the classic
+ * first-N cap. Over budget (overageFactor > 1): keep the non-shrink (add/grow)
+ * cap at `maxChanges`, but allow proportionally MORE shrink ops (remove /
+ * length-reducing replace) so an over-budget file converges instead of trickling
+ * at `maxChanges`/night. Capped at MAX_SHRINK_OPS_PER_RUN.
+ */
+export function selectProposals(
+  proposals: DreamProposal[],
+  maxChanges: number,
+  overageFactor: number,
+): DreamProposal[] {
+  if (overageFactor <= 1 || maxChanges <= 0) return proposals.slice(0, maxChanges);
+  const shrinkCap = Math.min(maxChanges * Math.ceil(overageFactor), MAX_SHRINK_OPS_PER_RUN);
+  const out: DreamProposal[] = [];
+  let nonShrink = 0;
+  let shrink = 0;
+  for (const p of proposals) {
+    if (isShrinkOp(p)) {
+      if (shrink >= shrinkCap) continue;
+      shrink++;
+    } else {
+      if (nonShrink >= maxChanges) continue;
+      nonShrink++;
+    }
+    out.push(p);
+  }
+  return out;
+}
 
 function readFileSafe(filePath: string): string {
   try {
@@ -97,29 +137,51 @@ export class DreamingManager {
       return { outcome: 'skipped-quiet', ...base };
     }
 
-    if (!gathered.transcript.trim()) {
-      this.audit(now, 'skipped-empty', '', [], 0, 0);
-      return { outcome: 'skipped-empty', ...base };
+    const memoryPath = path.join(this.deps.workspaceDir, 'MEMORY.md');
+    const memoryBudget = this.deps.memoryBudgetChars ?? 8_000;
+
+    // DETERMINISTIC COMPACTION (#337): before the LLM reviewer, archive terminal
+    // (MERGED/CLOSED) log entries out to a searchable memory/archive/ file, leaving
+    // a pointer. This is the primary shrink lever for append-only PR/issue logs and
+    // needs no transcript — so it runs (auto mode only) even on empty-transcript
+    // nights. Best-effort; never blocks the dream.
+    let compactedCount = 0;
+    if (cfg.mode === 'auto') {
+      try {
+        compactedCount = compactCompletedEntries(this.deps.workspaceDir, now).archivedCount;
+      } catch {
+        compactedCount = 0;
+      }
     }
 
-    const currentMemory = readFileSafe(path.join(this.deps.workspaceDir, 'MEMORY.md')).slice(0, REVIEWER_CONTEXT_CAP);
+    if (!gathered.transcript.trim()) {
+      this.audit(now, 'skipped-empty', '', [], 0, 0, cfg.mode === 'auto' ? 0 : undefined, compactedCount);
+      return { outcome: 'skipped-empty', ...base, compactedCount };
+    }
+
+    // Read the TRUE on-disk MEMORY.md size for the budget signal (the reviewer
+    // context below is truncated, so it can't be used to measure the file).
+    const memoryChars = readFileSafe(memoryPath).length;
+    const currentMemory = readFileSafe(memoryPath).slice(0, REVIEWER_CONTEXT_CAP);
     const currentUser = readFileSafe(path.join(this.deps.workspaceDir, 'USER.md')).slice(0, REVIEWER_CONTEXT_CAP);
 
     let review;
     try {
       review = await runDreamReviewer(
-        { transcript: gathered.transcript, currentMemory, currentUser },
+        { transcript: gathered.transcript, currentMemory, currentUser, memoryChars, memoryBudget },
         cfg,
         this.deps.spawnFn,
       );
     } catch {
       // runDreamReviewer never throws, but belt-and-suspenders: a failed review
       // is a safe no-op.
-      this.audit(now, 'error', '', [], 0, gathered.sessionCount);
-      return { outcome: 'error', ...base };
+      this.audit(now, 'error', '', [], 0, gathered.sessionCount, undefined, compactedCount);
+      return { outcome: 'error', ...base, compactedCount };
     }
 
-    const proposals = review.proposals.slice(0, cfg.maxChangesPerRun);
+    // Over budget ⇒ allow proportionally more shrink ops so the file converges (#337).
+    const overageFactor = memoryBudget > 0 ? memoryChars / memoryBudget : 1;
+    const proposals = selectProposals(review.proposals, cfg.maxChangesPerRun, overageFactor);
     const outcome: DreamOutcome = review.timedOut
       ? 'error'
       : proposals.length > 0
@@ -135,7 +197,7 @@ export class DreamingManager {
       let appliedProposals: DreamProposal[] = [];
       try {
         const applied = applyDreamProposals(this.deps.workspaceDir, proposals, {
-          memoryBudgetChars: this.deps.memoryBudgetChars ?? 8_000,
+          memoryBudgetChars: memoryBudget,
           userBudgetChars: this.deps.userBudgetChars ?? 3_000,
         }, now);
         appliedCount = applied.totalApplied;
@@ -161,13 +223,14 @@ export class DreamingManager {
       }
     }
 
-    this.audit(now, outcome, review.summary, proposals, review.tokensSpent, gathered.sessionCount, cfg.mode === 'auto' ? appliedCount : undefined);
+    this.audit(now, outcome, review.summary, proposals, review.tokensSpent, gathered.sessionCount, cfg.mode === 'auto' ? appliedCount : undefined, compactedCount);
     this.log('Dream run complete', {
       agentId: this.deps.agentId,
       outcome,
       mode: cfg.mode,
       proposals: proposals.length,
       applied: appliedCount,
+      compacted: compactedCount,
       tokens: review.tokensSpent,
     });
 
@@ -177,6 +240,7 @@ export class DreamingManager {
       tokensSpent: review.tokensSpent,
       mode: cfg.mode,
       appliedCount,
+      compactedCount,
     };
   }
 
@@ -188,6 +252,7 @@ export class DreamingManager {
     tokensSpent: number,
     sessionCount: number,
     appliedCount?: number,
+    compactedCount?: number,
   ): void {
     writeDreamAudit(this.deps.workspaceDir, {
       ts,
@@ -198,6 +263,7 @@ export class DreamingManager {
       tokensSpent,
       sessionCount,
       appliedCount,
+      compactedCount,
     });
   }
 

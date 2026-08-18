@@ -74,4 +74,6 @@ export interface DreamRunResult {
   mode: DreamMode;
   /** Ops actually applied to memory (auto mode only; 0 in propose mode). */
   appliedCount?: number;
+  /** Terminal-state entries the deterministic compactor archived (auto mode; #337). */
+  compactedCount?: number;
 }
