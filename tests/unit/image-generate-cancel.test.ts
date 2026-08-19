@@ -186,3 +186,83 @@ describe('generate_image action="generate" — Stop mid-poll cancels the job', (
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   }, 20_000);
 });
+
+describe('drainCancel() — lets a process-exiting shutdown wait for the E3 call', () => {
+  const saved: Record<string, string | undefined> = {};
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env.ANTHROPIC_BASE_URL = BASE;
+    process.env.ANTHROPIC_AUTH_TOKEN = 'proxy-secret';
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('resolves immediately when nothing is in flight', async () => {
+    const mod = new ImageModule();
+    // No cancelledResult() ever ran — activeCancelPromise is still null.
+    await expect(mod.drainCancel()).resolves.toBeUndefined();
+  });
+
+  test('waits for an in-flight cancel call to actually finish before resolving', async () => {
+    const controller = new AbortController();
+    let resolveCancelFetch!: (res: Response) => void;
+    const cancelFetchGate = new Promise<Response>((resolve) => { resolveCancelFetch = resolve; });
+    let cancelFetchSettled = false;
+
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/v1/images/generations') && method === 'POST') {
+        controller.abort();
+        return new Response(JSON.stringify({ task_id: 'tid-drain', status: 'queued' }), { status: 202 });
+      }
+      if (url.includes('/v1/images/jobs/tid-drain/cancel') && method === 'POST') {
+        // Held open deliberately — drainCancel() must not resolve before this does.
+        const res = await cancelFetchGate;
+        cancelFetchSettled = true;
+        return res;
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    const mod = new ImageModule();
+    // Don't await yet — the cancel HTTP call is parked on cancelFetchGate.
+    const genPromise = mod.handleTool(
+      'generate_image',
+      { action: 'generate', model: 'gemini/gemini-2.5-flash-image', prompt: 'a red apple' },
+      controller.signal
+    );
+
+    // Give handleGenerate's poll loop a tick to reach cancelledResult() and set
+    // activeCancelPromise before we start racing drainCancel() against it.
+    await new Promise((r) => setImmediate(r));
+
+    let drainSettled = false;
+    const drainPromise = mod.drainCancel().then(() => { drainSettled = true; });
+
+    // The cancel fetch is still parked — neither the tool call nor drainCancel
+    // should have settled yet.
+    await new Promise((r) => setImmediate(r));
+    expect(cancelFetchSettled).toBe(false);
+    expect(drainSettled).toBe(false);
+
+    resolveCancelFetch(new Response(JSON.stringify({ task_id: 'tid-drain', cancelled: true, status: 'cancelling' }), { status: 200 }));
+
+    await drainPromise;
+    expect(drainSettled).toBe(true);
+    expect(cancelFetchSettled).toBe(true);
+
+    await genPromise;
+  });
+});

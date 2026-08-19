@@ -118,19 +118,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   // it by requestId) — the CLI sends that when a user Stop/Ctrl-C interrupts an
   // in-flight tool call. Threaded through so a long-running module (image
   // generation's poll loop) can react instead of running to its full timeout.
-  return mod.handleTool(toolName, args, extra.signal);
+  // Also combine with shutdownController.signal: the CLI sending that
+  // notification is only a "SHOULD" in the MCP spec, not a "MUST", and in
+  // practice a Stop that lets the CLI process exit cleanly (rather than
+  // staying alive to keep chatting) closes this server's stdin without ever
+  // sending notifications/cancelled — extra.signal would then never fire, and
+  // an in-flight image generation would poll to its full timeout instead of
+  // cancelling. stdin closing is a reliable, protocol-independent signal that
+  // the turn is over either way, so it backstops the notification.
+  const combinedSignal = AbortSignal.any([extra.signal, shutdownController.signal]);
+  return mod.handleTool(toolName, args, combinedSignal);
 });
 
 // Connect MCP transport
 await mcp.connect(new StdioServerTransport());
 
-// Graceful shutdown
+// Graceful shutdown — used by stdin-close, SIGINT, and SIGTERM paths.
+// Awaits any in-flight image cancel (E3) before exiting so the provider
+// actually stops generating when the user presses Stop, rather than the
+// process dying mid-request and the cancel call never reaching the server.
+const imageModuleRef = modules.find((m) => m.id === 'image') as { drainCancel?: () => Promise<void> } | undefined;
 let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   shutdownController.abort();
-  setTimeout(() => process.exit(0), 2000);
+  // Give the event loop one tick so the poll loop's sleep() onAbort listener
+  // fires and cancelledResult() sets activeCancelPromise before we try to drain it.
+  setImmediate(async () => {
+    try { await imageModuleRef?.drainCancel?.(); } catch { /* non-fatal */ }
+    process.exit(0);
+  });
 }
 process.stdin.on('end', shutdown);
 process.stdin.on('close', shutdown);
