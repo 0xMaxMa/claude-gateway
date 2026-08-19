@@ -1,7 +1,7 @@
 
 # Claude Gateway
 
-A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Telegram, HTTP APIs, and scheduled tasks — each runs in an isolated session with its own personality and tools. Agents don't just respond, they **grow**: a searchable knowledge base, long-term memory that consolidates itself through nightly dreaming, and skills they learn from their own work.
+A self-hosted multi-agent gateway for Claude Code — with agents that improve themselves, manage their own memory through nightly dreaming, and build a searchable knowledge base from what they learn.
 
 <p align="center">
   <img src="resource/claude_gateway.svg" alt="Claude Gateway" width="680" />
