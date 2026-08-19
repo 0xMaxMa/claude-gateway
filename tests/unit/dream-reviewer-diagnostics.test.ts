@@ -4,7 +4,7 @@ import * as path from 'path';
 
 import { DreamingManager } from '../../src/agent/dreaming';
 import { makeClaudeSpawn, type ClaudeSpawnFn } from '../../src/agent/skill-learning/reviewer';
-import { gatherTranscript, type DreamHistoryDb } from '../../src/agent/dreaming/gather';
+import type { DreamHistoryDb } from '../../src/agent/dreaming/gather';
 
 // Regression suite for #353 — the dream reviewer's failures used to be
 // undebuggable: makeClaudeSpawn discarded stderr and collapsed every failure into
@@ -193,6 +193,3 @@ describe('dreaming diagnostics (#353): reviewer failures are observable', () => 
     }
   });
 });
-
-// Keep the shared import referenced so the suite documents the real seam.
-void gatherTranscript;
