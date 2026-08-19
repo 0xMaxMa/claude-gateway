@@ -31,6 +31,14 @@ const CHANNEL_REPLY_TOOLS = new Set([
   'mcp__gateway__line_reply',
 ]);
 
+// Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
+// assistant text at all — used both to patch the in-memory prompt fed to the next
+// spawn (buildInitialPrompt below) and, in AgentRunner, to persist a real assistant
+// message to durable history so a dangling last-message-from-user turn doesn't leave
+// the web sidebar's "typing…" indicator stuck (isSessionPending only clears once the
+// last committed message is from the assistant).
+export const INTERRUPTED_NO_REPLY_TEXT = '[Session was interrupted before I could respond.]';
+
 /**
  * Resolve the per-spawn history re-injection cap with precedence
  * per-agent → global → MAX_HISTORY_MESSAGES. Non-finite or negative values are
@@ -98,6 +106,12 @@ export class SessionProcess extends EventEmitter {
   private restartRequested = false;
   private _processing = false;
   private _pendingRestart = false;
+  // Set by interrupt() right before SIGINT, cleared at the start of the next
+  // sendMessage(). Lets a caller's process-exit handler tell a /stop-triggered
+  // exit (CLI's SIGINT handler fell through to default termination instead of
+  // flushing a terminal `result` line) apart from a genuine crash — see
+  // consumeInterruptFlag().
+  private interruptRequested = false;
   private restartWatcher: chokidar.FSWatcher | null = null;
   private readonly sessionStore: SessionStore;
   private readonly agentConfig: AgentConfig;
@@ -284,7 +298,7 @@ export class SessionProcess extends EventEmitter {
     // If the last message is a dangling user turn (session was interrupted before Claude responded),
     // inject a synthetic assistant acknowledgement so the conversation structure stays valid.
     if (recent[recent.length - 1]?.role === 'user') {
-      recent.push({ role: 'assistant', content: '[Session was interrupted before I could respond.]', ts: Date.now() });
+      recent.push({ role: 'assistant', content: INTERRUPTED_NO_REPLY_TEXT, ts: Date.now() });
     }
 
     const historyText = recent
@@ -1005,9 +1019,17 @@ export class SessionProcess extends EventEmitter {
     });
     setTimeout(() => {
       if (!this.stopping) {
-        this.spawnProcess().catch(err =>
-          this.logger.error('restart failed', { error: err.message }),
-        );
+        this.spawnProcess()
+          // Tell anyone waiting on this SessionProcess (getOrSpawnSession's
+          // !isRunning() gap, below) that a new child is attached and
+          // sendMessage() will no longer silently no-op. Emitted on every
+          // successful crash-triggered respawn — cheap, and nothing currently
+          // listens outside that one call site.
+          .then(() => this.emit('restarted'))
+          .catch(err => {
+            this.logger.error('restart failed', { error: err.message });
+            this.emit('restartFailed', err);
+          });
       }
     }, AUTO_RESTART_DELAY_MS);
   }
@@ -1054,6 +1076,9 @@ export class SessionProcess extends EventEmitter {
       });
       return;
     }
+    // A new turn starting means any prior interrupt() is no longer "the last
+    // thing that happened" — don't let it misattribute a future crash.
+    this.interruptRequested = false;
     // Signal queued state + ensure typing signal file exists for this turn.
     // If the previous turn already called stop() and cleared the typing loop,
     // re-creating the signal file here lets stop() restart the loop for queued turns.
@@ -1176,8 +1201,22 @@ export class SessionProcess extends EventEmitter {
   interrupt(): boolean {
     if (!this.process || this.process.killed) return false;
     if (!this._processing) return false;
+    this.interruptRequested = true;
     this.process.kill('SIGINT');
     return true;
+  }
+
+  /**
+   * Reads and clears the interrupt() flag. True means the process exit a
+   * caller is currently handling followed a /stop SIGINT rather than an
+   * unrelated crash — e.g. so the exit can resolve the turn the same way a
+   * gracefully-flushed interrupted `result` line would, instead of surfacing
+   * a "process exited unexpectedly" error for something the user asked for.
+   */
+  consumeInterruptFlag(): boolean {
+    const requested = this.interruptRequested;
+    this.interruptRequested = false;
+    return requested;
   }
 
   markPendingRestart(): void {
