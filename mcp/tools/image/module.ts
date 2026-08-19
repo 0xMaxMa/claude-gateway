@@ -692,12 +692,14 @@ export class ImageModule implements ToolModule {
         text: JSON.stringify({
           status: 'done',
           task_id: taskId,
+          ...(model ? { model } : {}),
           byok: job.byok ?? false,
           cost: job.cost ?? 0,
           files,
           ...(artifacts ? { artifacts } : {}),
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
           note: 'Image saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]), or line_image on LINE. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
+            + (model ? ` Mention which model made it (${model}).` : '')
             + (artifacts ? ' To edit this image later, reference it via its artifact_ref (e.g. image: "artifact:...").' : '')
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),
         }),
