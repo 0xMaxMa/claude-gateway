@@ -232,16 +232,29 @@ export async function runDreamReviewer(
 
   let stdout = '';
   let timedOut = false;
+  let failureReason: string | undefined;
+  let stderrTail: string | undefined;
   try {
     const r = await spawn([], prompt);
     stdout = r.stdout;
     timedOut = r.timedOut ?? false;
-  } catch {
-    return { summary: '', proposals: [], tokensSpent: 0, timedOut: true };
+    failureReason = r.failureReason;
+    stderrTail = r.stderrTail;
+  } catch (err) {
+    // Contracted never to throw, but if an injected spawn does, capture why (#353).
+    return {
+      summary: '',
+      proposals: [],
+      tokensSpent: 0,
+      timedOut: true,
+      failureReason: `spawn-throw: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 
   if (timedOut || !stdout.trim()) {
-    return { summary: '', proposals: [], tokensSpent: 0, timedOut };
+    // Carry the diagnostics up so dreamOnce can log WHY (timeout / non-zero exit /
+    // API error on stderr) instead of recording an opaque error (#353).
+    return { summary: '', proposals: [], tokensSpent: 0, timedOut, failureReason, stderrTail };
   }
 
   const { resultText, tokens } = parseEnvelope(stdout);
