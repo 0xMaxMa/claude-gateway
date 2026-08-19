@@ -762,10 +762,16 @@ export class ImageModule implements ToolModule {
 
 // Resolves early (without rejecting) on abort — the poll loop re-checks
 // signal.aborted itself right after, so this only needs to shorten the wait.
+// The abort listener is removed when the timer fires normally: sleep() is called
+// once per poll iteration against the SAME long-lived signal (up to ~75 times for
+// the default 150s/2s budget), so leaving { once:true } listeners around on the
+// non-abort path would pile them onto that one signal and trip Node's
+// MaxListenersExceededWarning.
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((r) => {
-    const t = setTimeout(r, ms);
-    signal?.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true });
+    const onAbort = () => { clearTimeout(t); r(); };
+    const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); r(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

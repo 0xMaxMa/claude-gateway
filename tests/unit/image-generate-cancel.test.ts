@@ -20,11 +20,12 @@
  *     a poll loop worth reacting to) — handleTool's dispatch, not re-tested per
  *     action here since it's a single `case 'generate':` line change.
  */
+import { getEventListeners } from 'events';
 import { ImageModule } from '../../mcp/tools/image/module';
 
 const BASE = 'https://image.example.com';
 
-const ENV_KEYS = ['IMAGE_BASE_URL', 'ANTHROPIC_BASE_URL', 'IMAGE_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
+const ENV_KEYS = ['IMAGE_BASE_URL', 'ANTHROPIC_BASE_URL', 'IMAGE_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'IMAGE_POLL_TIMEOUT_MS'] as const;
 
 type Captured = { url: string; method: string };
 
@@ -144,4 +145,44 @@ describe('generate_image action="generate" — Stop mid-poll cancels the job', (
     expect(submitCount).toBe(1);
     expect(res.isError).toBe(true);
   });
+
+  test('the poll loop does not leak an abort listener per iteration on the normal (non-aborted) path', async () => {
+    // Regression: sleep() adds an { once:true } abort listener each poll iteration
+    // against the SAME long-lived per-call signal. { once:true } only removes it
+    // when abort actually fires — so on the normal path (timer fires, never
+    // aborted) an un-removed listener piles up every iteration (up to ~75 for the
+    // default 150s/2s budget), tripping Node's MaxListenersExceededWarning. Here
+    // the signal is NEVER aborted and the job stays 'processing' until the poll
+    // budget runs out, so after handleTool returns the signal must hold ZERO abort
+    // listeners. Before the fix this was one-per-iteration.
+    process.env.IMAGE_POLL_TIMEOUT_MS = '6000'; // ~3 real 2s sleeps, then deadline exit
+    const controller = new AbortController();
+    let polls = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/v1/images/generations') && method === 'POST') {
+        return new Response(JSON.stringify({ task_id: 'tid-leak', status: 'queued' }), { status: 202 });
+      }
+      if (url.endsWith('/v1/images/jobs/tid-leak') && method === 'GET') {
+        polls++;
+        return new Response(JSON.stringify({ task_id: 'tid-leak', status: 'processing' }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    const res = await new ImageModule().handleTool(
+      'generate_image',
+      { action: 'generate', model: 'gemini/gemini-2.5-flash-image', prompt: 'a red apple' },
+      controller.signal
+    );
+
+    // Loop ran several iterations (proving multiple sleeps happened) and exited via
+    // the poll-budget deadline, not via abort.
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(controller.signal.aborted).toBe(false);
+    expect((res.content[0] as { text: string }).text).toContain('still generating');
+    // The invariant: no abort listeners left dangling on the signal.
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  }, 20_000);
 });
