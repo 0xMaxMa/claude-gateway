@@ -23,6 +23,9 @@ A self-hosted multi-agent gateway for Claude Code. Connect Claude agents to Tele
 - **Persistent chat history** — two-layer storage: session context (`.jsonl`) + permanent SQLite DB with FTS5 full-text search; survives `/compact` and session eviction
 - **Auto-cleanup** — configurable retention policy prunes messages and media files older than N days on a daily schedule
 - **Long-term memory** — persistent memory system across sessions
+- **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](#gatewayknowledge)
+- **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](#gatewaydreaming)
+- **Skill self-improvement** — agents learn reusable skills from their own work: after a substantive turn a background reviewer creates or updates a skill, hot-reloaded for the next turn. Provenance-guarded (never overwrites human-written skills), capped per day, and audited to `SKILLS_LEARNED.md`. See [`gateway.skillLearning`](#gatewayskilllearning)
 - **Config auto-migration** — automatic schema migration when config format changes
 - **Access control** — allowlist, open, or pairing-based Telegram access policies
 - **HTTP API** — REST API with key-based auth for external integrations
