@@ -68,6 +68,39 @@ export function msUntilNextHour(hour: number, timezone: string, now = new Date()
   return hoursUntil * msPerHour - msIntoCurrentHour;
 }
 
+/**
+ * Compute milliseconds until the next occurrence of `hour:minute` in `timezone`.
+ * Minute-precision sibling of {@link msUntilNextHour}; if the target time has
+ * already passed today (or is exactly now), fires at the same time tomorrow.
+ * Handles half-hour/45-min offset timezones via formatToParts.
+ */
+export function msUntilNextTime(
+  hour: number,
+  minute: number,
+  timezone: string,
+  now = new Date(),
+): number {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hour: 'numeric',
+    hour12: false,
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const parts = fmt.formatToParts(now);
+  const curHour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10) % 24;
+  const curMinute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  const curSecond = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+
+  const msIntoDay = ((curHour * 60 + curMinute) * 60 + curSecond) * 1000 + (now.getTime() % 1000);
+  const targetMs = (hour * 60 + minute) * 60 * 1000;
+  const msPerDay = 24 * 60 * 60 * 1000;
+
+  let delay = targetMs - msIntoDay;
+  if (delay <= 0) delay += msPerDay;
+  return delay;
+}
+
 function doCleanup(opts: CleanupOptions): void {
   const { db, agentMediaRoot, logPath, retentionDays } = opts;
   if (retentionDays === 0) return;

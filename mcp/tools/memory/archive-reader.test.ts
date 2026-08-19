@@ -83,6 +83,42 @@ test('searchArchive: FTS match returns ranked hit with provenance + importance',
   }
 });
 
+// Regression (#351): a kb.sqlite built before the planning-66 `entry_hash`
+// column (exactly what `mkAgentWithArchive` produces) must not crash the read
+// path with `no such column: entry_hash`. searchArchive heals the column in
+// place and returns hits with entryHash=null. Proven to throw on pre-fix code.
+test('searchArchive: DB missing entry_hash column does not throw and heals it', () => {
+  const { workspaceDir, agentDir } = mkAgentWithArchive([
+    { id: 'memory/x.md#1-1', path: 'memory/x.md', start: 1, end: 1, text: 'ingress 401 token mismatch', origin: 'agent' },
+  ]);
+  const dbPath = archiveDbPath(workspaceDir);
+  const cols = (dbPath: string): string[] => {
+    const d = new Database(dbPath, { readonly: true });
+    try {
+      return (d.query(`PRAGMA table_info(kb_chunks)`).all() as Array<{ name: string }>).map((c) => c.name);
+    } finally {
+      d.close();
+    }
+  };
+  try {
+    // Precondition: the pre-#346 fixture genuinely lacks the column.
+    expect(cols(dbPath)).not.toContain('entry_hash');
+
+    let hits: ReturnType<typeof searchArchive> = [];
+    expect(() => {
+      hits = searchArchive(dbPath, 'ingress 401', 6);
+    }).not.toThrow();
+    expect(hits.length).toBe(1);
+    expect(hits[0].path).toBe('memory/x.md');
+    expect(hits[0].entryHash).toBeNull();
+
+    // The read path healed the DB in place so subsequent writers/readers are safe.
+    expect(cols(dbPath)).toContain('entry_hash');
+  } finally {
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test('searchArchive: missing DB → [], empty/punctuation query → []', () => {
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb1-'));
   const workspaceDir = path.join(agentDir, 'workspace');

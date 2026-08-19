@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.28",
+  "configVersion": "1.0.29",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -88,6 +88,7 @@
       "enabled": true,
       "mode": "auto",
       "dreamHour": 3,
+      "dreamMinute": 0,
       "dreamTimezone": "UTC",
       "quietMinutes": 30,
       "lookbackDays": 3,

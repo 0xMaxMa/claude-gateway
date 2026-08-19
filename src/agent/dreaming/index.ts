@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { msUntilNextHour } from '../../history/cleanup';
+import { msUntilNextTime } from '../../history/cleanup';
 import { isValidTimezone } from '../skill-learning/config';
 import type { ClaudeSpawnFn } from '../skill-learning/reviewer';
 import { resolveDreamingConfig } from './config';
@@ -260,9 +260,15 @@ export class DreamingManager {
         cfg,
         this.deps.spawnFn,
       );
-    } catch {
-      // runDreamReviewer never throws, but belt-and-suspenders: a failed review
-      // is a safe no-op.
+    } catch (err) {
+      // runDreamReviewer is not supposed to throw, but if it does, surface the
+      // cause instead of swallowing it silently — an outcome=error run with no
+      // diagnostics is undebuggable. Compaction + route-out already committed
+      // this tick, so note that they succeeded even though the reviewer failed.
+      this.log('dream: reviewer failed; keeping compaction/route-out results', {
+        error: err instanceof Error ? err.message : String(err),
+        compacted: compactedCount,
+      });
       this.audit(now, 'error', '', [], 0, gathered.sessionCount, undefined, compactedCount);
       return { outcome: 'error', ...base, compactedCount };
     }
@@ -375,7 +381,7 @@ export class DreamingManager {
       // planning-68: spread agents across a window so they don't all fire at
       // dreamHour:00 together (deterministic per-agent offset, stable per reschedule).
       const delay =
-        msUntilNextHour(this.cfg.dreamHour, tz) +
+        msUntilNextTime(this.cfg.dreamHour, this.cfg.dreamMinute, tz) +
         agentJitterMs(this.deps.agentId, this.cfg.staggerWindowMinutes);
       this.timer = setTimeout(() => {
         void this.dreamOnce(Date.now()).catch(() => {
