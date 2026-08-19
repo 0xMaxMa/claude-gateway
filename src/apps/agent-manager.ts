@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { AppsRegistry, AppEntry } from './registry';
+import { pathWithNativeBin } from '../session/claude-bin';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,10 +53,21 @@ export class AgentManager {
   /**
    * Detect host binary paths for injection into the agent container.
    * Runs once at install time; results stored in apps.json.
+   *
+   * The PATH is hardened with the native-installer bin dir before probing, the
+   * same way process.ts hardens a spawned child's PATH. Without it, execSync
+   * inherits the gateway's own PATH — under systemd that omits ~/.local/bin, so
+   * `which claude` misses the native install and can return a compat wrapper
+   * script instead. Mounting that wrapper into the container is fatal: it only
+   * re-probes host paths that were never mounted, so it exits 1 on every turn.
    */
   detectAgentPaths(): AgentPaths {
+    const hardenedPath = pathWithNativeBin();
     const run = (cmd: string): string =>
-      execSync(cmd, { encoding: 'utf-8' }).toString().trim();
+      execSync(cmd, {
+        encoding: 'utf-8',
+        env: { ...process.env, ...(hardenedPath ? { PATH: hardenedPath } : {}) },
+      }).toString().trim();
 
     const claudeBin = run('which claude');
     const realClaudeBin = fs.realpathSync(claudeBin);
