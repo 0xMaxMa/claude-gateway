@@ -113,6 +113,15 @@ export interface DreamReviewResult {
   /** Tokens the reviewer spent (input+output), for the net-token ledger. 0 if unknown. */
   tokensSpent: number;
   timedOut?: boolean;
+  /**
+   * Diagnostics (#353) for a failed run: WHY the reviewer produced no usable
+   * output (e.g. 'timeout', 'spawn-error: …', 'nonzero-exit:1', 'spawn-throw: …')
+   * and a bounded tail of the child's stderr (an API error such as
+   * overloaded_error). Absent on success. Logged by dreamOnce so an
+   * `outcome=error` run is debuggable instead of opaque.
+   */
+  failureReason?: string;
+  stderrTail?: string;
 }
 
 export type DreamOutcome =

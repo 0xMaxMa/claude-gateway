@@ -261,11 +261,13 @@ export class DreamingManager {
         this.deps.spawnFn,
       );
     } catch (err) {
-      // runDreamReviewer is not supposed to throw, but if it does, surface the
-      // cause instead of swallowing it silently — an outcome=error run with no
-      // diagnostics is undebuggable. Compaction + route-out already committed
-      // this tick, so note that they succeeded even though the reviewer failed.
-      this.log('dream: reviewer failed; keeping compaction/route-out results', {
+      // Defensive only: runDreamReviewer is contracted NEVER to throw — it converts
+      // every spawn failure into a `timedOut` result. The #352 catch that logged
+      // here was therefore dead code. Keep a minimal guard so a future contract
+      // break still audits instead of crashing, but the REAL reviewer-failure
+      // diagnostic lives on the reachable branch below (#353).
+      this.log('dream: reviewer threw unexpectedly (contract violation)', {
+        agentId: this.deps.agentId,
         error: err instanceof Error ? err.message : String(err),
         compacted: compactedCount,
       });
@@ -281,6 +283,22 @@ export class DreamingManager {
       : proposals.length > 0
         ? 'proposed'
         : 'no-changes';
+
+    // Surface WHY the reviewer produced no usable output (#353). This was
+    // previously invisible: makeClaudeSpawn discarded stderr and collapsed
+    // timeout / spawn-error / non-zero-exit into a lone `timedOut`, and the #352
+    // reviewer-catch log above was unreachable (runDreamReviewer never throws).
+    // Log the distinguishable reason HERE, on the branch that actually fires, so
+    // the next dream night records the real cause (timeout vs API 429 vs …).
+    if (review.timedOut || review.failureReason) {
+      this.log('dream: reviewer produced no usable output', {
+        agentId: this.deps.agentId,
+        outcome,
+        failureReason: review.failureReason ?? 'unknown',
+        stderrTail: review.stderrTail,
+        compacted: compactedCount,
+      });
+    }
 
     // AUTO MODE (K4): apply the ops to memory through the safe applier (backup +
     // ordered anchor re-resolution + bounded-loss + net-negative + append-only

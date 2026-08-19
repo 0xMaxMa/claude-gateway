@@ -33,8 +33,20 @@ export interface ReviewerResult {
   timedOut?: boolean;
 }
 
-/** Injectable spawn: given argv + stdin, resolve with the process stdout. */
-export type ClaudeSpawnFn = (args: string[], stdin: string) => Promise<{ stdout: string; timedOut?: boolean }>;
+/**
+ * Injectable spawn: given argv + stdin, resolve with the process stdout.
+ *
+ * `failureReason` / `stderrTail` are diagnostics (#353): previously every failure
+ * mode collapsed into a bare `timedOut` and the child's stderr was discarded, so
+ * an `outcome=error` dream run was undebuggable. These optional fields let a caller
+ * log WHY a spawn failed (timeout vs spawn-error vs non-zero exit + the API error on
+ * stderr) without changing the success contract — consumers that only read
+ * `{ stdout, timedOut }` are unaffected.
+ */
+export type ClaudeSpawnFn = (
+  args: string[],
+  stdin: string,
+) => Promise<{ stdout: string; timedOut?: boolean; failureReason?: string; stderrTail?: string }>;
 
 const SYSTEM_PROMPT = `You are a skill-distillation reviewer for an AI agent. You are given a finished work transcript and the agent's existing skills. Decide whether the transcript reveals a REUSABLE procedure worth capturing as a skill so future similar tasks are faster.
 
@@ -84,7 +96,16 @@ export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
     return new Promise((resolve) => {
       let done = false;
       let out = '';
-      const finish = (r: { stdout: string; timedOut?: boolean }): void => {
+      // Bounded stderr tail (#353): capture enough to surface an API error
+      // (e.g. 429 / overloaded_error) without letting a chatty child balloon
+      // memory. Keep consuming the stream even after the cap so it never blocks.
+      let errOut = '';
+      const STDERR_TAIL_CAP = 2_000;
+      const tail = (): string | undefined => {
+        const t = errOut.slice(-STDERR_TAIL_CAP).trim();
+        return t.length ? t : undefined;
+      };
+      const finish = (r: { stdout: string; timedOut?: boolean; failureReason?: string; stderrTail?: string }): void => {
         if (done) return;
         done = true;
         clearTimeout(timer);
@@ -96,17 +117,43 @@ export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
         } catch {
           /* already gone */
         }
-        finish({ stdout: '', timedOut: true });
+        finish({ stdout: '', timedOut: true, failureReason: 'timeout', stderrTail: tail() });
       }, REVIEWER_TIMEOUT_MS);
       const child = spawn(claudeBin, args, {
-        stdio: ['pipe', 'pipe', 'ignore'],
+        // Pipe stderr (was 'ignore') so a spawn/API failure's real message is
+        // recoverable instead of silently dropped (#353).
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, PATH: pathWithNativeBin() ?? process.env.PATH },
       });
       child.stdout?.on('data', (d) => {
         out += String(d);
       });
-      child.on('error', () => finish({ stdout: '', timedOut: true }));
-      child.on('close', () => finish({ stdout: out }));
+      child.stderr?.on('data', (d) => {
+        if (errOut.length < STDERR_TAIL_CAP * 4) errOut += String(d);
+      });
+      child.on('error', (err) =>
+        finish({
+          stdout: '',
+          timedOut: true,
+          failureReason: `spawn-error: ${err instanceof Error ? err.message : String(err)}`,
+          stderrTail: tail(),
+        }),
+      );
+      child.on('close', (code) => {
+        // Clean exit WITH output = success (unchanged). Empty stdout — typically a
+        // non-zero exit whose real error went to stderr — is now surfaced with the
+        // exit code + stderr tail instead of an opaque empty result. `timedOut`
+        // stays falsy on this path, so downstream outcome classification is unchanged.
+        if (out.trim()) {
+          finish({ stdout: out });
+        } else {
+          finish({
+            stdout: '',
+            failureReason: code === 0 ? 'empty-output' : `nonzero-exit:${code ?? 'null'}`,
+            stderrTail: tail(),
+          });
+        }
+      });
       // The stdin socket emits its own async 'error' (e.g. EPIPE if the child
       // exits before we finish writing). `child.on('error')` does NOT cover the
       // stream, so without this handler that event is unhandled and can crash
@@ -116,7 +163,7 @@ export function makeClaudeSpawn(reviewModel: string): ClaudeSpawnFn {
         child.stdin?.write(stdin);
         child.stdin?.end();
       } catch {
-        finish({ stdout: '', timedOut: true });
+        finish({ stdout: '', timedOut: true, failureReason: 'stdin-error', stderrTail: tail() });
       }
     });
   };
