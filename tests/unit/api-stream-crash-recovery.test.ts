@@ -30,6 +30,16 @@ jest.mock('../../src/history/db', () => ({
   },
 }));
 
+// ── knowledge/archive-db mock (same node:sqlite gap, pulled in transitively via
+// process.ts's resolveSharedConfig/sharedVaultDir import and runner.ts's
+// fire-and-forget spawnArchiveReindex on session spawn) — shared knowledge is
+// disabled, so nothing here needs to do anything.
+jest.mock('../../src/agent/knowledge', () => ({
+  resolveSharedConfig: jest.fn(() => ({ enabled: false })),
+  sharedVaultDir: jest.fn(() => '/tmp'),
+  spawnArchiveReindex: jest.fn(),
+}));
+
 // ── child_process mock (capture the spawned mock process for output/exit) ────
 interface MockStdin { writable: boolean; write: jest.Mock }
 interface MockChildProcess extends EventEmitter {
