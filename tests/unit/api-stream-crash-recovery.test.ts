@@ -69,7 +69,7 @@ jest.mock('child_process', () => ({
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import { AgentRunner } from '../../src/agent/runner';
-import { SessionProcess } from '../../src/session/process';
+import { SessionProcess, INTERRUPTED_NO_REPLY_TEXT } from '../../src/session/process';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
 function makeAgentConfig(workspace: string): AgentConfig {
@@ -287,6 +287,51 @@ describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => 
 
       expect(onDone).toHaveBeenCalledTimes(1);
       expect(onDone.mock.calls[0][0]).toBe('partial reply');
+      expect(onError).not.toHaveBeenCalled();
+      expect(runner.hasActiveApiSession(sessionId)).toBe(false);
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  });
+
+  it('/stop with NOTHING streamed yet persists an interrupted placeholder, not a silent empty turn', async () => {
+    // Regression: a /stop landing before any text/tool output (e.g. the user
+    // asked for something that would call a tool, and hit Stop before the
+    // model produced a single token) left `done('')` persisting nothing at
+    // all — the last committed message stayed the user's forever, so the web
+    // sidebar's "typing…" indicator (computePendingConversationIds, which
+    // only clears once the last message is from the assistant) never
+    // cleared. Confirmed live: a real session's history DB showed the user's
+    // message as the newest row with no assistant reply after it.
+    let liveSession: SessionProcess | undefined;
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        liveSession = this;
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      const onDone = jest.fn();
+      const onError = jest.fn();
+
+      await runner.sendApiMessageStream(
+        sessionId,
+        chatId,
+        'generate me a picture',
+        { onChunk: jest.fn(), onDone, onError },
+        { timeoutMs: 60_000 },
+      );
+
+      expect(liveSession).toBeDefined();
+
+      // Stop before a single token of output arrived — buffer is still empty.
+      expect(liveSession!.interrupt()).toBe(true);
+      await new Promise((r) => setImmediate(r));
+
+      expect(onDone).toHaveBeenCalledTimes(1);
+      expect(onDone.mock.calls[0][0]).toBe(INTERRUPTED_NO_REPLY_TEXT);
       expect(onError).not.toHaveBeenCalled();
       expect(runner.hasActiveApiSession(sessionId)).toBe(false);
     } finally {

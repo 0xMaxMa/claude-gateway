@@ -6,7 +6,7 @@ import * as net from 'net';
 import * as path from 'path';
 import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
 import { createLogger } from '../logger';
-import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages } from '../session/process';
+import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
 import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
@@ -2796,19 +2796,27 @@ export class AgentRunner extends EventEmitter {
       // line that already settled this turn (see onExit below).
       let settled = false;
 
-      const done = (result: string) => {
+      const done = (result: string, interrupted = false) => {
         if (settled) return;
         settled = true;
         cleanup();
         const attachments = this.popApiAttachments(sessionId);
+        const trimmed = result.trim();
+        // A /stop that lands before any text or attachment came out of this turn
+        // would otherwise persist nothing at all — the last committed message
+        // stays the user's forever, and the web sidebar's "typing…" indicator
+        // never clears (it only clears once the last message is from the
+        // assistant). Same wording buildInitialPrompt uses to patch this same
+        // dangling-turn shape for the next spawn's in-memory context.
+        const finalText = !trimmed && !attachments.length && interrupted ? INTERRUPTED_NO_REPLY_TEXT : trimmed;
         // Persist assistant reply. Image-only replies (empty text but attachments
         // present) must also persist — otherwise the screenshot vanishes from history.
-        if (result.trim() || attachments.length) {
+        if (finalText || attachments.length) {
           const apiAssistantTs = Date.now();
           this.sessionStore
             .appendMessage(this.agentConfig.id, sessionId, {
               role: 'assistant',
-              content: result.trim(),
+              content: finalText,
               ts: apiAssistantTs,
             })
             .catch(() => {});
@@ -2817,12 +2825,12 @@ export class AgentRunner extends EventEmitter {
             sessionId,
             source: 'api',
             role: 'assistant',
-            content: result.trim(),
+            content: finalText,
             mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
             ts: apiAssistantTs,
           });
         }
-        resolve({ text: result.trim(), attachments });
+        resolve({ text: finalText, attachments });
       };
 
       const fail = (err: Error) => {
@@ -2849,8 +2857,9 @@ export class AgentRunner extends EventEmitter {
       // successful stop, not a crash — resolve like the graceful path instead
       // of surfacing "process exited unexpectedly" for a stop the user asked for.
       const onExit = () => {
-        if (session.consumeInterruptFlag()) {
-          done(buffer.join(''));
+        const interrupted = session.consumeInterruptFlag();
+        if (interrupted) {
+          done(buffer.join(''), true);
           return;
         }
         fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
@@ -2867,7 +2876,7 @@ export class AgentRunner extends EventEmitter {
 
       const resetQuiet = () => {
         if (quietTimer) clearTimeout(quietTimer);
-        quietTimer = setTimeout(() => done(buffer.join('')), 2000);
+        quietTimer = setTimeout(() => done(buffer.join(''), session.consumeInterruptFlag()), 2000);
       };
 
       const onOutput = (line: string) => {
@@ -2906,7 +2915,12 @@ export class AgentRunner extends EventEmitter {
             // accumulated buffer (needed for non-Anthropic models e.g. OpenRouter,
             // which emit result:"" even though the text arrived via stream_event chunks).
             const resultText = (obj['result'] as string | undefined) || buffer.join('');
-            done(resultText);
+            // Consumed here (rather than left for onExit) so the graceful path — a
+            // result line flushed before the subprocess exits — still gets credit
+            // for the interrupt; onExit's own consumeInterruptFlag() call would
+            // otherwise see it already cleared and take the (harmless, settled-
+            // guarded) fail() branch instead.
+            done(resultText, session.consumeInterruptFlag());
           }
         } catch {
           /* non-JSON stdout line */
@@ -3029,20 +3043,28 @@ export class AgentRunner extends EventEmitter {
     // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
     const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
-    const done = (result: string) => {
+    const done = (result: string, interrupted = false) => {
       if (settled) return;
       settled = true;
       cleanup();
       const attachments = this.popApiAttachments(sessionId);
+      const trimmed = result.trim();
+      // A /stop that lands before any text or attachment came out of this turn
+      // would otherwise persist nothing at all — the last committed message
+      // stays the user's forever, and the web sidebar's "typing…" indicator
+      // never clears (it only clears once the last message is from the
+      // assistant). Same wording buildInitialPrompt uses to patch this same
+      // dangling-turn shape for the next spawn's in-memory context.
+      const finalText = !trimmed && !attachments.length && interrupted ? INTERRUPTED_NO_REPLY_TEXT : trimmed;
       // Persist assistant reply regardless of whether the SSE client is still connected.
       // Image-only replies (empty text but attachments present) must also persist —
       // otherwise the screenshot vanishes from history once the stream ends.
-      if (result.trim() || attachments.length) {
+      if (finalText || attachments.length) {
         const streamAssistantTs = Date.now();
         this.sessionStore
           .appendMessage(this.agentConfig.id, sessionId, {
             role: 'assistant',
-            content: result.trim(),
+            content: finalText,
             ts: streamAssistantTs,
           })
           .catch(() => {});
@@ -3051,12 +3073,12 @@ export class AgentRunner extends EventEmitter {
           sessionId,
           source: 'api',
           role: 'assistant',
-          content: result.trim(),
+          content: finalText,
           mediaFiles: attachments.length ? attachments.map((a) => `media/${a.relPath}`) : undefined,
           ts: streamAssistantTs,
         });
       }
-      callbacks.onDone(result.trim(), attachments);
+      callbacks.onDone(finalText, attachments);
     };
 
     const fail = (err: Error) => {
@@ -3084,8 +3106,9 @@ export class AgentRunner extends EventEmitter {
     // successful stop, not a crash — resolve like the graceful path instead
     // of surfacing "process exited unexpectedly" for a stop the user asked for.
     const onExit = () => {
-      if (session.consumeInterruptFlag()) {
-        done(buffer.join(''));
+      const interrupted = session.consumeInterruptFlag();
+      if (interrupted) {
+        done(buffer.join(''), true);
         return;
       }
       fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
@@ -3169,7 +3192,12 @@ export class AgentRunner extends EventEmitter {
           lastPartialText = ''; // reset for next turn
           // Use || so empty-string result falls back to buffer (OpenRouter emits result:"").
           const resultText = (obj['result'] as string | undefined) || buffer.join('');
-          done(resultText);
+          // Consumed here (rather than left for onExit) so the graceful path — a
+          // result line flushed before the subprocess exits — still gets credit
+          // for the interrupt; onExit's own consumeInterruptFlag() call would
+          // otherwise see it already cleared and take the (harmless, settled-
+          // guarded) fail() branch instead.
+          done(resultText, session.consumeInterruptFlag());
         }
       } catch {
         /* non-JSON stdout line */

@@ -31,6 +31,14 @@ const CHANNEL_REPLY_TOOLS = new Set([
   'mcp__gateway__line_reply',
 ]);
 
+// Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
+// assistant text at all — used both to patch the in-memory prompt fed to the next
+// spawn (buildInitialPrompt below) and, in AgentRunner, to persist a real assistant
+// message to durable history so a dangling last-message-from-user turn doesn't leave
+// the web sidebar's "typing…" indicator stuck (isSessionPending only clears once the
+// last committed message is from the assistant).
+export const INTERRUPTED_NO_REPLY_TEXT = '[Session was interrupted before I could respond.]';
+
 /**
  * Resolve the per-spawn history re-injection cap with precedence
  * per-agent → global → MAX_HISTORY_MESSAGES. Non-finite or negative values are
@@ -290,7 +298,7 @@ export class SessionProcess extends EventEmitter {
     // If the last message is a dangling user turn (session was interrupted before Claude responded),
     // inject a synthetic assistant acknowledgement so the conversation structure stays valid.
     if (recent[recent.length - 1]?.role === 'user') {
-      recent.push({ role: 'assistant', content: '[Session was interrupted before I could respond.]', ts: Date.now() });
+      recent.push({ role: 'assistant', content: INTERRUPTED_NO_REPLY_TEXT, ts: Date.now() });
     }
 
     const historyText = recent
