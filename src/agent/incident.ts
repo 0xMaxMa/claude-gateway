@@ -57,7 +57,7 @@ export interface IncidentManifest {
   cliVersion: string
   /** Gateway version at capture time, or 'unknown'. Context only. */
   gatewayVersion: string
-  /** Transport name only: 'telegram' | 'discord' | 'line' | 'api'. */
+  /** Transport name only: 'telegram' | 'discord' | 'line' | 'slack' | 'api'. */
   channel: string
   /** First and most-recent occurrence (epoch ms). */
   firstAt: number

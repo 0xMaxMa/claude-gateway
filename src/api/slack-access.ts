@@ -38,8 +38,16 @@ export function isSlackSenderAllowed(
  * trivially testable. Slack sources are one of:
  *   im (DM)  → { channel_type: 'im',      channel, user }
  *   channel  → { channel_type: 'channel', channel, user }  (also 'group'/'mpim', both treated as 'group' here)
+ *
+ * `app_mention` events are a special case: Slack does NOT include
+ * `channel_type` on them at all (confirmed live — only `message` events
+ * carry it) — only `type: 'app_mention'`, `channel`, `user`. Since
+ * `app_mention` only ever fires for channel/group mentions (never DMs — a
+ * DM mention is just a plain `message.im` event), `type` is accepted here
+ * specifically to classify that case without needing `channel_type`.
  */
 export interface SlackEventLike {
+  type?: string;
   channel?: string;
   channel_type?: string;
   user?: string;
@@ -61,6 +69,8 @@ export function resolveSlackSource(event: SlackEventLike | undefined | null): Re
   const conversationId = event?.channel ?? '';
   const senderId = event?.user ?? '';
   if (!conversationId) return { conversationId: '', senderId: '', kind: 'other' };
+  // app_mention has no channel_type — it's always a channel/group context.
+  if (event?.type === 'app_mention') return { conversationId, senderId, kind: 'group' };
   if (channelType === 'im') return { conversationId, senderId, kind: 'user' };
   if (channelType === 'channel' || channelType === 'group' || channelType === 'mpim') {
     return { conversationId, senderId, kind: 'group' };

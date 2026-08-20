@@ -79,6 +79,15 @@ describe('resolveSlackSource()', () => {
     expect(resolveSlackSource({ channel_type: 'group', channel: C, user: U }).kind).toBe('group');
     expect(resolveSlackSource({ channel_type: 'mpim', channel: C, user: U }).kind).toBe('group');
   });
+  // Regression: Slack's app_mention event carries NO channel_type at all
+  // (confirmed live) — without this branch it fell through to 'other' and
+  // got silently denied, which was the actual reason @mentions in a channel
+  // never reached the agent even after the channel was allowlisted.
+  test('app_mention events have no channel_type but still resolve to kind group', () => {
+    expect(resolveSlackSource({ type: 'app_mention', channel: C, user: U })).toEqual({
+      conversationId: C, senderId: U, kind: 'group',
+    });
+  });
   test('missing channel → other', () => {
     expect(resolveSlackSource({ channel_type: 'im', user: U }).kind).toBe('other');
   });

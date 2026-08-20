@@ -5,7 +5,7 @@ import crypto from 'crypto';
  * authenticated the requesting user (allowlist / pairing gate) before a pairing
  * is ever created, so the channel + user id recorded here is a trusted binding.
  */
-export type CliChannel = 'telegram' | 'discord' | 'line';
+export type CliChannel = 'telegram' | 'discord' | 'line' | 'slack';
 
 /** Runtime guard for the trusted channel set (payloads cross a process boundary). */
 export function isCliChannel(value: unknown): value is CliChannel {

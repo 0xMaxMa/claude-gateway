@@ -1,4 +1,4 @@
-export type CommandChannel = 'telegram' | 'discord' | 'line' | 'api';
+export type CommandChannel = 'telegram' | 'discord' | 'line' | 'slack' | 'api';
 
 interface CommandDef {
   channels: CommandChannel[];

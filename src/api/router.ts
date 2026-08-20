@@ -2287,12 +2287,12 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line chats' });
+    if (source !== 'telegram' && source !== 'discord' && source !== 'line' && source !== 'slack') {
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack chats' });
       return;
     }
     try {
-      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord' | 'line');
+      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord' | 'line' | 'slack');
       res.json(index);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2477,8 +2477,8 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line chats' });
+    if (source !== 'telegram' && source !== 'discord' && source !== 'line' && source !== 'slack') {
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack chats' });
       return;
     }
 
@@ -2526,7 +2526,7 @@ export function createApiRouter(
 
       cleanup = await runner.sendMessageToSession(
         rawChatId,
-        source as 'telegram' | 'discord' | 'line',
+        source as 'telegram' | 'discord' | 'line' | 'slack',
         sessionId,
         content.trim(),
         senderName,
@@ -3259,5 +3259,6 @@ function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: st
   if (fullChatId.startsWith('telegram-')) return { source: 'telegram', rawChatId: fullChatId.slice(9) };
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
   if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
+  if (fullChatId.startsWith('slack-')) return { source: 'slack', rawChatId: fullChatId.slice(6) };
   return { source: 'api', rawChatId: fullChatId };
 }

@@ -36,14 +36,27 @@ export class SlackClient {
     this.logger = createLogger('slack-client', opts.logDir);
   }
 
+  /**
+   * form-urlencoded, not JSON: write-oriented methods (chat.postMessage,
+   * reactions.*) accept a JSON body fine, but read/info methods
+   * (users.info, conversations.info) do NOT reliably parse it — confirmed
+   * live (users.info returned "user_not_found" for a real user id via JSON,
+   * "ok":true via form-encoding). form-urlencoded is the one format every
+   * Slack Web API method accepts, so use it uniformly rather than branching
+   * per method.
+   */
   private async call(method: string, body: Record<string, unknown>): Promise<SlackApiResponse> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(body)) {
+      if (v !== undefined) params.set(k, String(v));
+    }
     const res = await fetch(`${this.apiBase}/${method}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.botToken}`,
-        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
       },
-      body: JSON.stringify(body),
+      body: params,
     });
     const json = (await res.json()) as SlackApiResponse;
     if (!json.ok) {
@@ -97,5 +110,32 @@ export class SlackClient {
     if (!json.ok && json.error !== 'no_reaction') {
       this.logger.debug('removeReaction failed', { error: json.error });
     }
+  }
+
+  /**
+   * Best-effort display name for a pending-knock DM sender — mirrors LINE's
+   * `getProfile()` backfill in line-webhook-router.ts. Needs the `users:read`
+   * scope; returns undefined (never throws) if missing or the call fails, so
+   * the pending list just falls back to "Unknown" same as before this existed.
+   */
+  async getUserDisplayName(userId: string): Promise<string | undefined> {
+    const json = await this.call('users.info', { user: userId });
+    if (!json.ok) return undefined;
+    const user = json.user as
+      | { profile?: { display_name?: string; real_name?: string }; real_name?: string }
+      | undefined;
+    return user?.profile?.display_name || user?.profile?.real_name || user?.real_name || undefined;
+  }
+
+  /**
+   * Best-effort channel name for a pending-knock channel — mirrors LINE's
+   * `getGroupSummary()` backfill. Needs `channels:read` (public) / `groups:read`
+   * (private); same graceful undefined-on-failure contract as above.
+   */
+  async getChannelName(channelId: string): Promise<string | undefined> {
+    const json = await this.call('conversations.info', { channel: channelId });
+    if (!json.ok) return undefined;
+    const channel = json.channel as { name?: string } | undefined;
+    return channel?.name || undefined;
   }
 }

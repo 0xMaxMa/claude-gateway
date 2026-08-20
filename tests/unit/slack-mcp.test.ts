@@ -146,7 +146,9 @@ describe('SlackModule', () => {
       process.env.SLACK_BOT_TOKEN = 'xoxb-test';
       calls = [];
       global.fetch = (async (url: string, init: RequestInit) => {
-        const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
+        // Slack calls are form-urlencoded now (see slack-client.ts's `call()` doc
+        // comment) — every value round-trips as a string, not JSON.
+        const body = init?.body ? Object.fromEntries(new URLSearchParams(String(init.body))) : {};
         calls.push({ url, body });
         return {
           ok: true,
@@ -170,8 +172,8 @@ describe('SlackModule', () => {
       expect(postCall?.body).toMatchObject({
         channel: 'D1',
         text: 'hello back',
-        unfurl_links: false,
-        unfurl_media: false,
+        unfurl_links: 'false',
+        unfurl_media: 'false',
         thread_ts: '1699999999.000000',
       });
     });

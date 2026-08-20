@@ -85,7 +85,7 @@ export interface CliDevicePageOpts {
   pairingId: string;
   agentId: string;
   code: string;
-  channel: 'telegram' | 'discord' | 'line';
+  channel: 'telegram' | 'discord' | 'line' | 'slack';
   basePath: string;
 }
 

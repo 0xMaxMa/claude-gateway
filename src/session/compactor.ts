@@ -50,7 +50,7 @@ export class SessionCompactor {
     sessionId: string,
     model: string,
     contextWindow: number,
-    channel: 'telegram' | 'discord' | 'line' | 'api' = 'telegram',
+    channel: 'telegram' | 'discord' | 'line' | 'slack' | 'api' = 'telegram',
   ): Promise<CompactionResult> {
     // Load current history
     const messages = await this.sessionStore.loadTelegramSession(agentId, chatId, sessionId, channel);

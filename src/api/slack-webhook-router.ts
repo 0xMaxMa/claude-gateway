@@ -223,17 +223,39 @@ export function createSlackWebhookHandler(
         const isPairing = cfg?.pairing !== false && sourcePolicy !== 'open' && sourcePolicy !== 'disabled';
         const prev = getPendingSender('slack', deniedAgentId, knockId);
         const code = prev?.code ?? (isPairing ? generatePairingCode() : undefined);
+        const client = cfg?.botToken
+          ? new SlackClient({ botToken: cfg.botToken, logDir, apiBase: opts.apiBase })
+          : null;
 
         let wasNew = false;
         if (resolved.kind === 'user') {
           wasNew = recordDeniedSender('slack', deniedAgentId, knockId, undefined, Date.now(), code);
+          // Best-effort display-name backfill — mirrors LINE's getProfile() call.
+          if (client) {
+            void client
+              .getUserDisplayName(knockId)
+              .then((name) => {
+                const e = getPendingSender('slack', deniedAgentId, knockId);
+                if (e && name && !e.displayName) e.displayName = name;
+              })
+              .catch(() => {});
+          }
         } else if (resolved.kind === 'group') {
           wasNew = recordDeniedConversation('slack', deniedAgentId, knockId, 'group', undefined, Date.now(), code);
+          // Best-effort channel-name backfill — mirrors LINE's getGroupSummary() call.
+          if (client) {
+            void client
+              .getChannelName(knockId)
+              .then((name) => {
+                const e = getPendingSender('slack', deniedAgentId, knockId);
+                if (e && name && !e.displayName) e.displayName = name;
+              })
+              .catch(() => {});
+          }
         }
 
         // Send the pairing code exactly once — on first contact only.
-        if (isPairing && wasNew && code && cfg?.botToken) {
-          const client = new SlackClient({ botToken: cfg.botToken, logDir, apiBase: opts.apiBase });
+        if (isPairing && wasNew && code && client) {
           const target = resolved.conversationId;
           void client
             .postMessage(target, pairingMessage(code, resolved.kind === 'group' ? 'group' : 'user'))
