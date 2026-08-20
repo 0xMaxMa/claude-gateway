@@ -48,6 +48,7 @@ export class TelegramModule implements ChannelModule {
   private lastError?: string;
   private _hasMarkdown?: (text: string) => boolean;
   private _toTelegramHtml?: (text: string) => string;
+  private _normalizeTelegramLineBreaks?: (text: string) => string;
   private _InputFile?: any;
   private _typingManager?: any;
 
@@ -189,7 +190,7 @@ export class TelegramModule implements ChannelModule {
     });
 
     // Import pure functions and typing manager
-    const { hasMarkdown, toTelegramHtml } = await import('./pure');
+    const { hasMarkdown, toTelegramHtml, normalizeTelegramLineBreaks } = await import('./pure');
     const { createWorkingStateManager } = await import('./typing');
 
     const typingManager = createWorkingStateManager(
@@ -209,6 +210,7 @@ export class TelegramModule implements ChannelModule {
 
     this._hasMarkdown = hasMarkdown;
     this._toTelegramHtml = toTelegramHtml;
+    this._normalizeTelegramLineBreaks = normalizeTelegramLineBreaks;
     this._InputFile = InputFile;
     this._typingManager = typingManager;
 
@@ -292,7 +294,7 @@ export class TelegramModule implements ChannelModule {
 
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
     const chat_id = args.chat_id as string;
-    const text = args.text as string;
+    const text = this._normalizeTelegramLineBreaks!(args.text as string);
     const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined;
     const files = (args.files as string[] | undefined) ?? [];
     const explicitFormat = args.format as string | undefined;

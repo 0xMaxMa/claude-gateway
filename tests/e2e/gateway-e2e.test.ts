@@ -370,6 +370,22 @@ describe('Gateway Telegram E2E — TelegramModule via mock API', () => {
     expect(msg!.parse_mode).toBe('HTML');
   });
 
+  test('E2E-TG-2bb: telegram_reply converts escaped break tags before HTML conversion', async () => {
+    const result = await mod.handleTool('telegram_reply', {
+      chat_id: '67890',
+      text: '**bold**&lt;br&gt;- item',
+      format: 'html',
+    });
+
+    expect(result.isError).toBeUndefined();
+
+    const sent = mockTg.getSentMessages();
+    const msg = sent.find(m => m.method === 'sendMessage');
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe('<b>bold</b>\n• item');
+    expect(msg!.parse_mode).toBe('HTML');
+  });
+
   test('E2E-TG-2c: telegram_reply preserves raw Markdown when text format is explicit', async () => {
     const result = await mod.handleTool('telegram_reply', {
       chat_id: '67890',

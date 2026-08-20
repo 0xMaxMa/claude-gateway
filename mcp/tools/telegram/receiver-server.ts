@@ -38,7 +38,7 @@ import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
-import { hasMarkdown, toTelegramHtml, migrateAccess, telegramDisplayName } from './pure'
+import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, migrateAccess, telegramDisplayName } from './pure'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -565,10 +565,6 @@ function checkApprovals(): void {
 
 setInterval(checkApprovals, 5000).unref()
 
-function containsTelegramHtml(text: string): boolean {
-  return /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|spoiler|strike|strong|tg-spoiler|u)(?:\s[^>]*)?>/i.test(text)
-}
-
 // .jpg/.jpeg/.png/.gif/.webp go as photos (Telegram compresses + shows inline);
 // everything else goes as documents (raw file, no compression).
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
@@ -716,11 +712,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     switch (req.params.name) {
       case 'reply': {
         const chat_id = args.chat_id as string
-        const text = args.text as string
+        const text = normalizeTelegramLineBreaks(args.text as string)
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const explicitFormat = args.format as string | undefined
-        const inputIsHtml = explicitFormat === 'html' && containsTelegramHtml(text)
+        const inputIsHtml = explicitFormat === 'html' && /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|spoiler|strike|strong|tg-spoiler|u)(?:\s[^>]*)?>/i.test(text)
         const useHtml = inputIsHtml || explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text))
         const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text
         const parseMode = useHtml ? 'HTML' as const : undefined

@@ -3,6 +3,11 @@
  * Used by AgentRunner to auto-format agent output before forwarding.
  */
 
+/** Telegram does not support HTML <br> tags; normalize raw and escaped variants to line breaks. */
+export function normalizeTelegramLineBreaks(text: string): string {
+  return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
+}
+
 /**
  * Detects whether text contains markdown formatting patterns
  * that warrant HTML rendering in Telegram.

@@ -1,7 +1,7 @@
 /**
  * Unit tests for hasMarkdown() and toTelegramHtml() from src/telegram/markdown.ts
  */
-import { hasMarkdown, toTelegramHtml } from '../../../src/telegram/markdown'
+import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../../../src/telegram/markdown'
 
 describe('hasMarkdown()', () => {
   test('detects **bold**', () => {
@@ -54,6 +54,12 @@ describe('hasMarkdown()', () => {
 
   test('detects _italic_', () => {
     expect(hasMarkdown('this is _italic_ text')).toBe(true)
+  })
+})
+
+describe('normalizeTelegramLineBreaks()', () => {
+  test.each(['&lt;br&gt;', '&lt;br/&gt;', '&lt;br /&gt;', '&lt;BR&gt;'])('converts %s to a newline', tag => {
+    expect(normalizeTelegramLineBreaks(`first${tag}second`)).toBe('first\nsecond')
   })
 })
 

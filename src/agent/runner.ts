@@ -12,7 +12,7 @@ import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
-import { hasMarkdown, toTelegramHtml } from '../telegram/markdown';
+import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
 import { SafeModeManager } from './safe-mode';
@@ -1773,12 +1773,13 @@ export class AgentRunner extends EventEmitter {
               // Forward to channel. LINE has no .forward consumer — the gateway
               // delivers via LineReplyManager (free reply, or cache + postback
               // button when slow) instead of writeAutoForward.
+              const channelText = normalizeTelegramLineBreaks(text)
               if (channelSrcForResult === 'line' && this.lineReply) {
-                void this.lineReply.onAnswer(mapKey, text);
-              } else if (channelSrcForResult !== 'discord' && hasMarkdown(text)) {
-                this.writeAutoForward(mapKey, toTelegramHtml(text), 'html');
+                void this.lineReply.onAnswer(mapKey, channelText)
+              } else if (channelSrcForResult !== 'discord' && hasMarkdown(channelText)) {
+                this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
               } else {
-                this.writeAutoForward(mapKey, text);
+                this.writeAutoForward(mapKey, channelText);
               }
               // Assistant output reached the channel — mark the turn delivered so
               // a later recovery does not resend a message that was answered (C1).
