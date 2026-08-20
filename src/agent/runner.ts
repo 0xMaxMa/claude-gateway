@@ -3409,9 +3409,8 @@ export class AgentRunner extends EventEmitter {
     //
     // skipPersist (wire param store_user_message=false) suppresses BOTH the user command and
     // the assistant reply: programmatic REST callers leave no trace in chat history at all.
-    // `force` overrides that for notes that must stay visible regardless (see /stop below).
-    const persist = (role: 'user' | 'assistant', content: string, force = false) => {
-      if ((skipPersist && !force) || !content) return;
+    const persist = (role: 'user' | 'assistant', content: string) => {
+      if (skipPersist || !content) return;
       this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts: Date.now() });
     };
 
@@ -3423,7 +3422,6 @@ export class AgentRunner extends EventEmitter {
 
     let result: Record<string, unknown>;
     let responseText: string;
-    let forcePersist = false;
     try {
       if (cmd === '/model') {
         const model = this.agentConfig.claude.model;
@@ -3436,14 +3434,7 @@ export class AgentRunner extends EventEmitter {
         const session = this.sessions.get(sessionId);
         const stopped = session ? session.interrupt() : false;
         result = { stopped };
-        responseText = stopped
-          ? 'Session was interrupted before I could respond.'
-          : 'No active session to stop.';
-        // A turn was actually cut off — always leave a visible note in history so the
-        // web Stop button (skipPersist:true, to suppress the "/stop" command echo) and
-        // a typed /stop command show the same outcome instead of the button leaving a
-        // silently-dangling user turn.
-        forcePersist = stopped;
+        responseText = stopped ? 'Session interrupted.' : 'No active session to stop.';
       } else if (cmd === '/restart') {
         this.restartProcess(sessionId).catch(() => {});
         result = { restarting: true };
@@ -3546,8 +3537,7 @@ export class AgentRunner extends EventEmitter {
 
     // Persist the human-readable response as an assistant turn so the conversation ends with
     // an assistant message (the web's computeIsPendingResponse needs last.role !== 'user').
-    // forcePersist writes it even under skipPersist (set only when /stop cut a turn off).
-    persist('assistant', responseText, forcePersist);
+    persist('assistant', responseText);
 
     return { result, responseText };
   }
