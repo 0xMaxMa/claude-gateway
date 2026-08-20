@@ -37,7 +37,7 @@ const CHANNEL_REPLY_TOOLS = new Set([
 // message to durable history so a dangling last-message-from-user turn doesn't leave
 // the web sidebar's "typing…" indicator stuck (isSessionPending only clears once the
 // last committed message is from the assistant).
-export const INTERRUPTED_NO_REPLY_TEXT = '[Session was interrupted before I could respond.]';
+export const INTERRUPTED_NO_REPLY_TEXT = 'Session was interrupted before I could respond.';
 
 /**
  * Resolve the per-spawn history re-injection cap with precedence

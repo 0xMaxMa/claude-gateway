@@ -2808,7 +2808,12 @@ export class AgentRunner extends EventEmitter {
         // never clears (it only clears once the last message is from the
         // assistant). Same wording buildInitialPrompt uses to patch this same
         // dangling-turn shape for the next spawn's in-memory context.
-        const finalText = !trimmed && !attachments.length && interrupted ? INTERRUPTED_NO_REPLY_TEXT : trimmed;
+        // A /stop that lands AFTER partial text/attachments already streamed out
+        // (e.g. mid tool-use, "กำลังวาด...") must still say so — appended rather
+        // than replacing, so the partial work stays visible alongside the notice.
+        const finalText = interrupted
+          ? [trimmed, INTERRUPTED_NO_REPLY_TEXT].filter(Boolean).join('\n\n')
+          : trimmed;
         // Persist assistant reply. Image-only replies (empty text but attachments
         // present) must also persist — otherwise the screenshot vanishes from history.
         if (finalText || attachments.length) {
@@ -3055,7 +3060,12 @@ export class AgentRunner extends EventEmitter {
       // never clears (it only clears once the last message is from the
       // assistant). Same wording buildInitialPrompt uses to patch this same
       // dangling-turn shape for the next spawn's in-memory context.
-      const finalText = !trimmed && !attachments.length && interrupted ? INTERRUPTED_NO_REPLY_TEXT : trimmed;
+      // A /stop that lands AFTER partial text/attachments already streamed out
+      // (e.g. mid tool-use, "กำลังวาด...") must still say so — appended rather
+      // than replacing, so the partial work stays visible alongside the notice.
+      const finalText = interrupted
+        ? [trimmed, INTERRUPTED_NO_REPLY_TEXT].filter(Boolean).join('\n\n')
+        : trimmed;
       // Persist assistant reply regardless of whether the SSE client is still connected.
       // Image-only replies (empty text but attachments present) must also persist —
       // otherwise the screenshot vanishes from history once the stream ends.
