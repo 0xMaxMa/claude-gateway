@@ -296,7 +296,7 @@ describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => 
       await new Promise((r) => setImmediate(r));
 
       expect(onDone).toHaveBeenCalledTimes(1);
-      expect(onDone.mock.calls[0][0]).toBe('partial reply');
+      expect(onDone.mock.calls[0][0]).toBe(`partial reply\n\n${INTERRUPTED_NO_REPLY_TEXT}`);
       expect(onError).not.toHaveBeenCalled();
       expect(runner.hasActiveApiSession(sessionId)).toBe(false);
     } finally {
