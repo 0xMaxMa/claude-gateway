@@ -143,10 +143,19 @@ function shutdown(): void {
   if (shuttingDown) return;
   shuttingDown = true;
   shutdownController.abort();
+  // Hard cap: never let shutdown block on the drain. cancelJob() is bounded by
+  // its own AbortSignal.timeout (up to 30s), which is far longer than a
+  // supervisor's SIGTERM→SIGKILL grace period. Force-exit after a short window
+  // so a slow/hung provider cancel can't keep the process alive and risk SIGKILL
+  // mid-drain. Whichever fires first wins; unref() so the timer itself never
+  // holds the loop open.
+  const forceExit = setTimeout(() => process.exit(0), 2000);
+  forceExit.unref();
   // Give the event loop one tick so the poll loop's sleep() onAbort listener
   // fires and cancelledResult() sets activeCancelPromise before we try to drain it.
   setImmediate(async () => {
     try { await imageModuleRef?.drainCancel?.(); } catch { /* non-fatal */ }
+    clearTimeout(forceExit);
     process.exit(0);
   });
 }

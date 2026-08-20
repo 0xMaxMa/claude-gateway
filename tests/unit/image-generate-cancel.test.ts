@@ -185,6 +185,88 @@ describe('generate_image action="generate" — Stop mid-poll cancels the job', (
     // The invariant: no abort listeners left dangling on the signal.
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   }, 20_000);
+
+  test('the caller cancel signal is threaded into the fetchJob GET, so a Stop mid-fetch aborts the request', async () => {
+    // Mechanism: fetchJob builds AbortSignal.any([timeout, callerSignal]) and passes it
+    // as the GET's signal. Without threading, a Stop landing mid-poll would wait out
+    // REQUEST_TIMEOUT_MS on the in-flight GET before the loop could react. Capture the
+    // signal actually handed to fetch and prove that aborting the caller aborts it.
+    const controller = new AbortController();
+    let capturedGetSignal: AbortSignal | undefined;
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push({ url, method });
+      if (url.endsWith('/v1/images/generations') && method === 'POST') {
+        return new Response(JSON.stringify({ task_id: 'tid-sig', status: 'queued' }), { status: 202 });
+      }
+      if (url.endsWith('/v1/images/jobs/tid-sig') && method === 'GET') {
+        capturedGetSignal = init?.signal ?? undefined;
+        // Simulate the Stop landing while this GET is in flight.
+        controller.abort();
+        return new Response(JSON.stringify({ task_id: 'tid-sig', status: 'processing' }), { status: 200 });
+      }
+      if (url.includes('/v1/images/jobs/tid-sig/cancel') && method === 'POST') {
+        return new Response(JSON.stringify({ task_id: 'tid-sig', cancelled: true, status: 'cancelling' }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    const res = await new ImageModule().handleTool(
+      'generate_image',
+      { action: 'generate', model: 'gemini/gemini-2.5-flash-image', prompt: 'a red apple' },
+      controller.signal
+    );
+
+    // The GET actually received a signal, and it is the combined one that reflects the
+    // caller's abort (not a bare per-request timeout signal).
+    expect(capturedGetSignal).toBeInstanceOf(AbortSignal);
+    expect(capturedGetSignal!.aborted).toBe(true);
+    // The loop then bailed to a cancel, not a timeout/error.
+    expect(res.isError).toBe(true);
+    expect((res.content[0] as { text: string }).text).toContain('cancelled');
+    expect(calls.filter((c) => c.url.includes('/cancel'))).toHaveLength(1);
+  });
+
+  test('a transport error that coincides with an abort is not swallowed as retryable — it cancels', async () => {
+    // fetchJob maps a thrown fetch (network error / abort) to { __transportError }. The
+    // poll loop treats that as transient and would `continue` to retry — but it first
+    // checks signal.aborted so a Stop-triggered abort mid-fetch resolves to a cancel
+    // instead of silently looping. Prove that branch: throw on the GET AND abort in the
+    // same turn, and assert the loop cancels rather than issuing a second GET.
+    const controller = new AbortController();
+    let getCount = 0;
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push({ url, method });
+      if (url.endsWith('/v1/images/generations') && method === 'POST') {
+        return new Response(JSON.stringify({ task_id: 'tid-terr', status: 'queued' }), { status: 202 });
+      }
+      if (url.endsWith('/v1/images/jobs/tid-terr') && method === 'GET') {
+        getCount++;
+        controller.abort();
+        throw new TypeError('network error'); // → fetchJob returns { __transportError }
+      }
+      if (url.includes('/v1/images/jobs/tid-terr/cancel') && method === 'POST') {
+        return new Response(JSON.stringify({ task_id: 'tid-terr', cancelled: true, status: 'cancelling' }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    const res = await new ImageModule().handleTool(
+      'generate_image',
+      { action: 'generate', model: 'gemini/gemini-2.5-flash-image', prompt: 'a red apple' },
+      controller.signal
+    );
+
+    expect(res.isError).toBe(true);
+    expect((res.content[0] as { text: string }).text).toContain('cancelled');
+    expect((res.content[0] as { text: string }).text).toContain('tid-terr');
+    // The abort was honored immediately: exactly one GET (no retry), and a cancel fired.
+    expect(getCount).toBe(1);
+    expect(calls.filter((c) => c.url.includes('/cancel'))).toHaveLength(1);
+  });
 });
 
 describe('drainCancel() — lets a process-exiting shutdown wait for the E3 call', () => {
