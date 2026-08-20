@@ -334,6 +334,11 @@ function countPending(access: Access, kind: 'dm' | 'group'): number {
 
 export { hasMarkdown, toTelegramHtml } from './lib/markdown'
 
+/** Telegram does not support HTML <br> tags; normalize raw and escaped variants to line breaks. */
+export function normalizeTelegramLineBreaks(text: string): string {
+  return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
+}
+
 export function isMentionedPure(input: GateInput, extraPatterns?: string[]): boolean {
   const entities = input.messageEntities ?? input.captionEntities ?? []
   const text = input.messageText ?? ''

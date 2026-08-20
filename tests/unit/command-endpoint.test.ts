@@ -473,10 +473,17 @@ describe('SessionProcess restart watcher notify payload', () => {
   afterEach(async () => {
     // Always stop the SessionProcess to prevent chokidar watcher leak
     if (currentSp) {
-      await Promise.race([
-        currentSp.stop(),
-        new Promise<void>(r => setTimeout(r, 5000)),
-      ]);
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          currentSp.stop(),
+          new Promise<void>(resolve => {
+            timeout = setTimeout(resolve, 5000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
       currentSp = null;
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });

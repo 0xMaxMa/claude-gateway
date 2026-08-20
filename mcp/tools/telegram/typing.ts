@@ -66,6 +66,7 @@ export function openTagStack(html: string): string[] {
 /** Strip Telegram-HTML tags and unescape entities → plain-text equivalent. */
 export function htmlToPlain(html: string): string {
   return html
+    .replace(/&lt;br\s*\/?&gt;/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')

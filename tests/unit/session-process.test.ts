@@ -88,6 +88,24 @@ import { SessionProcess, resolveMaxHistoryMessages, MAX_HISTORY_MESSAGES } from 
 import { SessionStore } from '../../src/session/store';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 
+// ── SessionProcess registry ───────────────────────────────────────────────────
+// start() opens a chokidar FSWatcher that only stop() closes. Tests create many
+// instances but stop few, so unclosed watchers accumulated across the file and
+// eventually OOM-killed the Jest worker. Route every construction through this
+// factory and stop() each instance after its test — stop() is null-safe on
+// never-started instances and idempotent, so blanket teardown is harmless.
+const activeSps: SessionProcess[] = [];
+function makeSp(...args: ConstructorParameters<typeof SessionProcess>): SessionProcess {
+  const sp = new SessionProcess(...args);
+  activeSps.push(sp);
+  return sp;
+}
+
+afterEach(async () => {
+  const pending = activeSps.splice(0);
+  await Promise.all(pending.map(sp => sp.stop().catch(() => {})));
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -147,7 +165,7 @@ describe('SessionProcess', () => {
   // U-SP-01: start() spawns a subprocess
   // --------------------------------------------------------------------------
   it('U-SP-01: start() spawns a subprocess', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -158,7 +176,7 @@ describe('SessionProcess', () => {
   // U-SP-02: sendMessage() writes stream-json turn to stdin
   // --------------------------------------------------------------------------
   it('U-SP-02: sendMessage() writes a stream-json turn to stdin', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     sp.sendMessage('hello world');
@@ -172,7 +190,7 @@ describe('SessionProcess', () => {
   // U-SP-03: stop() kills the subprocess
   // --------------------------------------------------------------------------
   it('U-SP-03: stop() kills the subprocess', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     expect(sp.isRunning()).toBe(true);
@@ -190,7 +208,7 @@ describe('SessionProcess', () => {
   // stopped/restarted until the 5-min stalled detector fires.
   // --------------------------------------------------------------------------
   it("U-SP-03a: re-emits 'exit' to listeners when the child subprocess exits", async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const exitSpy = jest.fn();
@@ -210,7 +228,7 @@ describe('SessionProcess', () => {
   // U-SP-04: isIdle() / touch() behaviour
   // --------------------------------------------------------------------------
   it('U-SP-04: isIdle() returns true after idle window, touch() resets it', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Manually set lastActivityAt to 2 minutes ago
@@ -227,7 +245,7 @@ describe('SessionProcess', () => {
   // U-SP-05: MCP config has TELEGRAM_SEND_ONLY=true for telegram source
   // --------------------------------------------------------------------------
   it('U-SP-05: MCP config written for telegram source has TELEGRAM_SEND_ONLY=true', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const sessionDir = path.join(agentConfig.workspace, '.sessions', 'chat:111');
@@ -242,7 +260,7 @@ describe('SessionProcess', () => {
   // U-SP-06: No MCP config for api source
   // --------------------------------------------------------------------------
   it('U-SP-06: No MCP config written for api source', async () => {
-    const sp = new SessionProcess('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // For api source, writeMcpConfig returns null — no --mcp-config in args
@@ -254,7 +272,7 @@ describe('SessionProcess', () => {
   // U-SP-06a: allow_tools:false api session denies built-in tools at the CLI
   // --------------------------------------------------------------------------
   it('U-SP-06a: api source without allow_tools passes --disallowedTools for built-ins', async () => {
-    const sp = new SessionProcess('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -269,7 +287,7 @@ describe('SessionProcess', () => {
   // --------------------------------------------------------------------------
   it('U-SP-06b: api source with allow_tools:true does NOT pass --disallowedTools', async () => {
     agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace'), allow_tools: true });
-    const sp = new SessionProcess('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -281,7 +299,7 @@ describe('SessionProcess', () => {
   // U-SP-06c: channel (telegram) sessions are never given the deny-list
   // --------------------------------------------------------------------------
   it('U-SP-06c: telegram source never passes --disallowedTools', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -304,7 +322,7 @@ describe('SessionProcess', () => {
       ts: Date.now(),
     });
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Nothing written to stdin yet — history is deferred to first sendMessage call
@@ -322,7 +340,7 @@ describe('SessionProcess', () => {
   // U-SP-08: No history section when SessionStore is empty
   // --------------------------------------------------------------------------
   it('U-SP-08: no history section in prompt when session is empty', async () => {
-    const sp = new SessionProcess('chat:new', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:new', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const firstWrite = lastProcess!.stdin!.write.mock.calls[0][0] as string;
@@ -346,7 +364,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -371,7 +389,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     // Mirror what the runner sets from a resolved maxHistoryMessages config
     sp.historyLimit = 30;
     await sp.start();
@@ -405,7 +423,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -431,7 +449,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -460,7 +478,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -496,7 +514,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -521,7 +539,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     sp.historyLimit = 10; // escalated rung (e.g. after several 32MB recoveries)
     await sp.start();
 
@@ -548,7 +566,7 @@ describe('SessionProcess', () => {
       });
     }
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     sp.historyLimit = 0; // ladder's last rung — drop all history
     await sp.start();
 
@@ -577,7 +595,7 @@ describe('SessionProcess', () => {
       role: 'assistant', content: 'Prior answer', ts: 1001,
     });
 
-    const sp = new SessionProcess('chat:rst', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rst', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const firstProcess = lastProcess!;
     spawnMock.mockClear();
@@ -621,7 +639,7 @@ describe('SessionProcess', () => {
   // U-SP-10: --strict-mcp-config must NOT be in subprocess args
   // --------------------------------------------------------------------------
   it('U-SP-10: subprocess is spawned without --strict-mcp-config', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -632,7 +650,7 @@ describe('SessionProcess', () => {
   // U-SP-11: --mcp-config is still present for telegram sessions
   // --------------------------------------------------------------------------
   it('U-SP-11: --mcp-config arg is present for telegram sessions', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -643,7 +661,7 @@ describe('SessionProcess', () => {
   // U-SP-11a: --dangerously-skip-permissions is built-in (no config needed)
   // --------------------------------------------------------------------------
   it('U-SP-11a: --dangerously-skip-permissions is always passed (built-in)', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -655,7 +673,7 @@ describe('SessionProcess', () => {
   // --------------------------------------------------------------------------
   it('U-SP-11b: gateway.headless=false spawns the claude-pty-shell wrapper', async () => {
     gatewayConfig.gateway.headless = false;
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [bin, args, opts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
@@ -670,10 +688,10 @@ describe('SessionProcess', () => {
   // U-SP-11c: gateway.headless omitted/true keeps the headless backend
   // --------------------------------------------------------------------------
   it('U-SP-11c: gateway.headless omitted or true spawns claude directly', async () => {
-    const sp1 = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp1 = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp1.start();
     gatewayConfig.gateway.headless = true;
-    const sp2 = new SessionProcess('chat:222', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp2 = makeSp('chat:222', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp2.start();
 
     for (const call of spawnMock.mock.calls) {
@@ -698,7 +716,7 @@ describe('SessionProcess', () => {
       workspace: agentConfig.workspace,
       claude: { model: 'claude-opus-4-8', dangerouslySkipPermissions: false, extraFlags: [] },
     });
-    const sp = new SessionProcess('chat:1md', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:1md', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -720,7 +738,7 @@ describe('SessionProcess', () => {
       workspace: agentConfig.workspace,
       claude: { model: 'claude-opus-4-8', dangerouslySkipPermissions: false, extraFlags: [] },
     });
-    const sp = new SessionProcess('chat:1mh', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:1mh', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -743,7 +761,7 @@ describe('SessionProcess', () => {
       workspace: agentConfig.workspace,
       claude: { model: 'claude-haiku-4-5', dangerouslySkipPermissions: false, extraFlags: [] },
     });
-    const sp = new SessionProcess('chat:haik', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:haik', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -766,7 +784,7 @@ describe('SessionProcess', () => {
       workspace: agentConfig.workspace,
       claude: { model: 'claude-opus-4-8[1m]', dangerouslySkipPermissions: false, extraFlags: [] },
     });
-    const sp = new SessionProcess('chat:dbl', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:dbl', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -795,7 +813,7 @@ describe('SessionProcess', () => {
       );
       mockHomeDir = fakeHome;
 
-      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
 
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
@@ -842,7 +860,7 @@ describe('SessionProcess', () => {
       );
       mockHomeDir = fakeHome;
 
-      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
 
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
@@ -871,7 +889,7 @@ describe('SessionProcess', () => {
       );
       mockHomeDir = fakeHome;
 
-      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
 
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
@@ -893,7 +911,7 @@ describe('SessionProcess', () => {
       // No settings.json, no .claude.json
       mockHomeDir = fakeHome;
 
-      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await expect(sp.start()).resolves.not.toThrow();
 
       const configPath = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
@@ -918,7 +936,7 @@ describe('SessionProcess', () => {
       );
       mockHomeDir = fakeHome;
 
-      const sp = new SessionProcess('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+      const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
 
       const [, args] = spawnMock.mock.calls[0] as [string, string[]];
@@ -938,7 +956,7 @@ describe('SessionProcess', () => {
   }
 
   it('T7: stdout tool_use Write → writes "coding" to status file', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -961,7 +979,7 @@ describe('SessionProcess', () => {
   });
 
   it('T8: stdout tool_use Bash → writes "tool" to status file', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -984,7 +1002,7 @@ describe('SessionProcess', () => {
   });
 
   it('T9: stdout result ok → writes "done" to status file', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -999,7 +1017,7 @@ describe('SessionProcess', () => {
   });
 
   it('T10: stdout result is_error → writes "error" to status file', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -1014,7 +1032,7 @@ describe('SessionProcess', () => {
   });
 
   it('T11: sendMessage() writes "queued" to status file for telegram source', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -1031,7 +1049,7 @@ describe('SessionProcess', () => {
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------
   it('U-SP-17: --include-partial-messages flag is in spawn args', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const [, args] = spawnMock.mock.calls[0] as [string, string[]];
     expect(args).toContain('--include-partial-messages');
@@ -1041,7 +1059,7 @@ describe('SessionProcess', () => {
   // U-SP-18: Partial messages don't double-count in assistantBuffer
   // --------------------------------------------------------------------------
   it('U-SP-18: partial messages dont double-count in assistantBuffer', async () => {
-    const sp = new SessionProcess('chat:partial', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:partial', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Partial assistant with cumulative text "Hello"
@@ -1082,7 +1100,7 @@ describe('SessionProcess', () => {
   //           lost on resume).
   // --------------------------------------------------------------------------
   it('U-SP-20a: a reply-tool-only turn is persisted even with no result event', async () => {
-    const sp = new SessionProcess('chat:reply-only', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:reply-only', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Final assistant message whose ONLY output is a telegram_reply tool call —
@@ -1109,7 +1127,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20b: the same reply tool_use is persisted exactly once across partial + final events', async () => {
-    const sp = new SessionProcess('chat:reply-once', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:reply-once', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Partial message carrying the reply tool_use (input still streaming)…
@@ -1134,7 +1152,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20c: a narration text block that duplicates the reply text is not double-written', async () => {
-    const sp = new SessionProcess('chat:reply-dup', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:reply-dup', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Same text emitted BOTH as a visible text block and as the reply tool input.
@@ -1160,7 +1178,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20d: a normal text-only turn is still persisted exactly once (no regression)', async () => {
-    const sp = new SessionProcess('chat:plain', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:plain', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({
@@ -1179,7 +1197,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20e: a same-text reply retried with a fresh tool_use id in one turn is stored once', async () => {
-    const sp = new SessionProcess('chat:retry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:retry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // First reply attempt (delivery is assumed to have failed downstream)…
@@ -1203,7 +1221,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20f: the same-text guard is per-turn — a genuine resend in a later turn is stored again', async () => {
-    const sp = new SessionProcess('chat:resend', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:resend', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Turn 1: reply 'ping', then result (which must reset the per-turn dedup).
@@ -1228,7 +1246,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-20g: persistedReplyToolIds is reset each turn (a recurring id in a later turn is not swallowed)', async () => {
-    const sp = new SessionProcess('chat:idreset', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:idreset', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Turn 1: reply with id 'toolu_reused'.
@@ -1260,7 +1278,7 @@ describe('SessionProcess', () => {
   // U-SP-19: Partial messages don't spam status file with "thinking"
   // --------------------------------------------------------------------------
   it('U-SP-19: partial text-only messages do not write thinking status', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -1295,7 +1313,7 @@ describe('SessionProcess', () => {
   // U9: stream-json result with usage data → tokenUsage event fired with correct counts
   // --------------------------------------------------------------------------
   it('U9: result event with usage data fires tokenUsage event with correct counts', async () => {
-    const sp = new SessionProcess('chat:tok9', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:tok9', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const tokenEvents: Array<{ inputTokens: number; outputTokens: number; totalTokens: number }> = [];
@@ -1334,7 +1352,7 @@ describe('SessionProcess', () => {
   });
 
   it('U9b: result event without usage data does not fire tokenUsage event', async () => {
-    const sp = new SessionProcess('chat:tok9b', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:tok9b', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const tokenEvents: unknown[] = [];
@@ -1351,7 +1369,7 @@ describe('SessionProcess', () => {
   // U10: cumulative tokens tracked — each turn adds to total
   // --------------------------------------------------------------------------
   it('U10: cumulative tokens tracked — each result event fires tokenUsage with that turn count', async () => {
-    const sp = new SessionProcess('chat:tok10', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:tok10', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const tokenEvents: Array<{ totalTokens: number }> = [];
@@ -1383,7 +1401,7 @@ describe('SessionProcess', () => {
   });
 
   it('U10b: tokenUsage correctly handles missing optional cache fields', async () => {
-    const sp = new SessionProcess('chat:tok10b', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:tok10b', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const tokenEvents: Array<{ inputTokens: number; outputTokens: number; totalTokens: number }> = [];
@@ -1415,14 +1433,14 @@ describe('SessionProcess', () => {
   // U-SP-21..25: lastModel — real model captured from the assistant stream (#273)
   // --------------------------------------------------------------------------
   it('U-SP-21: lastModel is empty string before any assistant message arrives', async () => {
-    const sp = new SessionProcess('chat:model1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:model1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     expect(sp.lastModel).toBe('');
   });
 
   it('U-SP-22: lastModel is captured from message.model on an assistant stream event', async () => {
-    const sp = new SessionProcess('chat:model2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:model2', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const line = JSON.stringify({
@@ -1438,7 +1456,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-23: lastModel updates to the newest value across multiple turns (model switch mid-session)', async () => {
-    const sp = new SessionProcess('chat:model3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:model3', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const turn1 = JSON.stringify({
@@ -1457,7 +1475,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-24: lastModel is unaffected (stays at prior value) when message.model is missing or non-string', async () => {
-    const sp = new SessionProcess('chat:model4', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:model4', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Establish a known value first.
@@ -1486,7 +1504,7 @@ describe('SessionProcess', () => {
   });
 
   it('U-SP-25: lastModel is captured even from a tool-only assistant message (no text block)', async () => {
-    const sp = new SessionProcess('chat:model5', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:model5', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const line = JSON.stringify({
@@ -1505,7 +1523,7 @@ describe('SessionProcess', () => {
   // U-SP-20: Status file still works for tool_use in partial messages
   // --------------------------------------------------------------------------
   it('U-SP-20: tool_use in partial assistant message still writes status', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const typingDir = path.join(agentConfig.workspace, '.telegram-state', 'typing');
@@ -1558,7 +1576,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP1: defaults to not processing
   it('IP1: isProcessing defaults to false', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     expect(sp.isProcessing).toBe(false);
     await sp.stop();
@@ -1566,7 +1584,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP2: setProcessing(true) flips the flag
   it('IP2: setProcessing(true) → isProcessing true', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
     expect(sp.isProcessing).toBe(true);
@@ -1575,7 +1593,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP3: setProcessing(false) resets the flag
   it('IP3: setProcessing(false) → isProcessing false', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
     sp.setProcessing(false);
@@ -1585,7 +1603,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP4: emits processingChange event on transition
   it('IP4: emits processingChange event when state changes', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const changes: boolean[] = [];
     sp.on('processingChange', (v: boolean) => changes.push(v));
@@ -1598,7 +1616,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP5: stop() works while processing
   it('IP5: stop() succeeds while isProcessing is true', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
     await expect(sp.stop()).resolves.toBeUndefined();
@@ -1606,7 +1624,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP6: markPendingRestart while not processing → emits deferredRestartReady immediately
   it('IP6: markPendingRestart while idle emits deferredRestartReady immediately', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     let fired = false;
     sp.once('deferredRestartReady', () => { fired = true; });
@@ -1617,7 +1635,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP7: markPendingRestart while processing → deferred until setProcessing(false)
   it('IP7: markPendingRestart while processing defers until turn ends', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
     let fired = false;
@@ -1633,7 +1651,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP8: setProcessing(true) for telegram writes .processing sentinel
   it('IP8: setProcessing(true) for telegram writes .processing file', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
 
@@ -1645,7 +1663,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP9: setProcessing(false) for telegram deletes .processing sentinel
   it('IP9: setProcessing(false) for telegram deletes .processing file', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
 
@@ -1659,7 +1677,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP10: setProcessing for discord source does NOT write .processing
   it('IP10: setProcessing(true) for discord does not write .processing file', async () => {
-    const sp = new SessionProcess('s1', 'discord', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'discord', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const discordPath = path.join(agentConfig.workspace, '.discord-state', 'typing', 's1.processing');
     const telegramPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
@@ -1673,7 +1691,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP11: setProcessing for api source does NOT write .processing
   it('IP11: setProcessing(true) for api does not write .processing file', async () => {
-    const sp = new SessionProcess('s1', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
 
@@ -1685,7 +1703,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
 
   // IP12: stop() cleans up .processing sentinel for telegram
   it('IP12: stop() cleans up .processing file for telegram source', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const processingPath = path.join(agentConfig.workspace, '.telegram-state', 'typing', 's1.processing');
 
@@ -1699,7 +1717,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
   // ── interrupt() ────────────────────────────────────────────────────────────
 
   it('U-SP-INT-01: interrupt() sends SIGINT when a turn is in flight', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
 
@@ -1710,7 +1728,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
   });
 
   it('U-SP-INT-02: interrupt() returns false when no turn is in flight', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     // Do NOT setProcessing(true) — idle state
 
@@ -1722,7 +1740,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
   });
 
   it('U-SP-INT-03: interrupt() returns false when subprocess is already killed', async () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
     lastProcess!.killed = true;
@@ -1734,7 +1752,7 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
   });
 
   it('U-SP-INT-04: interrupt() returns false when subprocess never started', () => {
-    const sp = new SessionProcess('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     // No start() — process is null
 
     const result = sp.interrupt();
@@ -1772,7 +1790,7 @@ describe('SessionProcess — query()', () => {
   }
 
   it('U-SP-QRY-01: query() resolves with assistant text when result fires', async () => {
-    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const queryPromise = sp.query('describe all images');
@@ -1789,7 +1807,7 @@ describe('SessionProcess — query()', () => {
   });
 
   it('U-SP-QRY-02: query() sets queryMode=false after resolving', async () => {
-    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const queryPromise = sp.query('describe all images');
@@ -1807,7 +1825,7 @@ describe('SessionProcess — query()', () => {
   });
 
   it('U-SP-QRY-03: query() does not save assistant message to session store', async () => {
-    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const appendSpy = jest.spyOn(sessionStore, 'appendTelegramMessage');
@@ -1825,7 +1843,7 @@ describe('SessionProcess — query()', () => {
   });
 
   it('U-SP-QRY-04: query() rejects when timeout fires', async () => {
-    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     await expect(sp.query('describe all images', 50)).rejects.toThrow('query timeout');
@@ -1833,7 +1851,7 @@ describe('SessionProcess — query()', () => {
   }, 5000);
 
   it('U-SP-QRY-05: query() rejects immediately when subprocess not running', async () => {
-    const sp = new SessionProcess('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:qry', 'telegram', agentConfig, gatewayConfig, sessionStore);
     // No start() — process is null
 
     await expect(sp.query('describe all images')).rejects.toThrow('Cannot query');
@@ -1876,7 +1894,7 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
       ts: Date.now(),
     });
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -1898,7 +1916,7 @@ describe('SessionProcess — buildInitialPrompt system role', () => {
       role: 'system', content: '[Image Context Summary]\nImage 1: A chart', ts: Date.now(),
     });
 
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // sendMessage bundles history + activation + user message into one stdin write
@@ -1948,7 +1966,7 @@ describe('SessionProcess — API model-switch history injection', () => {
       ts: Date.now(),
     });
 
-    const sp = new SessionProcess('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // API session must NOT write anything to stdin at spawn — history is deferred to first sendMessage()
@@ -1967,7 +1985,7 @@ describe('SessionProcess — API model-switch history injection', () => {
       ts: Date.now(),
     });
 
-    const sp = new SessionProcess('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // No write at spawn
@@ -1994,7 +2012,7 @@ describe('SessionProcess — API model-switch history injection', () => {
       ts: Date.now(),
     });
 
-    const sp = new SessionProcess('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('sess-uuid', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     sp.sendMessage('First message');
@@ -2014,7 +2032,7 @@ describe('SessionProcess — API model-switch history injection', () => {
   });
 
   it('U-SP-API-04: API session with no prior history sends message as-is', async () => {
-    const sp = new SessionProcess('sess-new', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('sess-new', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     sp.sendMessage('Hello fresh session');
@@ -2062,7 +2080,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R1: a 400 thinking-block error triggers a respawn (kill + restart marker)
   it('R1: thinking-block 400 on stdout kills the subprocess to respawn with clean history', async () => {
-    const sp = new SessionProcess('chat:rec', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
@@ -2076,7 +2094,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R2: the 400 error text is not persisted as an assistant message
   it('R2: API error text is not persisted to the session store during recovery', async () => {
-    const sp = new SessionProcess('chat:rec2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec2', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Assistant text carrying the error, then the result event.
@@ -2099,7 +2117,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R3: recovery is bounded — once the budget is spent, no further respawn
   it('R3: recovery stops after MAX_THINKING_RECOVERIES to avoid an infinite respawn loop', async () => {
-    const sp = new SessionProcess('chat:rec3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec3', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Simulate the budget already being exhausted by prior respawns.
@@ -2116,7 +2134,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R4: a clean turn refills the recovery budget
   it('R4: a successful result resets the recovery budget', async () => {
-    const sp = new SessionProcess('chat:rec4', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec4', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     (sp as unknown as { thinkingRecoveryCount: number }).thinkingRecoveryCount = 1;
@@ -2130,7 +2148,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R5: API sessions are not auto-respawned by this path (runner owns API error handling)
   it('R5: api source does not auto-respawn on a thinking-block 400', async () => {
-    const sp = new SessionProcess('api:rec', 'api', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('api:rec', 'api', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stdout!.emit('data', Buffer.from(errorResultLine() + '\n'));
@@ -2143,7 +2161,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R6: recovery does not fire while serving an internal query()
   it('R6: query mode does not trigger recovery', async () => {
-    const sp = new SessionProcess('chat:rec6', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec6', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const queryPromise = sp.query('describe images', 1000);
@@ -2160,7 +2178,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   // R7: an ordinary (non-thinking) error does not trigger a respawn
   it('R7: a generic error result does not trigger recovery', async () => {
-    const sp = new SessionProcess('chat:rec7', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec7', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const generic = JSON.stringify({ type: 'result', is_error: true, result: 'API Error: 500 internal server error' });
@@ -2182,7 +2200,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
       role: 'assistant', content: 'clean reply', ts: Date.now(),
     });
 
-    const sp = new SessionProcess('chat:rec8', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec8', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     const firstProcess = lastProcess!;
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -2225,7 +2243,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // R9: the whole point of the tightened detection — an agent whose own reply
   // discusses the error phrase must NOT be misread as a real 400.
   it('R9: assistant text mentioning the error phrase in a clean turn does not trigger recovery', async () => {
-    const sp = new SessionProcess('chat:rec9', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec9', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const chatty = JSON.stringify({
@@ -2256,7 +2274,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // R10: a failed result that mentions the loose keywords but lacks the full API
   // signature must not trigger recovery (no two-word substring match anymore).
   it('R10: a failed result lacking the full signature does not trigger recovery', async () => {
-    const sp = new SessionProcess('chat:rec10', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:rec10', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     const loose = JSON.stringify({
@@ -2276,7 +2294,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // failure can name what actually died (e.g. an unresolvable claude binary).
   // --------------------------------------------------------------------------
   it('U-SP-BIN1: retains the last stderr line and the spawned binary', async () => {
-    const sp = new SessionProcess('chat:bin1', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stderr!.emit('data', Buffer.from('some warning\nclaude: binary not found\n'));
@@ -2294,7 +2312,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // looping silently — the fatal branch that logs the actionable error.
   // --------------------------------------------------------------------------
   it("U-SP-BIN2: emits 'failed' after MAX_RESTARTS is reached", async () => {
-    const sp = new SessionProcess('chat:bin2', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin2', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not found\n'));
 
@@ -2315,7 +2333,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // --------------------------------------------------------------------------
   it('U-SP-BIN3: host session spawns the resolved binary path', async () => {
     mockResolvedBin = '/home/u/.local/bin/claude';
-    const sp = new SessionProcess('chat:bin3', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin3', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     expect(spawnMock.mock.calls[0][0]).toBe('/home/u/.local/bin/claude');
@@ -2335,7 +2353,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
       type: 'app-agent',
       container: 'my-app-container',
     });
-    const sp = new SessionProcess('chat:bin4', 'telegram', appAgent, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin4', 'telegram', appAgent, gatewayConfig, sessionStore);
     await sp.start();
 
     const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
@@ -2353,7 +2371,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
   // --------------------------------------------------------------------------
   it('U-SP-BIN5: captures a spawn ENOENT error into lastStderrLine', async () => {
-    const sp = new SessionProcess('chat:bin5', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin5', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.emit('error', new Error('spawn /home/u/.local/bin/claude ENOENT'));
@@ -2371,7 +2389,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // one line, not captured as two partials.
   // --------------------------------------------------------------------------
   it('U-SP-BIN6: reassembles a stderr line split across chunks', async () => {
-    const sp = new SessionProcess('chat:bin6', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin6', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stderr!.emit('data', Buffer.from('claude: binary not '));
@@ -2390,7 +2408,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // trailing newline) is flushed into lastStderrLine on exit.
   // --------------------------------------------------------------------------
   it('U-SP-BIN7: flushes an unterminated trailing stderr line on exit', async () => {
-    const sp = new SessionProcess('chat:bin7', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:bin7', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     lastProcess!.stderr!.emit('data', Buffer.from('fatal: claude crashed mid-line'));
@@ -2412,7 +2430,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // `isIdle()` wrongly returned true -> the loop got killed mid-flight.
   // --------------------------------------------------------------------------
   it('U-SP-IDLE-CHILD: child stdout output resets the idle clock', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     // Simulate a session that has had no parent-side injection for 2 minutes:
@@ -2435,7 +2453,7 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   // injection) still ages out — the fix must not defeat idle cleanup.
   // --------------------------------------------------------------------------
   it('U-SP-IDLE-QUIET: session with no child output stays idle and remains reapable', async () => {
-    const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
 
     (sp as unknown as { lastActivityAt: number }).lastActivityAt = Date.now() - 120_000;

@@ -1186,7 +1186,11 @@ describe('createWorkingStateManager', () => {
       expect(openTagStack('a &lt;b&gt; c')).toEqual([])
     })
 
-    it('U-TY-20: htmlToPlain strips tags and unescapes entities', () => {
+    it('U-TY-20a: preserves escaped break tags as newlines in fallback text', () => {
+    expect(htmlToPlain('first&lt;br&gt;second&lt;br/&gt;third')).toBe('first\nsecond\nthird')
+  })
+
+  it('U-TY-20: htmlToPlain strips tags and unescapes entities', () => {
       expect(htmlToPlain('<b>bold</b> <code>x &lt; y &amp;&amp; z &gt; w</code>')).toBe('bold x < y && z > w')
     })
 
