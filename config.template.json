@@ -10,7 +10,7 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.29",
+  "configVersion": "1.0.30",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
@@ -26,7 +26,11 @@
       { "id": "claude-opus-4-6",           "label": "Opus 4.6",         "alias": "opus46",      "contextWindow": 200000 },
       { "id": "claude-sonnet-5",           "label": "Sonnet 5",         "alias": "sonnet",      "contextWindow": 200000 },
       { "id": "claude-sonnet-4-6",         "label": "Sonnet 4.6",       "alias": "sonnet46",    "contextWindow": 200000 },
-      { "id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5",        "alias": "haiku",       "contextWindow": 200000 }
+      { "id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5",        "alias": "haiku",       "contextWindow": 200000 },
+      { "id": "gpt-5.6-sol[1m]",           "label": "GPT 5.6 Sol",      "alias": "gpt56sol",    "contextWindow": 1050000 },
+      { "id": "gpt-5.6-terra[1m]",         "label": "GPT 5.6 Terra",    "alias": "gpt56terra",  "contextWindow": 1050000 },
+      { "id": "gpt-5.6-luna[1m]",          "label": "GPT 5.6 Luna",     "alias": "gpt56luna",   "contextWindow": 1050000 },
+      { "id": "gpt-5.5[1m]",               "label": "GPT 5.5",          "alias": "gpt55",       "contextWindow": 1050000 }
     ],
     "api": {
       "keys": [

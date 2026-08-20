@@ -650,10 +650,17 @@ export function migrateConfig(
   );
 }
 
+const LEGACY_MODEL_ID_RENAMES: Readonly<Record<string, string>> = {
+  'gpt-5.6-sol': 'gpt-5.6-sol[1m]',
+  'gpt-5.6-terra': 'gpt-5.6-terra[1m]',
+  'gpt-5.6-luna': 'gpt-5.6-luna[1m]',
+  'gpt-5.5': 'gpt-5.5[1m]',
+};
+
 /**
  * Merge models from template into user config by ID.
  * Adds new models, updates alias/label/contextWindow of existing ones.
- * Preserves user models not in template.
+ * Renames retired built-in IDs and preserves unrelated user models.
  */
 function migrateModels(
   config: Record<string, unknown>,
@@ -668,6 +675,10 @@ function migrateModels(
   if (!templateModels || templateModels.length === 0) return;
 
   const userModels = (gw.models ?? []) as Array<Record<string, unknown>>;
+  for (const model of userModels) {
+    const renamedId = LEGACY_MODEL_ID_RENAMES[String(model.id)];
+    if (renamedId) model.id = renamedId;
+  }
   const userMap = new Map(userModels.map((m) => [m.id as string, m]));
   const merged: Array<Record<string, unknown>> = [];
 
@@ -691,6 +702,16 @@ function migrateModels(
   }
 
   gw.models = merged;
+
+  if (Array.isArray(config.agents)) {
+    for (const agent of config.agents as Array<Record<string, unknown>>) {
+      const claude = agent.claude;
+      if (!claude || typeof claude !== 'object' || Array.isArray(claude)) continue;
+      const model = (claude as Record<string, unknown>).model;
+      const renamedId = LEGACY_MODEL_ID_RENAMES[String(model)];
+      if (renamedId) (claude as Record<string, unknown>).model = renamedId;
+    }
+  }
 }
 
 // Exported for testing
