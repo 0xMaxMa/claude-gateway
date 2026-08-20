@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { migrateAccess, defaultAccess } from './pure';
+import { chunkText, htmlToPlain } from './typing';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -97,7 +98,7 @@ export class TelegramModule implements ChannelModule {
             format: {
               type: 'string',
               enum: ['text', 'html'],
-              description: "Rendering mode. 'html' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per HTML rules (&amp; &lt; &gt;). Default: 'text' (plain, no escaping needed).",
+              description: "Rendering mode. 'html' accepts pre-rendered Telegram HTML. Raw Markdown is detected and converted automatically. Default: auto-detect Markdown or send plain text.",
             },
           },
           required: ['chat_id', 'text'],
@@ -139,7 +140,7 @@ export class TelegramModule implements ChannelModule {
             format: {
               type: 'string',
               enum: ['text', 'html'],
-              description: "Rendering mode. 'html' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per HTML rules (&amp; &lt; &gt;). Default: 'text' (plain, no escaping needed).",
+              description: "Rendering mode. 'html' accepts pre-rendered Telegram HTML. Raw Markdown is detected and converted automatically. Default: auto-detect Markdown or send plain text.",
             },
           },
           required: ['chat_id', 'message_id', 'text'],
@@ -285,23 +286,8 @@ export class TelegramModule implements ChannelModule {
     }
   }
 
-  private chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
-    if (text.length <= limit) return [text];
-    const out: string[] = [];
-    let rest = text;
-    while (rest.length > limit) {
-      let cut = limit;
-      if (mode === 'newline') {
-        const para = rest.lastIndexOf('\n\n', limit);
-        const line = rest.lastIndexOf('\n', limit);
-        const space = rest.lastIndexOf(' ', limit);
-        cut = para > limit / 2 ? para : line > limit / 2 ? line : space > 0 ? space : limit;
-      }
-      out.push(rest.slice(0, cut));
-      rest = rest.slice(cut).replace(/^\n+/, '');
-    }
-    if (rest) out.push(rest);
-    return out;
+  private containsTelegramHtml(text: string): boolean {
+    return /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|spoiler|strike|strong|tg-spoiler|u)(?:\s[^>]*)?>/i.test(text);
   }
 
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
@@ -315,8 +301,9 @@ export class TelegramModule implements ChannelModule {
     const toTelegramHtml = this._toTelegramHtml!;
     const InputFile = this._InputFile;
 
-    const useHtml = explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text));
-    const sendText = useHtml && !explicitFormat ? toTelegramHtml(text) : text;
+    const inputIsHtml = explicitFormat === 'html' && this.containsTelegramHtml(text);
+    const useHtml = inputIsHtml || explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text));
+    const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text;
     const parseMode = useHtml ? 'HTML' as const : undefined;
 
     this.assertAllowedChat(chat_id);
@@ -331,9 +318,8 @@ export class TelegramModule implements ChannelModule {
 
     const access = this.readAccessFile();
     const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT));
-    const mode = access.chunkMode ?? 'length';
     const replyMode = access.replyToMode ?? 'first';
-    const chunks = this.chunk(sendText, limit, mode);
+    const chunks = chunkText(sendText, limit, parseMode === 'HTML');
     const sentIds: number[] = [];
 
     try {
@@ -342,11 +328,18 @@ export class TelegramModule implements ChannelModule {
           reply_to != null &&
           replyMode !== 'off' &&
           (replyMode === 'all' || i === 0);
-        const sent = await this.bot.api.sendMessage(chat_id, chunks[i], {
+        const opts = {
           ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
           ...(parseMode ? { parse_mode: parseMode } : {}),
-        });
-        sentIds.push(sent.message_id);
+        };
+        try {
+          const sent = await this.bot.api.sendMessage(chat_id, chunks[i], opts);
+          sentIds.push(sent.message_id);
+        } catch (err) {
+          if (!parseMode) throw err;
+          const sent = await this.bot.api.sendMessage(chat_id, htmlToPlain(chunks[i]), shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : undefined);
+          sentIds.push(sent.message_id);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

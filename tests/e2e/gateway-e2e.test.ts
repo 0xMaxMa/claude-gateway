@@ -338,7 +338,7 @@ describe('Gateway Telegram E2E — TelegramModule via mock API', () => {
     expect(msg!.text).toBe('Hello from E2E test!');
   });
 
-  test('E2E-TG-2: telegram_reply with HTML format', async () => {
+  test('E2E-TG-2: telegram_reply preserves pre-rendered HTML', async () => {
     const result = await mod.handleTool('telegram_reply', {
       chat_id: '67890',
       text: '<b>bold</b> text',
@@ -352,6 +352,38 @@ describe('Gateway Telegram E2E — TelegramModule via mock API', () => {
     expect(msg).toBeDefined();
     expect(msg!.text).toBe('<b>bold</b> text');
     expect(msg!.parse_mode).toBe('HTML');
+  });
+
+  test('E2E-TG-2b: telegram_reply converts raw Markdown despite explicit HTML format', async () => {
+    const result = await mod.handleTool('telegram_reply', {
+      chat_id: '67890',
+      text: '**bold**\n- item',
+      format: 'html',
+    });
+
+    expect(result.isError).toBeUndefined();
+
+    const sent = mockTg.getSentMessages();
+    const msg = sent.find(m => m.method === 'sendMessage');
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe('<b>bold</b>\n• item');
+    expect(msg!.parse_mode).toBe('HTML');
+  });
+
+  test('E2E-TG-2c: telegram_reply preserves raw Markdown when text format is explicit', async () => {
+    const result = await mod.handleTool('telegram_reply', {
+      chat_id: '67890',
+      text: '**bold**\n- item',
+      format: 'text',
+    });
+
+    expect(result.isError).toBeUndefined();
+
+    const sent = mockTg.getSentMessages();
+    const msg = sent.find(m => m.method === 'sendMessage');
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe('**bold**\n- item');
+    expect(msg!.parse_mode).toBeUndefined();
   });
 
   test('E2E-TG-3: telegram_reply with reply_to threading', async () => {
