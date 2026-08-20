@@ -26,7 +26,7 @@ import * as path from 'path';
 import { createApiRouter } from '../../src/api/router';
 import { type LineWebhookOptions } from '../../src/api/line-webhook-router';
 import { createWebhooksRouter } from '../../src/api/webhooks-router';
-import { getPendingSenders, _resetPendingSenders } from '../../src/api/line-pending-senders';
+import { getPendingSenders, _resetPendingSenders } from '../../src/api/pending-senders';
 import { AgentConfig, ApiKey } from '../../src/types';
 import type { AgentRunner } from '../../src/agent/runner';
 import { waitFor } from '../helpers/wait-for';
@@ -103,7 +103,7 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
   function buildApp(lineOpts: LineWebhookOptions = {}): express.Express {
     const app = express();
     // LINE webhook must be mounted before express.json() (raw body for signature).
-    app.use('/webhooks', createWebhooksRouter(runners, tmpDir, lineOpts));
+    app.use('/webhooks', createWebhooksRouter(runners, tmpDir, { line: lineOpts }));
     app.use(express.json());
     const apiKeys: ApiKey[] = [{ key: 'sk-admin', agents: '*', admin: true }];
     app.use('/api', createApiRouter(runners, configs, apiKeys, configPath));
@@ -270,9 +270,9 @@ describe('LINE: getpod config → chat (inbound) integration', () => {
       expect(res.status).toBe(200); // webhook is always ack'd
 
       // Async gate work settles: not forwarded, but recorded on the knock list.
-      await waitFor(() => getPendingSenders(AGENT_ID).some((s) => s.userId === KNOCKER_ID), 5000);
+      await waitFor(() => getPendingSenders('line', AGENT_ID).some((s) => s.userId === KNOCKER_ID), 5000);
       expect(intake).toHaveLength(0);
-      expect(getPendingSenders(AGENT_ID).map((s) => s.userId)).toContain(KNOCKER_ID);
+      expect(getPendingSenders('line', AGENT_ID).map((s) => s.userId)).toContain(KNOCKER_ID);
     } finally {
       lineMock.close();
     }

@@ -15,6 +15,7 @@ import {
 import { TelegramModule } from './tools/telegram/module';
 import { DiscordModule } from './tools/discord/module';
 import { LineModule } from './tools/line/module';
+import { SlackModule } from './tools/slack/module';
 import { CronModule } from './tools/cron/module';
 import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
@@ -39,6 +40,7 @@ const modules: AnyModule[] = [
   new TelegramModule(),
   new DiscordModule(),
   new LineModule(),
+  new SlackModule(),
   new CronModule(),
   new SkillsModule(),
   new AgentModule(),

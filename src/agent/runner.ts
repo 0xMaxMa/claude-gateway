@@ -1257,6 +1257,7 @@ export class AgentRunner extends EventEmitter {
       'attachment_name',
       'user_id',     // LINE: the userId the session passes back to line_reply
       'reply_token', // LINE: single-use reply token (push is preferred; surfaced for completeness)
+      'message_id',  // Slack: the inbound message ts, passed back to slack_reply so it can clear the ack-reaction it left
     ]
       .filter(k => meta[k])
       .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)

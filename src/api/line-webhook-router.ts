@@ -28,7 +28,7 @@ import {
   recordDeniedConversation,
   getPendingSender,
   generatePairingCode,
-} from './line-pending-senders';
+} from './pending-senders';
 import { wasBotMentioned, type LineMessageLike } from './line-mention';
 import type { WebhookAppHandler } from './webhooks-router';
 
@@ -410,34 +410,34 @@ export function createLineWebhookHandler(
           const sourcePolicy = resolved.kind === 'user' ? cfg?.dmPolicy : cfg?.groupPolicy;
           const isPairing =
             cfg?.pairing !== false && sourcePolicy !== 'open' && sourcePolicy !== 'disabled';
-          const prev = getPendingSender(deniedAgentId, knockId);
+          const prev = getPendingSender('line', deniedAgentId, knockId);
           const code = prev?.code ?? (isPairing ? generatePairingCode() : undefined);
 
           let wasNew = false;
           if (resolved.kind === 'user') {
-            wasNew = recordDeniedSender(deniedAgentId, knockId, undefined, Date.now(), code);
+            wasNew = recordDeniedSender('line', deniedAgentId, knockId, undefined, Date.now(), code);
             if (client) {
               void client
                 .getProfile(knockId)
                 .then((p) => {
-                  const e = getPendingSender(deniedAgentId, knockId);
+                  const e = getPendingSender('line', deniedAgentId, knockId);
                   if (e && p?.displayName && !e.displayName) e.displayName = p.displayName;
                 })
                 .catch(() => {});
             }
           } else if (resolved.kind === 'group') {
-            wasNew = recordDeniedConversation(deniedAgentId, knockId, 'group', undefined, Date.now(), code);
+            wasNew = recordDeniedConversation('line', deniedAgentId, knockId, 'group', undefined, Date.now(), code);
             if (client) {
               void client
                 .getGroupSummary(knockId)
                 .then((s) => {
-                  const e = getPendingSender(deniedAgentId, knockId);
+                  const e = getPendingSender('line', deniedAgentId, knockId);
                   if (e && s?.groupName && !e.displayName) e.displayName = s.groupName;
                 })
                 .catch(() => {});
             }
           } else if (resolved.kind === 'room') {
-            wasNew = recordDeniedConversation(deniedAgentId, knockId, 'room', undefined, Date.now(), code);
+            wasNew = recordDeniedConversation('line', deniedAgentId, knockId, 'room', undefined, Date.now(), code);
           }
 
           // Send the pairing code exactly once — on first contact only — via the

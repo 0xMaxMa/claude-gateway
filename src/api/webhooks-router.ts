@@ -1,23 +1,27 @@
 /**
  * Unified public webhook ingress.
  *
- * All external, unauthenticated webhooks (LINE today; more later) enter through a
- * single route `/webhooks/:app/:agentId?` and are dispatched to a per-app handler
- * by the `:app` path segment. Mounted BEFORE express.json() so each handler sees
- * the raw request bytes it needs for signature validation.
+ * All external, unauthenticated webhooks (LINE, Slack; more later) enter
+ * through a single route `/webhooks/:app/:agentId?` and are dispatched to a
+ * per-app handler by the `:app` path segment. Mounted BEFORE express.json()
+ * so each handler sees the raw request bytes it needs for signature
+ * validation.
  *
  * The whole `/webhooks/*` zone bypasses the gateway's API-key auth (it is mounted
  * outside the /api routers, exactly like the old LINE mount) AND Traefik's
  * ForwardAuth (a single `/gateway/webhooks` bypass router upstream). Therefore
  * EVERY app handler MUST authenticate its own requests (e.g. LINE's HMAC
- * signature) as its first step — there is no ambient auth on this path.
+ * signature, Slack's HMAC signature) as its first step — there is no ambient
+ * auth on this path.
  *
  * Adding a new webhook app = register one entry in `handlers` below; no Traefik or
- * getpod change is needed once the `/gateway/webhooks` ingress exists.
+ * getpod change is needed once the `/gateway/webhooks` ingress exists. Slack is
+ * the first proof this generalizes past LINE — see slack-webhook-router.ts.
  */
 import express, { Router, type Request, type Response } from 'express';
 import type { AgentRunner } from '../agent/runner';
 import { createLineWebhookHandler, type LineWebhookOptions } from './line-webhook-router';
+import { createSlackWebhookHandler, type SlackWebhookOptions } from './slack-webhook-router';
 
 const MAX_BODY_BYTES = 256 * 1024; // pre-auth body cap
 
@@ -32,10 +36,15 @@ export interface WebhookAppHandler {
 }
 
 /**
- * Options forwarded to app handlers. Only LINE has options today (test-only base
- * URL overrides); generalize to a per-app map when a second app needs its own.
+ * Options forwarded to app handlers, keyed by app so each handler only sees
+ * its own test-only overrides (LINE's apiBase/dataApiBase are meaningless to
+ * Slack and vice versa — a flat merged type would let one app's option leak
+ * into another's constructor by accident).
  */
-export type WebhooksOptions = LineWebhookOptions;
+export interface WebhooksOptions {
+  line?: LineWebhookOptions;
+  slack?: SlackWebhookOptions;
+}
 
 export function createWebhooksRouter(
   agents: Map<string, AgentRunner>,
@@ -46,7 +55,8 @@ export function createWebhooksRouter(
   const rawBody = express.raw({ type: '*/*', limit: MAX_BODY_BYTES });
 
   const handlers: Record<string, WebhookAppHandler> = {
-    line: createLineWebhookHandler(agents, logDir, opts),
+    line: createLineWebhookHandler(agents, logDir, opts.line ?? {}),
+    slack: createSlackWebhookHandler(agents, logDir, opts.slack ?? {}),
   };
 
   const resolve = (req: Request, res: Response): WebhookAppHandler | null => {

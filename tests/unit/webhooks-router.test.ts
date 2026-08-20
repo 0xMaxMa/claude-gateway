@@ -47,6 +47,22 @@ describe('webhooks dispatcher', () => {
     expect(res.body.error).toContain('no LINE-enabled agent');
   });
 
+  it('routes GET /webhooks/slack to the Slack verify handler (200 ok)', async () => {
+    const res = await supertest.default(makeApp()).get('/webhooks/slack');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+  });
+
+  it('dispatches POST /webhooks/slack to the Slack handler (404 when no Slack agent)', async () => {
+    const res = await supertest.default(makeApp())
+      .post('/webhooks/slack')
+      .set('Content-Type', 'application/json')
+      .send({ type: 'event_callback' });
+    // Reaches the Slack handler, which resolves no Slack-enabled agent.
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('no Slack-enabled agent');
+  });
+
   // `app` is attacker-controlled (`:app` path segment, no auth on this zone). A
   // plain-object lookup with no own-property guard would resolve these to a
   // truthy prototype-chain value instead of undefined, bypassing the 404 below

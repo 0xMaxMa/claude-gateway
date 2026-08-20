@@ -405,6 +405,11 @@ export class SessionProcess extends EventEmitter {
               this.agentConfig.line && (this.agentConfig.line.slowResponseThreshold ?? 45) > 0
                 ? '1'
                 : '',
+            // Slack outbound: slack_reply posts via chat.postMessage. Unlike LINE
+            // there's no gateway-side reply manager to defer to (no reply-token TTL
+            // to work around), so no refresh-mode env is needed — the subprocess
+            // always sends directly.
+            SLACK_BOT_TOKEN: this.agentConfig.slack?.botToken ?? '',
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.
