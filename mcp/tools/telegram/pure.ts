@@ -332,7 +332,7 @@ function countPending(access: Access, kind: 'dm' | 'group'): number {
   return n
 }
 
-export { hasMarkdown, toTelegramHtml } from './lib/markdown'
+export { hasMarkdown, toTelegramHtml, containsTelegramHtml } from './lib/markdown'
 
 /** Telegram does not support HTML <br> tags; normalize raw and escaped variants to line breaks. */
 export function normalizeTelegramLineBreaks(text: string): string {

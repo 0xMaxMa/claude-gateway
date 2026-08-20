@@ -1,7 +1,7 @@
 /**
  * Unit tests for hasMarkdown() and toTelegramHtml() from src/telegram/markdown.ts
  */
-import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../../../src/telegram/markdown'
+import { containsTelegramHtml, hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../../../src/telegram/markdown'
 
 describe('hasMarkdown()', () => {
   test('detects **bold**', () => {
@@ -60,6 +60,61 @@ describe('hasMarkdown()', () => {
 describe('normalizeTelegramLineBreaks()', () => {
   test.each(['&lt;br&gt;', '&lt;br/&gt;', '&lt;br /&gt;', '&lt;BR&gt;'])('converts %s to a newline', tag => {
     expect(normalizeTelegramLineBreaks(`first${tag}second`)).toBe('first\nsecond')
+  })
+})
+
+describe('containsTelegramHtml()', () => {
+  test.each([
+    ['<b>x</b>', 'bold'],
+    ['<code>y</code>', 'code'],
+    ['<a href="https://e.com">l</a>', 'link'],
+    ['<pre>block</pre>', 'pre'],
+    ['<tg-spoiler>s</tg-spoiler>', 'spoiler'],
+  ])('detects %s (%s)', input => {
+    expect(containsTelegramHtml(input)).toBe(true)
+  })
+
+  test.each([
+    ['plain text with no tags', 'plain'],
+    ['5 < 6 and 7 > 3', 'bare comparisons'],
+    ['<script>alert(1)</script>', 'non-whitelist tag'],
+    ['<div>x</div>', 'non-whitelist div'],
+  ])('returns false for %s (%s)', input => {
+    expect(containsTelegramHtml(input)).toBe(false)
+  })
+})
+
+describe('toTelegramHtml() preserves agent-authored Telegram HTML tags', () => {
+  // Regression for #365: a directly-written <b>/<code>/etc. mixed with markdown
+  // was escaped to literal &lt;b&gt; while markdown-derived tags rendered.
+  test('mixed markdown and literal HTML tags both render', () => {
+    expect(toTelegramHtml('**bold** <b>x</b> [l](https://e.com)')).toBe(
+      '<b>bold</b> <b>x</b> <a href="https://e.com">l</a>',
+    )
+  })
+
+  test('preserves a lone <code> tag with no markdown', () => {
+    expect(toTelegramHtml('<code>/update-agent</code> route')).toBe('<code>/update-agent</code> route')
+  })
+
+  test('preserves <b>, <i> and <a> together', () => {
+    expect(toTelegramHtml('<b>h</b>\n<i>note</i> and <a href="https://e.com">link</a>')).toBe(
+      '<b>h</b>\n<i>note</i> and <a href="https://e.com">link</a>',
+    )
+  })
+
+  test('escapes non-whitelist tags instead of passing them through', () => {
+    expect(toTelegramHtml('danger <script>alert(1)</script> end')).toBe(
+      'danger &lt;script&gt;alert(1)&lt;/script&gt; end',
+    )
+  })
+
+  test('a tag inside inline code stays literal (escaped within <code>)', () => {
+    expect(toTelegramHtml('talk about `<b>` here')).toBe('talk about <code>&lt;b&gt;</code> here')
+  })
+
+  test('bare < with a space is still escaped, not treated as a tag', () => {
+    expect(toTelegramHtml('a < c > d')).toBe('a &lt; c &gt; d')
   })
 })
 

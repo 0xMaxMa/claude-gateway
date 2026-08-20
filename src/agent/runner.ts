@@ -12,7 +12,7 @@ import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
-import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../telegram/markdown';
+import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
 import { SafeModeManager } from './safe-mode';
@@ -1776,7 +1776,7 @@ export class AgentRunner extends EventEmitter {
               const channelText = normalizeTelegramLineBreaks(text)
               if (channelSrcForResult === 'line' && this.lineReply) {
                 void this.lineReply.onAnswer(mapKey, channelText)
-              } else if (channelSrcForResult !== 'discord' && hasMarkdown(channelText)) {
+              } else if (channelSrcForResult !== 'discord' && (hasMarkdown(channelText) || containsTelegramHtml(channelText))) {
                 this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
               } else {
                 this.writeAutoForward(mapKey, channelText);
