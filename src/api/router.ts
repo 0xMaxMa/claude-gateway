@@ -435,7 +435,7 @@ export function createApiRouter(
           res.socket?.setNoDelay(true);
           try {
             const { responseText } = await runner.executeApiCommand(
-              sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage },
+              sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage, model: modelStr },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(responseText, []);

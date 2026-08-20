@@ -60,6 +60,10 @@ export const DEFAULT_MODELS: ModelConfig[] = [
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet',      contextWindow: 200000 },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46',    contextWindow: 200000 },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku',       contextWindow: 200000 },
+  { id: 'gpt-5.6-sol[1m]',           label: 'GPT 5.6 Sol',      alias: 'gpt56sol',    contextWindow: 1050000 },
+  { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra',  contextWindow: 1050000 },
+  { id: 'gpt-5.6-luna[1m]',          label: 'GPT 5.6 Luna',     alias: 'gpt56luna',   contextWindow: 1050000 },
+  { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55',       contextWindow: 1050000 },
 ];
 
 const PROTECTED_WORKSPACE_FILES = [
@@ -3385,7 +3389,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean },
+    opts?: { skipPersist?: boolean; model?: string },
   ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
@@ -3515,7 +3519,8 @@ export class AgentRunner extends EventEmitter {
         responseText = 'Session cleared.';
       } else if (cmd === '/compact') {
         const ch = 'api' as const;
-        const compactEffectiveModel = this.agentConfig.claude.model;
+        const activeSession = this.sessions.get(sessionId);
+        const compactEffectiveModel = opts?.model ?? activeSession?.modelOverride ?? this.agentConfig.claude.model;
         const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
         const modelConfig = availableModels.find((m) => m.id === compactEffectiveModel);
         const contextWindow = modelConfig?.contextWindow ?? 200000;
