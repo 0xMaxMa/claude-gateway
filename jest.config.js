@@ -7,7 +7,13 @@ module.exports = {
   testPathIgnorePatterns: ['/node_modules/', '<rootDir>/tests/e2e/'],
   forceExit: true,
   testTimeout: 30000,
-  maxWorkers: '50%',
+  // Two workers, each capped below (see the `test` script's --max-old-space-size),
+  // keep peak RSS within a ~8GB CI box. workerIdleMemoryLimit recycles a worker
+  // between test files once its heap grows past the limit, so a heavy suite
+  // (e.g. session-process.test.ts, ~1.9GB in one file) never accumulates on top
+  // of a worker's earlier residue and OOM-kills the process.
+  maxWorkers: 2,
+  workerIdleMemoryLimit: '768MB',
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
       tsconfig: {
