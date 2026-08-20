@@ -302,7 +302,7 @@ export class TelegramModule implements ChannelModule {
     const InputFile = this._InputFile;
 
     const inputIsHtml = explicitFormat === 'html' && this.containsTelegramHtml(text);
-    const useHtml = inputIsHtml || hasMarkdown(text);
+    const useHtml = inputIsHtml || explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text));
     const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text;
     const parseMode = useHtml ? 'HTML' as const : undefined;
 

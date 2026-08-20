@@ -721,7 +721,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const files = (args.files as string[] | undefined) ?? []
         const explicitFormat = args.format as string | undefined
         const inputIsHtml = explicitFormat === 'html' && containsTelegramHtml(text)
-        const useHtml = inputIsHtml || hasMarkdown(text)
+        const useHtml = inputIsHtml || explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text))
         const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text
         const parseMode = useHtml ? 'HTML' as const : undefined
 
