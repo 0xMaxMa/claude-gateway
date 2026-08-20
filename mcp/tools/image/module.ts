@@ -382,9 +382,12 @@ export class ImageModule implements ToolModule {
       if (signal?.aborted) return this.cancelledResult(taskId);
       await sleep(DEFAULT_POLL_INTERVAL_MS, signal);
       if (signal?.aborted) return this.cancelledResult(taskId);
-      const polled = await this.fetchJob(taskId);
+      const polled = await this.fetchJob(taskId, signal);
       if (polled.__transportError) {
-        // transient transport error — keep polling until deadline
+        // transient transport error (or abort signal fired mid-fetch) — check
+        // signal before continuing so a Stop-triggered abort isn't swallowed
+        // as a retryable error and the cancel fires on the next loop iteration.
+        if (signal?.aborted) return this.cancelledResult(taskId);
         continue;
       }
       if (polled.httpError) return this.mapHttpError(polled.httpError.status, polled.httpError.body);
@@ -539,8 +542,9 @@ export class ImageModule implements ToolModule {
   /**
    * Best-effort E3 cancel — fires and never throws, so a failed cancel call can
    * never break the caller's own (already-cancelled) tool response. The api-side
-   * cancel is itself idempotent/no-op-safe on an already-terminal or unknown task,
-   * so no need to track whether this actually reached a still-running job.
+   * cancel is itself idempotent/no-op-safe on an already-terminal or unknown task.
+   * cancelledResult() tracks the returned promise (activeCancelPromise) so a
+   * process-exiting shutdown can await it via drainCancel() instead of racing it.
    */
   private async cancelJob(taskId: string): Promise<void> {
     try {
@@ -554,9 +558,23 @@ export class ImageModule implements ToolModule {
     }
   }
 
+  // Tracks the in-flight cancel call so drainCancel() can await it before the
+  // server process exits — a Stop that lets the CLI process die cleanly closes
+  // this server's stdin, which fires process.exit() shortly after; without
+  // this, that exit can race the fire-and-forget cancelJob() fetch and kill it
+  // before the request ever reaches the provider.
+  private activeCancelPromise: Promise<void> | null = null;
+
+  /** Wait for any in-flight E3 cancel to complete. Called by the shutdown handler. */
+  async drainCancel(): Promise<void> {
+    if (this.activeCancelPromise) await this.activeCancelPromise;
+  }
+
   /** Tool result for a Stop-triggered cancellation, firing the E3 cancel first. */
   private cancelledResult(taskId: string): McpToolResult {
-    void this.cancelJob(taskId);
+    this.activeCancelPromise = this.cancelJob(taskId).finally(() => {
+      this.activeCancelPromise = null;
+    });
     return {
       content: [{
         type: 'text',
@@ -567,13 +585,19 @@ export class ImageModule implements ToolModule {
   }
 
   /** Fetch a job (E2), classifying transport vs HTTP errors so the poller can retry transient ones. */
-  private async fetchJob(taskId: string): Promise<{ job?: JobResponse; httpError?: { status: number; body: string }; __transportError?: unknown }> {
+  private async fetchJob(taskId: string, signal?: AbortSignal): Promise<{ job?: JobResponse; httpError?: { status: number; body: string }; __transportError?: unknown }> {
     let res: Response;
     try {
+      // Combine with the caller's cancel signal (not just the request timeout) so
+      // a Stop that lands mid-fetch aborts the request immediately instead of
+      // waiting out REQUEST_TIMEOUT_MS before the poll loop even gets to check.
+      const fetchSignal = signal
+        ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
+        : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
       res = await fetch(`${this.baseUrl()}/v1/images/jobs/${encodeURIComponent(taskId)}`, {
         method: 'GET',
         headers: this.headers(),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: fetchSignal,
       });
     } catch (err) {
       return { __transportError: err };
@@ -764,7 +788,7 @@ export class ImageModule implements ToolModule {
 // signal.aborted itself right after, so this only needs to shorten the wait.
 // The abort listener is removed when the timer fires normally: sleep() is called
 // once per poll iteration against the SAME long-lived signal (up to ~75 times for
-// the default 150s/2s budget), so leaving { once:true } listeners around on the
+// the default 150s/2s budget), so leaving { once: true } listeners around on the
 // non-abort path would pile them onto that one signal and trip Node's
 // MaxListenersExceededWarning.
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
