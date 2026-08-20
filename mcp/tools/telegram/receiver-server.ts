@@ -29,7 +29,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
-import { createWorkingStateManager, drainOrphanForwards } from './typing'
+import { createWorkingStateManager, drainOrphanForwards, chunkText, htmlToPlain } from './typing'
 // Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
@@ -565,27 +565,8 @@ function checkApprovals(): void {
 
 setInterval(checkApprovals, 5000).unref()
 
-// Telegram caps messages at 4096 chars. Split long replies, preferring
-// paragraph boundaries when chunkMode is 'newline'.
-function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
-  if (text.length <= limit) return [text]
-  const out: string[] = []
-  let rest = text
-  while (rest.length > limit) {
-    let cut = limit
-    if (mode === 'newline') {
-      // Prefer the last double-newline (paragraph), then single newline,
-      // then space. Fall back to hard cut.
-      const para = rest.lastIndexOf('\n\n', limit)
-      const line = rest.lastIndexOf('\n', limit)
-      const space = rest.lastIndexOf(' ', limit)
-      cut = para > limit / 2 ? para : line > limit / 2 ? line : space > 0 ? space : limit
-    }
-    out.push(rest.slice(0, cut))
-    rest = rest.slice(cut).replace(/^\n+/, '')
-  }
-  if (rest) out.push(rest)
-  return out
+function containsTelegramHtml(text: string): boolean {
+  return /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|spoiler|strike|strong|tg-spoiler|u)(?:\s[^>]*)?>/i.test(text)
 }
 
 // .jpg/.jpeg/.png/.gif/.webp go as photos (Telegram compresses + shows inline);
@@ -678,7 +659,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           format: {
             type: 'string',
             enum: ['text', 'html'],
-            description: "Rendering mode. 'html' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per HTML rules (&amp; &lt; &gt;). Default: 'text' (plain, no escaping needed).",
+            description: "Rendering mode. 'html' accepts pre-rendered Telegram HTML. Raw Markdown is detected and converted automatically. Default: auto-detect Markdown or send plain text.",
           },
         },
         required: ['chat_id', 'text'],
@@ -720,7 +701,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           format: {
             type: 'string',
             enum: ['text', 'html'],
-            description: "Rendering mode. 'html' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per HTML rules (&amp; &lt; &gt;). Default: 'text' (plain, no escaping needed).",
+            description: "Rendering mode. 'html' accepts pre-rendered Telegram HTML. Raw Markdown is detected and converted automatically. Default: auto-detect Markdown or send plain text.",
           },
         },
         required: ['chat_id', 'message_id', 'text'],
@@ -739,9 +720,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const explicitFormat = args.format as string | undefined
-        // Auto-detect markdown when caller didn't specify format explicitly
-        const useHtml = explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text))
-        const sendText = useHtml && !explicitFormat ? toTelegramHtml(text) : text
+        const inputIsHtml = explicitFormat === 'html' && containsTelegramHtml(text)
+        const useHtml = inputIsHtml || hasMarkdown(text)
+        const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text
         const parseMode = useHtml ? 'HTML' as const : undefined
 
         assertAllowedChat(chat_id)
@@ -756,9 +737,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
         const access = loadAccess()
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-        const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(sendText, limit, mode)
+        const chunks = chunkText(sendText, limit, parseMode === 'HTML')
         const sentIds: number[] = []
 
         try {
@@ -767,11 +747,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+            const opts = {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
-            })
-            sentIds.push(sent.message_id)
+            }
+            try {
+              const sent = await bot.api.sendMessage(chat_id, chunks[i], opts)
+              sentIds.push(sent.message_id)
+            } catch (err) {
+              if (!parseMode) throw err
+              const sent = await bot.api.sendMessage(
+                chat_id,
+                htmlToPlain(chunks[i]),
+                shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : undefined,
+              )
+              sentIds.push(sent.message_id)
+            }
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)

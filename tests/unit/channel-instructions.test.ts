@@ -24,6 +24,13 @@ describe('buildChannelInstructions', () => {
     }
   });
 
+  it('requires final replies to exclude progress narration', () => {
+    const out = buildChannelInstructions(false);
+    expect(out).toContain('Do not put tool-by-tool progress narration in final text output');
+    expect(out).toContain('current channel\'s reply tool');
+    expect(out).toContain('one concise final reply');
+  });
+
   it('preserves the existing baseline channel instructions in both modes', () => {
     expect(buildChannelInstructions(true)).toContain('reply tool');
     expect(buildChannelInstructions(false)).toContain('reply tool');
