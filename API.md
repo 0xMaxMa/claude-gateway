@@ -74,7 +74,7 @@ browser to open a link owns it (a link opened in a second browser is rejected), 
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
 | `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
-| `GET` | `/api/v1/models` | Key | List all supported Claude models |
+| `GET` | `/api/v1/models` | Key | List all supported models (Claude and GPT) |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
 
 ### Session Management API
@@ -1438,7 +1438,7 @@ The stream ends with `data: [DONE]`.
 
 ### GET /api/v1/models
 
-List all supported Claude models from gateway config.
+List all supported models (Claude and GPT) from gateway config.
 
 ```bash
 curl -H "X-Api-Key: my-secret-key-123" \
@@ -1451,7 +1451,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
     { "id": "claude-opus-5",     "name": "Opus 5",     "alias": "opus",     "contextWindow": 200000,  "multiplier": 1 },
     { "id": "claude-opus-5[1m]", "name": "Opus 5 (1M)", "alias": "opus[1m]", "contextWindow": 1000000, "multiplier": 1 },
     { "id": "claude-opus-4-8",   "name": "Opus 4.8",   "alias": "opus48",   "contextWindow": 200000,  "multiplier": 1 },
-    { "id": "claude-sonnet-5",   "name": "Sonnet 5",   "alias": "sonnet",   "contextWindow": 200000,  "multiplier": 1 }
+    { "id": "claude-sonnet-5",   "name": "Sonnet 5",   "alias": "sonnet",   "contextWindow": 200000,  "multiplier": 1 },
+    { "id": "gpt-5.6-sol[1m]",   "name": "GPT 5.6 Sol", "alias": "gpt56sol", "contextWindow": 1050000, "multiplier": 1 }
   ]
 }
 ```
@@ -1720,7 +1721,7 @@ curl -X POST \
 ```
 
 ```json
-{ "compacted": true, "keptMessages": 10, "sessionId": "da19d84a-6a36-4f57-b419-d322d82c4db8" }
+{ "success": true, "keptMessages": 10, "archivedMessages": 42 }
 ```
 
 ---

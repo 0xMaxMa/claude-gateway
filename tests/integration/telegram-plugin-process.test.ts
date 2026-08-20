@@ -223,6 +223,13 @@ function startMockCallbackServer(port: number) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       if (body['command'] === 'cli_pair') {
         res.end(JSON.stringify({ success: true, pairingId: 'a'.repeat(36), code: '1234', url: 'https://host.example/cli/' + 'a'.repeat(36) }))
+      } else if (body['command'] === 'get_model') {
+        res.end(JSON.stringify({ model: 'claude-opus-5' }))
+      } else if (body['command'] === 'get_models') {
+        res.end(JSON.stringify({ models: [
+          { id: 'claude-opus-5', label: 'Opus 5' },
+          { id: 'claude-sonnet-5', label: 'Sonnet 5' },
+        ] }))
       } else {
         res.end(JSON.stringify({ success: true }))
       }
@@ -489,5 +496,78 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
     expect(pair).toBeTruthy()
     expect((pair!['payload'] as { channel: string; user_id: string }).channel).toBe('telegram')
     expect((pair!['payload'] as { channel: string; user_id: string }).user_id).toBe(USER_ID)
+  }, 30000)
+
+  // ── test 7: /models picker can be dismissed without changing the model ─────
+
+  test('/models Dismiss acknowledges and deletes the picker without setting a model', async () => {
+    const t0 = Date.now()
+    const now = Math.floor(t0 / 1000)
+    const callbackStart = mockCb.commands.length
+
+    mock.queueUpdate({
+      message: {
+        message_id: 78,
+        from: { id: Number(USER_ID), username: 'tester', is_bot: false, first_name: 'Tester' },
+        chat: { id: Number(USER_ID), type: 'private' },
+        date: now,
+        text: '/models',
+        entities: [{ type: 'bot_command', offset: 0, length: 7 }],
+      },
+    })
+
+    const picker = await mock.waitForCall('sendMessage', t0, 20000)
+    let markup = picker.body['reply_markup'] as unknown
+    if (typeof markup === 'string') markup = JSON.parse(markup)
+    const rows = (markup as { inline_keyboard: Array<Array<Record<string, unknown>>> }).inline_keyboard
+    expect(rows[rows.length - 1]).toEqual([{ text: 'Dismiss', callback_data: 'models:dismiss' }])
+    expect(rows.flat().filter(b => /^model:/.test(String(b['callback_data'])))).toHaveLength(2)
+
+    const authorizedAt = Date.now()
+    mock.queueUpdate({
+      callback_query: {
+        id: 'dismiss-authorized',
+        chat_instance: 'instance-authorized',
+        data: 'models:dismiss',
+        from: { id: Number(USER_ID), username: 'tester', is_bot: false, first_name: 'Tester' },
+        message: {
+          message_id: 500,
+          date: now,
+          chat: { id: Number(USER_ID), type: 'private' },
+          from: { id: 99999, is_bot: true, username: 'testbot', first_name: 'TestBot' },
+          text: 'Current model: claude-opus-5\nSelect a model:',
+        },
+      },
+    })
+
+    const acknowledgement = await mock.waitForCall('answerCallbackQuery', authorizedAt, 20000)
+    expect(acknowledgement.body['text']).toBe('Dismissed')
+    const deleted = await mock.waitForCall('deleteMessage', authorizedAt, 20000)
+    expect(String(deleted.body['chat_id'])).toBe(USER_ID)
+    expect(String(deleted.body['message_id'])).toBe('500')
+    await sleep(300)
+    expect(mockCb.commands.slice(callbackStart).find(c => c['command'] === 'set_model')).toBeUndefined()
+
+    const unauthorizedAt = Date.now()
+    mock.queueUpdate({
+      callback_query: {
+        id: 'dismiss-unauthorized',
+        chat_instance: 'instance-unauthorized',
+        data: 'models:dismiss',
+        from: { id: 888777666, username: 'stranger', is_bot: false, first_name: 'Stranger' },
+        message: {
+          message_id: 501,
+          date: now,
+          chat: { id: Number(USER_ID), type: 'private' },
+          from: { id: 99999, is_bot: true, username: 'testbot', first_name: 'TestBot' },
+        },
+      },
+    })
+
+    const rejection = await mock.waitForCall('answerCallbackQuery', unauthorizedAt, 20000)
+    expect(rejection.body['text']).toBe('Not authorized.')
+    await sleep(300)
+    expect(mock.calls.find(c => c.method === 'deleteMessage' && c.ts >= unauthorizedAt)).toBeUndefined()
+    expect(mockCb.commands.slice(callbackStart).find(c => c['command'] === 'set_model')).toBeUndefined()
   }, 30000)
 })

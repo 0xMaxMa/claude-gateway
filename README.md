@@ -1151,7 +1151,7 @@ paired, the following commands are available in a private chat:
 | Command | Description |
 |---------|-------------|
 | `/model` | Show the current AI model |
-| `/models` | Switch AI model — shows an inline keyboard; selecting a model triggers a graceful restart and notifies when back online |
+| `/models` | Switch AI model — shows an inline keyboard; selecting a model triggers a graceful restart and notifies when back online; **Dismiss** closes the picker without changing the model |
 
 **Account**
 

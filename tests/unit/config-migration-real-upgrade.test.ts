@@ -7,6 +7,7 @@ import {
   loadCleanTemplate,
   stripIgnoredPaths,
   BIND_PRESERVED_WARNING,
+  compareSemver,
 } from '../../src/config/migrator';
 
 /**
@@ -327,5 +328,90 @@ describe('config migration — Opus 5 support reaches existing installs', () => 
     );
     expect(custom).toBeDefined();
     expect(custom.alias).toBe('mine');
+  });
+});
+
+/**
+ * Existing installs persist their own gateway.models list. The version bump is
+ * therefore part of the feature: without it, migrateModels() is never reached.
+ */
+describe('config migration — GPT models reach existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpt-model-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writePreGptConfig(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.29',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'gpt-5.6-terra', label: 'Old GPT Terra', alias: 'oldterra', contextWindow: 1000000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+          agents: [
+            {
+              id: 'legacy-gpt-agent',
+              claude: { model: 'gpt-5.6-terra', extraFlags: [] },
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  it('uses a template version newer than the pre-GPT registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.29')).toBeGreaterThan(0);
+  });
+
+  it('adds missing GPT models and corrects metadata for an existing GPT entry', () => {
+    const configPath = writePreGptConfig();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[gpt-5.6-sol[1m]]');
+    expect(result.addedFields).not.toContain('gateway.models[gpt-5.6-terra[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-5.6-luna[1m]]');
+    expect(result.addedFields).toContain('gateway.models[gpt-5.5[1m]]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'gpt-5.6-terra[1m]',
+      label: 'GPT 5.6 Terra',
+      alias: 'gpt56terra',
+      contextWindow: 1050000,
+    });
+    expect(migrated.gateway.models.some((model: { id: string }) => model.id === 'gpt-5.6-terra')).toBe(false);
+    expect(migrated.agents[0].claude.model).toBe('gpt-5.6-terra[1m]');
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreGptConfig();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
   });
 });

@@ -903,6 +903,10 @@ const AVAILABLE_MODELS = [
   { id: 'claude-sonnet-5',           label: 'Sonnet 5',         alias: 'sonnet' },
   { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6',       alias: 'sonnet46' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5',        alias: 'haiku' },
+  { id: 'gpt-5.6-sol[1m]',           label: 'GPT 5.6 Sol',      alias: 'gpt56sol' },
+  { id: 'gpt-5.6-terra[1m]',         label: 'GPT 5.6 Terra',    alias: 'gpt56terra' },
+  { id: 'gpt-5.6-luna[1m]',          label: 'GPT 5.6 Luna',     alias: 'gpt56luna' },
+  { id: 'gpt-5.5[1m]',               label: 'GPT 5.5',          alias: 'gpt55' },
 ]
 
 // Base URL for command API calls to the AgentRunner callback server.
@@ -1231,6 +1235,7 @@ bot.command('models', async ctx => {
       const prefix = m.id === currentModel ? '\u2705 ' : ''
       keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
     }
+    keyboard.text('Dismiss', 'models:dismiss')
 
     await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
       reply_markup: keyboard,
@@ -1478,6 +1483,16 @@ bot.on('callback_query:data', async ctx => {
         process.stderr.write(`telegram channel: menu cancel callback POST failed: ${err}\n`)
       })
     }
+    return
+  }
+
+  if (data === 'models:dismiss') {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
+    await ctx.deleteMessage().catch(() => {})
     return
   }
 

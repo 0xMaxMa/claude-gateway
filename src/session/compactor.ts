@@ -76,7 +76,7 @@ export class SessionCompactor {
       .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
       .join('\n\n');
 
-    const summaryText = await this.summarizeWithChunking(historyText);
+    const summaryText = await this.summarizeWithChunking(historyText, model);
     const compacted: Message[] = [
       { role: 'system', content: `[Conversation Summary]\n${summaryText}`, ts: Date.now() },
       ...tail,
@@ -94,10 +94,10 @@ export class SessionCompactor {
     return { beforeMessages, afterMessages, beforeTokens, afterTokens, reductionPct, contextPctBefore, contextPctAfter };
   }
 
-  private async summarizeWithChunking(historyText: string): Promise<string> {
+  private async summarizeWithChunking(historyText: string, model: string): Promise<string> {
     // If small enough, summarize directly
     if (historyText.length <= CHUNK_CHARS) {
-      return this.callClaudeForSummary(historyText);
+      return this.callClaudeForSummary(historyText, model);
     }
 
     // Split into chunks and summarize each
@@ -107,6 +107,7 @@ export class SessionCompactor {
     for (let i = 0; i < chunks.length; i++) {
       const summary = await this.callClaudeForSummary(
         chunks[i],
+        model,
         `This is part ${i + 1} of ${chunks.length} of a longer conversation. Summarize this segment concisely.`,
       );
       chunkSummaries.push(`[Part ${i + 1}/${chunks.length}]\n${summary}`);
@@ -116,6 +117,7 @@ export class SessionCompactor {
     const mergedText = chunkSummaries.join('\n\n');
     return this.callClaudeForSummary(
       mergedText,
+      model,
       MERGE_SUMMARIES_PROMPT,
     );
   }
@@ -140,6 +142,7 @@ export class SessionCompactor {
 
   private async callClaudeForSummary(
     text: string,
+    model: string,
     instruction = SINGLE_SUMMARY_INSTRUCTION,
   ): Promise<string> {
     // Wrap content in XML tags so claude treats it as data to analyze, not an active conversation
@@ -153,7 +156,7 @@ export class SessionCompactor {
     const claudeBinRaw = process.env.CLAUDE_BIN ?? resolveClaudeBin().bin;
     const [claudeBin, ...claudeBinArgs] = claudeBinRaw.split(' ');
 
-    const result = spawnSync(claudeBin, [...claudeBinArgs, '--print'], {
+    const result = spawnSync(claudeBin, [...claudeBinArgs, '--print', '--model', model], {
       input: prompt,
       encoding: 'utf-8',
       timeout: 300_000,

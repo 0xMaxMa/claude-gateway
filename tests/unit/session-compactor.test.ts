@@ -119,11 +119,11 @@ describe('SessionCompactor', () => {
   });
 
   // -------------------------------------------------------------------------
-  // U-CB1: the summary call honors CLAUDE_BIN (which may carry args) and always
-  // appends --print. Prevents the `claude --print` site from regressing to a
-  // hardcoded bare `claude` that a native-installer migration would break.
+  // U-CB1: the summary call honors CLAUDE_BIN (which may carry args), passes the
+  // selected model, and includes --print. Prevents compaction from silently using
+  // the CLI default model or a hardcoded bare `claude` binary.
   // -------------------------------------------------------------------------
-  it('U-CB1: honors CLAUDE_BIN (with args) and passes --print', async () => {
+  it('U-CB1: honors CLAUDE_BIN (with args) and passes --print with the selected model', async () => {
     const index = await sessionStore.getOrCreateIndex(agentId, chatId);
     const sessionId = index.activeSessionId;
     for (let i = 0; i < 6; i++) {
@@ -143,12 +143,12 @@ describe('SessionCompactor', () => {
 
     const [bin, args] = mockSpawnSync.mock.calls[0] as [string, string[]];
     expect(bin).toBe('node');
-    expect(args).toEqual(['/opt/claude/cli.js', '--print']);
+    expect(args).toEqual(['/opt/claude/cli.js', '--print', '--model', 'claude-sonnet-4-6']);
   });
 
   // -------------------------------------------------------------------------
-  // U-CB2: with CLAUDE_BIN unset the binary is resolved (non-empty) and --print
-  // is still the final arg.
+  // U-CB2: with CLAUDE_BIN unset the binary is resolved (non-empty), and the
+  // selected model is still passed to the CLI.
   // -------------------------------------------------------------------------
   it('U-CB2: resolves a binary and passes --print when CLAUDE_BIN is unset', async () => {
     const index = await sessionStore.getOrCreateIndex(agentId, chatId);
@@ -170,7 +170,7 @@ describe('SessionCompactor', () => {
     const [bin, args] = mockSpawnSync.mock.calls[0] as [string, string[]];
     expect(typeof bin).toBe('string');
     expect(bin.length).toBeGreaterThan(0);
-    expect(args[args.length - 1]).toBe('--print');
+    expect(args).toEqual(['--print', '--model', 'claude-sonnet-4-6']);
   });
 
   // -------------------------------------------------------------------------
