@@ -9,7 +9,7 @@ export type CliChannel = 'telegram' | 'discord' | 'line' | 'slack';
 
 /** Runtime guard for the trusted channel set (payloads cross a process boundary). */
 export function isCliChannel(value: unknown): value is CliChannel {
-  return value === 'telegram' || value === 'discord' || value === 'line';
+  return value === 'telegram' || value === 'discord' || value === 'line' || value === 'slack';
 }
 
 /**

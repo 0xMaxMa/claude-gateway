@@ -57,7 +57,10 @@ export class SlackModule implements ToolModule {
             },
             thread_id: {
               type: 'string',
-              description: 'Optional thread_ts to reply inside the same thread instead of top-level.',
+              description:
+                'Optional thread_ts to reply inside the same thread instead of top-level — ' +
+                'pass the thread_ts attribute from the <channel> tag when present, so a reply ' +
+                'to a threaded message stays in-thread.',
             },
           },
           required: ['chat_id', 'text'],

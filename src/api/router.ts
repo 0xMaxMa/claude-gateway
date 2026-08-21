@@ -17,6 +17,30 @@ import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agen
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+/**
+ * Standalone `auth.test` call for the Slack connect flow's Save-time token
+ * check (see the PATCH /agents/:agentId handler below). Not SlackClient
+ * (src/api/slack-client.ts) — that class requires a logDir-backed logger,
+ * which this router has no other reason to plumb through for one validation
+ * call. form-urlencoded per slack-client.ts's own finding (JSON is not
+ * reliably parsed by every Slack Web API method).
+ */
+async function verifySlackBotToken(botToken: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch('https://slack.com/api/auth.test', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+      },
+    });
+    const json = (await res.json()) as { ok: boolean; error?: string };
+    return { ok: json.ok, error: json.error };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'network error' };
+  }
+}
+
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -1416,6 +1440,22 @@ export function createApiRouter(
         res.status(400).json({ error: 'slack_bot_token and slack_signing_secret must be provided together' });
         return;
       }
+      // Reject a bad/expired token at Save time instead of persisting it silently
+      // (the failure would otherwise only surface later, when the agent tries to
+      // reply and gets a Slack API error). Mirrors openclaw's startup `auth.test`
+      // call — see slack-client.ts's authTest() doc comment, which named this as
+      // the intended Save-time check. A standalone fetch rather than SlackClient
+      // itself: SlackClient's constructor requires a logDir-backed logger this
+      // router has no other reason to plumb through for one validation call.
+      if (bothSet) {
+        const verify = await verifySlackBotToken(tok);
+        if (!verify.ok) {
+          res.status(400).json({
+            error: `Invalid Slack bot token — auth.test failed: ${verify.error ?? 'unknown error'}`,
+          });
+          return;
+        }
+      }
     }
     if (slack_dm_policy !== undefined && slack_dm_policy !== null &&
         !(typeof slack_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(slack_dm_policy))) {
@@ -1747,6 +1787,24 @@ export function createApiRouter(
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
         line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${agentId}` : null,
+        line_dm_policy: cfg.line?.channelSecret ? (cfg.line?.dmPolicy ?? null) : null,
+        line_dm_allowlist: cfg.line?.channelSecret ? (cfg.line?.dmAllowlist ?? []) : null,
+        line_group_policy: cfg.line?.channelSecret ? (cfg.line?.groupPolicy ?? null) : null,
+        line_group_allowlist: cfg.line?.channelSecret ? (cfg.line?.groupAllowlist ?? []) : null,
+        line_require_mention: cfg.line?.channelSecret ? (cfg.line?.requireMention ?? null) : null,
+        line_pairing: cfg.line?.channelSecret ? (cfg.line?.pairing ?? true) : null,
+        // Slack — same shape/semantics as LINE above, mirrors the GET /agents
+        // list response exactly (this PATCH response never carried these
+        // fields at all before — the UI fell back to the next GET refetch).
+        slack_connected: !!cfg.slack?.signingSecret,
+        slack_token_preview: cfg.slack?.botToken ? maskToken(cfg.slack.botToken) : null,
+        slack_webhook_path: cfg.slack?.signingSecret ? `/webhooks/slack/${agentId}` : null,
+        slack_dm_policy: cfg.slack?.signingSecret ? (cfg.slack?.dmPolicy ?? null) : null,
+        slack_dm_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.dmAllowlist ?? []) : null,
+        slack_group_policy: cfg.slack?.signingSecret ? (cfg.slack?.groupPolicy ?? null) : null,
+        slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
+        slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
+        slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
       },
     });
   });

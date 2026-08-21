@@ -3,8 +3,8 @@
  *  - normalizeSlackEvent (src/api/slack-webhook-router.ts) — inbound parsing
  *  - SlackModule (mcp/tools/slack/module.ts) — outbound slack_reply tool
  *
- * Signature validation is covered in slack-access.test.ts / slack.test.ts
- * (crypto-level, no network). This file mocks `global.fetch` (mirrors
+ * Signature validation (verifySlackSignature) is covered separately in
+ * slack-signature.test.ts (crypto-level, no network). This file mocks `global.fetch` (mirrors
  * tests/unit/cron-client-update.test.ts's pattern) rather than hitting a real
  * Slack API.
  */

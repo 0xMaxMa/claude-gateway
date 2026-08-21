@@ -104,7 +104,7 @@ export function normalizeSlackEvent(
 }
 
 /** Verify `X-Slack-Signature` (HMAC-SHA256 of "v0:{timestamp}:{rawBody}") and reject stale requests. */
-function verifySlackSignature(
+export function verifySlackSignature(
   rawBody: Buffer,
   signingSecret: string,
   timestampHeader: string | undefined,
@@ -143,12 +143,29 @@ export interface SlackWebhookOptions {
   apiBase?: string;
 }
 
+// Slack retries an event (at-least-once delivery) if our 200 ack is slow or
+// dropped — event_id is Slack's own dedup key for exactly this case. A bounded
+// map is enough here, not a full LRU: entries are pruned by age on each
+// insert, and Slack's retry window is short (seconds to a few minutes), so
+// this only needs to outlive that window, not forever.
+const SLACK_EVENT_ID_TTL_MS = 10 * 60_000;
+
 export function createSlackWebhookHandler(
   agents: Map<string, AgentRunner>,
   logDir: string,
   opts: SlackWebhookOptions = {},
 ): WebhookAppHandler {
   const logger = createLogger('slack-webhook', logDir);
+  const seenEventIds = new Map<string, number>();
+  const isDuplicateSlackEvent = (eventId: string): boolean => {
+    const now = Date.now();
+    for (const [id, ts] of seenEventIds) {
+      if (now - ts > SLACK_EVENT_ID_TTL_MS) seenEventIds.delete(id);
+    }
+    if (seenEventIds.has(eventId)) return true;
+    seenEventIds.set(eventId, now);
+    return false;
+  };
   // Slack's URL-verification handshake arrives as a signed POST, not a GET —
   // unlike LINE's Console "Verify" (an empty GET/POST) — so this handler is
   // effectively unused; kept only because WebhookAppHandler requires it.
@@ -200,6 +217,11 @@ export function createSlackWebhookHandler(
     res.status(200).json({ ok: true });
 
     if (payload.type !== 'event_callback') return;
+    const eventId = typeof payload.event_id === 'string' ? payload.event_id : '';
+    if (eventId && isDuplicateSlackEvent(eventId)) {
+      logger.debug('Slack webhook: duplicate event_id (Slack retry), skipping', { eventId });
+      return;
+    }
     const event = payload.event as SlackEvent | undefined;
     if (!event) return;
 
