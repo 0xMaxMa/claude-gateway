@@ -79,8 +79,14 @@ describe('containsTelegramHtml()', () => {
     ['5 < 6 and 7 > 3', 'bare comparisons'],
     ['<script>alert(1)</script>', 'non-whitelist tag'],
     ['<div>x</div>', 'non-whitelist div'],
+    ['<span>x</span>', 'bare span without tg-spoiler class'],
+    ['<span class="tg-spoiler">x</span>', 'span spoiler (use <tg-spoiler> instead)'],
   ])('returns false for %s (%s)', input => {
     expect(containsTelegramHtml(input)).toBe(false)
+  })
+
+  test('detects the canonical <tg-spoiler> element', () => {
+    expect(containsTelegramHtml('<tg-spoiler>hidden</tg-spoiler>')).toBe(true)
   })
 })
 
@@ -115,6 +121,29 @@ describe('toTelegramHtml() preserves agent-authored Telegram HTML tags', () => {
 
   test('bare < with a space is still escaped, not treated as a tag', () => {
     expect(toTelegramHtml('a < c > d')).toBe('a &lt; c &gt; d')
+  })
+
+  // Hardening (PR #366 review): a bare <span> is not valid Telegram HTML, and a
+  // raw & inside a hand-written <a href> query string must be escaped so
+  // Telegram does not reject the message.
+  test('escapes a bare <span> (use <tg-spoiler> for spoilers)', () => {
+    expect(toTelegramHtml('<span>x</span>')).toBe('&lt;span&gt;x&lt;/span&gt;')
+  })
+
+  test('preserves the canonical <tg-spoiler> element verbatim', () => {
+    expect(toTelegramHtml('<tg-spoiler>shh</tg-spoiler>')).toBe('<tg-spoiler>shh</tg-spoiler>')
+  })
+
+  test('escapes a raw & in a passed-through <a href> query string', () => {
+    expect(toTelegramHtml('<a href="https://x.com?a=1&b=2">link</a>')).toBe(
+      '<a href="https://x.com?a=1&amp;b=2">link</a>',
+    )
+  })
+
+  test('leaves an already-encoded &amp; in a passed-through tag untouched', () => {
+    expect(toTelegramHtml('<a href="https://x.com?a=1&amp;b=2">link</a>')).toBe(
+      '<a href="https://x.com?a=1&amp;b=2">link</a>',
+    )
   })
 })
 

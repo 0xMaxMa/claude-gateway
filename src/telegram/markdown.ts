@@ -10,8 +10,11 @@ export function normalizeTelegramLineBreaks(text: string): string {
 
 // Opening (with optional attributes) or closing form of every tag Telegram's
 // HTML parse mode honours. Sticky so it can be tested at a given offset without
-// slicing. `[^<>]*` keeps an attribute run from swallowing past the tag.
-const TELEGRAM_HTML_TAG = /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|span|strike|strong|tg-spoiler|u)(?:\s[^<>]*)?>/iy
+// slicing. `[^<>]*` keeps an attribute run from swallowing past the tag. `span`
+// is intentionally excluded: only `<span class="tg-spoiler">` is valid Telegram
+// HTML and pairing a class-bearing open with a bare `</span>` close is
+// error-prone — agents should use the canonical `<tg-spoiler>` element instead.
+const TELEGRAM_HTML_TAG = /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|strike|strong|tg-spoiler|u)(?:\s[^<>]*)?>/iy
 
 /** Length of a valid Telegram HTML tag starting at `i` (where text[i] === '<'), or 0 if none. */
 function matchTelegramTag(text: string, i: number): number {
@@ -52,6 +55,16 @@ export function hasMarkdown(text: string): boolean {
  */
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * Escapes a bare `&` (one not already opening a character entity) inside a
+ * passed-through Telegram HTML tag — Telegram rejects a raw `&` in e.g. an
+ * <a href> query string ("...?a=1&b=2"). `<`/`>` cannot occur here because the
+ * tag matcher forbids them in the attribute run, so only `&` needs escaping.
+ */
+function escapeTagAmp(tag: string): string {
+  return tag.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;')
 }
 
 /**
@@ -265,7 +278,7 @@ export function toTelegramHtml(text: string): string {
     if (text[i] === '<') {
       const tagLen = matchTelegramTag(text, i)
       if (tagLen > 0) {
-        out.push(text.slice(i, i + tagLen))
+        out.push(escapeTagAmp(text.slice(i, i + tagLen)))
         i += tagLen
         continue
       }
