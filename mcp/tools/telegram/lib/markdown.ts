@@ -294,3 +294,28 @@ export function toTelegramHtml(text: string): string {
 
   return out.join('')
 }
+
+/**
+ * Resolve how a channel reply should be sent given an optional explicit format.
+ * Mirrors the auto-forward decision in src/agent/runner.ts: agent-authored
+ * Telegram HTML tags must trigger HTML mode even when the text contains no
+ * markdown, otherwise a pure-HTML reply falls through to raw text with no
+ * parse_mode and the tags render literally (e.g. a visible "<b>").
+ * - explicit 'html' + already-valid Telegram HTML -> send verbatim under HTML
+ * - explicit 'html' (not yet valid) -> convert via toTelegramHtml under HTML
+ * - explicit 'text' -> always raw, no parse_mode (caller asked for plain text)
+ * - auto (no format) -> HTML when markdown OR Telegram tags are present
+ */
+export function resolveTelegramReplyFormat(
+  text: string,
+  explicitFormat?: string,
+): { sendText: string; parseMode: 'HTML' | undefined } {
+  const inputIsHtml = explicitFormat === 'html' && containsTelegramHtml(text)
+  const useHtml =
+    inputIsHtml ||
+    explicitFormat === 'html' ||
+    (!explicitFormat && (hasMarkdown(text) || containsTelegramHtml(text)))
+  const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text
+  const parseMode: 'HTML' | undefined = useHtml ? 'HTML' : undefined
+  return { sendText, parseMode }
+}

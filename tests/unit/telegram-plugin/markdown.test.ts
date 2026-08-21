@@ -1,7 +1,7 @@
 /**
  * Unit tests for hasMarkdown() and toTelegramHtml() from src/telegram/markdown.ts
  */
-import { containsTelegramHtml, hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../../../src/telegram/markdown'
+import { containsTelegramHtml, hasMarkdown, normalizeTelegramLineBreaks, resolveTelegramReplyFormat, toTelegramHtml } from '../../../src/telegram/markdown'
 
 describe('hasMarkdown()', () => {
   test('detects **bold**', () => {
@@ -297,5 +297,50 @@ describe('toTelegramHtml()', () => {
       expect(result).toContain('<code>lastRecalledAt</code>')
       expect(result).toContain('• Point one')
     })
+  })
+})
+
+describe('resolveTelegramReplyFormat() — agent-authored HTML must not render literally', () => {
+  // Real payload shape from the reported bug: agent writes Telegram HTML tags
+  // (<b>, <code>) with NO markdown tokens. Before the fix, auto-detect only
+  // checked hasMarkdown() -> useHtml=false -> raw text, no parse_mode -> the
+  // tags showed up literally in the chat.
+  const htmlOnlyReport =
+    '<b>Code review PR #2294 → commit <code>48060b3c</code></b>\n' +
+    '12 files · <b>+52 / −196</b>\n' +
+    '• verb <code>update</code> in <code>archive-backup-control.sh</code>'
+
+  test('auto format: pure-HTML report is sent as HTML, tags preserved (regression)', () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat(htmlOnlyReport)
+    // Old behaviour returned parseMode=undefined here — this is the fail-on-old assertion.
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toContain('<b>Code review PR #2294')
+    expect(sendText).toContain('<code>48060b3c</code>')
+    // never escaped into a literal tag
+    expect(sendText).not.toContain('&lt;b&gt;')
+  })
+
+  test('auto format: markdown-only still routes to HTML', () => {
+    const { parseMode } = resolveTelegramReplyFormat('This is **bold** and `code`')
+    expect(parseMode).toBe('HTML')
+  })
+
+  test("explicit 'html' with already-valid tags is sent verbatim under HTML", () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat('<b>hi</b>', 'html')
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toBe('<b>hi</b>')
+  })
+
+  test("explicit 'text' is always raw with no parse_mode", () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat(htmlOnlyReport, 'text')
+    expect(parseMode).toBeUndefined()
+    expect(sendText).toBe(htmlOnlyReport)
+  })
+
+  test('non-whitelist tags stay escaped even in auto HTML mode (safety)', () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat('<b>ok</b> <script>alert(1)</script>')
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toContain('<b>ok</b>')
+    expect(sendText).toContain('&lt;script&gt;')
   })
 })
