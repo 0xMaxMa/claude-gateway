@@ -15,7 +15,7 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 - 📚 **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](#gatewayknowledge)
 - 🌙 **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](#gatewaydreaming)
 - 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
-- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, Cron, Skills, extensible to Slack/WhatsApp)
+- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, Cron, Skills, extensible to more)
 - 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
 - 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress

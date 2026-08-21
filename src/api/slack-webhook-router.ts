@@ -72,6 +72,20 @@ interface SlackEvent {
 }
 
 /**
+ * Strip a leading/embedded bot self-mention (`<@U…>`) from `app_mention` text.
+ * Slack delivers the raw text with the mention markup inline (e.g.
+ * `<@U0BOT> hello`), which is noise to the agent. Only the bot's OWN id is
+ * removed — mentions of other users are left intact so the agent can still see
+ * who else was referenced. No-op when the bot id is unknown.
+ */
+function stripBotMention(text: string, botUserId: string | undefined): string {
+  if (!text || !botUserId) return text;
+  // Match `<@U123>` or `<@U123|label>` for exactly this bot id.
+  const re = new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, 'g');
+  return text.replace(re, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
  * Normalize a Slack Events API `event` into the gateway's {content, meta}
  * intake shape. Returns null for anything not handled in v1 (bot-authored
  * events, missing channel/user, non message/app_mention types — see 2c for
@@ -80,6 +94,7 @@ interface SlackEvent {
 export function normalizeSlackEvent(
   event: SlackEvent,
   resolved?: ResolvedSlackSource,
+  botUserId?: string,
 ): NormalizedSlackMessage | null {
   if (event.type !== 'message' && event.type !== 'app_mention') return null;
   // Bot-loop protection (2c #18) — never respond to our own or another bot's
@@ -100,7 +115,7 @@ export function normalizeSlackEvent(
   };
   if (event.thread_ts) meta.thread_ts = event.thread_ts;
 
-  return { content: event.text ?? '', meta };
+  return { content: stripBotMention(event.text ?? '', botUserId), meta };
 }
 
 /** Verify `X-Slack-Signature` (HMAC-SHA256 of "v0:{timestamp}:{rawBody}") and reject stale requests. */
@@ -225,6 +240,12 @@ export function createSlackWebhookHandler(
     const event = payload.event as SlackEvent | undefined;
     if (!event) return;
 
+    // The bot's own Slack user id — carried on every event_callback in
+    // `authorizations` — used to strip the bot's self-mention from
+    // app_mention text (see normalizeSlackEvent below).
+    const authorizations = payload.authorizations as Array<{ user_id?: string }> | undefined;
+    const botUserId = authorizations?.[0]?.user_id;
+
     const deniedAgentId = runner.getAgentConfig().id;
     const resolved = resolveSlackSource(event as SlackEventLike);
 
@@ -287,7 +308,7 @@ export function createSlackWebhookHandler(
       return;
     }
 
-    const norm = normalizeSlackEvent(event, resolved);
+    const norm = normalizeSlackEvent(event, resolved, botUserId);
     if (!norm) return;
 
     // Channel activation gate: unless requireMention is explicitly false,

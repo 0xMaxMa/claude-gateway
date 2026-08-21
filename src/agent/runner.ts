@@ -188,6 +188,13 @@ export class AgentRunner extends EventEmitter {
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
   private readonly channelSourceMap = new Map<string, ChatChannel>();
+  // Slack only: the thread_ts of the most recent inbound message per chat, so
+  // the auto-forward fallback path (command replies, socket-drop notices, the
+  // no-tool-call assistant fallback) can reply in-thread the same way the
+  // slack_reply tool does. Set when an inbound Slack turn carries thread_ts,
+  // cleared when a top-level message arrives so a later fallback doesn't leak
+  // into a stale thread.
+  private readonly slackThreadTs = new Map<string, string>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
   // LINE slow-LLM postback button manager (null when LINE disabled or threshold=0).
@@ -424,6 +431,16 @@ export class AgentRunner extends EventEmitter {
                 ? 'slack'
                 : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
+
+          // Slack: remember the current message's thread context so the
+          // auto-forward fallback (writeAutoForward) can stay in-thread. A
+          // top-level message clears it so a later fallback isn't misrouted
+          // into a thread the user already left.
+          if (channelSource === 'slack') {
+            const threadTs = meta['thread_ts'];
+            if (threadTs) this.slackThreadTs.set(chatId, threadTs);
+            else this.slackThreadTs.delete(chatId);
+          }
 
           // LINE slow-LLM postback: stash this turn's reply token + arm the
           // button timer before the token expires. In groups/rooms the shared
@@ -2458,7 +2475,10 @@ export class AgentRunner extends EventEmitter {
     // assistant-fallback path (no tool call) silently vanished for Slack.
     if (this.channelFor(chatId) === 'slack') {
       if (this.slackOutbound) {
-        void this.slackOutbound.postMessage(chatId, text).catch((err: unknown) => {
+        // Reply in-thread when the last inbound message was threaded (mirrors
+        // the slack_reply tool's thread_id behavior); top-level otherwise.
+        const threadTs = this.slackThreadTs.get(chatId);
+        void this.slackOutbound.postMessage(chatId, text, threadTs).catch((err: unknown) => {
           this.logger.warn('Slack auto-forward failed', {
             chatId,
             error: err instanceof Error ? err.message : String(err),
