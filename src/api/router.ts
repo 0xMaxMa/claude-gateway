@@ -10,6 +10,7 @@ import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
+import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
@@ -2345,12 +2346,12 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line' && source !== 'slack') {
+    if (!isChatChannel(source)) {
       res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack chats' });
       return;
     }
     try {
-      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord' | 'line' | 'slack');
+      const index = await runner.listSessionsForChat(rawChatId, source);
       res.json(index);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2535,7 +2536,7 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line' && source !== 'slack') {
+    if (!isChatChannel(source)) {
       res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack chats' });
       return;
     }
@@ -2584,7 +2585,7 @@ export function createApiRouter(
 
       cleanup = await runner.sendMessageToSession(
         rawChatId,
-        source as 'telegram' | 'discord' | 'line' | 'slack',
+        source,
         sessionId,
         content.trim(),
         senderName,

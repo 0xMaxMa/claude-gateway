@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { Message } from '../types';
+import type { ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
 import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
 
@@ -50,7 +51,7 @@ export class SessionCompactor {
     sessionId: string,
     model: string,
     contextWindow: number,
-    channel: 'telegram' | 'discord' | 'line' | 'slack' | 'api' = 'telegram',
+    channel: ChatChannelOrApi = 'telegram',
   ): Promise<CompactionResult> {
     // Load current history
     const messages = await this.sessionStore.loadTelegramSession(agentId, chatId, sessionId, channel);

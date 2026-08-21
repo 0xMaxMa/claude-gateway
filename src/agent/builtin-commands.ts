@@ -1,4 +1,6 @@
-export type CommandChannel = 'telegram' | 'discord' | 'line' | 'slack' | 'api';
+import type { ChatChannelOrApi } from '../history/types';
+
+export type CommandChannel = ChatChannelOrApi;
 
 interface CommandDef {
   channels: CommandChannel[];

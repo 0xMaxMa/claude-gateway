@@ -27,7 +27,7 @@ import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
-import type { HistorySource } from '../history/types';
+import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 
@@ -181,13 +181,13 @@ export class AgentRunner extends EventEmitter {
   imageSize(chatId: string): number { return this.imageSizePerChat.get(chatId) ?? 0; }
   restartPending(chatId: string): boolean { return this.pendingRestarts.has(chatId); }
 
-  private channelFor(chatId: string): 'telegram' | 'discord' | 'line' | 'slack' {
+  private channelFor(chatId: string): ChatChannel {
     return this.channelSourceMap.get(chatId) ?? 'telegram';
   }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
-  private readonly channelSourceMap = new Map<string, 'telegram' | 'discord' | 'line' | 'slack'>();
+  private readonly channelSourceMap = new Map<string, ChatChannel>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
   // LINE slow-LLM postback button manager (null when LINE disabled or threshold=0).
@@ -254,7 +254,7 @@ export class AgentRunner extends EventEmitter {
   private readonly channelCoalesce = new Map<
     string,
     {
-      channelSource: 'telegram' | 'discord' | 'line' | 'slack';
+      channelSource: ChatChannel;
       entries: Array<{ content?: string; meta?: Record<string, string> }>;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -276,7 +276,7 @@ export class AgentRunner extends EventEmitter {
   private readonly turnQueue = new Map<
     string,
     Array<{
-      channelSource: 'telegram' | 'discord' | 'line' | 'slack';
+      channelSource: ChatChannel;
       entries: Array<{ content?: string; meta?: Record<string, string> }>;
     }>
   >();
@@ -422,7 +422,7 @@ export class AgentRunner extends EventEmitter {
               ? 'line'
               : meta['source'] === 'slack'
                 ? 'slack'
-                : 'telegram') as 'telegram' | 'discord' | 'line' | 'slack';
+                : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
 
           // LINE slow-LLM postback: stash this turn's reply token + arm the
@@ -976,7 +976,7 @@ export class AgentRunner extends EventEmitter {
    */
   private routeChannelTurn(
     chatId: string,
-    channelSource: 'telegram' | 'discord' | 'line' | 'slack',
+    channelSource: ChatChannel,
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     if (entries.length === 0) return;
@@ -1021,7 +1021,7 @@ export class AgentRunner extends EventEmitter {
    */
   private injectTurn(
     chatId: string,
-    channelSource: 'telegram' | 'discord' | 'line' | 'slack',
+    channelSource: ChatChannel,
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     // Snapshot the stop epoch: if /stop bumps it during the async window below, we
@@ -1331,7 +1331,7 @@ export class AgentRunner extends EventEmitter {
 
   private async getOrSpawnSession(
     mapKey: string,              // Map lookup key (chatId for telegram/discord, sessionId for API)
-    source: 'telegram' | 'discord' | 'line' | 'slack' | 'api',
+    source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
   ): Promise<SessionProcess> {
@@ -1392,7 +1392,7 @@ export class AgentRunner extends EventEmitter {
 
   private async spawnSession(
     mapKey: string,
-    source: 'telegram' | 'discord' | 'line' | 'slack' | 'api',
+    source: ChatChannelOrApi,
     sessionId?: string,
     modelOverride?: string,
   ): Promise<SessionProcess> {
@@ -3437,7 +3437,7 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 
-  async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord' | 'line' | 'slack'): Promise<import('../types').SessionIndex> {
+  async listSessionsForChat(chatId: string, channel: ChatChannel): Promise<import('../types').SessionIndex> {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
   }
 
@@ -3720,7 +3720,7 @@ export class AgentRunner extends EventEmitter {
    */
   async sendMessageToSession(
     rawChatId: string,
-    channel: 'telegram' | 'discord' | 'line' | 'slack',
+    channel: ChatChannel,
     sessionId: string,
     message: string,
     senderName: string | undefined,

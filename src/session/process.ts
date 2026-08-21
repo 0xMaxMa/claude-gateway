@@ -7,6 +7,7 @@ import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
 import { resolveDreamingConfig } from '../agent/dreaming/config';
+import { toChatChannel, type ChatChannel, type ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
 import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
@@ -77,11 +78,20 @@ const NO_TOOLS_DISALLOWED = [
   'WebFetch', 'WebSearch', 'TodoWrite', 'ExitPlanMode', 'Skill',
 ].join(',');
 
+// Per-channel state directory suffix — single source of truth for what used
+// to be the same 4-branch ternary repeated at both call sites below.
+const STATE_SUBDIR: Record<ChatChannel, string> = {
+  telegram: '.telegram-state',
+  discord: '.discord-state',
+  line: '.line-state',
+  slack: '.slack-state',
+};
+
 export class SessionProcess extends EventEmitter {
   readonly sessionId: string;
   readonly chatId: string;
-  readonly source: 'telegram' | 'discord' | 'line' | 'slack' | 'api';
-  private readonly sessionChannel: 'telegram' | 'discord' | 'line' | 'slack';
+  readonly source: ChatChannelOrApi;
+  private readonly sessionChannel: ChatChannel;
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
@@ -151,7 +161,7 @@ export class SessionProcess extends EventEmitter {
 
   constructor(
     sessionId: string,
-    source: 'telegram' | 'discord' | 'line' | 'slack' | 'api',
+    source: ChatChannelOrApi,
     agentConfig: AgentConfig,
     gatewayConfig: GatewayConfig,
     sessionStore: SessionStore,
@@ -161,8 +171,7 @@ export class SessionProcess extends EventEmitter {
     this.sessionId = sessionId;
     this.source = source;
     this.chatId = chatId ?? sessionId;
-    this.sessionChannel =
-      source === 'discord' ? 'discord' : source === 'line' ? 'line' : source === 'slack' ? 'slack' : 'telegram';
+    this.sessionChannel = toChatChannel(source);
     this.agentConfig = agentConfig;
     this.gatewayConfig = gatewayConfig;
     this.sessionStore = sessionStore;
@@ -172,8 +181,7 @@ export class SessionProcess extends EventEmitter {
     );
     // config.json lives 3 levels above workspace: <base>/<agentId>/workspace → <base>/config.json
     this.configPath = path.resolve(agentConfig.workspace, '..', '..', '..', 'config.json');
-    const stateSubDir = source === 'discord' ? '.discord-state' : source === 'line' ? '.line-state' : source === 'slack' ? '.slack-state' : '.telegram-state';
-    this.restartSignalPath = path.join(agentConfig.workspace, stateSubDir, `restart-${sessionId}`);
+    this.restartSignalPath = path.join(agentConfig.workspace, STATE_SUBDIR[this.sessionChannel], `restart-${sessionId}`);
   }
 
   /**
@@ -181,8 +189,7 @@ export class SessionProcess extends EventEmitter {
    * Priority: per-session override > config.json on disk > cached agentConfig.
    */
   private get typingDir(): string {
-    const sub = this.source === 'discord' ? '.discord-state' : this.source === 'line' ? '.line-state' : this.source === 'slack' ? '.slack-state' : '.telegram-state';
-    return path.join(this.agentConfig.workspace, sub, 'typing');
+    return path.join(this.agentConfig.workspace, STATE_SUBDIR[this.sessionChannel], 'typing');
   }
 
   private appendToStore(msg: { role: 'user' | 'assistant' | 'system'; content: string; ts: number }): Promise<void> {
