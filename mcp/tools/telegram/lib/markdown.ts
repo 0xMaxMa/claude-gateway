@@ -8,6 +8,30 @@ export function normalizeTelegramLineBreaks(text: string): string {
   return text.replace(/(?:<|&lt;)br\s*\/?(?:>|&gt;)/gi, '\n')
 }
 
+// Opening (with optional attributes) or closing form of every tag Telegram's
+// HTML parse mode honours. Sticky so it can be tested at a given offset without
+// slicing. `[^<>]*` keeps an attribute run from swallowing past the tag. `span`
+// is intentionally excluded: only `<span class="tg-spoiler">` is valid Telegram
+// HTML and pairing a class-bearing open with a bare `</span>` close is
+// error-prone — agents should use the canonical `<tg-spoiler>` element instead.
+const TELEGRAM_HTML_TAG = /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|strike|strong|tg-spoiler|u)(?:\s[^<>]*)?>/iy
+
+/** Length of a valid Telegram HTML tag starting at `i` (where text[i] === '<'), or 0 if none. */
+function matchTelegramTag(text: string, i: number): number {
+  if (text[i] !== '<') return 0
+  TELEGRAM_HTML_TAG.lastIndex = i
+  const m = TELEGRAM_HTML_TAG.exec(text)
+  return m ? m[0].length : 0
+}
+
+/** Whether text already contains at least one Telegram-whitelist HTML tag written directly. */
+export function containsTelegramHtml(text: string): boolean {
+  for (let i = text.indexOf('<'); i !== -1; i = text.indexOf('<', i + 1)) {
+    if (matchTelegramTag(text, i) > 0) return true
+  }
+  return false
+}
+
 /**
  * Detects whether text contains markdown formatting patterns
  * that warrant HTML rendering in Telegram.
@@ -31,6 +55,16 @@ export function hasMarkdown(text: string): boolean {
  */
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * Escapes a bare `&` (one not already opening a character entity) inside a
+ * passed-through Telegram HTML tag — Telegram rejects a raw `&` in e.g. an
+ * <a href> query string ("...?a=1&b=2"). `<`/`>` cannot occur here because the
+ * tag matcher forbids them in the attribute run, so only `&` needs escaping.
+ */
+function escapeTagAmp(tag: string): string {
+  return tag.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;')
 }
 
 /**
@@ -238,6 +272,18 @@ export function toTelegramHtml(text: string): string {
       }
     }
 
+    // Pass through a valid Telegram HTML tag the agent wrote directly, verbatim.
+    // Non-whitelist tags (e.g. <script>) fail the match and are escaped as plain
+    // text below, so this is a controlled pass-through, not raw HTML injection.
+    if (text[i] === '<') {
+      const tagLen = matchTelegramTag(text, i)
+      if (tagLen > 0) {
+        out.push(escapeTagAmp(text.slice(i, i + tagLen)))
+        i += tagLen
+        continue
+      }
+    }
+
     // Accumulate plain text until next markdown token
     let j = i + 1
     while (j < len) {
@@ -249,6 +295,7 @@ export function toTelegramHtml(text: string): string {
         (c === '*' && text[j + 1] !== '*' && text[j + 1] !== ' ') ||
         (c === '_' && text[j + 1] !== '_' && text[j + 1] !== ' ') ||
         c === '[' ||
+        (c === '<' && matchTelegramTag(text, j) > 0) ||
         (c === '#' && (j === 0 || text[j - 1] === '\n')) ||
         (c === '|' && (j === 0 || text[j - 1] === '\n'))
       ) break
@@ -259,4 +306,29 @@ export function toTelegramHtml(text: string): string {
   }
 
   return out.join('')
+}
+
+/**
+ * Resolve how a channel reply should be sent given an optional explicit format.
+ * Mirrors the auto-forward decision in src/agent/runner.ts: agent-authored
+ * Telegram HTML tags must trigger HTML mode even when the text contains no
+ * markdown, otherwise a pure-HTML reply falls through to raw text with no
+ * parse_mode and the tags render literally (e.g. a visible "<b>").
+ * - explicit 'html' + already-valid Telegram HTML -> send verbatim under HTML
+ * - explicit 'html' (not yet valid) -> convert via toTelegramHtml under HTML
+ * - explicit 'text' -> always raw, no parse_mode (caller asked for plain text)
+ * - auto (no format) -> HTML when markdown OR Telegram tags are present
+ */
+export function resolveTelegramReplyFormat(
+  text: string,
+  explicitFormat?: string,
+): { sendText: string; parseMode: 'HTML' | undefined } {
+  const inputIsHtml = explicitFormat === 'html' && containsTelegramHtml(text)
+  const useHtml =
+    inputIsHtml ||
+    explicitFormat === 'html' ||
+    (!explicitFormat && (hasMarkdown(text) || containsTelegramHtml(text)))
+  const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text
+  const parseMode: 'HTML' | undefined = useHtml ? 'HTML' : undefined
+  return { sendText, parseMode }
 }

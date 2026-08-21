@@ -1,7 +1,7 @@
 /**
  * Unit tests for hasMarkdown() and toTelegramHtml() from src/telegram/markdown.ts
  */
-import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml } from '../../../src/telegram/markdown'
+import { containsTelegramHtml, hasMarkdown, normalizeTelegramLineBreaks, resolveTelegramReplyFormat, toTelegramHtml } from '../../../src/telegram/markdown'
 
 describe('hasMarkdown()', () => {
   test('detects **bold**', () => {
@@ -60,6 +60,90 @@ describe('hasMarkdown()', () => {
 describe('normalizeTelegramLineBreaks()', () => {
   test.each(['&lt;br&gt;', '&lt;br/&gt;', '&lt;br /&gt;', '&lt;BR&gt;'])('converts %s to a newline', tag => {
     expect(normalizeTelegramLineBreaks(`first${tag}second`)).toBe('first\nsecond')
+  })
+})
+
+describe('containsTelegramHtml()', () => {
+  test.each([
+    ['<b>x</b>', 'bold'],
+    ['<code>y</code>', 'code'],
+    ['<a href="https://e.com">l</a>', 'link'],
+    ['<pre>block</pre>', 'pre'],
+    ['<tg-spoiler>s</tg-spoiler>', 'spoiler'],
+  ])('detects %s (%s)', input => {
+    expect(containsTelegramHtml(input)).toBe(true)
+  })
+
+  test.each([
+    ['plain text with no tags', 'plain'],
+    ['5 < 6 and 7 > 3', 'bare comparisons'],
+    ['<script>alert(1)</script>', 'non-whitelist tag'],
+    ['<div>x</div>', 'non-whitelist div'],
+    ['<span>x</span>', 'bare span without tg-spoiler class'],
+    ['<span class="tg-spoiler">x</span>', 'span spoiler (use <tg-spoiler> instead)'],
+  ])('returns false for %s (%s)', input => {
+    expect(containsTelegramHtml(input)).toBe(false)
+  })
+
+  test('detects the canonical <tg-spoiler> element', () => {
+    expect(containsTelegramHtml('<tg-spoiler>hidden</tg-spoiler>')).toBe(true)
+  })
+})
+
+describe('toTelegramHtml() preserves agent-authored Telegram HTML tags', () => {
+  // Regression for #365: a directly-written <b>/<code>/etc. mixed with markdown
+  // was escaped to literal &lt;b&gt; while markdown-derived tags rendered.
+  test('mixed markdown and literal HTML tags both render', () => {
+    expect(toTelegramHtml('**bold** <b>x</b> [l](https://e.com)')).toBe(
+      '<b>bold</b> <b>x</b> <a href="https://e.com">l</a>',
+    )
+  })
+
+  test('preserves a lone <code> tag with no markdown', () => {
+    expect(toTelegramHtml('<code>/update-agent</code> route')).toBe('<code>/update-agent</code> route')
+  })
+
+  test('preserves <b>, <i> and <a> together', () => {
+    expect(toTelegramHtml('<b>h</b>\n<i>note</i> and <a href="https://e.com">link</a>')).toBe(
+      '<b>h</b>\n<i>note</i> and <a href="https://e.com">link</a>',
+    )
+  })
+
+  test('escapes non-whitelist tags instead of passing them through', () => {
+    expect(toTelegramHtml('danger <script>alert(1)</script> end')).toBe(
+      'danger &lt;script&gt;alert(1)&lt;/script&gt; end',
+    )
+  })
+
+  test('a tag inside inline code stays literal (escaped within <code>)', () => {
+    expect(toTelegramHtml('talk about `<b>` here')).toBe('talk about <code>&lt;b&gt;</code> here')
+  })
+
+  test('bare < with a space is still escaped, not treated as a tag', () => {
+    expect(toTelegramHtml('a < c > d')).toBe('a &lt; c &gt; d')
+  })
+
+  // Hardening (PR #366 review): a bare <span> is not valid Telegram HTML, and a
+  // raw & inside a hand-written <a href> query string must be escaped so
+  // Telegram does not reject the message.
+  test('escapes a bare <span> (use <tg-spoiler> for spoilers)', () => {
+    expect(toTelegramHtml('<span>x</span>')).toBe('&lt;span&gt;x&lt;/span&gt;')
+  })
+
+  test('preserves the canonical <tg-spoiler> element verbatim', () => {
+    expect(toTelegramHtml('<tg-spoiler>shh</tg-spoiler>')).toBe('<tg-spoiler>shh</tg-spoiler>')
+  })
+
+  test('escapes a raw & in a passed-through <a href> query string', () => {
+    expect(toTelegramHtml('<a href="https://x.com?a=1&b=2">link</a>')).toBe(
+      '<a href="https://x.com?a=1&amp;b=2">link</a>',
+    )
+  })
+
+  test('leaves an already-encoded &amp; in a passed-through tag untouched', () => {
+    expect(toTelegramHtml('<a href="https://x.com?a=1&amp;b=2">link</a>')).toBe(
+      '<a href="https://x.com?a=1&amp;b=2">link</a>',
+    )
   })
 })
 
@@ -242,5 +326,50 @@ describe('toTelegramHtml()', () => {
       expect(result).toContain('<code>lastRecalledAt</code>')
       expect(result).toContain('• Point one')
     })
+  })
+})
+
+describe('resolveTelegramReplyFormat() — agent-authored HTML must not render literally', () => {
+  // Real payload shape from the reported bug: agent writes Telegram HTML tags
+  // (<b>, <code>) with NO markdown tokens. Before the fix, auto-detect only
+  // checked hasMarkdown() -> useHtml=false -> raw text, no parse_mode -> the
+  // tags showed up literally in the chat.
+  const htmlOnlyReport =
+    '<b>Code review PR #2294 → commit <code>48060b3c</code></b>\n' +
+    '12 files · <b>+52 / −196</b>\n' +
+    '• verb <code>update</code> in <code>archive-backup-control.sh</code>'
+
+  test('auto format: pure-HTML report is sent as HTML, tags preserved (regression)', () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat(htmlOnlyReport)
+    // Old behaviour returned parseMode=undefined here — this is the fail-on-old assertion.
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toContain('<b>Code review PR #2294')
+    expect(sendText).toContain('<code>48060b3c</code>')
+    // never escaped into a literal tag
+    expect(sendText).not.toContain('&lt;b&gt;')
+  })
+
+  test('auto format: markdown-only still routes to HTML', () => {
+    const { parseMode } = resolveTelegramReplyFormat('This is **bold** and `code`')
+    expect(parseMode).toBe('HTML')
+  })
+
+  test("explicit 'html' with already-valid tags is sent verbatim under HTML", () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat('<b>hi</b>', 'html')
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toBe('<b>hi</b>')
+  })
+
+  test("explicit 'text' is always raw with no parse_mode", () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat(htmlOnlyReport, 'text')
+    expect(parseMode).toBeUndefined()
+    expect(sendText).toBe(htmlOnlyReport)
+  })
+
+  test('non-whitelist tags stay escaped even in auto HTML mode (safety)', () => {
+    const { sendText, parseMode } = resolveTelegramReplyFormat('<b>ok</b> <script>alert(1)</script>')
+    expect(parseMode).toBe('HTML')
+    expect(sendText).toContain('<b>ok</b>')
+    expect(sendText).toContain('&lt;script&gt;')
   })
 })

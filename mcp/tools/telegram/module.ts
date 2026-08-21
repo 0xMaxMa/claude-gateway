@@ -49,6 +49,11 @@ export class TelegramModule implements ChannelModule {
   private _hasMarkdown?: (text: string) => boolean;
   private _toTelegramHtml?: (text: string) => string;
   private _normalizeTelegramLineBreaks?: (text: string) => string;
+  private _containsTelegramHtml?: (text: string) => boolean;
+  private _resolveTelegramReplyFormat?: (
+    text: string,
+    explicitFormat?: string,
+  ) => { sendText: string; parseMode: 'HTML' | undefined };
   private _InputFile?: any;
   private _typingManager?: any;
 
@@ -190,7 +195,7 @@ export class TelegramModule implements ChannelModule {
     });
 
     // Import pure functions and typing manager
-    const { hasMarkdown, toTelegramHtml, normalizeTelegramLineBreaks } = await import('./pure');
+    const { hasMarkdown, toTelegramHtml, normalizeTelegramLineBreaks, containsTelegramHtml, resolveTelegramReplyFormat } = await import('./pure');
     const { createWorkingStateManager } = await import('./typing');
 
     const typingManager = createWorkingStateManager(
@@ -211,6 +216,8 @@ export class TelegramModule implements ChannelModule {
     this._hasMarkdown = hasMarkdown;
     this._toTelegramHtml = toTelegramHtml;
     this._normalizeTelegramLineBreaks = normalizeTelegramLineBreaks;
+    this._containsTelegramHtml = containsTelegramHtml;
+    this._resolveTelegramReplyFormat = resolveTelegramReplyFormat;
     this._InputFile = InputFile;
     this._typingManager = typingManager;
 
@@ -288,25 +295,18 @@ export class TelegramModule implements ChannelModule {
     }
   }
 
-  private containsTelegramHtml(text: string): boolean {
-    return /<\/?(?:a|b|blockquote|code|del|em|i|ins|pre|s|spoiler|strike|strong|tg-spoiler|u)(?:\s[^>]*)?>/i.test(text);
-  }
-
   private async handleReply(args: Record<string, unknown>): Promise<McpToolResult> {
     const chat_id = args.chat_id as string;
     const text = this._normalizeTelegramLineBreaks!(args.text as string);
     const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined;
     const files = (args.files as string[] | undefined) ?? [];
     const explicitFormat = args.format as string | undefined;
-
-    const hasMarkdown = this._hasMarkdown!;
-    const toTelegramHtml = this._toTelegramHtml!;
     const InputFile = this._InputFile;
 
-    const inputIsHtml = explicitFormat === 'html' && this.containsTelegramHtml(text);
-    const useHtml = inputIsHtml || explicitFormat === 'html' || (!explicitFormat && hasMarkdown(text));
-    const sendText = useHtml && !inputIsHtml ? toTelegramHtml(text) : text;
-    const parseMode = useHtml ? 'HTML' as const : undefined;
+    // Single source of truth for reply format detection (shared with receiver-server).
+    // Auto mode uses HTML when the text has markdown OR agent-authored Telegram HTML
+    // tags — the latter fixes HTML-only replies being sent raw (no parse_mode).
+    const { sendText, parseMode } = this._resolveTelegramReplyFormat!(text, explicitFormat);
 
     this.assertAllowedChat(chat_id);
 
