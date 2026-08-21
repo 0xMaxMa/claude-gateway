@@ -12,6 +12,7 @@ import { SessionCompactor } from '../session/compactor';
 import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
+import { SlackClient } from '../api/slack-client';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -26,7 +27,7 @@ import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
-import type { HistorySource } from '../history/types';
+import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 
@@ -180,17 +181,29 @@ export class AgentRunner extends EventEmitter {
   imageSize(chatId: string): number { return this.imageSizePerChat.get(chatId) ?? 0; }
   restartPending(chatId: string): boolean { return this.pendingRestarts.has(chatId); }
 
-  private channelFor(chatId: string): 'telegram' | 'discord' | 'line' {
+  private channelFor(chatId: string): ChatChannel {
     return this.channelSourceMap.get(chatId) ?? 'telegram';
   }
 
   // Session pool
   private readonly sessions = new Map<string, SessionProcess>();
-  private readonly channelSourceMap = new Map<string, 'telegram' | 'discord' | 'line'>();
+  private readonly channelSourceMap = new Map<string, ChatChannel>();
+  // Slack only: the thread_ts of the most recent inbound message per chat, so
+  // the auto-forward fallback path (command replies, socket-drop notices, the
+  // no-tool-call assistant fallback) can reply in-thread the same way the
+  // slack_reply tool does. Set when an inbound Slack turn carries thread_ts,
+  // cleared when a top-level message arrives so a later fallback doesn't leak
+  // into a stale thread.
+  private readonly slackThreadTs = new Map<string, string>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
   // LINE slow-LLM postback button manager (null when LINE disabled or threshold=0).
   private lineReply: LineReplyManager | null = null;
+  // Slack has no reply-token TTL to work around (see the plan's "no reply-manager
+  // needed" note), so unlike LINE this is a plain client, not a stateful manager —
+  // it exists only so writeAutoForward's fallback/command-reply path (below) has
+  // somewhere to actually deliver Slack messages instead of silently dropping them.
+  private slackOutbound: SlackClient | null = null;
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -248,7 +261,7 @@ export class AgentRunner extends EventEmitter {
   private readonly channelCoalesce = new Map<
     string,
     {
-      channelSource: 'telegram' | 'discord' | 'line';
+      channelSource: ChatChannel;
       entries: Array<{ content?: string; meta?: Record<string, string> }>;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -270,7 +283,7 @@ export class AgentRunner extends EventEmitter {
   private readonly turnQueue = new Map<
     string,
     Array<{
-      channelSource: 'telegram' | 'discord' | 'line';
+      channelSource: ChatChannel;
       entries: Array<{ content?: string; meta?: Record<string, string> }>;
     }>
   >();
@@ -414,8 +427,20 @@ export class AgentRunner extends EventEmitter {
             ? 'discord'
             : meta['source'] === 'line'
               ? 'line'
-              : 'telegram') as 'telegram' | 'discord' | 'line';
+              : meta['source'] === 'slack'
+                ? 'slack'
+                : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
+
+          // Slack: remember the current message's thread context so the
+          // auto-forward fallback (writeAutoForward) can stay in-thread. A
+          // top-level message clears it so a later fallback isn't misrouted
+          // into a thread the user already left.
+          if (channelSource === 'slack') {
+            const threadTs = meta['thread_ts'];
+            if (threadTs) this.slackThreadTs.set(chatId, threadTs);
+            else this.slackThreadTs.delete(chatId);
+          }
 
           // LINE slow-LLM postback: stash this turn's reply token + arm the
           // button timer before the token expires. In groups/rooms the shared
@@ -968,7 +993,7 @@ export class AgentRunner extends EventEmitter {
    */
   private routeChannelTurn(
     chatId: string,
-    channelSource: 'telegram' | 'discord' | 'line',
+    channelSource: ChatChannel,
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     if (entries.length === 0) return;
@@ -1013,7 +1038,7 @@ export class AgentRunner extends EventEmitter {
    */
   private injectTurn(
     chatId: string,
-    channelSource: 'telegram' | 'discord' | 'line',
+    channelSource: ChatChannel,
     entries: Array<{ content?: string; meta?: Record<string, string> }>,
   ): void {
     // Snapshot the stop epoch: if /stop bumps it during the async window below, we
@@ -1257,6 +1282,10 @@ export class AgentRunner extends EventEmitter {
       'attachment_name',
       'user_id',     // LINE: the userId the session passes back to line_reply
       'reply_token', // LINE: single-use reply token (push is preferred; surfaced for completeness)
+      'thread_ts',   // Slack: set when the inbound message is inside a thread — pass back as thread_id to slack_reply to reply in-thread
+      // NOTE: message_id is NOT listed here — the base <channel> template below
+      // already unconditionally emits it; adding it here would duplicate the
+      // attribute in the XML whenever meta.message_id is set (any channel).
     ]
       .filter(k => meta[k])
       .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
@@ -1319,7 +1348,7 @@ export class AgentRunner extends EventEmitter {
 
   private async getOrSpawnSession(
     mapKey: string,              // Map lookup key (chatId for telegram/discord, sessionId for API)
-    source: 'telegram' | 'discord' | 'line' | 'api',
+    source: ChatChannelOrApi,
     sessionId?: string,          // actual session UUID (only for channel sessions; equals mapKey for API)
     modelOverride?: string,      // per-session model override from SessionMeta
   ): Promise<SessionProcess> {
@@ -1380,7 +1409,7 @@ export class AgentRunner extends EventEmitter {
 
   private async spawnSession(
     mapKey: string,
-    source: 'telegram' | 'discord' | 'line' | 'api',
+    source: ChatChannelOrApi,
     sessionId?: string,
     modelOverride?: string,
   ): Promise<SessionProcess> {
@@ -1508,7 +1537,9 @@ export class AgentRunner extends EventEmitter {
           ? 'mcp__gateway__discord_reply'
           : source === 'line'
             ? 'mcp__gateway__line_reply'
-            : 'mcp__gateway__telegram_reply';
+            : source === 'slack'
+              ? 'mcp__gateway__slack_reply'
+              : 'mcp__gateway__telegram_reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -1776,7 +1807,14 @@ export class AgentRunner extends EventEmitter {
               const channelText = normalizeTelegramLineBreaks(text)
               if (channelSrcForResult === 'line' && this.lineReply) {
                 void this.lineReply.onAnswer(mapKey, channelText)
-              } else if (channelSrcForResult !== 'discord' && (hasMarkdown(channelText) || containsTelegramHtml(channelText))) {
+              } else if (
+                channelSrcForResult !== 'discord' &&
+                channelSrcForResult !== 'slack' &&
+                (hasMarkdown(channelText) || containsTelegramHtml(channelText))
+              ) {
+                // Telegram HTML entities — Slack has its own mrkdwn format and
+                // would display these tags literally, so Slack skips this and
+                // falls through to the plain-text branch below.
                 this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
               } else {
                 this.writeAutoForward(mapKey, channelText);
@@ -2430,6 +2468,25 @@ export class AgentRunner extends EventEmitter {
       if (this.lineReply) void this.lineReply.onAnswer(chatId, text);
       return;
     }
+    // Slack likewise has no .forward consumer (only Telegram/Discord receivers
+    // poll that directory) — post directly via the outbound client instead.
+    // Without this branch every command reply (/stop, /rename, /sessions,
+    // /compact), the Anthropic-socket-drop notice, and the plain-text
+    // assistant-fallback path (no tool call) silently vanished for Slack.
+    if (this.channelFor(chatId) === 'slack') {
+      if (this.slackOutbound) {
+        // Reply in-thread when the last inbound message was threaded (mirrors
+        // the slack_reply tool's thread_id behavior); top-level otherwise.
+        const threadTs = this.slackThreadTs.get(chatId);
+        void this.slackOutbound.postMessage(chatId, text, threadTs).catch((err: unknown) => {
+          this.logger.warn('Slack auto-forward failed', {
+            chatId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+      return;
+    }
     const typingDir = this.getTypingDir(chatId);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
@@ -2496,6 +2553,7 @@ export class AgentRunner extends EventEmitter {
     // Enabled for any LINE agent unless its threshold is 0 (then the MCP
     // line_reply tool keeps the plain reply-first → push-fallback path).
     this.startLineReply();
+    this.startSlackOutbound();
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
@@ -2507,6 +2565,23 @@ export class AgentRunner extends EventEmitter {
     // picks up a new access token, threshold, or labels without a full restart.
     this.stopLineReply();
     this.startLineReply();
+    // Slack token/secret may have changed (or been cleared) — rebuild to pick
+    // it up, same reasoning as LineReplyManager above.
+    this.stopSlackOutbound();
+    this.startSlackOutbound();
+  }
+
+  startSlackOutbound(): void {
+    if (!this.agentConfig.slack?.botToken || !this.agentConfig.slack?.signingSecret) return;
+    if (this.slackOutbound) return; // already running
+    this.slackOutbound = new SlackClient({
+      botToken: this.agentConfig.slack.botToken,
+      logDir: this.gatewayConfig.gateway.logDir,
+    });
+  }
+
+  stopSlackOutbound(): void {
+    this.slackOutbound = null;
   }
 
   startLineReply(): void {
@@ -3382,7 +3457,7 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 
-  async listSessionsForChat(chatId: string, channel: 'telegram' | 'discord' | 'line'): Promise<import('../types').SessionIndex> {
+  async listSessionsForChat(chatId: string, channel: ChatChannel): Promise<import('../types').SessionIndex> {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, channel);
   }
 
@@ -3424,8 +3499,9 @@ export class AgentRunner extends EventEmitter {
     //
     // skipPersist (wire param store_user_message=false) suppresses BOTH the user command and
     // the assistant reply: programmatic REST callers leave no trace in chat history at all.
-    const persist = (role: 'user' | 'assistant', content: string) => {
-      if (skipPersist || !content) return;
+    // `force` overrides that for notes that must stay visible regardless (see /stop below).
+    const persist = (role: 'user' | 'assistant', content: string, force = false) => {
+      if ((skipPersist && !force) || !content) return;
       this.historyDb.insertMessage({ chatId: dbChatId, sessionId, source: 'api', role, content, ts: Date.now() });
     };
 
@@ -3437,6 +3513,7 @@ export class AgentRunner extends EventEmitter {
 
     let result: Record<string, unknown>;
     let responseText: string;
+    let forcePersist = false;
     try {
       if (cmd === '/model') {
         const model = this.agentConfig.claude.model;
@@ -3449,7 +3526,14 @@ export class AgentRunner extends EventEmitter {
         const session = this.sessions.get(sessionId);
         const stopped = session ? session.interrupt() : false;
         result = { stopped };
-        responseText = stopped ? 'Session interrupted.' : 'No active session to stop.';
+        responseText = stopped
+          ? 'Session was interrupted before I could respond.'
+          : 'No active session to stop.';
+        // A turn was actually cut off — always leave a visible note in history so the
+        // web Stop button (skipPersist:true, to suppress the "/stop" command echo) and
+        // a typed /stop command show the same outcome instead of the button leaving a
+        // silently-dangling user turn.
+        forcePersist = stopped;
       } else if (cmd === '/restart') {
         this.restartProcess(sessionId).catch(() => {});
         result = { restarting: true };
@@ -3553,7 +3637,8 @@ export class AgentRunner extends EventEmitter {
 
     // Persist the human-readable response as an assistant turn so the conversation ends with
     // an assistant message (the web's computeIsPendingResponse needs last.role !== 'user').
-    persist('assistant', responseText);
+    // forcePersist writes it even under skipPersist (set only when /stop cut a turn off).
+    persist('assistant', responseText, forcePersist);
 
     return { result, responseText };
   }
@@ -3655,7 +3740,7 @@ export class AgentRunner extends EventEmitter {
    */
   async sendMessageToSession(
     rawChatId: string,
-    channel: 'telegram' | 'discord' | 'line',
+    channel: ChatChannel,
     sessionId: string,
     message: string,
     senderName: string | undefined,

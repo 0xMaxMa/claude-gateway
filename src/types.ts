@@ -91,6 +91,43 @@ export interface AgentConfig {
      */
     pairing?: boolean;
   };
+  slack?: {
+    /** Bot User OAuth Token (xoxb-...) — used for chat.postMessage / reactions.add / auth.test. */
+    botToken: string;
+    /** Signing Secret — verifies X-Slack-Signature (HMAC-SHA256 of "v0:{timestamp}:{rawBody}"). */
+    signingSecret: string;
+    /**
+     * DM access policy (mirrors `line.dmPolicy` exactly — same 3 states, same
+     * closed-by-default posture). Gates Slack user ids (1:1 `im` conversations).
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed Slack user ids (stable "U"+ids — never names; Slack UI display names are not usable here). */
+    dmAllowlist?: string[];
+    /**
+     * Channel access policy — named `groupPolicy` (not `channelPolicy`) to
+     * match `line.groupPolicy` field-for-field, even though Slack's own term
+     * for this tier is "channel". Gates the channels the bot is a member of.
+     */
+    groupPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed Slack channel ids (stable "C"+ids — never names, same footgun LINE's groupAllowlist avoids). */
+    groupAllowlist?: string[];
+    /**
+     * In channels, only respond when the bot is @mentioned (mirrors
+     * `line.requireMention`). Default true (absent ⇒ true). No effect on DMs.
+     * Enforced for free at the Slack API level: channel messages only reach
+     * this gateway via the `app_mention` event subscription.
+     */
+    requireMention?: boolean;
+    /**
+     * Pairing aid for the allowlist (mirrors `line.pairing` exactly — same
+     * orthogonal-boolean shape, not a named policy value). When on, an
+     * un-allowlisted sender gets a one-time visual-match pairing code posted
+     * back to them, and the same code shows in the UI "pending" row so an
+     * admin can visually match it before clicking "+ Add". Default true
+     * (absent ⇒ on). Only has an effect under `allowlist` (closed-default).
+     */
+    pairing?: boolean;
+  };
   claude: {
     model: string;
     /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */

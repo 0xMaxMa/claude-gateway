@@ -1,4 +1,4 @@
-import { CliPairingStore } from '../../src/cli-viewer/pairing-store';
+import { CliPairingStore, isCliChannel } from '../../src/cli-viewer/pairing-store';
 
 /**
  * `/cli` pairing store — the device-authorization state machine behind the
@@ -9,6 +9,24 @@ import { CliPairingStore } from '../../src/cli-viewer/pairing-store';
  *  - approval must come from the pairing's own channel + user,
  *  - the access token is agent-scoped and single-issue.
  */
+describe('isCliChannel()', () => {
+  // Regression: the CliChannel type union was widened to include 'slack', but
+  // the runtime guard was not updated to match — a Slack-originated /cli
+  // pairing request would be silently rejected as an invalid channel.
+  test('accepts every channel in the CliChannel union', () => {
+    expect(isCliChannel('telegram')).toBe(true);
+    expect(isCliChannel('discord')).toBe(true);
+    expect(isCliChannel('line')).toBe(true);
+    expect(isCliChannel('slack')).toBe(true);
+  });
+  test('rejects anything outside the union', () => {
+    expect(isCliChannel('whatsapp')).toBe(false);
+    expect(isCliChannel('')).toBe(false);
+    expect(isCliChannel(undefined)).toBe(false);
+    expect(isCliChannel(42)).toBe(false);
+  });
+});
+
 describe('CliPairingStore', () => {
   const BROWSER = 'browser-token-aaa';
   const OTHER_BROWSER = 'browser-token-bbb';

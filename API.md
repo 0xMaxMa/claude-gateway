@@ -1371,6 +1371,79 @@ response.
 code (via LINE reply) to share with the admin, who approves it the same way as Telegram
 pairing.
 
+### Slack (`app: "slack"`)
+
+**Setup:** configure `slack.botToken` (Bot User OAuth Token, `xoxb-…`) +
+`slack.signingSecret` for an agent via `PATCH /api/v1/agents/:agentId` (see Agent API
+above — both must be sent together, and the token is validated with `auth.test` at save
+time). Then, in the Slack app's **Event Subscriptions**, point the Request URL at:
+
+```
+https://<your-gateway-host>/webhooks/slack/<agentId>
+```
+
+Subscribe the bot to `message.im` (DMs) and `app_mention` (channel mentions). **Socket
+Mode must be off** — this is the HTTP Request URL integration, not Socket Mode.
+
+`<agentId>` may be omitted — the dispatcher then falls back to the first agent with
+`slack.signingSecret` set — but an explicit ID is recommended once more than one agent has
+Slack configured.
+
+**URL verification (`POST`):** Slack's one-time handshake arrives as a *signed* POST with
+`{"type":"url_verification","challenge":"…"}` (unlike LINE's unsigned Console button). The
+signature is verified like any other request, then the raw `challenge` is echoed back:
+
+```json
+{ "challenge": "<the value Slack sent>" }
+```
+
+**Inbound delivery (`POST`):** the request must carry a valid `x-slack-signature` header —
+`v0=` + HMAC-SHA256 of `v0:{timestamp}:{rawBody}`, keyed by `signingSecret` — together with
+`x-slack-request-timestamp`. Requests whose timestamp is more than 5 minutes from now are
+rejected (replay protection).
+
+```bash
+TS=$(date +%s)
+BODY='{"type":"event_callback","event_id":"Ev1","authorizations":[{"user_id":"U0BOT"}],"event":{"type":"app_mention","channel":"C123","user":"U456","text":"<@U0BOT> hi","ts":"1.2","event_ts":"1.2"}}'
+SIG="v0=$(printf 'v0:%s:%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "<SIGNING_SECRET>" | sed 's/^.* //')"
+curl -X POST http://localhost:10850/webhooks/slack/<agentId> \
+  -H "Content-Type: application/json" \
+  -H "x-slack-request-timestamp: $TS" \
+  -H "x-slack-signature: $SIG" \
+  -d "$BODY"
+```
+
+Text messages from allowed DMs and `@mention`s in allowed channels are normalized and
+forwarded to the agent's `/channel` intake (the same path Telegram/LINE use); the bot's own
+self-mention is stripped from `app_mention` text. The request is acknowledged
+(`200 {"ok":true}`) **before** event processing, so Slack never sees a slow response and its
+3-second-ack retry is avoided. Duplicate retries (Slack's at-least-once delivery) are
+de-duplicated by `event_id`.
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 401 | Missing or invalid `x-slack-signature` (or a timestamp outside the 5-minute window) |
+| 400 | Body was not valid JSON |
+| 404 | No Slack-enabled agent found — no agent has `slack.signingSecret` set, or the given `:agentId` doesn't |
+
+**Access control:** DMs (gated on the sender's Slack user id) and channels (gated on the
+channel id) are closed by default (`slack.dmPolicy` / `slack.groupPolicy` allowlist, per
+agent config); allowlist entries MUST be stable Slack ids (`U…` for users, `C…` for
+channels), never display/channel names. A denied sender receives a one-time pairing code
+(via `chat.postMessage`) to share with the admin, who approves it the same way as Telegram
+pairing. In channels, only `@mention`s are answered unless `slack.requireMention` is set to
+`false`.
+
+**Pending-sender discovery (admin only):** the recently-denied Slack senders/channels are
+surfaced for one-click allowlisting, mirroring LINE:
+
+| Method | Endpoint | Auth |
+|--------|----------|------|
+| `GET` | `/api/v1/agents/:agentId/slack/pending` | Admin key — list recently-denied Slack senders (id, best-effort name, pairing code) |
+| `DELETE` | `/api/v1/agents/:agentId/slack/pending/:senderId` | Admin key — dismiss one knock from the in-memory pending list |
+
 ---
 
 ## Streaming API (SSE)

@@ -1,16 +1,15 @@
 import crypto from 'crypto';
+import { type ChatChannel, isChatChannel } from '../history/types';
 
 /**
  * Chat channel a `/cli` pairing originated from. The channel already
  * authenticated the requesting user (allowlist / pairing gate) before a pairing
  * is ever created, so the channel + user id recorded here is a trusted binding.
  */
-export type CliChannel = 'telegram' | 'discord' | 'line';
+export type CliChannel = ChatChannel;
 
 /** Runtime guard for the trusted channel set (payloads cross a process boundary). */
-export function isCliChannel(value: unknown): value is CliChannel {
-  return value === 'telegram' || value === 'discord' || value === 'line';
-}
+export const isCliChannel = isChatChannel;
 
 /**
  * Pairing lifecycle:

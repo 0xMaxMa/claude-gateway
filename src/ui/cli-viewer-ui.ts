@@ -17,6 +17,8 @@
  * works whether the gateway is mounted at the origin root or under a prefix.
  */
 
+import type { ChatChannel } from '../history/types';
+
 const XTERM_CSS = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.min.css';
 const XTERM_JS = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.min.js';
 const TG_WEBAPP_JS = 'https://telegram.org/js/telegram-web-app.js';
@@ -85,7 +87,7 @@ export interface CliDevicePageOpts {
   pairingId: string;
   agentId: string;
   code: string;
-  channel: 'telegram' | 'discord' | 'line';
+  channel: ChatChannel;
   basePath: string;
 }
 

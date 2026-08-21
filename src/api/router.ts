@@ -10,12 +10,37 @@ import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
+import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
-import { getPendingSenders, clearPendingSender } from './line-pending-senders';
+import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Standalone `auth.test` call for the Slack connect flow's Save-time token
+ * check (see the PATCH /agents/:agentId handler below). Not SlackClient
+ * (src/api/slack-client.ts) — that class requires a logDir-backed logger,
+ * which this router has no other reason to plumb through for one validation
+ * call. form-urlencoded per slack-client.ts's own finding (JSON is not
+ * reliably parsed by every Slack Web API method).
+ */
+async function verifySlackBotToken(botToken: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch('https://slack.com/api/auth.test', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+      },
+    });
+    const json = (await res.json()) as { ok: boolean; error?: string };
+    return { ok: json.ok, error: json.error };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'network error' };
+  }
+}
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -585,6 +610,18 @@ export function createApiRouter(
         // Pairing toggle (orthogonal to dm/groupPolicy). Absent ⇒ on; surface a
         // concrete boolean so the UI toggle reflects the effective default.
         line_pairing: cfg.line?.channelSecret ? (cfg.line?.pairing ?? true) : null,
+        // Slack — same shape/semantics as LINE above, field-for-field
+        // (dmPolicy/groupPolicy/requireMention/pairing), gated on
+        // signingSecret the way LINE gates on channelSecret.
+        slack_connected: !!cfg.slack?.signingSecret,
+        slack_token_preview: cfg.slack?.botToken ? maskToken(cfg.slack.botToken) : null,
+        slack_webhook_path: cfg.slack?.signingSecret ? `/webhooks/slack/${id}` : null,
+        slack_dm_policy: cfg.slack?.signingSecret ? (cfg.slack?.dmPolicy ?? null) : null,
+        slack_dm_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.dmAllowlist ?? []) : null,
+        slack_group_policy: cfg.slack?.signingSecret ? (cfg.slack?.groupPolicy ?? null) : null,
+        slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
+        slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
+        slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
       }));
     res.json({ agents });
   });
@@ -1300,8 +1337,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1384,6 +1421,77 @@ export function createApiRouter(
       line_group_policy !== undefined || line_group_allowlist !== undefined || line_require_mention !== undefined ||
       line_pairing !== undefined;
 
+    // Slack — same validation shape as LINE above, field-for-field.
+    if (slack_bot_token !== undefined && slack_bot_token !== null && typeof slack_bot_token !== 'string') {
+      res.status(400).json({ error: 'slack_bot_token must be a string or null' });
+      return;
+    }
+    if (slack_signing_secret !== undefined && slack_signing_secret !== null && typeof slack_signing_secret !== 'string') {
+      res.status(400).json({ error: 'slack_signing_secret must be a string or null' });
+      return;
+    }
+    // Slack needs BOTH credentials together, same as LINE's access token + secret pair.
+    const slackTouched = slack_bot_token !== undefined || slack_signing_secret !== undefined;
+    if (slackTouched) {
+      const tok = typeof slack_bot_token === 'string' ? slack_bot_token.trim() : '';
+      const sec = typeof slack_signing_secret === 'string' ? slack_signing_secret.trim() : '';
+      const bothSet = tok !== '' && sec !== '';
+      const bothClear = tok === '' && sec === '';
+      if (!bothSet && !bothClear) {
+        res.status(400).json({ error: 'slack_bot_token and slack_signing_secret must be provided together' });
+        return;
+      }
+      // Reject a bad/expired token at Save time instead of persisting it silently
+      // (the failure would otherwise only surface later, when the agent tries to
+      // reply and gets a Slack API error). Mirrors openclaw's startup `auth.test`
+      // call — see slack-client.ts's authTest() doc comment, which named this as
+      // the intended Save-time check. A standalone fetch rather than SlackClient
+      // itself: SlackClient's constructor requires a logDir-backed logger this
+      // router has no other reason to plumb through for one validation call.
+      if (bothSet) {
+        const verify = await verifySlackBotToken(tok);
+        if (!verify.ok) {
+          res.status(400).json({
+            error: `Invalid Slack bot token — auth.test failed: ${verify.error ?? 'unknown error'}`,
+          });
+          return;
+        }
+      }
+    }
+    if (slack_dm_policy !== undefined && slack_dm_policy !== null &&
+        !(typeof slack_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(slack_dm_policy))) {
+      res.status(400).json({ error: "slack_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (slack_dm_allowlist !== undefined && slack_dm_allowlist !== null &&
+        !(Array.isArray(slack_dm_allowlist) && slack_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'slack_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (slack_group_policy !== undefined && slack_group_policy !== null &&
+        !(typeof slack_group_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(slack_group_policy))) {
+      res.status(400).json({ error: "slack_group_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (slack_group_allowlist !== undefined && slack_group_allowlist !== null &&
+        !(Array.isArray(slack_group_allowlist) && slack_group_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'slack_group_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (slack_require_mention !== undefined && slack_require_mention !== null &&
+        typeof slack_require_mention !== 'boolean') {
+      res.status(400).json({ error: 'slack_require_mention must be a boolean or null' });
+      return;
+    }
+    if (slack_pairing !== undefined && slack_pairing !== null &&
+        typeof slack_pairing !== 'boolean') {
+      res.status(400).json({ error: 'slack_pairing must be a boolean or null' });
+      return;
+    }
+    const slackAccessTouched = slack_dm_policy !== undefined || slack_dm_allowlist !== undefined ||
+      slack_group_policy !== undefined || slack_group_allowlist !== undefined || slack_require_mention !== undefined ||
+      slack_pairing !== undefined;
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1453,6 +1561,49 @@ export function createApiRouter(
             if (line_pairing !== undefined) {
               if (line_pairing === null) delete existing.pairing;
               else existing.pairing = line_pairing;
+            }
+          }
+        }
+        if (slackTouched) {
+          const tok = typeof slack_bot_token === 'string' ? slack_bot_token.trim() : '';
+          const sec = typeof slack_signing_secret === 'string' ? slack_signing_secret.trim() : '';
+          if (tok === '' && sec === '') {
+            delete (agent as Record<string, unknown>).slack;
+          } else {
+            const existing = agent.slack as Record<string, unknown> | undefined;
+            agent.slack = { ...(existing ?? {}), botToken: tok, signingSecret: sec };
+          }
+        }
+        // Access fields — merge into the existing slack block (re-read after the
+        // credential block above, which may have just created or deleted it).
+        // Skip silently when no slack channel exists; policy without credentials
+        // is meaningless.
+        if (slackAccessTouched) {
+          const existing = agent.slack as Record<string, unknown> | undefined;
+          if (existing) {
+            if (slack_dm_policy !== undefined) {
+              if (slack_dm_policy === null) delete existing.dmPolicy;
+              else existing.dmPolicy = slack_dm_policy;
+            }
+            if (slack_dm_allowlist !== undefined) {
+              if (slack_dm_allowlist === null) delete existing.dmAllowlist;
+              else existing.dmAllowlist = slack_dm_allowlist;
+            }
+            if (slack_group_policy !== undefined) {
+              if (slack_group_policy === null) delete existing.groupPolicy;
+              else existing.groupPolicy = slack_group_policy;
+            }
+            if (slack_group_allowlist !== undefined) {
+              if (slack_group_allowlist === null) delete existing.groupAllowlist;
+              else existing.groupAllowlist = slack_group_allowlist;
+            }
+            if (slack_require_mention !== undefined) {
+              if (slack_require_mention === null) delete existing.requireMention;
+              else existing.requireMention = slack_require_mention;
+            }
+            if (slack_pairing !== undefined) {
+              if (slack_pairing === null) delete existing.pairing;
+              else existing.pairing = slack_pairing;
             }
           }
         }
@@ -1558,10 +1709,58 @@ export function createApiRouter(
       // Anyone just added to an allowlist is now allowed — drop them from the
       // in-memory knock list so the discovery UI stops surfacing them.
       if (Array.isArray(line_dm_allowlist)) {
-        for (const userId of line_dm_allowlist) clearPendingSender(agentId, userId);
+        for (const userId of line_dm_allowlist) clearPendingSender('line', agentId, userId);
       }
       if (Array.isArray(line_group_allowlist)) {
-        for (const id of line_group_allowlist) clearPendingSender(agentId, id);
+        for (const id of line_group_allowlist) clearPendingSender('line', agentId, id);
+      }
+    }
+    if (slackTouched) {
+      const tok = typeof slack_bot_token === 'string' ? slack_bot_token.trim() : '';
+      const sec = typeof slack_signing_secret === 'string' ? slack_signing_secret.trim() : '';
+      if (tok && sec) {
+        cfg.slack = { ...(cfg.slack ?? {}), botToken: tok, signingSecret: sec };
+      } else {
+        delete cfg.slack;
+      }
+      // Slack is webhook-based — no receiver to start/stop. The webhook router
+      // reads config live via runner.getAgentConfig(); just keep the runner's
+      // copy in sync (same as LINE above).
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+    }
+    if (slackAccessTouched && cfg.slack) {
+      if (slack_dm_policy !== undefined) {
+        if (slack_dm_policy === null) delete cfg.slack.dmPolicy;
+        else cfg.slack.dmPolicy = slack_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (slack_dm_allowlist !== undefined) {
+        if (slack_dm_allowlist === null) delete cfg.slack.dmAllowlist;
+        else cfg.slack.dmAllowlist = slack_dm_allowlist as string[];
+      }
+      if (slack_group_policy !== undefined) {
+        if (slack_group_policy === null) delete cfg.slack.groupPolicy;
+        else cfg.slack.groupPolicy = slack_group_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (slack_group_allowlist !== undefined) {
+        if (slack_group_allowlist === null) delete cfg.slack.groupAllowlist;
+        else cfg.slack.groupAllowlist = slack_group_allowlist as string[];
+      }
+      if (slack_require_mention !== undefined) {
+        if (slack_require_mention === null) delete cfg.slack.requireMention;
+        else cfg.slack.requireMention = slack_require_mention as boolean;
+      }
+      if (slack_pairing !== undefined) {
+        if (slack_pairing === null) delete cfg.slack.pairing;
+        else cfg.slack.pairing = slack_pairing as boolean;
+      }
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Anyone just added to an allowlist is now allowed — drop them from the
+      // in-memory knock list so the discovery UI stops surfacing them.
+      if (Array.isArray(slack_dm_allowlist)) {
+        for (const userId of slack_dm_allowlist) clearPendingSender('slack', agentId, userId);
+      }
+      if (Array.isArray(slack_group_allowlist)) {
+        for (const id of slack_group_allowlist) clearPendingSender('slack', agentId, id);
       }
     }
 
@@ -1589,6 +1788,24 @@ export function createApiRouter(
         line_connected: !!cfg.line?.channelSecret,
         line_token_preview: cfg.line?.channelAccessToken ? maskToken(cfg.line.channelAccessToken) : null,
         line_webhook_path: cfg.line?.channelSecret ? `/webhooks/line/${agentId}` : null,
+        line_dm_policy: cfg.line?.channelSecret ? (cfg.line?.dmPolicy ?? null) : null,
+        line_dm_allowlist: cfg.line?.channelSecret ? (cfg.line?.dmAllowlist ?? []) : null,
+        line_group_policy: cfg.line?.channelSecret ? (cfg.line?.groupPolicy ?? null) : null,
+        line_group_allowlist: cfg.line?.channelSecret ? (cfg.line?.groupAllowlist ?? []) : null,
+        line_require_mention: cfg.line?.channelSecret ? (cfg.line?.requireMention ?? null) : null,
+        line_pairing: cfg.line?.channelSecret ? (cfg.line?.pairing ?? true) : null,
+        // Slack — same shape/semantics as LINE above, mirrors the GET /agents
+        // list response exactly (this PATCH response never carried these
+        // fields at all before — the UI fell back to the next GET refetch).
+        slack_connected: !!cfg.slack?.signingSecret,
+        slack_token_preview: cfg.slack?.botToken ? maskToken(cfg.slack.botToken) : null,
+        slack_webhook_path: cfg.slack?.signingSecret ? `/webhooks/slack/${agentId}` : null,
+        slack_dm_policy: cfg.slack?.signingSecret ? (cfg.slack?.dmPolicy ?? null) : null,
+        slack_dm_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.dmAllowlist ?? []) : null,
+        slack_group_policy: cfg.slack?.signingSecret ? (cfg.slack?.groupPolicy ?? null) : null,
+        slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
+        slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
+        slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
       },
     });
   });
@@ -1741,7 +1958,7 @@ export function createApiRouter(
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    res.json({ senders: getPendingSenders(agentId) });
+    res.json({ senders: getPendingSenders('line', agentId) });
   });
 
   /**
@@ -1757,7 +1974,37 @@ export function createApiRouter(
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     const { agentId, senderId } = req.params as { agentId: string; senderId: string };
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    clearPendingSender(agentId, senderId);
+    clearPendingSender('line', agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/slack/pending
+   * Recently denied Slack senders (Tier 1 allowlist discovery aid). Admin only.
+   * Mirrors GET .../line/pending exactly, keyed under the 'slack' channel
+   * namespace in the shared pending-senders store so LINE and Slack knocks on
+   * the same agent never mix.
+   */
+  router.get('/v1/agents/:agentId/slack/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders('slack', agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/slack/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). Mirrors
+   * DELETE .../line/pending/:senderId exactly. The id is a Slack user id (DM)
+   * or channel id (channel/group/mpim), so no numeric validation.
+   */
+  router.delete('/v1/agents/:agentId/slack/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender('slack', agentId, senderId);
     res.json({ ok: true });
   });
 
@@ -2099,12 +2346,12 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line chats' });
+    if (!isChatChannel(source)) {
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack chats' });
       return;
     }
     try {
-      const index = await runner.listSessionsForChat(rawChatId, source as 'telegram' | 'discord' | 'line');
+      const index = await runner.listSessionsForChat(rawChatId, source);
       res.json(index);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -2289,8 +2536,8 @@ export function createApiRouter(
       return;
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
-    if (source !== 'telegram' && source !== 'discord' && source !== 'line') {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line chats' });
+    if (!isChatChannel(source)) {
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack chats' });
       return;
     }
 
@@ -2338,7 +2585,7 @@ export function createApiRouter(
 
       cleanup = await runner.sendMessageToSession(
         rawChatId,
-        source as 'telegram' | 'discord' | 'line',
+        source,
         sessionId,
         content.trim(),
         senderName,
@@ -3071,5 +3318,6 @@ function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: st
   if (fullChatId.startsWith('telegram-')) return { source: 'telegram', rawChatId: fullChatId.slice(9) };
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
   if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
+  if (fullChatId.startsWith('slack-')) return { source: 'slack', rawChatId: fullChatId.slice(6) };
   return { source: 'api', rawChatId: fullChatId };
 }

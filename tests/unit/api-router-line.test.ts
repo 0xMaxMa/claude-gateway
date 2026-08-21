@@ -19,7 +19,7 @@ import {
   recordDeniedConversation,
   getPendingSenders,
   _resetPendingSenders,
-} from '../../src/api/line-pending-senders';
+} from '../../src/api/pending-senders';
 import { AgentConfig, ApiKey } from '../../src/types';
 
 const AGENT_ID = 'alfred';
@@ -243,12 +243,12 @@ describe('LINE channel management API', () => {
 
     it('drops a user from the knock list when added to the allowlist', async () => {
       await connect();
-      recordDeniedSender(AGENT_ID, 'Uknocker', 'Knocker', 1000);
-      recordDeniedSender(AGENT_ID, 'Uother', 'Other', 1000);
+      recordDeniedSender('line', AGENT_ID, 'Uknocker', 'Knocker', 1000);
+      recordDeniedSender('line', AGENT_ID, 'Uother', 'Other', 1000);
       const res = await patch({ line_dm_policy: 'allowlist', line_dm_allowlist: ['Uknocker'] });
       expect(res.status).toBe(200);
       // Uknocker is now allowed → gone from the knock list; Uother stays.
-      expect(getPendingSenders(AGENT_ID).map((s) => s.userId)).toEqual(['Uother']);
+      expect(getPendingSenders('line', AGENT_ID).map((s) => s.userId)).toEqual(['Uother']);
     });
   });
 
@@ -256,8 +256,8 @@ describe('LINE channel management API', () => {
     const url = `/api/v1/agents/${AGENT_ID}/line/pending`;
 
     it('returns recorded denied senders to an admin (most-recent first)', async () => {
-      recordDeniedSender(AGENT_ID, 'Ualice', 'Alice', 1000);
-      recordDeniedSender(AGENT_ID, 'Ubob', 'Bob', 2000);
+      recordDeniedSender('line', AGENT_ID, 'Ualice', 'Alice', 1000);
+      recordDeniedSender('line', AGENT_ID, 'Ubob', 'Bob', 2000);
       const res = await supertest.default(app).get(url).set(ADMIN);
       expect(res.status).toBe(200);
       expect(res.body.senders.map((s: { userId: string }) => s.userId)).toEqual(['Ubob', 'Ualice']);
@@ -283,21 +283,21 @@ describe('LINE channel management API', () => {
     });
 
     it('exposes the pairing code on each sender (pairing mode)', async () => {
-      recordDeniedSender(AGENT_ID, 'Ualice', 'Alice', 1000, 'ABC123');
+      recordDeniedSender('line', AGENT_ID, 'Ualice', 'Alice', 1000, 'ABC123');
       const res = await supertest.default(app).get(url).set(ADMIN);
       expect(res.status).toBe(200);
       expect(res.body.senders[0]).toMatchObject({ userId: 'Ualice', code: 'ABC123' });
     });
 
     it('DELETE removes one sender from the knock list (admin)', async () => {
-      recordDeniedSender(AGENT_ID, 'Ualice', 'Alice', 1000);
-      recordDeniedConversation(AGENT_ID, 'Cteam', 'group', 'Team', 1000);
+      recordDeniedSender('line', AGENT_ID, 'Ualice', 'Alice', 1000);
+      recordDeniedConversation('line', AGENT_ID, 'Cteam', 'group', 'Team', 1000);
       const res = await supertest.default(app)
         .delete(`${url}/Ualice`)
         .set(ADMIN);
       expect(res.status).toBe(200);
       expect(res.body.ok).toBe(true);
-      expect(getPendingSenders(AGENT_ID).map((s) => s.userId)).toEqual(['Cteam']);
+      expect(getPendingSenders('line', AGENT_ID).map((s) => s.userId)).toEqual(['Cteam']);
     });
 
     it('DELETE is idempotent for an unknown id', async () => {
@@ -306,10 +306,10 @@ describe('LINE channel management API', () => {
     });
 
     it('DELETE rejects a non-admin key with 403', async () => {
-      recordDeniedSender(AGENT_ID, 'Ualice', 'Alice', 1000);
+      recordDeniedSender('line', AGENT_ID, 'Ualice', 'Alice', 1000);
       const res = await supertest.default(app).delete(`${url}/Ualice`).set(USER);
       expect(res.status).toBe(403);
-      expect(getPendingSenders(AGENT_ID)).toHaveLength(1); // untouched
+      expect(getPendingSenders('line', AGENT_ID)).toHaveLength(1); // untouched
     });
 
     it('DELETE returns 404 for an unknown agent', async () => {
@@ -414,11 +414,11 @@ describe('LINE channel management API', () => {
 
     it('drops a group from the knock list when added to the group allowlist', async () => {
       await connect();
-      recordDeniedConversation(AGENT_ID, 'Cf3a9', 'group', 'Team', 1000);
-      recordDeniedConversation(AGENT_ID, 'Cother', 'group', 'Other', 1000);
+      recordDeniedConversation('line', AGENT_ID, 'Cf3a9', 'group', 'Team', 1000);
+      recordDeniedConversation('line', AGENT_ID, 'Cother', 'group', 'Other', 1000);
       const res = await patch({ line_group_policy: 'allowlist', line_group_allowlist: ['Cf3a9'] });
       expect(res.status).toBe(200);
-      expect(getPendingSenders(AGENT_ID).map((s) => s.userId)).toEqual(['Cother']);
+      expect(getPendingSenders('line', AGENT_ID).map((s) => s.userId)).toEqual(['Cother']);
     });
   });
 });

@@ -1,4 +1,38 @@
-export type HistorySource = 'telegram' | 'discord' | 'line' | 'api' | 'ui';
+/**
+ * Canonical channel list — the SINGLE source of truth for the
+ * 'telegram' | 'discord' | 'line' | 'slack' union that used to be
+ * hand-copied into ~10 files (session/process.ts, agent/runner.ts,
+ * api/router.ts, session/compactor.ts, agent/builtin-commands.ts,
+ * cli-viewer/pairing-store.ts, ui/cli-viewer-ui.ts, ...).
+ *
+ * That duplication is exactly what caused three real bugs when Slack was
+ * added: a channelSource ternary with no 'slack' branch (every Slack
+ * session silently became 'telegram'), a replyToolName ternary with the
+ * same gap, and an isCliChannel() runtime guard whose type was widened to
+ * include 'slack' but whose implementation wasn't. Deriving both the type
+ * AND a runtime guard from one array makes that specific failure mode
+ * (type says X is valid, some hand-copied runtime check disagrees)
+ * impossible to reintroduce for this union — adding a channel here updates
+ * every consumer's type AND its guard in one place.
+ */
+export const CHAT_CHANNELS = ['telegram', 'discord', 'line', 'slack'] as const;
+export type ChatChannel = (typeof CHAT_CHANNELS)[number];
+export function isChatChannel(value: unknown): value is ChatChannel {
+  return typeof value === 'string' && (CHAT_CHANNELS as readonly string[]).includes(value);
+}
+
+/** ChatChannel plus 'api' — a session spawned via direct API access, not a channel. */
+export type ChatChannelOrApi = ChatChannel | 'api';
+export type HistorySource = ChatChannelOrApi | 'ui';
+
+/**
+ * Normalize a ChatChannelOrApi down to a live ChatChannel — 'api' (not a real
+ * channel) falls back to 'telegram', matching this codebase's long-standing
+ * default for channel-scoped state paths (session/process.ts's stateSubDir).
+ */
+export function toChatChannel(source: ChatChannelOrApi): ChatChannel {
+  return isChatChannel(source) ? source : 'telegram';
+}
 export type MessageRole = 'user' | 'assistant' | 'system';
 
 export interface HistoryMessage {
