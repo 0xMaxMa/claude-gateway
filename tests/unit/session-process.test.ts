@@ -225,6 +225,51 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-03b: a /stop SIGINT the pty-shell SURVIVES must not wedge the session.
+  // The pty-shell traps SIGINT (forwards ESC to interrupt the TUI turn) and
+  // keeps running, but Node flips ChildProcess.killed=true the instant the
+  // signal is sent. isRunning()/interrupt() must key off the observed 'exit'
+  // (_exited), NOT .killed — otherwise the survived-SIGINT child reads as dead
+  // and the next turn waits forever on a restart that never comes.
+  // Regression for: session stuck "Session restart did not complete in time"
+  // after /stop + resend.
+  // --------------------------------------------------------------------------
+  it('U-SP-03b: a survived /stop SIGINT keeps the session running and interruptible', async () => {
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const child = lastProcess!;
+
+    // Simulate the pty-shell: SIGINT is trapped and survived (no 'exit'); only
+    // SIGTERM/SIGKILL actually kill it. Node still sets killed=true on SIGINT.
+    child.kill = jest.fn((signal?: string) => {
+      child.killed = true;
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        process.nextTick(() => child.emit('exit', signal === 'SIGKILL' ? 1 : 0, signal));
+      }
+      // SIGINT: the child survives — deliberately emit no 'exit'.
+      return true;
+    });
+
+    // An actively-processing turn, then a /stop interrupt.
+    sp.setProcessing(true);
+    expect(sp.interrupt()).toBe(true);
+    expect(child.kill).toHaveBeenCalledWith('SIGINT');
+    expect(child.killed).toBe(true); // Node flipped it — but the child is alive
+
+    // The child survived, so the session is still running and a follow-up
+    // interrupt on the same live turn must still fire. On the pre-fix code
+    // (isRunning/interrupt gated on child.killed) BOTH of these are false.
+    expect(sp.isRunning()).toBe(true);
+    expect(sp.interrupt()).toBe(true);
+
+    // Sanity (guard against over-correction): a genuine teardown still flips
+    // isRunning() to false.
+    sp.setProcessing(false);
+    await sp.stop();
+    expect(sp.isRunning()).toBe(false);
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-04: isIdle() / touch() behaviour
   // --------------------------------------------------------------------------
   it('U-SP-04: isIdle() returns true after idle window, touch() resets it', async () => {
@@ -1739,16 +1784,21 @@ describe('SessionProcess — isProcessing and deferred restart', () => {
     await sp.stop();
   });
 
-  it('U-SP-INT-03: interrupt() returns false when subprocess is already killed', async () => {
+  it('U-SP-INT-03: interrupt() returns false after the subprocess has actually exited', async () => {
     const sp = makeSp('s1', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
     sp.setProcessing(true);
-    lastProcess!.killed = true;
+
+    // A GENUINE teardown — the child's 'exit' is observed (process gone).
+    // This is distinct from a survived /stop SIGINT, which sets Node's
+    // .killed=true while the child stays alive (see U-SP-03b): that case must
+    // remain interruptible, so interrupt() keys off the observed exit, not
+    // .killed.
+    await sp.stop();
 
     const result = sp.interrupt();
 
     expect(result).toBe(false);
-    expect(lastProcess!.kill).not.toHaveBeenCalled();
   });
 
   it('U-SP-INT-04: interrupt() returns false when subprocess never started', () => {
