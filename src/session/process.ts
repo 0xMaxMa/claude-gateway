@@ -116,6 +116,16 @@ export class SessionProcess extends EventEmitter {
   private restartRequested = false;
   private _processing = false;
   private _pendingRestart = false;
+  // True once we have OBSERVED the child actually exit (the 'exit' handler
+  // fired). Distinct from Node's ChildProcess.killed, which flips true the
+  // instant ANY signal is delivered — including a graceful /stop SIGINT that
+  // the pty-shell traps and SURVIVES (it forwards ESC to interrupt the TUI turn
+  // and keeps running). Liveness checks must use _exited, never .killed: a
+  // survived-SIGINT child is still alive, and treating it as dead wedges the
+  // session forever (isRunning() → false → the next turn waits on a restart
+  // that never comes; see runner.ts waitForSessionRestart). Reset to false on
+  // every fresh spawn.
+  private _exited = false;
   // Set by interrupt() right before SIGINT, cleared at the start of the next
   // sendMessage(). Lets a caller's process-exit handler tell a /stop-triggered
   // exit (CLI's SIGINT handler fell through to default termination instead of
@@ -703,6 +713,9 @@ export class SessionProcess extends EventEmitter {
     });
 
     this.process = proc;
+    // Fresh child is alive: clear any exit observed for a prior process (e.g.
+    // after an auto-restart), so isRunning()/interrupt() see it as live.
+    this._exited = false;
 
     // Send initial prompt only for Telegram/Discord sessions.
     // API sessions receive the first message directly via sendApiMessage(),
@@ -982,6 +995,7 @@ export class SessionProcess extends EventEmitter {
       });
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
+      this._exited = true;
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
       // stopped or restarted mid-turn (without a final result/session_idle).
@@ -1211,7 +1225,10 @@ export class SessionProcess extends EventEmitter {
   }
 
   interrupt(): boolean {
-    if (!this.process || this.process.killed) return false;
+    // .killed is NOT liveness — it flips true on the FIRST SIGINT and stays
+    // true, so a prior /stop would make every later interrupt() no-op even on a
+    // live, actively-processing turn. Gate on _exited (child actually gone).
+    if (!this.process || this._exited) return false;
     if (!this._processing) return false;
     this.interruptRequested = true;
     this.process.kill('SIGINT');
@@ -1259,7 +1276,10 @@ export class SessionProcess extends EventEmitter {
   }
 
   isRunning(): boolean {
-    return this.process !== null && !this.process.killed;
+    // Use _exited (child's 'exit' observed), NOT .killed — .killed is true after
+    // any signal send, including a /stop SIGINT the pty-shell survives, which
+    // would falsely report a healthy interrupted session as not-running.
+    return this.process !== null && !this._exited;
   }
 
   async stop(): Promise<void> {
