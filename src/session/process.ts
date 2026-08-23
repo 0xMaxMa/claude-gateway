@@ -1097,7 +1097,13 @@ export class SessionProcess extends EventEmitter {
           });
       } else {
         // stop() won the race before the timer fired — no respawn will happen.
+        // Wake any waiter blocked on this restart (waitForSessionRestart) so it
+        // rejects immediately instead of hanging for the full timeout: the
+        // restarted/restartFailed/failed event it waits on would otherwise never
+        // fire. Clearing the flag first also lets a fresh getOrSpawnSession call
+        // take the respawn-fresh path. See #371.
         this._restartScheduled = false;
+        this.emit('restartFailed', new Error('Session restart abandoned: session stopping'));
       }
     }, AUTO_RESTART_DELAY_MS);
   }

@@ -2597,6 +2597,40 @@ describe('SessionProcess — crash-budget reset on healthy uptime (#371)', () =>
 
     await sp.stop();
   });
+
+  it("emits 'restartFailed' when stop() races the auto-restart window, so waiters don't hang — #371", async () => {
+    const sp = makeSp('sess:budget-race', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start(); // real timers for the spawn + fs I/O
+
+    // Switch to fake timers only for the restart-delay window. The timer's
+    // stop-race branch does NOT call spawnProcess (stopping===true), so no fs
+    // I/O runs under fake timers.
+    jest.useFakeTimers();
+    try {
+      const restartFailedSpy = jest.fn();
+      sp.on('restartFailed', restartFailedSpy);
+
+      // Crash → scheduleRestart arms the 5s timer and marks a restart in flight.
+      lastProcess!.emit('exit', 1, null);
+      await Promise.resolve();
+      expect(sp.isRestartScheduled()).toBe(true);
+
+      // stop() races in before the timer fires (the child is already gone, so
+      // stop() just sets stopping=true and returns).
+      await sp.stop();
+
+      // Timer fires into the stop-race branch: it must wake waiters, not clear
+      // the flag silently (which previously left waitForSessionRestart to hang
+      // for the full 20s timeout before rejecting).
+      jest.advanceTimersByTime(5_000); // AUTO_RESTART_DELAY_MS
+      await Promise.resolve();
+
+      expect(restartFailedSpy).toHaveBeenCalledTimes(1);
+      expect(sp.isRestartScheduled()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 // ── resolveMaxHistoryMessages ────────────────────────────────────────────────
