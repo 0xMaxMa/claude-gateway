@@ -1326,6 +1326,15 @@ export class AgentRunner extends EventEmitter {
    */
   private waitForSessionRestart(proc: SessionProcess): Promise<void> {
     if (proc.isRunning()) return Promise.resolve();
+    // Dead with no respawn in flight → the restarted/restartFailed/failed events
+    // this waits on will never fire, so blocking for the full timeout only to
+    // reject is pointless. Fail fast so the caller recovers immediately. (The
+    // primary caller, getOrSpawnSession, already guards on isRestartScheduled()
+    // and respawns instead of calling here; this is a defence-in-depth backstop
+    // for any other caller.) See #371.
+    if (!proc.isRestartScheduled()) {
+      return Promise.reject(new Error('Session is not running and no restart is scheduled'));
+    }
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
@@ -1376,7 +1385,34 @@ export class AgentRunner extends EventEmitter {
       // but THIS gap is hit before a turn even starts, so that fix can't see
       // it). Wait for the pending respawn to actually land before handing the
       // session back.
-      if (!existing.isRunning()) await this.waitForSessionRestart(existing);
+      //
+      // But only wait if a respawn is actually in flight. A session can also be
+      // dead with NOTHING coming — permanently failed (max restarts), or stopped
+      // without eviction. Handing that corpse back would wedge the caller:
+      // sendMessage() no-ops on a null child, and waitForSessionRestart would
+      // block for the full timeout waiting on a restarted/failed event that will
+      // never fire. Drop it and spawn a fresh session instead so the message is
+      // served immediately. See #371.
+      if (!existing.isRunning()) {
+        if (existing.isRestartScheduled()) {
+          await this.waitForSessionRestart(existing);
+        } else {
+          this.logger.warn('Mapped session is dead with no restart in flight — respawning fresh', {
+            mapKey, source,
+          });
+          const respawn = (async () => {
+            await existing.stop();          // idempotent on a dead child; closes watchers + signal file
+            this.sessions.delete(mapKey);
+            return this.spawnSession(mapKey, source, sessionId, effectiveOverride);
+          })();
+          this.sessionSpawnLocks.set(mapKey, respawn);
+          try {
+            return await respawn;
+          } finally {
+            this.sessionSpawnLocks.delete(mapKey);
+          }
+        }
+      }
 
       // Restart if model changed (including switching back to the agent default)
       if (existing.modelOverride !== effectiveOverride) {
@@ -1490,6 +1526,18 @@ export class AgentRunner extends EventEmitter {
     // Forward all session output lines so listeners on AgentRunner (GatewayRouter,
     // CronScheduler, tests) receive them without needing individual session references.
     proc.on('output', (line: string) => this.emit('output', line));
+
+    // API sessions get NONE of the channel lifecycle handlers below (the whole
+    // block is gated to source !== 'api'), so a permanent failure would
+    // otherwise leave the dead SessionProcess in the pool: the next
+    // getOrSpawnSession returns it and, finding no auto-restart in flight, would
+    // block on waitForSessionRestart for the full 20s timeout before rejecting —
+    // the "wedge" #371 describes. Remove it from the pool on failure so the next
+    // message spawns a fresh session instead. (Channel sessions already do this
+    // inside the notify handler below.)
+    if (source === 'api') {
+      proc.once('failed', () => this.sessions.delete(mapKey));
+    }
 
     // Notify typing indicator when session permanently fails (max restarts exceeded)
     if (source !== 'api') {
