@@ -30,8 +30,7 @@ import { createMessageHandler } from './inbound';
 // the others see the O_EXCL marker and drop, so a stranger's DM is handled once.
 import { initDedupDir, isDuplicate, pruneDedup } from '../telegram/dedup';
 import type { DiscordMessageContext } from './types';
-
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
 
 /** AgentRunner callback base (origin of CLAUDE_CHANNEL_CALLBACK, "" when unset).
  *  Used to mint/approve `/cli` pairings via the runner, the same bridge the

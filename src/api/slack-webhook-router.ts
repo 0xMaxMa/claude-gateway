@@ -33,31 +33,18 @@ import {
   generatePairingCode,
 } from './pending-senders';
 import { SlackClient } from './slack-client';
+import { MediaStore } from '../history/media-store';
+import { sniffImageExt } from '../shared/image-sniff';
 import type { WebhookAppHandler } from './webhooks-router';
 
 // Requests older than this are rejected outright (Slack's own replay-protection
 // guidance: reject if the timestamp is more than 5 minutes from "now").
 const MAX_REQUEST_AGE_SECONDS = 60 * 5;
 
-// Inbound image cap — same value LINE uses (matches MediaStore.maxUploadBytes).
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-
-/**
- * Pick a file extension from an image's magic bytes; default jpg. Same sniffer
- * LINE's inbound path uses (line-webhook-router.ts) — deliberately duplicated
- * rather than shared: each channel router keeps its own media helpers local,
- * and Slack's `mimetype` field is untrusted enough that we sniff anyway.
- */
-function sniffImageExt(buf: Buffer): string {
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  if (buf.length >= 3 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
-  if (
-    buf.length >= 12 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) return 'webp';
-  return 'jpg';
-}
+// Inbound image cap. Sourced from MediaStore, which is where the downloaded
+// bytes end up — a router-local literal could drift into accepting an image the
+// store then rejects.
+const MAX_IMAGE_BYTES = MediaStore.maxUploadBytes;
 
 /**
  * Fetch an inbound Slack image's bytes and write them to a temp file, returning

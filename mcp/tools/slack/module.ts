@@ -21,9 +21,7 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 // "Cannot find module" from an installed package). `npm run build` must have
 // run at least once for this import to resolve locally.
 import { SlackClient } from '../../../dist/api/slack-client.js';
-
-// Same cap Discord/Telegram use for outbound attachments.
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
 
 export class SlackModule implements ToolModule {
   id = 'slack';
