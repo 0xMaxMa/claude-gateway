@@ -13,7 +13,6 @@
  * imports). Verified against mcp-no-src-imports.test.ts.
  */
 
-import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
@@ -40,18 +39,35 @@ function cfgFromVaultDir(vaultDir: string): ResolvedKnowledgeSharedCfg {
 }
 
 /**
- * Content-hashed note name — the exact scheme `makeSharedPromoter` (Node side)
- * uses, so an on-demand write and a nightly promotion of the same content map
- * to the same file (idempotent; the two paths dedupe against each other).
+ * Slug identity for an agent's on-demand shared note: `<agentId>-<reason>`,
+ * stable across writes (NOT content-hashed) so a repeat call with the same
+ * `reason` addresses the same file — required for update/delete semantics.
+ * This deliberately diverges from the nightly promoter's content-hashed
+ * naming (`shared-promote.ts`), which exists so that unrelated *automatic*
+ * promotions never collide; the two schemes can never collide with each
+ * other either, since a hashed name always has an extra `-<8hex>` segment
+ * this slug does not.
  */
-export function sharedNoteName(agentId: string, reason: string, content: string): string {
-  const hash = createHash('sha256').update(content).digest('hex').slice(0, 8);
-  return `${agentId}-${reason}-${hash}`;
+export function sharedNoteSlug(agentId: string, reason: string): string {
+  return `${agentId}-${reason}`;
+}
+
+/** Whether a note already exists at this slug (post-`sharedNoteFilename` slugification). */
+export function sharedNoteExists(vaultDir: string, slug: string): boolean {
+  return fs.existsSync(path.join(vaultDir, 'notes', sharedNoteFilename(slug)));
 }
 
 /** Write a note into the shared vault atomically. Returns the absolute path written. */
 export function writeSharedNoteAtomic(vaultDir: string, name: string, content: string): string {
   return writeSharedNote(cfgFromVaultDir(vaultDir), name, content);
+}
+
+/** Delete a note by slug. Returns false (no-op) if it did not exist. */
+export function deleteSharedNote(vaultDir: string, slug: string): boolean {
+  const target = path.join(vaultDir, 'notes', sharedNoteFilename(slug));
+  if (!fs.existsSync(target)) return false;
+  fs.rmSync(target);
+  return true;
 }
 
 /**

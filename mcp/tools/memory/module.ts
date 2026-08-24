@@ -11,17 +11,17 @@
 
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { searchArchive, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
-import { sharedNoteName, writeSharedNoteAtomic, triggerSharedReindex } from './archive-writer';
+import { sharedNoteSlug, sharedNoteExists, writeSharedNoteAtomic, deleteSharedNote, triggerSharedReindex } from './archive-writer';
 
 /** Corpora the tool can serve. */
 const SUPPORTED_CORPORA = new Set(['memory', 'shared', 'all']);
 
 // Mirrors skill_create's MAX_SKILL_SIZE (mcp/tools/skills/handlers.ts) — the
 // direct structural precedent for a write-capable, scope-aware MCP tool. A
-// promoted note lives in a vault SHARED across every agent in the project, so
+// shared note lives in a vault SHARED across every agent in the project, so
 // leaving it uncapped would let one agent (a runaway loop, or a prompt
 // injection) exhaust shared disk / bloat the shared FTS5 index for everyone.
-const MAX_PROMOTE_CONTENT_SIZE = 100 * 1024; // 100KB
+const MAX_SHARED_NOTE_SIZE = 100 * 1024; // 100KB
 
 export class MemoryModule implements ToolModule {
   id = 'memory';
@@ -73,16 +73,36 @@ export class MemoryModule implements ToolModule {
         },
       },
       {
-        name: 'memory_promote',
+        name: 'memory_shared_write',
         description:
-          'Push one note into the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected. The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns. Writing the exact same content again is a no-op (idempotent, content-hashed).',
+          'Create or update one note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected and unrelated. Notes are identified by "reason" (per-agent, stable): calling again with the same "reason" targets the SAME note. By default this fails if a note for that "reason" already exists — pass force:true to overwrite it (update). The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
         inputSchema: {
           type: 'object',
           properties: {
             content: { type: 'string', description: 'Full note body to write into the shared KB. Max 100KB.' },
-            reason: { type: 'string', description: 'Short slug describing why (used in the note filename), e.g. "deploy-runbook".' },
+            reason: {
+              type: 'string',
+              description: 'Short slug identifying this note, e.g. "deploy-runbook". Stable identity — reuse it to update the same note later.',
+            },
+            force: {
+              type: 'boolean',
+              description: 'Overwrite an existing note for this "reason". Default: false (fails if it already exists).',
+            },
           },
           required: ['content', 'reason'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'memory_shared_delete',
+        description:
+          'Delete one note this agent previously wrote to the shared knowledge base via memory_shared_write, by its "reason". Only notes this agent itself wrote can be targeted (identity is scoped to the calling agent) — this cannot delete another agent\'s notes or notes the nightly dreaming pipeline promoted.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'The "reason" the note was written under (see memory_shared_write).' },
+          },
+          required: ['reason'],
           additionalProperties: false,
         },
       },
@@ -156,26 +176,49 @@ export class MemoryModule implements ToolModule {
           return this.json(excerpt);
         }
 
-        case 'memory_promote': {
+        case 'memory_shared_write': {
           // Same gate memory_search uses for corpus:"shared" — fail closed with a
           // clear error rather than silently falling back to some default vault.
           const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
           if (!vaultDir || !vaultDir.trim()) {
-            return this.err('memory_promote unavailable: shared KB is not enabled.');
+            return this.err('memory_shared_write unavailable: shared KB is not enabled.');
           }
           const content = typeof args.content === 'string' ? args.content : '';
-          if (!content.trim()) return this.err('memory_promote requires non-empty "content".');
-          if (content.length > MAX_PROMOTE_CONTENT_SIZE) {
-            return this.err(`memory_promote: content exceeds ${MAX_PROMOTE_CONTENT_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
+          if (!content.trim()) return this.err('memory_shared_write requires non-empty "content".');
+          if (content.length > MAX_SHARED_NOTE_SIZE) {
+            return this.err(`memory_shared_write: content exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
           }
           const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-          if (!reason) return this.err('memory_promote requires non-empty "reason".');
+          if (!reason) return this.err('memory_shared_write requires non-empty "reason".');
+          const force = args.force === true;
 
           const agentId = process.env.GATEWAY_AGENT_ID || 'agent';
-          const noteName = sharedNoteName(agentId, reason, content);
-          const notePath = writeSharedNoteAtomic(vaultDir, noteName, content);
+          const slug = sharedNoteSlug(agentId, reason);
+          const existed = sharedNoteExists(vaultDir, slug);
+          if (existed && !force) {
+            return this.err(`memory_shared_write: a note for reason "${reason}" already exists. Pass force:true to overwrite it, or call memory_shared_delete first.`);
+          }
+          const notePath = writeSharedNoteAtomic(vaultDir, slug, content);
           triggerSharedReindex(vaultDir);
-          return this.json({ promoted: true, path: notePath });
+          return this.json({ written: true, overwritten: existed, path: notePath });
+        }
+
+        case 'memory_shared_delete': {
+          const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
+          if (!vaultDir || !vaultDir.trim()) {
+            return this.err('memory_shared_delete unavailable: shared KB is not enabled.');
+          }
+          const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+          if (!reason) return this.err('memory_shared_delete requires non-empty "reason".');
+
+          const agentId = process.env.GATEWAY_AGENT_ID || 'agent';
+          const slug = sharedNoteSlug(agentId, reason);
+          const deleted = deleteSharedNote(vaultDir, slug);
+          if (!deleted) {
+            return this.err(`memory_shared_delete: no note found for reason "${reason}" written by this agent.`);
+          }
+          triggerSharedReindex(vaultDir);
+          return this.json({ deleted: true, reason });
         }
 
         default:
