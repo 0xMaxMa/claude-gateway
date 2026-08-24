@@ -1,5 +1,5 @@
 /**
- * Shared pairing primitives for both scripts/create-agent.ts and mcp/tools/agent/handlers.ts.
+ * Shared pairing primitives for mcp/tools/agent/handlers.ts.
  * Uses fetch (available in Node 18+ and Bun) — no https module dependency.
  */
 

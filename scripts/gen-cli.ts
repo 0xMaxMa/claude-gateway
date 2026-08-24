@@ -97,6 +97,17 @@ The \`claude-gateway\` binary accepts friendly \`<noun> <verb>\` subcommands. Ru
 | \`claude-gateway debug-bundle\` | Write a small redacted diagnostics bundle for a stuck session |
 | \`claude-gateway api <METHOD> <path>\` | Escape hatch: call any endpoint directly |
 
+## Agents & channels (require a running server)
+
+| Command | Description |
+|---------|-------------|
+| \`claude-gateway agents list\` | List agents accessible by this key |
+| \`claude-gateway agents create [id] [--description <v>]\` | Interactive wizard — generate workspace files, confirm, optionally connect Telegram/Discord |
+| \`claude-gateway agents update [--agent <id>]\` | Regenerate AGENTS.md, or connect/update/disconnect Telegram/Discord/LINE/Slack |
+| \`claude-gateway channels pending --agent <id> [--channel telegram\\|discord]\` | List incoming pairing requests |
+| \`claude-gateway channels approve --agent <id> --channel <v> --code <v>\` | Approve a pending pairing request |
+| \`claude-gateway channels deny --agent <id> --channel <v> --code <v>\` | Deny and remove a pending pairing request |
+
 ## Resource commands
 
 `;

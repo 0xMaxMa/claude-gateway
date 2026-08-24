@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop create-agent update-agent pair mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
+.PHONY: help start stop mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -29,15 +29,6 @@ stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 	@pgrep -af "[n]ode dist/index\.js|[b]un .*/claude-gateway/mcp/|[c]laude .*--mcp-config .*/claude-gateway/" >/dev/null \
 		&& { echo "WARNING: some processes still alive:"; pgrep -af "[n]ode dist/index\.js|[b]un .*/claude-gateway/mcp/|[c]laude .*--mcp-config .*/claude-gateway/"; exit 1; } \
 		|| echo "Stopped"
-
-create-agent: ## Run the interactive wizard to create a new agent
-	./node_modules/.bin/ts-node scripts/create-agent.ts
-
-update-agent: ## Update agent.md or manage channels for an existing agent
-	./node_modules/.bin/ts-node scripts/update-agent.ts
-
-pair: ## Approve a channel pairing (e.g. make pair agent=alfred code=abc123 channel=telegram)
-	./node_modules/.bin/ts-node scripts/pair.ts --agent=$(agent) --code=$(code) --channel=$(or $(channel),telegram)
 
 mcp-install: ## Install MCP gateway dependencies
 	cd mcp && bun install

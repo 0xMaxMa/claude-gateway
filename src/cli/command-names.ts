@@ -13,6 +13,8 @@ export const CORE_COMMANDS = [
   'doctor',
   'debug-bundle',
   'logs',
+  'agents',
+  'channels',
 ] as const;
 
 /** True if `name` is a friendly CLI command (a core command or a resource noun),

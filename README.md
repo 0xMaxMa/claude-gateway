@@ -80,15 +80,41 @@ EOF
 
 All variables are optional. Full list: [`.env.example`](.env.example)
 
-**3. Create an agent**
+**3. Create a config file**
 
-Add an agent entry to `~/.claude-gateway/config.json` manually (see [`config.template.json`](config.template.json) for the format), or clone the repo and run `make create-agent` for the interactive wizard (see **For development** below).
+```bash
+mkdir -p ~/.claude-gateway
+cat > ~/.claude-gateway/config.json << 'EOF'
+{
+  "gateway": {
+    "logDir": "~/.claude-gateway/logs",
+    "timezone": "UTC",
+    "api": {
+      "keys": [
+        { "key": "REPLACE_WITH_A_RANDOM_SECRET", "description": "Admin", "agents": "*", "admin": true }
+      ]
+    }
+  },
+  "agents": []
+}
+EOF
+```
+
+`"agents": []` is fine — the first agent is added in the next step. Replace the placeholder key with a real random secret; see [`config.template.json`](config.template.json) for the full format (models list, more options).
 
 **4. Start**
 
 ```bash
 claude-gateway
 ```
+
+**5. Create an agent**
+
+```bash
+claude-gateway agents create
+```
+
+Interactive wizard — describe the agent, Claude generates the workspace files, review and accept them, then optionally connect a Telegram or Discord bot. Hot-reloads immediately, no restart needed. (You can also add an agent entry to `config.json` by hand instead — same template link as above.)
 
 **Run as a service with PM2 (optional)**
 
@@ -122,30 +148,32 @@ npm install          # also runs bun install in mcp/
 npm run build
 ```
 
-### Create an agent
-
-The interactive wizard handles everything — workspace files, config, bot token, and pairing:
-
-```bash
-make create-agent
-```
-
-Steps:
-1. Choose an agent name
-2. Describe the agent — Claude generates workspace files
-3. Review and accept generated files
-4. Choose a channel: **Telegram** or **Discord**
-5. Paste the bot token — wizard verifies it automatically
-6. Send any message to the bot to complete pairing
-7. Agent sends a welcome message
-
-### 4. Start the gateway
+### Start the gateway
 
 ```bash
 npm start
 ```
 
-Config is auto-loaded from `~/.claude-gateway/config.json`. Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
+Config is auto-loaded from `~/.claude-gateway/config.json` (see the config-file step in the npm-install path above — `"agents": []` is fine to start with). Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
+
+### Create an agent
+
+The interactive wizard handles everything — workspace files, bot token, and pairing:
+
+```bash
+claude-gateway agents create
+```
+
+Steps:
+1. Choose an agent id and describe its role — Claude generates workspace files
+2. Review and accept the generated files
+3. Optionally connect a channel: **Telegram** or **Discord** — paste the bot token, wizard verifies it automatically
+4. Agent hot-reloads immediately — send any message to the bot, then approve pairing:
+   ```bash
+   claude-gateway channels approve --agent <id> --channel telegram --code <code>
+   ```
+
+To manage an existing agent — regenerate `AGENTS.md`, or connect/update/disconnect Telegram, Discord, LINE, or Slack — run `claude-gateway agents update`.
 
 ---
 
@@ -295,7 +323,7 @@ Access policy is configured per-channel in the agent's workspace state file, not
 |-------|-----------|
 | `allowlist` | Only user IDs in `allowFrom` can DM the agent (**default**) |
 | `open` | Anyone can DM the agent |
-| `pairing` | New users DM the bot to receive a pairing code; approve with `npm run pair` |
+| `pairing` | New users DM the bot to receive a pairing code; approve with `claude-gateway channels approve` |
 
 ### `gateway.headless`
 
@@ -670,6 +698,8 @@ The `claude-gateway` binary doubles as a command-line client for a running gatew
 ```bash
 claude-gateway gateway status              # is it running? which manager owns it?
 claude-gateway doctor                      # check config / key / connectivity
+claude-gateway agents create               # interactive wizard — new agent + optional channel
+claude-gateway channels pending --agent alfred   # incoming Telegram/Discord pairing requests
 claude-gateway crons list                  # friendly <noun> <verb> commands
 claude-gateway crons run <jobId>
 claude-gateway debug-bundle                # small redacted bundle for a stuck session (works even if the server is down)
@@ -733,7 +763,7 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `POST` | `/api/v1/apps/:name/reconfigure` | Change env vars / host ports on an installed app, with rollback → `jobId` (admin) |
 | `GET` | `/app/:name/:portName/*` | Reverse proxy to installed app (no auth) |
 
-**Wizard API** — create agents programmatically with the same flow as the interactive `make create-agent` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
+**Wizard API** — create agents programmatically with the same flow as the interactive `claude-gateway agents create` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
 
 See **[API.md](./API.md)** for full reference with request/response schemas and curl examples.
 
@@ -793,7 +823,7 @@ See **[API.md — App Store section](./API.md#app-store-api)** for the full refe
 
 ```
 claude-gateway/
-├── Makefile                            ← make start / create-agent / update-agent / pair / mcp-install
+├── Makefile                            ← make start / mcp-install / release / pm2-* / system-*
 ├── config.template.json                ← config template (source of truth for migration)
 │
 ├── src/                                ← Gateway core (TypeScript, compiled to dist/)
@@ -857,12 +887,10 @@ claude-gateway/
 │       └── web-ui.ts                   ← live HTML dashboard
 │
 ├── scripts/
-│   ├── create-agent.ts                 ← interactive agent creation wizard (with channel selection)
-│   ├── create-agent-prompts.ts         ← agent workspace generation prompts
-│   ├── update-agent.ts                 ← update agent.md or manage channels (add/remove)
-│   ├── interactive-select.ts           ← interactive selection UI helper
-│   ├── pair.ts                         ← approve channel pairing (Telegram / Discord)
-│   └── setup-claude-settings.js        ← enables channelsEnabled in Claude Code
+│   ├── gen-cli.ts                       ← generates src/cli/commands.generated.ts + CLI.md from the route registry
+│   ├── mock-line-webhook.ts             ← local LINE webhook simulator for dev testing
+│   ├── release.sh                       ← interactive release (make release)
+│   └── setup-claude-settings.js         ← enables channelsEnabled in Claude Code
 │
 └── mcp/                                ← MCP server (runs in Bun, separate node_modules)
     ├── package.json                    ← dependencies: grammy, @modelcontextprotocol/sdk
@@ -1036,9 +1064,9 @@ toggle **on**, so pairing works out of the box — no setup needed.
 1. Ask the user to DM the bot — they receive a 6-character pairing code
 2. Approve it:
    ```bash
-   npm run pair -- --agent=alfred --code=abc123 --channel=discord
+   claude-gateway channels approve --agent alfred --channel discord --code abc123
    ```
-   (omit `--channel` or use `--channel=telegram` for Telegram)
+   (use `--channel telegram` for Telegram; omit `--channel` on `channels pending` to check both)
 3. The bot confirms pairing within 5 seconds
 4. Lock down after everyone is paired (optional) — turn the pairing toggle off
    so unknown senders are dropped silently (the base policy is already
@@ -1055,7 +1083,7 @@ automatically on read to `{ dmPolicy: "allowlist", pairing: true }`.
 
 To manage channels (add/remove Telegram or Discord) on an existing agent:
 ```bash
-make update-agent   # choose "Manage channels"
+claude-gateway agents update   # choose "Connect/update a channel" or "Disconnect a channel"
 ```
 
 ---

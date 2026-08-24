@@ -6,6 +6,8 @@ import { loadCliConfig, resolveUrl, resolveKey, request, CliConfigView } from '.
 import { runGatewayLifecycle } from './commands/gateway';
 import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
+import { runAgents } from './commands/agents';
+import { runChannels } from './commands/channels';
 
 /** Flags that are always boolean regardless of command — never consume the next
  *  token as a value (see parseCliArgs). */
@@ -45,6 +47,10 @@ export async function runCli(argv: string[]): Promise<number> {
         return await runDoctor(flags, config);
       case 'debug-bundle':
         return await runDebugBundle(flags);
+      case 'agents':
+        return await runAgents(positionals, flags, config);
+      case 'channels':
+        return await runChannels(positionals, flags, config);
       case 'logs':
         process.stderr.write('logs: not yet implemented — use `debug-bundle` for a shareable snapshot.\n');
         return 1;
@@ -226,6 +232,8 @@ function printGeneralHelp(): void {
     '  gateway status|restart|stop   Manage the gateway process (manager-aware)',
     '  doctor                        Check config/env/connectivity',
     '  debug-bundle                  Write a small redacted diagnostics bundle',
+    '  agents list|create|update     Create/manage agents (interactive wizard)',
+    '  channels pending|approve|deny Approve/deny incoming Telegram/Discord pairing requests',
     '  api <METHOD> <path>           Call any endpoint directly (escape hatch)',
     '  version                       Print the gateway version',
     '',

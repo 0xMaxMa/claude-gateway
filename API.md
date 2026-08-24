@@ -624,7 +624,7 @@ curl -H "X-Api-Key: my-key" \
 
 ### Wizard API — multi-step agent creation
 
-The Wizard API mirrors the interactive `make create-agent` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL (refreshed on each step transition); nothing is written to disk until the `/confirm` step.
+The Wizard API mirrors the interactive `claude-gateway agents create` terminal wizard but is consumable by web UIs and automation. State is kept **in memory** with a 30-minute TTL (refreshed on each step transition); nothing is written to disk until the `/confirm` step.
 
 **State machine:**
 

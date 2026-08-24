@@ -92,6 +92,22 @@ describe('config-loader', () => {
   });
 
   // -------------------------------------------------------------------------
+  // U-CL-04b: A genuinely empty "agents": [] is a valid bootstrap state —
+  // start the gateway with zero agents, then add the first one via
+  // `claude-gateway agents create` (the wizard needs the gateway running).
+  // -------------------------------------------------------------------------
+  it('U-CL-04b: loads successfully with an empty agents array (zero-agent bootstrap)', () => {
+    const configPath = path.join(tmpDir, 'no-agents.json');
+    fs.writeFileSync(configPath, JSON.stringify({
+      gateway: { logDir: '/tmp', timezone: 'UTC' },
+      agents: [],
+    }));
+
+    const config = loadConfig(configPath);
+    expect(config.agents).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
   // U-CL-05: Duplicate agent IDs
   // -------------------------------------------------------------------------
   it('U-CL-05: throws DuplicateAgentIdError for duplicate agent IDs', () => {
