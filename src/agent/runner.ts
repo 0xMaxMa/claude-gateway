@@ -16,6 +16,7 @@ import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
 import { SlackClient } from '../api/slack-client';
+import { WhatsAppManager, type WhatsAppStatus } from '../whatsapp/manager';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -238,6 +239,15 @@ export class AgentRunner extends EventEmitter {
   // it exists only so writeAutoForward's fallback/command-reply path (below) has
   // somewhere to actually deliver Slack messages instead of silently dropping them.
   private slackOutbound: SlackClient | null = null;
+  // Constructed once in start() (needs this.callbackPort, only resolved once
+  // startCallbackServer() runs — same reason DiscordReceiver/TelegramReceiver
+  // are built there too, not in the constructor) and then kept for the
+  // runner's lifetime — unlike SlackClient/DiscordReceiver, there's no
+  // "config changed" event to rebuild it on, since the credential IS the
+  // on-disk session, not a config.json field (see AgentConfig.whatsapp's doc
+  // comment). WhatsAppManager itself decides whether there's anything to do
+  // on start (resumeIfLinked() no-ops if never linked).
+  private whatsapp: WhatsAppManager | null = null;
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -469,7 +479,9 @@ export class AgentRunner extends EventEmitter {
               ? 'line'
               : meta['source'] === 'slack'
                 ? 'slack'
-                : 'telegram') as ChatChannel;
+                : meta['source'] === 'whatsapp'
+                  ? 'whatsapp'
+                  : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
 
           // Slack: remember the current message's thread context so the
@@ -1711,7 +1723,9 @@ export class AgentRunner extends EventEmitter {
             ? 'mcp__gateway__line_reply'
             : source === 'slack'
               ? 'mcp__gateway__slack_reply'
-              : 'mcp__gateway__telegram_reply';
+              : source === 'whatsapp'
+                ? 'mcp__gateway__whatsapp_reply'
+                : 'mcp__gateway__telegram_reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -2021,11 +2035,14 @@ export class AgentRunner extends EventEmitter {
                 } else if (
                   channelSrcForResult !== 'discord' &&
                   channelSrcForResult !== 'slack' &&
+                  channelSrcForResult !== 'whatsapp' &&
                   (hasMarkdown(channelText) || containsTelegramHtml(channelText))
                 ) {
                   // Telegram HTML entities — Slack has its own mrkdwn format and
                   // would display these tags literally, so Slack skips this and
-                  // falls through to the plain-text branch below.
+                  // falls through to the plain-text branch below. WhatsApp has
+                  // its own lightweight markup (*bold*/_italic_/~strike~, not
+                  // HTML), same reasoning.
                   this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html', replySendFailed);
                 } else {
                   this.writeAutoForward(mapKey, channelText, 'text', replySendFailed);
@@ -2938,6 +2955,19 @@ export class AgentRunner extends EventEmitter {
       }
       return;
     }
+    // WhatsApp likewise has no .forward consumer, and — unlike Slack/SMS's
+    // outbound REST clients — cannot open a fresh connection per call either
+    // (see WhatsAppManager's doc comment): reach the live socket this
+    // process already holds directly.
+    if (this.channelFor(chatId) === 'whatsapp') {
+      void this.whatsapp?.sendMessage(chatId, text).catch((err: unknown) => {
+        this.logger.warn('WhatsApp auto-forward failed', {
+          chatId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return;
+    }
     const typingDir = this.getTypingDir(chatId);
     const forwardPath = path.join(typingDir, `${chatId}.forward`);
     try {
@@ -3043,6 +3073,13 @@ export class AgentRunner extends EventEmitter {
     // line_reply tool keeps the plain reply-first → push-fallback path).
     this.startLineReply();
     this.startSlackOutbound();
+    // Unconditional construction (unlike every credential-gated channel
+    // above) — WhatsAppManager checks disk for a previously-linked session
+    // itself; there's no config field to gate on. A brand-new agent that's
+    // never linked just no-ops here and stays 'unlinked' until the user
+    // starts a QR/pairing flow via the API.
+    this.whatsapp = new WhatsAppManager(this.agentConfig, this.callbackPort, this.gatewayConfig.gateway.logDir);
+    void this.whatsapp.resumeIfLinked();
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
@@ -3095,6 +3132,33 @@ export class AgentRunner extends EventEmitter {
     // it up, same reasoning as LineReplyManager above.
     this.stopSlackOutbound();
     this.startSlackOutbound();
+    // WhatsApp has no credential to rebuild on — just push the new config
+    // (access-control fields) into the already-running manager.
+    this.whatsapp?.updateAgentConfig(newConfig);
+  }
+
+  getWhatsAppStatus(): WhatsAppStatus | undefined {
+    return this.whatsapp?.getStatus();
+  }
+
+  async startWhatsAppLinking(): Promise<void> {
+    if (!this.whatsapp) throw new Error('Agent not started');
+    await this.whatsapp.startLinking();
+  }
+
+  async requestWhatsAppPairingCode(phoneNumber: string): Promise<string> {
+    if (!this.whatsapp) throw new Error('Agent not started');
+    return this.whatsapp.requestPairingCode(phoneNumber);
+  }
+
+  async unlinkWhatsApp(): Promise<void> {
+    if (!this.whatsapp) throw new Error('Agent not started');
+    await this.whatsapp.unlink();
+  }
+
+  async sendWhatsAppMessage(jid: string, text: string, imagePath?: string): Promise<void> {
+    if (!this.whatsapp) throw new Error('Agent not started');
+    await this.whatsapp.sendMessage(jid, text, imagePath);
   }
 
   startSlackOutbound(): void {
@@ -3213,6 +3277,10 @@ export class AgentRunner extends EventEmitter {
     // teardown rather than serially — both are bounded, neither depends on the
     // other, and shutdown latency is user-visible.
     const receiversStopped = [this.receiver?.stop(), this.discordReceiver?.stop()];
+    // stop(), not unlink() — gateway shutdown should NOT wipe a linked
+    // session; resumeIfLinked() picks it back up on next boot. Synchronous
+    // (no socket-close promise to await), unlike the receivers above.
+    this.whatsapp?.stop();
     this.stopLineReply();
     await Promise.all([
       ...receiversStopped,

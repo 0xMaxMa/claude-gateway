@@ -195,6 +195,21 @@ function maskToken(token: string): string {
   return token.slice(0, 8) + '•••••' + token.slice(-4);
 }
 
+/**
+ * Live WhatsApp status for an agent, tolerant of a runner that doesn't
+ * implement `getWhatsAppStatus` — unlike every other channel's fields
+ * (config-derived, always safe to read), this one reaches into a live
+ * object. Test fixtures across this file stub `AgentRunner` as a plain
+ * object with only the methods each test needs; `?.()` (not just `?.`)
+ * keeps those fixtures passing instead of throwing "not a function".
+ */
+function getWhatsAppStatus(
+  agentRunners: Map<string, AgentRunner>,
+  id: string,
+): { status: string; phoneNumber?: string } | undefined {
+  return agentRunners.get(id)?.getWhatsAppStatus?.();
+}
+
 /** Detect MIME type from file magic bytes (first 12 bytes). */
 function detectMimeFromMagic(header: Buffer): string | null {
   if (header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) return 'image/jpeg';
@@ -753,6 +768,20 @@ export function createApiRouter(
         slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
         slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
         slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
+        // WhatsApp — no credential field to gate on (see AgentConfig.whatsapp's
+        // doc comment): connected/status/number are LIVE runtime state read
+        // from the manager, not derived from config.json. Access-control
+        // fields are always surfaced (not gated behind "connected") since
+        // they're meaningful to configure even before the first link.
+        whatsapp_connected: getWhatsAppStatus(agentRunners, id)?.status === 'linked',
+        whatsapp_status: getWhatsAppStatus(agentRunners, id)?.status ?? 'unlinked',
+        whatsapp_number: getWhatsAppStatus(agentRunners, id)?.phoneNumber ?? null,
+        whatsapp_dm_policy: cfg.whatsapp?.dmPolicy ?? null,
+        whatsapp_dm_allowlist: cfg.whatsapp?.dmAllowlist ?? [],
+        whatsapp_group_policy: cfg.whatsapp?.groupPolicy ?? null,
+        whatsapp_group_allowlist: cfg.whatsapp?.groupAllowlist ?? [],
+        whatsapp_require_mention: cfg.whatsapp?.requireMention ?? null,
+        whatsapp_pairing: cfg.whatsapp?.pairing ?? true,
       }));
     res.json({ agents });
   });
@@ -1466,8 +1495,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1667,6 +1696,44 @@ export function createApiRouter(
       }
     }
 
+    // WhatsApp — access-control fields only, same validation shape as Slack.
+    // No credential fields to validate here at all (see AgentConfig.whatsapp's
+    // doc comment): the "credential" is the linked device session on disk,
+    // never in this PATCH body.
+    if (whatsapp_dm_policy !== undefined && whatsapp_dm_policy !== null &&
+        !(typeof whatsapp_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_dm_policy))) {
+      res.status(400).json({ error: "whatsapp_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_dm_allowlist !== undefined && whatsapp_dm_allowlist !== null &&
+        !(Array.isArray(whatsapp_dm_allowlist) && whatsapp_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_group_policy !== undefined && whatsapp_group_policy !== null &&
+        !(typeof whatsapp_group_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_group_policy))) {
+      res.status(400).json({ error: "whatsapp_group_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_group_allowlist !== undefined && whatsapp_group_allowlist !== null &&
+        !(Array.isArray(whatsapp_group_allowlist) && whatsapp_group_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_group_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_require_mention !== undefined && whatsapp_require_mention !== null &&
+        typeof whatsapp_require_mention !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_require_mention must be a boolean or null' });
+      return;
+    }
+    if (whatsapp_pairing !== undefined && whatsapp_pairing !== null &&
+        typeof whatsapp_pairing !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_pairing must be a boolean or null' });
+      return;
+    }
+    const whatsappAccessTouched = whatsapp_dm_policy !== undefined || whatsapp_dm_allowlist !== undefined ||
+      whatsapp_group_policy !== undefined || whatsapp_group_allowlist !== undefined ||
+      whatsapp_require_mention !== undefined || whatsapp_pairing !== undefined;
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1785,6 +1852,39 @@ export function createApiRouter(
         if (connectors !== undefined) {
           const existing = (agent.connectors as Record<string, { enabled: boolean }>) ?? {};
           agent.connectors = { ...existing, ...connectorPatch };
+        }
+        // WhatsApp access fields — unlike every other channel, there's no
+        // credential-touch branch that might have created `agent.whatsapp`
+        // first: access control is meaningful to configure independent of
+        // (and even before) ever linking a device, so create the block on
+        // first touch instead of skipping when absent.
+        if (whatsappAccessTouched) {
+          const existing = (agent.whatsapp as Record<string, unknown> | undefined) ?? {};
+          if (whatsapp_dm_policy !== undefined) {
+            if (whatsapp_dm_policy === null) delete existing.dmPolicy;
+            else existing.dmPolicy = whatsapp_dm_policy;
+          }
+          if (whatsapp_dm_allowlist !== undefined) {
+            if (whatsapp_dm_allowlist === null) delete existing.dmAllowlist;
+            else existing.dmAllowlist = whatsapp_dm_allowlist;
+          }
+          if (whatsapp_group_policy !== undefined) {
+            if (whatsapp_group_policy === null) delete existing.groupPolicy;
+            else existing.groupPolicy = whatsapp_group_policy;
+          }
+          if (whatsapp_group_allowlist !== undefined) {
+            if (whatsapp_group_allowlist === null) delete existing.groupAllowlist;
+            else existing.groupAllowlist = whatsapp_group_allowlist;
+          }
+          if (whatsapp_require_mention !== undefined) {
+            if (whatsapp_require_mention === null) delete existing.requireMention;
+            else existing.requireMention = whatsapp_require_mention;
+          }
+          if (whatsapp_pairing !== undefined) {
+            if (whatsapp_pairing === null) delete existing.pairing;
+            else existing.pairing = whatsapp_pairing;
+          }
+          (agent as Record<string, unknown>).whatsapp = existing;
         }
       });
     } catch (err) {
@@ -1983,6 +2083,40 @@ export function createApiRouter(
         }
       }
     }
+    if (whatsappAccessTouched) {
+      cfg.whatsapp = cfg.whatsapp ?? {};
+      if (whatsapp_dm_policy !== undefined) {
+        if (whatsapp_dm_policy === null) delete cfg.whatsapp.dmPolicy;
+        else cfg.whatsapp.dmPolicy = whatsapp_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (whatsapp_dm_allowlist !== undefined) {
+        if (whatsapp_dm_allowlist === null) delete cfg.whatsapp.dmAllowlist;
+        else cfg.whatsapp.dmAllowlist = whatsapp_dm_allowlist as string[];
+      }
+      if (whatsapp_group_policy !== undefined) {
+        if (whatsapp_group_policy === null) delete cfg.whatsapp.groupPolicy;
+        else cfg.whatsapp.groupPolicy = whatsapp_group_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (whatsapp_group_allowlist !== undefined) {
+        if (whatsapp_group_allowlist === null) delete cfg.whatsapp.groupAllowlist;
+        else cfg.whatsapp.groupAllowlist = whatsapp_group_allowlist as string[];
+      }
+      if (whatsapp_require_mention !== undefined) {
+        if (whatsapp_require_mention === null) delete cfg.whatsapp.requireMention;
+        else cfg.whatsapp.requireMention = whatsapp_require_mention as boolean;
+      }
+      if (whatsapp_pairing !== undefined) {
+        if (whatsapp_pairing === null) delete cfg.whatsapp.pairing;
+        else cfg.whatsapp.pairing = whatsapp_pairing as boolean;
+      }
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      if (Array.isArray(whatsapp_dm_allowlist)) {
+        for (const jid of whatsapp_dm_allowlist) clearPendingSender('whatsapp', agentId, jid);
+      }
+      if (Array.isArray(whatsapp_group_allowlist)) {
+        for (const jid of whatsapp_group_allowlist) clearPendingSender('whatsapp', agentId, jid);
+      }
+    }
 
     res.json({
       agent: {
@@ -2027,6 +2161,15 @@ export function createApiRouter(
         slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
         slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
         slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
+        whatsapp_connected: getWhatsAppStatus(agentRunners, agentId)?.status === 'linked',
+        whatsapp_status: getWhatsAppStatus(agentRunners, agentId)?.status ?? 'unlinked',
+        whatsapp_number: getWhatsAppStatus(agentRunners, agentId)?.phoneNumber ?? null,
+        whatsapp_dm_policy: cfg.whatsapp?.dmPolicy ?? null,
+        whatsapp_dm_allowlist: cfg.whatsapp?.dmAllowlist ?? [],
+        whatsapp_group_policy: cfg.whatsapp?.groupPolicy ?? null,
+        whatsapp_group_allowlist: cfg.whatsapp?.groupAllowlist ?? [],
+        whatsapp_require_mention: cfg.whatsapp?.requireMention ?? null,
+        whatsapp_pairing: cfg.whatsapp?.pairing ?? true,
       },
     });
   });
@@ -2227,6 +2370,141 @@ export function createApiRouter(
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     clearPendingSender('slack', agentId, senderId);
     res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp/pending
+   * Recently denied WhatsApp senders/groups (Tier 1/3 discovery aid). Admin only.
+   * Mirrors GET .../slack/pending exactly, keyed under the 'whatsapp' channel
+   * namespace in the shared pending-senders store.
+   */
+  router.get('/v1/agents/:agentId/whatsapp/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders('whatsapp', agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/whatsapp/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). The id is
+   * a WhatsApp JID (DM sender or group).
+   */
+  router.delete('/v1/agents/:agentId/whatsapp/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender('whatsapp', agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp/status
+   * Live link status — status/qr/pairingCode/phoneNumber straight from the
+   * in-process WhatsAppManager, never config-derived (there is no config
+   * field to derive it from). Polled by the web UI during linking and while
+   * showing the connected card. Requires write access (same as every other
+   * channel's connect surface), not just read.
+   */
+  router.get('/v1/agents/:agentId/whatsapp/status', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json(runner.getWhatsAppStatus?.() ?? { status: 'unlinked' });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/link
+   * Start (or restart) a QR-code linking flow. Returns immediately — poll
+   * GET .../status for the QR image once it's available.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/link', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    try {
+      await runner.startWhatsAppLinking();
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/pairing-code
+   * Start linking via a text pairing code instead of QR. Body: {phoneNumber}
+   * (E.164, e.g. "+15551234567"). Returns the code once Baileys issues it.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/pairing-code', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { phoneNumber } = req.body as { phoneNumber?: unknown };
+    if (typeof phoneNumber !== 'string' || !phoneNumber.trim()) {
+      res.status(400).json({ error: 'phoneNumber is required' });
+      return;
+    }
+    try {
+      const code = await runner.requestWhatsAppPairingCode(phoneNumber.trim());
+      res.json({ pairingCode: code });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/unlink
+   * Logout and wipe the linked session. The user must scan/pair fresh afterward.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/unlink', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    await runner.unlinkWhatsApp();
+    res.json({ ok: true });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/send
+   * INTERNAL — called by the `whatsapp_reply` MCP tool (via GATEWAY_API_URL/
+   * GATEWAY_API_KEY, same as every other MCP subprocess reaches the gateway),
+   * never by the web UI. Same auth as the rest of /api — no separate secret.
+   * Exists because Baileys has no stateless per-call send path (see
+   * WhatsAppManager's doc comment): the MCP tool cannot open its own
+   * connection, it must reach the live socket this process already holds.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/send', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: 'Access required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { jid, text, image_path } = req.body as { jid?: unknown; text?: unknown; image_path?: unknown };
+    if (typeof jid !== 'string' || !jid) { res.status(400).json({ error: 'jid is required' }); return; }
+    if (typeof text !== 'string' && typeof image_path !== 'string') {
+      res.status(400).json({ error: 'text or image_path is required' });
+      return;
+    }
+    try {
+      await runner.sendWhatsAppMessage(
+        jid,
+        typeof text === 'string' ? text : '',
+        typeof image_path === 'string' ? image_path : undefined,
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message });
+    }
   });
 
   /**
@@ -2568,7 +2846,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack chats' });
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack/whatsapp chats' });
       return;
     }
     try {
@@ -2758,7 +3036,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack chats' });
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack/whatsapp chats' });
       return;
     }
 
@@ -3635,5 +3913,6 @@ function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: st
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
   if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
   if (fullChatId.startsWith('slack-')) return { source: 'slack', rawChatId: fullChatId.slice(6) };
+  if (fullChatId.startsWith('whatsapp-')) return { source: 'whatsapp', rawChatId: fullChatId.slice(9) };
   return { source: 'api', rawChatId: fullChatId };
 }

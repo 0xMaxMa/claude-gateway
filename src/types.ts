@@ -131,6 +131,54 @@ export interface AgentConfig {
      */
     pairing?: boolean;
   };
+  /**
+   * WhatsApp — via WhatsApp Web device linking (the Baileys library), NOT
+   * the official Meta Cloud API. Unlike every other channel, there is NO
+   * credential field here: the "credential" is the linked device session
+   * itself, persisted on disk at `<workspace>/.whatsapp-state/` (Baileys'
+   * `creds.json`, written by `useMultiFileAuthState`), not in this config.
+   * Live link status (unlinked/pending-scan/linked/reconnecting) is
+   * ephemeral runtime state held by WhatsAppManager, never persisted here.
+   *
+   * Unofficial/reverse-engineered protocol — using it violates WhatsApp's
+   * ToS and carries real account-ban risk (elevated further since GetPod
+   * agents run on cloud/datacenter IPs, the exact traffic profile
+   * WhatsApp's abuse detection flags). This is a user-accepted trade-off,
+   * disclosed prominently in the web UI's connect flow — not enforced or
+   * mitigated by this config.
+   */
+  whatsapp?: {
+    /**
+     * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
+     * Gates 1:1 conversations (JIDs ending `@s.whatsapp.net`). Necessary
+     * even though the number itself is authenticated via QR/pairing-code
+     * linking: unlike a fresh bot token, a WhatsApp number is typically the
+     * owner's real number that other people already have — without this,
+     * anyone who knows the number could reach the agent once linked.
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed sender JIDs/numbers (E.164 or bare digits — normalized at the access-gate boundary). */
+    dmAllowlist?: string[];
+    /**
+     * Group access policy (mirrors `slack.groupPolicy`/`line.groupPolicy`).
+     * Gates group JIDs (ending `@g.us`) the linked number is a member of.
+     */
+    groupPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed group JIDs. */
+    groupAllowlist?: string[];
+    /**
+     * In groups, only respond when the bot is @mentioned (mirrors
+     * `slack.requireMention`/`line.requireMention`). Default true. No
+     * effect on DMs.
+     */
+    requireMention?: boolean;
+    /**
+     * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
+     * exactly). Default true (absent ⇒ on). Only has an effect under
+     * `allowlist` (closed-default) for either tier.
+     */
+    pairing?: boolean;
+  };
   claude: {
     model: string;
     /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */

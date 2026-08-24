@@ -15,7 +15,7 @@
  * impossible to reintroduce for this union — adding a channel here updates
  * every consumer's type AND its guard in one place.
  */
-export const CHAT_CHANNELS = ['telegram', 'discord', 'line', 'slack'] as const;
+export const CHAT_CHANNELS = ['telegram', 'discord', 'line', 'slack', 'whatsapp'] as const;
 export type ChatChannel = (typeof CHAT_CHANNELS)[number];
 export function isChatChannel(value: unknown): value is ChatChannel {
   return typeof value === 'string' && (CHAT_CHANNELS as readonly string[]).includes(value);

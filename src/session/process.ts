@@ -196,6 +196,10 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
   discord: '.discord-state',
   line: '.line-state',
   slack: '.slack-state',
+  // Dual-purpose for WhatsApp: this is ALSO where WhatsAppManager's
+  // useMultiFileAuthState() persists Baileys' creds.json — not just
+  // message-turn state like the other channels' subdirs.
+  whatsapp: '.whatsapp-state',
 };
 
 export class SessionProcess extends EventEmitter {

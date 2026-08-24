@@ -18,9 +18,10 @@ describe('isCliChannel()', () => {
     expect(isCliChannel('discord')).toBe(true);
     expect(isCliChannel('line')).toBe(true);
     expect(isCliChannel('slack')).toBe(true);
+    expect(isCliChannel('whatsapp')).toBe(true);
   });
   test('rejects anything outside the union', () => {
-    expect(isCliChannel('whatsapp')).toBe(false);
+    expect(isCliChannel('signal')).toBe(false);
     expect(isCliChannel('')).toBe(false);
     expect(isCliChannel(undefined)).toBe(false);
     expect(isCliChannel(42)).toBe(false);
