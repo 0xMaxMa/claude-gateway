@@ -2213,7 +2213,19 @@ export class AgentRunner extends EventEmitter {
 
     try {
       const compactor = new SessionCompactor(this.sessionStore);
-      const result = await compactor.compact(agentId, chatId, sessionId, compactModel, contextWindow, ch);
+      // Large sessions summarize in many chunks (see compactor.ts); post a status
+      // update at each ~25% step so the channel doesn't look dead mid-compact.
+      // Throttled (not per-chunk) to avoid spamming the chat on a 16+ chunk job.
+      let lastReportedPct = -1;
+      const onProgress = (done: number, total: number): void => {
+        if (total <= 1) return;
+        const pct = Math.floor((done / total) * 100);
+        if (pct - lastReportedPct >= 25) {
+          lastReportedPct = pct;
+          this.writeAutoForward(chatId, `⏳ Compacting session "${name}"... ${done}/${total} parts summarized`);
+        }
+      };
+      const result = await compactor.compact(agentId, chatId, sessionId, compactModel, contextWindow, ch, onProgress);
       await this.sessionStore.updateSessionMeta(agentId, chatId, sessionId, {
         loadedAtSpawn: undefined,
         archivedCount: undefined,
