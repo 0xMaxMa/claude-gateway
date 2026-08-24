@@ -1,4 +1,4 @@
-import { shortHash, buildSubmitDiag, SubmitDiagInputs } from '../../src/shell/submit-diag';
+import { shortHash, buildSubmitDiag, classifyLikelyCause, SubmitDiagInputs } from '../../src/shell/submit-diag';
 
 // Diagnostics for the swallowed-Enter submit-retry path (#370). These are pure
 // helpers, so the tests mirror the menu-probe/decideMenuCancel style: no
@@ -134,6 +134,7 @@ describe('submit-diag buildSubmitDiag (structured snapshot)', () => {
       'event',
       'fromMenuSelection',
       'hasPrompt',
+      'likelyCause',
       'msSinceFirstRecord',
       'msSinceStart',
       'msSinceSubmit',
@@ -144,5 +145,28 @@ describe('submit-diag buildSubmitDiag (structured snapshot)', () => {
       'sawBusy',
       'sawBusyMarker',
     ]);
+  });
+});
+
+describe('submit-diag classifyLikelyCause (reading-aid label)', () => {
+  it('labels a non-empty draft as cause1-swallowed (Enter genuinely swallowed)', () => {
+    expect(classifyLikelyCause(156, 0)).toBe('cause1-swallowed');
+    // draftLen wins even if records also arrived — the draft is still on screen.
+    expect(classifyLikelyCause(156, 9)).toBe('cause1-swallowed');
+  });
+
+  it('labels an empty draft with records as cause2-marker-drift (Enter went through)', () => {
+    expect(classifyLikelyCause(0, 9)).toBe('cause2-marker-drift');
+    expect(classifyLikelyCause(0, 1)).toBe('cause2-marker-drift');
+  });
+
+  it('labels an empty draft with no records as unknown (fits neither known cause)', () => {
+    expect(classifyLikelyCause(0, 0)).toBe('unknown');
+  });
+
+  it('is reflected in the snapshot and derived only from raw fields', () => {
+    expect(buildSubmitDiag(baseInputs({ draft: 'unsent', recordsDelta: 0 })).likelyCause).toBe('cause1-swallowed');
+    expect(buildSubmitDiag(baseInputs({ draft: '', recordsDelta: 3 })).likelyCause).toBe('cause2-marker-drift');
+    expect(buildSubmitDiag(baseInputs({ draft: '', recordsDelta: 0 })).likelyCause).toBe('unknown');
   });
 });

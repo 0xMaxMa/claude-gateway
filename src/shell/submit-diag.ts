@@ -50,16 +50,39 @@ export interface SubmitDiagInputs {
   probeRounds: number | null;
 }
 
+/** Classification of a submit-retry snapshot into the two known failure modes,
+ *  or `unknown` when the evidence fits neither. This is a *label to aid reading*
+ *  — the raw fields (`draftLen`, `recordsDelta`, `sawBusyMarker`, …) remain the
+ *  source of truth and are always emitted, so a novel case is never lost to a
+ *  wrong bucket.
+ *
+ *  - `cause1-swallowed`: a non-empty draft is still sitting in the input box
+ *    (`draftLen > 0`) ⇒ the Enter was genuinely swallowed.
+ *  - `cause2-marker-drift`: the draft is empty and records arrived
+ *    (`draftLen === 0 && recordsDelta > 0`) ⇒ the Enter went through; the
+ *    give-up was a busy-marker-drift false positive.
+ *  - `unknown`: empty draft and no records (`draftLen === 0 && recordsDelta === 0`)
+ *    ⇒ Enter cleared but nothing followed — fits neither known cause. */
+export type LikelyCause = 'cause1-swallowed' | 'cause2-marker-drift' | 'unknown';
+
+export function classifyLikelyCause(draftLen: number, recordsDelta: number): LikelyCause {
+  if (draftLen > 0) return 'cause1-swallowed';
+  if (recordsDelta > 0) return 'cause2-marker-drift';
+  return 'unknown';
+}
+
 /** Build the prod-safe, structured diagnostic snapshot for the swallowed-Enter
  *  submit-retry path. Pure: the raw draft is reduced to `draftLen` + `draftHash`
  *  here and NEVER passed through verbatim, so no user text, token, or secret can
  *  reach the logs. `event` distinguishes an Enter-retry, the final give-up
  *  (cause 1 proof: non-empty draft still on screen), and a later successful
  *  completion (`recovered` — cause 2 proof: the Enter was not actually
- *  swallowed). */
+ *  swallowed). `likelyCause` is a reading aid derived from the raw fields; those
+ *  fields remain the source of truth. */
 export function buildSubmitDiag(i: SubmitDiagInputs): Record<string, unknown> {
   return {
     event: i.event,
+    likelyCause: classifyLikelyCause(i.draft.length, i.recordsDelta),
     enterRetries: i.enterRetries,
     sawBusy: i.sawBusy,
     sawBusyMarker: i.sawBusyMarker,
