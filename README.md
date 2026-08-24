@@ -80,41 +80,30 @@ EOF
 
 All variables are optional. Full list: [`.env.example`](.env.example)
 
-**3. Create a config file**
-
-```bash
-mkdir -p ~/.claude-gateway
-cat > ~/.claude-gateway/config.json << 'EOF'
-{
-  "gateway": {
-    "logDir": "~/.claude-gateway/logs",
-    "timezone": "UTC",
-    "api": {
-      "keys": [
-        { "key": "REPLACE_WITH_A_RANDOM_SECRET", "description": "Admin", "agents": "*", "admin": true }
-      ]
-    }
-  },
-  "agents": []
-}
-EOF
-```
-
-`"agents": []` is fine — the first agent is added in the next step. Replace the placeholder key with a real random secret; see [`config.template.json`](config.template.json) for the full format (models list, more options).
-
-**4. Start**
+**3. Start**
 
 ```bash
 claude-gateway
 ```
 
-**5. Create an agent**
+No config file needed — on first run, if `~/.claude-gateway/config.json` doesn't exist yet, the gateway creates it automatically with `"agents": []` and a fresh random admin API key, and prints that key once:
+
+```
+[gateway] No config found — created one at ~/.claude-gateway/config.json
+[gateway] Admin API key (save this now — it will not be shown again):
+[gateway]   <random-hex-key>
+[gateway] The CLI (claude-gateway agents create, etc.) picks this up automatically from ~/.claude-gateway/config.json.
+```
+
+Save that key somewhere safe — it isn't shown again (though you can always read it back from `config.json` on disk). See [`config.template.json`](config.template.json) for the full config format (models list, more options) if you want to customize it by hand later.
+
+**4. Create an agent**
 
 ```bash
 claude-gateway agents create
 ```
 
-Interactive wizard — describe the agent, Claude generates the workspace files, review and accept them, then optionally connect a Telegram or Discord bot. Hot-reloads immediately, no restart needed. (You can also add an agent entry to `config.json` by hand instead — same template link as above.)
+Interactive wizard — describe the agent, Claude generates the workspace files, review and accept them, then optionally connect a Telegram or Discord bot. Hot-reloads immediately, no restart needed. The CLI picks up the admin key from `config.json` automatically — no need to pass `--key`. (You can also add an agent entry to `config.json` by hand instead — same template link as above.)
 
 **Run as a service with PM2 (optional)**
 
@@ -154,7 +143,7 @@ npm run build
 npm start
 ```
 
-Config is auto-loaded from `~/.claude-gateway/config.json` (see the config-file step in the npm-install path above — `"agents": []` is fine to start with). Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
+Config is auto-loaded from `~/.claude-gateway/config.json` — if it doesn't exist yet, `npm start` creates it automatically with `"agents": []` and a fresh admin key (see the Start step in the npm-install path above). Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
 
 ### Create an agent
 

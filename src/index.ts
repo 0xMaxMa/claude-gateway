@@ -24,6 +24,7 @@ import * as os from 'os';
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
+import { ensureConfigExists } from './config/bootstrap';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
@@ -587,8 +588,17 @@ async function main(): Promise<void> {
   const gatewayAgentsDir = path.join(path.dirname(CONFIG_PATH), 'agents');
   loadAgentEnvFiles(gatewayAgentsDir);
 
-  // ── Auto-migrate config (add missing fields from template) ────────────────
+  // ── First run: create config.json with a fresh admin key if none exists ───
   const templatePath = path.join(__dirname, '..', 'config.template.json');
+  const bootstrap = ensureConfigExists(CONFIG_PATH, templatePath);
+  if (bootstrap.created) {
+    console.log(`[gateway] No config found — created one at ${CONFIG_PATH}`);
+    console.log(`[gateway] Admin API key (save this now — it will not be shown again):`);
+    console.log(`[gateway]   ${bootstrap.adminKey}`);
+    console.log(`[gateway] The CLI (claude-gateway agents create, etc.) picks this up automatically from ${CONFIG_PATH}.`);
+  }
+
+  // ── Auto-migrate config (add missing fields from template) ────────────────
   const templateJson = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
   const templateVersion: string = templateJson.configVersion ?? '0.0.0';
   try {
