@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { migrateAccess, defaultAccess } from './pure';
 import { chunkText, htmlToPlain } from './typing';
+import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
 import type {
   ChannelModule,
   ChannelCapabilities,
@@ -20,7 +21,6 @@ import type {
 } from '../../types';
 
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
 const MAX_CHUNK_LIMIT = 4096;
 
 export class TelegramModule implements ChannelModule {

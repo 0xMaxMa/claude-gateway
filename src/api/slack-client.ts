@@ -8,6 +8,8 @@
  * needed here — this is a plain fetch wrapper around the handful of Web API
  * methods the channel actually uses.
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import { createLogger } from '../logger';
 
 const SLACK_API_BASE = 'https://slack.com/api';
@@ -19,7 +21,7 @@ export interface SlackClientOptions {
   apiBase?: string;
 }
 
-interface SlackApiResponse {
+export interface SlackApiResponse {
   ok: boolean;
   error?: string;
   [key: string]: unknown;
@@ -88,6 +90,81 @@ export class SlackClient {
       unfurl_media: false,
       ...(threadTs ? { thread_ts: threadTs } : {}),
     });
+  }
+
+  /**
+   * Send one or more local files to a conversation.
+   *
+   * Slack's old one-shot `files.upload` is deprecated (retired for new apps), so
+   * this uses the documented 3-step external-upload flow:
+   *
+   *   1. `files.getUploadURLExternal` (per file) → a one-shot `upload_url` + `file_id`
+   *   2. POST the raw bytes to that URL as multipart/form-data, field name `file`
+   *      (Slack documents it as `curl -F file=@image.jpg <upload_url>`) — this step
+   *      does NOT go through `call()`: different content-type, different host.
+   *   3. ONE `files.completeUploadExternal` for the whole batch, which is what
+   *      actually shares them into the channel.
+   *
+   * Step 3 must be JSON, not form-urlencoded (unlike every other method here —
+   * see `call()`'s doc comment): `files` is a nested array, which
+   * form-encoding cannot express.
+   *
+   * `initialComment` rides along on step 3, so text + images arrive as ONE Slack
+   * message rather than a separate `chat.postMessage` plus a bare file drop.
+   */
+  async uploadFiles(
+    channel: string,
+    filePaths: string[],
+    opts?: { threadTs?: string; initialComment?: string },
+  ): Promise<SlackApiResponse> {
+    if (filePaths.length === 0) return { ok: false, error: 'no_files' };
+
+    const uploaded: Array<{ id: string; title: string }> = [];
+    for (const filePath of filePaths) {
+      const filename = path.basename(filePath);
+      const length = fs.statSync(filePath).size;
+
+      // Step 1 — reserve an upload slot. `call()` already logs on !ok.
+      const reserved = await this.call('files.getUploadURLExternal', { filename, length });
+      if (!reserved.ok) return reserved;
+      const uploadUrl = typeof reserved.upload_url === 'string' ? reserved.upload_url : '';
+      const fileId = typeof reserved.file_id === 'string' ? reserved.file_id : '';
+      if (!uploadUrl || !fileId) {
+        this.logger.warn('Slack files.getUploadURLExternal returned no upload_url/file_id', { filename });
+        return { ok: false, error: 'upload_url_missing' };
+      }
+
+      // Step 2 — the bytes themselves.
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(fs.readFileSync(filePath))]), filename);
+      const put = await fetch(uploadUrl, { method: 'POST', body: form });
+      if (!put.ok) {
+        this.logger.warn('Slack file byte upload failed', { filename, status: put.status });
+        return { ok: false, error: `upload_failed_${put.status}` };
+      }
+
+      uploaded.push({ id: fileId, title: filename });
+    }
+
+    // Step 3 — share the batch into the conversation.
+    const res = await fetch(`${this.apiBase}/files.completeUploadExternal`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.botToken}`,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({
+        files: uploaded,
+        channel_id: channel,
+        ...(opts?.threadTs ? { thread_ts: opts.threadTs } : {}),
+        ...(opts?.initialComment ? { initial_comment: opts.initialComment } : {}),
+      }),
+    });
+    const json = (await res.json()) as SlackApiResponse;
+    if (!json.ok) {
+      this.logger.warn('Slack API files.completeUploadExternal failed', { error: json.error });
+    }
+    return json;
   }
 
   /**

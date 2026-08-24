@@ -39,6 +39,7 @@ import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
 import { initDedupDir, isDuplicate as _isDuplicate, pruneDedup as _pruneDedup } from './dedup'
 import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat, migrateAccess, telegramDisplayName } from './pure'
+import { MAX_ATTACHMENT_BYTES } from '../shared/limits'
 
 // Standalone fallback: default state dir to ~/.claude/channels/telegram
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -336,7 +337,6 @@ function defaultAccess(): Access {
 }
 
 const MAX_CHUNK_LIMIT = 4096
-const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 // reply's files param takes any path. Claude can already Read+paste file
 // contents, so this isn't a new exfil channel for arbitrary paths — but the

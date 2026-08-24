@@ -30,10 +30,15 @@ import {
   generatePairingCode,
 } from './pending-senders';
 import { wasBotMentioned, type LineMessageLike } from './line-mention';
+import { MediaStore } from '../history/media-store';
+import { sniffImageExt } from '../shared/image-sniff';
 import type { WebhookAppHandler } from './webhooks-router';
 
 const LOADING_SECONDS = 20; // 5..60, multiple of 5; 1:1 chats only
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // matches MediaStore.maxUploadBytes
+// Inbound image cap. Sourced from MediaStore, which is where the downloaded
+// bytes end up — a router-local literal could drift into accepting an image the
+// store then rejects.
+const MAX_IMAGE_BYTES = MediaStore.maxUploadBytes;
 
 /** A sane public hostname: letters, digits, dot, hyphen, optional :port. */
 const HOST_RE = /^[A-Za-z0-9.\-:]+$/;
@@ -91,18 +96,6 @@ function persistPublicBase(
   } catch (err) {
     logger.debug('LINE webhook: .public-base write failed', { error: (err as Error).message });
   }
-}
-
-/** Pick a file extension from an image's magic bytes; default jpg (LINE photos). */
-function sniffImageExt(buf: Buffer): string {
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
-  if (buf.length >= 3 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
-  if (
-    buf.length >= 12 &&
-    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) return 'webp';
-  return 'jpg';
 }
 
 /**
