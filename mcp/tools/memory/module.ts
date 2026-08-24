@@ -11,6 +11,7 @@
 
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
 import { searchArchive, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
+import { sharedNoteName, writeSharedNoteAtomic, triggerSharedReindex } from './archive-writer';
 
 /** Corpora the tool can serve. */
 const SUPPORTED_CORPORA = new Set(['memory', 'shared', 'all']);
@@ -61,6 +62,20 @@ export class MemoryModule implements ToolModule {
             lines: { type: 'number', description: 'Number of lines to return (default 200).' },
           },
           required: ['path'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'memory_promote',
+        description:
+          'Push one note into the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected. The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns. Writing the exact same content again is a no-op (idempotent, content-hashed).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string', description: 'Full note body to write into the shared KB.' },
+            reason: { type: 'string', description: 'Short slug describing why (used in the note filename), e.g. "deploy-runbook".' },
+          },
+          required: ['content', 'reason'],
           additionalProperties: false,
         },
       },
@@ -132,6 +147,25 @@ export class MemoryModule implements ToolModule {
             return this.err(`memory_get: "${p}" is not a readable memory-scoped file (memory/*.md, MEMORY.md, USER.md).`);
           }
           return this.json(excerpt);
+        }
+
+        case 'memory_promote': {
+          // Same gate memory_search uses for corpus:"shared" — fail closed with a
+          // clear error rather than silently falling back to some default vault.
+          const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
+          if (!vaultDir || !vaultDir.trim()) {
+            return this.err('memory_promote unavailable: shared KB is not enabled.');
+          }
+          const content = typeof args.content === 'string' ? args.content : '';
+          if (!content.trim()) return this.err('memory_promote requires non-empty "content".');
+          const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+          if (!reason) return this.err('memory_promote requires non-empty "reason".');
+
+          const agentId = process.env.GATEWAY_AGENT_ID || 'agent';
+          const noteName = sharedNoteName(agentId, reason, content);
+          const notePath = writeSharedNoteAtomic(vaultDir, noteName, content);
+          triggerSharedReindex(vaultDir);
+          return this.json({ promoted: true, path: notePath });
         }
 
         default:

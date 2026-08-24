@@ -458,6 +458,13 @@ export class SessionProcess extends EventEmitter {
             // Shared KB vault dir (planning-64 K3), so memory_search corpus:"shared"
             // can reach the cross-agent vault. Empty when shared KB is disabled.
             GATEWAY_SHARED_KB_DIR: this.resolveSharedKbDir(),
+            // The Bun MCP subprocess's own `process.execPath` is the `bun` binary, not
+            // `node` — spawning the compiled reindex-cli.js (needs `node:sqlite`) with
+            // that would fail (`No such built-in module: node:sqlite`), silently, since
+            // memory_promote's reindex trigger runs detached/stdio:'ignore'. Forward the
+            // GATEWAY PROCESS's own execPath (real Node, guaranteed >=22 by `engines`) so
+            // the mcp side can spawn the CLI with the right runtime.
+            GATEWAY_NODE_EXEC_PATH: process.execPath,
             // planning-66: gate the read-path retrieval recorder (memory_search →
             // kb_retrieval_log) so the staleness GC's LRU/feedback signal is only
             // collected when the agent actually runs the GC.
