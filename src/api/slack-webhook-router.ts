@@ -15,6 +15,9 @@
  */
 import { type Request, type Response } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { AgentRunner } from '../agent/runner';
 import { createLogger } from '../logger';
 import {
@@ -35,6 +38,69 @@ import type { WebhookAppHandler } from './webhooks-router';
 // Requests older than this are rejected outright (Slack's own replay-protection
 // guidance: reject if the timestamp is more than 5 minutes from "now").
 const MAX_REQUEST_AGE_SECONDS = 60 * 5;
+
+// Inbound image cap — same value LINE uses (matches MediaStore.maxUploadBytes).
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Pick a file extension from an image's magic bytes; default jpg. Same sniffer
+ * LINE's inbound path uses (line-webhook-router.ts) — deliberately duplicated
+ * rather than shared: each channel router keeps its own media helpers local,
+ * and Slack's `mimetype` field is untrusted enough that we sniff anyway.
+ */
+function sniffImageExt(buf: Buffer): string {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf.length >= 3 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'gif';
+  if (
+    buf.length >= 12 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return 'webp';
+  return 'jpg';
+}
+
+/**
+ * Fetch an inbound Slack image's bytes and write them to a temp file, returning
+ * its absolute path. `url_private` is NOT public — it requires the bot token as
+ * a bearer, the same auth requirement LINE's blob API has.
+ *
+ * The runner copies the returned path into the agent's permanent MediaStore and
+ * tells the agent to Read it (meta.image_path), exactly as for LINE/Telegram.
+ * Returns null on an empty body; throws on HTTP failure or over-cap size — the
+ * caller logs and forwards the turn regardless.
+ */
+async function downloadSlackImage(botToken: string, fileUrl: string): Promise<string | null> {
+  const res = await fetch(fileUrl, { headers: { Authorization: `Bearer ${botToken}` } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  // Cheap early reject on the declared length, then enforce the cap again while
+  // reading — a response that omits or lies about content-length must not be
+  // able to blow past it.
+  const declared = Number(res.headers.get('content-length') ?? '');
+  if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
+    throw new Error(`image exceeds ${MAX_IMAGE_BYTES} byte cap`);
+  }
+
+  let buf: Buffer;
+  if (res.body) {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      total += chunk.byteLength;
+      if (total > MAX_IMAGE_BYTES) throw new Error(`image exceeds ${MAX_IMAGE_BYTES} byte cap`);
+      chunks.push(Buffer.from(chunk));
+    }
+    buf = Buffer.concat(chunks);
+  } else {
+    buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_IMAGE_BYTES) throw new Error(`image exceeds ${MAX_IMAGE_BYTES} byte cap`);
+  }
+
+  if (buf.length === 0) return null;
+  const dest = path.join(os.tmpdir(), `slack-img-${Date.now()}.${sniffImageExt(buf)}`);
+  fs.writeFileSync(dest, buf);
+  return dest;
+}
 
 /**
  * One-time pairing-code message — same visual-match-code contract as LINE's
@@ -59,8 +125,18 @@ export type NormalizedSlackMessage = {
   meta: Record<string, string>;
 };
 
+/** A file attached to an inbound event (message with subtype `file_share`, or an app_mention). */
+interface SlackEventFile {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  /** Private download URL — needs the bot token as a bearer, not publicly fetchable. */
+  url_private?: string;
+}
+
 interface SlackEvent {
   type: string;
+  subtype?: string;
   channel?: string;
   channel_type?: string;
   user?: string;
@@ -69,6 +145,7 @@ interface SlackEvent {
   ts?: string;
   thread_ts?: string;
   event_ts?: string;
+  files?: SlackEventFile[];
 }
 
 /**
@@ -89,7 +166,11 @@ function stripBotMention(text: string, botUserId: string | undefined): string {
  * Normalize a Slack Events API `event` into the gateway's {content, meta}
  * intake shape. Returns null for anything not handled in v1 (bot-authored
  * events, missing channel/user, non message/app_mention types — see 2c for
- * what's deliberately deferred: files, edits, reactions, etc.).
+ * what's deliberately deferred: edits, reactions, etc.).
+ *
+ * Stays synchronous and pure: an attached image's bytes are fetched by the
+ * async handler AFTER this returns (see downloadSlackImage's call site), which
+ * sets `meta.image_path` on the object built here.
  */
 export function normalizeSlackEvent(
   event: SlackEvent,
@@ -339,6 +420,26 @@ export function createSlackWebhookHandler(
       const client = new SlackClient({ botToken: token, logDir, apiBase: opts.apiBase });
       if (event.ts) {
         void client.addReaction(resolved.conversationId, event.ts).catch(() => {});
+      }
+    }
+
+    // Inbound image: fetch the first image attachment's bytes with the bot token
+    // and hand the agent an absolute path (meta.image_path) — the same contract
+    // LINE uses, so the runner persists it to MediaStore and tells the agent to
+    // Read it. Best-effort: a failure only logs, the text turn still forwards.
+    // Scope is images only; other file types are left alone for now.
+    const imageFile = event.files?.find(
+      (f) => typeof f.mimetype === 'string' && f.mimetype.startsWith('image/') && f.url_private,
+    );
+    if (token && imageFile?.url_private) {
+      try {
+        const imgPath = await downloadSlackImage(token, imageFile.url_private);
+        if (imgPath) norm.meta.image_path = imgPath;
+      } catch (err) {
+        logger.warn('Slack webhook: image download failed', {
+          fileId: imageFile.id,
+          error: (err as Error).message,
+        });
       }
     }
 
