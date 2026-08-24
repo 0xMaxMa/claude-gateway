@@ -53,4 +53,17 @@ describe('cli debug-bundle selectDiagnosticLines', () => {
     expect(lines).toHaveLength(10);
     expect(lines[lines.length - 1]).toBe('WARN line 99');
   });
+
+  it('caps an individual line length, marking how much was truncated', () => {
+    const huge = `WARN ${'lorem ipsum dolor sit amet '.repeat(200)}`; // spaced words, nothing token-like to redact
+    const lines = selectDiagnosticLines(huge, 4000, 200);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].length).toBeLessThan(300);
+    expect(lines[0]).toMatch(/…\[truncated, \d+ more chars\]$/);
+  });
+
+  it('leaves lines under the length cap untouched', () => {
+    const lines = selectDiagnosticLines('WARN short line', 4000, 200);
+    expect(lines).toEqual(['WARN short line']);
+  });
 });

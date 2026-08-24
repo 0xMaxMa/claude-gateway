@@ -20,6 +20,21 @@ describe('cli args parseCliArgs', () => {
   it('treats a flag followed by another flag as boolean', () => {
     expect(parseCliArgs(['--force', '--json'])).toEqual({ positionals: [], flags: { force: true, json: true } });
   });
+
+  it('without a declared boolean set, a flag before a positional swallows it as its value (documents the trap)', () => {
+    expect(parseCliArgs(['--force', 'sid-9'])).toEqual({ positionals: [], flags: { force: 'sid-9' } });
+  });
+
+  it('a declared boolean flag never consumes the next token, even when it looks like a positional', () => {
+    expect(parseCliArgs(['--force', 'sid-9', 'extra'], new Set(['force']))).toEqual({
+      positionals: ['sid-9', 'extra'],
+      flags: { force: true },
+    });
+  });
+
+  it('--flag=value form still wins over a declared boolean set', () => {
+    expect(parseCliArgs(['--force=true'], new Set(['force']))).toEqual({ positionals: [], flags: { force: 'true' } });
+  });
 });
 
 describe('cli command-names isCliCommand', () => {

@@ -16,14 +16,25 @@ import { redactLine } from '../redact';
  */
 
 const MAX_DIAG_LINES = 4000;
+/** Cap on a single kept line's length. Guards against one giant serialized
+ *  object/stack trace blowing past the "small bundle" goal, and limits how much
+ *  of any one line's content (which redaction cannot fully guarantee is clean —
+ *  see the banner below) ends up in the file. */
+const MAX_LINE_LENGTH = 2000;
+
+function truncateLine(line: string, maxLength: number): string {
+  if (line.length <= maxLength) return line;
+  return `${line.slice(0, maxLength)} …[truncated, ${line.length - maxLength} more chars]`;
+}
 
 /** Pure: pick the diagnostic lines (warn/error/submit-diag) from a log's text,
- *  redact them, and keep at most `maxLines` (from the tail — most recent). */
-export function selectDiagnosticLines(content: string, maxLines = MAX_DIAG_LINES): string[] {
+ *  redact them, cap each line's length, and keep at most `maxLines` (from the
+ *  tail — most recent). */
+export function selectDiagnosticLines(content: string, maxLines = MAX_DIAG_LINES, maxLineLength = MAX_LINE_LENGTH): string[] {
   const picked: string[] = [];
   for (const line of content.split('\n')) {
     if (/\bWARN\b|\bERROR\b|submit-diag/i.test(line)) {
-      picked.push(redactLine(line));
+      picked.push(truncateLine(redactLine(line), maxLineLength));
     }
   }
   return picked.length > maxLines ? picked.slice(picked.length - maxLines) : picked;
@@ -97,6 +108,12 @@ export async function runDebugBundle(flags: Record<string, string | boolean>): P
 
   const sections: string[] = [];
   sections.push('=== claude-gateway debug bundle ===');
+  sections.push(
+    '⚠ Please skim this file before sharing it. Redaction masks common secret ' +
+      'patterns (bearer tokens, api-key/secret/password assignments, provider-style ' +
+      'keys, long opaque tokens) but cannot guarantee removal of arbitrary free-form ' +
+      'text that happened to land in a WARN/ERROR log line.',
+  );
   sections.push(`generatedAt: ${new Date().toISOString()}`);
   sections.push(`gatewayVersion: ${gatewayVersion()}`);
   sections.push(`claudeCodeVersion: ${claudeCodeVersion()}`);
@@ -123,6 +140,9 @@ export async function runDebugBundle(flags: Record<string, string | boolean>): P
   const outFile = path.join(process.cwd(), `debug-bundle-${stamp}.txt`);
   fs.writeFileSync(outFile, sections.join('\n'));
   process.stdout.write(`${outFile}\n`);
-  process.stderr.write(`Wrote debug bundle: ${outFile}\nAttach this single file to a GitHub issue or send it to the team.\n`);
+  process.stderr.write(
+    `Wrote debug bundle: ${outFile}\n` +
+      'Redaction covers common secret patterns, not all free-form text — please skim it before attaching to a GitHub issue or sending it to the team.\n',
+  );
   return 0;
 }

@@ -99,6 +99,20 @@ describe('cli e2e — friendly resource commands', () => {
     const code = await runCli(['crons', 'frobnicate', ...base([])]);
     expect(code).toBe(1);
   });
+
+  it('`--json` prints compact (single-line) JSON instead of the pretty-printed default', async () => {
+    const prettyCode = await runCli(['crons', 'list', ...base([])]);
+    expect(prettyCode).toBe(0);
+    const pretty = stdout.join('');
+    expect(pretty.split('\n').length).toBeGreaterThan(2); // pretty-printed spans multiple lines
+
+    stdout = [];
+    const compactCode = await runCli(['crons', 'list', ...base(['--json'])]);
+    expect(compactCode).toBe(0);
+    const compact = stdout.join('');
+    expect(compact.trim().split('\n')).toHaveLength(1); // one line: the minified JSON
+    expect(JSON.parse(compact)).toEqual(JSON.parse(pretty)); // same data either way
+  });
 });
 
 describe('cli e2e — api passthrough & meta', () => {

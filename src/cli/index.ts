@@ -7,16 +7,21 @@ import { runGatewayLifecycle } from './commands/gateway';
 import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
 
+/** Flags that are always boolean regardless of command — never consume the next
+ *  token as a value (see parseCliArgs). */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json']);
+
 /**
  * CLI entry point. Returns a process exit code. Never boots the server — the
  * boot entry (src/index.ts) only calls this when argv[2] is a CLI command.
  *
- * Convention: stdout carries the command's result (JSON); human-facing help and
- * errors go to stderr, so `--json` output is never polluted.
+ * Convention: stdout carries the command's result (JSON, pretty by default or
+ * compact with `--json`); human-facing help and errors go to stderr, so result
+ * output is never polluted.
  */
 export async function runCli(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
-  const { positionals, flags } = parseCliArgs(rest);
+  const { positionals, flags } = parseCliArgs(rest, GLOBAL_BOOLEAN_FLAGS);
   const wantHelp = flags.help === true;
 
   if (!command || command === 'help') {
@@ -51,7 +56,7 @@ export async function runCli(argv: string[]): Promise<number> {
       printGeneralHelp();
       return 1;
     }
-    return await runResourceCommand(command, positionals, flags, wantHelp, config);
+    return await runResourceCommand(command, rest, wantHelp, config);
   } catch (err) {
     process.stderr.write(`Error: ${(err as Error).message}\n`);
     return 1;
@@ -60,12 +65,13 @@ export async function runCli(argv: string[]): Promise<number> {
 
 async function runResourceCommand(
   noun: string,
-  positionals: string[],
-  flags: Record<string, string | boolean>,
+  rest: string[],
   wantHelp: boolean,
   config: CliConfigView,
 ): Promise<number> {
-  const verb = positionals[0];
+  // First pass just to find the verb — a plain positional, so it parses the
+  // same regardless of which flags turn out to be boolean for this command.
+  const verb = parseCliArgs(rest, GLOBAL_BOOLEAN_FLAGS).positionals[0];
   if (!verb || (wantHelp && !verb)) {
     printNounHelp(noun);
     return verb ? 0 : 1;
@@ -81,6 +87,10 @@ async function runResourceCommand(
     return 0;
   }
 
+  // Re-parse now that the command's own boolean flags (e.g. `--force`) are
+  // known, so one placed right before a positional doesn't swallow it.
+  const booleanFlags = new Set([...GLOBAL_BOOLEAN_FLAGS, ...cmd.flags.filter((f) => f.boolean).map((f) => f.name)]);
+  const { positionals, flags } = parseCliArgs(rest, booleanFlags);
   const restPositionals = positionals.slice(1);
   // Positional path args
   if (restPositionals.length < cmd.args.length) {
@@ -135,7 +145,7 @@ async function runResourceCommand(
     query,
     body: cmd.method === 'GET' ? undefined : body,
   });
-  printResult(result.data);
+  printResult(result.data, flags.json === true);
   return 0;
 }
 
@@ -166,7 +176,7 @@ async function runApiPassthrough(
   const baseUrl = resolveUrl({ flagUrl: strFlag(flags.url), env: process.env, config });
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
   const result = await request({ method, path: apiPath, baseUrl, key, body });
-  printResult(result.data);
+  printResult(result.data, flags.json === true);
   return 0;
 }
 
@@ -176,8 +186,14 @@ function strFlag(v: string | boolean | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
-function printResult(data: unknown): void {
-  process.stdout.write((typeof data === 'string' ? data : JSON.stringify(data, null, 2)) + '\n');
+/** `compact` (`--json`) prints minified JSON for piping to `jq`/scripts;
+ *  otherwise output is pretty-printed for humans. Either way it's valid JSON. */
+function printResult(data: unknown, compact: boolean): void {
+  if (typeof data === 'string') {
+    process.stdout.write(data + '\n');
+    return;
+  }
+  process.stdout.write((compact ? JSON.stringify(data) : JSON.stringify(data, null, 2)) + '\n');
 }
 
 function readVersion(): string {
@@ -216,7 +232,7 @@ function printGeneralHelp(): void {
     `Resource commands: ${nouns.join(', ')}`,
     '  Run `claude-gateway <resource> --help` for its verbs.',
     '',
-    'Global flags: --url <url>  --key <key>  --json  --data <json>  --help',
+    'Global flags: --url <url>  --key <key>  --json (compact/minified output)  --data <json>  --help',
   ];
   process.stderr.write(lines.join('\n') + '\n');
 }

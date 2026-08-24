@@ -24,6 +24,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | `POST` | `/dashboard/login` | None (validates an admin key) | Exchange an **admin** API key for an `HttpOnly; SameSite=Lax` `dash_session` cookie (8h). Brute-force throttled per IP (`429` after 10 failed attempts / 5 min) |
 | `POST` | `/dashboard/logout` | Session cookie | Revoke the dashboard session and clear the cookie |
 | `GET` | `/api/v1/commands` | None | List slash commands available in the chat UI |
+| `GET` | `/api/v1/_meta/routes` | API key | Route manifest (every `defineRoute`-registered endpoint, incl. its CLI noun/verb mapping) — source for the `claude-gateway` CLI's codegen and `doctor` cross-check |
 
 ¹ **Auth applies when `gateway.api.keys` is configured, and requires an _admin_ key**
 (`admin: true`). The dashboard/monitoring surface grants cross-agent, host-wide power
@@ -394,6 +395,35 @@ curl http://localhost:10850/api/v1/commands | jq
     { "name": "/stop",     "description": "Interrupt the in-flight turn" },
     { "name": "/restart",  "description": "Graceful session restart" },
     { "name": "/model",    "description": "Show the current AI model" }
+  ]
+}
+```
+
+---
+
+### GET /api/v1/_meta/routes
+
+Returns the route manifest: every endpoint registered via `defineRoute` in the API
+routers, each with its method, path, auth level, and (where exposed) its CLI
+`noun`/`verb` mapping. `scripts/gen-cli.ts` reads this manifest offline to generate
+the CLI's command table (`src/cli/commands.generated.ts`) and `CLI.md`; the endpoint
+itself is for runtime verification (e.g. `claude-gateway doctor`), not for building
+commands at request time. Requires a valid API key.
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://localhost:10850/api/v1/_meta/routes | jq
+```
+
+```json
+{
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/crons",
+      "auth": "key",
+      "summary": "List cron jobs accessible by this key",
+      "cli": { "noun": "crons", "verb": "list", "args": [], "flags": [{ "name": "agent", "in": "query" }] }
+    }
   ]
 }
 ```

@@ -62,22 +62,24 @@ function gatewayAction(action: 'restart' | 'stop'): Promise<number> {
       case 'systemd':
         process.stderr.write(`Using systemd (may require sudo): systemctl ${action} claude-gateway\n`);
         run(`sudo systemctl ${action} claude-gateway`);
-        break;
+        return Promise.resolve(0);
       case 'pm2':
         run(`pm2 ${action} gateway`);
-        break;
+        return Promise.resolve(0);
       case 'foreground': {
         const pidfile = defaultPidfilePath();
         const pid = parseInt(fs.readFileSync(pidfile, 'utf8').trim(), 10);
         process.kill(pid, 'SIGTERM');
         if (action === 'restart') {
           process.stderr.write(
-            'Stopped the foreground gateway (SIGTERM). A bare foreground process has no supervisor to respawn it — start it again with `make start` / `npm start`.\n',
+            'Stopped the foreground gateway (SIGTERM) but a bare foreground process has no supervisor to respawn it — start it again with `make start` / `npm start`.\n',
           );
-        } else {
-          process.stderr.write(`Sent SIGTERM to gateway (pid ${pid}).\n`);
+          // Only the "stop" half of restart happened — a caller/script checking
+          // the exit code should see this as incomplete, not a successful restart.
+          return Promise.resolve(1);
         }
-        break;
+        process.stderr.write(`Sent SIGTERM to gateway (pid ${pid}).\n`);
+        return Promise.resolve(0);
       }
       default:
         process.stderr.write(
@@ -89,5 +91,4 @@ function gatewayAction(action: 'restart' | 'stop'): Promise<number> {
     process.stderr.write(`gateway ${action} failed: ${(err as Error).message}\n`);
     return Promise.resolve(1);
   }
-  return Promise.resolve(0);
 }
