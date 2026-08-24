@@ -12,10 +12,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-// ── Mock child_process (restartProcess on /clear spawns a child) ──────────────
+// ── Mock child_process (restartProcess on /clear spawns a child; SessionCompactor's
+//    async `claude --print` spawn (#376) also goes through this same `spawn` mock —
+//    distinguished by the `--print` flag, since compactor calls no longer use spawnSync) ──
 
 interface MockChildProcess extends EventEmitter {
-  stdin: { writable: boolean; write: jest.Mock } | null;
+  stdin: { writable: boolean; write: jest.Mock; end: jest.Mock; on: jest.Mock } | null;
   stdout: EventEmitter | null;
   stderr: EventEmitter | null;
   killed: boolean;
@@ -25,7 +27,7 @@ interface MockChildProcess extends EventEmitter {
 
 function makeMockProcess(): MockChildProcess {
   const proc = new EventEmitter() as MockChildProcess;
-  proc.stdin = { writable: true, write: jest.fn() };
+  proc.stdin = { writable: true, write: jest.fn(), end: jest.fn(), on: jest.fn() };
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
   proc.killed = false;
@@ -38,11 +40,28 @@ function makeMockProcess(): MockChildProcess {
   return proc;
 }
 
-const mockSpawnSync = jest.fn();
+/** Queued result for the compactor's `claude --print` spawn — set via mockCompactorCli.mockReturnValueOnce(...). */
+const mockCompactorCli = jest.fn(() => ({ status: 0, stdout: '', stderr: '', error: undefined as Error | undefined }));
 
 jest.mock('child_process', () => ({
-  spawn: jest.fn(() => makeMockProcess()),
-  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
+  spawn: jest.fn((_bin: string, args: string[]) => {
+    const proc = makeMockProcess();
+    if (args.includes('--print')) {
+      // SessionCompactor's defaultSpawnClaude: resolve async (next tick, like a real
+      // child exiting) via the queued result instead of the old sync spawnSync return.
+      const r = mockCompactorCli();
+      process.nextTick(() => {
+        if (r.error) {
+          proc.emit('error', r.error);
+          return;
+        }
+        if (r.stdout) proc.stdout!.emit('data', r.stdout);
+        if (r.stderr) proc.stderr!.emit('data', r.stderr);
+        proc.emit('close', r.status);
+      });
+    }
+    return proc;
+  }),
 }));
 
 // ── Imports ───────────────────────────────────────────────────────────────────
@@ -94,7 +113,8 @@ describe('executeApiCommand session counting (#160)', () => {
       JSON.stringify({ agents: [{ id: 'alfred', claude: { model: 'claude-opus-4-6' } }] }, null, 2) + '\n',
     );
     runner = new AgentRunner(makeAgentConfig(workspaceDir), makeGatewayConfig());
-    mockSpawnSync.mockReset();
+    mockCompactorCli.mockReset();
+    mockCompactorCli.mockReturnValue({ status: 0, stdout: '', stderr: '', error: undefined });
   });
 
   afterEach(async () => {
@@ -158,7 +178,7 @@ describe('executeApiCommand session counting (#160)', () => {
 
   it('U-RUN-05: /compact end-to-end — compacts the flat store and returns keptMessages count', async () => {
     await seedFlatStore(sessionId, 6);
-    mockSpawnSync.mockReturnValueOnce({ status: 0, stdout: 'Compact summary.', stderr: '', error: undefined });
+    mockCompactorCli.mockReturnValueOnce({ status: 0, stdout: 'Compact summary.', stderr: '', error: undefined });
 
     const { result, responseText } = await runner.executeApiCommand(sessionId, chatId, '/compact', { skipPersist: true });
 

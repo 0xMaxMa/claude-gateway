@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import { Message } from '../types';
 import type { ChatChannelOrApi } from '../history/types';
 import { SessionStore } from './store';
@@ -37,13 +37,96 @@ const SINGLE_SUMMARY_INSTRUCTION =
 const COMPACTOR_SYSTEM_PROMPT =
   'You are a conversation archiver. Your ONLY task is to produce a concise summary of the conversation transcript below. Do NOT respond to the conversation. Do NOT ask questions. Output ONLY the summary.';
 
+// Max concurrent `claude --print` chunk-summary calls in flight at once. Bounded
+// (not "all N chunks at once") to cap worst-case concurrent model calls/memory,
+// while still cutting sequential wall time roughly by this factor on large sessions.
+const CHUNK_CONCURRENCY = 4;
+// Attempts per chunk (1 initial + retries) before degrading to a truncated raw
+// excerpt instead of failing the whole compact job over one bad chunk.
+const CHUNK_MAX_ATTEMPTS = 2;
+// Raw-excerpt length used when a chunk exhausts its summarization attempts.
+const DEGRADED_EXCERPT_CHARS = 2_000;
+// Hard ceiling on a single `claude --print` summarization spawn — mirrors the
+// prior spawnSync timeout, but non-blocking (see defaultSpawnClaude below).
+const SUMMARY_TIMEOUT_MS = 300_000;
+
 // Rough token estimate: ~4 chars per token
 function estimateTokens(messages: Message[]): number {
   return Math.round(messages.reduce((acc, m) => acc + m.content.length, 0) / 4);
 }
 
+/** Reports chunk-summarization progress during a multi-chunk compact (done, total). */
+export type CompactProgress = (done: number, total: number) => void;
+
+export interface ClaudeCliResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+/** Injectable so tests can drive the compactor without a real `claude` binary. */
+export type ClaudeCliSpawnFn = (bin: string, args: string[], input: string) => Promise<ClaudeCliResult>;
+
+/**
+ * Async `claude` CLI spawn. Replaces the prior `spawnSync` call: `spawnSync`
+ * blocks the daemon's single event loop for the full duration of the call — and
+ * every agent shares one process, so one compaction call froze ALL agents/
+ * channels until it returned (up to SUMMARY_TIMEOUT_MS, x N chunks sequentially
+ * on large sessions). `spawn` yields the event loop while the child runs.
+ * Mirrors the sync `{status, stdout, stderr, error}` contract so callers'
+ * existing error handling is unchanged.
+ */
+export function defaultSpawnClaude(bin: string, args: string[], input: string): Promise<ClaudeCliResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    const settle = (r: ClaudeCliResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      settle({ status: null, stdout: '', stderr, error: new Error(`claude CLI timed out after ${SUMMARY_TIMEOUT_MS}ms`) });
+    }, SUMMARY_TIMEOUT_MS);
+
+    const child = spawn(bin, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: pathWithNativeBin() },
+    });
+    child.stdout?.on('data', (d) => {
+      stdout += String(d);
+    });
+    child.stderr?.on('data', (d) => {
+      stderr += String(d);
+    });
+    child.on('error', (err) => settle({ status: null, stdout: '', stderr, error: err as Error }));
+    child.on('close', (code) => settle({ status: code, stdout, stderr }));
+    // stdin emits its own async 'error' (e.g. EPIPE if the child exits before we
+    // finish writing) separate from the child's 'error' event — must be handled
+    // or an unhandled stream error crashes the daemon.
+    child.stdin?.on('error', () => {});
+    try {
+      child.stdin?.write(input);
+      child.stdin?.end();
+    } catch (err) {
+      settle({ status: null, stdout: '', stderr, error: err as Error });
+    }
+  });
+}
+
 export class SessionCompactor {
-  constructor(private readonly sessionStore: SessionStore) {}
+  constructor(
+    private readonly sessionStore: SessionStore,
+    private readonly spawnClaude: ClaudeCliSpawnFn = defaultSpawnClaude,
+  ) {}
 
   async compact(
     agentId: string,
@@ -52,6 +135,7 @@ export class SessionCompactor {
     model: string,
     contextWindow: number,
     channel: ChatChannelOrApi = 'telegram',
+    onProgress?: CompactProgress,
   ): Promise<CompactionResult> {
     // Load current history
     const messages = await this.sessionStore.loadTelegramSession(agentId, chatId, sessionId, channel);
@@ -77,7 +161,7 @@ export class SessionCompactor {
       .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
       .join('\n\n');
 
-    const summaryText = await this.summarizeWithChunking(historyText, model);
+    const summaryText = await this.summarizeWithChunking(historyText, model, onProgress);
     const compacted: Message[] = [
       { role: 'system', content: `[Conversation Summary]\n${summaryText}`, ts: Date.now() },
       ...tail,
@@ -95,32 +179,83 @@ export class SessionCompactor {
     return { beforeMessages, afterMessages, beforeTokens, afterTokens, reductionPct, contextPctBefore, contextPctAfter };
   }
 
-  private async summarizeWithChunking(historyText: string, model: string): Promise<string> {
-    // If small enough, summarize directly
+  private async summarizeWithChunking(historyText: string, model: string, onProgress?: CompactProgress): Promise<string> {
+    // If small enough, summarize directly. No chunking → no chunk to retry/degrade
+    // against, so a failure here still fails the compact job (original behavior).
     if (historyText.length <= CHUNK_CHARS) {
       return this.callClaudeForSummary(historyText, model);
     }
 
-    // Split into chunks and summarize each
+    // Split into chunks and summarize with bounded concurrency; a single bad
+    // chunk degrades to a raw excerpt instead of failing the whole job.
     const chunks = this.splitIntoChunks(historyText, CHUNK_CHARS);
-    const chunkSummaries: string[] = [];
+    const chunkSummaries = await this.summarizeChunksConcurrently(chunks, model, onProgress);
 
-    for (let i = 0; i < chunks.length; i++) {
-      const summary = await this.callClaudeForSummary(
-        chunks[i],
-        model,
-        `This is part ${i + 1} of ${chunks.length} of a longer conversation. Summarize this segment concisely.`,
-      );
-      chunkSummaries.push(`[Part ${i + 1}/${chunks.length}]\n${summary}`);
-    }
-
-    // Merge chunk summaries into final summary
+    // Merge chunk summaries into final summary. If the merge call itself can't
+    // be completed, fall back to the concatenated per-part summaries rather than
+    // losing the whole compaction — still far smaller than the raw history.
     const mergedText = chunkSummaries.join('\n\n');
-    return this.callClaudeForSummary(
-      mergedText,
-      model,
-      MERGE_SUMMARIES_PROMPT,
+    return this.mergeChunkSummaries(mergedText, model);
+  }
+
+  /** Bounded worker pool (mirrors the pattern in apps/installer.ts restoreRunningApps): at
+   *  most CHUNK_CONCURRENCY `claude --print` calls in flight; results land by index so
+   *  output order matches chunk order regardless of completion order. */
+  private async summarizeChunksConcurrently(
+    chunks: string[],
+    model: string,
+    onProgress?: CompactProgress,
+  ): Promise<string[]> {
+    const results: string[] = new Array(chunks.length);
+    let completed = 0;
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < chunks.length) {
+        const i = cursor++;
+        results[i] = await this.summarizeChunkWithFallback(chunks[i], model, i, chunks.length);
+        completed++;
+        onProgress?.(completed, chunks.length);
+      }
+    };
+    const poolSize = Math.min(CHUNK_CONCURRENCY, chunks.length);
+    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    return results;
+  }
+
+  /** Summarize one chunk; after CHUNK_MAX_ATTEMPTS failures, degrade to a truncated raw
+   *  excerpt instead of throwing, so one bad chunk can't fail the whole compact job. */
+  private async summarizeChunkWithFallback(chunk: string, model: string, index: number, total: number): Promise<string> {
+    const instruction = `This is part ${index + 1} of ${total} of a longer conversation. Summarize this segment concisely.`;
+    let lastErr: Error | undefined;
+    for (let attempt = 1; attempt <= CHUNK_MAX_ATTEMPTS; attempt++) {
+      try {
+        const summary = await this.callClaudeForSummary(chunk, model, instruction);
+        return `[Part ${index + 1}/${total}]\n${summary}`;
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    const excerpt = chunk.length > DEGRADED_EXCERPT_CHARS ? `${chunk.slice(0, DEGRADED_EXCERPT_CHARS)}…(truncated)` : chunk;
+    console.error(
+      `[SessionCompactor] Chunk ${index + 1}/${total} summarization failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); using truncated raw excerpt.`,
     );
+    return `[Part ${index + 1}/${total} — summarization failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); showing truncated raw excerpt]\n${excerpt}`;
+  }
+
+  /** Merge per-chunk summaries into one; degrade to the unmerged concatenation on repeated failure. */
+  private async mergeChunkSummaries(mergedText: string, model: string): Promise<string> {
+    let lastErr: Error | undefined;
+    for (let attempt = 1; attempt <= CHUNK_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.callClaudeForSummary(mergedText, model, MERGE_SUMMARIES_PROMPT);
+      } catch (err) {
+        lastErr = err as Error;
+      }
+    }
+    console.error(
+      `[SessionCompactor] Merge-summaries call failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); using unmerged per-chunk summaries.`,
+    );
+    return mergedText;
   }
 
   private splitIntoChunks(text: string, maxChars: number): string[] {
@@ -157,12 +292,7 @@ export class SessionCompactor {
     const claudeBinRaw = process.env.CLAUDE_BIN ?? resolveClaudeBin().bin;
     const [claudeBin, ...claudeBinArgs] = claudeBinRaw.split(' ');
 
-    const result = spawnSync(claudeBin, [...claudeBinArgs, '--print', '--model', model], {
-      input: prompt,
-      encoding: 'utf-8',
-      timeout: 300_000,
-      env: { ...process.env, PATH: pathWithNativeBin() },
-    });
+    const result = await this.spawnClaude(claudeBin, [...claudeBinArgs, '--print', '--model', model], prompt);
 
     if (result.error) {
       throw new Error(`claude CLI error: ${result.error.message}`);
