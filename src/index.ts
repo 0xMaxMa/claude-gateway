@@ -50,6 +50,8 @@ import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
+import { isCliCommand } from './cli/command-names';
+import { defaultPidfilePath } from './cli/manager';
 
 function expandTilde(p: string): string {
   if (p === '~' || p.startsWith('~/')) {
@@ -86,6 +88,9 @@ const CONFIG_PATH: string = expandTilde(
 );
 
 const PORT = parseInt((process.env.PORT ?? '10850'), 10);
+
+// Pidfile lets the CLI detect a foreground gateway (see src/cli/manager.ts).
+const PIDFILE_PATH = defaultPidfilePath();
 
 // ─── Startup summary table ────────────────────────────────────────────────────
 interface StartupResult {
@@ -821,6 +826,15 @@ async function main(): Promise<void> {
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
 
+  // Write the pidfile so the CLI can detect a foreground gateway (and SIGTERM it
+  // for `gateway stop/restart`). Best-effort — never fail boot over it.
+  try {
+    fs.mkdirSync(path.dirname(PIDFILE_PATH), { recursive: true });
+    fs.writeFileSync(PIDFILE_PATH, String(process.pid));
+  } catch (e) {
+    globalLogger.warn?.('Could not write pidfile', { path: PIDFILE_PATH, error: (e as Error).message });
+  }
+
   // Wire installer callbacks now that the router is available
   installerCallbacks.registerRoutes = (appName, ports) => {
     for (const port of ports) {
@@ -1021,6 +1035,13 @@ async function main(): Promise<void> {
       }
     }
 
+    // Remove the pidfile so the CLI does not treat a stale pid as a live gateway.
+    try {
+      fs.unlinkSync(PIDFILE_PATH);
+    } catch {
+      /* already gone — fine */
+    }
+
     console.log('[gateway] Shutdown complete.');
   };
 
@@ -1054,6 +1075,20 @@ process.on('uncaughtException', (err) => {
   emergencyShutdown('uncaughtException', err).finally(() => process.exit(1));
 });
 
-main().catch((err) => {
-  emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
-});
+// Dispatch a friendly CLI subcommand (claude-gateway <noun> <verb> ...) instead
+// of booting the server. A bare `claude-gateway` (or any flag-only invocation)
+// falls through to main() and boots as before — so systemd/pm2/npm start are
+// unaffected. The CLI runner is lazy-imported so it stays off the server path.
+if (isCliCommand(process.argv[2])) {
+  import('./cli')
+    .then(({ runCli }) => runCli(process.argv.slice(2)))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      process.stderr.write(`Error: ${err?.message ?? err}\n`);
+      process.exit(1);
+    });
+} else {
+  main().catch((err) => {
+    emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
+  });
+}
