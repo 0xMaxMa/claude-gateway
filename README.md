@@ -663,7 +663,28 @@ update at all, and the message is replaced only if it is deleted or becomes uned
 
 ---
 
+## Command Line (CLI)
+
+The `claude-gateway` binary doubles as a command-line client for a running gateway — a friendlier alternative to hand-built `curl` calls. It works the same whether the gateway was started with `make start`, pm2, or systemd (it resolves the target from your config), and running `claude-gateway` with **no subcommand still boots the server** (so nothing about your existing startup changes).
+
+```bash
+claude-gateway gateway status              # is it running? which manager owns it?
+claude-gateway doctor                      # check config / key / connectivity
+claude-gateway crons list                  # friendly <noun> <verb> commands
+claude-gateway crons run <jobId>
+claude-gateway debug-bundle                # small redacted bundle for a stuck session (works even if the server is down)
+claude-gateway api GET /v1/agents          # escape hatch: call any endpoint directly
+```
+
+Commands are **generated from the same route manifest the server mounts**, so every endpoint exposed as a friendly command stays in sync with the API automatically. Global flags: `--url`, `--key`, `--json`, `--data <json>`, `--help`.
+
+See **[CLI.md](./CLI.md)** for the full command reference.
+
+---
+
 ## HTTP API
+
+> For day-to-day operation, prefer the **[CLI](#command-line-cli)** above (`claude-gateway <noun> <verb>`) — it resolves the URL and key for you and is easier to read. This section is the **raw HTTP reference** for programmatic clients and integrations.
 
 When `gateway.api.keys` is configured, the gateway exposes a REST API for external clients.
 
