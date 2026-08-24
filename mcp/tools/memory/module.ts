@@ -16,6 +16,13 @@ import { sharedNoteName, writeSharedNoteAtomic, triggerSharedReindex } from './a
 /** Corpora the tool can serve. */
 const SUPPORTED_CORPORA = new Set(['memory', 'shared', 'all']);
 
+// Mirrors skill_create's MAX_SKILL_SIZE (mcp/tools/skills/handlers.ts) — the
+// direct structural precedent for a write-capable, scope-aware MCP tool. A
+// promoted note lives in a vault SHARED across every agent in the project, so
+// leaving it uncapped would let one agent (a runaway loop, or a prompt
+// injection) exhaust shared disk / bloat the shared FTS5 index for everyone.
+const MAX_PROMOTE_CONTENT_SIZE = 100 * 1024; // 100KB
+
 export class MemoryModule implements ToolModule {
   id = 'memory';
   toolVisibility: ToolVisibility = 'all-configured';
@@ -72,7 +79,7 @@ export class MemoryModule implements ToolModule {
         inputSchema: {
           type: 'object',
           properties: {
-            content: { type: 'string', description: 'Full note body to write into the shared KB.' },
+            content: { type: 'string', description: 'Full note body to write into the shared KB. Max 100KB.' },
             reason: { type: 'string', description: 'Short slug describing why (used in the note filename), e.g. "deploy-runbook".' },
           },
           required: ['content', 'reason'],
@@ -158,6 +165,9 @@ export class MemoryModule implements ToolModule {
           }
           const content = typeof args.content === 'string' ? args.content : '';
           if (!content.trim()) return this.err('memory_promote requires non-empty "content".');
+          if (content.length > MAX_PROMOTE_CONTENT_SIZE) {
+            return this.err(`memory_promote: content exceeds ${MAX_PROMOTE_CONTENT_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
+          }
           const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
           if (!reason) return this.err('memory_promote requires non-empty "reason".');
 

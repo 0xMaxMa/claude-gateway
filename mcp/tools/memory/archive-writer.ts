@@ -1,33 +1,42 @@
 /**
- * Write-side mirror for the shared KB (Bun/mcp side; planning-64 K3 follow-up).
+ * Write-side glue for the shared KB (Bun/mcp side; planning-64 K3 follow-up).
  *
- * `mcp/` must never import from `src/` (enforced by mcp-no-src-imports.test.ts —
- * src/ is not in the published package). The atomic-write half of the shared
- * vault lives Node-side at `src/agent/knowledge/shared-writer.ts` and is used
- * only by the nightly dreaming promoter. This file is a deliberate mirror of
- * that logic (same slugify rule, same temp+rename scheme) so an agent-initiated
- * `memory_promote` call — issued from the Bun MCP process — can write into the
- * exact same vault the nightly path writes to, without crossing the packaging
- * boundary. Keep the two writers in sync (mirrors the existing
- * archive-reader.ts / archive-db.ts read-side split).
+ * Unlike the read side (archive-reader.ts, which must reimplement its query
+ * path because `bun:sqlite`/`node:sqlite` are different bindings over the
+ * same file), the atomic-write logic itself (slugify + write-temp-then-rename)
+ * has NO `node:sqlite` dependency — it's plain `fs`/`path`. So this file does
+ * NOT duplicate it: it imports the real `writeSharedNote` / `sharedNoteFilename`
+ * straight from the compiled `dist/agent/knowledge/shared-writer.js`, the same
+ * pattern already used elsewhere in `mcp/` for logic it needs but cannot reach
+ * in `src/` directly (see `mcp/tools/slack/module.ts`'s `SlackClient` import,
+ * `mcp/tools/telegram/receiver-server.ts`'s `turn-trace`/`incident-store`
+ * imports). Verified against mcp-no-src-imports.test.ts.
  */
 
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
+import { writeSharedNote, sharedNoteFilename } from '../../../dist/agent/knowledge/shared-writer.js';
+import type { ResolvedKnowledgeSharedCfg } from '../../../dist/agent/knowledge/types.js';
 
-let tmpCounter = 0;
+export { sharedNoteFilename };
 
-/** Reduce an arbitrary name to one safe `*.md` path segment (no traversal). */
-export function sharedNoteFilename(name: string): string {
-  const base = name
-    .toLowerCase()
-    .replace(/\.md$/i, '')
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '')
-    .slice(0, 120);
-  return `${base || 'note'}.md`;
+/**
+ * Reconstruct the minimal resolved shared-KB config `writeSharedNote` needs
+ * (only `root`/`project` are actually read, via `sharedNotesDir`), by
+ * splitting `vaultDir` = `<root>/<project>` — the inverse of the Node-side
+ * `sharedVaultDir()`. `mode`/`graph`/`enabled` are dead weight for this call
+ * (writeSharedNote never reads them) but filled in for type shape.
+ */
+function cfgFromVaultDir(vaultDir: string): ResolvedKnowledgeSharedCfg {
+  return {
+    enabled: true,
+    root: path.dirname(vaultDir),
+    project: path.basename(vaultDir),
+    mode: 'auto',
+    graph: false,
+  };
 }
 
 /**
@@ -40,36 +49,18 @@ export function sharedNoteName(agentId: string, reason: string, content: string)
   return `${agentId}-${reason}-${hash}`;
 }
 
-/**
- * Write a note into `<vaultDir>/notes` atomically (write-temp + rename), same
- * as `writeSharedNote`. Returns the absolute path written.
- */
+/** Write a note into the shared vault atomically. Returns the absolute path written. */
 export function writeSharedNoteAtomic(vaultDir: string, name: string, content: string): string {
-  const dir = path.join(vaultDir, 'notes');
-  fs.mkdirSync(dir, { recursive: true });
-  const target = path.join(dir, sharedNoteFilename(name));
-  const tmp = path.join(dir, `.tmp-${process.pid}-${(tmpCounter += 1)}-${process.hrtime.bigint().toString(36)}.part`);
-  try {
-    fs.writeFileSync(tmp, content, 'utf8');
-    fs.renameSync(tmp, target); // atomic replace
-  } catch (err) {
-    try {
-      fs.rmSync(tmp, { force: true });
-    } catch {
-      /* best-effort cleanup */
-    }
-    throw err;
-  }
-  return target;
+  return writeSharedNote(cfgFromVaultDir(vaultDir), name, content);
 }
 
 /**
  * Fire-and-forget reindex trigger so a promoted note is searchable immediately,
  * instead of waiting for the next natural reindex (session spawn / nightly
  * dream). Spawns the SAME compiled CLI the Node-side `spawnArchiveReindex`
- * uses (`dist/agent/knowledge/reindex-cli.js`, shipped alongside `mcp/` per
- * package.json `files`) — never imported, only spawned as a subprocess, so this
- * does not trip the mcp-no-src-imports guard.
+ * uses (`dist/agent/knowledge/reindex-cli.js`) as a SUBPROCESS (never
+ * imported — reindex-cli.ts requires `node:sqlite`, which Bun does not have,
+ * so it can only be run, not loaded, from this process).
  *
  * This code runs under Bun, whose own `process.execPath` points at the `bun`
  * binary — spawning the CLI with that fails silently (`node:sqlite` is not a
@@ -78,19 +69,18 @@ export function writeSharedNoteAtomic(vaultDir: string, name: string, content: s
  * (see src/session/process.ts) specifically so this spawn uses the right
  * runtime; fall back to a bare `node` on PATH if that env is somehow unset.
  *
- * The CLI's shared-archive half only needs `{enabled, root, project}`; `root`
- * and `project` are recovered by splitting `vaultDir` (= `<root>/<project>`,
- * the inverse of the Node-side `sharedVaultDir()`). The personal-archive half
- * is explicitly disabled (`{enabled:false}`) since this trigger only concerns
- * the shared vault. Best-effort: swallows every failure so a promote call
- * never fails because reindexing couldn't be kicked off.
+ * The CLI's shared-archive half only needs `{enabled, root, project}` (see
+ * `cfgFromVaultDir`); the personal-archive half is explicitly disabled
+ * (`{enabled:false}`) since this trigger only concerns the shared vault.
+ * Best-effort: swallows every failure so a promote call never fails because
+ * reindexing couldn't be kicked off.
  */
 export function triggerSharedReindex(vaultDir: string): void {
   try {
     const cliPath = path.join(__dirname, '..', '..', '..', 'dist', 'agent', 'knowledge', 'reindex-cli.js');
     if (!fs.existsSync(cliPath)) return;
     const nodeBin = process.env.GATEWAY_NODE_EXEC_PATH || 'node';
-    const sharedCfg = { enabled: true, root: path.dirname(vaultDir), project: path.basename(vaultDir) };
+    const sharedCfg = cfgFromVaultDir(vaultDir);
     const child = spawn(
       nodeBin,
       [cliPath, vaultDir, JSON.stringify({ enabled: false }), JSON.stringify(sharedCfg)],
