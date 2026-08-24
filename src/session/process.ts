@@ -59,6 +59,14 @@ export function resolveMaxHistoryMessages(
 }
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
+// A respawned child that stays alive at least this long counts as a healthy run
+// rather than a member of a crash loop: on its eventual death the crash budget
+// (restartCount) is reset so sporadic crashes spread across a long-lived
+// session don't slowly accumulate toward a false permanent `failed`. Must be
+// comfortably longer than the crash-loop window (AUTO_RESTART_DELAY_MS *
+// MAX_RESTARTS = 15s) so a genuine tight crash loop never survives it and the
+// MAX_RESTARTS backstop still fires. See issue #371.
+const RESTART_COUNT_RESET_MS = 60_000;
 // Bound how many times a single session may auto-respawn to recover from a
 // corrupted thinking block, so a recovery that never helps can't loop forever.
 const MAX_THINKING_RECOVERIES = 2;
@@ -113,6 +121,18 @@ export class SessionProcess extends EventEmitter {
   private process: ChildProcess | null = null;
   private stopping = false;
   private restartCount = 0;
+  // Wall-clock time the current (or most recent) child was spawned. Used by the
+  // exit handler to measure how long that child survived, so a death after
+  // sustained healthy uptime resets the crash budget instead of counting toward
+  // MAX_RESTARTS. See RESTART_COUNT_RESET_MS.
+  private lastSpawnAt = 0;
+  // True while a crash-triggered respawn is in flight — from the moment
+  // scheduleRestart() arms the AUTO_RESTART_DELAY_MS timer until the replacement
+  // child has attached (emit 'restarted') or the respawn failed/was abandoned.
+  // The runner reads this via isRestartScheduled() to distinguish "a restart is
+  // coming, wait for it" from "dead with nothing coming, respawn fresh" — the
+  // latter would otherwise wedge on waitForSessionRestart's full timeout. #371.
+  private _restartScheduled = false;
   private restartRequested = false;
   private _processing = false;
   private _pendingRestart = false;
@@ -716,6 +736,7 @@ export class SessionProcess extends EventEmitter {
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
     // after an auto-restart), so isRunning()/interrupt() see it as live.
     this._exited = false;
+    this.lastSpawnAt = Date.now();
 
     // Send initial prompt only for Telegram/Discord sessions.
     // API sessions receive the first message directly via sendApiMessage(),
@@ -1004,6 +1025,16 @@ export class SessionProcess extends EventEmitter {
       // rmSync(force)), so emitting on every child exit — including auto-restart
       // — is safe.
       this.emit('exit', code, signal);
+      // A child that ran healthily for a sustained period before dying is not
+      // part of a crash loop — reset the crash budget so an occasional crash
+      // over a long-lived session doesn't slowly accumulate toward MAX_RESTARTS
+      // and trip a false permanent `failed` (which would tear down a healthy
+      // session and, for an API session, previously wedge it — see #371). A
+      // rapid crash loop never survives RESTART_COUNT_RESET_MS, so the
+      // MAX_RESTARTS backstop is preserved.
+      if (this.lastSpawnAt && Date.now() - this.lastSpawnAt >= RESTART_COUNT_RESET_MS) {
+        this.restartCount = 0;
+      }
       if (!this.stopping) this.scheduleRestart();
     });
 
@@ -1040,6 +1071,10 @@ export class SessionProcess extends EventEmitter {
       return;
     }
     this.restartCount++;
+    // A crash-triggered respawn is now committed (timer armed below). Mark it in
+    // flight so waitForSessionRestart knows to wait for the replacement child
+    // rather than fail fast. Cleared once the respawn settles (or is skipped).
+    this._restartScheduled = true;
     this.logger.warn(`Scheduling session restart in ${AUTO_RESTART_DELAY_MS}ms`, {
       attempt: this.restartCount,
     });
@@ -1051,11 +1086,24 @@ export class SessionProcess extends EventEmitter {
           // sendMessage() will no longer silently no-op. Emitted on every
           // successful crash-triggered respawn — cheap, and nothing currently
           // listens outside that one call site.
-          .then(() => this.emit('restarted'))
+          .then(() => {
+            this._restartScheduled = false;
+            this.emit('restarted');
+          })
           .catch(err => {
+            this._restartScheduled = false;
             this.logger.error('restart failed', { error: err.message });
             this.emit('restartFailed', err);
           });
+      } else {
+        // stop() won the race before the timer fired — no respawn will happen.
+        // Wake any waiter blocked on this restart (waitForSessionRestart) so it
+        // rejects immediately instead of hanging for the full timeout: the
+        // restarted/restartFailed/failed event it waits on would otherwise never
+        // fire. Clearing the flag first also lets a fresh getOrSpawnSession call
+        // take the respawn-fresh path. See #371.
+        this._restartScheduled = false;
+        this.emit('restartFailed', new Error('Session restart abandoned: session stopping'));
       }
     }, AUTO_RESTART_DELAY_MS);
   }
@@ -1265,6 +1313,20 @@ export class SessionProcess extends EventEmitter {
    */
   hasPendingRestart(): boolean {
     return this._pendingRestart;
+  }
+
+  /**
+   * True while a crash-triggered auto-restart is in flight — armed by
+   * scheduleRestart() on child death and cleared once the replacement child
+   * attaches ('restarted'), the respawn fails ('restartFailed'), or the restart
+   * is abandoned because stop() raced in. Distinct from hasPendingRestart(),
+   * which tracks a *deferred* (graceful, turn-boundary) restart. The runner
+   * reads this to tell "a restart is coming, wait for it" apart from "dead with
+   * nothing coming, respawn a fresh session" — the latter would otherwise block
+   * on waitForSessionRestart's full timeout and wedge the caller. See #371.
+   */
+  isRestartScheduled(): boolean {
+    return this._restartScheduled;
   }
 
   touch(): void {

@@ -2515,6 +2515,124 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   });
 });
 
+// ── crash-budget reset on healthy uptime (#371) ──────────────────────────────
+// restartCount only ever reset in start()/graceful-restart, never after a
+// crash-triggered respawn succeeded. A long-lived session that crashed a few
+// times over its whole life (each recovering fine) would slowly accumulate
+// toward MAX_RESTARTS and then permanently `failed` on the next crash — tearing
+// down a healthy session (and, for API, wedging it). The fix resets the budget
+// when a child dies after sustained healthy uptime, while a tight crash loop
+// (no uptime gap) still trips MAX_RESTARTS so the backstop is preserved.
+describe('SessionProcess — crash-budget reset on healthy uptime (#371)', () => {
+  let tmpDir: string;
+  let sessionStore: SessionStore;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-budget-'));
+    agentConfig = makeAgentConfig({ workspace: path.join(tmpDir, 'workspace') });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    sessionStore = new SessionStore(path.join(tmpDir, 'sessions'));
+    lastProcess = null;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.restoreAllMocks();
+  });
+
+  const getRestartCount = (sp: SessionProcess) =>
+    (sp as unknown as { restartCount: number }).restartCount;
+
+  it("resets the crash budget after sustained uptime — no false 'failed' over many lifetime crashes", async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 1_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('sess:budget-1', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start(); // lastSpawnAt = T0
+
+    const failedSpy = jest.fn();
+    sp.on('failed', failedSpy);
+
+    // Crash the child far more times than MAX_RESTARTS, but each death comes
+    // after a long healthy uptime gap (well past RESTART_COUNT_RESET_MS = 60s).
+    // No live respawn happens (the 5s timers never fire in the test), so
+    // lastSpawnAt stays at T0 and each advanced clock reads as a huge uptime →
+    // the budget resets every time and 'failed' is never emitted.
+    for (let i = 1; i <= 8; i++) {
+      nowSpy.mockReturnValue(T0 + i * 120_000); // +2min each crash
+      lastProcess!.emit('exit', 1, null);
+      await Promise.resolve();
+      // Budget resets to 0 then increments to 1 on each healthy-uptime crash.
+      expect(getRestartCount(sp)).toBeLessThanOrEqual(1);
+    }
+    expect(failedSpy).not.toHaveBeenCalled();
+
+    await sp.stop();
+  });
+
+  it("still trips 'failed' at MAX_RESTARTS for a tight crash loop (backstop preserved)", async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 2_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('sess:budget-2', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const failedSpy = jest.fn();
+    sp.on('failed', failedSpy);
+
+    // Rapid crashes with NO uptime gap (clock barely advances) → uptime stays
+    // under RESTART_COUNT_RESET_MS → budget never resets → after MAX_RESTARTS
+    // the next crash emits the permanent 'failed'.
+    for (let i = 1; i <= 5; i++) {
+      nowSpy.mockReturnValue(T0 + i * 100); // +100ms each — a tight loop
+      lastProcess!.emit('exit', 1, null);
+      await Promise.resolve();
+    }
+    expect(failedSpy).toHaveBeenCalled();
+
+    await sp.stop();
+  });
+
+  it("emits 'restartFailed' when stop() races the auto-restart window, so waiters don't hang — #371", async () => {
+    const sp = makeSp('sess:budget-race', 'api', agentConfig, gatewayConfig, sessionStore);
+    await sp.start(); // real timers for the spawn + fs I/O
+
+    // Switch to fake timers only for the restart-delay window. The timer's
+    // stop-race branch does NOT call spawnProcess (stopping===true), so no fs
+    // I/O runs under fake timers.
+    jest.useFakeTimers();
+    try {
+      const restartFailedSpy = jest.fn();
+      sp.on('restartFailed', restartFailedSpy);
+
+      // Crash → scheduleRestart arms the 5s timer and marks a restart in flight.
+      lastProcess!.emit('exit', 1, null);
+      await Promise.resolve();
+      expect(sp.isRestartScheduled()).toBe(true);
+
+      // stop() races in before the timer fires (the child is already gone, so
+      // stop() just sets stopping=true and returns).
+      await sp.stop();
+
+      // Timer fires into the stop-race branch: it must wake waiters, not clear
+      // the flag silently (which previously left waitForSessionRestart to hang
+      // for the full 20s timeout before rejecting).
+      jest.advanceTimersByTime(5_000); // AUTO_RESTART_DELAY_MS
+      await Promise.resolve();
+
+      expect(restartFailedSpy).toHaveBeenCalledTimes(1);
+      expect(sp.isRestartScheduled()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 // ── resolveMaxHistoryMessages ────────────────────────────────────────────────
 
 describe('resolveMaxHistoryMessages', () => {

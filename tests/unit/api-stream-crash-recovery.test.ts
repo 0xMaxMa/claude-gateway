@@ -348,4 +348,152 @@ describe('AgentRunner.sendApiMessageStream — subprocess exit mid-turn', () => 
       sendMessageSpy.mockRestore();
     }
   });
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // #371 — session wedge: a dead session must never linger in the pool.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  it("a permanently-failed API session is evicted from the pool so the next message spawns fresh (not a wedge) — #371", async () => {
+    // Before the fix, the `failed` (max-restarts) handler that removes the dead
+    // SessionProcess from the pool was gated to `source !== 'api'`, so an API
+    // session that permanently failed stayed mapped. The next getOrSpawnSession
+    // returned that corpse and blocked on waitForSessionRestart for the full 20s
+    // timeout before rejecting — the wedge.
+    let liveSession: SessionProcess | undefined;
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        liveSession = this;
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      // Turn 1 completes normally → the session is live and mapped.
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'hello',
+        { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() },
+        { timeoutMs: 60_000 },
+      );
+      lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'hi' }) + '\n'));
+      await new Promise((r) => setImmediate(r));
+
+      expect(liveSession).toBeDefined();
+      const sessions = (runner as unknown as { sessions: Map<string, SessionProcess> }).sessions;
+      // For API sessions the pool is keyed by the session id.
+      expect(sessions.get(sessionId)).toBe(liveSession);
+
+      // The session hits the permanent-failure ceiling (max auto-restarts).
+      liveSession!.emit('failed');
+      await new Promise((r) => setImmediate(r));
+
+      // Fix: an API session must be dropped from the pool on `failed`, exactly
+      // like a channel session — so the next message spawns a fresh session
+      // instead of being handed the dead one.
+      expect(sessions.has(sessionId)).toBe(false);
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  });
+
+  it("a message to a dead, non-restarting mapped API session respawns fresh instead of wedging — #371", async () => {
+    // A session can be dead with NO auto-restart in flight (stopped without
+    // eviction, or permanently failed). getOrSpawnSession used to unconditionally
+    // await waitForSessionRestart on it, blocking for the full 20s timeout on a
+    // restarted/failed event that never comes. The fix: detect "dead + no restart
+    // scheduled" and respawn a fresh session immediately.
+    let liveSession: SessionProcess | undefined;
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        liveSession = this;
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      // Turn 1 → proc1, complete normally.
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'turn 1',
+        { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() },
+        { timeoutMs: 60_000 },
+      );
+      const proc1 = lastProcess!;
+      proc1.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'r1' }) + '\n'));
+      await new Promise((r) => setImmediate(r));
+
+      const session1 = liveSession!;
+      const sessions = (runner as unknown as { sessions: Map<string, SessionProcess> }).sessions;
+      expect(sessions.get(sessionId)).toBe(session1);
+
+      // Kill the session WITHOUT evicting it from the pool → dead, stopping=true,
+      // no auto-restart scheduled: the exact "corpse left in the map" state.
+      await session1.stop();
+      expect(session1.isRunning()).toBe(false);
+      expect(session1.isRestartScheduled()).toBe(false);
+      expect(sessions.get(sessionId)).toBe(session1); // still mapped
+
+      // Turn 2 must be served by a fresh session, promptly — not blocked on the
+      // 20s restart-wait timeout.
+      const turn2Done = jest.fn();
+      const turn2Error = jest.fn();
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'turn 2',
+        { onChunk: jest.fn(), onDone: turn2Done, onError: turn2Error },
+        { timeoutMs: 60_000 },
+      );
+      const proc2 = lastProcess!;
+      expect(proc2).not.toBe(proc1);
+
+      proc2.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'r2' }) + '\n'));
+      await new Promise((r) => setImmediate(r));
+
+      expect(turn2Done).toHaveBeenCalledTimes(1);
+      expect(turn2Done.mock.calls[0][0]).toBe('r2');
+      expect(turn2Error).not.toHaveBeenCalled();
+      // The corpse was replaced by the fresh session in the pool.
+      expect(sessions.get(sessionId)).not.toBe(session1);
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it('waitForSessionRestart rejects immediately for a dead session with no restart scheduled (no 20s hang) — #371', async () => {
+    // Defence-in-depth backstop: even a caller that reaches waitForSessionRestart
+    // directly on a dead, non-restarting session must not block for the full
+    // timeout. It should reject at once so the caller can recover.
+    let liveSession: SessionProcess | undefined;
+    const originalSendMessage = SessionProcess.prototype.sendMessage;
+    const sendMessageSpy = jest
+      .spyOn(SessionProcess.prototype, 'sendMessage')
+      .mockImplementation(function (this: SessionProcess, text: string) {
+        liveSession = this;
+        return originalSendMessage.call(this, text);
+      });
+
+    try {
+      await runner.sendApiMessageStream(
+        sessionId, chatId, 'hello',
+        { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() },
+        { timeoutMs: 60_000 },
+      );
+      lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'r' }) + '\n'));
+      await new Promise((r) => setImmediate(r));
+
+      const session1 = liveSession!;
+      await session1.stop();
+      expect(session1.isRunning()).toBe(false);
+      expect(session1.isRestartScheduled()).toBe(false);
+
+      const started = Date.now();
+      await expect(
+        (runner as unknown as { waitForSessionRestart(p: SessionProcess): Promise<void> })
+          .waitForSessionRestart(session1),
+      ).rejects.toThrow(/no restart is scheduled/);
+      // Rejected essentially instantly — nowhere near the 20s wait timeout.
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      sendMessageSpy.mockRestore();
+    }
+  });
 });

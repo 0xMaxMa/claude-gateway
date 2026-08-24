@@ -381,6 +381,19 @@ class Driver {
       logDebug('SIGTERM → killing claude');
       this.shutdown(0);
     });
+    // SIGHUP (controlling terminal / OS hangup) has no handler by default, so
+    // Node would terminate the pty-shell with the default action (exit 129),
+    // killing the wrapper abruptly WITHOUT running shutdown() — which means the
+    // underlying claude child is never reaped (host.kill()) and can be orphaned.
+    // Treat SIGHUP like SIGTERM: run the graceful shutdown(0) path so the child
+    // is cleaned up and the parent observes a normal exit. (This does not change
+    // whether the exit counts toward MAX_RESTARTS — every exit routes through
+    // scheduleRestart; the win here is orderly teardown, not restart accounting.)
+    // See issue #371.
+    process.on('SIGHUP', () => {
+      logDebug('SIGHUP → killing claude');
+      this.shutdown(0);
+    });
   }
 
   // ---- transcript events: claude → gateway --------------------------------
