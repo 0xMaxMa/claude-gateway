@@ -98,6 +98,7 @@ describe('inbound image download → meta.image_path', () => {
   let handler: ReturnType<typeof createSlackWebhookHandler>;
   let forwarded: Array<{ content: string; meta: Record<string, string> }>;
   let downloadInits: RequestInit[];
+  let fetchedUrls: string[];
   let downloadResponse: () => Response | Promise<Response>;
   const written: string[] = [];
 
@@ -159,12 +160,14 @@ describe('inbound image download → meta.image_path', () => {
   beforeEach(() => {
     forwarded = [];
     downloadInits = [];
+    fetchedUrls = [];
     // Default: a real Response, so the streaming read path is genuinely exercised.
     downloadResponse = () => new Response(PNG);
     handler = createSlackWebhookHandler(new Map([[AGENT, fakeRunner()]]), '/tmp');
 
     global.fetch = (async (input: string, init?: RequestInit) => {
       const url = String(input);
+      fetchedUrls.push(url);
       if (url === PRIVATE_URL) {
         downloadInits.push(init ?? {});
         return downloadResponse();
@@ -191,8 +194,9 @@ describe('inbound image download → meta.image_path', () => {
     const imgPath = forwarded[0].meta.image_path;
     expect(imgPath).toBeTruthy();
     written.push(imgPath);
-    // Extension comes from the magic bytes, not the (untrusted) mimetype field.
-    expect(imgPath).toMatch(/slack-img-\d+\.png$/);
+    // Extension comes from the magic bytes, not the (untrusted) mimetype field;
+    // the Slack file id is embedded so same-millisecond events can't collide.
+    expect(imgPath).toMatch(/slack-img-F1-\d+\.png$/);
     expect(fs.readFileSync(imgPath)).toEqual(PNG);
 
     // url_private is NOT public — it must be fetched with the bot token.
@@ -261,6 +265,21 @@ describe('inbound image download → meta.image_path', () => {
 
     expect(forwarded).toHaveLength(1);
     expect(forwarded[0].meta.image_path).toBeUndefined();
+  });
+
+  test('url_private on a non-Slack host → bot token never sent, no image_path, turn still forwards', async () => {
+    // A url_private pointing anywhere other than *.slack.com must be refused
+    // BEFORE the fetch, so the bot token can never leak to an attacker host.
+    const EVIL = 'https://evil.example.com/files-pri/T1-F1/pic.png';
+    await post(imageEvent([{ id: 'F1', name: 'pic.png', mimetype: 'image/png', url_private: EVIL }]));
+
+    // No request was ever made to the evil host (guard runs before fetch).
+    expect(downloadInits).toHaveLength(0);
+    expect(fetchedUrls).not.toContain(EVIL);
+    // The turn is never dropped — it just forwards without an image.
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0].meta.image_path).toBeUndefined();
+    expect(forwarded[0].content).toBe('look at this');
   });
 
   test('an event with no files at all is unchanged', async () => {

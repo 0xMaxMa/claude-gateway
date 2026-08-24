@@ -56,7 +56,26 @@ const MAX_IMAGE_BYTES = MediaStore.maxUploadBytes;
  * Returns null on an empty body; throws on HTTP failure or over-cap size — the
  * caller logs and forwards the turn regardless.
  */
-async function downloadSlackImage(botToken: string, fileUrl: string): Promise<string | null> {
+async function downloadSlackImage(
+  botToken: string,
+  fileUrl: string,
+  fileId?: string,
+): Promise<string | null> {
+  // Defence in depth: the signature check upstream already guarantees the event
+  // (and thus `url_private`) is authentic Slack data, but never send the bot
+  // token anywhere other than Slack's own file host. If a future refactor ever
+  // moves the download ahead of verification, or Slack changes the payload
+  // shape, this stops the token from leaking to an attacker-chosen host.
+  let host: string;
+  try {
+    host = new URL(fileUrl).hostname;
+  } catch {
+    throw new Error('invalid file url');
+  }
+  if (host !== 'slack.com' && !host.endsWith('.slack.com')) {
+    throw new Error(`refusing to send bot token to non-Slack host: ${host}`);
+  }
+
   const res = await fetch(fileUrl, { headers: { Authorization: `Bearer ${botToken}` } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -84,7 +103,10 @@ async function downloadSlackImage(botToken: string, fileUrl: string): Promise<st
   }
 
   if (buf.length === 0) return null;
-  const dest = path.join(os.tmpdir(), `slack-img-${Date.now()}.${sniffImageExt(buf)}`);
+  // Include the Slack file id (like LINE's `line-img-${messageId}-…`) so two
+  // events landing in the same millisecond on a shared tmpdir can't collide.
+  const suffix = fileId ? `${fileId}-${Date.now()}` : `${Date.now()}`;
+  const dest = path.join(os.tmpdir(), `slack-img-${suffix}.${sniffImageExt(buf)}`);
   fs.writeFileSync(dest, buf);
   return dest;
 }
@@ -420,7 +442,7 @@ export function createSlackWebhookHandler(
     );
     if (token && imageFile?.url_private) {
       try {
-        const imgPath = await downloadSlackImage(token, imageFile.url_private);
+        const imgPath = await downloadSlackImage(token, imageFile.url_private, imageFile.id);
         if (imgPath) norm.meta.image_path = imgPath;
       } catch (err) {
         logger.warn('Slack webhook: image download failed', {
