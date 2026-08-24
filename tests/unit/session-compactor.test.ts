@@ -476,14 +476,23 @@ describe('SessionCompactor', () => {
       const sessionId = index.activeSessionId;
       await seedLargeSession(sessionId, 3);
 
-      // Must NOT throw — the whole job completes despite the one dead chunk.
-      const result = await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
-      expect(result.afterMessages).toBeGreaterThan(0);
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        // Must NOT throw — the whole job completes despite the one dead chunk.
+        const result = await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
+        expect(result.afterMessages).toBeGreaterThan(0);
 
-      // The degraded excerpt (not a thrown error) is what reached the merge step —
-      // proves the bad chunk was carried forward as data, not allowed to kill the job.
-      expect(mergeInputs).toHaveLength(1);
-      expect(mergeInputs[0]).toContain('summarization failed after 2 attempts');
+        // The degraded excerpt (not a thrown error) is what reached the merge step —
+        // proves the bad chunk was carried forward as data, not allowed to kill the job.
+        expect(mergeInputs).toHaveLength(1);
+        expect(mergeInputs[0]).toContain('summarization failed after 2 attempts');
+
+        // Degradation is logged server-side, not silent.
+        expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Chunk 2/'));
+        expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('summarization failed after 2 attempts'));
+      } finally {
+        errSpy.mockRestore();
+      }
     });
 
     it('U-CMP-LG-4: merge-call failure degrades to the concatenated chunk summaries instead of throwing', async () => {
@@ -497,7 +506,14 @@ describe('SessionCompactor', () => {
       const sessionId = index.activeSessionId;
       await seedLargeSession(sessionId, 3);
 
-      const result = await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      let result: Awaited<ReturnType<typeof compactor.compact>>;
+      try {
+        result = await compactor.compact(agentId, chatId, sessionId, 'claude-sonnet-4-6', 200000);
+        expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('Merge-summaries call failed after 2 attempts'));
+      } finally {
+        errSpy.mockRestore();
+      }
       expect(result.afterMessages).toBeGreaterThan(0);
 
       const compacted = await sessionStore.loadTelegramSession(agentId, chatId, sessionId);

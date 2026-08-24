@@ -236,18 +236,25 @@ export class SessionCompactor {
       }
     }
     const excerpt = chunk.length > DEGRADED_EXCERPT_CHARS ? `${chunk.slice(0, DEGRADED_EXCERPT_CHARS)}…(truncated)` : chunk;
+    console.error(
+      `[SessionCompactor] Chunk ${index + 1}/${total} summarization failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); using truncated raw excerpt.`,
+    );
     return `[Part ${index + 1}/${total} — summarization failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); showing truncated raw excerpt]\n${excerpt}`;
   }
 
   /** Merge per-chunk summaries into one; degrade to the unmerged concatenation on repeated failure. */
   private async mergeChunkSummaries(mergedText: string, model: string): Promise<string> {
+    let lastErr: Error | undefined;
     for (let attempt = 1; attempt <= CHUNK_MAX_ATTEMPTS; attempt++) {
       try {
         return await this.callClaudeForSummary(mergedText, model, MERGE_SUMMARIES_PROMPT);
-      } catch {
-        // retry, then degrade below
+      } catch (err) {
+        lastErr = err as Error;
       }
     }
+    console.error(
+      `[SessionCompactor] Merge-summaries call failed after ${CHUNK_MAX_ATTEMPTS} attempts (${lastErr?.message ?? 'unknown error'}); using unmerged per-chunk summaries.`,
+    );
     return mergedText;
   }
 
