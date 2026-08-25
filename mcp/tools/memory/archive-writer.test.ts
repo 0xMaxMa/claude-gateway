@@ -1,6 +1,6 @@
 /**
- * Bun tests for the shared-KB write mirror (memory_shared_write/_delete's
- * building blocks). Runs under Bun (`bun test`) alongside archive-reader.test.ts.
+ * Bun tests for the shared-KB write mirror (memory_shared_create/_get/_update/
+ * _delete's building blocks). Runs under Bun (`bun test`) alongside archive-reader.test.ts.
  */
 
 import { test, expect } from 'bun:test';
@@ -10,10 +10,11 @@ import * as path from 'path';
 
 import {
   sharedNoteFilename,
-  sharedNoteSlug,
   sharedNoteExists,
+  readSharedNote,
   writeSharedNoteAtomic,
   deleteSharedNote,
+  contentLossPercent,
   triggerSharedReindex,
 } from './archive-writer';
 import { searchArchive } from './archive-reader';
@@ -27,17 +28,6 @@ test('sharedNoteFilename: slugifies, strips .md, contains to one segment (mirror
   expect(sharedNoteFilename('../../etc/passwd')).toBe('etc-passwd.md'); // no separators survive
   expect(sharedNoteFilename('')).toBe('note.md');
   expect(sharedNoteFilename('a/b\\c')).toBe('a-b-c.md');
-});
-
-test('sharedNoteSlug: stable per agent+reason regardless of content (identity for update/delete)', () => {
-  const a = sharedNoteSlug('kaede-fua', 'deploy-runbook');
-  const b = sharedNoteSlug('kaede-fua', 'deploy-runbook');
-  const c = sharedNoteSlug('kaede-fua', 'oncall-escalation');
-  const d = sharedNoteSlug('other-agent', 'deploy-runbook');
-  expect(a).toBe(b);
-  expect(a).not.toBe(c);
-  expect(a).not.toBe(d); // scoped per agent
-  expect(a).toBe('kaede-fua-deploy-runbook');
 });
 
 test('writeSharedNoteAtomic: writes atomically into <vaultDir>/notes and cannot escape it', () => {
@@ -54,24 +44,33 @@ test('writeSharedNoteAtomic: writes atomically into <vaultDir>/notes and cannot 
   }
 });
 
-test('sharedNoteExists: false before write, true after — the basis for memory_shared_write\'s force gate', () => {
+test('sharedNoteExists: false before write, true after — the basis for memory_shared_create/_update\'s existence gates', () => {
   const vaultDir = tmpVaultDir();
   try {
-    const slug = sharedNoteSlug('agentA', 'oncall');
-    expect(sharedNoteExists(vaultDir, slug)).toBe(false);
-    writeSharedNoteAtomic(vaultDir, slug, 'escalate paging incidents to platform team');
-    expect(sharedNoteExists(vaultDir, slug)).toBe(true);
+    expect(sharedNoteExists(vaultDir, 'oncall')).toBe(false);
+    writeSharedNoteAtomic(vaultDir, 'oncall', 'escalate paging incidents to platform team');
+    expect(sharedNoteExists(vaultDir, 'oncall')).toBe(true);
   } finally {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });
 
-test('writeSharedNoteAtomic: same slug overwrites in place (update semantics, no duplicate file)', () => {
+test('readSharedNote: null before write, full content after', () => {
   const vaultDir = tmpVaultDir();
   try {
-    const slug = sharedNoteSlug('agentA', 'oncall');
-    const p1 = writeSharedNoteAtomic(vaultDir, slug, 'v1: escalate to platform team');
-    const p2 = writeSharedNoteAtomic(vaultDir, slug, 'v2: escalate to SRE team');
+    expect(readSharedNote(vaultDir, 'oncall')).toBeNull();
+    writeSharedNoteAtomic(vaultDir, 'oncall', 'escalate paging incidents to platform team');
+    expect(readSharedNote(vaultDir, 'oncall')).toBe('escalate paging incidents to platform team');
+  } finally {
+    fs.rmSync(vaultDir, { recursive: true, force: true });
+  }
+});
+
+test('writeSharedNoteAtomic: same name overwrites in place (update semantics, no duplicate file)', () => {
+  const vaultDir = tmpVaultDir();
+  try {
+    const p1 = writeSharedNoteAtomic(vaultDir, 'oncall', 'v1: escalate to platform team');
+    const p2 = writeSharedNoteAtomic(vaultDir, 'oncall', 'v2: escalate to SRE team');
     expect(p1).toBe(p2);
     expect(fs.readFileSync(p2, 'utf8')).toBe('v2: escalate to SRE team');
     expect(fs.readdirSync(path.join(vaultDir, 'notes')).length).toBe(1);
@@ -83,19 +82,18 @@ test('writeSharedNoteAtomic: same slug overwrites in place (update semantics, no
 test('deleteSharedNote: removes an existing note and reports true; false (no-op) if absent', () => {
   const vaultDir = tmpVaultDir();
   try {
-    const slug = sharedNoteSlug('agentA', 'oncall');
-    expect(deleteSharedNote(vaultDir, slug)).toBe(false); // nothing written yet
-    writeSharedNoteAtomic(vaultDir, slug, 'escalate paging incidents to platform team');
-    expect(sharedNoteExists(vaultDir, slug)).toBe(true);
-    expect(deleteSharedNote(vaultDir, slug)).toBe(true);
-    expect(sharedNoteExists(vaultDir, slug)).toBe(false);
-    expect(deleteSharedNote(vaultDir, slug)).toBe(false); // already gone
+    expect(deleteSharedNote(vaultDir, 'oncall')).toBe(false); // nothing written yet
+    writeSharedNoteAtomic(vaultDir, 'oncall', 'escalate paging incidents to platform team');
+    expect(sharedNoteExists(vaultDir, 'oncall')).toBe(true);
+    expect(deleteSharedNote(vaultDir, 'oncall')).toBe(true);
+    expect(sharedNoteExists(vaultDir, 'oncall')).toBe(false);
+    expect(deleteSharedNote(vaultDir, 'oncall')).toBe(false); // already gone
   } finally {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
 });
 
-test('deleteSharedNote: cannot escape the notes dir (slug is filename-slugified first)', () => {
+test('deleteSharedNote: cannot escape the notes dir (name is filename-slugified first)', () => {
   const vaultDir = tmpVaultDir();
   try {
     // Nothing outside notes/ can ever be targeted, so this is always a no-op.
@@ -103,6 +101,28 @@ test('deleteSharedNote: cannot escape the notes dir (slug is filename-slugified 
   } finally {
     fs.rmSync(vaultDir, { recursive: true, force: true });
   }
+});
+
+test('contentLossPercent: 0 when every old line survives, 100 when none do', () => {
+  const oldContent = 'line one\nline two\nline three';
+  expect(contentLossPercent(oldContent, 'line one\nline two\nline three\nline four')).toBe(0); // pure append, nothing dropped
+  expect(contentLossPercent(oldContent, 'totally different content')).toBe(100);
+});
+
+test('contentLossPercent: dropping a subset of old lines is proportional loss, not zero', () => {
+  const oldContent = 'line one\nline two\nline three';
+  expect(contentLossPercent(oldContent, 'line one\nline two')).toBe(33); // 1 of 3 old lines missing
+});
+
+test('contentLossPercent: partial loss rounds to nearest percent', () => {
+  // 2 of 4 old lines survive verbatim -> 50% lost.
+  const oldContent = 'a\nb\nc\nd';
+  expect(contentLossPercent(oldContent, 'a\nb\nsomething else')).toBe(50);
+});
+
+test('contentLossPercent: empty old content never divides by zero', () => {
+  expect(contentLossPercent('', 'brand new content')).toBe(0);
+  expect(contentLossPercent('\n\n', 'brand new content')).toBe(0); // blank-only old content
 });
 
 test('triggerSharedReindex: never throws, even when the compiled CLI is missing', () => {
@@ -120,7 +140,7 @@ test('triggerSharedReindex: never throws, even when the compiled CLI is missing'
 // by `npm run build` into dist/ alongside this package, per package.json
 // `files`) — skips gracefully if that build artifact is missing (e.g. a bare
 // `bun test` run against source with no prior `npm run build`).
-test('memory_shared_write flow: write + triggerSharedReindex makes the note searchable within a few seconds', async () => {
+test('memory_shared_create flow: write + triggerSharedReindex makes the note searchable within a few seconds', async () => {
   const cliPath = path.join(__dirname, '..', '..', '..', 'dist', 'agent', 'knowledge', 'reindex-cli.js');
   if (!fs.existsSync(cliPath)) {
     console.warn('[archive-writer.test] dist/agent/knowledge/reindex-cli.js missing — run `npm run build` first; skipping e2e reindex test');
@@ -129,8 +149,7 @@ test('memory_shared_write flow: write + triggerSharedReindex makes the note sear
   const vaultDir = tmpVaultDir();
   try {
     const content = 'The staging cluster now runs on kubernetes in ap-southeast-1.';
-    const slug = sharedNoteSlug('e2e-agent', 'infra-note');
-    writeSharedNoteAtomic(vaultDir, slug, content);
+    writeSharedNoteAtomic(vaultDir, 'infra-note', content);
     triggerSharedReindex(vaultDir);
 
     const dbPath = path.join(vaultDir, 'kb.sqlite');

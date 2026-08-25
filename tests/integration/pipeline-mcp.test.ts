@@ -374,7 +374,7 @@ describe('Pipeline MCP — Telegram → plugin → Claude Code (step-by-step)', 
     expect(gw.args[0]).toMatch(/mcp\/server\.ts$/)
     expect(gw.env.TELEGRAM_BOT_TOKEN).toBe(BOT_TOKEN)
     expect(gw.env.TELEGRAM_STATE_DIR).toMatch(/\.telegram-state$/)
-    // memory_shared_write/_delete's reindex trigger runs under Bun, whose own process.execPath
+    // memory_shared_create/_update/_delete's reindex trigger runs under Bun, whose own process.execPath
     // is the `bun` binary — it needs the GATEWAY (real Node) execPath forwarded
     // to spawn dist/agent/knowledge/reindex-cli.js (uses node:sqlite) correctly.
     expect(gw.env.GATEWAY_NODE_EXEC_PATH).toBe(process.execPath)

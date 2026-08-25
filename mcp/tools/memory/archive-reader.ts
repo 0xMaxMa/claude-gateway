@@ -70,6 +70,22 @@ function toFtsMatch(query: string): string {
 }
 
 /**
+ * Same tokenizing/quoting as `toFtsMatch`, but joined with OR and capped to
+ * `maxTerms`. Used for "is anything like this already here?" lookups
+ * (`findSimilarSharedNotes`), where an implicit-AND match across a whole
+ * note's worth of terms would almost never hit — a near-duplicate rarely
+ * repeats every single word of the seed text.
+ */
+function toFtsMatchOr(query: string, maxTerms = 12): string {
+  return query
+    .split(/[^\p{L}\p{N}_]+/u)
+    .filter(Boolean)
+    .slice(0, maxTerms)
+    .map((t) => `"${t.replace(/"/g, '""')}"`)
+    .join(' OR ');
+}
+
+/**
  * Keyword search over the archive (FTS5 BM25). Returns [] when the index does
  * not exist yet or the query has no usable tokens. Read-only; never creates a DB.
  *
@@ -111,16 +127,12 @@ function ensureEntryHashColumn(dbPath: string): void {
   }
 }
 
-export function searchArchive(
-  dbPath: string,
-  query: string,
-  maxResults: number,
-  opts?: { recordRetrievals?: boolean; now?: number },
-): SearchHit[] {
-  if (!fs.existsSync(dbPath)) return [];
-  const match = toFtsMatch(query);
-  if (!match) return [];
-
+/**
+ * Core FTS5 query, shared by `searchArchive` (implicit-AND keyword search)
+ * and `findSimilarSharedNotes` (OR-based near-duplicate lookup) — only the
+ * MATCH expression differs between the two callers.
+ */
+function runFtsMatchQuery(dbPath: string, match: string, maxResults: number): SearchHit[] {
   // Heal pre-#346 DBs in place so the query never crashes on a missing column.
   ensureEntryHashColumn(dbPath);
 
@@ -128,7 +140,6 @@ export function searchArchive(
   // If the heal above could not run (read-only FS), select a NULL entry_hash
   // rather than referencing a column that does not exist.
   const entryHashSelect = hasEntryHashColumn(db) ? 'c.entry_hash' : 'NULL';
-  let hits: SearchHit[];
   try {
     const rows = db
       .query(
@@ -153,7 +164,7 @@ export function searchArchive(
       originClass: string | null;
       importance: number | null;
     }>;
-    hits = rows.map((r) => ({
+    return rows.map((r) => ({
       path: r.path,
       startLine: r.startLine,
       endLine: r.endLine,
@@ -166,6 +177,18 @@ export function searchArchive(
   } finally {
     db.close();
   }
+}
+
+export function searchArchive(
+  dbPath: string,
+  query: string,
+  maxResults: number,
+  opts?: { recordRetrievals?: boolean; now?: number },
+): SearchHit[] {
+  if (!fs.existsSync(dbPath)) return [];
+  const match = toFtsMatch(query);
+  if (!match) return [];
+  const hits = runFtsMatchQuery(dbPath, match, maxResults);
 
   // Recall counter (planning-66): fire-and-forget, append-only, best-effort. A
   // dedicated writable handle (WAL + busy_timeout so it never fails a concurrent
@@ -189,6 +212,19 @@ export function searchArchive(
     }
   }
   return hits;
+}
+
+/**
+ * Find shared notes whose content overlaps `seedText` (typically a new
+ * note's name plus the opening of its content) — the basis of
+ * `memory_shared_create`'s "does something like this already exist?" nudge.
+ * Read-only, same missing-DB/empty-query behavior as `searchArchive`.
+ */
+export function findSimilarSharedNotes(dbPath: string, seedText: string, maxResults = 3): SearchHit[] {
+  if (!fs.existsSync(dbPath)) return [];
+  const match = toFtsMatchOr(seedText);
+  if (!match) return [];
+  return runFtsMatchQuery(dbPath, match, maxResults);
 }
 
 /** A memory-scoped path: MEMORY.md, USER.md, or memory/**.md — no traversal. */

@@ -10,8 +10,11 @@
  */
 
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
-import { searchArchive, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
-import { sharedNoteSlug, sharedNoteExists, writeSharedNoteAtomic, deleteSharedNote, triggerSharedReindex } from './archive-writer';
+import { searchArchive, findSimilarSharedNotes, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
+import { sharedNoteExists, readSharedNote, writeSharedNoteAtomic, deleteSharedNote, contentLossPercent, triggerSharedReindex } from './archive-writer';
+
+/** memory_shared_update: below this line-loss %, an update just applies — no confirm needed. */
+const UPDATE_LOSS_CONFIRM_THRESHOLD = 50;
 
 /** Corpora the tool can serve. */
 const SUPPORTED_CORPORA = new Set(['memory', 'shared', 'all']);
@@ -73,36 +76,56 @@ export class MemoryModule implements ToolModule {
         },
       },
       {
-        name: 'memory_shared_write',
+        name: 'memory_shared_create',
         description:
-          'Create or update one note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected and unrelated. Notes are identified by "reason" (per-agent, stable): calling again with the same "reason" targets the SAME note. By default this fails if a note for that "reason" already exists — pass force:true to overwrite it (update). The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
+          'Create a NEW note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose"). Notes live in a shared namespace across every agent — pick any "name" you like, there is no agent-id prefix. Fails if a note with this exact name already exists (use memory_shared_update on it instead, after reading it with memory_shared_get). Before writing, this also searches the shared KB for notes with SIMILAR content and, if any are found, returns them instead of creating (to avoid near-duplicate notes cluttering the vault) — pass confirm:true to create anyway once you have checked they are not the same topic. The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
         inputSchema: {
           type: 'object',
           properties: {
+            name: { type: 'string', description: 'Freeform name identifying this note, e.g. "deploy-runbook". Stable identity — reuse it with memory_shared_update to edit the same note later.' },
             content: { type: 'string', description: 'Full note body to write into the shared KB. Max 100KB.' },
-            reason: {
-              type: 'string',
-              description: 'Short slug identifying this note, e.g. "deploy-runbook". Stable identity — reuse it to update the same note later.',
-            },
-            force: {
-              type: 'boolean',
-              description: 'Overwrite an existing note for this "reason". Default: false (fails if it already exists).',
-            },
+            confirm: { type: 'boolean', description: 'Create anyway even though similar existing notes were found. Default: false.' },
           },
-          required: ['content', 'reason'],
+          required: ['name', 'content'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'memory_shared_get',
+        description: 'Read the full current content of one shared-KB note by its exact "name" (see memory_shared_create). Use this before memory_shared_update so your edit is based on what is actually there — memory_search only returns short snippets, not the full note.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'The note\'s exact name.' },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: 'memory_shared_update',
+        description:
+          `Update an EXISTING shared-KB note by its exact "name" — replaces its full content with "content". Fails if no note with this name exists yet (use memory_shared_create instead). Read the note first with memory_shared_get and edit it — "content" is what the note becomes, not what gets appended, so anything you drop is gone. As a guard against an update that blindly discards most of the note (rather than an intentional rewrite), if the new content is missing ${UPDATE_LOSS_CONFIRM_THRESHOLD}%+ of the existing note's lines, this returns a warning instead of writing — pass confirm:true once you have checked that is what you intend.`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'The note\'s exact name (see memory_shared_create).' },
+            content: { type: 'string', description: 'Full replacement body for the note. Max 100KB.' },
+            confirm: { type: 'boolean', description: `Apply the update even though it would remove ${UPDATE_LOSS_CONFIRM_THRESHOLD}%+ of the existing content. Default: false.` },
+          },
+          required: ['name', 'content'],
           additionalProperties: false,
         },
       },
       {
         name: 'memory_shared_delete',
-        description:
-          'Delete one note this agent previously wrote to the shared knowledge base via memory_shared_write, by its "reason". Only notes this agent itself wrote can be targeted (identity is scoped to the calling agent) — this cannot delete another agent\'s notes or notes the nightly dreaming pipeline promoted.',
+        description: 'Delete one shared-KB note by its exact "name" (see memory_shared_create). Any agent can delete any note in the shared vault — there is no per-agent ownership. This cannot delete notes the nightly dreaming pipeline promoted (different naming scheme).',
         inputSchema: {
           type: 'object',
           properties: {
-            reason: { type: 'string', description: 'The "reason" the note was written under (see memory_shared_write).' },
+            name: { type: 'string', description: 'The note\'s exact name.' },
           },
-          required: ['reason'],
+          required: ['name'],
           additionalProperties: false,
         },
       },
@@ -176,34 +199,92 @@ export class MemoryModule implements ToolModule {
           return this.json(excerpt);
         }
 
-        case 'memory_shared_write': {
+        case 'memory_shared_create': {
           // Same gate memory_search uses for corpus:"shared" — fail closed with a
           // clear error rather than silently falling back to some default vault.
           const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
           if (!vaultDir || !vaultDir.trim()) {
-            return this.err('memory_shared_write unavailable: shared KB is not enabled.');
+            return this.err('memory_shared_create unavailable: shared KB is not enabled.');
           }
+          const name = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!name) return this.err('memory_shared_create requires non-empty "name".');
           const content = typeof args.content === 'string' ? args.content : '';
-          if (!content.trim()) return this.err('memory_shared_write requires non-empty "content".');
+          if (!content.trim()) return this.err('memory_shared_create requires non-empty "content".');
           if (content.length > MAX_SHARED_NOTE_SIZE) {
-            return this.err(`memory_shared_write: content exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
+            return this.err(`memory_shared_create: content exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
           }
-          const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-          if (!reason) return this.err('memory_shared_write requires non-empty "reason".');
-          const force = args.force === true;
+          if (sharedNoteExists(vaultDir, name)) {
+            return this.err(`memory_shared_create: a note named "${name}" already exists. Use memory_shared_update to modify it (read it first with memory_shared_get), or pick a different name.`);
+          }
 
-          const agentId = process.env.GATEWAY_AGENT_ID;
-          if (!agentId || !agentId.trim()) {
-            return this.err('memory_shared_write unavailable: GATEWAY_AGENT_ID is not set, cannot scope note ownership.');
+          const confirm = args.confirm === true;
+          if (!confirm) {
+            const sharedDb = sharedDbPathFromEnv();
+            if (sharedDb) {
+              const similar = findSimilarSharedNotes(sharedDb, `${name} ${content}`, 3);
+              if (similar.length > 0) {
+                return this.json({
+                  created: false,
+                  needsConfirmation: true,
+                  reason: 'similar-notes-found',
+                  similar: similar.map((h) => ({ path: h.path, snippet: h.snippet })),
+                  message: `Found ${similar.length} existing note(s) with similar content — consider memory_shared_update on one of these instead of creating a new one. Pass confirm:true to create "${name}" anyway.`,
+                });
+              }
+            }
           }
-          const slug = sharedNoteSlug(agentId, reason);
-          const existed = sharedNoteExists(vaultDir, slug);
-          if (existed && !force) {
-            return this.err(`memory_shared_write: a note for reason "${reason}" already exists. Pass force:true to overwrite it, or call memory_shared_delete first.`);
-          }
-          const notePath = writeSharedNoteAtomic(vaultDir, slug, content);
+
+          const notePath = writeSharedNoteAtomic(vaultDir, name, content);
           triggerSharedReindex(vaultDir);
-          return this.json({ written: true, overwritten: existed, path: notePath });
+          return this.json({ created: true, path: notePath });
+        }
+
+        case 'memory_shared_get': {
+          const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
+          if (!vaultDir || !vaultDir.trim()) {
+            return this.err('memory_shared_get unavailable: shared KB is not enabled.');
+          }
+          const name = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!name) return this.err('memory_shared_get requires non-empty "name".');
+          const content = readSharedNote(vaultDir, name);
+          if (content === null) {
+            return this.err(`memory_shared_get: no note named "${name}" found.`);
+          }
+          return this.json({ name, content });
+        }
+
+        case 'memory_shared_update': {
+          const vaultDir = process.env.GATEWAY_SHARED_KB_DIR;
+          if (!vaultDir || !vaultDir.trim()) {
+            return this.err('memory_shared_update unavailable: shared KB is not enabled.');
+          }
+          const name = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!name) return this.err('memory_shared_update requires non-empty "name".');
+          const content = typeof args.content === 'string' ? args.content : '';
+          if (!content.trim()) return this.err('memory_shared_update requires non-empty "content".');
+          if (content.length > MAX_SHARED_NOTE_SIZE) {
+            return this.err(`memory_shared_update: content exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
+          }
+          const existing = readSharedNote(vaultDir, name);
+          if (existing === null) {
+            return this.err(`memory_shared_update: no note named "${name}" found. Use memory_shared_create instead.`);
+          }
+
+          const lossPercent = contentLossPercent(existing, content);
+          const confirm = args.confirm === true;
+          if (lossPercent >= UPDATE_LOSS_CONFIRM_THRESHOLD && !confirm) {
+            return this.json({
+              updated: false,
+              needsConfirmation: true,
+              reason: 'large-content-loss',
+              lossPercent,
+              message: `This update would remove ~${lossPercent}% of the existing note's lines. Pass confirm:true if that's intentional.`,
+            });
+          }
+
+          const notePath = writeSharedNoteAtomic(vaultDir, name, content);
+          triggerSharedReindex(vaultDir);
+          return this.json({ updated: true, path: notePath, lossPercent });
         }
 
         case 'memory_shared_delete': {
@@ -211,20 +292,14 @@ export class MemoryModule implements ToolModule {
           if (!vaultDir || !vaultDir.trim()) {
             return this.err('memory_shared_delete unavailable: shared KB is not enabled.');
           }
-          const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-          if (!reason) return this.err('memory_shared_delete requires non-empty "reason".');
-
-          const agentId = process.env.GATEWAY_AGENT_ID;
-          if (!agentId || !agentId.trim()) {
-            return this.err('memory_shared_delete unavailable: GATEWAY_AGENT_ID is not set, cannot scope note ownership.');
-          }
-          const slug = sharedNoteSlug(agentId, reason);
-          const deleted = deleteSharedNote(vaultDir, slug);
+          const name = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!name) return this.err('memory_shared_delete requires non-empty "name".');
+          const deleted = deleteSharedNote(vaultDir, name);
           if (!deleted) {
-            return this.err(`memory_shared_delete: no note found for reason "${reason}" written by this agent.`);
+            return this.err(`memory_shared_delete: no note named "${name}" found.`);
           }
           triggerSharedReindex(vaultDir);
-          return this.json({ deleted: true, reason });
+          return this.json({ deleted: true, name });
         }
 
         default:
