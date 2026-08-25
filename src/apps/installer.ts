@@ -251,6 +251,17 @@ const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.
 
 // ─── Installer ────────────────────────────────────────────────────────────────
 
+const UUID_RE_SRC = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/**
+ * Scratch directories `runUpdate` creates beside an app's install path:
+ * `.cg-update-<app>-<uuid>` (staging checkout) and `<appDir>-old-<uuid>` /
+ * `<appDir>-failed-<uuid>` (release snapshots). All three carry a v4 UUID, so
+ * the pattern cannot match an app directory named by a user.
+ */
+const STALE_UPDATE_DIR_RE = new RegExp(
+  `^\\.cg-update-.+-${UUID_RE_SRC}$|-(?:old|failed)-${UUID_RE_SRC}$`,
+);
+
 export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
@@ -956,42 +967,6 @@ export class AppInstaller {
     }
   }
 
-  private discoverBindMountsOrThrow(appName: string, appDir: string): string[] {
-    try {
-      const { stdout } = this.run(
-        ['docker', 'compose', '-p', appName, 'config', '--format', 'json'],
-        appDir,
-        30_000,
-      );
-      const parsed = JSON.parse(stdout) as {
-        services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
-      };
-      const bases = [appDir];
-      try {
-        const real = fs.realpathSync(appDir);
-        if (real !== appDir) bases.push(real);
-      } catch { /* app dir unreadable — use literal base */ }
-      const rels = new Set<string>();
-      for (const svc of Object.values(parsed.services ?? {})) {
-        for (const vol of svc.volumes ?? []) {
-          if (vol.type !== 'bind' || typeof vol.source !== 'string') continue;
-          const abs = path.resolve(appDir, vol.source);
-          const matched = bases.find((base) => abs !== base && abs.startsWith(base + path.sep));
-          if (!matched) continue;
-          rels.add(path.relative(matched, abs).split(path.sep).join('/'));
-        }
-      }
-      return Array.from(rels).sort();
-    } catch (err) {
-      // A config query is only optional for apps whose stored compose declares no
-      // app-local bind source. If it does, continuing would discard unknown state.
-      const composePath = path.join(appDir, 'docker-compose.yml');
-      const compose = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : '';
-      if (!compose.includes(appDir)) return [];
-      throw new Error(`Cannot safely discover bind mounts for update: ${(err as Error).message}`);
-    }
-  }
-
   /**
    * Discover bind-mount source directories that live **under the app dir**
    * (e.g. `./data/photos` → `data/photos`). These hold app-owned data that is
@@ -1003,7 +978,29 @@ export class AppInstaller {
    * read-only `~/.claude/projects`) are intentionally excluded. Best-effort:
    * returns `[]` on any failure, mirroring {@link discoverVolumes}.
    */
-  private discoverBindMounts(appName: string, appDir: string): string[] {
+  /**
+   * The paths a generated compose file may have resolved this app dir to.
+   * Local-dev installs symlink the app dir into appsDir, and the generated
+   * compose resolves bind sources against the symlink's *realpath*, so both the
+   * symlink path and its target must be treated as the app root.
+   */
+  private bindMountBases(appDir: string): string[] {
+    const bases = [appDir];
+    try {
+      const real = fs.realpathSync(appDir);
+      if (real !== appDir) bases.push(real);
+    } catch {
+      /* app dir unreadable — fall back to the literal path */
+    }
+    return bases;
+  }
+
+  private discoverBindMounts(
+    appName: string,
+    appDir: string,
+    onError: 'empty' | 'throw' = 'empty',
+  ): string[] {
+    const bases = this.bindMountBases(appDir);
     try {
       const { stdout } = this.run(
         ['docker', 'compose', '-p', appName, 'config', '--format', 'json'],
@@ -1013,17 +1010,6 @@ export class AppInstaller {
       const parsed = JSON.parse(stdout) as {
         services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
       };
-      // Local-dev installs symlink the app dir into appsDir, and the generated
-      // compose resolves bind sources against the symlink's *realpath*. Match a
-      // source that sits under either the symlink path or its target, so those
-      // bind mounts are not wrongly excluded.
-      const bases = [appDir];
-      try {
-        const real = fs.realpathSync(appDir);
-        if (real !== appDir) bases.push(real);
-      } catch {
-        /* app dir unreadable — fall back to the literal path */
-      }
       const rels = new Set<string>();
       for (const svc of Object.values(parsed.services ?? {})) {
         for (const vol of svc.volumes ?? []) {
@@ -1036,8 +1022,16 @@ export class AppInstaller {
         }
       }
       return Array.from(rels).sort();
-    } catch {
-      return [];
+    } catch (err) {
+      if (onError === 'empty') return [];
+      // Fail closed: the caller is about to move this app's directory, so an
+      // unknown bind set would silently strand live state. Only an app whose
+      // stored compose anchors nothing to the app dir (under either base) is
+      // safe to treat as bind-free.
+      const composePath = path.join(appDir, 'docker-compose.yml');
+      const compose = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : '';
+      if (!bases.some((b) => compose.includes(b))) return [];
+      throw new Error(`Cannot safely discover bind mounts for update: ${(err as Error).message}`);
     }
   }
 
@@ -1100,6 +1094,48 @@ export class AppInstaller {
    * Returns a cancel function. No-op (returns a noop canceller) when both caps
    * are disabled. The timer is `unref`'d so it never holds the event loop open.
    */
+  /**
+   * Reclaim update scratch directories a crashed or killed update left behind:
+   * the `.cg-update-*` staging checkout and the `-old-`/`-failed-` release
+   * snapshots. Staging moved next to the install path so the swap is a
+   * same-filesystem rename, which also means `/tmp` cleanup no longer collects
+   * it — without this sweep a mid-update crash leaks a full app checkout
+   * forever.
+   *
+   * **Boot only.** An update in flight owns directories matching these names,
+   * so this must run before any update can start. Never throws; a directory it
+   * cannot remove is reported and skipped.
+   */
+  async sweepStaleUpdateDirs(): Promise<string[]> {
+    const swept: string[] = [];
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.appsDir);
+    } catch {
+      return swept; // no apps dir yet
+    }
+    // An installPath is authoritative — never remove a directory an app still
+    // points at, however its name happens to look.
+    let live: Set<string>;
+    try {
+      live = new Set((await this.registry.list()).map((a) => a.installPath));
+    } catch {
+      return swept; // registry unreadable — do not guess
+    }
+    for (const name of names) {
+      if (!STALE_UPDATE_DIR_RE.test(name)) continue;
+      const full = path.join(this.appsDir, name);
+      if (live.has(full)) continue;
+      try {
+        this.rmrf(full);
+        swept.push(full);
+      } catch (err) {
+        console.warn(`[installer] failed to sweep stale update dir "${full}": ${(err as Error).message}`);
+      }
+    }
+    return swept;
+  }
+
   startBackupCleanup(): () => void {
     const { retention, maxAgeDays, cleanupHour, cleanupTimezone } = this.appBackupConfig;
     if (retention <= 0 && maxAgeDays <= 0) return () => {};
@@ -1744,16 +1780,21 @@ export class AppInstaller {
         }
       }
 
+      // Discover the app-owned bind paths while the old compose file still points
+      // at the durable install directory. They must move with the release swap so
+      // cleanup cannot delete live state. This query fails closed, so it runs
+      // *before* routes and sockets come down — a throw here would otherwise
+      // leave the app running but unreachable, with no path back.
+      const oldBindMounts = this.discoverBindMounts(appName, entry.installPath, 'throw');
+
       // ── Deregister old routes before taking down containers ───────────────
       this.callbacks.deregisterRoutes(appName);
       this.callbacks.stopSockets(appName);
 
-      // Capture the current (old) image IDs and app-owned bind paths while the old
-      // compose file still points at the durable install directory. The bind paths
-      // must move with the release swap so cleanup cannot delete live state.
+      // Capture the current (old) image IDs while the old compose file is still
+      // the live one, so the reclaim below targets exactly this app's images.
       const oldImageIds = this.captureComposeImageIds(appName, entry.installPath);
       const oldImageRefs = this.captureComposeImageRefs(appName, entry.installPath);
-      const oldBindMounts = this.discoverBindMountsOrThrow(appName, entry.installPath);
 
       // ── Swap dirs before starting the new containers ───────────────────────
       // The new compose file's bind sources are anchored to finalDir. Starting
@@ -1770,14 +1811,17 @@ export class AppInstaller {
         fs.renameSync(finalDir, oldBackupDir);
         fs.renameSync(tmpDir, finalDir);
         swapped = true;
-        this.moveBindMounts(oldBackupDir, finalDir, oldBindMounts, movedBindMounts);
+        this.moveBindMounts(oldBackupDir, finalDir, oldBindMounts, job, movedBindMounts);
 
-        // The source checkout is now permanent. Regenerate so build contexts stay
-        // relative to it and agent injection never retains a staging path.
+        // The source checkout is now permanent. Rewrite the compose file with
+        // finalDir as its base so every bind source and build context resolves
+        // to the durable path — this call is kept for that side effect; its
+        // return value necessarily matches `generated` (same app.yaml). The
+        // rewrite drops the injected agent service, so re-inject it after.
         const finalComposePath = path.join(finalDir, 'docker-compose.yml');
         const finalYaml = parseAppYaml(fs.readFileSync(path.join(finalDir, 'app.yaml'), 'utf-8'), finalDir);
-        const finalGenerated = generateCompose(finalYaml, appName, finalDir, finalComposePath);
-        if (finalGenerated.agentDeclaration && this.agentManager && agentPaths) {
+        generateCompose(finalYaml, appName, finalDir, finalComposePath);
+        if (generated.agentDeclaration && this.agentManager && agentPaths) {
           this.agentManager.injectAgentService({ ...newEntry, installPath: finalDir });
         }
 
@@ -1792,7 +1836,7 @@ export class AppInstaller {
           if (swapped) {
             fs.renameSync(finalDir, failedDir);
             fs.renameSync(oldBackupDir, finalDir);
-            this.moveBindMounts(failedDir, finalDir, movedBindMounts);
+            this.restoreBindMounts(failedDir, finalDir, movedBindMounts, job);
           } else if (fs.existsSync(oldBackupDir)) {
             fs.renameSync(oldBackupDir, finalDir);
           }
@@ -2391,47 +2435,130 @@ export class AppInstaller {
     }
   }
 
-  private assertNoSymlinkAncestors(baseDir: string, targetDir: string): void {
+  /**
+   * Create `targetDir` under `baseDir`, refusing to traverse or create through a
+   * symlink. The check runs **before** each segment is created — a `mkdir -p`
+   * that ran first would already have materialised directories on the far side
+   * of a symlink, leaving the guard with nothing left to prevent.
+   */
+  private ensureDirWithinNoSymlink(baseDir: string, targetDir: string): void {
     const relative = path.relative(baseDir, targetDir);
+    if (path.isAbsolute(relative) || relative.split(path.sep).includes('..')) {
+      throw new Error(`Bind-mount path escapes the app directory: "${targetDir}"`);
+    }
     let current = baseDir;
     for (const segment of relative.split(path.sep).filter(Boolean)) {
       current = path.join(current, segment);
-      if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      let stat: fs.Stats | null;
+      try {
+        stat = fs.lstatSync(current);
+      } catch {
+        stat = null;
+      }
+      if (stat === null) {
+        fs.mkdirSync(current);
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
         throw new Error(`Updated app bind-mount path contains a symlink: "${current}"`);
+      }
+      if (!stat.isDirectory()) {
+        throw new Error(`Updated app bind-mount path is not a directory: "${current}"`);
       }
     }
   }
 
+  /** Reject a discovered bind path that does not stay inside both app roots. */
+  private isSafeBindRel(fromDir: string, toDir: string, rel: string): boolean {
+    if (rel.length === 0 || path.isAbsolute(rel)) return false;
+    const fromBase = fromDir.endsWith(path.sep) ? fromDir : fromDir + path.sep;
+    const toBase = toDir.endsWith(path.sep) ? toDir : toDir + path.sep;
+    return path.resolve(fromDir, rel).startsWith(fromBase)
+      && path.resolve(toDir, rel).startsWith(toBase);
+  }
+
   /**
-   * Move app-owned relative bind directories across an update directory swap.
-   * Renaming preserves the database's ownership and inode, unlike copying, and
-   * every path is constrained to its respective app root before use.
+   * Move app-owned relative bind data across an update directory swap.
+   * Renaming preserves the database's ownership and inode, unlike copying.
+   *
+   * A release legitimately ships content at a bind path (a `.gitkeep`, seed
+   * files, a tracked `init.sql`), so a collision is normal, not an error. Live
+   * state always wins — it is the data the issue exists to protect — but a
+   * directory collision is **merged** entry by entry so release-provided files
+   * the previous version never had still land. Every rename performed is
+   * recorded, app-relative and in order, so a rollback can replay it backwards.
    */
   private moveBindMounts(
     fromDir: string,
     toDir: string,
     rels: string[],
+    job: JobState,
     moved?: string[],
   ): void {
     for (const rel of rels) {
-      const source = path.resolve(fromDir, rel);
-      const destination = path.resolve(toDir, rel);
-      const fromBase = fromDir.endsWith(path.sep) ? fromDir : fromDir + path.sep;
-      const toBase = toDir.endsWith(path.sep) ? toDir : toDir + path.sep;
-      if (
-        rel.length === 0 || path.isAbsolute(rel)
-        || !source.startsWith(fromBase) || !destination.startsWith(toBase)
-        || !fs.existsSync(source)
-      ) {
+      if (!this.isSafeBindRel(fromDir, toDir, rel)) {
+        this.log(job, `Warning: skipping bind-mount path outside the app directory: "${rel}"`);
         continue;
       }
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      this.assertNoSymlinkAncestors(toDir, path.dirname(destination));
-      if (fs.existsSync(destination)) {
-        throw new Error(`Updated app already contains bind-mount path "${rel}"`);
-      }
+      if (!fs.existsSync(path.resolve(fromDir, rel))) continue; // never created
+      this.moveBindEntry(fromDir, toDir, rel, job, moved);
+    }
+  }
+
+  private moveBindEntry(
+    fromDir: string,
+    toDir: string,
+    rel: string,
+    job: JobState,
+    moved?: string[],
+  ): void {
+    const source = path.resolve(fromDir, rel);
+    const destination = path.resolve(toDir, rel);
+    this.ensureDirWithinNoSymlink(toDir, path.dirname(destination));
+
+    let destStat: fs.Stats | null;
+    try {
+      destStat = fs.lstatSync(destination);
+    } catch {
+      destStat = null;
+    }
+    if (destStat === null) {
       fs.renameSync(source, destination);
       moved?.push(rel);
+      return;
+    }
+    if (destStat.isDirectory() && fs.lstatSync(source).isDirectory()) {
+      // Merge: recurse so a release-only file inside the directory survives.
+      for (const name of fs.readdirSync(source)) {
+        this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
+      }
+      return;
+    }
+    this.log(
+      job,
+      `Warning: preserved existing bind-mount data at "${rel}" — the updated release's copy of that path was discarded`,
+    );
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.renameSync(source, destination);
+    moved?.push(rel);
+  }
+
+  /**
+   * Undo {@link moveBindMounts} after a failed update: replay the recorded
+   * renames backwards so the restored previous app dir gets its state back.
+   */
+  private restoreBindMounts(fromDir: string, toDir: string, moved: string[], job: JobState): void {
+    for (const rel of [...moved].reverse()) {
+      if (!this.isSafeBindRel(fromDir, toDir, rel)) continue;
+      const source = path.resolve(fromDir, rel);
+      const destination = path.resolve(toDir, rel);
+      if (!fs.existsSync(source) || fs.existsSync(destination)) continue;
+      try {
+        this.ensureDirWithinNoSymlink(toDir, path.dirname(destination));
+        fs.renameSync(source, destination);
+      } catch (err) {
+        this.log(job, `Warning: could not restore bind-mount path "${rel}": ${(err as Error).message}`);
+      }
     }
   }
 

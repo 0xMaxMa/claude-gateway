@@ -3251,7 +3251,13 @@ For custom/local apps, `latest` and `latest_commit` are `null` and `updateable` 
 
 ### POST /api/v1/apps/:name/update
 
-Start an async update. Uses blue/green swap: build new version in `/tmp/`, stop old containers, start new, swap directories, rollback automatically if new containers fail health check. The `.env` from the previous install is copied forward, so volumes and secrets are preserved.
+Start an async update. Uses blue/green swap: the new version is cloned and built in a hidden `.cg-update-*` staging directory **beside the app's install path** (same filesystem, so the swap is a rename), old containers are stopped, the staging directory is swapped into the permanent install path, and only then are the new containers started. Rollback is automatic if the new containers fail their health check. The `.env` from the previous install is copied forward, so volumes and secrets are preserved.
+
+Starting *after* the swap is what keeps relative bind mounts (`./postgres/pgdata`) pointing at the app's permanent directory — a stack started from the staging path would bind newly created empty data and a stateful service would re-initialise (issue #396). App-owned bind directories are carried across the swap by rename, preserving inode and ownership.
+
+If the updated release also ships content at a bind path (a tracked `.gitkeep`, seed files, an `init.sql`), the two are merged: **existing data always wins**, and release-provided files the previous version did not have are kept. A collision on a non-directory path preserves the existing file and logs a warning naming it — the release's copy of that one path is discarded, so a config file you bind-mount from the repo must be re-applied by hand after the update.
+
+Update scratch directories (`.cg-update-*`, `<appDir>-old-*`, `<appDir>-failed-*`) left behind by a crash mid-update are swept on gateway boot.
 
 The update target depends on the app's `source`:
 - `registry` — the latest published registry version.
@@ -3471,7 +3477,7 @@ services:
 | `command` | Override container command |
 | `entrypoint` | Override container entrypoint |
 | `environment` | Static env vars (`KEY=value`), secret keys to prompt for (`KEY` without `=`), or self-generating secrets (`KEY=!generate:<encoding>:<bytes>`) |
-| `volumes` | Volume mounts (named volumes or host paths within app dir) |
+| `volumes` | Volume mounts (named volumes or host paths within app dir). A relative source must start with `./` and stay inside the app dir — `../` is rejected at parse time, as is any embedded `/../`. **Breaking change:** an app installed before this rule that declares a `../` source can no longer be updated or reconfigured until its manifest is corrected. |
 | `ports` | Array of port declarations (see **Port fields** below) |
 | `depends_on` | Service dependency list |
 | `healthcheck` | Docker healthcheck (test, interval, timeout, retries) |
