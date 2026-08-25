@@ -19,6 +19,14 @@ import * as path from 'path';
 import { sharedNotesDir } from './config';
 import type { ResolvedKnowledgeSharedCfg } from './types';
 
+/**
+ * Same cap the Bun-side MCP tools enforce on `memory_shared_create`/`_update`
+ * (`MAX_SHARED_NOTE_SIZE` in `mcp/tools/memory/module.ts`) — kept as an
+ * independent constant here since the two processes don't share imports
+ * (see the cross-runtime note in `shared-dedup.ts`). Keep both values in sync.
+ */
+export const MAX_SHARED_NOTE_SIZE = 100 * 1024;
+
 /** Whether a note already exists at this name (post-`sharedNoteFilename` slugification). */
 export function sharedNoteExists(cfg: ResolvedKnowledgeSharedCfg, name: string): boolean {
   return fs.existsSync(path.join(sharedNotesDir(cfg), sharedNoteFilename(name)));

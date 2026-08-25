@@ -1,4 +1,4 @@
-import { writeSharedNote, sharedNoteExists, readSharedNote } from './shared-writer';
+import { writeSharedNote, sharedNoteExists, readSharedNote, MAX_SHARED_NOTE_SIZE } from './shared-writer';
 import { findSimilarSharedNotes } from './shared-dedup';
 import { resolveSharedConfig } from './config';
 import type { KnowledgeSharedConfig } from './types';
@@ -22,6 +22,19 @@ function mergeIntoNote(existing: string, addition: string, relatedNames: string[
 }
 
 /**
+ * Write only if the result stays within the same size cap the manual
+ * `memory_shared_create`/`_update` tools enforce. Unlike those tools, dreaming
+ * has no one to show a "content too large" error to — a note a recurring topic
+ * keeps merging into over months has no natural stopping point otherwise, so
+ * once a merge would cross the cap the note is left as-is (best-effort: a
+ * skipped promotion never fails the local dream, same as any other error here).
+ */
+function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: string, content: string): void {
+  if (content.length > MAX_SHARED_NOTE_SIZE) return;
+  writeSharedNote(cfg, name, content);
+}
+
+/**
  * Build the per-agent→shared promotion function used after the dreaming applier
  * writes an `add` to local memory (K3↔K4). Returns `undefined` when the shared
  * KB is disabled or in `propose` (dry-run) mode — callers then skip promotion.
@@ -36,6 +49,15 @@ function mergeIntoNote(existing: string, addition: string, relatedNames: string[
  * update. A `reason` that doesn't collide by name is also checked against the
  * shared vault's near-dup search before creating, and merged into the closest
  * match instead of creating a disconnected duplicate when one is found.
+ *
+ * Concurrency note: the name-collision check, read, and write below are not one
+ * atomic operation, so two agents dreaming at the same moment and promoting
+ * under the exact same `reason` can race — `shared-writer.ts` already documents
+ * that same-file races resolve to last-write-wins, never corruption, and other
+ * read-modify-write callers (e.g. `memory_shared_update`) have this same
+ * property. Naming by `reason` instead of a content hash makes same-name
+ * collisions between different agents more likely than the pre-#386 scheme, but
+ * it's the same accepted tradeoff, not a new class of risk.
  */
 export function makeSharedPromoter(
   // Kept for call-site compatibility (src/index.ts, gateway-router.ts) though no
@@ -56,7 +78,7 @@ export function makeSharedPromoter(
       // Same reason recurred: this IS the same fact — update it, never duplicate.
       if (sharedNoteExists(sharedCfg, name)) {
         const existing = readSharedNote(sharedCfg, name) ?? '';
-        writeSharedNote(sharedCfg, name, mergeIntoNote(existing, content));
+        writeCapped(sharedCfg, name, mergeIntoNote(existing, content));
         return;
       }
 
@@ -67,7 +89,7 @@ export function makeSharedPromoter(
       if (similar.length > 0) {
         const [primary, ...related] = similar;
         const existing = readSharedNote(sharedCfg, primary.name) ?? '';
-        writeSharedNote(
+        writeCapped(
           sharedCfg,
           primary.name,
           mergeIntoNote(existing, content, related.map((r) => r.name)),
@@ -75,7 +97,7 @@ export function makeSharedPromoter(
         return;
       }
 
-      writeSharedNote(sharedCfg, name, content);
+      writeCapped(sharedCfg, name, content);
     } catch {
       /* best-effort — a promotion failure never affects the local dream */
     }

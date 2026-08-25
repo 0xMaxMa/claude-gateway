@@ -10,6 +10,7 @@ import {
   makeSharedPromoter,
   ArchiveDB,
   findSimilarSharedNotes,
+  MAX_SHARED_NOTE_SIZE,
 } from '../../src/agent/knowledge';
 import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
 
@@ -144,6 +145,25 @@ describe('makeSharedPromoter — note identity + dedup (#386)', () => {
       promote({ reason: '', content: 'has content but no reason' });
       promote({ reason: 'no-content' });
       expect(noteFiles(cfg)).toEqual([]);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a merge that would cross MAX_SHARED_NOTE_SIZE is skipped — the note is left as it was', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({ reason: 'growing-topic', content: 'x'.repeat(MAX_SHARED_NOTE_SIZE - 100) });
+      const before = fs.readFileSync(path.join(sharedNotesDir(cfg), 'growing-topic.md'), 'utf8');
+
+      // Same reason recurs with enough new content that the merged result would
+      // exceed the cap — pre-fix this would have written past it unbounded.
+      promote({ reason: 'growing-topic', content: 'y'.repeat(1000) });
+
+      const after = fs.readFileSync(path.join(sharedNotesDir(cfg), 'growing-topic.md'), 'utf8');
+      expect(after).toBe(before);
+      expect(after.length).toBeLessThanOrEqual(MAX_SHARED_NOTE_SIZE);
     } finally {
       cleanup(cfg);
     }
