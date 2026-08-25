@@ -683,8 +683,9 @@ class Driver {
       { isBusy: this.screen.isBusy(), quietMs: this.screen.quietMs() },
       HEARTBEAT_LIVENESS_QUIET_MS,
     )
-      // A pending Task sub-agent runs invisibly (sidechain records, quiet
-      // screen) — keep writing the heartbeat so the receiver's stalled
+      // A pending tool call (Task's invisible sub-agent, or a quiet
+      // foreground tool like Bash) can leave the screen quiet with no PTY
+      // output — keep writing the heartbeat so the receiver's stalled
       // detector doesn't tear the session down in exactly the window the
       // pendingToolUseIds gate is holding the turn open for.
       || (this.turn ? this.turn.pendingToolUseIds.size > 0 : false);

@@ -66,6 +66,10 @@
  *                          detection heuristic would wrongly end the turn at
  *                          ~2s here too, submitting the next queued message
  *                          into a still-busy TUI (issue #388).
+ *   BASH_ORPHAN         — like TASK_ORPHAN, but for an ordinary foreground
+ *                          tool (Bash): its tool_result never arrives. Proves
+ *                          the watchdog's "session preserved" recovery isn't
+ *                          Task-specific either.
  *   …SWALLOW_ONCE…      — (substring anywhere in the text) the first Enter
  *                          is swallowed: the draft stays in the input line
  *                          ("❯ <text>"), never busy, no transcript. The
@@ -290,6 +294,25 @@ function submit(text) {
       });
       writeTranscript('bash-wait-final-result');
     }, 4500);
+    return;
+  }
+  if (trimmed === 'BASH_ORPHAN') {
+    // Like TASK_ORPHAN, but for an ordinary foreground tool (Bash): a
+    // tool_use lands but its tool_result NEVER arrives (the shell command
+    // hung or the process died) and no turn_duration is written. The
+    // fallback stays blocked (pendingToolUseIds never empties); the
+    // watchdog must end the turn with an error WITHOUT killing the PTY
+    // session — the same "session preserved" branch that TASK_ORPHAN
+    // proves, now exercised for a non-Task tool name (issue #388).
+    scenario = null;
+    render('esc to interrupt\r\n❯ ');
+    setTimeout(() => {
+      appendRecord({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'bash-2', name: 'Bash', input: {} }] },
+      });
+      idle(); // then silence — no tool_result, no turn_duration, ever.
+    }, 150);
     return;
   }
 

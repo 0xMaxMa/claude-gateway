@@ -436,4 +436,37 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     expect(result.subtype).toBe('success');
     expect(result.result).toContain('bash-wait-final-result');
   }, 20000);
+
+  /**
+   * I-PTY-MENU-15: an orphaned non-Task tool_use (Bash) — no tool_result, no
+   * turn_duration ever — must NOT hang forever or kill the session, same as
+   * I-PTY-MENU-13 for Task. Proves the watchdog's "session preserved"
+   * recovery branch isn't Task-specific either (issue #388).
+   */
+  it('I-PTY-MENU-15: an orphaned non-Task tool_use (Bash) ends via the watchdog with an error, session survives', async () => {
+    start({ PTY_SHELL_WATCHDOG_MS: '1500' });
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('BASH_ORPHAN'));
+
+    // No tool_result ever comes; the shortened watchdog (1500ms after the last
+    // progress) must end the turn with an error rather than hang.
+    const ended = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      6000,
+    );
+    expect(ended).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; is_error?: boolean };
+    expect(result.is_error).toBe(true);
+
+    // Session must still be alive (watchdog did NOT shutdown) — a fresh turn
+    // still completes, producing a second result event.
+    expect(wrapper.exitCode).toBeNull();
+    wrapper.stdin!.write(makeTurnJson('hello again'));
+    const second = await waitFor(
+      () => collector.events.filter((e) => e.type === 'result').length >= 2,
+      6000,
+    );
+    expect(second).toBe(true);
+  }, 25000);
 });
