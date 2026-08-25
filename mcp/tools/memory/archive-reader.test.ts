@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { searchArchive, getExcerpt, isMemoryScopedPath, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
+import { searchArchive, findSimilarSharedNotes, getExcerpt, isMemoryScopedPath, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
 
 // Build a temp agent dir with a kb.sqlite carrying the given chunks.
 function mkAgentWithArchive(
@@ -209,4 +209,28 @@ test('getExcerpt: a symlink inside memory/ escaping the workspace is refused', (
   } finally {
     fs.rmSync(agentDir, { recursive: true, force: true });
   }
+});
+
+test('findSimilarSharedNotes: OR-matches on partial overlap where an AND search (searchArchive) would miss', () => {
+  const { workspaceDir } = mkAgentWithArchive([
+    { id: 'notes/oncall-runbook.md#1-1', path: 'notes/oncall-runbook.md', start: 1, end: 1, text: 'escalate paging incidents to the platform team via pagerduty' },
+    { id: 'notes/unrelated.md#1-1', path: 'notes/unrelated.md', start: 1, end: 1, text: 'deploy checklist for the frontend release pipeline' },
+  ]);
+  const dbPath = archiveDbPath(workspaceDir);
+  // Seed text shares only "escalate" + "paging" with the runbook note, not the
+  // rest of its wording — an implicit-AND searchArchive() call would need every
+  // token to hit and returns nothing, but OR-based findSimilarSharedNotes finds it.
+  const seed = 'oncall escalation paging on-call playbook';
+  expect(searchArchive(dbPath, seed, 5).length).toBe(0);
+  const similar = findSimilarSharedNotes(dbPath, seed, 5);
+  expect(similar.length).toBe(1);
+  expect(similar[0].path).toBe('notes/oncall-runbook.md');
+});
+
+test('findSimilarSharedNotes: no matching terms, or a missing DB, both return []', () => {
+  const { workspaceDir } = mkAgentWithArchive([
+    { id: 'notes/oncall-runbook.md#1-1', path: 'notes/oncall-runbook.md', start: 1, end: 1, text: 'escalate paging incidents to the platform team' },
+  ]);
+  expect(findSimilarSharedNotes(archiveDbPath(workspaceDir), 'completely unrelated topic zzz', 5)).toEqual([]);
+  expect(findSimilarSharedNotes('/nonexistent/kb.sqlite', 'oncall escalation', 5)).toEqual([]);
 });
