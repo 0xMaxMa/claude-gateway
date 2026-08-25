@@ -217,6 +217,78 @@ export interface FsApi {
 }
 
 /**
+ * A single queued auto-forward. `turnId` identifies the turn that produced it
+ * (the live typing-signal timestamp read at write time) — `null` when no
+ * signal file existed yet (e.g. an orphan forward from an autonomous wake
+ * with no inbound message). Writers: `AgentRunner.writeAutoForward()`.
+ */
+export interface ForwardEntry {
+  text: string
+  format: 'text' | 'html'
+  turnId: string | null
+}
+
+function normalizeForwardEntry(raw: unknown): ForwardEntry | null {
+  if (raw && typeof raw === 'object' && typeof (raw as { text?: unknown }).text === 'string') {
+    const o = raw as { text: string; format?: unknown; turnId?: unknown }
+    return {
+      text: o.text,
+      format: o.format === 'html' ? 'html' : 'text',
+      turnId: typeof o.turnId === 'string' ? o.turnId : null,
+    }
+  }
+  return null
+}
+
+/**
+ * Parse `.forward` file content into an ordered queue of entries. Accepts the
+ * current queue format (a JSON array), the pre-queue single-object format,
+ * and the original plain-text format — so an in-flight file survives a
+ * rolling deploy in either direction instead of losing its content.
+ */
+export function parseForwardQueue(raw: string): ForwardEntry[] {
+  const trimmed = raw.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) {
+      return parsed.map(normalizeForwardEntry).filter((e): e is ForwardEntry => e !== null)
+    }
+    const single = normalizeForwardEntry(parsed)
+    return single ? [single] : []
+  } catch {
+    return [{ text: trimmed, format: 'text', turnId: null }]
+  }
+}
+
+/**
+ * Parse `.replied` marker content. Current format is `{ text, turnId }`; a
+ * legacy marker (plain text, or JSON without a `turnId`) parses to
+ * `turnId: null`, which — per `resolveForwardDelivery` below — never
+ * satisfies dedup, so a marker from a version predating this format degrades
+ * to "deliver" rather than risking a silent drop.
+ */
+function parseRepliedTurnId(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw.trim()) as { turnId?: unknown }
+    if (parsed && typeof parsed === 'object' && typeof parsed.turnId === 'string') {
+      return parsed.turnId
+    }
+  } catch {}
+  return null
+}
+
+/**
+ * Turn-scoped dedup: an entry is already covered by the reply tool only when
+ * both sides captured the SAME live turn id at write time. A `null` turnId on
+ * either side never matches — favors an extra/duplicate delivery over a
+ * silently dropped one.
+ */
+function isEntryAlreadyReplied(entry: ForwardEntry, repliedTurnId: string | null): boolean {
+  return repliedTurnId !== null && entry.turnId !== null && entry.turnId === repliedTurnId
+}
+
+/**
  * Deliver auto-forwarded turn text to a chat, never silently dropping content.
  * Each chunk that fails as HTML (e.g. Telegram rejects an entity the balancer
  * didn't anticipate) is retried as plain text — the user always gets the words,
@@ -292,22 +364,18 @@ export function drainOrphanForwards(
     // Remove BEFORE sending so a slow/failing send can't double-deliver.
     fsApi.rmSync(forwardPath, { force: true })
     // Mirror stop()'s dedup: a lingering .replied with no typing state means
-    // the agent already sent this turn's text via the reply tool.
+    // the agent already sent SOME turn's text via the reply tool — but only
+    // entries whose turnId matches that marker's turn are actually covered.
     const repliedPath = `${typingDir}/${chatId}.replied`
+    let repliedTurnId: string | null = null
     if (fsApi.existsSync(repliedPath)) {
+      try { repliedTurnId = parseRepliedTurnId(fsApi.readFileSync(repliedPath, 'utf8')) } catch {}
       fsApi.rmSync(repliedPath, { force: true })
-      continue
     }
-    let text = raw
-    let parseMode: 'HTML' | undefined
-    try {
-      const parsed = JSON.parse(raw) as { text: string; format: string }
-      text = parsed.text
-      parseMode = parsed.format === 'html' ? 'HTML' : undefined
-    } catch {
-      // Old format: plain text
+    for (const entry of parseForwardQueue(raw)) {
+      if (!entry.text || isEntryAlreadyReplied(entry, repliedTurnId)) continue
+      void deliverForwardText(botApi, chatId, entry.text, entry.format === 'html' ? 'HTML' : undefined)
     }
-    if (text) void deliverForwardText(botApi, chatId, text, parseMode)
   }
 }
 
@@ -472,27 +540,21 @@ export function createWorkingStateManager(
         }
       } catch {}
     }
-    // Auto-forward result text to Telegram if the agent did not already reply with the same text.
+    // Auto-forward queued turn text to Telegram, skipping only the entries the
+    // reply tool already sent (same turnId as the .replied marker) — turn A's
+    // leftover marker must never suppress turn B's forward. See
+    // isEntryAlreadyReplied() / the module docstring for the race this guards.
     const forwardPath = forwardFilePath(chatId)
     const repliedPath = repliedFilePath(chatId)
     if (fsApi.existsSync(forwardPath)) {
       try {
-        const raw = fsApi.readFileSync(forwardPath, 'utf8').trim()
-        let forwardText: string
-        let parseMode: 'HTML' | undefined
-        try {
-          const parsed = JSON.parse(raw) as { text: string; format: string }
-          forwardText = parsed.text
-          parseMode = parsed.format === 'html' ? 'HTML' : undefined
-        } catch {
-          // Fallback: treat as plain text (old format compatibility)
-          forwardText = raw
-          parseMode = undefined
-        }
-        // Skip if the reply tool already sent a message (agent already replied)
-        const alreadyReplied = fsApi.existsSync(repliedPath)
-        if (!alreadyReplied && forwardText) {
-          await deliverForwardText(botApi, chatId, forwardText, parseMode)
+        const raw = fsApi.readFileSync(forwardPath, 'utf8')
+        const repliedTurnId = fsApi.existsSync(repliedPath)
+          ? parseRepliedTurnId(fsApi.readFileSync(repliedPath, 'utf8'))
+          : null
+        for (const entry of parseForwardQueue(raw)) {
+          if (!entry.text || isEntryAlreadyReplied(entry, repliedTurnId)) continue
+          await deliverForwardText(botApi, chatId, entry.text, entry.format === 'html' ? 'HTML' : undefined)
         }
       } catch {}
       fsApi.rmSync(forwardPath, { force: true })

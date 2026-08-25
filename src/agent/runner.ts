@@ -2476,6 +2476,22 @@ export class AgentRunner extends EventEmitter {
     return path.join(this.agentConfig.workspace, stateDir, 'typing');
   }
 
+  /**
+   * Read the live typing-signal file's timestamp as this turn's id. Shared
+   * with the `telegram_reply` MCP tool (a separate process) purely via this
+   * file, so `.forward`/`.replied` markers written around the same turn carry
+   * a matching id — see writeAutoForward()'s dedup comment.
+   */
+  private readCurrentTurnId(chatId: string): string | null {
+    const typingDir = this.getTypingDir(chatId);
+    try {
+      const raw = fs.readFileSync(path.join(typingDir, chatId), 'utf8').trim();
+      return raw || null;
+    } catch {
+      return null;
+    }
+  }
+
   private writeTypingError(chatId: string, code: string): void {
     const typingDir = this.getTypingDir(chatId);
     try {
@@ -2548,9 +2564,37 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     const typingDir = this.getTypingDir(chatId);
+    const forwardPath = path.join(typingDir, `${chatId}.forward`);
     try {
       fs.mkdirSync(typingDir, { recursive: true });
-      fs.writeFileSync(path.join(typingDir, `${chatId}.forward`), JSON.stringify({ text, format }));
+      // Append rather than overwrite: two forward-worthy events for the same
+      // chat before the typing loop drains (e.g. two command replies, or the
+      // race where a queued turn's stop() call drains a prior turn's leftover
+      // state) must both reach the user, not have the second clobber the
+      // first. turnId is the live typing-signal timestamp — the receiver uses
+      // it to scope the `.replied` dedup marker to the turn that wrote it.
+      let entries: Array<{ text: string; format: string; turnId: string | null }> = [];
+      try {
+        const raw = fs.readFileSync(forwardPath, 'utf8').trim();
+        if (raw) {
+          try {
+            const parsed: unknown = JSON.parse(raw);
+            entries = Array.isArray(parsed)
+              ? (parsed as typeof entries)
+              : [parsed as (typeof entries)[number]];
+          } catch {
+            entries = [{ text: raw, format: 'text', turnId: null }];
+          }
+        }
+      } catch {
+        // No existing file — fresh queue.
+      }
+      entries.push({ text, format, turnId: this.readCurrentTurnId(chatId) });
+      // Atomic write (tmp + rename): the receiver polls this directory on
+      // every typing tick, so a non-atomic write could be read mid-flush.
+      const tmpPath = `${forwardPath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(entries));
+      fs.renameSync(tmpPath, forwardPath);
     } catch {
       // Non-fatal
     }

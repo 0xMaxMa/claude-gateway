@@ -866,15 +866,19 @@ describe('createWorkingStateManager', () => {
       expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, 'Plain text fallback', {})
     })
 
-    it('U-TY-08: skips forward when .replied exists (agent already replied via tool)', async () => {
+    it('U-TY-08: skips forward when .replied exists for the SAME turn (agent already replied via tool)', async () => {
       const bot = makeBotApi()
       const fsApi = makeFsApi()
       const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
 
       mgr.start(CHAT_ID)
-      // Simulate both .forward and .replied exist — agent already sent a reply
-      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'Hello from agent', format: 'text' }))
-      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.replied`, String(Date.now()))
+      // Simulate both .forward and .replied written during the same turn —
+      // both carry the turn's live signal timestamp as turnId.
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'Hello from agent', format: 'text', turnId: 'turn-A' }),
+      )
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.replied`, JSON.stringify({ text: 'Hello from agent', turnId: 'turn-A' }))
 
       // Remove signal file to trigger stop on next tick
       fsApi._files.delete(`${TYPING_DIR}/${CHAT_ID}`)
@@ -883,11 +887,64 @@ describe('createWorkingStateManager', () => {
       await Promise.resolve()
       await Promise.resolve()
 
-      // sendMessage should NOT be called — agent already replied
+      // sendMessage should NOT be called — agent already replied this turn
       const forwardCalls = bot.sendMessage.mock.calls.filter(
         (c: unknown[]) => c[1] === 'Hello from agent'
       )
       expect(forwardCalls).toHaveLength(0)
+    })
+
+    // Regression for claude-gateway#380 — race 1: a `.replied` marker left
+    // over from an earlier turn (turn A) must NEVER suppress a later turn's
+    // (turn B's) auto-forward, even though `stop()` only runs once both
+    // turns have ended. Reproduces the exact race from the issue: turn A
+    // replies via the tool, turn B replies via writeAutoForward (e.g. a
+    // command reply) before stop() ever drains turn A's leftover marker.
+    it('U-TY-08b: turn B forward is delivered despite turn A\'s leftover .replied marker (different turnId)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      // Turn A's .replied marker lingers (its own stop() never ran before
+      // turn B's signal-file rewrite made this stop() call the one that
+      // finally observes the missing signal and drains everything).
+      fsApi._files.set(`${TYPING_DIR}/${CHAT_ID}.replied`, JSON.stringify({ text: 'turn A reply', turnId: 'turn-A' }))
+      // Turn B's forward — a different turnId.
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'turn B forward', format: 'text', turnId: 'turn-B' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, 'turn B forward', {})
+    })
+
+    // Regression for claude-gateway#380 — race 2: two forward-worthy events
+    // for the same chat before drain (e.g. two command replies queued back
+    // to back) must both reach the user in order, not have the second
+    // silently clobber the first.
+    it('U-TY-08c: two queued forward entries both deliver in order (no clobber)', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify([
+          { text: 'first notice', format: 'text', turnId: 'turn-A' },
+          { text: 'second notice', format: 'text', turnId: 'turn-A' },
+        ]),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      const calls = bot.sendMessage.mock.calls
+        .filter(c => c[0] === CHAT_ID && (c[1] === 'first notice' || c[1] === 'second notice'))
+        .map(c => c[1])
+      expect(calls).toEqual(['first notice', 'second notice'])
     })
 
     it('U-TY-09: cleans up both .forward and .replied files after stop', async () => {
@@ -1272,10 +1329,10 @@ describe('drainOrphanForwards', () => {
     expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(true)
   })
 
-  it('U-TY-DR-03: lingering .replied means the reply tool already sent — removes both, no send', () => {
+  it('U-TY-DR-03: lingering .replied for the SAME turn means the reply tool already sent — removes both, no send', () => {
     const files = new Map([
-      [`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'dup', format: 'text' })],
-      [`${TYPING_DIR}/${CHAT_ID}.replied`, '1'],
+      [`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'dup', format: 'text', turnId: 'turn-A' })],
+      [`${TYPING_DIR}/${CHAT_ID}.replied`, JSON.stringify({ text: 'dup', turnId: 'turn-A' })],
     ])
     const fsApi = makeDrainFsApi(files)
     const bot = makeBotApi()
@@ -1283,6 +1340,25 @@ describe('drainOrphanForwards', () => {
     drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
 
     expect(bot.sendMessage).not.toHaveBeenCalled()
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
+    expect(files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
+  })
+
+  // Regression for claude-gateway#380 — a `.replied` marker from a DIFFERENT
+  // turn must not suppress this orphan forward, mirroring U-TY-08b for the
+  // drain-poller path.
+  it('U-TY-DR-03b: lingering .replied for a DIFFERENT turn does not suppress the forward', async () => {
+    const files = new Map([
+      [`${TYPING_DIR}/${CHAT_ID}.forward`, JSON.stringify({ text: 'not a dup', format: 'text', turnId: 'turn-B' })],
+      [`${TYPING_DIR}/${CHAT_ID}.replied`, JSON.stringify({ text: 'earlier turn', turnId: 'turn-A' })],
+    ])
+    const fsApi = makeDrainFsApi(files)
+    const bot = makeBotApi()
+
+    drainOrphanForwards(TYPING_DIR, new Set<string>(), bot, fsApi)
+    await Promise.resolve()
+
+    expect(bot.sendMessage).toHaveBeenCalledWith(CHAT_ID, 'not a dup', {})
     expect(files.has(`${TYPING_DIR}/${CHAT_ID}.forward`)).toBe(false)
     expect(files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
   })

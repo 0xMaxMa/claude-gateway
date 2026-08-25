@@ -363,10 +363,18 @@ export class TelegramModule implements ChannelModule {
       }
     }
 
-    // Write .replied marker
+    // Write .replied marker, tagged with the live typing-signal timestamp as
+    // this turn's id — the receiver (typing.ts) only treats a queued
+    // auto-forward as "already replied" when its own turnId matches this one,
+    // so a marker left over from an earlier turn can never suppress a later
+    // turn's forward (see typing.ts's isEntryAlreadyReplied()).
     try {
       fs.mkdirSync(this.typingDir, { recursive: true });
-      fs.writeFileSync(path.join(this.typingDir, `${chat_id}.replied`), sendText);
+      let turnId: string | null = null;
+      try {
+        turnId = fs.readFileSync(path.join(this.typingDir, chat_id), 'utf8').trim() || null;
+      } catch {}
+      fs.writeFileSync(path.join(this.typingDir, `${chat_id}.replied`), JSON.stringify({ text: sendText, turnId }));
     } catch {}
 
     const result = sentIds.length === 1

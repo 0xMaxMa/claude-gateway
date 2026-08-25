@@ -586,29 +586,37 @@ export class DiscordModule implements ChannelModule {
       if (!file.endsWith('.forward')) continue;
       const filePath = path.join(typingDir, file);
       const channelId = file.slice(0, -'.forward'.length);
-      let text: string;
-      let parseMode: undefined | 'html';
+      // AgentRunner.writeAutoForward() appends to a queue rather than
+      // overwriting (claude-gateway#380), so this file is a JSON array of
+      // { text, format, turnId } entries — but tolerate the pre-queue
+      // single-object form and the original plain-text form too, since a
+      // file in flight during a rolling deploy can be in either shape.
+      let entries: Array<{ text?: unknown; format?: unknown }>;
       try {
         const raw = fs.readFileSync(filePath, 'utf8').trim();
         try {
-          const parsed = JSON.parse(raw) as { text: string; format: string };
-          text = parsed.text;
-          parseMode = parsed.format === 'html' ? 'html' : undefined;
+          const parsed: unknown = JSON.parse(raw);
+          entries = Array.isArray(parsed) ? parsed : [parsed as { text?: unknown; format?: unknown }];
         } catch {
-          text = raw;
+          entries = [{ text: raw }];
         }
         fs.rmSync(filePath, { force: true });
       } catch { continue; }
 
-      if (!text) continue;
-      try {
-        const channel = await this.client.channels.fetch(channelId);
-        if (parseMode === 'html') {
-          // Discord doesn't support HTML — strip tags and send plain text
-          text = text.replace(/<[^>]*>/g, '');
-        }
-        await sendMessage(channel, text, {});
-      } catch { /* non-fatal */ }
+      // Discord has no `.replied` dedup mechanism (unlike Telegram) — every
+      // queued entry is delivered, in order.
+      for (const entry of entries) {
+        let text = typeof entry.text === 'string' ? entry.text : '';
+        if (!text) continue;
+        try {
+          const channel = await this.client.channels.fetch(channelId);
+          if (entry.format === 'html') {
+            // Discord doesn't support HTML — strip tags and send plain text
+            text = text.replace(/<[^>]*>/g, '');
+          }
+          await sendMessage(channel, text, {});
+        } catch { /* non-fatal */ }
+      }
     }
   }
 

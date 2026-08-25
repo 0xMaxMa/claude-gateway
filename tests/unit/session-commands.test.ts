@@ -132,8 +132,9 @@ describe('AgentRunner — /session info display (U22, U23)', () => {
   function getForwardText(): string {
     const forwardFile = getForwardFile();
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    return content.text as string;
+    // Queue format (claude-gateway#380): read the most recently queued entry.
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8')) as Array<{ text: string }>;
+    return entries[entries.length - 1]!.text;
   }
 
   async function waitForForward(): Promise<void> {
@@ -294,8 +295,9 @@ describe('AgentRunner — /stop command', () => {
   function getForwardText(): string {
     const forwardFile = getForwardFile();
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    return content.text as string;
+    // Queue format (claude-gateway#380): read the most recently queued entry.
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8')) as Array<{ text: string }>;
+    return entries[entries.length - 1]!.text;
   }
 
   type SessionLike = {
