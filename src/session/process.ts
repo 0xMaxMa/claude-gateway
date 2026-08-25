@@ -126,6 +126,7 @@ export class SessionProcess extends EventEmitter {
   // this field exists for no longer applies. Read via
   // hasLikelyOutstandingBackgroundWork().
   private lastBackgroundAgentDispatchAt: number | null = null;
+  private backgroundWaitTimer: ReturnType<typeof setTimeout> | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
   backend: 'pty-shell' | 'headless' = 'headless';
@@ -1063,6 +1064,8 @@ export class SessionProcess extends EventEmitter {
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       this._exited = true;
+      this.lastBackgroundAgentDispatchAt = null;
+      this.clearBackgroundWaitTimer();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
       // stopped or restarted mid-turn (without a final result/session_idle).
@@ -1295,6 +1298,48 @@ export class SessionProcess extends EventEmitter {
 
   get isProcessing(): boolean { return this._processing; }
 
+  private clearBackgroundWaitTimer(): void {
+    if (this.backgroundWaitTimer !== null) {
+      clearTimeout(this.backgroundWaitTimer);
+      this.backgroundWaitTimer = null;
+    }
+  }
+
+  /**
+   * Extend Telegram's working state only while a parent session is waiting for
+   * background Agent/Workflow work. A bounded expiry releases the state if the
+   * child task never sends its completion notification.
+   */
+  retainBackgroundWorkingState(): boolean {
+    if (this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
+
+    const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
+    try {
+      fs.mkdirSync(this.typingDir, { recursive: true });
+      fs.writeFileSync(processingPath, String(Date.now()));
+    } catch (err) {
+      this.logger.warn('Failed to retain .processing sentinel for background work', {
+        chatId: this.chatId,
+        error: (err as Error).message,
+      });
+    }
+
+    if (this.backgroundWaitTimer === null) {
+      const elapsed = Date.now() - this.lastBackgroundAgentDispatchAt!;
+      const remaining = Math.max(0, BACKGROUND_AGENT_GRACE_MS - elapsed);
+      this.backgroundWaitTimer = setTimeout(() => {
+        this.backgroundWaitTimer = null;
+        this.lastBackgroundAgentDispatchAt = null;
+        if (!this._processing) {
+          try { fs.rmSync(processingPath, { force: true }); } catch {}
+          this.emit('backgroundWorkExpired');
+        }
+      }, remaining);
+      this.backgroundWaitTimer.unref();
+    }
+    return true;
+  }
+
   setProcessing(active: boolean): void {
     if (this._processing !== active) {
       this._processing = active;
@@ -1304,6 +1349,7 @@ export class SessionProcess extends EventEmitter {
         // it (moot either way). isProcessing now covers this session correctly
         // on its own, so the idle-window concern this field exists for is over.
         this.lastBackgroundAgentDispatchAt = null;
+        this.clearBackgroundWaitTimer();
       }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
@@ -1413,6 +1459,8 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.lastBackgroundAgentDispatchAt = null;
+    this.clearBackgroundWaitTimer();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}

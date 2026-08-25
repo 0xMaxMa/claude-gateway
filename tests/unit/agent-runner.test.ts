@@ -4802,6 +4802,60 @@ describe('AgentRunner — gateway turn queue, coalesce, and /stop', () => {
     expect(channelWrites()[1]).toContain('second');
   }, 15000);
 
+  // U-AR-Q2-BG: after dispatching an asynchronous Agent task, the parent PTY
+  // becomes idle before the task notification arrives. Telegram typing must stay
+  // active throughout that wait, then stop normally after the follow-up turn.
+  it.each([
+    ['Agent', 'headless'],
+    ['Workflow', 'headless'],
+    ['Agent', 'pty-shell'],
+    ['Workflow', 'pty-shell'],
+  ])('U-AR-Q2-BG: retains Telegram typing for %s work on %s', async (toolName, backend) => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    const chatId = 'chat:q2-background';
+
+    await sendChannelPost(port, chatId, 'review this PR');
+    await waitForSession(runner, chatId);
+    await new Promise(r => setTimeout(r, 80));
+    const session = getSessions(runner).get(chatId)!;
+    (session as unknown as { backend: string }).backend = backend;
+    const rawProc = allProcesses[allProcesses.length - 1]!;
+    const typingSignal = path.join(agentConfig.workspace, '.telegram-state', 'typing', chatId);
+    const processingSignal = `${typingSignal}.processing`;
+    expect(fs.existsSync(typingSignal)).toBe(true);
+
+    rawProc.stdout!.emit('data', Buffer.from(JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_bg_typing', name: toolName, input: {} }] },
+      stop_reason: 'tool_use',
+    }) + '\n'));
+    // PTY emits a result for the sub-turn before session_idle; headless result
+    // itself is the true end-of-turn event.
+    rawProc.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+    if (backend === 'pty-shell') {
+      rawProc.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'session_idle' }) + '\n'));
+    }
+    await new Promise(r => setTimeout(r, 3_100));
+
+    // Pre-fix this signal was unconditionally deleted after 3 seconds.
+    expect(fs.existsSync(typingSignal)).toBe(true);
+    expect(fs.existsSync(processingSignal)).toBe(true);
+
+    // The task notification starts and completes a new turn with no further dispatch.
+    session.setProcessing(true);
+    session.setProcessing(false);
+    rawProc.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', is_error: false, result: '' }) + '\n'));
+    if (backend === 'pty-shell') {
+      rawProc.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'session_idle' }) + '\n'));
+    }
+    await new Promise(r => setTimeout(r, 3_100));
+
+    expect(fs.existsSync(typingSignal)).toBe(false);
+    expect(fs.existsSync(processingSignal)).toBe(false);
+  }, 15000);
+
   // U-AR-Q3: consecutive text messages within the coalesce window merge into ONE
   // turn (A1) — each still individually written to permanent history upstream.
   it('U-AR-Q3: coalesces consecutive text messages into a single turn', async () => {

@@ -1885,16 +1885,23 @@ export class AgentRunner extends EventEmitter {
             // `session_idle` once it is truly done; headless mode only produces
             // one `result` per message, so the timer pattern still applies there.
             if (proc.backend !== 'pty-shell') {
-              typingDoneTimer = setTimeout(() => {
-                this.writeTypingDone(mapKey);
-                typingDoneTimer = null;
-              }, TYPING_DONE_DELAY_MS);
+              const waitingForBackgroundWork = proc.retainBackgroundWorkingState();
+              if (!waitingForBackgroundWork) {
+                typingDoneTimer = setTimeout(() => {
+                  this.writeTypingDone(mapKey);
+                  typingDoneTimer = null;
+                }, TYPING_DONE_DELAY_MS);
+              }
             }
           }
           // PTY shell signals "truly idle" (no active turn, empty queue) with this
           // event. Start the typing-done timer here so the indicator stays alive
           // through multi-turn tool-call sequences and only stops when all work is done.
           if (obj['type'] === 'session_idle' && proc.backend === 'pty-shell') {
+            // A parent can become idle immediately after dispatching background
+            // Agent/Workflow work. Keep the Telegram typing signal and processing
+            // sentinel alive until the task notification starts its follow-up turn.
+            const waitingForBackgroundWork = proc.retainBackgroundWorkingState();
             // Gateway turn queue: on pty-shell this is the true end of the user's
             // turn (the wrapper only emits it when its own `this.turn` is null, so
             // it never fires between sub-turns) — flush the next queued turn.
@@ -1906,10 +1913,12 @@ export class AgentRunner extends EventEmitter {
             }
             // Skill-learning: pty-shell session_idle is the true end-of-user-turn.
             this.skillLearning?.onTurnEnd(mapKey, actualSessionId);
-            typingDoneTimer = setTimeout(() => {
-              this.writeTypingDone(mapKey);
-              typingDoneTimer = null;
-            }, TYPING_DONE_DELAY_MS);
+            if (!waitingForBackgroundWork) {
+              typingDoneTimer = setTimeout(() => {
+                this.writeTypingDone(mapKey);
+                typingDoneTimer = null;
+              }, TYPING_DONE_DELAY_MS);
+            }
           }
         } catch { /* non-JSON */ }
       });
@@ -1944,6 +1953,12 @@ export class AgentRunner extends EventEmitter {
           messageCountAtSpawn: proc.spawnContext.messageCountAtSpawn,
         }, this.channelFor(mapKey)).catch(() => {});
       }
+
+      proc.on('backgroundWorkExpired', () => {
+        // The child task never notified its parent within the bounded grace
+        // window; release the Telegram typing signal instead of leaving it live.
+        this.writeTypingDone(mapKey);
+      });
 
       // Tear down per-chat typing/processing state whenever the subprocess dies.
       // Uses `on` (not `once`): a single SessionProcess can auto-restart its child
@@ -2637,6 +2652,9 @@ export class AgentRunner extends EventEmitter {
   private startIdleCleaner(): void {
     this.idleCleanerTimer = setInterval(async () => {
       for (const [id, proc] of this.sessions) {
+        // A parent that just dispatched Agent/Workflow work is CLI-idle but its
+        // sub-agent may still need this session to receive the task notification.
+        if (proc.hasLikelyOutstandingBackgroundWork()) continue;
         if (proc.isIdle(this.idleTimeoutMs)) {
           this.logger.info('Stopping idle session', { sessionId: id });
           await proc.stop();
