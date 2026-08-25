@@ -15,6 +15,16 @@ import type { ApiKey } from '../types';
 
 export const DEFAULT_PORT = 10850;
 
+/** Expand a leading `~` to the home directory. Env vars (e.g. `GATEWAY_CONFIG`
+ *  set via Docker/systemd) are not shell-expanded, so a literal `~` must be
+ *  resolved here or the path silently fails to resolve. */
+function expandHome(p: string): string {
+  if (p.startsWith('~/') || p === '~') {
+    return path.join(os.homedir(), p.slice(2));
+  }
+  return p;
+}
+
 /** The slice of gateway config the CLI cares about. */
 export interface CliConfigView {
   bind?: string;
@@ -27,10 +37,11 @@ export interface CliConfigView {
  *  fields the CLI needs. Returns an empty view if the file is missing/unreadable
  *  so that flags/env can still drive resolution. */
 export function loadCliConfig(configPath?: string): CliConfigView {
-  const file =
+  const file = expandHome(
     configPath ||
-    process.env.GATEWAY_CONFIG ||
-    path.join(os.homedir(), '.claude-gateway', 'config.json');
+      process.env.GATEWAY_CONFIG ||
+      path.join(os.homedir(), '.claude-gateway', 'config.json')
+  );
   try {
     const raw = fs.readFileSync(file, 'utf8');
     const json = JSON.parse(raw) as { gateway?: { bind?: string; publicUrl?: string; logDir?: string; api?: { keys?: ApiKey[] } } };
