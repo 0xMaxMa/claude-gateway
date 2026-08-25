@@ -2421,12 +2421,25 @@ export class AgentRunner extends EventEmitter {
         }
         proc.markPendingRestart();
         deferred++;
-      } else if (deferIdle && proc.source !== 'api') {
-        // Lossless deferral for CHANNEL sessions only: leave the idle process
-        // running and arm a restart on its next message (mirrors the
-        // image-size-threshold path). Do NOT call proc.markPendingRestart() here
-        // — on an idle process it fires deferredRestartReady immediately and
-        // stops the session.
+      } else if ((proc.hasLikelyOutstandingBackgroundWork() || deferIdle) && proc.source !== 'api') {
+        // Lossless deferral for CHANNEL sessions: leave the idle process running
+        // and arm a restart on its next message instead of an immediate stop.
+        // Two independent reasons land here, neither gated by skipBusy (which
+        // only governs the isProcessing branch above — a session that's already
+        // idle isn't the self-restart-footgun case skipBusy exists for):
+        //   - deferIdle: the caller explicitly asked never to SIGKILL an idle
+        //     bystander (mirrors the image-size-threshold path).
+        //   - hasLikelyOutstandingBackgroundWork(): regardless of which tier
+        //     called restartOrDefer — even today's aggressive default — a
+        //     session that dispatched a background Agent/Workflow tool_use and
+        //     then ended its OWN turn looks idle here, but a sub-agent it
+        //     launched may still be doing real work. SIGKILLing it now would
+        //     silently destroy that in-flight work with no notification or
+        //     recovery (the incident this guards against: a CLAUDE.md-triggered
+        //     restart killed a session mid-way through 3 dispatched code-review
+        //     sub-agents).
+        // Do NOT call proc.markPendingRestart() here — on an idle process it
+        // fires deferredRestartReady immediately and stops the session.
         //
         // Guard on source: `pendingRestarts` is consumed ONLY in injectTurn (the
         // channel turn path, keyed by chatId). api / __heartbeat__ sessions are

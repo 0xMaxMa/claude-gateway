@@ -3,6 +3,7 @@ import * as path from 'path';
 import { WorkspaceFiles, LoadedWorkspace, WatchHandle } from '../types';
 import { createWatcher } from '../watch/factory';
 import { loadSkills, renderSkillsSection } from '../skills';
+import { DIARY_FILENAME } from './skill-learning/notifier';
 
 export class MissingRequiredFileError extends Error {
   constructor(fileName: string) {
@@ -407,9 +408,23 @@ const WATCH_DEBOUNCE_MS = 300;
  *   composed into CLAUDE.md exactly like SOUL/AGENTS, so it belongs in this tier
  *   for the same reason — omitting it would SIGKILL idle sessions on an
  *   IDENTITY.md write while deferring the semantically identical SOUL write.
+ *
+ * SKILL_LEARNING_FILES — the skill-learning diary (SKILLS_LEARNED.md, written by
+ *   the auto skill-create/update pipeline, not the live conversation). Unlike
+ *   MEMORY_FILES, the session whose transcript was reviewed is very often NOT
+ *   the one that needs restarting — other idle sessions on the same agent don't
+ *   already hold the new skill, so `none` would be wrong. It gets the same
+ *   `defer-idle` treatment as IDENTITY_FILES instead: reach sessions on their
+ *   next message, never SIGKILL one that's idle only because it dispatched a
+ *   background Agent/Workflow sub-agent and is waiting on it (see
+ *   hasLikelyOutstandingBackgroundWork() in session/process.ts — that guard
+ *   covers every restart tier, but keeping this file out of the aggressive
+ *   `restart` tier in the first place is the direct fix for the incident that
+ *   surfaced it).
  */
 export const MEMORY_FILES = new Set<string>(['MEMORY.md', 'USER.md']);
 export const IDENTITY_FILES = new Set<string>(['SOUL.md', 'AGENTS.md', 'IDENTITY.md']);
+export const SKILL_LEARNING_FILES = new Set<string>([DIARY_FILENAME]);
 
 /**
  * Union of the two tiers — kept for callers that only need "did the agent write
@@ -418,6 +433,7 @@ export const IDENTITY_FILES = new Set<string>(['SOUL.md', 'AGENTS.md', 'IDENTITY
 export const AGENT_WRITABLE_FILES = new Set<string>([
   ...MEMORY_FILES,
   ...IDENTITY_FILES,
+  ...SKILL_LEARNING_FILES,
 ]);
 
 /**
@@ -428,8 +444,9 @@ export const AGENT_WRITABLE_FILES = new Set<string>([
  *                  the writing session already holds the change and every future
  *                  spawn reads the recomposed CLAUDE.md, so a restart is pure
  *                  downside. A memory write can never drop a live session.
- *  - `defer-idle`  Operator identity (SOUL.md/AGENTS.md/IDENTITY.md), possibly
- *                  mixed with memory files: skip busy sessions (self-restart footgun) and
+ *  - `defer-idle`  Operator identity (SOUL.md/AGENTS.md/IDENTITY.md) or the
+ *                  skill-learning diary (SKILLS_LEARNED.md), possibly mixed with
+ *                  memory files: skip busy sessions (self-restart footgun) and
  *                  defer idle ones (lossless respawn on next message) — never
  *                  SIGKILL an idle bystander.
  *  - `restart`     Any non-agent-writable change (HEARTBEAT.md, operator config,

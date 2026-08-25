@@ -1091,6 +1091,111 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // hasLikelyOutstandingBackgroundWork() — a session that dispatches a
+  // background Agent/Workflow tool_use and then ends its own turn looks idle
+  // from the outside, but a sub-agent it launched may still be doing real
+  // work. This is the signal restartOrDefer consults so a config-driven
+  // restart never SIGKILLs a session mid-dispatch (the incident: 3 in-flight
+  // code-review sub-agents were destroyed when a skill-learning write
+  // triggered an immediate restart of their idle-but-waiting parent).
+  // --------------------------------------------------------------------------
+
+  function agentDispatchLine(toolName: string): string {
+    return JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'toolu_bg_1', name: toolName, input: {} }],
+      },
+      stop_reason: 'tool_use',
+    });
+  }
+
+  it('BG1: false before any Agent/Workflow dispatch is seen', async () => {
+    const sp = makeSp('chat:bg-none', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
+  it('BG2: true after a final-message Agent tool_use, while idle', async () => {
+    const sp = makeSp('chat:bg-agent', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true); // dispatch happens mid-turn
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false); // turn ends right after — this is the observed incident shape
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+  });
+
+  it('BG3: true after a Workflow dispatch too (same background-task contract as Agent)', async () => {
+    const sp = makeSp('chat:bg-workflow', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Workflow') + '\n'));
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+  });
+
+  it('BG4: an ordinary tool_use (e.g. Bash) never arms it — no false positive', async () => {
+    const sp = makeSp('chat:bg-bash', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Bash') + '\n'));
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
+  it('BG5: false while the session is actively processing (isProcessing takes precedence)', async () => {
+    const sp = makeSp('chat:bg-processing', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    // Still processing — isProcessing's own branch in restartOrDefer already
+    // covers this session correctly, so this getter defers to it (false here).
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
+  it('BG6: clears when a fresh turn starts, and does not silently re-arm on that turn ending', async () => {
+    const sp = makeSp('chat:bg-clear', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // A fresh turn begins — e.g. the notification this dispatch was waiting on
+    // woke the session, or unrelated new work superseded it.
+    sp.setProcessing(true);
+    // Turn ends with NO new Agent/Workflow dispatch this time.
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
+  it('BG7: expires after BACKGROUND_AGENT_GRACE_MS — a dispatch that never reports back cannot block a restart forever', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-ttl', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockReturnValue(T0 + 16 * 60 * 1000); // +16 min, past the 15-min grace window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------
   it('U-SP-17: --include-partial-messages flag is in spawn args', async () => {

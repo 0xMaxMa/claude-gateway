@@ -8,6 +8,7 @@ import {
   AGENT_WRITABLE_FILES,
   MEMORY_FILES,
   IDENTITY_FILES,
+  SKILL_LEARNING_FILES,
   classifyWorkspaceRestart,
   resolveMemoryBudget,
   DEFAULT_MEMORY_BUDGET,
@@ -15,6 +16,7 @@ import {
   MissingRequiredFileError,
   buildMemoryIndex,
 } from '../../src/agent/workspace-loader';
+import { DIARY_FILENAME } from '../../src/agent/skill-learning/notifier';
 import { waitFor } from '../helpers/wait-for';
 
 const FIXTURES = path.join(__dirname, '../fixtures/workspaces');
@@ -537,7 +539,7 @@ describe('workspace-loader', () => {
   // -------------------------------------------------------------------------
   // Self-restart footgun guard: agent-writable files skip busy-session restart
   // -------------------------------------------------------------------------
-  it('AGENT_WRITABLE_FILES: contains the memory + identity tiers (incl. IDENTITY.md), not HEARTBEAT/CLAUDE', () => {
+  it('AGENT_WRITABLE_FILES: contains the memory + identity + skill-learning tiers (incl. IDENTITY.md, SKILLS_LEARNED.md), not HEARTBEAT/CLAUDE', () => {
     // Memory-rule files the agent writes about itself/the user
     expect(AGENT_WRITABLE_FILES.has('MEMORY.md')).toBe(true);
     expect(AGENT_WRITABLE_FILES.has('USER.md')).toBe(true);
@@ -545,21 +547,32 @@ describe('workspace-loader', () => {
     expect(AGENT_WRITABLE_FILES.has('SOUL.md')).toBe(true);
     expect(AGENT_WRITABLE_FILES.has('AGENTS.md')).toBe(true);
     expect(AGENT_WRITABLE_FILES.has('IDENTITY.md')).toBe(true);
-    // Files outside both tiers → still trigger a normal restart-or-defer
+    // Skill-learning diary — also agent-self-authored, also deferred, never
+    // SIGKILLed idle (issue that motivated this: a skill-learning auto-edit
+    // triggered a `restart` tier that immediately killed an idle session, taking
+    // its in-flight background sub-agents down with it).
+    expect(AGENT_WRITABLE_FILES.has(DIARY_FILENAME)).toBe(true);
+    expect(AGENT_WRITABLE_FILES.has('SKILLS_LEARNED.md')).toBe(true);
+    // Files outside all tiers → still trigger a normal restart-or-defer
     expect(AGENT_WRITABLE_FILES.has('HEARTBEAT.md')).toBe(false);
     expect(AGENT_WRITABLE_FILES.has('CLAUDE.md')).toBe(false);
   });
 
   // -------------------------------------------------------------------------
-  // Tiered writable sets: memory vs identity (issue #321)
+  // Tiered writable sets: memory vs identity vs skill-learning (issue #321,
+  // extended for the skill-learning tier)
   // -------------------------------------------------------------------------
-  it('MEMORY_FILES/IDENTITY_FILES: partition the writable set correctly', () => {
+  it('MEMORY_FILES/IDENTITY_FILES/SKILL_LEARNING_FILES: partition the writable set correctly', () => {
     expect([...MEMORY_FILES].sort()).toEqual(['MEMORY.md', 'USER.md']);
     expect([...IDENTITY_FILES].sort()).toEqual(['AGENTS.md', 'IDENTITY.md', 'SOUL.md']);
-    // The two tiers are disjoint and their union is exactly AGENT_WRITABLE_FILES.
+    expect([...SKILL_LEARNING_FILES]).toEqual([DIARY_FILENAME]);
+    // The three tiers are pairwise disjoint and their union is exactly
+    // AGENT_WRITABLE_FILES.
     for (const f of MEMORY_FILES) expect(IDENTITY_FILES.has(f)).toBe(false);
+    for (const f of MEMORY_FILES) expect(SKILL_LEARNING_FILES.has(f)).toBe(false);
+    for (const f of IDENTITY_FILES) expect(SKILL_LEARNING_FILES.has(f)).toBe(false);
     expect([...AGENT_WRITABLE_FILES].sort()).toEqual(
-      [...MEMORY_FILES, ...IDENTITY_FILES].sort(),
+      [...MEMORY_FILES, ...IDENTITY_FILES, ...SKILL_LEARNING_FILES].sort(),
     );
   });
 
@@ -584,6 +597,18 @@ describe('workspace-loader', () => {
     // A mix of memory + identity is NOT memory-only → must not restart nothing;
     // identity presence pulls it into the deferred tier.
     expect(classifyWorkspaceRestart(['MEMORY.md', 'SOUL.md'])).toBe('defer-idle');
+  });
+
+  it('classifyWorkspaceRestart: REGRESSION — a skill-learning diary change (or mixed with memory/identity) defers idle, never restarts immediately', () => {
+    // Before this fix, SKILLS_LEARNED.md was outside every safe tier, so an
+    // auto skill-create/update write fell through to the aggressive `restart`
+    // action — which SIGKILLs any session that isn't mid-turn right now,
+    // including one that's idle only because it just dispatched a background
+    // Agent/Workflow sub-agent and is waiting on it.
+    expect(classifyWorkspaceRestart([DIARY_FILENAME])).toBe('defer-idle');
+    expect(classifyWorkspaceRestart(['SKILLS_LEARNED.md'])).toBe('defer-idle');
+    expect(classifyWorkspaceRestart(['SKILLS_LEARNED.md', 'MEMORY.md'])).toBe('defer-idle');
+    expect(classifyWorkspaceRestart(['SKILLS_LEARNED.md', 'SOUL.md'])).toBe('defer-idle');
   });
 
   it('classifyWorkspaceRestart: non-writable or empty change → normal restart', () => {
