@@ -214,6 +214,28 @@ export function searchArchive(
   return hits;
 }
 
+export function recordSharedPathRetrieval(dbPath: string, sourcePath: string, now = Date.now()): void {
+  if (!fs.existsSync(dbPath)) return;
+  try {
+    const db = new Database(dbPath);
+    try {
+      db.exec('PRAGMA busy_timeout=2000');
+      const rows = db
+        .query('SELECT DISTINCT entry_hash FROM kb_chunks WHERE path = ? AND entry_hash IS NOT NULL')
+        .all(sourcePath) as Array<{ entry_hash: string | null }>;
+      recordRetrievalHits(
+        { run: (sql, params = []) => void db.query(sql).run(...(params as never[])) },
+        rows.map((r) => r.entry_hash),
+        now,
+      );
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* best-effort telemetry — never affect a direct read response */
+  }
+}
+
 /**
  * Find shared notes whose content overlaps `seedText` (typically a new
  * note's name plus the opening of its content) — the basis of

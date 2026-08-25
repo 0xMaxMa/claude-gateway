@@ -48,11 +48,9 @@ function cfgFromVaultDir(vaultDir: string): ResolvedKnowledgeSharedCfg {
  * `findSimilarSharedNotes` before writing — nothing else prevents two agents
  * from independently picking the same topic under different names.
  *
- * This deliberately diverges from the nightly promoter's content-hashed
- * naming (`shared-promote.ts`), which exists so unrelated *automatic*
- * promotions never collide; the two schemes can't collide with each other
- * either, since a hashed name always carries an extra `-<8hex>` segment a
- * plain slugified name does not.
+ * This matches the nightly promoter's reason-derived naming (`shared-promote.ts`),
+ * so recurring automatic promotions and manual writes resolve through the same
+ * freeform shared namespace.
  */
 
 /** Whether a note already exists at this name (post-`sharedNoteFilename` slugification). */

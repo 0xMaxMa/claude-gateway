@@ -8,6 +8,8 @@
  * prompt or spawns tools.
  */
 
+import type { StalenessConfig, ResolvedStalenessCfg } from '../dreaming/types';
+
 /** Trust class of an indexed chunk. Fail-closed: unclassified ⇒ `untrusted`. */
 export type OriginClass = 'owner' | 'agent' | 'untrusted' | 'system';
 
@@ -37,6 +39,8 @@ export interface KnowledgeSharedConfig {
   root?: string;
   mode?: 'propose' | 'auto';
   graph?: boolean; // K5: compile the memory-wiki graph/dashboards over the vault
+  /** issue #392 part D: shared-KB staleness GC (reuses the dreaming shape). */
+  staleness?: StalenessConfig;
 }
 
 /** Resolved, sanitized shared-KB config (all fields present). */
@@ -46,6 +50,29 @@ export interface ResolvedKnowledgeSharedCfg {
   root: string;
   mode: 'propose' | 'auto';
   graph: boolean;
+  staleness: ResolvedStalenessCfg;
+}
+
+/** Raw config shape under `gateway.knowledge.reflection` (issue #392 part C). */
+export interface KnowledgeReflectionConfig {
+  enabled?: boolean;
+  dayOfWeek?: number; // 0=Sunday .. 6=Saturday, default 0
+  hour?: number; // default 4
+  minute?: number; // default 0
+  timezone?: string; // default "UTC"
+  maxClustersPerRun?: number; // default 5
+  reviewModel?: string; // default matches the dreaming reviewer's default
+}
+
+/** Resolved, sanitized reflection config (all fields present). */
+export interface ResolvedKnowledgeReflectionCfg {
+  enabled: boolean;
+  dayOfWeek: number;
+  hour: number;
+  minute: number;
+  timezone: string;
+  maxClustersPerRun: number;
+  reviewModel: string;
 }
 
 /** One indexed source file. */

@@ -230,6 +230,17 @@ export class ArchiveDB {
       CREATE TRIGGER IF NOT EXISTS kb_chunks_rev AFTER INSERT ON kb_chunks BEGIN
         UPDATE kb_index_state SET revision = revision + 1 WHERE id = 1;
       END;
+
+      -- Watermark for the weekly shared-KB reflection pass (issue #392 part C):
+      -- the kb_index_state.revision this DB was at the last time reflection ran,
+      -- so an unchanged KB is skipped entirely (zero LLM/compute cost). Single row,
+      -- same shape as kb_index_state. Harmless/unused for a per-agent archive DB.
+      CREATE TABLE IF NOT EXISTS kb_reflection_state (
+        id            INTEGER PRIMARY KEY CHECK (id = 1),
+        last_revision INTEGER NOT NULL DEFAULT 0,
+        last_run_at   INTEGER
+      );
+      INSERT OR IGNORE INTO kb_reflection_state (id, last_revision, last_run_at) VALUES (1, 0, NULL);
     `);
 
     // Idempotent column migration (planning-66): a kb.sqlite built before the
@@ -356,6 +367,29 @@ export class ArchiveDB {
       | { revision: number }
       | undefined;
     return row ? row.revision : 0;
+  }
+
+  /** The weekly reflection pass's watermark (issue #392 part C). */
+  getReflectionState(): { lastRevision: number; lastRunAt: number | null } {
+    const row = this.db.prepare('SELECT last_revision, last_run_at FROM kb_reflection_state WHERE id = 1').get() as
+      | { last_revision: number; last_run_at: number | null }
+      | undefined;
+    return { lastRevision: row?.last_revision ?? 0, lastRunAt: row?.last_run_at ?? null };
+  }
+
+  /** Persist the reflection pass's watermark after a run. */
+  setReflectionState(lastRevision: number, lastRunAt: number): void {
+    this.db
+      .prepare('UPDATE kb_reflection_state SET last_revision = ?, last_run_at = ? WHERE id = 1')
+      .run(lastRevision, lastRunAt);
+  }
+
+  /** Source paths whose mtime is strictly newer than `sinceMtime` (issue #392 part C). */
+  changedSourcePaths(sinceMtime: number): string[] {
+    const rows = this.db
+      .prepare('SELECT path FROM kb_sources WHERE mtime > ? ORDER BY path')
+      .all(sinceMtime) as Array<{ path: string }>;
+    return rows.map((r) => r.path);
   }
 
   /** Total chunk count (test/introspection helper). */

@@ -557,16 +557,19 @@ export class SessionProcess extends EventEmitter {
 
   /**
    * "1" when the read-path retrieval recorder should log memory_search hits into
-   * kb_retrieval_log (planning-66) — the LRU/feedback signal the nightly staleness
-   * GC folds into per-entry recency. Off unless staleness AND recordRetrievals are
-   * both enabled. Mirrors resolveSharedKbDir's env-gate pattern.
+   * kb_retrieval_log. Either enabled lifecycle tier can consume the same
+   * append-only log: personal dreaming staleness or shared-KB staleness.
    */
   private resolveRecordRetrievals(): string {
-    const s = resolveDreamingConfig(
+    const personal = resolveDreamingConfig(
       this.agentConfig.dreaming,
       this.gatewayConfig.gateway.dreaming,
     ).staleness;
-    return s.enabled && s.recordRetrievals ? '1' : '';
+    const shared = resolveSharedConfig(
+      this.agentConfig.knowledge?.shared,
+      this.gatewayConfig.gateway.knowledge?.shared,
+    ).staleness;
+    return (personal.enabled && personal.recordRetrievals) || (shared.enabled && shared.recordRetrievals) ? '1' : '';
   }
 
   private buildArgs(mcpConfigPath: string | null, model: string): string[] {

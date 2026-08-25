@@ -10,8 +10,8 @@
  */
 
 import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } from '../../types';
-import { searchArchive, findSimilarSharedNotes, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits } from './archive-reader';
-import { sharedNoteExists, readSharedNote, writeSharedNoteAtomic, deleteSharedNote, contentLossPercent, triggerSharedReindex } from './archive-writer';
+import { searchArchive, findSimilarSharedNotes, getExcerpt, archiveDbPath, sharedDbPathFromEnv, mergeHits, recordSharedPathRetrieval } from './archive-reader';
+import { sharedNoteExists, readSharedNote, writeSharedNoteAtomic, deleteSharedNote, contentLossPercent, triggerSharedReindex, sharedNoteFilename } from './archive-writer';
 
 /** memory_shared_update: below this line-loss %, an update just applies — no confirm needed. */
 const UPDATE_LOSS_CONFIRM_THRESHOLD = 50;
@@ -159,22 +159,23 @@ export class MemoryModule implements ToolModule {
 
           const personalDb = archiveDbPath(workspaceDir);
           const sharedDb = sharedDbPathFromEnv();
-          // Recall counter (planning-66): record retrievals ONLY against the
-          // per-agent archive (the GC tier). Gated by the gateway via env, mirroring
-          // GATEWAY_SHARED_KB_DIR — off unless dreaming.staleness.recordRetrievals.
+          // Recall counters are append-only, best-effort telemetry. Apply the
+          // same opt-in recording to BOTH KB tiers: shared lifecycle/staleness
+          // (issue #392) needs real `memory_search` reads to retain and restore
+          // notes, not manually seeded DB events in tests.
           const rec = { recordRetrievals: process.env.GATEWAY_RECORD_RETRIEVALS === '1' };
           let results;
           if (corpus === 'memory') {
             results = searchArchive(personalDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'memory' }));
           } else if (corpus === 'shared') {
             if (!sharedDb) return this.json({ results: [], unavailable: true, warning: 'shared KB is not enabled.' });
-            results = searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }));
+            results = searchArchive(sharedDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'shared' }));
           } else {
             // "all": merge personal + shared, keep the best by bm25.
             type Tagged = ReturnType<typeof searchArchive>[number] & { corpus: string };
             const mine: Tagged[] = searchArchive(personalDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'memory' }));
             const shared: Tagged[] = sharedDb
-              ? searchArchive(sharedDb, query, maxResults).map((h) => ({ ...h, corpus: 'shared' }))
+              ? searchArchive(sharedDb, query, maxResults, rec).map((h) => ({ ...h, corpus: 'shared' }))
               : [];
             results = mergeHits(mine, shared, maxResults);
           }
@@ -261,6 +262,11 @@ export class MemoryModule implements ToolModule {
           const content = readSharedNote(vaultDir, name);
           if (content === null) {
             return this.err(`memory_shared_get: no note named "${name}" found.`);
+          }
+          if (process.env.GATEWAY_RECORD_RETRIEVALS === '1' && sharedDb) {
+            // Shared notes are lifecycle-whole-file entries, so record the source
+            // note's indexed entry hash after a successful exact read (#392).
+            recordSharedPathRetrieval(sharedDb, sharedNoteFilename(name));
           }
           return this.json({ name, content });
         }

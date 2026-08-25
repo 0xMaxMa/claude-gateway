@@ -19,12 +19,31 @@ export {
   sharedVaultDir,
   sharedDbPath,
   sharedNotesDir,
+  resolveReflectionConfig,
+  REFLECTION_DEFAULTS,
 } from './config';
-export type { KnowledgeSharedConfig, ResolvedKnowledgeSharedCfg } from './types';
-export { writeSharedNote, sharedNoteFilename, sharedNoteExists, readSharedNote, MAX_SHARED_NOTE_SIZE } from './shared-writer';
+export type {
+  KnowledgeSharedConfig,
+  ResolvedKnowledgeSharedCfg,
+  KnowledgeReflectionConfig,
+  ResolvedKnowledgeReflectionCfg,
+} from './types';
+export {
+  writeSharedNote,
+  sharedNoteFilename,
+  sharedNoteExists,
+  readSharedNote,
+  deleteSharedNoteFile,
+  MAX_SHARED_NOTE_SIZE,
+} from './shared-writer';
 export { makeSharedPromoter } from './shared-promote';
 export { findSimilarSharedNotes } from './shared-dedup';
 export type { SimilarSharedNote } from './shared-dedup';
+export { runSharedStalenessGc, retireSharedNote, STALE_NOTE_PREFIX } from './shared-staleness';
+export type { SharedStalenessResult } from './shared-staleness';
+export { SharedReflectionManager, connectedComponents, msUntilNextWeeklyTime } from './reflection';
+export type { ReflectionResult, SharedReflectionManagerDeps } from './reflection';
+export { wholeNoteEntryBlock } from './lifecycle';
 export {
   compileWiki,
   parseWikiPage,

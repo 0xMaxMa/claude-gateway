@@ -64,11 +64,17 @@ const ZERO: StalenessResult = {
  *    (idle-past-TTL AND retrieved fewer than `minRetrievalKeep` times).
  *  - PROMOTE back any invalidated entry whose `last_retrieved` is newer than its
  *    `invalid_at` (it earned its keep after we aged it out).
+ *
+ * `isEligiblePath` (issue #392 part D) defaults to the personal-archive tier
+ * check (`isArchiveTierPath`); the shared-vault GC passes `() => true` since
+ * every shared note is lifecycle-eligible (there is no evergreen/pinned
+ * distinction there).
  */
 export function decideStaleness(
   rows: LifecycleRow[],
   cfg: { staleTtlDays: number; keepImportance: number; minRetrievalKeep: number },
   now: number,
+  isEligiblePath: (path: string) => boolean = isArchiveTierPath,
 ): { invalidate: LifecycleRow[]; promote: LifecycleRow[] } {
   const ttlMs = cfg.staleTtlDays * DAY_MS;
   const invalidate: LifecycleRow[] = [];
@@ -77,7 +83,7 @@ export function decideStaleness(
     if (r.invalidAt == null) {
       // Structurally exempt: evergreen/pinned never reach here (no lifecycle row),
       // but re-check the path defensively; importance is a non-decaying keep-axis.
-      if (!isArchiveTierPath(r.path)) continue;
+      if (!isEligiblePath(r.path)) continue;
       if ((r.importance ?? 0) >= cfg.keepImportance) continue;
       const superseded = !!r.supersededBy;
       const idle = now - (r.lastRetrieved ?? r.firstSeen);

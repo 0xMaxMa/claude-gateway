@@ -25,7 +25,7 @@ import * as os from 'os';
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
-import { resolveArchiveConfig, makeSharedPromoter } from './agent/knowledge';
+import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
 import { syncSharedSkills, syncModuleSkills } from './skills/sync';
 import { createWatcher } from './watch/factory';
@@ -174,6 +174,13 @@ interface StartupContext {
   sharedSkillsDir: string;
   logDir: string;
   cronManager: CronManager;
+  /**
+   * issue #392 part C: distinct resolved shared-vault roots a
+   * `SharedReflectionManager` has already been started for. The reflection
+   * pass is KB-level, not per-agent — however many agents share one vault
+   * root, exactly one manager is started for it (keyed by `sharedVaultDir`).
+   */
+  reflectionVaultsStarted: Set<string>;
 }
 
 async function startAgent(
@@ -365,6 +372,33 @@ async function startAgent(
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer
   } catch (err) {
     logger.warn('Failed to wire dreaming (continuing without it)', { error: (err as Error).message });
+  }
+
+  // ── Weekly shared-KB reflection pass (issue #392 part C) ──
+  // KB-level, not per-agent: only the FIRST agent to resolve a given shared-
+  // vault root starts a manager for it, so N agents sharing one vault still run
+  // exactly one weekly reflection job, not N nightly ones.
+  try {
+    const sharedCfg = resolveSharedConfig(agentConfig.knowledge?.shared, gatewayConfig.gateway.knowledge?.shared);
+    if (sharedCfg.enabled && sharedCfg.mode === 'auto') {
+      const vaultKey = sharedVaultDir(sharedCfg);
+      if (!ctx.reflectionVaultsStarted.has(vaultKey)) {
+        ctx.reflectionVaultsStarted.add(vaultKey);
+        const reflectionCfg = resolveReflectionConfig(
+          agentConfig.knowledge?.reflection,
+          gatewayConfig.gateway.knowledge?.reflection,
+        );
+        const reflection = new SharedReflectionManager({
+          sharedCfg,
+          reflectionCfg,
+          logger,
+          spawnFn: makeClaudeSpawn(reflectionCfg.reviewModel),
+        });
+        reflection.startReflecting(); // unref'd weekly self-rescheduling timer
+      }
+    }
+  } catch (err) {
+    logger.warn('Failed to wire shared-KB reflection (continuing without it)', { error: (err as Error).message });
   }
 
   // Log startup status
@@ -638,6 +672,7 @@ async function main(): Promise<void> {
     sharedSkillsDir,
     logDir,
     cronManager,
+    reflectionVaultsStarted: new Set(),
   };
 
   for (const agentConfig of config.agents) {

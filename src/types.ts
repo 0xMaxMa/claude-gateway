@@ -389,6 +389,31 @@ export interface GatewayConfig {
         root?: string;      // vault root dir, default ~/.claude-gateway/shared/kb
         mode?: 'propose' | 'auto'; // per-agent→shared promotion mode (K4), default "auto"
         graph?: boolean;    // K5: compile memory-wiki graph/dashboards, default false
+        /** issue #392 part D: shared-KB staleness GC (same shape as dreaming.staleness above). */
+        staleness?: {
+          enabled?: boolean;
+          staleTtlDays?: number;
+          keepImportance?: number;
+          minRetrievalKeep?: number;
+          supersession?: boolean;
+          recordRetrievals?: boolean;
+        };
+      };
+      /**
+       * Weekly, KB-level shared reflection pass (issue #392 part C). Runs once
+       * per distinct shared-vault root (not per agent), skips entirely when the
+       * vault hasn't changed since the last run, and clusters related notes
+       * (connected components over the wikilink graph) before proposing at most
+       * `maxClustersPerRun` bounded merges.
+       */
+      reflection?: {
+        enabled?: boolean;         // default true
+        dayOfWeek?: number;        // 0=Sunday..6=Saturday, default 0
+        hour?: number;             // default 4
+        minute?: number;           // default 0
+        timezone?: string;         // default "UTC"
+        maxClustersPerRun?: number; // default 5
+        reviewModel?: string;      // default matches the dreaming reviewer's default
       };
     };
   };
