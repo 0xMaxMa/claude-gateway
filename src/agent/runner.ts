@@ -1885,10 +1885,13 @@ export class AgentRunner extends EventEmitter {
             // `session_idle` once it is truly done; headless mode only produces
             // one `result` per message, so the timer pattern still applies there.
             if (proc.backend !== 'pty-shell') {
-              typingDoneTimer = setTimeout(() => {
-                this.writeTypingDone(mapKey);
-                typingDoneTimer = null;
-              }, TYPING_DONE_DELAY_MS);
+              const waitingForBackgroundWork = proc.retainBackgroundWorkingState();
+              if (!waitingForBackgroundWork) {
+                typingDoneTimer = setTimeout(() => {
+                  this.writeTypingDone(mapKey);
+                  typingDoneTimer = null;
+                }, TYPING_DONE_DELAY_MS);
+              }
             }
           }
           // PTY shell signals "truly idle" (no active turn, empty queue) with this
@@ -2649,6 +2652,9 @@ export class AgentRunner extends EventEmitter {
   private startIdleCleaner(): void {
     this.idleCleanerTimer = setInterval(async () => {
       for (const [id, proc] of this.sessions) {
+        // A parent that just dispatched Agent/Workflow work is CLI-idle but its
+        // sub-agent may still need this session to receive the task notification.
+        if (proc.hasLikelyOutstandingBackgroundWork()) continue;
         if (proc.isIdle(this.idleTimeoutMs)) {
           this.logger.info('Stopping idle session', { sessionId: id });
           await proc.stop();

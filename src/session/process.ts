@@ -1064,6 +1064,8 @@ export class SessionProcess extends EventEmitter {
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       this._exited = true;
+      this.lastBackgroundAgentDispatchAt = null;
+      this.clearBackgroundWaitTimer();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
       // stopped or restarted mid-turn (without a final result/session_idle).
@@ -1296,6 +1298,13 @@ export class SessionProcess extends EventEmitter {
 
   get isProcessing(): boolean { return this._processing; }
 
+  private clearBackgroundWaitTimer(): void {
+    if (this.backgroundWaitTimer !== null) {
+      clearTimeout(this.backgroundWaitTimer);
+      this.backgroundWaitTimer = null;
+    }
+  }
+
   /**
    * Extend Telegram's working state only while a parent session is waiting for
    * background Agent/Workflow work. A bounded expiry releases the state if the
@@ -1326,6 +1335,7 @@ export class SessionProcess extends EventEmitter {
           this.emit('backgroundWorkExpired');
         }
       }, remaining);
+      this.backgroundWaitTimer.unref();
     }
     return true;
   }
@@ -1339,10 +1349,7 @@ export class SessionProcess extends EventEmitter {
         // it (moot either way). isProcessing now covers this session correctly
         // on its own, so the idle-window concern this field exists for is over.
         this.lastBackgroundAgentDispatchAt = null;
-        if (this.backgroundWaitTimer !== null) {
-          clearTimeout(this.backgroundWaitTimer);
-          this.backgroundWaitTimer = null;
-        }
+        this.clearBackgroundWaitTimer();
       }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
@@ -1452,6 +1459,8 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.lastBackgroundAgentDispatchAt = null;
+    this.clearBackgroundWaitTimer();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
