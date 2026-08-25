@@ -4,6 +4,8 @@ import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrl, resolveKey, request, CliConfigView } from './http-client';
 import { runGatewayLifecycle } from './commands/gateway';
+import { runService } from './commands/service';
+import { runUpdate, runClaude } from './commands/update';
 import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
 import { runAgents } from './commands/agents';
@@ -11,7 +13,9 @@ import { runChannels } from './commands/channels';
 
 /** Flags that are always boolean regardless of command — never consume the next
  *  token as a value (see parseCliArgs). */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json']);
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print']);
+const HELP_ALIASES = new Set(['help', '--help', '-h']);
+const VERSION_ALIASES = new Set(['version', '--version', '-V']);
 
 /**
  * CLI entry point. Returns a process exit code. Never boots the server — the
@@ -26,12 +30,19 @@ export async function runCli(argv: string[]): Promise<number> {
   const { positionals, flags } = parseCliArgs(rest, GLOBAL_BOOLEAN_FLAGS);
   const wantHelp = flags.help === true;
 
-  if (!command || command === 'help') {
+  if (!command || HELP_ALIASES.has(command)) {
     printGeneralHelp();
     return 0;
   }
-  if (command === 'version' || command === '--version') {
+  if (VERSION_ALIASES.has(command)) {
     process.stdout.write(readVersion() + '\n');
+    return 0;
+  }
+  // Flags with no command (`claude-gateway --config /etc/cg.json`) — the shape
+  // old service units used. There is nothing to run, so this is the same
+  // "here's what I can do" answer as a bare invocation, never a server boot.
+  if (command.startsWith('-')) {
+    printGeneralHelp();
     return 0;
   }
 
@@ -43,6 +54,12 @@ export async function runCli(argv: string[]): Promise<number> {
         return await runApiPassthrough(positionals, flags, config);
       case 'gateway':
         return await runGatewayLifecycle(positionals, flags, config);
+      case 'service':
+        return await runService(positionals, flags, config);
+      case 'update':
+        return await runUpdate('claude-gateway', positionals, flags);
+      case 'claude':
+        return await runClaude(positionals, flags);
       case 'doctor':
         return await runDoctor(flags, config);
       case 'debug-bundle':
@@ -51,9 +68,6 @@ export async function runCli(argv: string[]): Promise<number> {
         return await runAgents(positionals, flags, config);
       case 'channels':
         return await runChannels(positionals, flags, config);
-      case 'logs':
-        process.stderr.write('logs: not yet implemented — use `debug-bundle` for a shareable snapshot.\n');
-        return 1;
     }
 
     // Resource nouns (generated).
@@ -78,9 +92,11 @@ async function runResourceCommand(
   // First pass just to find the verb — a plain positional, so it parses the
   // same regardless of which flags turn out to be boolean for this command.
   const verb = parseCliArgs(rest, GLOBAL_BOOLEAN_FLAGS).positionals[0];
-  if (!verb || (wantHelp && !verb)) {
+  if (!verb) {
+    // `crons --help` is a help request (exit 0); a bare `crons` is a usage
+    // error (exit 1) even though both print the same listing.
     printNounHelp(noun);
-    return verb ? 0 : 1;
+    return wantHelp ? 0 : 1;
   }
   const cmd = GENERATED_COMMANDS.find((c) => c.noun === noun && c.verb === verb);
   if (!cmd) {
@@ -226,10 +242,16 @@ function printGeneralHelp(): void {
     'claude-gateway — control a running gateway from the command line',
     '',
     'Usage: claude-gateway <command> [args] [--flags]',
-    '  (running with no command boots the server, unchanged)',
+    '',
+    'Start the gateway in the foreground:',
+    '  gateway start                 Start the gateway server (the only command that boots it)',
     '',
     'Core commands:',
     '  gateway status|restart|stop   Manage the gateway process (manager-aware)',
+    '  service install|status|uninstall',
+    '                                Run the gateway as a systemd-user or PM2 service',
+    '  update [check]                Check for / install a newer claude-gateway',
+    '  claude version|update [check] Inspect / update the Claude Code binary',
     '  doctor                        Check config/env/connectivity',
     '  debug-bundle                  Write a small redacted diagnostics bundle',
     '  agents list|create|update     Create/manage agents (interactive wizard)',

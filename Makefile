@@ -17,7 +17,7 @@ start: ## Build and start the gateway
 
 start-dev: ## Dev mode — tsc --watch + hot-reload /dashboard on save (no gateway restart needed)
 	npm run build
-	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start
 
 stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 	@echo "Stopping claude-gateway..."
@@ -40,7 +40,7 @@ release: ## Interactive release — choose patch/minor/major with version previe
 pm2-start: ## Build and start gateway via pm2 (auto-restart on crash, saves process list)
 	npm run build
 	-pm2 delete gateway
-	pm2 start node --name gateway -- --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+	pm2 start node --name gateway -- --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start
 	pm2 save
 
 pm2-stop: ## Stop gateway via pm2

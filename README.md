@@ -83,8 +83,11 @@ All variables are optional. Full list: [`.env.example`](.env.example)
 **3. Start**
 
 ```bash
-claude-gateway
+claude-gateway gateway start
 ```
+
+`claude-gateway` on its own prints help — starting the server is always the explicit
+`gateway start`, so a stray or mistyped command can never leave a gateway listening.
 
 No config file needed — on first run, if `~/.claude-gateway/config.json` doesn't exist yet, the gateway creates it automatically with `"agents": []` and a fresh random admin API key, and prints that key once:
 
@@ -105,18 +108,33 @@ claude-gateway agents create
 
 Interactive wizard — describe the agent, Claude generates the workspace files, review and accept them, then optionally connect a Telegram or Discord bot. Hot-reloads immediately, no restart needed. The CLI picks up the admin key from `config.json` automatically — no need to pass `--key`. (You can also add an agent entry to `config.json` by hand instead — same template link as above.)
 
-**Run as a service with PM2 (optional)**
+**Run as a service (optional)**
 
-To keep the gateway running after logout or system restarts, use [PM2](https://pm2.keymetrics.io):
+To keep the gateway running after you log out or the machine reboots, let the CLI install the
+service for you. It shows the exact unit it will write, asks before installing, and verifies
+`/health` afterwards:
 
 ```bash
-npm install -g pm2
-pm2 start $(which claude-gateway) --name gateway
-pm2 save       # persist the process list
-pm2 startup    # register PM2 to start on boot (follow the printed command)
+claude-gateway service install              # systemd *user* unit — no sudo
+claude-gateway service install --print      # just show what it would install
+claude-gateway service status
+claude-gateway service uninstall
 ```
 
-Useful commands:
+The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
+`loginctl enable-linger $USER` once if it must keep running while you're logged out.
+Prefer [PM2](https://pm2.keymetrics.io)? `claude-gateway service install --manager pm2` registers
+and saves the process instead (run `pm2 startup` separately for boot-time start).
+
+Once installed, drive it through the CLI — it detects whichever manager owns the process:
+
+```bash
+claude-gateway gateway status   # manager, URL, health
+claude-gateway gateway restart
+claude-gateway gateway stop
+```
+
+Managing PM2 directly still works too:
 
 ```bash
 pm2 status           # check gateway status
@@ -682,10 +700,15 @@ update at all, and the message is replaced only if it is deleted or becomes uned
 
 ## Command Line (CLI)
 
-The `claude-gateway` binary doubles as a command-line client for a running gateway — a friendlier alternative to hand-built `curl` calls. It works the same whether the gateway was started with `make start`, pm2, or systemd (it resolves the target from your config), and running `claude-gateway` with **no subcommand still boots the server** (so nothing about your existing startup changes).
+The `claude-gateway` binary doubles as a command-line client for a running gateway — a friendlier alternative to hand-built `curl` calls. It works the same whether the gateway was started with `make start`, pm2, or systemd (it resolves the target from your config). Run it with no arguments to see what it can do; **only `gateway start` boots the server**.
 
 ```bash
+claude-gateway                             # help (never starts a server)
+claude-gateway gateway start               # run the gateway in the foreground
 claude-gateway gateway status              # is it running? which manager owns it?
+claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
+claude-gateway update check                # newer claude-gateway published?
+claude-gateway claude update               # update Claude Code via its own updater
 claude-gateway doctor                      # check config / key / connectivity
 claude-gateway agents create               # interactive wizard — new agent + optional channel
 claude-gateway channels pending --agent alfred   # incoming Telegram/Discord pairing requests
@@ -694,6 +717,10 @@ claude-gateway crons run <jobId>
 claude-gateway debug-bundle                # small redacted bundle for a stuck session (works even if the server is down)
 claude-gateway api GET /v1/agents          # escape hatch: call any endpoint directly
 ```
+
+> **Upgrading from < 1.8:** a service unit that runs the binary with no command still starts the
+> gateway, with a deprecation warning. Point `ExecStart` at `claude-gateway gateway start`, or
+> reinstall the unit with `claude-gateway service install`.
 
 Commands are **generated from the same route manifest the server mounts**, so every endpoint exposed as a friendly command stays in sync with the API automatically. Global flags: `--url`, `--key`, `--json`, `--data <json>`, `--help`.
 

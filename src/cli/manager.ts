@@ -1,26 +1,28 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-/** Which process manager owns the running gateway. */
-export type Manager = 'systemd' | 'pm2' | 'foreground' | 'unknown';
+/** Which process manager owns the running gateway. User systemd is preferred
+ * because `service systemd install` deliberately creates a user-scoped unit. */
+export type Manager = 'systemd-user' | 'systemd-system' | 'pm2' | 'foreground' | 'unknown';
 
 export function defaultPidfilePath(): string {
   return path.join(os.homedir(), '.claude-gateway', 'gateway.pid');
 }
 
 export interface DetectDeps {
-  /** Run a command, return stdout; throw on non-zero exit. Injectable for tests. */
-  exec?: (cmd: string) => string;
+  /** Run a trusted manager command and return stdout; injectable for tests. */
+  exec?: (args: string[]) => string;
   pidfilePath?: string;
-  /** True if a process with this pid is alive. Injectable for tests. */
+  /** True if a process with this pid is alive; injectable for tests. */
   isAlive?: (pid: number) => boolean;
   readPidfile?: (p: string) => string | null;
 }
 
-function realExec(cmd: string): string {
-  return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+function realExec(args: string[]): string {
+  const [file, ...argv] = args;
+  return execFileSync(file, argv, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
 }
 
 function realIsAlive(pid: number): boolean {
@@ -41,9 +43,9 @@ function realReadPidfile(p: string): string | null {
 }
 
 /**
- * Detect the process manager that owns the gateway, in priority order:
- *   systemd (unit `claude-gateway` active) → pm2 (process `gateway`) →
- *   foreground (a live pid in the pidfile) → unknown.
+ * Detect the manager that currently owns the gateway, in priority order:
+ * user-systemd → system-systemd (legacy external install) → PM2 → foreground.
+ * Commands use fixed argument arrays, never user-controlled shell fragments.
  */
 export function detectManager(deps: DetectDeps = {}): Manager {
   const exec = deps.exec ?? realExec;
@@ -51,13 +53,19 @@ export function detectManager(deps: DetectDeps = {}): Manager {
   const readPidfile = deps.readPidfile ?? realReadPidfile;
 
   try {
-    if (exec('systemctl is-active claude-gateway').trim() === 'active') return 'systemd';
+    if (exec(['systemctl', '--user', 'is-active', 'claude-gateway.service']).trim() === 'active') return 'systemd-user';
   } catch {
-    /* systemctl absent or unit not active */
+    /* no reachable user manager or inactive unit */
   }
 
   try {
-    const pid = exec('pm2 pid gateway').trim();
+    if (exec(['systemctl', 'is-active', 'claude-gateway.service']).trim() === 'active') return 'systemd-system';
+  } catch {
+    /* system service absent or inactive */
+  }
+
+  try {
+    const pid = exec(['pm2', 'pid', 'gateway']).trim();
     if (/^\d+$/.test(pid) && Number(pid) > 0) return 'pm2';
   } catch {
     /* pm2 absent or process not found */

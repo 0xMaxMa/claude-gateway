@@ -51,7 +51,7 @@ import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
-import { isCliCommand } from './cli/command-names';
+import { classifyInvocation } from './cli/command-names';
 import { defaultPidfilePath } from './cli/manager';
 
 function expandTilde(p: string): string {
@@ -1085,11 +1085,25 @@ process.on('uncaughtException', (err) => {
   emergencyShutdown('uncaughtException', err).finally(() => process.exit(1));
 });
 
-// Dispatch a friendly CLI subcommand (claude-gateway <noun> <verb> ...) instead
-// of booting the server. A bare `claude-gateway` (or any flag-only invocation)
-// falls through to main() and boots as before — so systemd/pm2/npm start are
-// unaffected. The CLI runner is lazy-imported so it stays off the server path.
-if (isCliCommand(process.argv[2])) {
+// Starting the gateway is intentionally explicit: only `gateway start` enters
+// the server boot path. Every other invocation (including no args, --help, and
+// typos) runs through the CLI so it cannot accidentally create a live server.
+// The one exception is a supervised no-command launch from a pre-1.8 unit file,
+// which still boots (with a warning) so existing installs don't restart-loop.
+// The CLI runner remains lazy-loaded and is never imported on the server path.
+const invocation = classifyInvocation(process.argv.slice(2), process.env);
+if (invocation === 'legacy-boot') {
+  process.stderr.write(
+    'DEPRECATED: starting the gateway with no command. Update this service to run ' +
+      '`claude-gateway gateway start` (or reinstall with `claude-gateway service install`); ' +
+      'a future release will print help and exit instead of starting.\n',
+  );
+}
+if (invocation === 'boot' || invocation === 'legacy-boot') {
+  main().catch((err) => {
+    emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
+  });
+} else {
   import('./cli')
     .then(({ runCli }) => runCli(process.argv.slice(2)))
     .then((code) => process.exit(code))
@@ -1097,8 +1111,4 @@ if (isCliCommand(process.argv[2])) {
       process.stderr.write(`Error: ${err?.message ?? err}\n`);
       process.exit(1);
     });
-} else {
-  main().catch((err) => {
-    emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
-  });
 }

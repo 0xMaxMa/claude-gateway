@@ -3,10 +3,10 @@ jest.mock('../../src/cli/manager', () => ({
   defaultPidfilePath: () => '/tmp/fake-gateway.pid',
 }));
 jest.mock('fs', () => ({ readFileSync: jest.fn() }));
-jest.mock('child_process', () => ({ execSync: jest.fn() }));
+jest.mock('child_process', () => ({ execFileSync: jest.fn() }));
 
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { detectManager } from '../../src/cli/manager';
 import { runGatewayLifecycle } from '../../src/cli/commands/gateway';
 import type { CliConfigView } from '../../src/cli/http-client';
@@ -49,13 +49,36 @@ describe('cli gateway lifecycle exit codes', () => {
     expect(code).toBe(0);
   });
 
-  it('systemd restart delegates to systemctl and exits zero', async () => {
-    (detectManager as jest.Mock).mockReturnValue('systemd');
+  it('user systemd restart uses systemctl --user and never escalates', async () => {
+    (detectManager as jest.Mock).mockReturnValue('systemd-user');
 
     const code = await runGatewayLifecycle(['restart'], {}, config);
 
-    expect(execSync).toHaveBeenCalledWith('sudo systemctl restart claude-gateway', expect.anything());
+    expect(execFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'restart', 'claude-gateway.service'], expect.anything());
+    expect(execFileSync).not.toHaveBeenCalledWith('sudo', expect.anything(), expect.anything());
     expect(code).toBe(0);
+  });
+
+  it('system-scoped systemd restart escalates through sudo when not already root', async () => {
+    (detectManager as jest.Mock).mockReturnValue('systemd-system');
+    const uidSpy = jest.spyOn(process, 'getuid').mockReturnValue(1000);
+
+    const code = await runGatewayLifecycle(['restart'], {}, config);
+
+    expect(execFileSync).toHaveBeenCalledWith('sudo', ['systemctl', 'restart', 'claude-gateway.service'], expect.anything());
+    expect(code).toBe(0);
+    uidSpy.mockRestore();
+  });
+
+  it('system-scoped systemd restart skips sudo when already root', async () => {
+    (detectManager as jest.Mock).mockReturnValue('systemd-system');
+    const uidSpy = jest.spyOn(process, 'getuid').mockReturnValue(0);
+
+    const code = await runGatewayLifecycle(['restart'], {}, config);
+
+    expect(execFileSync).toHaveBeenCalledWith('systemctl', ['restart', 'claude-gateway.service'], expect.anything());
+    expect(code).toBe(0);
+    uidSpy.mockRestore();
   });
 
   it('pm2 restart delegates to pm2 and exits zero', async () => {
@@ -63,8 +86,18 @@ describe('cli gateway lifecycle exit codes', () => {
 
     const code = await runGatewayLifecycle(['restart'], {}, config);
 
-    expect(execSync).toHaveBeenCalledWith('pm2 restart gateway', expect.anything());
+    expect(execFileSync).toHaveBeenCalledWith('pm2', ['restart', 'gateway'], expect.anything());
     expect(code).toBe(0);
+  });
+
+  it('a bare `gateway` is a usage error (1) while `gateway --help` is a help request (0)', async () => {
+    expect(await runGatewayLifecycle([], {}, config)).toBe(1);
+    expect(await runGatewayLifecycle([], { help: true }, config)).toBe(0);
+  });
+
+  it('`gateway start` is not served by the CLI runner — the entry point handles it', async () => {
+    expect(await runGatewayLifecycle(['start'], {}, config)).toBe(1);
+    expect(execFileSync).not.toHaveBeenCalled();
   });
 
   it('unknown manager does nothing and exits non-zero', async () => {

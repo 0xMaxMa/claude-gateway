@@ -226,7 +226,7 @@ describe('cli e2e — auth', () => {
   });
 });
 
-describe('cli e2e — help/version/logs', () => {
+describe('cli e2e — help/version', () => {
   it('no command prints general help to stderr and exits 0', async () => {
     const code = await runCli([]);
     expect(code).toBe(0);
@@ -254,15 +254,41 @@ describe('cli e2e — help/version/logs', () => {
     expect(stdout.join('').trim().length).toBeGreaterThan(0);
   });
 
-  it('`logs` is a documented not-yet-implemented stub — exits 1, points at debug-bundle', async () => {
+  it('`logs` was removed rather than left as a failing stub — it is now simply unknown', async () => {
     const code = await runCli(['logs', ...base([])]);
     expect(code).toBe(1);
-    expect(stderr.join('')).toMatch(/logs: not yet implemented — use `debug-bundle`/);
+    expect(stderr.join('')).toMatch(/Unknown command: logs/);
   });
 
   it('an unknown top-level command exits 1 and prints general help', async () => {
     const code = await runCli(['frobnicate']);
     expect(code).toBe(1);
     expect(stderr.join('')).toMatch(/Unknown command: frobnicate/);
+  });
+
+  it('general help documents `gateway start` as the way to start the server', async () => {
+    await runCli([]);
+    const help = stderr.join('');
+    expect(help).toMatch(/gateway start/);
+    expect(help).toMatch(/service install\|status\|uninstall/);
+    expect(help).toMatch(/update \[check\]/);
+  });
+
+  it('`<noun> --help` is a help request (exit 0); a bare `<noun>` is a usage error (exit 1)', async () => {
+    // Both print the same verb listing — only the exit code distinguishes
+    // "you asked for help" from "you forgot the verb".
+    expect(await runCli(['crons', '--help'])).toBe(0);
+    expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
+
+    stderr = [];
+    expect(await runCli(['crons'])).toBe(1);
+    expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
+  });
+
+  it('`gateway --help` and `service --help` exit 0 while their bare forms exit 1', async () => {
+    expect(await runCli(['gateway', '--help'])).toBe(0);
+    expect(await runCli(['gateway'])).toBe(1);
+    expect(await runCli(['service', '--help'])).toBe(0);
+    expect(await runCli(['service'])).toBe(1);
   });
 });
