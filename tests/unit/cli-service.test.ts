@@ -26,11 +26,17 @@ const mockWriteFileSync = fs.writeFileSync as jest.MockedFunction<typeof fs.writ
 
 const unitPath = path.join(os.homedir(), '.config', 'systemd', 'user', 'claude-gateway.service');
 
-/** Resolving the unit's PATH probes `which claude`; only systemd/pm2 calls
- *  count as "did something". */
-function expectNoManagerCalls(): void {
-  for (const call of mockExecFileSync.mock.calls) {
-    expect(['systemctl', 'pm2', 'sudo']).not.toContain(call[0]);
+/**
+ * Assert nothing was *changed*. Read-only probes are fine and expected —
+ * resolving the unit's PATH runs `which claude`, and uninstall reads the
+ * current state before deciding what to do — so this checks for the verbs that
+ * actually mutate a service, not for any subprocess at all.
+ */
+const MUTATING_VERBS = ['enable', 'disable', 'daemon-reload', 'delete', 'save', 'start', 'stop', 'restart'];
+function expectNoStateChange(): void {
+  for (const [file, args] of mockExecFileSync.mock.calls as unknown as Array<[string, string[]]>) {
+    if (file === 'sudo') throw new Error('unexpected privilege escalation');
+    for (const verb of args ?? []) expect(MUTATING_VERBS).not.toContain(verb);
   }
 }
 
@@ -149,7 +155,7 @@ describe('service install — confirmation gate', () => {
     const code = await runService(['install'], { manager: 'systemd' });
     expect(code).toBe(1);
     expect(mockWriteFileSync).not.toHaveBeenCalled();
-    expectNoManagerCalls();
+    expectNoStateChange();
     expect(stderr.join('')).toMatch(/--yes/);
   });
 
@@ -158,14 +164,14 @@ describe('service install — confirmation gate', () => {
     expect(code).toBe(0);
     expect(stderr.join('')).toContain('gateway start');
     expect(mockWriteFileSync).not.toHaveBeenCalled();
-    expectNoManagerCalls();
+    expectNoStateChange();
   });
 
   it('--print for pm2 shows the exact argv without registering anything', async () => {
     const code = await runService(['install'], { manager: 'pm2', print: true });
     expect(code).toBe(0);
     expect(stderr.join('')).toContain('pm2 start');
-    expectNoManagerCalls();
+    expectNoStateChange();
   });
 
   it('probes the local bind for health, never config.publicUrl', async () => {
@@ -211,36 +217,72 @@ describe('service — argument validation', () => {
   it('rejects an unknown action and an unknown manager without running anything', async () => {
     expect(await runService(['frobnicate'], { manager: 'systemd' })).toBe(1);
     expect(await runService(['install'], { manager: 'nope' })).toBe(1);
-    expectNoManagerCalls();
+    expectNoStateChange();
   });
 });
 
 describe('service uninstall', () => {
+  /** systemd reports the unit as installed+active until it is removed. */
+  function unitIsLive(): void {
+    mockExistsSync.mockReturnValue(true);
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+      if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+  }
+
   it('refuses to stop a running service non-interactively without --yes', async () => {
-    // `disable --now` stops the gateway — never on an unattended invocation.
+    unitIsLive();
     const code = await runService(['uninstall'], { manager: 'systemd' });
     expect(code).toBe(1);
-    expectNoManagerCalls();
+    expectNoStateChange();
     expect(fs.unlinkSync).not.toHaveBeenCalled();
   });
 
   it('refuses the pm2 path the same way', async () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(JSON.stringify([{ name: 'gateway', pm2_env: { status: 'online' } }])) as never);
     const code = await runService(['uninstall'], { manager: 'pm2' });
     expect(code).toBe(1);
-    expectNoManagerCalls();
+    expectNoStateChange();
+  });
+
+  it('does not prompt at all when nothing is installed', async () => {
+    // Asking to stop a service that isn't there just trains people to answer
+    // these prompts without reading them.
+    mockExistsSync.mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+    expect(await runService(['uninstall'], { manager: 'systemd' })).toBe(0);
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/nothing to remove/);
+  });
+
+  it('says PM2 is not installed rather than blaming its process list', async () => {
+    mockExecFileSync.mockImplementation((() => {
+      const err = new Error('spawnSync pm2 ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    }) as unknown as typeof execFileSync);
+    expect(await runService(['uninstall'], { manager: 'pm2' })).toBe(0);
+    expect(stderr.join('')).toMatch(/PM2 is not installed/);
   });
 
   it('disables the unit, removes the file, and reloads systemd', async () => {
-    mockExistsSync.mockReturnValue(false); // unit gone after unlink
+    // installed before the call, gone after it
+    mockExistsSync.mockReturnValueOnce(true).mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+
     const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+
     expect(code).toBe(0);
     expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'disable', '--now', 'claude-gateway.service'], expect.anything());
     expect(fs.unlinkSync).toHaveBeenCalledWith(unitPath);
     expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ installed: false }));
   });
 
-  it('is idempotent when the unit was never installed', async () => {
-    mockExistsSync.mockReturnValue(false);
+  it('is idempotent when the unit file vanished between the state read and the unlink', async () => {
+    mockExistsSync.mockReturnValueOnce(true).mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
     (fs.unlinkSync as jest.Mock).mockImplementation(() => {
       const err = new Error('ENOENT') as NodeJS.ErrnoException;
       err.code = 'ENOENT';
@@ -253,18 +295,29 @@ describe('service uninstall', () => {
     // `disable --now` failing is swallowed (it may simply not be installed), so
     // the report has to come from systemd, or a still-running service would be
     // announced as stopped.
+    unitIsLive();
     mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
       if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
       if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
       if (file === 'systemctl' && args.includes('disable')) throw new Error('permission denied');
       return Buffer.from('');
     }) as unknown as typeof execFileSync);
-    mockExistsSync.mockReturnValue(true);
 
     const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
 
     expect(code).toBe(1);
     expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, installed: true }));
     expect(stderr.join('')).toMatch(/still present/);
+  });
+});
+
+describe('service — --print is install-only', () => {
+  it('rejects --print on status and uninstall instead of ignoring it', async () => {
+    // Silently accepting it would let someone believe `uninstall --print` was
+    // a dry run.
+    expect(await runService(['uninstall'], { manager: 'systemd', print: true })).toBe(1);
+    expect(await runService(['status'], { manager: 'systemd', print: true })).toBe(1);
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/--print only applies to/);
   });
 });

@@ -23,15 +23,23 @@ error and exits, so exploring the CLI can never leave a stray server on the gate
 | `--data <json>` | JSON object merged into the request body (write commands) |
 | `--help` | Show help for the command |
 
+**Exception — local health probes.** `gateway status` and `service install` report on the gateway
+process *on this host*, so they resolve `--url` → `http://<bind>:<port>` and ignore
+`$CLAUDE_GATEWAY_URL` and `config.gateway.publicUrl`. Those usually name a reverse proxy, which
+may be unreachable from the box itself — or may still be answering from a different instance, which
+would report a dead local service as healthy. Pass `--url` explicitly to probe another host.
+`doctor` keeps the normal precedence (it diagnoses the path the CLI's API calls take) and adds a
+second `localHealth` check whenever a local gateway is detected behind a different URL.
+
 ## Lifecycle & diagnostics (do not require a running server)
 
 | Command | Description |
 |---------|-------------|
 | `claude-gateway gateway start` | Run the gateway in the foreground (the only command that boots it) |
-| `claude-gateway gateway status` | Show the owning manager, base URL, and `/health` reachability |
+| `claude-gateway gateway status` | Show the owning manager and `/health` on the local bind address |
 | `claude-gateway gateway restart` | Restart via the owning manager (systemd-user/systemd-system/pm2/foreground) |
 | `claude-gateway gateway stop` | Stop the gateway |
-| `claude-gateway doctor` | Check config/env/connectivity |
+| `claude-gateway doctor` | Check config, key resolution, owning manager, and connectivity |
 | `claude-gateway debug-bundle` | Write a small redacted diagnostics bundle for a stuck session |
 | `claude-gateway api <METHOD> <path>` | Escape hatch: call any endpoint directly |
 

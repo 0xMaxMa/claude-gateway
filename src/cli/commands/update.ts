@@ -10,6 +10,7 @@ import {
 } from '../../packages/registry';
 import { detectManager } from '../manager';
 import { createRl, ask } from '../prompt';
+import { printJson } from '../output';
 
 /**
  * `update [check]` (the gateway itself) and `claude version|update [check]`
@@ -33,12 +34,6 @@ interface Resolved {
   current: string | null;
   latest: string | null;
   hasUpdate: boolean;
-}
-
-/** Pretty by default; `--json` prints one compact line for piping to jq. */
-function printJson(value: unknown, flags: Record<string, string | boolean>): void {
-  const compact = flags.json === true;
-  process.stdout.write((compact ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n');
 }
 
 /** Read the installed and published versions. Returns null (after reporting)

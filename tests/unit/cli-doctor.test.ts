@@ -97,6 +97,59 @@ describe('cli doctor', () => {
     expect(report().checks.find((c) => c.name === 'manager')).toEqual(expect.objectContaining({ ok: false, detail: 'unknown' }));
   });
 
+  /**
+   * The confusing case this exists for: a gateway running happily on this host
+   * behind a reverse proxy that is unreachable from the box. Without the second
+   * probe, doctor printed `manager: foreground` next to `health: no response`
+   * and left the operator to guess which one to believe.
+   */
+  describe('local probe when publicUrl differs', () => {
+    const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+
+    it('probes both URLs and says so when only the proxy is down', async () => {
+      global.fetch = jest.fn().mockImplementation((url: string) =>
+        String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
+      );
+
+      const code = await runDoctor({}, proxied);
+
+      const body = report();
+      expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'localUrl', 'localHealth']);
+      expect(body.checks.find((c) => c.name === 'health')?.ok).toBe(false);
+      expect(body.checks.find((c) => c.name === 'localHealth')?.ok).toBe(true);
+      expect(stderr.join('')).toMatch(/up locally but its public URL did not answer/);
+      expect(code).toBe(1);
+    });
+
+    it('skips the local probe when no local manager owns a gateway', async () => {
+      // Pointing the CLI at someone else's gateway must not fail doctor just
+      // because nothing is listening on this machine.
+      (detectManager as jest.Mock).mockReturnValue('unknown');
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({}, proxied);
+
+      expect(report().checks.map((c) => c.name)).not.toContain('localHealth');
+    });
+
+    it('skips the local probe when the resolved URLs are the same', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({}, configWithKey);
+
+      expect(report().checks.map((c) => c.name)).not.toContain('localHealth');
+    });
+  });
+
+  it('honours the global --json flag like every other command', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+    await runDoctor({ json: true }, configWithKey);
+
+    expect(stdout.join('').trim().split('\n')).toHaveLength(1);
+    expect(report().ok).toBe(true);
+  });
+
   it('never prints the resolved API key itself, on stdout or stderr', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 

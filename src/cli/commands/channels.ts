@@ -1,4 +1,5 @@
 import { CliConfigView, resolveUrl, resolveKey, request } from '../http-client';
+import { printResult } from '../output';
 
 /**
  * `channels pending|approve|deny` — manage incoming Telegram/Discord pairing
@@ -92,9 +93,7 @@ function strFlag(v: string | boolean | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
-function printResult(data: unknown, compact: boolean): void {
-  process.stdout.write((compact ? JSON.stringify(data) : JSON.stringify(data, null, 2)) + '\n');
-}
+
 
 function printHelp(): void {
   const lines = [

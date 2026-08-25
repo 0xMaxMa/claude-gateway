@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { detectManager, defaultPidfilePath } from '../manager';
+import { printJson } from '../output';
 
 /**
  * `gateway start|status|restart|stop` — whole-process lifecycle.
@@ -61,8 +62,7 @@ async function gatewayStatus(flags: Record<string, string | boolean>, config: Cl
   } finally {
     clearTimeout(timer);
   }
-  const out = { manager, url: baseUrl, health };
-  process.stdout.write((flags.json === true ? JSON.stringify(out) : JSON.stringify(out, null, 2)) + '\n');
+  printJson({ manager, url: baseUrl, health }, flags);
   return health === 'up' ? 0 : 1;
 }
 

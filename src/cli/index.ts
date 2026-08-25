@@ -3,6 +3,7 @@ import { parseCliArgs } from './args';
 import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrl, resolveKey, request, CliConfigView } from './http-client';
+import { printResult } from './output';
 import { runGatewayLifecycle } from './commands/gateway';
 import { runService } from './commands/service';
 import { runUpdate, runClaude } from './commands/update';
@@ -206,16 +207,6 @@ async function runApiPassthrough(
 
 function strFlag(v: string | boolean | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
-}
-
-/** `compact` (`--json`) prints minified JSON for piping to `jq`/scripts;
- *  otherwise output is pretty-printed for humans. Either way it's valid JSON. */
-function printResult(data: unknown, compact: boolean): void {
-  if (typeof data === 'string') {
-    process.stdout.write(data + '\n');
-    return;
-  }
-  process.stdout.write((compact ? JSON.stringify(data) : JSON.stringify(data, null, 2)) + '\n');
 }
 
 function readVersion(): string {

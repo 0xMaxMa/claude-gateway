@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { CliConfigView, resolveUrl, resolveKey, request } from '../http-client';
 import { buildUpdatePrompt } from '../../agent/create-agent-prompts';
 import { ask, askMultiline, createRl, previewAndAccept, printFilePreview, editInEditor } from '../prompt';
+import { printResult } from '../output';
 
 /** Files the wizard always returns; only AGENTS.md is required to confirm. */
 const WIZARD_OPTIONAL_FILES = new Set(['SOUL.md', 'USER.md', 'MEMORY.md']);
@@ -342,9 +343,7 @@ function strFlag(v: string | boolean | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
-function printResult(data: unknown, compact: boolean): void {
-  process.stdout.write((compact ? JSON.stringify(data) : JSON.stringify(data, null, 2)) + '\n');
-}
+
 
 function printHelp(): void {
   const lines = [

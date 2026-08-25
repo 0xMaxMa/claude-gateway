@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { createRl, ask, printFilePreview } from '../prompt';
+import { printJson } from '../output';
 
 /**
  * `service install|status|uninstall` — run the gateway under a process manager.
@@ -180,10 +181,11 @@ function capture(file: string, args: string[]): string {
   return execFileSync(file, args, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
 }
 
-/** Pretty by default; `--json` prints one compact line for piping to jq. */
-function printJson(value: unknown, flags: Record<string, string | boolean>): void {
-  const compact = flags.json === true;
-  process.stdout.write((compact ? JSON.stringify(value) : JSON.stringify(value, null, 2)) + '\n');
+/** True when the failure was "no such binary" rather than the command itself
+ *  reporting a problem — so "PM2 is not installed" never gets reported as
+ *  "PM2 refused to save its process list". */
+function isMissingBinary(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
 }
 
 /**
@@ -305,6 +307,14 @@ async function systemdInstall(
 
 async function systemdUninstall(flags: Record<string, string | boolean>): Promise<number> {
   const file = unitPath();
+  const before = systemdState();
+  if (!before.installed && !before.enabled && !before.active) {
+    // Nothing to stop — prompting to stop a service that isn't there only
+    // teaches people to answer these prompts without reading them.
+    printJson({ manager: 'systemd-user', unit: file, ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is not installed — nothing to remove.\n`);
+    return 0;
+  }
   // `disable --now` stops a running gateway, so this asks like install does.
   if (!(await confirm(flags, 'uninstall', `Stop and remove ${UNIT_NAME}?`))) {
     process.stderr.write('Aborted — the service was left in place.\n');
@@ -356,8 +366,12 @@ function pm2Status(flags: Record<string, string | boolean>): number {
   let entry: Pm2Entry | undefined;
   try {
     entry = pm2Entry();
-  } catch {
-    process.stderr.write('Could not read the PM2 process list. Is PM2 installed and on PATH?\n');
+  } catch (err) {
+    process.stderr.write(
+      isMissingBinary(err)
+        ? 'PM2 is not installed or not on PATH.\n'
+        : 'Could not read the PM2 process list. Is PM2 running?\n',
+    );
     return 1;
   }
   const status = entry?.pm2_env?.status ?? 'absent';
@@ -391,7 +405,11 @@ async function pm2Install(
     run('pm2', args);
     run('pm2', ['save']);
   } catch (err) {
-    process.stderr.write(`Could not install or start the PM2 service: ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`);
+    process.stderr.write(
+      isMissingBinary(err)
+        ? 'PM2 is not installed. Install it first (`npm install -g pm2`), or use --manager systemd.\n'
+        : `Could not install or start the PM2 service: ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`,
+    );
     return 1;
   }
 
@@ -406,6 +424,22 @@ async function pm2Install(
 }
 
 async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<number> {
+  let before: Pm2Entry | undefined;
+  try {
+    before = pm2Entry();
+  } catch (err) {
+    if (isMissingBinary(err)) {
+      process.stderr.write('PM2 is not installed — nothing to remove.\n');
+      return 0;
+    }
+    process.stderr.write('Could not read the PM2 process list. Is PM2 running?\n');
+    return 1;
+  }
+  if (!before) {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: false, active: false }, flags);
+    process.stderr.write(`No PM2 process named "${PM2_NAME}" — nothing to remove.\n`);
+    return 0;
+  }
   // `pm2 delete` stops a running gateway, so this asks like install does.
   if (!(await confirm(flags, 'uninstall', `Stop and remove the PM2 process "${PM2_NAME}"?`))) {
     process.stderr.write('Aborted — the process was left in place.\n');
@@ -418,9 +452,13 @@ async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<nu
   }
   try {
     run('pm2', ['save']);
-  } catch {
-    process.stderr.write('Could not save the PM2 process list — the process may come back on the next PM2 resurrect.\n');
-    return 1;
+  } catch (err) {
+    process.stderr.write(
+      isMissingBinary(err)
+        ? 'PM2 is not installed — nothing to remove.\n'
+        : 'Could not save the PM2 process list — the process may come back on the next PM2 resurrect.\n',
+    );
+    return isMissingBinary(err) ? 0 : 1;
   }
   // Same reason as the systemd path: report the observed state, not the intent.
   let entry: Pm2Entry | undefined;
@@ -474,6 +512,12 @@ export async function runService(
   }
   if (action !== 'install' && action !== 'status' && action !== 'uninstall') {
     process.stderr.write(`Unknown: service ${action} (expected install|status|uninstall)\n`);
+    return 1;
+  }
+  if (flags.print === true && action !== 'install') {
+    // Rejected rather than ignored: silently accepting it would let someone
+    // believe `service uninstall --print` was a dry run.
+    process.stderr.write(`--print only applies to \`service install\` (it previews what would be written).\n`);
     return 1;
   }
 
