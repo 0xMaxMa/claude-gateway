@@ -403,4 +403,37 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     );
     expect(second).toBe(true);
   }, 25000);
+
+  /**
+   * I-PTY-MENU-14: an ordinary foreground tool (Bash), not Task, staying
+   * screen-quiet for longer than FALLBACK_IDLE_QUIET_MS while genuinely still
+   * running (e.g. a git hook running a slow, silent test suite). Pre-fix,
+   * only Task tool_use blocks were tracked in pendingToolUseIds, so this
+   * shape reached the fallback exactly like TASK_WAIT's sub-agent gap and
+   * the turn ended early (issue #388). Mirrors I-PTY-MENU-11 but with a
+   * non-Task tool name, proving the fix isn't Task-specific.
+   */
+  it('I-PTY-MENU-14: a pending non-Task tool_use (Bash) blocks the fallback idle finish until its tool_result lands', async () => {
+    start();
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('BASH_WAIT'));
+
+    // The Bash call is still "running" (screen quiet, no busy marker, no
+    // tool_result yet) — the pre-fix fallback would already have ended the
+    // turn by ~2s. It must still be open.
+    await waitMs(2600);
+    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+
+    // Once the tool_result + final answer land, the turn completes with the
+    // real text — not an early, truncated one.
+    const completed = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      5000,
+    );
+    expect(completed).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; result?: string };
+    expect(result.subtype).toBe('success');
+    expect(result.result).toContain('bash-wait-final-result');
+  }, 20000);
 });

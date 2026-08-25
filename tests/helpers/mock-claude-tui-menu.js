@@ -57,6 +57,15 @@
  *                          arrives. The watchdog must end the turn with an
  *                          error WITHOUT killing the session (run with a
  *                          shortened PTY_SHELL_WATCHDOG_MS).
+ *   BASH_WAIT           — like TASK_WAIT, but the tool_use is an ORDINARY
+ *                          foreground tool (Bash), simulating a quiet,
+ *                          long-running shell command (e.g. a git hook
+ *                          running a slow test suite) rather than a Task
+ *                          sub-agent. Pre-fix, only Task calls were tracked
+ *                          in pendingToolUseIds, so the fallback idle-
+ *                          detection heuristic would wrongly end the turn at
+ *                          ~2s here too, submitting the next queued message
+ *                          into a still-busy TUI (issue #388).
  *   …SWALLOW_ONCE…      — (substring anywhere in the text) the first Enter
  *                          is swallowed: the draft stays in the input line
  *                          ("❯ <text>"), never busy, no transcript. The
@@ -253,6 +262,34 @@ function submit(text) {
       });
       idle(); // then silence — no tool_result, no turn_duration, ever.
     }, 150);
+    return;
+  }
+  if (trimmed === 'BASH_WAIT') {
+    // Simulates an ordinary foreground tool (Bash) staying quiet for LONGER
+    // than FALLBACK_IDLE_QUIET_MS (2000ms) — e.g. a git hook running a slow,
+    // mostly-silent test suite. Same shape as TASK_WAIT, but the tool_use
+    // name is a foreground tool, not Task. Pre-fix, onToolUse() only tracked
+    // 'Task' calls into pendingToolUseIds, so this scenario's tool_use would
+    // be ignored and the fallback would end the turn at ~2s, submitting the
+    // next queued message into a still-busy TUI (issue #388).
+    scenario = null;
+    render('esc to interrupt\r\n❯ ');
+    setTimeout(() => {
+      appendRecord({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} }] },
+      });
+      idle(); // busy marker gone — screen looks done, but the tool_use is still pending
+    }, 150);
+    // Same wide margin as TASK_WAIT (4500ms vs. the test's 2600ms assertion
+    // window) so the two-process wall-clock race doesn't flake under CI load.
+    setTimeout(() => {
+      appendRecord({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'bash-1', content: 'exit 0' }] },
+      });
+      writeTranscript('bash-wait-final-result');
+    }, 4500);
     return;
   }
 
