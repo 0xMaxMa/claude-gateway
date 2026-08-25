@@ -16,6 +16,19 @@ import type { CliConfigView } from '../../src/cli/http-client';
  * no supervisor to respawn it. A caller (script, cron job) reading the exit code
  * must be able to tell that apart from an actual completed restart.
  */
+let stdout: string[] = [];
+let outSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  stdout = [];
+  outSpy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    stdout.push(chunk.toString());
+    return true;
+  });
+});
+
+afterEach(() => outSpy.mockRestore());
+
 describe('cli gateway lifecycle exit codes', () => {
   const config: CliConfigView = {};
   let killSpy: jest.SpyInstance;
@@ -107,5 +120,58 @@ describe('cli gateway lifecycle exit codes', () => {
 
     expect(killSpy).not.toHaveBeenCalled();
     expect(code).toBe(1);
+  });
+});
+
+/**
+ * `gateway status` reports the process on this host — `manager` comes from
+ * local detection, so `health` has to be measured the same way. Probing
+ * config.publicUrl would answer for a reverse proxy that may front a different
+ * instance entirely.
+ */
+describe('cli gateway status', () => {
+  const config: CliConfigView = { publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+  let fetchSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (detectManager as jest.Mock).mockReturnValue('systemd-user');
+  });
+
+  afterEach(() => fetchSpy?.mockRestore());
+
+  it('probes the local bind, not publicUrl, and exits 0 when healthy', async () => {
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+
+    const code = await runGatewayLifecycle(['status'], {}, config);
+
+    expect(code).toBe(0);
+    expect(String(fetchSpy.mock.calls[0][0])).toBe('http://127.0.0.1:10850/health');
+    expect(JSON.parse(stdout.join(''))).toEqual({ manager: 'systemd-user', url: 'http://127.0.0.1:10850', health: 'up' });
+  });
+
+  it('reports health down and exits non-zero when the probe fails', async () => {
+    fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const code = await runGatewayLifecycle(['status'], {}, config);
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout.join('')).health).toBe('down');
+  });
+
+  it('honours an explicit --url for checking another host', async () => {
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+
+    await runGatewayLifecycle(['status'], { url: 'http://other:8080' }, config);
+
+    expect(String(fetchSpy.mock.calls[0][0])).toBe('http://other:8080/health');
+  });
+
+  it('--json prints one compact line', async () => {
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+
+    await runGatewayLifecycle(['status'], { json: true }, config);
+
+    expect(stdout.join('').trim().split('\n')).toHaveLength(1);
   });
 });

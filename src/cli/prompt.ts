@@ -32,12 +32,18 @@ export async function askMultiline(rl: readline.Interface, intro: string): Promi
 
 const SEPARATOR_WIDTH = 42;
 
-export function printFilePreview(filename: string, content: string): void {
+/** `write` defaults to stdout via console.log (the wizards' channel). Commands
+ *  that reserve stdout for JSON results pass a stderr writer instead. */
+export function printFilePreview(
+  filename: string,
+  content: string,
+  write: (line: string) => void = (line) => console.log(line),
+): void {
   const label = `─── ${filename} `;
   const padding = Math.max(0, SEPARATOR_WIDTH - label.length);
-  console.log('\n' + label + '─'.repeat(padding));
-  console.log(content);
-  console.log('─'.repeat(SEPARATOR_WIDTH));
+  write('\n' + label + '─'.repeat(padding));
+  write(content);
+  write('─'.repeat(SEPARATOR_WIDTH));
 }
 
 /** Open $VISUAL/$EDITOR/vim/vi/nano on a temp copy of `content`; returns the

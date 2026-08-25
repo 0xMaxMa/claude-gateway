@@ -86,6 +86,18 @@ describe('service — generated launch configuration', () => {
     }
   });
 
+  it('leaves WorkingDirectory unquoted — systemd rejects a quoted path there', () => {
+    // Verified with `systemd-analyze verify`: quoting this one yields
+    // "WorkingDirectory= path is not absolute". Every *other* value is quoted,
+    // so this exception needs a test or it reads like an oversight and gets
+    // "fixed" into a broken unit.
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!);
+    const line = unit.split('\n').find((l) => l.startsWith('WorkingDirectory='));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('"');
+    expect(line!.slice('WorkingDirectory='.length).startsWith('/')).toBe(true);
+  });
+
   it('escapes quotes and backslashes in a config path so the value cannot break out', () => {
     const unit = renderSystemdUnit({
       node: '/usr/bin/node',
@@ -156,6 +168,23 @@ describe('service install — confirmation gate', () => {
     expectNoManagerCalls();
   });
 
+  it('probes the local bind for health, never config.publicUrl', async () => {
+    // A proxy in front of a still-running old instance would answer for a
+    // service that never started — install must not call that success.
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      await runService(['install'], { manager: 'systemd', yes: true }, { publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' });
+      const probed = fetchSpy.mock.calls.map((c) => String(c[0]));
+      expect(probed.length).toBeGreaterThan(0);
+      for (const url of probed) {
+        expect(url).not.toContain('proxy.example.com');
+        expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/health$/);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('--yes installs the user unit, enables it, and reports it (health probed)', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
@@ -187,8 +216,23 @@ describe('service — argument validation', () => {
 });
 
 describe('service uninstall', () => {
-  it('disables the unit, removes the file, and reloads systemd', async () => {
+  it('refuses to stop a running service non-interactively without --yes', async () => {
+    // `disable --now` stops the gateway — never on an unattended invocation.
     const code = await runService(['uninstall'], { manager: 'systemd' });
+    expect(code).toBe(1);
+    expectNoManagerCalls();
+    expect(fs.unlinkSync).not.toHaveBeenCalled();
+  });
+
+  it('refuses the pm2 path the same way', async () => {
+    const code = await runService(['uninstall'], { manager: 'pm2' });
+    expect(code).toBe(1);
+    expectNoManagerCalls();
+  });
+
+  it('disables the unit, removes the file, and reloads systemd', async () => {
+    mockExistsSync.mockReturnValue(false); // unit gone after unlink
+    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
     expect(code).toBe(0);
     expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'disable', '--now', 'claude-gateway.service'], expect.anything());
     expect(fs.unlinkSync).toHaveBeenCalledWith(unitPath);
@@ -196,11 +240,31 @@ describe('service uninstall', () => {
   });
 
   it('is idempotent when the unit was never installed', async () => {
+    mockExistsSync.mockReturnValue(false);
     (fs.unlinkSync as jest.Mock).mockImplementation(() => {
       const err = new Error('ENOENT') as NodeJS.ErrnoException;
       err.code = 'ENOENT';
       throw err;
     });
-    expect(await runService(['uninstall'], { manager: 'systemd' })).toBe(0);
+    expect(await runService(['uninstall'], { manager: 'systemd', yes: true })).toBe(0);
+  });
+
+  it('reports the observed state, not the intent, when the unit survives removal', async () => {
+    // `disable --now` failing is swallowed (it may simply not be installed), so
+    // the report has to come from systemd, or a still-running service would be
+    // announced as stopped.
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+      if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+      if (file === 'systemctl' && args.includes('disable')) throw new Error('permission denied');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    mockExistsSync.mockReturnValue(true);
+
+    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, installed: true }));
+    expect(stderr.join('')).toMatch(/still present/);
   });
 });

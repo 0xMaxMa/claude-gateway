@@ -234,3 +234,11 @@ describe('claude — the Claude Code binary', () => {
     expect(mockNative).not.toHaveBeenCalled();
   });
 });
+
+describe('registry runNativeUpdate guard', () => {
+  it('refuses a package with no native updater instead of shelling out', () => {
+    const actual = jest.requireActual('../../src/packages/registry') as typeof import('../../src/packages/registry');
+    const err = actual.runNativeUpdate({ npm: '@scope/pkg', detect: 'npm', update: 'native' });
+    expect(err).toMatch(/no native updater/);
+  });
+});

@@ -81,11 +81,34 @@ export function resolveUrl(i: ResolveInputs = {}): string {
   if (explicit) {
     url = explicit;
   } else {
-    let host = cfg.bind || '127.0.0.1';
-    if (host === '0.0.0.0' || host === '::' || host === '[::]') host = '127.0.0.1';
-    const port = parseInt(env.PORT || String(DEFAULT_PORT), 10) || DEFAULT_PORT;
-    url = `http://${host}:${port}`;
+    url = bindUrl(cfg, env);
   }
+  return url.replace(/\/+$/, '');
+}
+
+/** `http://<bind>:<port>` — where a gateway on THIS host actually listens. */
+function bindUrl(cfg: CliConfigView, env: NodeJS.ProcessEnv): string {
+  let host = cfg.bind || '127.0.0.1';
+  if (host === '0.0.0.0' || host === '::' || host === '[::]') host = '127.0.0.1';
+  const port = parseInt(env.PORT || String(DEFAULT_PORT), 10) || DEFAULT_PORT;
+  return `http://${host}:${port}`;
+}
+
+/**
+ * Resolve the URL for probing the gateway *process on this host* — used by
+ * `gateway status` and by `service install`'s post-install health check.
+ * Precedence:
+ *   --url  →  http://<bind>:<port>
+ *
+ * Deliberately NOT resolveUrl(): `config.gateway.publicUrl` (and
+ * `$CLAUDE_GATEWAY_URL`) usually point at a reverse proxy, which may be
+ * unreachable from the box itself — or, worse, still answering from a
+ * different instance, so a dead local service would be reported healthy.
+ * An explicit `--url` still wins, for deliberately checking another host.
+ */
+export function resolveLocalUrl(i: ResolveInputs = {}): string {
+  const env = i.env ?? process.env;
+  const url = i.flagUrl || bindUrl(i.config ?? {}, env);
   return url.replace(/\/+$/, '');
 }
 

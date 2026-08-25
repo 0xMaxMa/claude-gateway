@@ -1,5 +1,3 @@
-import { GENERATED_NOUNS } from './commands.generated';
-
 /**
  * CLI invocation classification, deliberately cheap (no heavy imports) so the
  * boot entry point can decide what an invocation means without loading either
@@ -9,20 +7,6 @@ import { GENERATED_NOUNS } from './commands.generated';
  * — a bare `claude-gateway`, `--help`, a typo — goes to the CLI, so discovery
  * can never leave a stray server listening on the port.
  */
-export const CORE_COMMANDS = [
-  'help',
-  'version',
-  'api',
-  'gateway',
-  'service',
-  'update',
-  'claude',
-  'doctor',
-  'debug-bundle',
-  'agents',
-  'channels',
-] as const;
-
 /** How src/index.ts should handle an invocation. */
 export type Invocation =
   /** `gateway start [...]` — boot the server in the foreground. */
@@ -83,12 +67,4 @@ export function classifyInvocation(argv: readonly string[], env: InvocationEnv):
   const asksForHelp = argv.some((token) => HELP_OR_VERSION_FLAGS.has(token));
   if (!hasCommandToken(argv) && !asksForHelp && isSupervised(env)) return 'legacy-boot';
   return 'cli';
-}
-
-/** True if `name` is a known friendly CLI command. Used by help and tests;
- *  boot dispatch goes through classifyInvocation() so unknown commands reach
- *  the CLI's error handler instead of starting a server. */
-export function isCliCommand(name: string | undefined): boolean {
-  if (!name || name.startsWith('-')) return false;
-  return (CORE_COMMANDS as readonly string[]).includes(name) || GENERATED_NOUNS.includes(name);
 }

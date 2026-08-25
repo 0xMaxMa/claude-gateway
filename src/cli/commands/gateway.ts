@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
-import { CliConfigView, resolveUrl } from '../http-client';
+import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { detectManager, defaultPidfilePath } from '../manager';
 
 /**
@@ -44,18 +44,25 @@ export async function runGatewayLifecycle(
 
 async function gatewayStatus(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
   const manager = detectManager();
-  const baseUrl = resolveUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
+  // `manager` describes the process on this host, so `health` must too:
+  // probing config.publicUrl would report a reverse proxy (possibly fronting a
+  // different instance) rather than the gateway this command just detected.
+  const baseUrl = resolveLocalUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
   let health: 'up' | 'down' = 'down';
+  const controller = new AbortController();
+  // Cleared in `finally`: a rejected fetch would otherwise skip clearTimeout and
+  // leave a live timer holding the event loop open until it fires.
+  const timer = setTimeout(() => controller.abort(), 3000);
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-    clearTimeout(t);
     if (res.ok) health = 'up';
   } catch {
     health = 'down';
+  } finally {
+    clearTimeout(timer);
   }
-  process.stdout.write(JSON.stringify({ manager, url: baseUrl, health }, null, 2) + '\n');
+  const out = { manager, url: baseUrl, health };
+  process.stdout.write((flags.json === true ? JSON.stringify(out) : JSON.stringify(out, null, 2)) + '\n');
   return health === 'up' ? 0 : 1;
 }
 

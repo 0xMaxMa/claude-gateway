@@ -12,7 +12,7 @@ jest.mock('os', () => {
   };
 });
 
-import { resolveUrl, resolveKey, buildRequestUrl, loadCliConfig, DEFAULT_PORT } from '../../src/cli/http-client';
+import { resolveUrl, resolveLocalUrl, resolveKey, buildRequestUrl, loadCliConfig, DEFAULT_PORT } from '../../src/cli/http-client';
 import type { ApiKey } from '../../src/types';
 
 describe('cli http-client resolveUrl', () => {
@@ -41,6 +41,32 @@ describe('cli http-client resolveUrl', () => {
 
   it('strips a trailing slash', () => {
     expect(resolveUrl({ flagUrl: 'http://x:1/', env: {}, config: {} })).toBe('http://x:1');
+  });
+});
+
+/**
+ * Health probes must reach the gateway process on THIS host. publicUrl is
+ * usually a reverse proxy: unreachable from the box itself in some setups, and
+ * in others still answering from a different instance — which would report a
+ * dead local service as healthy.
+ */
+describe('cli http-client resolveLocalUrl', () => {
+  it('ignores publicUrl and $CLAUDE_GATEWAY_URL, using the bind address', () => {
+    expect(
+      resolveLocalUrl({
+        env: { CLAUDE_GATEWAY_URL: 'http://env:2' },
+        config: { publicUrl: 'https://proxy.example.com/gateway', bind: '127.0.0.1' },
+      }),
+    ).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+  });
+
+  it('still honours an explicit --url, for deliberately checking another host', () => {
+    expect(resolveLocalUrl({ flagUrl: 'http://other:1/', env: {}, config: { publicUrl: 'http://cfg:3' } })).toBe('http://other:1');
+  });
+
+  it('rewrites a wildcard bind to loopback and honours $PORT', () => {
+    expect(resolveLocalUrl({ env: { PORT: '9999' }, config: { bind: '0.0.0.0' } })).toBe('http://127.0.0.1:9999');
+    expect(resolveLocalUrl({ env: {}, config: { bind: '::' } })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
   });
 });
 

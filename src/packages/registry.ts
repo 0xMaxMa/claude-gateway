@@ -189,6 +189,9 @@ function errorText(err: unknown, fallback: string): string {
  * Returns null on success, or the updater's error text.
  */
 export function runNativeUpdate(config: PackageConfig): string | null {
+  // Guarded here as well as at the call sites: without a bin there is no
+  // updater to run, and shelling out would execute `undefined update`.
+  if (!config.bin) return `no native updater configured for ${config.npm}`;
   try {
     execSync(`${config.bin} update`, { stdio: ['pipe', 'pipe', 'pipe'], timeout: 300_000 });
     return null;

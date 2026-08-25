@@ -2,8 +2,8 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CliConfigView, resolveUrl } from '../http-client';
-import { createRl, ask } from '../prompt';
+import { CliConfigView, resolveLocalUrl } from '../http-client';
+import { createRl, ask, printFilePreview } from '../prompt';
 
 /**
  * `service install|status|uninstall` — run the gateway under a process manager.
@@ -133,6 +133,9 @@ After=network-online.target
 
 [Service]
 Type=simple
+# WorkingDirectory is deliberately unquoted, unlike every other value here:
+# systemd takes the rest of the line as the path, and rejects a quoted one
+# ("path is not absolute"). Escaping is unnecessary for the same reason.
 WorkingDirectory=${spec.cwd}
 Environment="HOME=${q(spec.home)}"
 Environment="PATH=${q(spec.pathEnv)}"
@@ -184,14 +187,18 @@ function printJson(value: unknown, flags: Record<string, string | boolean>): voi
 }
 
 /**
- * Ask before writing a unit / registering a process. `--yes` skips the prompt;
- * a non-interactive stdin without `--yes` refuses rather than blocking forever,
- * so this is safe to call from scripts and CI.
+ * Ask before changing service state — installing one, or stopping and removing
+ * one. `--yes` skips the prompt; a non-interactive stdin without `--yes`
+ * refuses rather than blocking forever, so this is safe in scripts and CI.
  */
-async function confirm(flags: Record<string, string | boolean>, question: string): Promise<boolean> {
+async function confirm(
+  flags: Record<string, string | boolean>,
+  action: ServiceAction,
+  question: string,
+): Promise<boolean> {
   if (flags.yes === true) return true;
   if (!process.stdin.isTTY) {
-    process.stderr.write('Refusing to install non-interactively without --yes.\n');
+    process.stderr.write(`Refusing to ${action} non-interactively without --yes.\n`);
     return false;
   }
   const rl = createRl();
@@ -204,18 +211,24 @@ async function confirm(flags: Record<string, string | boolean>, question: string
 }
 
 /** Poll /health so `service install` reports whether the service actually came
- *  up, instead of only whether the manager accepted the unit. */
+ *  up, instead of only whether the manager accepted the unit.
+ *
+ *  Probes the local bind address, never config.publicUrl: a proxy in front of a
+ *  still-running old instance would answer for a service that never started. */
 async function waitForHealth(config: CliConfigView, flags: Record<string, string | boolean>): Promise<boolean> {
-  const baseUrl = resolveUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
+  const baseUrl = resolveLocalUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
   for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    // Cleared in `finally`: while the service is still starting every probe
+    // rejects, and a skipped clearTimeout would leak one timer per attempt.
+    const timer = setTimeout(() => controller.abort(), 2000);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
       const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-      clearTimeout(timer);
       if (res.ok) return true;
     } catch {
       /* not up yet */
+    } finally {
+      clearTimeout(timer);
     }
     await new Promise((resolve) => setTimeout(resolve, HEALTH_INTERVAL_MS));
   }
@@ -255,9 +268,10 @@ async function systemdInstall(
   const unit = renderSystemdUnit(spec);
   const file = unitPath();
 
-  process.stderr.write(`\n─── ${file} ${'─'.repeat(Math.max(0, 40 - file.length))}\n${unit}${'─'.repeat(42)}\n`);
+  // stderr, not stdout: stdout carries the JSON result (see printJson).
+  printFilePreview(file, unit, (line) => process.stderr.write(line + '\n'));
   if (flags.print === true) return 0;
-  if (!(await confirm(flags, `Install and start ${UNIT_NAME} for user ${os.userInfo().username}?`))) {
+  if (!(await confirm(flags, 'install', `Install and start ${UNIT_NAME} for user ${os.userInfo().username}?`))) {
     process.stderr.write('Aborted — nothing was written.\n');
     return 1;
   }
@@ -289,8 +303,13 @@ async function systemdInstall(
   return 0;
 }
 
-function systemdUninstall(flags: Record<string, string | boolean>): number {
+async function systemdUninstall(flags: Record<string, string | boolean>): Promise<number> {
   const file = unitPath();
+  // `disable --now` stops a running gateway, so this asks like install does.
+  if (!(await confirm(flags, 'uninstall', `Stop and remove ${UNIT_NAME}?`))) {
+    process.stderr.write('Aborted — the service was left in place.\n');
+    return 1;
+  }
   try {
     run('systemctl', ['--user', 'disable', '--now', UNIT_NAME]);
   } catch {
@@ -309,7 +328,15 @@ function systemdUninstall(flags: Record<string, string | boolean>): number {
   } catch {
     /* nothing to reload without systemd */
   }
-  printJson({ manager: 'systemd-user', unit: file, installed: false, enabled: false, active: false }, flags);
+  // Report what systemd actually says, not what was intended: the disable above
+  // is best-effort, and claiming a stopped service that is still running would
+  // be exactly the silent failure this codebase forbids.
+  const state = systemdState();
+  printJson({ manager: 'systemd-user', unit: file, ...state }, flags);
+  if (state.active || state.installed) {
+    process.stderr.write(`${UNIT_NAME} is still present — check: systemctl --user status ${UNIT_NAME} --no-pager\n`);
+    return 1;
+  }
   return 0;
 }
 
@@ -348,7 +375,7 @@ async function pm2Install(
 
   process.stderr.write(`\nWould run:\n  pm2 ${args.join(' ')}\n  pm2 save\n`);
   if (flags.print === true) return 0;
-  if (!(await confirm(flags, `Register and start the PM2 process "${PM2_NAME}"?`))) {
+  if (!(await confirm(flags, 'install', `Register and start the PM2 process "${PM2_NAME}"?`))) {
     process.stderr.write('Aborted — nothing was registered.\n');
     return 1;
   }
@@ -378,7 +405,12 @@ async function pm2Install(
   return 0;
 }
 
-function pm2Uninstall(flags: Record<string, string | boolean>): number {
+async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<number> {
+  // `pm2 delete` stops a running gateway, so this asks like install does.
+  if (!(await confirm(flags, 'uninstall', `Stop and remove the PM2 process "${PM2_NAME}"?`))) {
+    process.stderr.write('Aborted — the process was left in place.\n');
+    return 1;
+  }
   try {
     run('pm2', ['delete', PM2_NAME]);
   } catch {
@@ -390,8 +422,15 @@ function pm2Uninstall(flags: Record<string, string | boolean>): number {
     process.stderr.write('Could not save the PM2 process list — the process may come back on the next PM2 resurrect.\n');
     return 1;
   }
-  printJson({ manager: 'pm2', name: PM2_NAME, installed: false, active: false }, flags);
-  return 0;
+  // Same reason as the systemd path: report the observed state, not the intent.
+  let entry: Pm2Entry | undefined;
+  try {
+    entry = pm2Entry();
+  } catch {
+    /* PM2 gone entirely — nothing left to report as running */
+  }
+  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: entry?.pm2_env?.status === 'online' }, flags);
+  return entry ? 1 : 0;
 }
 
 // ─── entry point ──────────────────────────────────────────────────────────────
@@ -443,8 +482,8 @@ export async function runService(
 
   if (manager === 'systemd') {
     if (action === 'install') return systemdInstall(flags, config);
-    return action === 'status' ? systemdStatus(flags) : systemdUninstall(flags);
+    return action === 'status' ? systemdStatus(flags) : await systemdUninstall(flags);
   }
   if (action === 'install') return pm2Install(flags, config);
-  return action === 'status' ? pm2Status(flags) : pm2Uninstall(flags);
+  return action === 'status' ? pm2Status(flags) : await pm2Uninstall(flags);
 }

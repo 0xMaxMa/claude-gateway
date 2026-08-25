@@ -44,7 +44,7 @@ you forgot the verb. The same listing with `--help` exits **0**.
 |---------|-------------|
 | `claude-gateway service install [--manager systemd\|pm2] [--config <path>] [--yes] [--print]` | Generate and start a service |
 | `claude-gateway service status [--manager systemd\|pm2]` | Report installed/enabled/active state as JSON |
-| `claude-gateway service uninstall [--manager systemd\|pm2]` | Stop and remove the service |
+| `claude-gateway service uninstall [--manager systemd\|pm2] [--yes]` | Stop and remove the service |
 
 - `systemd` (the default) installs a **user** unit at `~/.config/systemd/user/claude-gateway.service` —
   no `sudo`, and it runs as the user that owns `~/.claude-gateway`. Run
@@ -52,8 +52,11 @@ you forgot the verb. The same listing with `--help` exits **0**.
 - Every path in the generated unit (node, entry point, config, working directory) is absolute, and
   `ExecStart` always uses the explicit `gateway start` command. No secrets are written into the
   unit — the gateway reads `~/.claude-gateway/.env` itself.
-- `--print` shows exactly what would be installed and exits without touching anything. Install
-  asks for confirmation unless `--yes` is given, and refuses to run non-interactively without it.
+- `--print` shows exactly what would be installed and exits without touching anything. Install and
+  uninstall both ask for confirmation unless `--yes` is given (uninstall stops a running gateway),
+  and refuse to run non-interactively without it.
+- `install` verifies `/health` on the **local bind address**, and `uninstall` reports the state the
+  manager actually reports afterwards — never the state that was intended.
 - After installing, `gateway restart`/`stop` detect and drive that same service.
 
 ## Versions & updates

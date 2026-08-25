@@ -1,6 +1,5 @@
 import { parseCliArgs } from '../../src/cli/args';
-import { classifyInvocation, isCliCommand, isGatewayStartInvocation, CORE_COMMANDS } from '../../src/cli/command-names';
-import { GENERATED_NOUNS } from '../../src/cli/commands.generated';
+import { classifyInvocation, isGatewayStartInvocation } from '../../src/cli/command-names';
 
 describe('cli args parseCliArgs', () => {
   it('separates positionals from flags', () => {
@@ -34,30 +33,6 @@ describe('cli args parseCliArgs', () => {
 
   it('--flag=value form still wins over a declared boolean set', () => {
     expect(parseCliArgs(['--force=true'], new Set(['force']))).toEqual({ positionals: [], flags: { force: 'true' } });
-  });
-});
-
-describe('cli command-names isCliCommand', () => {
-  it('is true for every core command', () => {
-    for (const c of CORE_COMMANDS) expect(isCliCommand(c)).toBe(true);
-  });
-
-  it('is true for generated resource nouns (e.g. crons)', () => {
-    expect(GENERATED_NOUNS).toContain('crons');
-    expect(isCliCommand('crons')).toBe(true);
-  });
-
-  it('is false for undefined (no command name to classify)', () => {
-    expect(isCliCommand(undefined)).toBe(false);
-  });
-
-  it('is false for a flag-first invocation', () => {
-    expect(isCliCommand('--config')).toBe(false);
-    expect(isCliCommand('--help')).toBe(false);
-  });
-
-  it('is false for an unknown token', () => {
-    expect(isCliCommand('definitely-not-a-command')).toBe(false);
   });
 });
 

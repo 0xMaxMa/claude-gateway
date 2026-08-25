@@ -30,7 +30,7 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 - 🔐 **Access control** — allowlist, open, or pairing-based Telegram access policies
 - 🌐 **HTTP API** — REST API with key-based auth for external integrations
 - 🛍️ **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
-- ⬆️ **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
+- ⬆️ **Self-update** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call (no SSH or shell access needed), or from the terminal with `claude-gateway update` / `claude-gateway claude update`
 - 💾 **Session persistence** — conversation history saved and restored across restarts
 - 🖥️ **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; a `/cli` chat command (Telegram/Discord/LINE) opens the same viewer for a single agent, agent-scoped and without an admin key; app-agents always stay headless
 
@@ -118,8 +118,11 @@ service for you. It shows the exact unit it will write, asks before installing, 
 claude-gateway service install              # systemd *user* unit — no sudo
 claude-gateway service install --print      # just show what it would install
 claude-gateway service status
-claude-gateway service uninstall
+claude-gateway service uninstall            # asks first — this stops a running gateway
 ```
+
+Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
+non-interactive run is refused rather than left hanging).
 
 The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
 `loginctl enable-linger $USER` once if it must keep running while you're logged out.
