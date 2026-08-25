@@ -871,6 +871,89 @@ describe('AgentRunner — restartOrDefer', () => {
     expect(getSessions(runner).has('chat:web')).toBe(true);
     expect(pending.has('chat:web')).toBe(true);
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS12: REGRESSION — the incident this guards against. A session dispatches a
+  //       background Agent tool_use, ends its OWN turn (idle from the outside),
+  //       and THEN an aggressive restart tier (skipBusy:false, deferIdle:false —
+  //       exactly what a non-agent-writable CLAUDE.md change uses) must NOT
+  //       SIGKILL it. Before this fix it fell straight to toStopNow: isProcessing
+  //       was false and deferIdle was false, so it was stopped immediately,
+  //       destroying whatever the dispatched sub-agent was still doing.
+  // --------------------------------------------------------------------------
+  it('RS12: a session with a dispatched-but-unresolved background Agent call is deferred, not SIGKILLed, even under the aggressive default tier', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:review', 'review this PR');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:review')!;
+    const rawProc = allProcesses[allProcesses.length - 1];
+    // The session dispatches a background sub-agent mid-turn…
+    const dispatchLine = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Agent', input: {} }] },
+      stop_reason: 'tool_use',
+    });
+    rawProc.stdout!.emit('data', Buffer.from(dispatchLine + '\n'));
+    // …then its OWN turn ends right after (matches the observed session_idle
+    // pattern: "I'll wait for the sub-agents" → turn over, nothing more to do
+    // right now from the CLI's own perspective).
+    sess.setProcessing(false);
+
+    const stopSpy = jest.spyOn(sess, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    // The exact call the CLAUDE.md-change ("restart" tier) path makes — no
+    // deferIdle, no skipBusy. This is what SIGKILLed the session in the incident.
+    const counts = await runner.restartOrDefer({ skipBusy: false });
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:review')).toBe(true);
+    expect(pending.has('chat:review')).toBe(true);
+    expect(counts).toEqual({ immediate: 0, deferred: 1, skipped: 0 });
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS13: once the dispatch resolves (a fresh turn starts, e.g. the woken
+  //       notification) and ends without a new dispatch, the SAME aggressive
+  //       tier stops it immediately again — the protection is not permanent or
+  //       accidentally sticky.
+  // --------------------------------------------------------------------------
+  it('RS13: after the background dispatch resolves, the next idle window restarts normally again', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:resolved', 'review this PR');
+    await new Promise(r => setTimeout(r, 100));
+
+    const sess = getSessions(runner).get('chat:resolved')!;
+    const rawProc = allProcesses[allProcesses.length - 1];
+    const dispatchLine = JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'Agent', input: {} }] },
+      stop_reason: 'tool_use',
+    });
+    rawProc.stdout!.emit('data', Buffer.from(dispatchLine + '\n'));
+    sess.setProcessing(false);
+    expect(sess.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // The task-notification wakes the session (a fresh turn) and it ends
+    // normally with no further background dispatch.
+    sess.setProcessing(true);
+    sess.setProcessing(false);
+    expect(sess.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    const stopSpy = jest.spyOn(sess, 'stop');
+    const counts = await runner.restartOrDefer({ skipBusy: false });
+
+    expect(stopSpy).toHaveBeenCalled();
+    expect(getSessions(runner).has('chat:resolved')).toBe(false);
+    expect(counts).toEqual({ immediate: 1, deferred: 0, skipped: 0 });
+  }, 15000);
 });
 
 // ── Typing error notification tests ───────────────────────────────────────────

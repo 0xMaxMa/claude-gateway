@@ -32,6 +32,23 @@ const CHANNEL_REPLY_TOOLS = new Set([
   'mcp__gateway__line_reply',
 ]);
 
+// Tool names whose tool_use dispatches genuinely background work: the call
+// itself returns immediately (a task/agent id), and completion is delivered
+// later as a separate, asynchronously-injected turn (a task-notification) —
+// never as this tool_use's own tool_result. A session that ends its own turn
+// right after dispatching one of these is legitimately idle *from the CLI's
+// perspective* while real work is still in flight elsewhere. See
+// BACKGROUND_AGENT_GRACE_MS and hasLikelyOutstandingBackgroundWork() below.
+const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow']);
+// How long a session is treated as "may still have outstanding background
+// work" after dispatching one of BACKGROUND_DISPATCH_TOOLS, once its own turn
+// has ended. Generous enough to cover a multi-agent review of a large diff
+// (the incident that motivated this — a config-driven restart SIGHUP'd a
+// session mid-review, killing 3 in-flight review sub-agents with it, see
+// issue referenced in restartOrDefer below); bounded so a dispatch that never
+// reports back (crashed, errored) can't block a config rollout forever.
+const BACKGROUND_AGENT_GRACE_MS = 15 * 60 * 1000;
+
 // Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
 // assistant text at all — used both to patch the in-memory prompt fed to the next
 // spawn (buildInitialPrompt below) and, in AgentRunner, to persist a real assistant
@@ -101,6 +118,14 @@ export class SessionProcess extends EventEmitter {
   readonly source: ChatChannelOrApi;
   private readonly sessionChannel: ChatChannel;
   lastActivityAt = Date.now(); // accessible by AgentRunner for eviction sort
+  // Wall-clock time of the most recent BACKGROUND_DISPATCH_TOOLS tool_use seen
+  // in this session's own turn, while no NEWER turn has started since. Cleared
+  // whenever a fresh turn begins (setProcessing(true)) since by then the
+  // dispatch either reported back (the notification woke this turn) or has
+  // been superseded by unrelated new work — either way the idle-window concern
+  // this field exists for no longer applies. Read via
+  // hasLikelyOutstandingBackgroundWork().
+  private lastBackgroundAgentDispatchAt: number | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
   backend: 'pty-shell' | 'headless' = 'headless';
@@ -850,6 +875,20 @@ export class SessionProcess extends EventEmitter {
               lastPartialText = '';
             }
 
+            // Record a background-dispatch tool_use (see BACKGROUND_DISPATCH_TOOLS)
+            // so restartOrDefer can tell "genuinely idle" apart from "idle because
+            // it just fired off async work and is waiting on a task-notification".
+            // Only the final (non-partial) message carries a fully materialised
+            // tool_use block, same as the reply-mirror check above.
+            if (!isPartial && !this.queryMode) {
+              for (const block of obj.message.content) {
+                if (block.type === 'tool_use' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
+                  this.lastBackgroundAgentDispatchAt = Date.now();
+                  break;
+                }
+              }
+            }
+
             // Mirror channel replies (telegram_reply/discord_reply/line_reply) into
             // the resumable session store at delivery time. The user-facing text is
             // carried in the tool_use input, not a text block, so assistantBuffer
@@ -1259,6 +1298,13 @@ export class SessionProcess extends EventEmitter {
   setProcessing(active: boolean): void {
     if (this._processing !== active) {
       this._processing = active;
+      if (active) {
+        // A fresh turn is starting — either the notification this dispatch was
+        // waiting on just woke it (resolved), or unrelated new work superseded
+        // it (moot either way). isProcessing now covers this session correctly
+        // on its own, so the idle-window concern this field exists for is over.
+        this.lastBackgroundAgentDispatchAt = null;
+      }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
         const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
@@ -1342,6 +1388,20 @@ export class SessionProcess extends EventEmitter {
 
   isIdle(idleMs: number): boolean {
     return Date.now() - this.lastActivityAt > idleMs;
+  }
+
+  /**
+   * True when this session's own turn has ended (not `isProcessing`) but it
+   * recently dispatched a BACKGROUND_DISPATCH_TOOLS tool_use — i.e. it looks
+   * idle from the outside while a sub-agent it launched may still be doing
+   * real work. `restartOrDefer` treats this the same as `isProcessing` so a
+   * config-driven restart never SIGKILLs a session mid-dispatch, regardless of
+   * which restart tier triggered it.
+   */
+  hasLikelyOutstandingBackgroundWork(): boolean {
+    if (this._processing) return false;
+    if (this.lastBackgroundAgentDispatchAt === null) return false;
+    return Date.now() - this.lastBackgroundAgentDispatchAt < BACKGROUND_AGENT_GRACE_MS;
   }
 
   isRunning(): boolean {

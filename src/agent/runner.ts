@@ -2421,6 +2421,21 @@ export class AgentRunner extends EventEmitter {
         }
         proc.markPendingRestart();
         deferred++;
+      } else if (proc.hasLikelyOutstandingBackgroundWork() && proc.source !== 'api') {
+        // A session that dispatched a background Agent/Workflow tool_use and then
+        // ended its OWN turn looks idle here, but a sub-agent it launched may
+        // still be doing real work — SIGKILLing it now would silently destroy
+        // that in-flight work with no notification or recovery (the incident
+        // this guards against: a CLAUDE.md-triggered restart killed a session
+        // mid-way through 3 dispatched code-review sub-agents). Treat it like
+        // deferIdle below regardless of which tier called restartOrDefer —
+        // lossless respawn on its next message, never an immediate stop.
+        //
+        // Same `source !== 'api'` guard as deferIdle below, for the same reason:
+        // `pendingRestarts` is only ever consumed by the channel-turn path
+        // (injectTurn), so arming it for an api-sourced session would leak.
+        this.pendingRestarts.add(id);
+        deferred++;
       } else if (deferIdle && proc.source !== 'api') {
         // Lossless deferral for CHANNEL sessions only: leave the idle process
         // running and arm a restart on its next message (mirrors the
