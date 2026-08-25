@@ -192,7 +192,10 @@ export class MemoryModule implements ToolModule {
           if (!reason) return this.err('memory_shared_write requires non-empty "reason".');
           const force = args.force === true;
 
-          const agentId = process.env.GATEWAY_AGENT_ID || 'agent';
+          const agentId = process.env.GATEWAY_AGENT_ID;
+          if (!agentId || !agentId.trim()) {
+            return this.err('memory_shared_write unavailable: GATEWAY_AGENT_ID is not set, cannot scope note ownership.');
+          }
           const slug = sharedNoteSlug(agentId, reason);
           const existed = sharedNoteExists(vaultDir, slug);
           if (existed && !force) {
@@ -211,7 +214,10 @@ export class MemoryModule implements ToolModule {
           const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
           if (!reason) return this.err('memory_shared_delete requires non-empty "reason".');
 
-          const agentId = process.env.GATEWAY_AGENT_ID || 'agent';
+          const agentId = process.env.GATEWAY_AGENT_ID;
+          if (!agentId || !agentId.trim()) {
+            return this.err('memory_shared_delete unavailable: GATEWAY_AGENT_ID is not set, cannot scope note ownership.');
+          }
           const slug = sharedNoteSlug(agentId, reason);
           const deleted = deleteSharedNote(vaultDir, slug);
           if (!deleted) {
