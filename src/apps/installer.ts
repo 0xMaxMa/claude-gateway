@@ -956,6 +956,42 @@ export class AppInstaller {
     }
   }
 
+  private discoverBindMountsOrThrow(appName: string, appDir: string): string[] {
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'config', '--format', 'json'],
+        appDir,
+        30_000,
+      );
+      const parsed = JSON.parse(stdout) as {
+        services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
+      };
+      const bases = [appDir];
+      try {
+        const real = fs.realpathSync(appDir);
+        if (real !== appDir) bases.push(real);
+      } catch { /* app dir unreadable — use literal base */ }
+      const rels = new Set<string>();
+      for (const svc of Object.values(parsed.services ?? {})) {
+        for (const vol of svc.volumes ?? []) {
+          if (vol.type !== 'bind' || typeof vol.source !== 'string') continue;
+          const abs = path.resolve(appDir, vol.source);
+          const matched = bases.find((base) => abs !== base && abs.startsWith(base + path.sep));
+          if (!matched) continue;
+          rels.add(path.relative(matched, abs).split(path.sep).join('/'));
+        }
+      }
+      return Array.from(rels).sort();
+    } catch (err) {
+      // A config query is only optional for apps whose stored compose declares no
+      // app-local bind source. If it does, continuing would discard unknown state.
+      const composePath = path.join(appDir, 'docker-compose.yml');
+      const compose = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : '';
+      if (!compose.includes(appDir)) return [];
+      throw new Error(`Cannot safely discover bind mounts for update: ${(err as Error).message}`);
+    }
+  }
+
   /**
    * Discover bind-mount source directories that live **under the app dir**
    * (e.g. `./data/photos` → `data/photos`). These hold app-owned data that is
@@ -1641,7 +1677,12 @@ export class AppInstaller {
       }
     }
 
-    const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${crypto.randomUUID()}`);
+    // Stage beside the durable install path so the directory swap and bind-data
+    // moves are same-filesystem renames, not cross-device copies/failures.
+    const tmpDir = path.join(
+      path.dirname(entry.installPath),
+      `.cg-update-${appName}-${crypto.randomUUID()}`,
+    );
     try {
       // ── Shallow fetch of specific commit into tmp dir ─────────────────────
       this.log(job, `Cloning ${target.repo}`);
@@ -1682,7 +1723,7 @@ export class AppInstaller {
         version: newVersion,
         commit: target.newCommit,
         installPath: tmpDir,
-        ...(generated.agentDeclaration !== null ? { agentDeclaration: generated.agentDeclaration } : {}),
+        agentDeclaration: generated.agentDeclaration,
         ...(agentPaths ? { agentPaths } : {}),
       };
 
@@ -1707,28 +1748,55 @@ export class AppInstaller {
       this.callbacks.deregisterRoutes(appName);
       this.callbacks.stopSockets(appName);
 
-      // Capture the current (old) image IDs while the old stack is still up, so
-      // we can reclaim exactly those images after the update — without a
-      // `compose down` that would collide with the new stack (issue #283).
+      // Capture the current (old) image IDs and app-owned bind paths while the old
+      // compose file still points at the durable install directory. The bind paths
+      // must move with the release swap so cleanup cannot delete live state.
       const oldImageIds = this.captureComposeImageIds(appName, entry.installPath);
-      // Also capture the app's declared image refs (repo:tag) so a superseded
-      // *pulled* tag can be reclaimed after the update (issue #302).
       const oldImageRefs = this.captureComposeImageRefs(appName, entry.installPath);
+      const oldBindMounts = this.discoverBindMountsOrThrow(appName, entry.installPath);
 
-      // ── Bring old containers down (keeps images for rollback) ─────────────
+      // ── Swap dirs before starting the new containers ───────────────────────
+      // The new compose file's bind sources are anchored to finalDir. Starting
+      // before this swap would bind the old directory inode then delete it.
       this.log(job, 'Stopping old containers');
       this.run(['docker', 'compose', '-p', appName, 'down'], entry.installPath, 120_000);
-
-      // ── Start new containers ──────────────────────────────────────────────
-      this.log(job, 'Starting new containers');
+      this.log(job, 'Swapping app directories');
+      const finalDir = entry.installPath;
+      const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
+      let swapped = false;
+      let failedDir: string | null = null;
+      const movedBindMounts: string[] = [];
       try {
-        this.composeUp(appName, tmpDir, job);
+        fs.renameSync(finalDir, oldBackupDir);
+        fs.renameSync(tmpDir, finalDir);
+        swapped = true;
+        this.moveBindMounts(oldBackupDir, finalDir, oldBindMounts, movedBindMounts);
+
+        // The source checkout is now permanent. Regenerate so build contexts stay
+        // relative to it and agent injection never retains a staging path.
+        const finalComposePath = path.join(finalDir, 'docker-compose.yml');
+        const finalYaml = parseAppYaml(fs.readFileSync(path.join(finalDir, 'app.yaml'), 'utf-8'), finalDir);
+        const finalGenerated = generateCompose(finalYaml, appName, finalDir, finalComposePath);
+        if (finalGenerated.agentDeclaration && this.agentManager && agentPaths) {
+          this.agentManager.injectAgentService({ ...newEntry, installPath: finalDir });
+        }
+
+        // ── Start new containers ────────────────────────────────────────────
+        this.log(job, 'Starting new containers');
+        this.composeUp(appName, finalDir, job);
       } catch (upErr) {
-        // Rollback: bring old containers back up from old install path
         this.log(job, 'New containers failed — rolling back to previous version');
         let rollbackFailed = false;
+        failedDir = `${finalDir}-failed-${crypto.randomUUID()}`;
         try {
-          this.run(['docker', 'compose', '-p', appName, 'up', '-d'], entry.installPath, 120_000);
+          if (swapped) {
+            fs.renameSync(finalDir, failedDir);
+            fs.renameSync(oldBackupDir, finalDir);
+            this.moveBindMounts(failedDir, finalDir, movedBindMounts);
+          } else if (fs.existsSync(oldBackupDir)) {
+            fs.renameSync(oldBackupDir, finalDir);
+          }
+          this.run(['docker', 'compose', '-p', appName, 'up', '-d'], finalDir, 120_000);
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
             name: p.name,
             service: p.service,
@@ -1738,34 +1806,21 @@ export class AppInstaller {
             rateLimit: p.rateLimit,
           })));
           await this.registry.updateStatus(appName, 'running');
+          if (failedDir !== null) this.safeRmrf(failedDir, job, 'failed update dir');
         } catch (rollbackErr) {
           rollbackFailed = true;
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
-        this.safeRmrf(tmpDir, job, 'update temp dir');
         if (rollbackFailed) {
           throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
         }
         throw upErr;
       }
 
-      // Capture the new stack's image IDs (still at tmpDir) so image reclamation
-      // below never removes an image the new containers depend on (e.g. when the
-      // old and new versions happen to share a base/image).
-      const newImageIds = this.captureComposeImageIds(appName, tmpDir);
-      const newImageRefs = this.captureComposeImageRefs(appName, tmpDir);
-
-      // ── Swap dirs ─────────────────────────────────────────────────────────
-      // Swap in place at the recorded install path — NOT path.join(appsDir, appName).
-      // For legacy installs the on-disk dir is named after the source repo/URL
-      // basename, so `installPath` basename can differ from the app name. Using
-      // the app name here throws ENOENT (issue #275). `entry.installPath` is the
-      // authoritative location the `down`/rollback steps above already use.
-      this.log(job, 'Swapping app directories');
-      const finalDir = entry.installPath;
-      const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
-      fs.renameSync(finalDir, oldBackupDir);
-      fs.renameSync(tmpDir, finalDir);
+      // Capture the new stack's image IDs from its permanent compose file so
+      // cleanup below never removes an image the new containers depend on.
+      const newImageIds = this.captureComposeImageIds(appName, finalDir);
+      const newImageRefs = this.captureComposeImageRefs(appName, finalDir);
 
       // ── Restore MEMORY.md ─────────────────────────────────────────────────
       if (memoryBackup !== null && generated.agentDeclaration && this.agentManager) {
@@ -1782,8 +1837,11 @@ export class AppInstaller {
       };
       await this.registry.upsert(finalEntry);
 
-      // ── Re-create agent symlink + config.json entry ───────────────────────
-      if (generated.agentDeclaration && this.agentManager) {
+      // ── Re-create or remove the app-agent registration ────────────────────
+      if (entry.agentDeclaration && !generated.agentDeclaration && this.agentManager) {
+        await this.agentManager.deleteAgent(entry);
+        this.log(job, `Agent "${entry.agentDeclaration.name}" removed`);
+      } else if (generated.agentDeclaration && this.agentManager) {
         await this.agentManager.upsertAgent(finalEntry);
         this.log(job, `Agent "${generated.agentDeclaration.name}" re-registered`);
         await this.callbacks.reinitializeAgent?.(generated.agentDeclaration.name);
@@ -2330,6 +2388,50 @@ export class AppInstaller {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         this.log(job, `Warning: failed to remove ${label} "${dirPath}": ${(err as Error).message}`);
       }
+    }
+  }
+
+  private assertNoSymlinkAncestors(baseDir: string, targetDir: string): void {
+    const relative = path.relative(baseDir, targetDir);
+    let current = baseDir;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Updated app bind-mount path contains a symlink: "${current}"`);
+      }
+    }
+  }
+
+  /**
+   * Move app-owned relative bind directories across an update directory swap.
+   * Renaming preserves the database's ownership and inode, unlike copying, and
+   * every path is constrained to its respective app root before use.
+   */
+  private moveBindMounts(
+    fromDir: string,
+    toDir: string,
+    rels: string[],
+    moved?: string[],
+  ): void {
+    for (const rel of rels) {
+      const source = path.resolve(fromDir, rel);
+      const destination = path.resolve(toDir, rel);
+      const fromBase = fromDir.endsWith(path.sep) ? fromDir : fromDir + path.sep;
+      const toBase = toDir.endsWith(path.sep) ? toDir : toDir + path.sep;
+      if (
+        rel.length === 0 || path.isAbsolute(rel)
+        || !source.startsWith(fromBase) || !destination.startsWith(toBase)
+        || !fs.existsSync(source)
+      ) {
+        continue;
+      }
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      this.assertNoSymlinkAncestors(toDir, path.dirname(destination));
+      if (fs.existsSync(destination)) {
+        throw new Error(`Updated app already contains bind-mount path "${rel}"`);
+      }
+      fs.renameSync(source, destination);
+      moved?.push(rel);
     }
   }
 

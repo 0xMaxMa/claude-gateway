@@ -1009,6 +1009,140 @@ services:
       expect(readEnvFile(entry!.installPath)['APP_SECRET']).toBe('keep-me');
     });
 
+    it('keeps relative bind mounts at the permanent path across an update (issue #396)', async () => {
+      const githubUrl = 'https://github.com/test/stateful-app';
+      const appName = 'stateful-app';
+      const state = { head: 'a'.repeat(40), version: '1.0.0' };
+      const dockerCalls: Array<{ args: string[]; cwd?: string }> = [];
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(path.join(opts.cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: postgres:16-alpine
+    volumes:
+      - ./data/photos:/photos
+      - ./postgres/pgdata:/var/lib/postgresql/data
+    ports:
+      - name: api
+        host: 5410
+        container: 5410
+        type: api
+    healthcheck:
+      test: pg_isready
+      interval: 30s
+`.trim(), 'utf-8');
+        }
+        if (cmd === 'docker') {
+          dockerCalls.push({ args, cwd: opts?.cwd });
+          if (args.includes('config') && args.includes('--format') && opts?.cwd) {
+            return {
+              stdout: JSON.stringify({ services: { app: { volumes: [
+                { type: 'bind', source: path.join(opts.cwd, 'data', 'photos') },
+                { type: 'bind', source: path.join(opts.cwd, 'postgres', 'pgdata') },
+              ] } } }),
+              stderr: '', status: 0,
+            };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeInstaller(spawn);
+
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+      const before = await registry.get(appName);
+      const pgdata = path.join(before!.installPath, 'postgres', 'pgdata');
+      const photos = path.join(before!.installPath, 'data', 'photos');
+      fs.mkdirSync(pgdata, { recursive: true });
+      fs.mkdirSync(photos, { recursive: true });
+      fs.writeFileSync(path.join(pgdata, 'PG_VERSION'), '16');
+      fs.writeFileSync(path.join(photos, 'photo.jpg'), 'persisted');
+
+      dockerCalls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('completed');
+
+      const after = await registry.get(appName);
+      expect(after?.installPath).toBe(before?.installPath);
+      expect(fs.readFileSync(path.join(pgdata, 'PG_VERSION'), 'utf-8')).toBe('16');
+      expect(fs.readFileSync(path.join(photos, 'photo.jpg'), 'utf-8')).toBe('persisted');
+      const compose = fs.readFileSync(path.join(after!.installPath, 'docker-compose.yml'), 'utf-8');
+      expect(compose).toContain(pgdata);
+      expect(compose).toContain(photos);
+      expect(compose).not.toContain('cg-update-');
+      const updateUp = dockerCalls.find((call) => call.args.includes('up') && call.args.includes('--wait'));
+      expect(updateUp?.cwd).toBe(after?.installPath);
+    });
+
+    it('rolls back preserved bind mounts when the updated stack cannot start (issue #396)', async () => {
+      const githubUrl = 'https://github.com/test/rollback-stateful-app';
+      const appName = 'rollback-stateful-app';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', failNewUp: false, upCalls: 0 };
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(path.join(opts.cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: postgres:16-alpine
+    volumes:
+      - ./postgres/pgdata:/var/lib/postgresql/data
+    ports:
+      - name: api
+        host: 5411
+        container: 5411
+        type: api
+    healthcheck:
+      test: pg_isready
+      interval: 30s
+`.trim(), 'utf-8');
+        }
+        if (cmd === 'docker' && args.includes('config') && args.includes('--format') && opts?.cwd) {
+          return { stdout: JSON.stringify({ services: { app: { volumes: [
+            { type: 'bind', source: path.join(opts.cwd, 'postgres', 'pgdata') },
+          ] } } }), stderr: '', status: 0 };
+        }
+        if (cmd === 'docker' && args.includes('up')) {
+          state.upCalls += 1;
+          if (state.failNewUp && state.upCalls === 1) {
+            return { stdout: '', stderr: 'new stack failed', status: 1 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeInstaller(spawn);
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+      const before = await registry.get(appName);
+      const marker = path.join(before!.installPath, 'postgres', 'pgdata', 'PG_VERSION');
+      fs.mkdirSync(path.dirname(marker), { recursive: true });
+      fs.writeFileSync(marker, '16');
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('failed');
+      const after = await registry.get(appName);
+      expect(after?.commit).toBe('a'.repeat(40));
+      expect(fs.readFileSync(marker, 'utf-8')).toBe('16');
+    });
+
     it('updates an app whose on-disk dir name ≠ app.yaml name (legacy install, issue #275)', async () => {
       // Legacy installs named the on-disk dir after the source repo basename,
       // so installPath basename can differ from the app name. The dir-swap must
@@ -1088,12 +1222,12 @@ services:
         }
         if (cmd === 'docker') {
           dockerCalls.push({ args, cwd: opts?.cwd });
-          // `docker compose -p <app> images --quiet` → a distinct image id per
-          // stack, keyed off the working dir (new stack builds under a
-          // `cg-update-*` tmp dir; the old stack lives under appsDir).
+          // Image inspection runs before/after the directory swap. Distinguish
+          // the update's new-stack query by order, not a staging cwd: the fixed
+          // stack is intentionally started from the permanent app directory.
           if (args.includes('images') && args.includes('--quiet')) {
-            const isNew = (opts?.cwd ?? '').includes('cg-update-');
-            return { stdout: `${isNew ? 'sha-new' : 'sha-old'}\n`, stderr: '', status: 0 };
+            const imagesCalls = dockerCalls.filter((c) => c.args.includes('images') && c.args.includes('--quiet'));
+            return { stdout: `${imagesCalls.length >= 2 ? 'sha-new' : 'sha-old'}\n`, stderr: '', status: 0 };
           }
         }
         return { stdout: '', stderr: '', status: 0 };
