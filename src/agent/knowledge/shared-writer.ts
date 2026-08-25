@@ -19,6 +19,21 @@ import * as path from 'path';
 import { sharedNotesDir } from './config';
 import type { ResolvedKnowledgeSharedCfg } from './types';
 
+/** Whether a note already exists at this name (post-`sharedNoteFilename` slugification). */
+export function sharedNoteExists(cfg: ResolvedKnowledgeSharedCfg, name: string): boolean {
+  return fs.existsSync(path.join(sharedNotesDir(cfg), sharedNoteFilename(name)));
+}
+
+/** Full content of a shared note, or null if it does not exist / is unreadable. */
+export function readSharedNote(cfg: ResolvedKnowledgeSharedCfg, name: string): string | null {
+  const target = path.join(sharedNotesDir(cfg), sharedNoteFilename(name));
+  try {
+    return fs.readFileSync(target, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 // Monotonic per-process counter so concurrent writes within one process still get
 // distinct temp names (combined with pid for cross-process uniqueness).
 let tmpCounter = 0;

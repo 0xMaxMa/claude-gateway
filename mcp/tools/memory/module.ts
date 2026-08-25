@@ -78,7 +78,7 @@ export class MemoryModule implements ToolModule {
       {
         name: 'memory_shared_create',
         description:
-          'Create a NEW note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose"). Notes live in a shared namespace across every agent — pick any "name" you like, there is no agent-id prefix. Fails if a note with this exact name already exists (use memory_shared_update on it instead, after reading it with memory_shared_get). Before writing, this also searches the shared KB for notes with SIMILAR content and, if any are found, returns them instead of creating (to avoid near-duplicate notes cluttering the vault) — pass confirm:true to create anyway once you have checked they are not the same topic. The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
+          'Create a NEW note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose"). Notes live in a shared namespace across every agent — pick any "name" you like, there is no agent-id prefix. Fails if a note with this exact name already exists (use memory_shared_update on it instead, after reading it with memory_shared_get). Before writing, this also searches the shared KB for notes with SIMILAR content and, if any are found, returns them instead of creating (to avoid near-duplicate notes cluttering the vault) — pass confirm:true to create anyway once you have checked they are not the same topic; when you do, a `[[link]]` to each similar note found is appended to your content automatically, so the knowledge-graph dashboard stays connected instead of gaining a disconnected duplicate. The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -208,7 +208,7 @@ export class MemoryModule implements ToolModule {
           }
           const name = typeof args.name === 'string' ? args.name.trim() : '';
           if (!name) return this.err('memory_shared_create requires non-empty "name".');
-          const content = typeof args.content === 'string' ? args.content : '';
+          let content = typeof args.content === 'string' ? args.content : '';
           if (!content.trim()) return this.err('memory_shared_create requires non-empty "content".');
           if (content.length > MAX_SHARED_NOTE_SIZE) {
             return this.err(`memory_shared_create: content exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit (${(content.length / 1024).toFixed(1)}KB).`);
@@ -218,18 +218,30 @@ export class MemoryModule implements ToolModule {
           }
 
           const confirm = args.confirm === true;
-          if (!confirm) {
-            const sharedDb = sharedDbPathFromEnv();
-            if (sharedDb) {
-              const similar = findSimilarSharedNotes(sharedDb, `${name} ${content}`, 3);
-              if (similar.length > 0) {
-                return this.json({
-                  created: false,
-                  needsConfirmation: true,
-                  reason: 'similar-notes-found',
-                  similar: similar.map((h) => ({ path: h.path, snippet: h.snippet })),
-                  message: `Found ${similar.length} existing note(s) with similar content — consider memory_shared_update on one of these instead of creating a new one. Pass confirm:true to create "${name}" anyway.`,
-                });
+          const sharedDb = sharedDbPathFromEnv();
+          const similar = sharedDb ? findSimilarSharedNotes(sharedDb, `${name} ${content}`, 3) : [];
+          if (similar.length > 0) {
+            if (!confirm) {
+              return this.json({
+                created: false,
+                needsConfirmation: true,
+                reason: 'similar-notes-found',
+                similar: similar.map((h) => ({ path: h.path, snippet: h.snippet })),
+                message: `Found ${similar.length} existing note(s) with similar content — consider memory_shared_update on one of these instead of creating a new one. Pass confirm:true to create "${name}" anyway.`,
+              });
+            }
+            // Confirmed anyway: link to the related notes instead of leaving a
+            // disconnected duplicate (#386) — wiki.ts already resolves
+            // [[wikilinks]] into real /knowledge/graph edges, no parser change
+            // needed, this is the only writer that needs to start emitting them.
+            const links = similar
+              .map((h) => h.path.replace(/\.md$/i, ''))
+              .filter((n) => n !== name)
+              .map((n) => `[[${n}]]`);
+            if (links.length > 0) {
+              content = `${content.trim()}\n\nRelated: ${links.join(' ')}`;
+              if (content.length > MAX_SHARED_NOTE_SIZE) {
+                return this.err(`memory_shared_create: content plus related-note links exceeds ${MAX_SHARED_NOTE_SIZE / 1024}KB limit.`);
               }
             }
           }
