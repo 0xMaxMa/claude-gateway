@@ -783,10 +783,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
         // Typing persists until agent-runner sees result event + delay.
         // Removed signalReplyDone() — reply does not mean done, agent may continue working.
-        // Write .replied marker so auto-forward in typing.ts skips duplicate send.
+        // Write .replied marker so auto-forward in typing.ts skips duplicate send —
+        // tagged with the live typing-signal timestamp as this turn's id, so a
+        // marker left over from an earlier turn can never suppress a later
+        // turn's forward (see typing.ts's isEntryAlreadyReplied()).
         try {
           mkdirSync(TYPING_DIR, { recursive: true })
-          writeFileSync(join(TYPING_DIR, `${chat_id}.replied`), sendText)
+          let turnId: string | null = null
+          try {
+            turnId = readFileSync(join(TYPING_DIR, chat_id), 'utf8').trim() || null
+          } catch {}
+          writeFileSync(join(TYPING_DIR, `${chat_id}.replied`), JSON.stringify({ text: sendText, turnId }))
         } catch { /* non-fatal */ }
 
         const result =

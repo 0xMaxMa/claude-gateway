@@ -941,8 +941,10 @@ describe('AgentRunner — typing error notification', () => {
 
     const forwardFile = path.join(getTypingDir(), '123456789.forward');
     expect(fs.existsSync(forwardFile)).toBe(true);
+    // Queue format (claude-gateway#380): an array of entries, each tagged
+    // with the turn that wrote it (null here — no live typing-signal file).
     const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    expect(content).toEqual({ text: 'Hello from agent', format: 'text' });
+    expect(content).toEqual([{ text: 'Hello from agent', format: 'text', turnId: null }]);
   });
 
   // --------------------------------------------------------------------------
@@ -957,7 +959,7 @@ describe('AgentRunner — typing error notification', () => {
     const forwardFile = path.join(getTypingDir(), '123456789.forward');
     expect(fs.existsSync(forwardFile)).toBe(true);
     const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    expect(content).toEqual({ text: 'Hello <code>code</code>', format: 'html' });
+    expect(content).toEqual([{ text: 'Hello <code>code</code>', format: 'html', turnId: null }]);
   });
 
   // --------------------------------------------------------------------------
@@ -977,7 +979,12 @@ describe('AgentRunner — typing error notification', () => {
     const restartSpy = jest.spyOn(r, 'restartProcess').mockResolvedValue(undefined);
     const proc = { setProcessing: jest.fn() };
     const forwardFile = path.join(getTypingDir(), 'chat:big.forward');
-    const readForward = () => JSON.parse(fs.readFileSync(forwardFile, 'utf8')).text as string;
+    // Queue format (claude-gateway#380): each call appends rather than
+    // overwrites, so read the most recently queued entry's text.
+    const readForward = () => {
+      const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8')) as Array<{ text: string }>;
+      return entries[entries.length - 1]!.text;
+    };
 
     // Rungs 1..5 → counter climbs, each emits the "Restarting" resend notice + restarts.
     for (let i = 1; i <= 5; i++) {
@@ -1053,7 +1060,12 @@ describe('AgentRunner — typing error notification', () => {
     const restartSpy = jest.spyOn(r, 'restartProcess').mockResolvedValue(undefined);
     const proc = { setProcessing: jest.fn() };
     const forwardFile = path.join(getTypingDir(), 'chat:low.forward');
-    const readForward = () => JSON.parse(fs.readFileSync(forwardFile, 'utf8')).text as string;
+    // Queue format (claude-gateway#380): each call appends rather than
+    // overwrites, so read the most recently queued entry's text.
+    const readForward = () => {
+      const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8')) as Array<{ text: string }>;
+      return entries[entries.length - 1]!.text;
+    };
 
     // Rungs [20,10,0] → 3 climbing steps, each restarts.
     for (let i = 1; i <= 3; i++) {
@@ -2572,9 +2584,9 @@ describe('AgentRunner — session command routing', () => {
     // A .forward file should have been written (session list response)
     const forwardFile = path.join(getTypingDir(), 'chat:session-cmd.forward');
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    expect(typeof content.text).toBe('string');
-    expect(content.text).toContain('Session');
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(typeof entries[0].text).toBe('string');
+    expect(entries[0].text).toContain('Session');
   }, 15000);
 
   // -------------------------------------------------------------------------
@@ -2593,9 +2605,9 @@ describe('AgentRunner — session command routing', () => {
     // A .forward file should contain confirmation
     const forwardFile = path.join(getTypingDir(), 'chat:new-cmd.forward');
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    expect(content.text).toContain('my session');
-    expect(content.text).toContain('New session created');
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(entries[0].text).toContain('my session');
+    expect(entries[0].text).toContain('New session created');
 
     // The process should NOT be in the session map (new sessions are lazily spawned)
     const sessions = getSessions(runner);
@@ -2613,9 +2625,9 @@ describe('AgentRunner — session command routing', () => {
 
     const forwardFile = path.join(getTypingDir(), 'chat:new-noname.forward');
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
     // Auto-name should follow "Session N" pattern
-    expect(content.text).toMatch(/Session \d/);
+    expect(entries[0].text).toMatch(/Session \d/);
   }, 15000);
 
   // -------------------------------------------------------------------------
@@ -2699,9 +2711,9 @@ describe('AgentRunner — session command routing', () => {
 
     const forwardFile = path.join(getTypingDir(), `${chatId}.forward`);
     expect(fs.existsSync(forwardFile)).toBe(true);
-    const forward = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
-    expect(forward.text).toContain('Here is the detailed plan.');
-    expect(forward.text).not.toContain('Choose an option');
+    const entries = JSON.parse(fs.readFileSync(forwardFile, 'utf8'));
+    expect(entries[0].text).toContain('Here is the detailed plan.');
+    expect(entries[0].text).not.toContain('Choose an option');
   }, 15000);
 
   it('U14b: result that is only the menu text produces no forward (no duplicate)', async () => {
