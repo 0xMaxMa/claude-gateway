@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
+.PHONY: help start start-dev cli stop mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -18,6 +18,10 @@ start: ## Build and start the gateway
 start-dev: ## Dev mode — tsc --watch + hot-reload /dashboard on save (no gateway restart needed)
 	npm run build
 	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start
+
+cli: ## Run a CLI command against the local build — make cli ARGS="gateway status"
+	npm run build
+	@node --no-warnings=ExperimentalWarning dist/index.js $(ARGS)
 
 stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 	@echo "Stopping claude-gateway..."

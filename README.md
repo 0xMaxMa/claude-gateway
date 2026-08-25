@@ -725,6 +725,15 @@ claude-gateway api GET /v1/agents          # escape hatch: call any endpoint dir
 > gateway, with a deprecation warning. Point `ExecStart` at `claude-gateway gateway start`, or
 > reinstall the unit with `claude-gateway service install`.
 
+Working on the CLI itself? The globally installed `claude-gateway` is the published npm package, not
+your checkout, so a bare `claude-gateway` still runs whatever version is on your `PATH`. Use `make cli`
+to build and exercise the local sources instead:
+
+```bash
+make cli ARGS="--help"
+make cli ARGS="gateway status"
+```
+
 Commands are **generated from the same route manifest the server mounts**, so every endpoint exposed as a friendly command stays in sync with the API automatically. Global flags: `--url`, `--key`, `--json`, `--data <json>`, `--help`.
 
 See **[CLI.md](./CLI.md)** for the full command reference.
@@ -842,7 +851,7 @@ See **[API.md — App Store section](./API.md#app-store-api)** for the full refe
 
 ```
 claude-gateway/
-├── Makefile                            ← make start / mcp-install / release / pm2-* / system-*
+├── Makefile                            ← make start / cli / mcp-install / release / pm2-* / system-*
 ├── config.template.json                ← config template (source of truth for migration)
 │
 ├── src/                                ← Gateway core (TypeScript, compiled to dist/)

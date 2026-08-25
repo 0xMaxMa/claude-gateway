@@ -1,6 +1,7 @@
 import { CliConfigView, resolveUrl, resolveLocalUrl, resolveKey } from '../http-client';
 import { detectManager } from '../manager';
 import { printJson } from '../output';
+import { paletteFor } from '../colors';
 
 /**
  * `doctor` — quick health check of the CLI's view of the gateway: is config
@@ -14,18 +15,44 @@ interface Check {
   detail: string;
 }
 
-/** Probe `<baseUrl>/health`. The abort timer is cleared in `finally`: a
- *  rejected fetch would otherwise skip clearTimeout and leave a live timer
- *  holding the event loop open — and an unreachable gateway is exactly the
- *  case `doctor` is run for. */
-async function probe(baseUrl: string, timeoutMs = 3000): Promise<boolean> {
+interface ProbeResult {
+  /** True only for a 2xx — the CLI can actually use this URL. */
+  ok: boolean;
+  /** True when something answered at all, whatever the status. */
+  answered: boolean;
+  /** The HTTP status, when there was one. */
+  status?: number;
+  detail: string;
+}
+
+/** Probe `<baseUrl>/health`.
+ *
+ *  An HTTP status is reported verbatim rather than collapsed into "no
+ *  response": a reverse proxy that replies 401 is *up*, and saying otherwise
+ *  sends the operator to debug a proxy that is working fine.
+ *
+ *  The abort timer is cleared in `finally`: a rejected fetch would otherwise
+ *  skip clearTimeout and leave a live timer holding the event loop open — and
+ *  an unreachable gateway is exactly the case `doctor` is run for. */
+async function probe(baseUrl: string, timeoutMs = 3000): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-    return res.ok;
-  } catch {
-    return false;
+    if (res.ok) return { ok: true, answered: true, detail: 'gateway responding' };
+    return {
+      ok: false,
+      answered: true,
+      status: res.status,
+      detail: `HTTP ${res.status} (answered, but not a healthy gateway)`,
+    };
+  } catch (err) {
+    const aborted = (err as { name?: string } | undefined)?.name === 'AbortError';
+    return {
+      ok: false,
+      answered: false,
+      detail: aborted ? `no response (timed out after ${timeoutMs}ms)` : 'no response',
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -49,7 +76,8 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const manager = detectManager();
   checks.push({ name: 'manager', ok: manager !== 'unknown', detail: manager });
 
-  checks.push({ name: 'health', ok: await probe(baseUrl), detail: '' });
+  const health = await probe(baseUrl);
+  checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
   // When a gateway is running on this host behind a different URL (typically a
   // reverse proxy in config.gateway.publicUrl), probe it directly too. Without
@@ -57,24 +85,30 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // perfectly healthy — shows up as `manager: foreground` next to
   // `health: no response`, with nothing to explain the contradiction.
   const localUrl = resolveLocalUrl({ flagUrl, env: process.env, config });
+  let localOk = false;
   if (manager !== 'unknown' && localUrl !== baseUrl) {
     checks.push({ name: 'localUrl', ok: true, detail: localUrl });
-    checks.push({ name: 'localHealth', ok: await probe(localUrl), detail: '' });
-  }
-
-  for (const c of checks) {
-    if (c.name === 'health' || c.name === 'localHealth') {
-      c.detail = c.ok ? 'gateway responding' : 'no response';
-    }
+    const localHealth = await probe(localUrl);
+    localOk = localHealth.ok;
+    checks.push({ name: 'localHealth', ok: localHealth.ok, detail: localHealth.detail });
   }
 
   const allOk = checks.every((c) => c.ok);
-  const lines = checks.map((c) => `  [${c.ok ? 'ok' : '!!'}] ${c.name.padEnd(11)} ${c.detail}`);
-  const local = checks.find((c) => c.name === 'localHealth');
-  if (local && local.ok && !checks.find((c) => c.name === 'health')!.ok) {
-    lines.push('  note: the gateway is up locally but its public URL did not answer — check the reverse proxy.');
+  const c = paletteFor(process.stderr);
+  // Pad before colouring so escape codes never count toward the column width.
+  const lines = checks.map(
+    (chk) => `  ${chk.ok ? c.green('[ok]') : c.red('[!!]')} ${c.bold(chk.name.padEnd(11))} ${chk.detail}`,
+  );
+  // Explain the contradiction the two probes can produce, and blame the right
+  // component: a public URL that answered with a status is not an unreachable
+  // proxy, it is a reachable one rejecting the request.
+  if (localOk && !health.ok) {
+    const note = health.answered
+      ? `note: the gateway is up locally, but its public URL answered HTTP ${health.status} — the proxy in front of it rejected this request.`
+      : 'note: the gateway is up locally but its public URL did not answer — check the reverse proxy.';
+    lines.push(`  ${c.yellow(note)}`);
   }
-  process.stderr.write(['claude-gateway doctor', ...lines, ''].join('\n'));
+  process.stderr.write([`${c.bold('claude-gateway doctor')}`, ...lines, ''].join('\n'));
   printJson({ ok: allOk, checks }, flags);
   return allOk ? 0 : 1;
 }

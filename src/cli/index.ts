@@ -4,6 +4,7 @@ import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrl, resolveKey, request, CliConfigView } from './http-client';
 import { printResult } from './output';
+import { paletteFor, Paint } from './colors';
 import { runGatewayLifecycle } from './commands/gateway';
 import { runService } from './commands/service';
 import { runUpdate, runClaude } from './commands/update';
@@ -227,53 +228,78 @@ function usageFor(c: GeneratedCommand): string {
   return `${c.noun} ${c.verb}${positionals ? ' ' + positionals : ''}${flagStr ? ' ' + flagStr : ''}`.trim();
 }
 
+/** Two-column rows in the general help. The name column is padded to
+ *  NAME_W; a name wider than that puts its description on the next line. */
+const NAME_W = 30;
+
+const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
+  ['gateway status|restart|stop', 'Manage the gateway process (manager-aware)'],
+  ['service install|status|uninstall', 'Run the gateway as a systemd-user or PM2 service'],
+  ['update [check]', 'Check for / install a newer claude-gateway'],
+  ['claude version|update [check]', 'Inspect / update the Claude Code binary'],
+  ['doctor', 'Check config/env/connectivity'],
+  ['debug-bundle', 'Write a small redacted diagnostics bundle'],
+  ['agents list|create|update', 'Create/manage agents (interactive wizard)'],
+  ['channels pending|approve|deny', 'Approve/deny incoming Telegram/Discord pairing requests'],
+  ['api <METHOD> <path>', 'Call any endpoint directly (escape hatch)'],
+  ['version', 'Print the gateway version'],
+];
+
+/** Render one `  name   description` row, padding before colouring so ANSI
+ *  escapes never count toward the column width. */
+function helpRow(name: string, desc: string, paint: Paint): string[] {
+  if (name.length > NAME_W) return [`  ${paint(name)}`, `  ${' '.repeat(NAME_W)}${desc}`];
+  return [`  ${paint(name.padEnd(NAME_W))}${desc}`];
+}
+
 function printGeneralHelp(): void {
   const nouns = [...GENERATED_NOUNS].sort();
+  const c = paletteFor(process.stderr);
+  // readVersion() falls back to 'unknown'; render that as a plain banner rather than "vunknown".
+  const version = readVersion();
+  const name = c.bold('claude-gateway');
+  const banner =
+    version === 'unknown'
+      ? `${name} — control a running gateway from the command line`
+      : `${name} ${c.dim(`v${version}`)} — control a running gateway from the command line`;
   const lines = [
-    'claude-gateway — control a running gateway from the command line',
+    banner,
     '',
-    'Usage: claude-gateway <command> [args] [--flags]',
+    `${c.bold('Usage:')} claude-gateway <command> [args] [--flags]`,
     '',
-    'Start the gateway in the foreground:',
-    '  gateway start                 Start the gateway server (the only command that boots it)',
+    c.bold('Start the gateway in the foreground:'),
+    ...helpRow('gateway start', 'Start the gateway server (the only command that boots it)', c.green),
     '',
-    'Core commands:',
-    '  gateway status|restart|stop   Manage the gateway process (manager-aware)',
-    '  service install|status|uninstall',
-    '                                Run the gateway as a systemd-user or PM2 service',
-    '  update [check]                Check for / install a newer claude-gateway',
-    '  claude version|update [check] Inspect / update the Claude Code binary',
-    '  doctor                        Check config/env/connectivity',
-    '  debug-bundle                  Write a small redacted diagnostics bundle',
-    '  agents list|create|update     Create/manage agents (interactive wizard)',
-    '  channels pending|approve|deny Approve/deny incoming Telegram/Discord pairing requests',
-    '  api <METHOD> <path>           Call any endpoint directly (escape hatch)',
-    '  version                       Print the gateway version',
+    c.bold('Core commands:'),
+    ...CORE_HELP.flatMap(([n, d]) => helpRow(n, d, c.cyan)),
     '',
-    `Resource commands: ${nouns.join(', ')}`,
-    '  Run `claude-gateway <resource> --help` for its verbs.',
+    `${c.bold('Resource commands:')} ${nouns.map((n) => c.cyan(n)).join(', ')}`,
+    `  Run \`claude-gateway <resource> --help\` for its verbs.`,
     '',
-    'Global flags: --url <url>  --key <key>  --json (compact/minified output)  --data <json>  --help',
+    `${c.bold('Global flags:')} --url <url>  --key <key>  --json (compact/minified output)  --data <json>  --help`,
   ];
   process.stderr.write(lines.join('\n') + '\n');
 }
 
 function printNounHelp(noun: string): void {
   const cmds = GENERATED_COMMANDS.filter((c) => c.noun === noun);
-  const lines = [`claude-gateway ${noun} — commands:`, ''];
-  for (const c of cmds) lines.push(`  ${usageFor(c).padEnd(48)} ${c.summary}`);
+  const p = paletteFor(process.stderr);
+  const lines = [`${p.bold('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
+  // Pad before colouring so escape codes never count toward the column width.
+  for (const c of cmds) lines.push(`  ${p.cyan(usageFor(c).padEnd(48))} ${c.summary}`);
   process.stderr.write(lines.join('\n') + '\n');
 }
 
 function printCommandHelp(c: GeneratedCommand): void {
+  const p = paletteFor(process.stderr);
   const lines = [
-    `claude-gateway ${usageFor(c)}`,
+    `${p.bold('claude-gateway')} ${p.cyan(usageFor(c))}`,
     '',
     `  ${c.summary}`,
-    `  ${c.method} ${c.path}  (auth: ${c.auth})`,
+    `  ${p.dim(`${c.method} ${c.path}  (auth: ${c.auth})`)}`,
   ];
   if (c.flags.length) {
-    lines.push('', '  Flags:');
+    lines.push('', `  ${p.bold('Flags:')}`);
     for (const f of c.flags) {
       lines.push(`    --${f.name.padEnd(16)} ${f.in}${f.required ? ' (required)' : ''}  ${f.description ?? ''}`.trimEnd());
     }

@@ -31,6 +31,10 @@ would report a dead local service as healthy. Pass `--url` explicitly to probe a
 `doctor` keeps the normal precedence (it diagnoses the path the CLI's API calls take) and adds a
 second `localHealth` check whenever a local gateway is detected behind a different URL.
 
+**Colour.** Help and diagnostic text on stderr is coloured only when stderr is a terminal. Set
+`NO_COLOR` to turn it off, or `FORCE_COLOR=1` to keep it through a pipe; `NO_COLOR` wins if both
+are set. `--json` output on stdout is never coloured.
+
 ## Lifecycle & diagnostics (do not require a running server)
 
 | Command | Description |

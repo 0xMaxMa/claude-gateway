@@ -66,6 +66,16 @@ describe('cli doctor', () => {
     expect(body.checks.find((c) => c.name === 'config')?.ok).toBe(true);
   });
 
+  it('an aborted probe says it timed out rather than just "no response"', async () => {
+    const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    global.fetch = jest.fn().mockRejectedValue(abort);
+
+    const code = await runDoctor({}, configWithKey);
+
+    expect(code).toBe(1);
+    expect(report().checks.find((c) => c.name === 'health')?.detail).toMatch(/timed out/);
+  });
+
   it('no config/keys at all fails config + apiKey checks and exits 1', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
@@ -118,6 +128,26 @@ describe('cli doctor', () => {
       expect(body.checks.find((c) => c.name === 'health')?.ok).toBe(false);
       expect(body.checks.find((c) => c.name === 'localHealth')?.ok).toBe(true);
       expect(stderr.join('')).toMatch(/up locally but its public URL did not answer/);
+      expect(code).toBe(1);
+    });
+
+    it('reports the status when the proxy answers but rejects the request', async () => {
+      // A 401 from the proxy means the proxy is *up*. Collapsing that into
+      // "no response" sends the operator to debug a component that is fine.
+      global.fetch = jest.fn().mockImplementation((url: string) =>
+        String(url).startsWith('http://127.0.0.1')
+          ? Promise.resolve({ ok: true } as Response)
+          : Promise.resolve({ ok: false, status: 401 } as Response),
+      );
+
+      const code = await runDoctor({}, proxied);
+
+      const health = report().checks.find((c) => c.name === 'health')!;
+      expect(health.ok).toBe(false);
+      expect(health.detail).toContain('HTTP 401');
+      expect(health.detail).not.toContain('no response');
+      expect(stderr.join('')).toMatch(/answered HTTP 401 — the proxy in front of it rejected this request/);
+      expect(stderr.join('')).not.toMatch(/did not answer/);
       expect(code).toBe(1);
     });
 

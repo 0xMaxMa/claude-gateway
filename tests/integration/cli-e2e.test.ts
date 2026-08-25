@@ -230,7 +230,7 @@ describe('cli e2e — help/version', () => {
   it('no command prints general help to stderr and exits 0', async () => {
     const code = await runCli([]);
     expect(code).toBe(0);
-    expect(stderr.join('')).toMatch(/claude-gateway — control a running gateway/);
+    expect(stderr.join('')).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
   });
 
   it('`help` prints the same general help and exits 0', async () => {
