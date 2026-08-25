@@ -67,4 +67,25 @@ describe('config-bootstrap', () => {
     expect(written.agents).toEqual([]);
     expect(written.gateway.api.keys[0].key).toBe(result.adminKey);
   });
+
+  it('writes config.json with owner-only permissions (0600)', () => {
+    ensureConfigExists(configPath, TEMPLATE_PATH);
+
+    const mode = fs.statSync(configPath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('loses a concurrent-first-boot race safely instead of overwriting the winner', () => {
+    // Simulate a second process racing to create the same file first, after
+    // this call already decided (via existsSync) that no config exists yet.
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const winner = { gateway: { logDir: '~/winner' }, agents: [] };
+    fs.writeFileSync(configPath, JSON.stringify(winner), { flag: 'wx' });
+
+    const result = ensureConfigExists(configPath, TEMPLATE_PATH);
+
+    expect(result.created).toBe(false);
+    expect(result.adminKey).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(winner);
+  });
 });

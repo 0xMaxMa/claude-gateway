@@ -64,7 +64,16 @@ export interface RouteDef {
 
 const registered: RouteDef[] = [];
 
-/** Clear the manifest. Call before repopulating (codegen, tests). */
+/**
+ * Clear the manifest. Call before repopulating (codegen, tests).
+ *
+ * Not called anywhere on the live server boot path today — `defineRoute`'s own
+ * dedup keeps re-mounting the same routes from piling up duplicates, but if a
+ * `GatewayRouter` is ever re-instantiated in-process with a *different* route
+ * set (e.g. a future hot-reload path), stale entries from the first
+ * instantiation would linger here and leak into `GET /_meta/routes`. Call this
+ * before any such re-instantiation.
+ */
 export function resetRegisteredRoutes(): void {
   registered.length = 0;
 }

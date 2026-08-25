@@ -161,7 +161,7 @@ describe('Plugin E2E', () => {
       const senderId = '123456'
       const chatId = '123456'
 
-      // Simulate what scripts/pair.ts does
+      // Simulate the pairing-approval flow (see lib/pairing.ts)
       const access = defaultAccess()
       access.allowFrom = [senderId]
       saveAccess(tmpDir, access)

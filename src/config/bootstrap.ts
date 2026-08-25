@@ -45,7 +45,22 @@ export function ensureConfigExists(configPath: string, templatePath: string): Bo
   };
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  try {
+    // 'wx' fails with EEXIST instead of overwriting if another process won a
+    // concurrent first-boot race; mode 0o600 keeps the embedded admin key
+    // from being readable by other local users (matches installer.ts's
+    // convention for secret-bearing files).
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', {
+      encoding: 'utf-8',
+      mode: 0o600,
+      flag: 'wx',
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      return { created: false };
+    }
+    throw err;
+  }
 
   return { created: true, adminKey };
 }
