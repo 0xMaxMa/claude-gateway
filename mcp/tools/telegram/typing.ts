@@ -547,17 +547,22 @@ export function createWorkingStateManager(
     const forwardPath = forwardFilePath(chatId)
     const repliedPath = repliedFilePath(chatId)
     if (fsApi.existsSync(forwardPath)) {
+      let entries: ForwardEntry[] = []
       try {
-        const raw = fsApi.readFileSync(forwardPath, 'utf8')
-        const repliedTurnId = fsApi.existsSync(repliedPath)
-          ? parseRepliedTurnId(fsApi.readFileSync(repliedPath, 'utf8'))
-          : null
-        for (const entry of parseForwardQueue(raw)) {
-          if (!entry.text || isEntryAlreadyReplied(entry, repliedTurnId)) continue
-          await deliverForwardText(botApi, chatId, entry.text, entry.format === 'html' ? 'HTML' : undefined)
-        }
+        entries = parseForwardQueue(fsApi.readFileSync(forwardPath, 'utf8'))
       } catch {}
+      // Remove BEFORE delivering (mirrors drainOrphanForwards' same comment):
+      // delivery can take a while (multiple chunks, retries), and a
+      // writeAutoForward() append landing mid-delivery must start a fresh
+      // file rather than have this call's cleanup silently discard it.
       fsApi.rmSync(forwardPath, { force: true })
+      const repliedTurnId = fsApi.existsSync(repliedPath)
+        ? parseRepliedTurnId(fsApi.readFileSync(repliedPath, 'utf8'))
+        : null
+      for (const entry of entries) {
+        if (!entry.text || isEntryAlreadyReplied(entry, repliedTurnId)) continue
+        await deliverForwardText(botApi, chatId, entry.text, entry.format === 'html' ? 'HTML' : undefined)
+      }
     }
     // NOTE: interactive-menu (.menu) delivery is handled by an independent poller
     // in receiver-server.ts (drainMenuFiles), NOT here. A menu can be emitted

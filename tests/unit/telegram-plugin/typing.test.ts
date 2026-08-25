@@ -962,6 +962,33 @@ describe('createWorkingStateManager', () => {
       expect(fsApi._files.has(`${TYPING_DIR}/${CHAT_ID}.replied`)).toBe(false)
     })
 
+    // Self-review follow-up for claude-gateway#380: stop() can take a while to
+    // deliver (multiple chunks, retries over the network). The .forward file
+    // must be removed BEFORE delivery starts — mirroring drainOrphanForwards —
+    // so a writeAutoForward() append landing mid-delivery starts a fresh file
+    // instead of being silently discarded by this call's own cleanup.
+    it('U-TY-09b: .forward is removed BEFORE delivery starts, not after', async () => {
+      const bot = makeBotApi()
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+      fsApi._files.set(
+        `${TYPING_DIR}/${CHAT_ID}.forward`,
+        JSON.stringify({ text: 'hello', format: 'text', turnId: 'turn-A' }),
+      )
+
+      await mgr.stop(CHAT_ID)
+
+      const rmMock = fsApi.rmSync as jest.Mock
+      const forwardRmCallIndex = rmMock.mock.calls.findIndex(
+        (c: unknown[]) => c[0] === `${TYPING_DIR}/${CHAT_ID}.forward`,
+      )
+      const rmOrder = rmMock.mock.invocationCallOrder[forwardRmCallIndex]
+      const sendOrder = bot.sendMessage.mock.invocationCallOrder[0]
+      expect(rmOrder).toBeLessThan(sendOrder)
+    })
+
     it('U-TY-10: splits long auto-forward text into multiple sendMessage calls', async () => {
       const bot = makeBotApi()
       const fsApi = makeFsApi()
