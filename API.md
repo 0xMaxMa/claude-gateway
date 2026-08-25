@@ -3259,6 +3259,8 @@ If the updated release also ships content at a bind path (a tracked `.gitkeep`, 
 
 Update scratch directories (`.cg-update-*`, `<appDir>-old-*`, `<appDir>-failed-*`) left behind by a crash mid-update are swept on gateway boot.
 
+If the app declares an agent, its registration follows the new release: an agent whose name changed is deregistered under the old name before the new one is registered, and an agent the release no longer declares is deregistered entirely. Either way the agent's directory and session history are preserved (only the `workspace` symlink and the `config.json` entry are removed), and `MEMORY.md` is carried forward — written after the new registration exists, so it survives a rename.
+
 The update target depends on the app's `source`:
 - `registry` — the latest published registry version.
 - `custom` (installed from a GitHub URL) — the current default-branch `HEAD` of the app's repo, resolved via `git ls-remote`. If the resolved commit already matches the installed one, the job completes as a no-op.

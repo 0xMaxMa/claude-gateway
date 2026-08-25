@@ -1866,12 +1866,6 @@ export class AppInstaller {
       const newImageIds = this.captureComposeImageIds(appName, finalDir);
       const newImageRefs = this.captureComposeImageRefs(appName, finalDir);
 
-      // ── Restore MEMORY.md ─────────────────────────────────────────────────
-      if (memoryBackup !== null && generated.agentDeclaration && this.agentManager) {
-        this.agentManager.restoreMemory(generated.agentDeclaration.name, memoryBackup);
-        this.log(job, 'MEMORY.md restored');
-      }
-
       // ── Update registry ───────────────────────────────────────────────────
       const finalEntry: AppEntry = {
         ...newEntry,
@@ -1881,13 +1875,31 @@ export class AppInstaller {
       };
       await this.registry.upsert(finalEntry);
 
-      // ── Re-create or remove the app-agent registration ────────────────────
-      if (entry.agentDeclaration && !generated.agentDeclaration && this.agentManager) {
-        await this.agentManager.deleteAgent(entry);
-        this.log(job, `Agent "${entry.agentDeclaration.name}" removed`);
-      } else if (generated.agentDeclaration && this.agentManager) {
+      // ── Re-create, rename, or remove the app-agent registration ───────────
+      // `upsertAgent` keys off the *new* agent name, so a release that drops or
+      // renames its agent would otherwise strand the previous workspace symlink
+      // and config.json entry. Both transitions are the same deregistration.
+      const oldAgentName = entry.agentDeclaration?.name ?? null;
+      const newAgentName = generated.agentDeclaration?.name ?? null;
+      if (this.agentManager && oldAgentName !== null && oldAgentName !== newAgentName) {
+        await this.agentManager.deleteAgentByName(oldAgentName);
+        this.log(
+          job,
+          newAgentName === null
+            ? `Agent "${oldAgentName}" removed`
+            : `Agent "${oldAgentName}" deregistered (renamed to "${newAgentName}")`,
+        );
+      }
+      if (generated.agentDeclaration && this.agentManager) {
         await this.agentManager.upsertAgent(finalEntry);
         this.log(job, `Agent "${generated.agentDeclaration.name}" re-registered`);
+        // MEMORY.md must be written *after* registration: restoreMemory resolves
+        // the workspace through config.json, so on a rename the new name is not
+        // resolvable until upsertAgent has written its entry.
+        if (memoryBackup !== null) {
+          this.agentManager.restoreMemory(generated.agentDeclaration.name, memoryBackup);
+          this.log(job, 'MEMORY.md restored');
+        }
         await this.callbacks.reinitializeAgent?.(generated.agentDeclaration.name);
       }
 
@@ -2440,6 +2452,12 @@ export class AppInstaller {
    * symlink. The check runs **before** each segment is created — a `mkdir -p`
    * that ran first would already have materialised directories on the far side
    * of a symlink, leaving the guard with nothing left to prevent.
+   *
+   * Scope: this guards the **destination** side — the freshly checked-out
+   * release, which is the side an app repo controls. A bind path that was
+   * already a symlink in the *previous* app dir is carried across as-is; that
+   * preserves an escape the operator set up themselves rather than creating
+   * one, and is the behaviour every release before this one had.
    */
   private ensureDirWithinNoSymlink(baseDir: string, targetDir: string): void {
     const relative = path.relative(baseDir, targetDir);
@@ -2460,7 +2478,7 @@ export class AppInstaller {
         continue;
       }
       if (stat.isSymbolicLink()) {
-        throw new Error(`Updated app bind-mount path contains a symlink: "${current}"`);
+        throw new Error(`Updated app bind-mount source must not be a symlink: "${current}"`);
       }
       if (!stat.isDirectory()) {
         throw new Error(`Updated app bind-mount path is not a directory: "${current}"`);
@@ -2529,6 +2547,14 @@ export class AppInstaller {
     }
     if (destStat.isDirectory() && fs.lstatSync(source).isDirectory()) {
       // Merge: recurse so a release-only file inside the directory survives.
+      //
+      // Entry-by-entry on purpose. Swapping the trees (move the live dir over
+      // wholesale, then re-apply the release's own files on top) would be one
+      // rename instead of one per live file, but `moved` would no longer be an
+      // exact inverse: a rollback would carry those re-applied release files
+      // into the restored previous app dir. Exact rollback beats the renames,
+      // which are same-filesystem and only walk a directory the release also
+      // ships content in.
       for (const name of fs.readdirSync(source)) {
         this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
       }
@@ -2549,7 +2575,10 @@ export class AppInstaller {
    */
   private restoreBindMounts(fromDir: string, toDir: string, moved: string[], job: JobState): void {
     for (const rel of [...moved].reverse()) {
-      if (!this.isSafeBindRel(fromDir, toDir, rel)) continue;
+      if (!this.isSafeBindRel(fromDir, toDir, rel)) {
+        this.log(job, `Warning: skipping bind-mount path outside the app directory: "${rel}"`);
+        continue;
+      }
       const source = path.resolve(fromDir, rel);
       const destination = path.resolve(toDir, rel);
       if (!fs.existsSync(source) || fs.existsSync(destination)) continue;

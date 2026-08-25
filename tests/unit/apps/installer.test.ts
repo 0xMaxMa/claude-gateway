@@ -58,6 +58,24 @@ services:
   return appDir;
 }
 
+/** Stub AgentManager. `existingAgentName` is the only name it reports as taken. */
+function makeAgentMgr(existingAgentName: string) {
+  return {
+    findAgentByName: jest.fn(async (n: string) => (n === existingAgentName ? n : null)),
+    deleteAgentByName: jest.fn(async () => {}),
+    deleteAgent: jest.fn(async () => {}),
+    detectAgentPaths: jest.fn(() => ({
+      claudeBin: '/usr/bin/claude',
+      nodeBin: '/usr/bin/node',
+      npmRoot: '/usr/lib/node_modules',
+    })),
+    injectAgentService: jest.fn(() => {}),
+    upsertAgent: jest.fn(async () => {}),
+    backupMemory: jest.fn((): string | null => null),
+    restoreMemory: jest.fn(() => {}),
+  };
+}
+
 /** Spawn mock that always succeeds */
 const successSpawn = jest.fn(
   (_cmd: string, _args: string[], _opts?: object) => ({
@@ -127,6 +145,108 @@ describe('AppInstaller', () => {
       asyncSpawnFn as unknown as ConstructorParameters<typeof AppInstaller>[6],
     );
   }
+
+  function makeInstallerWithAgent(
+    spawn: typeof successSpawn,
+    agentMgr: ReturnType<typeof makeAgentMgr>,
+  ) {
+    return new AppInstaller(
+      registry,
+      new RegistryClient(),
+      callbacks,
+      spawn,
+      appsDir,
+      agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
+      successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+    );
+  }
+
+  /**
+   * Spawn mock for an app that declares a directory bind (`./data/photos`) and
+   * a file bind (`./config/app.conf`). `shipTracked` decides whether the updated
+   * release also carries content at those paths — the realistic case a repo
+   * creates with a `.gitkeep`, seed data, or a tracked config file.
+   */
+    function statefulAppSpawn(opts: {
+      appName: string;
+      state: { head: string; version: string };
+      hostPort: number;
+      shipTracked?: boolean;
+      failConfig?: () => boolean;
+      onCheckout?: (cwd: string) => void;
+      calls?: Array<{ args: string[]; cwd?: string }>;
+    }) {
+      const { appName, state, hostPort } = opts;
+      return jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && spawnOpts?.cwd) {
+          const cwd = spawnOpts.cwd;
+          fs.writeFileSync(path.join(cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: postgres:16-alpine
+    volumes:
+      - ./data/photos:/photos
+      - ./config/app.conf:/etc/app.conf
+    ports:
+      - name: api
+        host: ${hostPort}
+        container: ${hostPort}
+        type: api
+    healthcheck:
+      test: pg_isready
+      interval: 30s
+`.trim(), 'utf-8');
+          if (opts.shipTracked) {
+            // What a real `git checkout` of the new release produces.
+            fs.mkdirSync(path.join(cwd, 'data', 'photos'), { recursive: true });
+            fs.writeFileSync(path.join(cwd, 'data', 'photos', '.gitkeep'), '', 'utf-8');
+            fs.mkdirSync(path.join(cwd, 'config'), { recursive: true });
+            fs.writeFileSync(path.join(cwd, 'config', 'app.conf'), 'release-default', 'utf-8');
+          }
+          opts.onCheckout?.(cwd);
+        }
+        if (cmd === 'docker') {
+          opts.calls?.push({ args, cwd: spawnOpts?.cwd });
+          if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
+            if (opts.failConfig?.()) {
+              return { stdout: '', stderr: 'docker daemon unreachable', status: 1 };
+            }
+            return {
+              stdout: JSON.stringify({ services: { app: { volumes: [
+                { type: 'bind', source: path.join(spawnOpts.cwd, 'data', 'photos') },
+                { type: 'bind', source: path.join(spawnOpts.cwd, 'config', 'app.conf') },
+              ] } } }),
+              stderr: '', status: 0,
+            };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    /** Install the app, then seed live state into its bind paths. */
+    async function installWithLiveState(
+      installer: AppInstaller,
+      githubUrl: string,
+      appName: string,
+    ) {
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+      const entry = await registry.get(appName);
+      const photos = path.join(entry!.installPath, 'data', 'photos');
+      const conf = path.join(entry!.installPath, 'config', 'app.conf');
+      fs.mkdirSync(photos, { recursive: true });
+      fs.mkdirSync(path.dirname(conf), { recursive: true });
+      fs.writeFileSync(path.join(photos, 'photo.jpg'), 'persisted', 'utf-8');
+      fs.writeFileSync(conf, 'operator-edited', 'utf-8');
+      return { entry: entry!, photos, conf };
+    }
 
   // ─── install() — local path mode ─────────────────────────────────────────
 
@@ -1009,93 +1129,6 @@ services:
       expect(readEnvFile(entry!.installPath)['APP_SECRET']).toBe('keep-me');
     });
 
-    // ── Review follow-ups on the #396 fix ────────────────────────────────
-    //
-    // Shared harness: an app that declares a directory bind (`./data/photos`)
-    // and a file bind (`./config/app.conf`). `shipTracked` decides whether the
-    // updated release also carries content at those paths — the realistic case
-    // a repo creates with a `.gitkeep`, seed data, or a tracked config file.
-    function statefulAppSpawn(opts: {
-      appName: string;
-      state: { head: string; version: string };
-      hostPort: number;
-      shipTracked?: boolean;
-      failConfig?: () => boolean;
-      onCheckout?: (cwd: string) => void;
-      calls?: Array<{ args: string[]; cwd?: string }>;
-    }) {
-      const { appName, state, hostPort } = opts;
-      return jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
-        if (cmd === 'git' && args[0] === 'ls-remote') {
-          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
-        }
-        if (cmd === 'git' && args[0] === 'checkout' && spawnOpts?.cwd) {
-          const cwd = spawnOpts.cwd;
-          fs.writeFileSync(path.join(cwd, 'app.yaml'), `
-apiVersion: apps.getpod.ai/v1
-name: ${appName}
-version: ${state.version}
-commit: "${state.head}"
-services:
-  app:
-    image: postgres:16-alpine
-    volumes:
-      - ./data/photos:/photos
-      - ./config/app.conf:/etc/app.conf
-    ports:
-      - name: api
-        host: ${hostPort}
-        container: ${hostPort}
-        type: api
-    healthcheck:
-      test: pg_isready
-      interval: 30s
-`.trim(), 'utf-8');
-          if (opts.shipTracked) {
-            // What a real `git checkout` of the new release produces.
-            fs.mkdirSync(path.join(cwd, 'data', 'photos'), { recursive: true });
-            fs.writeFileSync(path.join(cwd, 'data', 'photos', '.gitkeep'), '', 'utf-8');
-            fs.mkdirSync(path.join(cwd, 'config'), { recursive: true });
-            fs.writeFileSync(path.join(cwd, 'config', 'app.conf'), 'release-default', 'utf-8');
-          }
-          opts.onCheckout?.(cwd);
-        }
-        if (cmd === 'docker') {
-          opts.calls?.push({ args, cwd: spawnOpts?.cwd });
-          if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
-            if (opts.failConfig?.()) {
-              return { stdout: '', stderr: 'docker daemon unreachable', status: 1 };
-            }
-            return {
-              stdout: JSON.stringify({ services: { app: { volumes: [
-                { type: 'bind', source: path.join(spawnOpts.cwd, 'data', 'photos') },
-                { type: 'bind', source: path.join(spawnOpts.cwd, 'config', 'app.conf') },
-              ] } } }),
-              stderr: '', status: 0,
-            };
-          }
-        }
-        return { stdout: '', stderr: '', status: 0 };
-      });
-    }
-
-    /** Install the app, then seed live state into its bind paths. */
-    async function installWithLiveState(
-      installer: AppInstaller,
-      githubUrl: string,
-      appName: string,
-    ) {
-      await waitForJob(installer, installer.install({ githubUrl }), 5000);
-      const entry = await registry.get(appName);
-      const photos = path.join(entry!.installPath, 'data', 'photos');
-      const conf = path.join(entry!.installPath, 'config', 'app.conf');
-      fs.mkdirSync(photos, { recursive: true });
-      fs.mkdirSync(path.dirname(conf), { recursive: true });
-      fs.writeFileSync(path.join(photos, 'photo.jpg'), 'persisted', 'utf-8');
-      fs.writeFileSync(conf, 'operator-edited', 'utf-8');
-      return { entry: entry!, photos, conf };
-    }
-
     it('merges live bind data into a release that ships tracked content at the same paths', async () => {
       // REVIEW #1 — the fix threw `Updated app already contains bind-mount path`
       // whenever the new checkout carried the bind path, making every update of
@@ -1236,7 +1269,7 @@ services:
       const job = await waitForJob(installer, installer.update(appName), 5000);
 
       expect(job.status).toBe('failed');
-      expect(job.logs.join('\n')).toContain('contains a symlink');
+      expect(job.logs.join('\n')).toContain('must not be a symlink');
       // Nothing was created through the symlink …
       expect(fs.readdirSync(escapeTarget)).toEqual([]);
       // … and the rollback put the live state back.
@@ -1734,40 +1767,156 @@ services:
     );
   });
 
+  // ── App-agent lifecycle across an update ───────────────────────────────────
+  describe('update() — app-agent lifecycle', () => {
+    /** GitHub app whose agent declaration can change (or vanish) per release. */
+    function agentUpdateSpawn(
+      appName: string,
+      port: number,
+      state: { head: string; version: string; agentName: string | null },
+    ) {
+      return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          const agentBlock = state.agentName === null
+            ? ''
+            : `\n  agent:\n    path: ./agent\n    name: ${state.agentName}`;
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: ${port}
+        container: ${port}
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:${port}/health
+      interval: 30s
+`.trim() + agentBlock,
+            'utf-8',
+          );
+          if (state.agentName !== null) {
+            fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    async function installThenUpdate(opts: {
+      appName: string;
+      port: number;
+      firstAgent: string | null;
+      secondAgent: string | null;
+    }) {
+      const state = { head: 'a'.repeat(40), version: '1.0.0', agentName: opts.firstAgent };
+      const agentMgr = makeAgentMgr('unrelated-bot'); // nothing conflicts
+      const spawn = agentUpdateSpawn(opts.appName, opts.port, state);
+      const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
+
+      const install = await waitForJob(
+        installer,
+        installer.install({ githubUrl: `https://github.com/test/${opts.appName}` }),
+        5000,
+      );
+      expect(install.status).toBe('completed');
+      agentMgr.deleteAgentByName.mockClear();
+      agentMgr.upsertAgent.mockClear();
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.agentName = opts.secondAgent;
+      const update = await waitForJob(installer, installer.update(opts.appName), 5000);
+      return { agentMgr, update };
+    }
+
+    it('deregisters the old agent when a release renames it', async () => {
+      // REVIEW #A — upsertAgent() keys off the new name, so without an explicit
+      // deregistration the old workspace symlink and config entry are orphaned.
+      const { agentMgr, update } = await installThenUpdate({
+        appName: 'rename-agent-app', port: 5730,
+        firstAgent: 'old-bot', secondAgent: 'new-bot',
+      });
+
+      expect(update.status).toBe('completed');
+      expect(agentMgr.deleteAgentByName).toHaveBeenCalledWith('old-bot');
+      expect(agentMgr.upsertAgent).toHaveBeenCalledTimes(1);
+      expect(agentMgr.upsertAgent).toHaveBeenCalledWith(
+        expect.objectContaining({ agentDeclaration: { path: './agent', name: 'new-bot' } }),
+      );
+      expect(update.logs.join('\n')).toContain('renamed to "new-bot"');
+    });
+
+    it('removes the registration when a release drops its agent', async () => {
+      // REVIEW #B — this branch shipped untested; every other update test passes
+      // agentManager: undefined, so it never ran.
+      const { agentMgr, update } = await installThenUpdate({
+        appName: 'drop-agent-app', port: 5731,
+        firstAgent: 'old-bot', secondAgent: null,
+      });
+
+      expect(update.status).toBe('completed');
+      expect(agentMgr.deleteAgentByName).toHaveBeenCalledWith('old-bot');
+      expect(agentMgr.upsertAgent).not.toHaveBeenCalled();
+      expect(update.logs.join('\n')).toContain('Agent "old-bot" removed');
+      expect((await registry.get('drop-agent-app'))?.agentDeclaration ?? null).toBeNull();
+    });
+
+    it('never deregisters when the agent name is unchanged', async () => {
+      // Guard against over-deleting: the ordinary update must not touch the
+      // registration it is about to re-upsert.
+      const { agentMgr, update } = await installThenUpdate({
+        appName: 'same-agent-app', port: 5732,
+        firstAgent: 'same-bot', secondAgent: 'same-bot',
+      });
+
+      expect(update.status).toBe('completed');
+      expect(agentMgr.deleteAgentByName).not.toHaveBeenCalled();
+      expect(agentMgr.upsertAgent).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores MEMORY.md under the new name, after the rename is registered', async () => {
+      // restoreMemory() resolves the workspace through config.json, so writing
+      // it before upsertAgent silently dropped the memory on a rename.
+      const state = { head: 'a'.repeat(40), version: '1.0.0', agentName: 'old-bot' as string | null };
+      const agentMgr = makeAgentMgr('unrelated-bot');
+      agentMgr.backupMemory.mockReturnValue('remembered');
+      const spawn = agentUpdateSpawn('memory-agent-app', 5733, state);
+      const installer = makeInstallerWithAgent(spawn as unknown as typeof successSpawn, agentMgr);
+
+      await waitForJob(
+        installer,
+        installer.install({ githubUrl: 'https://github.com/test/memory-agent-app' }),
+        5000,
+      );
+      // The install already called upsertAgent — compare ordering within the
+      // update alone, not against that first registration.
+      agentMgr.upsertAgent.mockClear();
+      agentMgr.restoreMemory.mockClear();
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.agentName = 'new-bot';
+      const update = await waitForJob(installer, installer.update('memory-agent-app'), 5000);
+
+      expect(update.status).toBe('completed');
+      expect(agentMgr.restoreMemory).toHaveBeenCalledWith('new-bot', 'remembered');
+      expect(agentMgr.restoreMemory.mock.invocationCallOrder[0])
+        .toBeGreaterThan(agentMgr.upsertAgent.mock.invocationCallOrder[0]);
+    });
+  });
+
   // ── Agent-name conflict / orphan reclaim (issue #263) ──────────────────────
   describe('install — agent-name conflict vs orphan reclaim', () => {
-    function makeAgentMgr(existingAgentName: string) {
-      return {
-        findAgentByName: jest.fn(async (n: string) => (n === existingAgentName ? n : null)),
-        deleteAgentByName: jest.fn(async () => {}),
-        deleteAgent: jest.fn(async () => {}),
-        detectAgentPaths: jest.fn(() => ({
-          claudeBin: '/usr/bin/claude',
-          nodeBin: '/usr/bin/node',
-          npmRoot: '/usr/lib/node_modules',
-        })),
-        injectAgentService: jest.fn(() => {}),
-        upsertAgent: jest.fn(async () => {}),
-        backupMemory: jest.fn(() => null),
-        restoreMemory: jest.fn(() => {}),
-      };
-    }
-
-    function makeInstallerWithAgent(
-      spawn: typeof successSpawn,
-      agentMgr: ReturnType<typeof makeAgentMgr>,
-    ) {
-      return new AppInstaller(
-        registry,
-        new RegistryClient(),
-        callbacks,
-        spawn,
-        appsDir,
-        agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
-        successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
-      );
-    }
-
     // GitHub install of an app that declares an agent service.
     function agentGitSpawn(appName: string, agentName: string, port: number, head: string) {
       return jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
