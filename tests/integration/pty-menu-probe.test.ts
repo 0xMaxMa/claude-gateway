@@ -403,4 +403,70 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     );
     expect(second).toBe(true);
   }, 25000);
+
+  /**
+   * I-PTY-MENU-14: an ordinary foreground tool (Bash), not Task, staying
+   * screen-quiet for longer than FALLBACK_IDLE_QUIET_MS while genuinely still
+   * running (e.g. a git hook running a slow, silent test suite). Pre-fix,
+   * only Task tool_use blocks were tracked in pendingToolUseIds, so this
+   * shape reached the fallback exactly like TASK_WAIT's sub-agent gap and
+   * the turn ended early (issue #388). Mirrors I-PTY-MENU-11 but with a
+   * non-Task tool name, proving the fix isn't Task-specific.
+   */
+  it('I-PTY-MENU-14: a pending non-Task tool_use (Bash) blocks the fallback idle finish until its tool_result lands', async () => {
+    start();
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('BASH_WAIT'));
+
+    // The Bash call is still "running" (screen quiet, no busy marker, no
+    // tool_result yet) — the pre-fix fallback would already have ended the
+    // turn by ~2s. It must still be open.
+    await waitMs(2600);
+    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+
+    // Once the tool_result + final answer land, the turn completes with the
+    // real text — not an early, truncated one.
+    const completed = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      5000,
+    );
+    expect(completed).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; result?: string };
+    expect(result.subtype).toBe('success');
+    expect(result.result).toContain('bash-wait-final-result');
+  }, 20000);
+
+  /**
+   * I-PTY-MENU-15: an orphaned non-Task tool_use (Bash) — no tool_result, no
+   * turn_duration ever — must NOT hang forever or kill the session, same as
+   * I-PTY-MENU-13 for Task. Proves the watchdog's "session preserved"
+   * recovery branch isn't Task-specific either (issue #388).
+   */
+  it('I-PTY-MENU-15: an orphaned non-Task tool_use (Bash) ends via the watchdog with an error, session survives', async () => {
+    start({ PTY_SHELL_WATCHDOG_MS: '1500' });
+    await waitMs(2500);
+
+    wrapper.stdin!.write(makeTurnJson('BASH_ORPHAN'));
+
+    // No tool_result ever comes; the shortened watchdog (1500ms after the last
+    // progress) must end the turn with an error rather than hang.
+    const ended = await waitFor(
+      () => !!collector.find((e) => e.type === 'result'),
+      6000,
+    );
+    expect(ended).toBe(true);
+    const result = collector.find((e) => e.type === 'result') as ProtocolEvent & { subtype: string; is_error?: boolean };
+    expect(result.is_error).toBe(true);
+
+    // Session must still be alive (watchdog did NOT shutdown) — a fresh turn
+    // still completes, producing a second result event.
+    expect(wrapper.exitCode).toBeNull();
+    wrapper.stdin!.write(makeTurnJson('hello again'));
+    const second = await waitFor(
+      () => collector.events.filter((e) => e.type === 'result').length >= 2,
+      6000,
+    );
+    expect(second).toBe(true);
+  }, 25000);
 });

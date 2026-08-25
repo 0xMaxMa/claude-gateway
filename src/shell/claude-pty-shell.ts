@@ -109,17 +109,20 @@ interface ActiveTurn {
    *  menuToolSeen — see maybeProbeAndBridge()/advanceProbe() below and
    *  planning-61. */
   probe: ProbeState | null;
-  /** tool_use ids for **Task** calls from this turn's own (non-sidechain)
-   *  assistant records that have no matching tool_result yet. A Task tool call
-   *  runs an invisible sub-agent whose own work writes only sidechain
-   *  transcript records — the screen can look idle (no busy marker, quiet ≥
-   *  FALLBACK_IDLE_QUIET_MS) for stretches while it's genuinely still running.
-   *  Non-empty blocks the fallback end-of-turn heuristic so it can never end
-   *  the turn out from under a pending sub-agent. Only Task is tracked:
-   *  ordinary foreground tools (Bash/Read/Edit…) keep the TUI busy, so they
-   *  never reach the fallback anyway, and tracking them would let an
-   *  interrupted-mid-tool turn (no tool_result ever lands) block the fallback
-   *  forever. */
+  /** tool_use ids for ANY tool call from this turn's own (non-sidechain)
+   *  assistant records that have no matching tool_result yet. Originally only
+   *  Task calls were tracked here, on the assumption that ordinary foreground
+   *  tools (Bash/Read/Edit…) always keep the TUI busy or the screen changing.
+   *  That assumption is false for a quiet, long-running foreground tool (e.g.
+   *  a git hook running a slow, mostly-silent test suite): the screen can
+   *  look idle (no busy marker, quiet ≥ FALLBACK_IDLE_QUIET_MS) for stretches
+   *  while it's genuinely still running — same shape as a Task sub-agent
+   *  (issue #388). Non-empty blocks the fallback end-of-turn heuristic so it
+   *  can never end the turn out from under any pending tool call. An
+   *  interrupted-mid-tool turn (no tool_result ever lands) is not left stuck
+   *  forever either: the watchdog below (WATCHDOG_MS) ends the turn with an
+   *  error, session preserved, exactly as it already did for an orphaned
+   *  Task. */
   pendingToolUseIds: Set<string>;
 }
 
@@ -445,16 +448,16 @@ class Driver {
     }
   }
 
-  /** A tool_use block appeared in this turn's transcript. Only **Task** calls
-   *  are tracked (see ActiveTurn.pendingToolUseIds) — they run an invisible
-   *  sub-agent that can leave the screen idle-quiet while still in flight. */
-  private onToolUse(toolUseId: string, toolName: string): void {
-    if (this.turn && toolName === 'Task') {
+  /** A tool_use block appeared in this turn's transcript. Every tool is
+   *  tracked (see ActiveTurn.pendingToolUseIds) — any of them can leave the
+   *  screen idle-quiet for a stretch while still genuinely in flight. */
+  private onToolUse(toolUseId: string, _toolName: string): void {
+    if (this.turn) {
       this.turn.pendingToolUseIds.add(toolUseId);
     }
   }
 
-  /** A non-sidechain tool_result landed — clears the pending Task gate on the
+  /** A non-sidechain tool_result landed — clears the pending-tool gate on the
    *  fallback end-of-turn heuristic (see ActiveTurn.pendingToolUseIds) and
    *  counts as progress so the watchdog's clock resets. */
   private onToolResult(toolUseId: string): void {
@@ -680,8 +683,9 @@ class Driver {
       { isBusy: this.screen.isBusy(), quietMs: this.screen.quietMs() },
       HEARTBEAT_LIVENESS_QUIET_MS,
     )
-      // A pending Task sub-agent runs invisibly (sidechain records, quiet
-      // screen) — keep writing the heartbeat so the receiver's stalled
+      // A pending tool call (Task's invisible sub-agent, or a quiet
+      // foreground tool like Bash) can leave the screen quiet with no PTY
+      // output — keep writing the heartbeat so the receiver's stalled
       // detector doesn't tear the session down in exactly the window the
       // pendingToolUseIds gate is holding the turn open for.
       || (this.turn ? this.turn.pendingToolUseIds.size > 0 : false);
@@ -841,10 +845,11 @@ class Driver {
 
     // Fallback end-of-turn (e.g. interrupted turn never writes turn_duration):
     // ran → idle prompt → quiet, and we already streamed assistant output.
-    // pendingToolUseIds must be empty too — a Task tool call's sub-agent runs
-    // invisibly (its own transcript records are sidechain and filtered out),
-    // so the screen can look idle-quiet for stretches while the turn is
-    // genuinely still in flight (see onToolResult()/pendingToolUseIds above).
+    // pendingToolUseIds must be empty too — any tool call (Task's invisible
+    // sub-agent, or an ordinary foreground tool like Bash sitting quiet
+    // through a long hook/build) can leave the screen looking idle-quiet for
+    // stretches while the turn is genuinely still in flight (see
+    // onToolResult()/pendingToolUseIds above; issue #388).
     if (turn.sawBusy && turn.sawAssistant
         && turn.pendingToolUseIds.size === 0
         && this.screen.hasPrompt()
@@ -856,15 +861,16 @@ class Driver {
 
     if (now - turn.lastProgressAt > WATCHDOG_MS) {
       if (turn.pendingToolUseIds.size > 0) {
-        // A pending Task held the turn past the watchdog: either a genuinely
-        // long sub-agent that stayed screen-quiet the whole time, or an
-        // orphaned tool_use whose result never landed. End the turn with an
-        // error but keep the PTY session alive — killing it would drop queued
-        // messages and is unrecoverable, whereas a stuck/slow sub-agent is
-        // turn-local. (Distinct from the no-progress kill below, which means
-        // the whole TUI has wedged.)
-        logWarn(`pending Task exceeded ${WATCHDOG_MS}ms without a result — ending turn, session preserved`);
-        this.finishTurn(true, `sub-agent did not complete within ${WATCHDOG_MS}ms`);
+        // A pending tool call held the turn past the watchdog: either a
+        // genuinely long-running call (sub-agent or foreground tool) that
+        // stayed screen-quiet the whole time, or an orphaned tool_use whose
+        // result never landed. End the turn with an error but keep the PTY
+        // session alive — killing it would drop queued messages and is
+        // unrecoverable, whereas a stuck/slow tool call is turn-local.
+        // (Distinct from the no-progress kill below, which means the whole
+        // TUI has wedged.)
+        logWarn(`pending tool call exceeded ${WATCHDOG_MS}ms without a result — ending turn, session preserved`);
+        this.finishTurn(true, `tool call did not complete within ${WATCHDOG_MS}ms`);
         return;
       }
       this.finishTurn(true, `no progress for ${WATCHDOG_MS}ms — giving up`);

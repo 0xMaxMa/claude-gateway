@@ -57,6 +57,19 @@
  *                          arrives. The watchdog must end the turn with an
  *                          error WITHOUT killing the session (run with a
  *                          shortened PTY_SHELL_WATCHDOG_MS).
+ *   BASH_WAIT           — like TASK_WAIT, but the tool_use is an ORDINARY
+ *                          foreground tool (Bash), simulating a quiet,
+ *                          long-running shell command (e.g. a git hook
+ *                          running a slow test suite) rather than a Task
+ *                          sub-agent. Pre-fix, only Task calls were tracked
+ *                          in pendingToolUseIds, so the fallback idle-
+ *                          detection heuristic would wrongly end the turn at
+ *                          ~2s here too, submitting the next queued message
+ *                          into a still-busy TUI (issue #388).
+ *   BASH_ORPHAN         — like TASK_ORPHAN, but for an ordinary foreground
+ *                          tool (Bash): its tool_result never arrives. Proves
+ *                          the watchdog's "session preserved" recovery isn't
+ *                          Task-specific either.
  *   …SWALLOW_ONCE…      — (substring anywhere in the text) the first Enter
  *                          is swallowed: the draft stays in the input line
  *                          ("❯ <text>"), never busy, no transcript. The
@@ -250,6 +263,53 @@ function submit(text) {
       appendRecord({
         type: 'assistant',
         message: { content: [{ type: 'tool_use', id: 'task-1', name: 'Task', input: {} }] },
+      });
+      idle(); // then silence — no tool_result, no turn_duration, ever.
+    }, 150);
+    return;
+  }
+  if (trimmed === 'BASH_WAIT') {
+    // Simulates an ordinary foreground tool (Bash) staying quiet for LONGER
+    // than FALLBACK_IDLE_QUIET_MS (2000ms) — e.g. a git hook running a slow,
+    // mostly-silent test suite. Same shape as TASK_WAIT, but the tool_use
+    // name is a foreground tool, not Task. Pre-fix, onToolUse() only tracked
+    // 'Task' calls into pendingToolUseIds, so this scenario's tool_use would
+    // be ignored and the fallback would end the turn at ~2s, submitting the
+    // next queued message into a still-busy TUI (issue #388).
+    scenario = null;
+    render('esc to interrupt\r\n❯ ');
+    setTimeout(() => {
+      appendRecord({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: {} }] },
+      });
+      idle(); // busy marker gone — screen looks done, but the tool_use is still pending
+    }, 150);
+    // Same wide margin as TASK_WAIT (4500ms vs. the test's 2600ms assertion
+    // window) so the two-process wall-clock race doesn't flake under CI load.
+    setTimeout(() => {
+      appendRecord({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'bash-1', content: 'exit 0' }] },
+      });
+      writeTranscript('bash-wait-final-result');
+    }, 4500);
+    return;
+  }
+  if (trimmed === 'BASH_ORPHAN') {
+    // Like TASK_ORPHAN, but for an ordinary foreground tool (Bash): a
+    // tool_use lands but its tool_result NEVER arrives (the shell command
+    // hung or the process died) and no turn_duration is written. The
+    // fallback stays blocked (pendingToolUseIds never empties); the
+    // watchdog must end the turn with an error WITHOUT killing the PTY
+    // session — the same "session preserved" branch that TASK_ORPHAN
+    // proves, now exercised for a non-Task tool name (issue #388).
+    scenario = null;
+    render('esc to interrupt\r\n❯ ');
+    setTimeout(() => {
+      appendRecord({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'bash-2', name: 'Bash', input: {} }] },
       });
       idle(); // then silence — no tool_result, no turn_duration, ever.
     }, 150);
