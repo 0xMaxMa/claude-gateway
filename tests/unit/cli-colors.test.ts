@@ -1,4 +1,4 @@
-import { colorsEnabled, paletteFor } from '../../src/cli/colors';
+import { colorsEnabled, paletteFor, supports256Colors } from '../../src/cli/colors';
 
 describe('cli colours', () => {
   describe('colorsEnabled', () => {
@@ -45,6 +45,34 @@ describe('cli colours', () => {
       const c = paletteFor({ isTTY: true }, {});
       // eslint-disable-next-line no-control-regex
       expect(c.cyan('abc'.padEnd(10)).replace(/\x1b\[[0-9;]*m/g, '')).toHaveLength(10);
+    });
+  });
+
+  describe('the brand tone', () => {
+    it('is bold orange on a 256-colour terminal', () => {
+      const p = paletteFor({ isTTY: true }, { TERM: 'xterm-256color' });
+      expect(p.brand('claude-gateway')).toBe('\x1b[1m\x1b[38;5;208mclaude-gateway\x1b[0m');
+    });
+
+    it('degrades to bold yellow where only 16 colours are advertised', () => {
+      // 208 would render as an arbitrary colour there; orange has no 16-colour
+      // code, so the nearest warm tone stands in.
+      const p = paletteFor({ isTTY: true }, { TERM: 'xterm' });
+      expect(p.brand('claude-gateway')).toBe('\x1b[1m\x1b[33mclaude-gateway\x1b[0m');
+    });
+
+    it('emits nothing when colour is off', () => {
+      expect(paletteFor({ isTTY: false }, {}).brand('claude-gateway')).toBe('claude-gateway');
+    });
+
+    it('detects 256-colour support from TERM or COLORTERM', () => {
+      expect(supports256Colors({ TERM: 'xterm-256color' })).toBe(true);
+      expect(supports256Colors({ TERM: 'screen-256color' })).toBe(true);
+      expect(supports256Colors({ TERM: 'xterm-direct' })).toBe(true);
+      expect(supports256Colors({ COLORTERM: 'truecolor', TERM: 'xterm' })).toBe(true);
+      expect(supports256Colors({ TERM: 'xterm' })).toBe(false);
+      expect(supports256Colors({ COLORTERM: '', TERM: 'vt100' })).toBe(false);
+      expect(supports256Colors({})).toBe(false);
     });
   });
 });

@@ -13,6 +13,9 @@ interface Check {
   name: string;
   ok: boolean;
   detail: string;
+  /** Informational only: reported, but never fails the command. Used for the
+   *  URL the CLI is *not* using — its state is context, not a verdict. */
+  info?: boolean;
 }
 
 interface ProbeResult {
@@ -68,8 +71,8 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   checks.push({ name: 'apiKey', ok: !!key, detail: key ? 'resolved (hidden)' : 'none resolved (set --key or $CLAUDE_GATEWAY_API_KEY)' });
 
   const flagUrl = typeof flags.url === 'string' ? flags.url : undefined;
-  // The URL the CLI's own API calls will use (publicUrl/env win here) — that is
-  // what `doctor` is diagnosing, so `health` reports on this one.
+  // The URL the CLI's own API calls will use — that is what `doctor` diagnoses,
+  // so `health` reports on this one and only this one decides the exit code.
   const baseUrl = resolveUrl({ flagUrl, env: process.env, config });
   checks.push({ name: 'url', ok: true, detail: baseUrl });
 
@@ -79,36 +82,60 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const health = await probe(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
-  // When a gateway is running on this host behind a different URL (typically a
-  // reverse proxy in config.gateway.publicUrl), probe it directly too. Without
-  // this, the most confusing failure — proxy unreachable while the gateway is
-  // perfectly healthy — shows up as `manager: foreground` next to
-  // `health: no response`, with nothing to explain the contradiction.
+  // A gateway fronted by a reverse proxy has two addresses for one process.
+  // Probe the one the CLI is *not* using as well: without it, the most
+  // confusing states — proxy down while the gateway is healthy, or the reverse
+  // — appear as a single contradictory line with nothing to explain it. The
+  // second probe is informational: the CLI does not use that address, so its
+  // state must not decide this command's exit code.
   const localUrl = resolveLocalUrl({ flagUrl, env: process.env, config });
-  let localOk = false;
-  if (manager !== 'unknown' && localUrl !== baseUrl) {
-    checks.push({ name: 'localUrl', ok: true, detail: localUrl });
-    const localHealth = await probe(localUrl);
-    localOk = localHealth.ok;
-    checks.push({ name: 'localHealth', ok: localHealth.ok, detail: localHealth.detail });
+  const publicUrl = (config.publicUrl ?? '').replace(/\/+$/, '');
+  const alt =
+    baseUrl === localUrl
+      ? publicUrl && publicUrl !== baseUrl
+        ? { urlName: 'publicUrl', healthName: 'publicHealth', url: publicUrl }
+        : undefined
+      : manager !== 'unknown'
+        ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
+        : undefined;
+
+  let altHealth: ProbeResult | undefined;
+  if (alt) {
+    checks.push({ name: alt.urlName, ok: true, detail: alt.url, info: true });
+    altHealth = await probe(alt.url);
+    checks.push({ name: alt.healthName, ok: altHealth.ok, detail: altHealth.detail, info: true });
   }
 
-  const allOk = checks.every((c) => c.ok);
+  const allOk = checks.every((c) => c.info || c.ok);
   const c = paletteFor(process.stderr);
   // Pad before colouring so escape codes never count toward the column width.
-  const lines = checks.map(
-    (chk) => `  ${chk.ok ? c.green('[ok]') : c.red('[!!]')} ${c.bold(chk.name.padEnd(11))} ${chk.detail}`,
-  );
-  // Explain the contradiction the two probes can produce, and blame the right
-  // component: a public URL that answered with a status is not an unreachable
-  // proxy, it is a reachable one rejecting the request.
-  if (localOk && !health.ok) {
-    const note = health.answered
-      ? `note: the gateway is up locally, but its public URL answered HTTP ${health.status} — the proxy in front of it rejected this request.`
-      : 'note: the gateway is up locally but its public URL did not answer — check the reverse proxy.';
-    lines.push(`  ${c.yellow(note)}`);
+  const lines = checks.map((chk) => {
+    const mark = chk.ok ? c.green('[ok]') : chk.info ? c.dim('[--]') : c.red('[!!]');
+    return `  ${mark} ${c.bold(chk.name.padEnd(12))} ${chk.detail}`;
+  });
+  // Name the right component. A public URL that answered with a status is not
+  // an unreachable proxy, it is a reachable one rejecting the request — and a
+  // proxy that requires its own credentials is doing its job, not failing.
+  if (alt && altHealth) {
+    if (alt.urlName === 'publicUrl' && health.ok && !altHealth.ok) {
+      lines.push(
+        `  ${c.yellow(
+          altHealth.answered
+            ? `note: the CLI is using the local address; the public URL answered HTTP ${altHealth.status}, so the proxy in front of the gateway rejected an unauthenticated request. External clients are unaffected if they authenticate with the proxy.`
+            : 'note: the CLI is using the local address; the public URL did not answer at all — external clients would not reach the gateway.',
+        )}`,
+      );
+    } else if (alt.urlName === 'localUrl' && altHealth.ok && !health.ok) {
+      lines.push(
+        `  ${c.yellow(
+          health.answered
+            ? `note: the gateway is up locally, but the URL the CLI was told to use answered HTTP ${health.status} — the proxy in front of it rejected this request. Drop --url / $CLAUDE_GATEWAY_URL to use ${localUrl} instead.`
+            : `note: the gateway is up locally but the URL the CLI was told to use did not answer. Drop --url / $CLAUDE_GATEWAY_URL to use ${localUrl} instead.`,
+        )}`,
+      );
+    }
   }
-  process.stderr.write([`${c.bold('claude-gateway doctor')}`, ...lines, ''].join('\n'));
+  process.stderr.write([`${c.brand('claude-gateway')} ${c.bold('doctor')}`, ...lines, ''].join('\n'));
   printJson({ ok: allOk, checks }, flags);
   return allOk ? 0 : 1;
 }

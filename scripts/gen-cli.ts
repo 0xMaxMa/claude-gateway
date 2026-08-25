@@ -88,19 +88,30 @@ error and exits, so exploring the CLI can never leave a stray server on the gate
 
 | Flag | Meaning |
 |------|---------|
-| \`--url <url>\` | Gateway base URL (else \`$CLAUDE_GATEWAY_URL\`, else \`config.gateway.publicUrl\`, else \`http://<bind>:<port>\`) |
+| \`--url <url>\` | Gateway base URL (else \`$CLAUDE_GATEWAY_URL\`, else \`http://<bind>:<port>\` when a gateway is running on this host, else \`config.gateway.publicUrl\`) |
 | \`--key <key>\` | API key (else \`$CLAUDE_GATEWAY_API_KEY\`, else the first admin key in config) |
 | \`--json\` | Print the raw JSON response only (stdout reserved for JSON) |
 | \`--data <json>\` | JSON object merged into the request body (write commands) |
 | \`--help\` | Show help for the command |
 
-**Exception — local health probes.** \`gateway status\` and \`service install\` report on the gateway
-process *on this host*, so they resolve \`--url\` → \`http://<bind>:<port>\` and ignore
-\`$CLAUDE_GATEWAY_URL\` and \`config.gateway.publicUrl\`. Those usually name a reverse proxy, which
-may be unreachable from the box itself — or may still be answering from a different instance, which
-would report a dead local service as healthy. Pass \`--url\` explicitly to probe another host.
-\`doctor\` keeps the normal precedence (it diagnoses the path the CLI's API calls take) and adds a
-second \`localHealth\` check whenever a local gateway is detected behind a different URL.
+**Which address the CLI uses.** \`config.gateway.publicUrl\` describes *this* gateway as seen from
+outside, so on the gateway's own host both addresses are the same server — the public one just adds
+a reverse-proxy hop. Routing through it makes every command depend on that proxy, and a proxy that
+enforces its own authentication (which the CLI has no credentials for) answers \`401\` to commands
+that work over loopback. So when a gateway is running on this host (detected from the pidfile it
+writes on boot, a file read and a signal-0 — no subprocess), the local bind wins over
+\`publicUrl\`. \`--url\` and \`$CLAUDE_GATEWAY_URL\` still override, for deliberately exercising the
+proxy path or reaching another host.
+
+\`gateway status\` and \`service install\` go further: they report on the gateway *process* on this
+host, so they resolve \`--url\` → \`http://<bind>:<port>\` and ignore \`$CLAUDE_GATEWAY_URL\` and
+\`publicUrl\` entirely — a proxy still answering from a different instance would otherwise report a
+dead local service as healthy.
+
+\`doctor\` probes the address the CLI will use (that check decides its exit code) and adds an
+**informational** probe of the other address whenever the two differ, marked \`[--]\`. A public URL
+that rejects an unauthenticated \`/health\` is reported, but never fails \`doctor\` — the CLI is not
+using that address.
 
 **Colour.** Help and diagnostic text on stderr is coloured only when stderr is a terminal. Set
 \`NO_COLOR\` to turn it off, or \`FORCE_COLOR=1\` to keep it through a pipe; \`NO_COLOR\` wins if both

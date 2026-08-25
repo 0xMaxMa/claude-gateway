@@ -229,8 +229,10 @@ function usageFor(c: GeneratedCommand): string {
 }
 
 /** Two-column rows in the general help. The name column is padded to
- *  NAME_W; a name wider than that puts its description on the next line. */
-const NAME_W = 30;
+ *  NAME_W; a name wider than that puts its description on the next line.
+ *  Wide enough for the longest name (`service install|status|uninstall`, 32)
+ *  plus a readable gap, so no core command wraps. */
+const NAME_W = 36;
 
 const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['gateway status|restart|stop', 'Manage the gateway process (manager-aware)'],
@@ -257,7 +259,7 @@ function printGeneralHelp(): void {
   const c = paletteFor(process.stderr);
   // readVersion() falls back to 'unknown'; render that as a plain banner rather than "vunknown".
   const version = readVersion();
-  const name = c.bold('claude-gateway');
+  const name = c.brand('claude-gateway');
   const banner =
     version === 'unknown'
       ? `${name} — control a running gateway from the command line`
@@ -284,7 +286,7 @@ function printGeneralHelp(): void {
 function printNounHelp(noun: string): void {
   const cmds = GENERATED_COMMANDS.filter((c) => c.noun === noun);
   const p = paletteFor(process.stderr);
-  const lines = [`${p.bold('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
+  const lines = [`${p.brand('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
   // Pad before colouring so escape codes never count toward the column width.
   for (const c of cmds) lines.push(`  ${p.cyan(usageFor(c).padEnd(48))} ${c.summary}`);
   process.stderr.write(lines.join('\n') + '\n');
@@ -293,7 +295,7 @@ function printNounHelp(noun: string): void {
 function printCommandHelp(c: GeneratedCommand): void {
   const p = paletteFor(process.stderr);
   const lines = [
-    `${p.bold('claude-gateway')} ${p.cyan(usageFor(c))}`,
+    `${p.brand('claude-gateway')} ${p.cyan(usageFor(c))}`,
     '',
     `  ${c.summary}`,
     `  ${p.dim(`${c.method} ${c.path}  (auth: ${c.auth})`)}`,

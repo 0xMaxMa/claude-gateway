@@ -1,6 +1,7 @@
 jest.mock('../../src/cli/manager', () => ({
   detectManager: jest.fn(),
   defaultPidfilePath: () => '/tmp/fake-gateway.pid',
+  localGatewayIsLive: () => true,
 }));
 jest.mock('fs', () => ({ readFileSync: jest.fn() }));
 jest.mock('child_process', () => ({ execFileSync: jest.fn() }));

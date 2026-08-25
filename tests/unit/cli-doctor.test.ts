@@ -1,12 +1,12 @@
-jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn() }));
+jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(), localGatewayIsLive: jest.fn(() => true) }));
 
-import { detectManager } from '../../src/cli/manager';
+import { detectManager, localGatewayIsLive } from '../../src/cli/manager';
 import { runDoctor } from '../../src/cli/commands/doctor';
 import type { CliConfigView } from '../../src/cli/http-client';
 
 interface DoctorReport {
   ok: boolean;
-  checks: Array<{ name: string; ok: boolean; detail: string }>;
+  checks: Array<{ name: string; ok: boolean; detail: string; info?: boolean }>;
 }
 
 describe('cli doctor', () => {
@@ -28,6 +28,7 @@ describe('cli doctor', () => {
       return true;
     });
     (detectManager as jest.Mock).mockReset().mockReturnValue('systemd');
+    (localGatewayIsLive as jest.Mock).mockReset().mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -108,32 +109,30 @@ describe('cli doctor', () => {
   });
 
   /**
-   * The confusing case this exists for: a gateway running happily on this host
-   * behind a reverse proxy that is unreachable from the box. Without the second
-   * probe, doctor printed `manager: foreground` next to `health: no response`
-   * and left the operator to guess which one to believe.
+   * A gateway behind a reverse proxy has two addresses for one process. The
+   * CLI uses the local one when a gateway is live on this host, and probes the
+   * other for context only — its state must not decide the exit code, because
+   * the CLI is not talking to it.
    */
-  describe('local probe when publicUrl differs', () => {
+  describe('two addresses for one gateway', () => {
     const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
 
-    it('probes both URLs and says so when only the proxy is down', async () => {
-      global.fetch = jest.fn().mockImplementation((url: string) =>
-        String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
-      );
+    it('uses the local address and reports the public one as informational', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
       const code = await runDoctor({}, proxied);
 
       const body = report();
-      expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'localUrl', 'localHealth']);
-      expect(body.checks.find((c) => c.name === 'health')?.ok).toBe(false);
-      expect(body.checks.find((c) => c.name === 'localHealth')?.ok).toBe(true);
-      expect(stderr.join('')).toMatch(/up locally but its public URL did not answer/);
-      expect(code).toBe(1);
+      expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'publicUrl', 'publicHealth']);
+      expect(body.checks.find((c) => c.name === 'url')?.detail).toMatch(/^http:\/\/127\.0\.0\.1:/);
+      expect(body.checks.find((c) => c.name === 'publicHealth')?.info).toBe(true);
+      expect(code).toBe(0);
     });
 
-    it('reports the status when the proxy answers but rejects the request', async () => {
-      // A 401 from the proxy means the proxy is *up*. Collapsing that into
-      // "no response" sends the operator to debug a component that is fine.
+    it('a proxy rejecting an unauthenticated probe does not fail doctor', async () => {
+      // The exact shape that made `doctor` exit 1 on a perfectly healthy host:
+      // the proxy answers 401 to an unauthenticated /health. The CLI does not
+      // use that address, so it is context, not a verdict.
       global.fetch = jest.fn().mockImplementation((url: string) =>
         String(url).startsWith('http://127.0.0.1')
           ? Promise.resolve({ ok: true } as Response)
@@ -142,32 +141,59 @@ describe('cli doctor', () => {
 
       const code = await runDoctor({}, proxied);
 
-      const health = report().checks.find((c) => c.name === 'health')!;
-      expect(health.ok).toBe(false);
-      expect(health.detail).toContain('HTTP 401');
-      expect(health.detail).not.toContain('no response');
-      expect(stderr.join('')).toMatch(/answered HTTP 401 — the proxy in front of it rejected this request/);
-      expect(stderr.join('')).not.toMatch(/did not answer/);
-      expect(code).toBe(1);
+      const body = report();
+      expect(body.ok).toBe(true);
+      expect(code).toBe(0);
+      const pub = body.checks.find((c) => c.name === 'publicHealth')!;
+      expect(pub.ok).toBe(false);
+      expect(pub.info).toBe(true);
+      expect(pub.detail).toContain('HTTP 401');
+      expect(pub.detail).not.toContain('no response');
+      expect(stderr.join('')).toMatch(/the public URL answered HTTP 401/);
     });
 
-    it('skips the local probe when no local manager owns a gateway', async () => {
-      // Pointing the CLI at someone else's gateway must not fail doctor just
-      // because nothing is listening on this machine.
-      (detectManager as jest.Mock).mockReturnValue('unknown');
+    it('falls back to publicUrl when no gateway is live on this host', async () => {
+      (localGatewayIsLive as jest.Mock).mockReturnValue(false);
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
       await runDoctor({}, proxied);
 
-      expect(report().checks.map((c) => c.name)).not.toContain('localHealth');
+      expect(report().checks.find((c) => c.name === 'url')?.detail).toBe('https://proxy.example.com/gateway');
     });
 
-    it('skips the local probe when the resolved URLs are the same', async () => {
+    it('when told to use a remote URL, a healthy local gateway is the informational one', async () => {
+      // $CLAUDE_GATEWAY_URL overrides the local preference, so `health` is the
+      // remote probe again — and a failure there is fatal, with the local
+      // address offered as the fix.
+      const prev = process.env.CLAUDE_GATEWAY_URL;
+      process.env.CLAUDE_GATEWAY_URL = 'https://proxy.example.com/gateway';
+      try {
+        global.fetch = jest.fn().mockImplementation((url: string) =>
+          String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
+        );
+
+        const code = await runDoctor({}, proxied);
+
+        const body = report();
+        expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'localUrl', 'localHealth']);
+        expect(body.checks.find((c) => c.name === 'health')?.ok).toBe(false);
+        expect(body.checks.find((c) => c.name === 'localHealth')?.ok).toBe(true);
+        expect(stderr.join('')).toMatch(/Drop --url \/ \$CLAUDE_GATEWAY_URL/);
+        expect(code).toBe(1);
+      } finally {
+        if (prev === undefined) delete process.env.CLAUDE_GATEWAY_URL;
+        else process.env.CLAUDE_GATEWAY_URL = prev;
+      }
+    });
+
+    it('skips the second probe when there is only one address', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
       await runDoctor({}, configWithKey);
 
-      expect(report().checks.map((c) => c.name)).not.toContain('localHealth');
+      const names = report().checks.map((c) => c.name);
+      expect(names).not.toContain('publicHealth');
+      expect(names).not.toContain('localHealth');
     });
   });
 

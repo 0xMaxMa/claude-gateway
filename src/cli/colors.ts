@@ -18,18 +18,33 @@ const CODES = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
   cyan: '\x1b[36m',
+  /** Bold + bright orange (xterm-256 colour 208) for the program name. */
+  brand256: '\x1b[1m\x1b[38;5;208m',
+  /** Fallback for terminals that advertise only the 16-colour palette: the
+   *  nearest warm tone. Orange has no 16-colour code, so yellow stands in. */
+  brand16: '\x1b[1m\x1b[33m',
 } as const;
 
 export type Paint = (s: string) => string;
 
 export interface Palette {
   enabled: boolean;
+  /** The program name — bold orange. */
+  brand: Paint;
   bold: Paint;
   dim: Paint;
   red: Paint;
   green: Paint;
   yellow: Paint;
   cyan: Paint;
+}
+
+/** True when the terminal advertises the 256-colour palette (or truecolor),
+ *  which is what the orange brand tone needs. `COLORTERM` is set by terminals
+ *  that support 24-bit colour; otherwise `TERM` names the palette. */
+export function supports256Colors(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.COLORTERM !== undefined && env.COLORTERM !== '') return true;
+  return /-256(color)?\b|truecolor|direct/i.test(env.TERM ?? '');
 }
 
 /** Decide whether `stream` should receive colour, given `env`. */
@@ -55,6 +70,7 @@ export function paletteFor(
       enabled ? `${code}${s}${CODES.reset}` : s;
   return {
     enabled,
+    brand: wrap(supports256Colors(env) ? CODES.brand256 : CODES.brand16),
     bold: wrap(CODES.bold),
     dim: wrap(CODES.dim),
     red: wrap(CODES.red),

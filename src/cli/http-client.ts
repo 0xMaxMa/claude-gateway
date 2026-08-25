@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { ApiKey } from '../types';
+import { localGatewayIsLive } from './manager';
 
 /**
  * CLI HTTP client — resolves where to talk to the gateway and which key to use,
@@ -63,11 +64,24 @@ export interface ResolveInputs {
   /** process.env (injectable for tests). */
   env?: NodeJS.ProcessEnv;
   config?: CliConfigView;
+  /** Is a gateway process alive on this host? Injectable for tests; defaults
+   *  to the pidfile check in `manager.ts`. */
+  localIsLive?: () => boolean;
 }
 
 /**
  * Resolve the base URL of the gateway. Precedence:
- *   --url  →  $CLAUDE_GATEWAY_URL  →  config.gateway.publicUrl  →  http://<bind>:<port>
+ *   --url  →  $CLAUDE_GATEWAY_URL  →  http://<bind>:<port> *when a gateway is
+ *   running on this host*  →  config.gateway.publicUrl  →  http://<bind>:<port>
+ *
+ * `config.gateway.publicUrl` describes *this* gateway as seen from outside,
+ * so when the gateway is running here, loopback and the public URL are the
+ * same server — the public one just adds a reverse-proxy hop. Preferring it
+ * from the gateway's own host makes every command depend on that proxy, and a
+ * proxy enforcing its own authentication (which the CLI has no credentials
+ * for) answers 401 to commands that work perfectly over loopback. So a live
+ * local gateway wins; `--url` and `$CLAUDE_GATEWAY_URL` still override, for
+ * deliberately exercising the proxy path or reaching another host.
  *
  * A bind of 0.0.0.0 / :: is a listen address, not a dial address, so it is
  * rewritten to loopback for the client. Port comes from $PORT (default 10850).
@@ -76,10 +90,12 @@ export interface ResolveInputs {
 export function resolveUrl(i: ResolveInputs = {}): string {
   const env = i.env ?? process.env;
   const cfg = i.config ?? {};
-  const explicit = i.flagUrl || env.CLAUDE_GATEWAY_URL || cfg.publicUrl;
+  const explicit = i.flagUrl || env.CLAUDE_GATEWAY_URL;
   let url: string;
   if (explicit) {
     url = explicit;
+  } else if (cfg.publicUrl && !(i.localIsLive ?? localGatewayIsLive)()) {
+    url = cfg.publicUrl;
   } else {
     url = bindUrl(cfg, env);
   }

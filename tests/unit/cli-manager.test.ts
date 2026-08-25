@@ -1,4 +1,4 @@
-import { detectManager } from '../../src/cli/manager';
+import { detectManager, localGatewayIsLive } from '../../src/cli/manager';
 
 describe('cli manager detectManager', () => {
   it('detects the user service first — `service install` creates a user unit', () => {
@@ -92,5 +92,23 @@ describe('cli manager detectManager', () => {
       readPidfile: () => null,
     });
     expect(m).toBe('unknown');
+  });
+});
+
+/**
+ * `resolveUrl()` consults this on every CLI invocation, so it must stay a file
+ * read plus a signal-0 — never a subprocess.
+ */
+describe('localGatewayIsLive', () => {
+  it('is true for a pidfile naming a live process', () => {
+    expect(localGatewayIsLive({ readPidfile: () => '4242\n', isAlive: (pid) => pid === 4242 })).toBe(true);
+  });
+
+  it('is false when the pidfile is missing, empty, junk, or names a dead process', () => {
+    expect(localGatewayIsLive({ readPidfile: () => null, isAlive: () => true })).toBe(false);
+    expect(localGatewayIsLive({ readPidfile: () => '', isAlive: () => true })).toBe(false);
+    expect(localGatewayIsLive({ readPidfile: () => 'not-a-pid', isAlive: () => true })).toBe(false);
+    expect(localGatewayIsLive({ readPidfile: () => '0', isAlive: () => true })).toBe(false);
+    expect(localGatewayIsLive({ readPidfile: () => '4242', isAlive: () => false })).toBe(false);
   });
 });

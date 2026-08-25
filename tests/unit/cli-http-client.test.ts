@@ -21,8 +21,37 @@ describe('cli http-client resolveUrl', () => {
   });
 
   it('falls back to $CLAUDE_GATEWAY_URL, then publicUrl', () => {
-    expect(resolveUrl({ env: { CLAUDE_GATEWAY_URL: 'http://env:2' }, config: { publicUrl: 'http://cfg:3' } })).toBe('http://env:2');
-    expect(resolveUrl({ env: {}, config: { publicUrl: 'http://cfg:3' } })).toBe('http://cfg:3');
+    const dead = () => false;
+    expect(resolveUrl({ env: { CLAUDE_GATEWAY_URL: 'http://env:2' }, config: { publicUrl: 'http://cfg:3' }, localIsLive: dead })).toBe('http://env:2');
+    expect(resolveUrl({ env: {}, config: { publicUrl: 'http://cfg:3' }, localIsLive: dead })).toBe('http://cfg:3');
+  });
+
+  /**
+   * publicUrl describes *this* gateway from outside, so on the gateway's own
+   * host both addresses are the same server — the public one just adds a
+   * reverse-proxy hop. Routing through it makes every command depend on that
+   * proxy, and a proxy with its own authentication answers 401 to commands
+   * that work over loopback.
+   */
+  it('prefers the local bind over publicUrl when a gateway is live on this host', () => {
+    expect(resolveUrl({ env: {}, config: { publicUrl: 'http://cfg:3', bind: '0.0.0.0' }, localIsLive: () => true })).toBe(
+      `http://127.0.0.1:${DEFAULT_PORT}`,
+    );
+  });
+
+  it('an explicit --url or $CLAUDE_GATEWAY_URL still overrides a live local gateway', () => {
+    const live = () => true;
+    expect(resolveUrl({ flagUrl: 'http://flag:1', env: {}, config: { publicUrl: 'http://cfg:3' }, localIsLive: live })).toBe('http://flag:1');
+    expect(resolveUrl({ env: { CLAUDE_GATEWAY_URL: 'http://env:2' }, config: { publicUrl: 'http://cfg:3' }, localIsLive: live })).toBe(
+      'http://env:2',
+    );
+  });
+
+  it('does not consult the local check when no publicUrl is configured', () => {
+    // The answer is the bind URL either way, so the pidfile read is pure cost.
+    const probe = jest.fn(() => false);
+    expect(resolveUrl({ env: {}, config: { bind: '127.0.0.1' }, localIsLive: probe })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it('composes from bind + port when nothing explicit is set', () => {

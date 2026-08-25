@@ -103,6 +103,28 @@ describe('binary dispatch — discovery never starts a server', () => {
   }, TIMEOUT_MS);
 });
 
+describe('binary dispatch — help layout', () => {
+  /** Every core command must fit its name column and keep a readable gap; the
+   *  longest (`service install|status|uninstall`) used to wrap its description
+   *  onto the next line. */
+  it('keeps each core command and its description on one line, with a visible gap', async () => {
+    const { stderr } = await run(['--help'], terminalEnv());
+    const rows = stderr
+      .split('\n')
+      .filter((l) => /^ {2}\S/.test(l) && / {2,}\S/.test(l.slice(2)))
+      .filter((l) => !l.includes('Run `claude-gateway'));
+    expect(rows.length).toBeGreaterThan(5);
+
+    const longest = rows.find((l) => l.includes('service install|status|uninstall'));
+    expect(longest).toBeDefined();
+    expect(longest).toMatch(/service install\|status\|uninstall {2,}Run the gateway as a systemd-user or PM2 service/);
+
+    // All descriptions start in the same column, so the block reads as a table.
+    const starts = new Set(rows.map((l) => l.length - l.replace(/^ {2}\S.*?(?= {2}\S)/, '').length));
+    expect(starts.size).toBe(1);
+  }, TIMEOUT_MS);
+});
+
 describe('binary dispatch — help colouring', () => {
   const base = () => terminalEnv({ GATEWAY_CONFIG: path.join(os.tmpdir(), 'cg-colour-should-never-be-read.json') });
 
@@ -123,11 +145,22 @@ describe('binary dispatch — help colouring', () => {
     return env;
   };
 
-  it('emits ANSI escapes when FORCE_COLOR is set', async () => {
-    const { code, stderr } = await run(['--help'], colourEnv());
+  it('paints the program name in the brand tone when FORCE_COLOR is set', async () => {
+    const env = colourEnv();
+    env.TERM = 'xterm-256color'; // pinned: the palette degrades on a 16-colour TERM
+    const { code, stderr } = await run(['--help'], env);
     expect(code).toBe(0);
     // eslint-disable-next-line no-control-regex
-    expect(stderr).toMatch(/\x1b\[1mclaude-gateway\x1b\[0m/);
+    expect(stderr).toMatch(/\x1b\[1m\x1b\[38;5;208mclaude-gateway\x1b\[0m/);
+  }, TIMEOUT_MS);
+
+  it('degrades the brand tone on a 16-colour terminal', async () => {
+    const env = colourEnv();
+    env.TERM = 'xterm';
+    delete env.COLORTERM;
+    const { stderr } = await run(['--help'], env);
+    // eslint-disable-next-line no-control-regex
+    expect(stderr).toMatch(/\x1b\[1m\x1b\[33mclaude-gateway\x1b\[0m/);
   }, TIMEOUT_MS);
 
   it('NO_COLOR wins over FORCE_COLOR', async () => {

@@ -71,12 +71,25 @@ export function detectManager(deps: DetectDeps = {}): Manager {
     /* pm2 absent or process not found */
   }
 
-  const pf = deps.pidfilePath ?? defaultPidfilePath();
-  const raw = readPidfile(pf);
-  if (raw) {
-    const pid = parseInt(raw.trim(), 10);
-    if (pid > 0 && isAlive(pid)) return 'foreground';
-  }
+  if (localGatewayIsLive({ pidfilePath: deps.pidfilePath, isAlive, readPidfile })) return 'foreground';
 
   return 'unknown';
+}
+
+/**
+ * True when a gateway process is alive on THIS host, per the pidfile the
+ * server writes on boot. Every manager runs the same entry point, so the
+ * pidfile is present under systemd and PM2 too, not only in the foreground.
+ *
+ * Deliberately cheap — one file read and one signal-0 — because `resolveUrl()`
+ * consults it on every CLI invocation. `detectManager()` is not usable there:
+ * it shells out to systemctl and pm2.
+ */
+export function localGatewayIsLive(deps: Pick<DetectDeps, 'pidfilePath' | 'isAlive' | 'readPidfile'> = {}): boolean {
+  const isAlive = deps.isAlive ?? realIsAlive;
+  const readPidfile = deps.readPidfile ?? realReadPidfile;
+  const raw = readPidfile(deps.pidfilePath ?? defaultPidfilePath());
+  if (!raw) return false;
+  const pid = parseInt(raw.trim(), 10);
+  return pid > 0 && isAlive(pid);
 }
