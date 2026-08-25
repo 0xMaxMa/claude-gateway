@@ -374,6 +374,19 @@ describe('generateCompose()', () => {
     return generateCompose(appYaml, appName, appDir, outputPath);
   }
 
+  it('rejects a bind mount that escapes the app directory', () => {
+    expect(() => generate(`
+apiVersion: apps.getpod.ai/v1
+name: bound-app
+version: 1.0.0
+services:
+  app:
+    image: nginx:1.25
+    volumes:
+      - ../other-app/data:/data
+`)).toThrow(/stay within the app directory/);
+  });
+
   it('writes a valid YAML file', () => {
     generate(MINIMAL_IMAGE_YAML);
     expect(() => readCompose(outputPath)).not.toThrow();

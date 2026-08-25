@@ -251,6 +251,53 @@ const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.
 
 // ─── Installer ────────────────────────────────────────────────────────────────
 
+const UUID_RE_SRC = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/**
+ * Scratch directories `runUpdate` creates beside an app's install path:
+ * `.cg-update-<app>-<uuid>` (staging checkout) and `<appDir>-old-<uuid>` /
+ * `<appDir>-failed-<uuid>` (release snapshots). All three carry a v4 UUID, so
+ * the pattern cannot match an app directory named by a user.
+ */
+const STALE_UPDATE_DIR_RE = new RegExp(
+  `^\\.cg-update-.+-${UUID_RE_SRC}$|-(?:old|failed)-${UUID_RE_SRC}$`,
+);
+
+/**
+ * Rows from a `docker compose … --format json` call. Compose has emitted both a
+ * single JSON array and one object per line across its 2.x line, so accept
+ * either rather than silently reading a newer/older daemon as "nothing here".
+ */
+function parseJsonRows(stdout: string): unknown[] {
+  const text = stdout.trim();
+  if (!text) return [];
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch { /* not a single document — try line-delimited below */ }
+  const rows: unknown[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      rows.push(JSON.parse(trimmed));
+    } catch { /* skip a line that is not JSON */ }
+  }
+  return rows;
+}
+
+/** Private tag the update holds on an image so a rollback can put it back. */
+const ROLLBACK_TAG_PREFIX = 'cg-rollback-';
+
+/**
+ * An image reference and the private tag pinning its pre-update build. An empty
+ * `backupRef` records a reference that could *not* be pinned — the rollback
+ * treats it as unrestorable and rebuilds instead.
+ */
+interface PreservedImage {
+  ref: string;
+  backupRef: string;
+}
+
 export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
@@ -967,7 +1014,29 @@ export class AppInstaller {
    * read-only `~/.claude/projects`) are intentionally excluded. Best-effort:
    * returns `[]` on any failure, mirroring {@link discoverVolumes}.
    */
-  private discoverBindMounts(appName: string, appDir: string): string[] {
+  /**
+   * The paths a generated compose file may have resolved this app dir to.
+   * Local-dev installs symlink the app dir into appsDir, and the generated
+   * compose resolves bind sources against the symlink's *realpath*, so both the
+   * symlink path and its target must be treated as the app root.
+   */
+  private bindMountBases(appDir: string): string[] {
+    const bases = [appDir];
+    try {
+      const real = fs.realpathSync(appDir);
+      if (real !== appDir) bases.push(real);
+    } catch {
+      /* app dir unreadable — fall back to the literal path */
+    }
+    return bases;
+  }
+
+  private discoverBindMounts(
+    appName: string,
+    appDir: string,
+    onError: 'empty' | 'throw' = 'empty',
+  ): string[] {
+    const bases = this.bindMountBases(appDir);
     try {
       const { stdout } = this.run(
         ['docker', 'compose', '-p', appName, 'config', '--format', 'json'],
@@ -977,17 +1046,6 @@ export class AppInstaller {
       const parsed = JSON.parse(stdout) as {
         services?: Record<string, { volumes?: Array<{ type?: string; source?: string }> }>;
       };
-      // Local-dev installs symlink the app dir into appsDir, and the generated
-      // compose resolves bind sources against the symlink's *realpath*. Match a
-      // source that sits under either the symlink path or its target, so those
-      // bind mounts are not wrongly excluded.
-      const bases = [appDir];
-      try {
-        const real = fs.realpathSync(appDir);
-        if (real !== appDir) bases.push(real);
-      } catch {
-        /* app dir unreadable — fall back to the literal path */
-      }
       const rels = new Set<string>();
       for (const svc of Object.values(parsed.services ?? {})) {
         for (const vol of svc.volumes ?? []) {
@@ -1000,8 +1058,16 @@ export class AppInstaller {
         }
       }
       return Array.from(rels).sort();
-    } catch {
-      return [];
+    } catch (err) {
+      if (onError === 'empty') return [];
+      // Fail closed: the caller is about to move this app's directory, so an
+      // unknown bind set would silently strand live state. Only an app whose
+      // stored compose anchors nothing to the app dir (under either base) is
+      // safe to treat as bind-free.
+      const composePath = path.join(appDir, 'docker-compose.yml');
+      const compose = fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : '';
+      if (!bases.some((b) => compose.includes(b))) return [];
+      throw new Error(`Cannot safely discover bind mounts for update: ${(err as Error).message}`);
     }
   }
 
@@ -1064,6 +1130,48 @@ export class AppInstaller {
    * Returns a cancel function. No-op (returns a noop canceller) when both caps
    * are disabled. The timer is `unref`'d so it never holds the event loop open.
    */
+  /**
+   * Reclaim update scratch directories a crashed or killed update left behind:
+   * the `.cg-update-*` staging checkout and the `-old-`/`-failed-` release
+   * snapshots. Staging moved next to the install path so the swap is a
+   * same-filesystem rename, which also means `/tmp` cleanup no longer collects
+   * it — without this sweep a mid-update crash leaks a full app checkout
+   * forever.
+   *
+   * **Boot only.** An update in flight owns directories matching these names,
+   * so this must run before any update can start. Never throws; a directory it
+   * cannot remove is reported and skipped.
+   */
+  async sweepStaleUpdateDirs(): Promise<string[]> {
+    const swept: string[] = [];
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.appsDir);
+    } catch {
+      return swept; // no apps dir yet
+    }
+    // An installPath is authoritative — never remove a directory an app still
+    // points at, however its name happens to look.
+    let live: Set<string>;
+    try {
+      live = new Set((await this.registry.list()).map((a) => a.installPath));
+    } catch {
+      return swept; // registry unreadable — do not guess
+    }
+    for (const name of names) {
+      if (!STALE_UPDATE_DIR_RE.test(name)) continue;
+      const full = path.join(this.appsDir, name);
+      if (live.has(full)) continue;
+      try {
+        this.rmrf(full);
+        swept.push(full);
+      } catch (err) {
+        console.warn(`[installer] failed to sweep stale update dir "${full}": ${(err as Error).message}`);
+      }
+    }
+    return swept;
+  }
+
   startBackupCleanup(): () => void {
     const { retention, maxAgeDays, cleanupHour, cleanupTimezone } = this.appBackupConfig;
     if (retention <= 0 && maxAgeDays <= 0) return () => {};
@@ -1641,7 +1749,15 @@ export class AppInstaller {
       }
     }
 
-    const tmpDir = path.join(os.tmpdir(), `cg-update-${appName}-${crypto.randomUUID()}`);
+    // Stage beside the durable install path so the directory swap and bind-data
+    // moves are same-filesystem renames, not cross-device copies/failures.
+    const tmpDir = path.join(
+      path.dirname(entry.installPath),
+      `.cg-update-${appName}-${crypto.randomUUID()}`,
+    );
+    // Rollback tags held on the images this update is about to build over.
+    // Declared out here so every exit path can drop them again.
+    let preservedImages: PreservedImage[] = [];
     try {
       // ── Shallow fetch of specific commit into tmp dir ─────────────────────
       this.log(job, `Cloning ${target.repo}`);
@@ -1682,13 +1798,22 @@ export class AppInstaller {
         version: newVersion,
         commit: target.newCommit,
         installPath: tmpDir,
-        ...(generated.agentDeclaration !== null ? { agentDeclaration: generated.agentDeclaration } : {}),
+        agentDeclaration: generated.agentDeclaration,
         ...(agentPaths ? { agentPaths } : {}),
       };
 
       if (generated.agentDeclaration && this.agentManager && agentPaths) {
         this.agentManager.injectAgentService(newEntry);
       }
+
+      // Pin the images the app is running before the build takes their tags
+      // over. A `build:` service's new image reuses the old tag
+      // (`<project>-<service>`), so once the build succeeds that tag names the
+      // new release: rolling only the source back would bring the app up on the
+      // failed release's image and crash-loop on a "successful" rollback. This
+      // has to happen before the build — afterwards the old image has no
+      // reference left to grab it by.
+      preservedImages = this.preserveRunningImages(appName, entry.installPath, job);
 
       // ── Build new images in tmp dir ───────────────────────────────────────
       this.log(job, 'Building new images');
@@ -1703,32 +1828,74 @@ export class AppInstaller {
         }
       }
 
+      // Discover the app-owned bind paths while the old compose file still points
+      // at the durable install directory. They must move with the release swap so
+      // cleanup cannot delete live state. This query fails closed, so it runs
+      // *before* routes and sockets come down — a throw here would otherwise
+      // leave the app running but unreachable, with no path back.
+      const oldBindMounts = this.discoverBindMounts(appName, entry.installPath, 'throw');
+
       // ── Deregister old routes before taking down containers ───────────────
       this.callbacks.deregisterRoutes(appName);
       this.callbacks.stopSockets(appName);
 
-      // Capture the current (old) image IDs while the old stack is still up, so
-      // we can reclaim exactly those images after the update — without a
-      // `compose down` that would collide with the new stack (issue #283).
+      // Capture the current (old) image IDs while the old compose file is still
+      // the live one, so the reclaim below targets exactly this app's images.
       const oldImageIds = this.captureComposeImageIds(appName, entry.installPath);
-      // Also capture the app's declared image refs (repo:tag) so a superseded
-      // *pulled* tag can be reclaimed after the update (issue #302).
       const oldImageRefs = this.captureComposeImageRefs(appName, entry.installPath);
 
-      // ── Bring old containers down (keeps images for rollback) ─────────────
+      // ── Swap dirs before starting the new containers ───────────────────────
+      // The new compose file's bind sources are anchored to finalDir. Starting
+      // before this swap would bind the old directory inode then delete it.
       this.log(job, 'Stopping old containers');
       this.run(['docker', 'compose', '-p', appName, 'down'], entry.installPath, 120_000);
-
-      // ── Start new containers ──────────────────────────────────────────────
-      this.log(job, 'Starting new containers');
+      this.log(job, 'Swapping app directories');
+      const finalDir = entry.installPath;
+      const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
+      let swapped = false;
+      let failedDir: string | null = null;
+      const movedBindMounts: string[] = [];
       try {
-        this.composeUp(appName, tmpDir, job);
+        fs.renameSync(finalDir, oldBackupDir);
+        fs.renameSync(tmpDir, finalDir);
+        swapped = true;
+        this.moveBindMounts(oldBackupDir, finalDir, oldBindMounts, job, movedBindMounts);
+
+        // The source checkout is now permanent. Rewrite the compose file with
+        // finalDir as its base so every bind source and build context resolves
+        // to the durable path — this call is kept for that side effect; its
+        // return value necessarily matches `generated` (same app.yaml). The
+        // rewrite drops the injected agent service, so re-inject it after.
+        const finalComposePath = path.join(finalDir, 'docker-compose.yml');
+        const finalYaml = parseAppYaml(fs.readFileSync(path.join(finalDir, 'app.yaml'), 'utf-8'), finalDir);
+        generateCompose(finalYaml, appName, finalDir, finalComposePath);
+        if (generated.agentDeclaration && this.agentManager && agentPaths) {
+          this.agentManager.injectAgentService({ ...newEntry, installPath: finalDir });
+        }
+
+        // ── Start new containers ────────────────────────────────────────────
+        this.log(job, 'Starting new containers');
+        this.composeUp(appName, finalDir, job);
       } catch (upErr) {
-        // Rollback: bring old containers back up from old install path
         this.log(job, 'New containers failed — rolling back to previous version');
         let rollbackFailed = false;
+        failedDir = `${finalDir}-failed-${crypto.randomUUID()}`;
         try {
-          this.run(['docker', 'compose', '-p', appName, 'up', '-d'], entry.installPath, 120_000);
+          if (swapped) {
+            fs.renameSync(finalDir, failedDir);
+            fs.renameSync(oldBackupDir, finalDir);
+            this.restoreBindMounts(failedDir, finalDir, movedBindMounts, job);
+          } else if (fs.existsSync(oldBackupDir)) {
+            fs.renameSync(oldBackupDir, finalDir);
+          }
+          // Point every tag back at the image the app was actually running
+          // before this update built over it, so the restored source and the
+          // restored image are the same release. Falls back to rebuilding from
+          // the restored source when an old image is no longer on disk.
+          const rebuild = !this.restorePreservedImages(preservedImages, finalDir, job);
+          const upArgs = ['docker', 'compose', '-p', appName, 'up', '-d'];
+          if (rebuild) upArgs.push('--build');
+          this.run(upArgs, finalDir, rebuild ? 600_000 : 120_000);
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
             name: p.name,
             service: p.service,
@@ -1738,40 +1905,27 @@ export class AppInstaller {
             rateLimit: p.rateLimit,
           })));
           await this.registry.updateStatus(appName, 'running');
+          if (failedDir !== null) this.safeRmrf(failedDir, job, 'failed update dir');
         } catch (rollbackErr) {
           rollbackFailed = true;
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
-        this.safeRmrf(tmpDir, job, 'update temp dir');
         if (rollbackFailed) {
           throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
         }
         throw upErr;
       }
 
-      // Capture the new stack's image IDs (still at tmpDir) so image reclamation
-      // below never removes an image the new containers depend on (e.g. when the
-      // old and new versions happen to share a base/image).
-      const newImageIds = this.captureComposeImageIds(appName, tmpDir);
-      const newImageRefs = this.captureComposeImageRefs(appName, tmpDir);
+      // The new stack is up: the previous images are no longer a rollback
+      // target. Untag them before the reclaim below, which removes by image ID
+      // and would be refused while a second reference exists.
+      this.dropPreservedImageTags(preservedImages);
+      preservedImages = [];
 
-      // ── Swap dirs ─────────────────────────────────────────────────────────
-      // Swap in place at the recorded install path — NOT path.join(appsDir, appName).
-      // For legacy installs the on-disk dir is named after the source repo/URL
-      // basename, so `installPath` basename can differ from the app name. Using
-      // the app name here throws ENOENT (issue #275). `entry.installPath` is the
-      // authoritative location the `down`/rollback steps above already use.
-      this.log(job, 'Swapping app directories');
-      const finalDir = entry.installPath;
-      const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
-      fs.renameSync(finalDir, oldBackupDir);
-      fs.renameSync(tmpDir, finalDir);
-
-      // ── Restore MEMORY.md ─────────────────────────────────────────────────
-      if (memoryBackup !== null && generated.agentDeclaration && this.agentManager) {
-        this.agentManager.restoreMemory(generated.agentDeclaration.name, memoryBackup);
-        this.log(job, 'MEMORY.md restored');
-      }
+      // Capture the new stack's image IDs from its permanent compose file so
+      // cleanup below never removes an image the new containers depend on.
+      const newImageIds = this.captureComposeImageIds(appName, finalDir);
+      const newImageRefs = this.captureComposeImageRefs(appName, finalDir);
 
       // ── Update registry ───────────────────────────────────────────────────
       const finalEntry: AppEntry = {
@@ -1782,10 +1936,31 @@ export class AppInstaller {
       };
       await this.registry.upsert(finalEntry);
 
-      // ── Re-create agent symlink + config.json entry ───────────────────────
+      // ── Re-create, rename, or remove the app-agent registration ───────────
+      // `upsertAgent` keys off the *new* agent name, so a release that drops or
+      // renames its agent would otherwise strand the previous workspace symlink
+      // and config.json entry. Both transitions are the same deregistration.
+      const oldAgentName = entry.agentDeclaration?.name ?? null;
+      const newAgentName = generated.agentDeclaration?.name ?? null;
+      if (this.agentManager && oldAgentName !== null && oldAgentName !== newAgentName) {
+        await this.agentManager.deleteAgentByName(oldAgentName);
+        this.log(
+          job,
+          newAgentName === null
+            ? `Agent "${oldAgentName}" removed`
+            : `Agent "${oldAgentName}" deregistered (renamed to "${newAgentName}")`,
+        );
+      }
       if (generated.agentDeclaration && this.agentManager) {
         await this.agentManager.upsertAgent(finalEntry);
         this.log(job, `Agent "${generated.agentDeclaration.name}" re-registered`);
+        // MEMORY.md must be written *after* registration: restoreMemory resolves
+        // the workspace through config.json, so on a rename the new name is not
+        // resolvable until upsertAgent has written its entry.
+        if (memoryBackup !== null) {
+          this.agentManager.restoreMemory(generated.agentDeclaration.name, memoryBackup);
+          this.log(job, 'MEMORY.md restored');
+        }
         await this.callbacks.reinitializeAgent?.(generated.agentDeclaration.name);
       }
 
@@ -1837,6 +2012,7 @@ export class AppInstaller {
       this.log(job, `Update complete → ${newVersion}`);
 
     } catch (err) {
+      this.dropPreservedImageTags(preservedImages);
       if (fs.existsSync(tmpDir)) {
         this.safeRmrf(tmpDir, job, 'update temp dir');
       }
@@ -2334,6 +2510,150 @@ export class AppInstaller {
   }
 
   /**
+   * Create `targetDir` under `baseDir`, refusing to traverse or create through a
+   * symlink. The check runs **before** each segment is created — a `mkdir -p`
+   * that ran first would already have materialised directories on the far side
+   * of a symlink, leaving the guard with nothing left to prevent.
+   *
+   * Scope: this guards the **destination** side — the freshly checked-out
+   * release, which is the side an app repo controls. A bind path that was
+   * already a symlink in the *previous* app dir is carried across as-is; that
+   * preserves an escape the operator set up themselves rather than creating
+   * one, and is the behaviour every release before this one had.
+   */
+  private ensureDirWithinNoSymlink(baseDir: string, targetDir: string): void {
+    const relative = path.relative(baseDir, targetDir);
+    if (path.isAbsolute(relative) || relative.split(path.sep).includes('..')) {
+      throw new Error(`Bind-mount path escapes the app directory: "${targetDir}"`);
+    }
+    let current = baseDir;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment);
+      let stat: fs.Stats | null;
+      try {
+        stat = fs.lstatSync(current);
+      } catch {
+        stat = null;
+      }
+      if (stat === null) {
+        fs.mkdirSync(current);
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Updated app bind-mount source must not be a symlink: "${current}"`);
+      }
+      if (!stat.isDirectory()) {
+        throw new Error(`Updated app bind-mount path is not a directory: "${current}"`);
+      }
+    }
+  }
+
+  /** Reject a discovered bind path that does not stay inside both app roots. */
+  private isSafeBindRel(fromDir: string, toDir: string, rel: string): boolean {
+    if (rel.length === 0 || path.isAbsolute(rel)) return false;
+    const fromBase = fromDir.endsWith(path.sep) ? fromDir : fromDir + path.sep;
+    const toBase = toDir.endsWith(path.sep) ? toDir : toDir + path.sep;
+    return path.resolve(fromDir, rel).startsWith(fromBase)
+      && path.resolve(toDir, rel).startsWith(toBase);
+  }
+
+  /**
+   * Move app-owned relative bind data across an update directory swap.
+   * Renaming preserves the database's ownership and inode, unlike copying.
+   *
+   * A release legitimately ships content at a bind path (a `.gitkeep`, seed
+   * files, a tracked `init.sql`), so a collision is normal, not an error. Live
+   * state always wins — it is the data the issue exists to protect — but a
+   * directory collision is **merged** entry by entry so release-provided files
+   * the previous version never had still land. Every rename performed is
+   * recorded, app-relative and in order, so a rollback can replay it backwards.
+   */
+  private moveBindMounts(
+    fromDir: string,
+    toDir: string,
+    rels: string[],
+    job: JobState,
+    moved?: string[],
+  ): void {
+    for (const rel of rels) {
+      if (!this.isSafeBindRel(fromDir, toDir, rel)) {
+        this.log(job, `Warning: skipping bind-mount path outside the app directory: "${rel}"`);
+        continue;
+      }
+      if (!fs.existsSync(path.resolve(fromDir, rel))) continue; // never created
+      this.moveBindEntry(fromDir, toDir, rel, job, moved);
+    }
+  }
+
+  private moveBindEntry(
+    fromDir: string,
+    toDir: string,
+    rel: string,
+    job: JobState,
+    moved?: string[],
+  ): void {
+    const source = path.resolve(fromDir, rel);
+    const destination = path.resolve(toDir, rel);
+    this.ensureDirWithinNoSymlink(toDir, path.dirname(destination));
+
+    let destStat: fs.Stats | null;
+    try {
+      destStat = fs.lstatSync(destination);
+    } catch {
+      destStat = null;
+    }
+    if (destStat === null) {
+      fs.renameSync(source, destination);
+      moved?.push(rel);
+      return;
+    }
+    if (destStat.isDirectory() && fs.lstatSync(source).isDirectory()) {
+      // Merge: recurse so a release-only file inside the directory survives.
+      //
+      // Entry-by-entry on purpose. Swapping the trees (move the live dir over
+      // wholesale, then re-apply the release's own files on top) would be one
+      // rename instead of one per live file, but `moved` would no longer be an
+      // exact inverse: a rollback would carry those re-applied release files
+      // into the restored previous app dir. Exact rollback beats the renames,
+      // which are same-filesystem and only walk a directory the release also
+      // ships content in.
+      for (const name of fs.readdirSync(source)) {
+        this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
+      }
+      return;
+    }
+    this.log(
+      job,
+      `Warning: preserved existing bind-mount data at "${rel}" — the updated release's copy of that path was discarded`,
+    );
+    fs.rmSync(destination, { recursive: true, force: true });
+    fs.renameSync(source, destination);
+    moved?.push(rel);
+  }
+
+  /**
+   * Undo {@link moveBindMounts} after a failed update: replay the recorded
+   * renames backwards so the restored previous app dir gets its state back.
+   */
+  private restoreBindMounts(fromDir: string, toDir: string, moved: string[], job: JobState): void {
+    for (const rel of [...moved].reverse()) {
+      if (!this.isSafeBindRel(fromDir, toDir, rel)) {
+        this.log(job, `Warning: skipping bind-mount path outside the app directory: "${rel}"`);
+        continue;
+      }
+      const source = path.resolve(fromDir, rel);
+      const destination = path.resolve(toDir, rel);
+      if (!fs.existsSync(source) || fs.existsSync(destination)) continue;
+      try {
+        this.ensureDirWithinNoSymlink(toDir, path.dirname(destination));
+        fs.renameSync(source, destination);
+      } catch (err) {
+        this.log(job, `Warning: could not restore bind-mount path "${rel}": ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /**
    * Stop conflicting containers then run `docker compose up -d --wait`.
    * Captures container logs into the job on failure before rethrowing.
    * job is optional — when omitted (e.g. startStopRestart) logs go to stderr.
@@ -2441,6 +2761,122 @@ export class AppInstaller {
    * container back down (issue #283). Returns a de-duplicated list of image
    * IDs, or `[]` on any error (nothing to reclaim / docker unavailable).
    */
+  /**
+   * Tag every image the app is *currently* running under a private
+   * `<repo>:cg-rollback-<id>` name, and return the pairs.
+   *
+   * A `build:` service's new image reuses the tag of the one in production
+   * (`<project>-<service>:latest`), so once the update's build succeeds that
+   * tag names the new release. Rolling only the source directory back would
+   * bring the app up on the failed release's image. Holding a second tag keeps
+   * the old image addressable *and* alive — under the containerd image store an
+   * untagged image is not kept around as a `<none>` image to find later.
+   *
+   * Only images this app builds are preserved: compose names them
+   * `<project>-<service>`, and a pulled tag (`postgres:16-alpine`) is never
+   * overwritten by a build, so it needs no protection. Best-effort throughout —
+   * anything that cannot be preserved is simply absent from the result, and the
+   * rollback rebuilds from the restored source instead.
+   */
+  private preserveRunningImages(
+    appName: string,
+    dir: string,
+    job: JobState,
+  ): PreservedImage[] {
+    let rows: unknown[];
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'images', '--format', 'json'],
+        dir,
+        15_000,
+      );
+      rows = parseJsonRows(stdout);
+    } catch {
+      return [];
+    }
+
+    const preserved: PreservedImage[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (typeof row !== 'object' || row === null) continue;
+      const r = row as { ID?: unknown; Repository?: unknown; Tag?: unknown };
+      const id = typeof r.ID === 'string' ? r.ID.trim() : '';
+      const repo = typeof r.Repository === 'string' ? r.Repository.trim() : '';
+      const tag = typeof r.Tag === 'string' && r.Tag.trim() ? r.Tag.trim() : 'latest';
+      if (!id || !repo.startsWith(`${appName}-`)) continue;
+      const ref = `${repo}:${tag}`;
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      const backupRef = `${repo}:${ROLLBACK_TAG_PREFIX}${id.replace(/^sha256:/, '').slice(0, 12)}`;
+      try {
+        this.run(['docker', 'image', 'tag', id, backupRef], dir, 15_000);
+        preserved.push({ ref, backupRef });
+      } catch (err) {
+        // Recorded with no backup reference: the rollback must know this tag is
+        // unprotected and rebuild, rather than read an empty list as "no built
+        // images, nothing at risk".
+        preserved.push({ ref, backupRef: '' });
+        this.log(
+          job,
+          `Warning: could not preserve image "${ref}" for rollback (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        );
+      }
+    }
+    return preserved;
+  }
+
+  /**
+   * Put each preserved image back on the reference the update's build took
+   * over. Returns true when nothing is at risk (an empty list — the app builds
+   * no images) or every reference is back on its original image; false when at
+   * least one could not be, so the caller rebuilds from the rolled-back source
+   * rather than starting the failed release's build.
+   */
+  private restorePreservedImages(
+    images: PreservedImage[],
+    dir: string,
+    job: JobState,
+  ): boolean {
+    let allRestored = true;
+    for (const { ref, backupRef } of images) {
+      if (!backupRef) {
+        allRestored = false;
+        this.log(job, `Image "${ref}" was not preserved — rebuilding from the rolled-back source`);
+        continue;
+      }
+      try {
+        this.run(['docker', 'image', 'tag', backupRef, ref], dir, 15_000);
+        this.log(job, `Restored image "${ref}" to the pre-update build`);
+      } catch (err) {
+        allRestored = false;
+        this.log(
+          job,
+          `Warning: could not restore image "${ref}" (${
+            err instanceof Error ? err.message : String(err)
+          }) — rebuilding from the rolled-back source instead`,
+        );
+      }
+    }
+    return allRestored;
+  }
+
+  /**
+   * Drop the private rollback tags. Removing a reference only untags the image
+   * while another tag remains, so this never deletes an image the app still
+   * uses. Must run before the post-update image reclaim: an extra tag would
+   * make `docker image rm <id>` refuse.
+   */
+  private dropPreservedImageTags(images: PreservedImage[]): void {
+    for (const { backupRef } of images) {
+      if (!backupRef) continue;
+      try {
+        this.run(['docker', 'image', 'rm', backupRef], os.tmpdir(), 15_000);
+      } catch { /* already gone — non-fatal */ }
+    }
+  }
+
   private captureComposeImageIds(appName: string, dir: string): string[] {
     try {
       const { stdout } = this.run(

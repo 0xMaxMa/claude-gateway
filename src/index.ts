@@ -739,6 +739,17 @@ async function main(): Promise<void> {
     config.gateway?.appBackup,
   );
 
+  // Reclaim update scratch dirs a previous crash left beside an install path.
+  // Must run at boot, before any update can claim one of those names.
+  try {
+    const swept = await appInstaller.sweepStaleUpdateDirs();
+    if (swept.length > 0) {
+      console.log(`[gateway] Swept ${swept.length} stale app update director${swept.length === 1 ? 'y' : 'ies'}`);
+    }
+  } catch (err) {
+    console.warn(`[gateway] Failed to sweep stale app update directories: ${(err as Error).message}`);
+  }
+
   // Daily backup-cleanup scheduler (issue #310): prunes every app's backups by
   // the retention-count + max-age union policy. Timer is unref'd, so it never
   // keeps the process alive.

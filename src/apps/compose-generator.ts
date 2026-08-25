@@ -452,8 +452,8 @@ export function generateCompose(
     const composeVolumes: string[] = [];
     for (const vol of svc.volumes ?? []) {
       const [src, ...rest] = vol.split(':');
-      if (src.startsWith('./') || src.startsWith('../')) {
-        // Relative bind mount — resolve to absolute path so Docker daemon gets a real path
+      if (src.startsWith('./')) {
+        // Relative bind mount — resolve to an absolute path for Docker.
         const absPath = path.resolve(appDir, src);
         composeVolumes.push([absPath, ...rest].join(':'));
       } else {
@@ -862,13 +862,17 @@ function validateVolumes(svcName: string, volList: unknown): void {
           `Service "${svcName}".volumes source contains path traversal: "${src}"`,
         );
       }
-    } else if (src.startsWith('./') || src.startsWith('../')) {
-      // Relative bind mount (e.g. ./postgres) — validate no double traversal beyond ./
+    } else if (src.startsWith('./')) {
+      // Relative bind mounts are allowed only beneath the app directory.
       if (src.includes('/../') || src.endsWith('/..')) {
         throw new Error(
           `Service "${svcName}".volumes source contains path traversal: "${src}"`,
         );
       }
+    } else if (src.startsWith('../')) {
+      throw new Error(
+        `Service "${svcName}".volumes source must stay within the app directory: "${src}"`,
+      );
     } else {
       // Named volume
       if (!NAMED_VOLUME_RE.test(src)) {
