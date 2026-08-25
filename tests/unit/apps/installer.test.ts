@@ -1472,6 +1472,191 @@ services:
       expect(fs.readFileSync(marker, 'utf-8')).toBe('16');
     });
 
+    /**
+     * A `build:` service's new image reuses the tag of the one in production,
+     * so a failed update leaves that tag on the broken release. Rolling the
+     * source back is not enough — the image has to come back too.
+     */
+    function rollbackImageSpawn(opts: {
+      appName: string;
+      state: { head: string; version: string; upCalls: number; failNewUp: boolean };
+      calls: Array<{ args: string[] }>;
+      oldImageId: string;
+      tagFails?: boolean;
+      ndjson?: boolean;
+    }) {
+      const { appName, state, calls, oldImageId } = opts;
+      return jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && spawnOpts?.cwd) {
+          fs.writeFileSync(path.join(spawnOpts.cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    build: .
+    volumes:
+      - ./data/photos:/photos
+    ports:
+      - name: api
+        host: 5412
+        container: 5412
+        type: api
+    healthcheck:
+      test: exit 0
+      interval: 30s
+`.trim(), 'utf-8');
+        }
+        if (cmd !== 'docker') return { stdout: '', stderr: '', status: 0 };
+        calls.push({ args });
+        if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
+          return { stdout: JSON.stringify({ services: { app: { volumes: [
+            { type: 'bind', source: path.join(spawnOpts.cwd, 'data', 'photos') },
+          ] } } }), stderr: '', status: 0 };
+        }
+        if (args.includes('images') && args.includes('json')) {
+          const row = { ID: oldImageId, Repository: `${appName}-app`, Tag: 'latest' };
+          return {
+            // Compose has shipped both dialects: a single array, and one object
+            // per line.
+            stdout: opts.ndjson ? `${JSON.stringify(row)}\n` : JSON.stringify([row]),
+            stderr: '', status: 0,
+          };
+        }
+        // `docker image tag <src> <dst>`: preserving the pre-update build, then
+        // (on rollback) putting it back. `tagFails` simulates an image the
+        // containerd store already dropped.
+        if (args[0] === 'image' && args[1] === 'tag') {
+          return opts.tagFails
+            ? { stdout: '', stderr: 'No such image', status: 1 }
+            : { stdout: '', stderr: '', status: 0 };
+        }
+        if (args.includes('up')) {
+          state.upCalls += 1;
+          if (state.failNewUp && state.upCalls === 1) {
+            return { stdout: '', stderr: 'new stack failed', status: 1 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+    }
+
+    it('rolls the image back with the source when the updated stack cannot start', async () => {
+      const githubUrl = 'https://github.com/test/rollback-image-app';
+      const appName = 'rollback-image-app';
+      const oldImageId = 'previousgoodrelease0000';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const calls: Array<{ args: string[] }> = [];
+      const installer = makeInstaller(
+        rollbackImageSpawn({ appName, state, calls, oldImageId }),
+      );
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      calls.length = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('failed');
+
+      const backupRef = `${appName}-app:cg-rollback-${oldImageId.slice(0, 12)}`;
+      const tagIdx = calls.findIndex(
+        (c) => c.args[0] === 'image' && c.args[1] === 'tag'
+          && c.args[2] === backupRef && c.args[3] === `${appName}-app:latest`,
+      );
+      expect(tagIdx).toBeGreaterThanOrEqual(0);
+      // The rollback `up` must follow the retag, and must not need a rebuild.
+      const rollbackUpIdx = calls.findIndex(
+        (c, i) => i > tagIdx && c.args.includes('up') && !c.args.includes('--wait'),
+      );
+      expect(rollbackUpIdx).toBeGreaterThan(tagIdx);
+      expect(calls[rollbackUpIdx].args).not.toContain('--build');
+      expect(job.logs.some((l) => l.includes('Restored image'))).toBe(true);
+    });
+
+    it('drops its rollback tag once the updated stack is up', async () => {
+      const githubUrl = 'https://github.com/test/rollback-cleanup-app';
+      const appName = 'rollback-cleanup-app';
+      const oldImageId = 'previousgoodrelease0000';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const calls: Array<{ args: string[] }> = [];
+      const installer = makeInstaller(
+        rollbackImageSpawn({ appName, state, calls, oldImageId }),
+      );
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      calls.length = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('completed');
+
+      const backupRef = `${appName}-app:cg-rollback-${oldImageId.slice(0, 12)}`;
+      // Left behind, the extra reference would make the post-update reclaim's
+      // `docker image rm <id>` refuse.
+      expect(calls.some(
+        (c) => c.args[0] === 'image' && c.args[1] === 'rm' && c.args[2] === backupRef,
+      )).toBe(true);
+    });
+
+    it('reads a line-delimited `compose images` dialect as well as an array', async () => {
+      const githubUrl = 'https://github.com/test/rollback-ndjson-app';
+      const appName = 'rollback-ndjson-app';
+      const oldImageId = 'previousgoodrelease0000';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const calls: Array<{ args: string[] }> = [];
+      const installer = makeInstaller(
+        rollbackImageSpawn({ appName, state, calls, oldImageId, ndjson: true }),
+      );
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      calls.length = 0;
+      await waitForJob(installer, installer.update(appName), 5000);
+
+      const backupRef = `${appName}-app:cg-rollback-${oldImageId.slice(0, 12)}`;
+      expect(calls.some(
+        (c) => c.args[0] === 'image' && c.args[1] === 'tag'
+          && c.args[2] === backupRef && c.args[3] === `${appName}-app:latest`,
+      )).toBe(true);
+    });
+
+    it('rebuilds from the rolled-back source when the previous image is gone', async () => {
+      const githubUrl = 'https://github.com/test/rollback-rebuild-app';
+      const appName = 'rollback-rebuild-app';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const calls: Array<{ args: string[] }> = [];
+      const installer = makeInstaller(
+        rollbackImageSpawn({
+          appName, state, calls, oldImageId: 'prunedawayimage0000', tagFails: true,
+        }),
+      );
+      await waitForJob(installer, installer.install({ githubUrl }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      calls.length = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('failed');
+
+      const rollbackUp = calls.find(
+        (c) => c.args.includes('up') && !c.args.includes('--wait'),
+      );
+      expect(rollbackUp?.args).toContain('--build');
+      expect(job.logs.some((l) => l.includes('could not preserve image'))).toBe(true);
+      expect(job.logs.some((l) => l.includes('was not preserved'))).toBe(true);
+    });
+
     it('updates an app whose on-disk dir name ≠ app.yaml name (legacy install, issue #275)', async () => {
       // Legacy installs named the on-disk dir after the source repo basename,
       // so installPath basename can differ from the app name. The dir-swap must

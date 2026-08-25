@@ -262,6 +262,42 @@ const STALE_UPDATE_DIR_RE = new RegExp(
   `^\\.cg-update-.+-${UUID_RE_SRC}$|-(?:old|failed)-${UUID_RE_SRC}$`,
 );
 
+/**
+ * Rows from a `docker compose … --format json` call. Compose has emitted both a
+ * single JSON array and one object per line across its 2.x line, so accept
+ * either rather than silently reading a newer/older daemon as "nothing here".
+ */
+function parseJsonRows(stdout: string): unknown[] {
+  const text = stdout.trim();
+  if (!text) return [];
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch { /* not a single document — try line-delimited below */ }
+  const rows: unknown[] = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      rows.push(JSON.parse(trimmed));
+    } catch { /* skip a line that is not JSON */ }
+  }
+  return rows;
+}
+
+/** Private tag the update holds on an image so a rollback can put it back. */
+const ROLLBACK_TAG_PREFIX = 'cg-rollback-';
+
+/**
+ * An image reference and the private tag pinning its pre-update build. An empty
+ * `backupRef` records a reference that could *not* be pinned — the rollback
+ * treats it as unrestorable and rebuilds instead.
+ */
+interface PreservedImage {
+  ref: string;
+  backupRef: string;
+}
+
 export class AppInstaller {
   private readonly jobs = new Map<string, JobState>();
   private readonly appsDir: string;
@@ -1719,6 +1755,9 @@ export class AppInstaller {
       path.dirname(entry.installPath),
       `.cg-update-${appName}-${crypto.randomUUID()}`,
     );
+    // Rollback tags held on the images this update is about to build over.
+    // Declared out here so every exit path can drop them again.
+    let preservedImages: PreservedImage[] = [];
     try {
       // ── Shallow fetch of specific commit into tmp dir ─────────────────────
       this.log(job, `Cloning ${target.repo}`);
@@ -1766,6 +1805,15 @@ export class AppInstaller {
       if (generated.agentDeclaration && this.agentManager && agentPaths) {
         this.agentManager.injectAgentService(newEntry);
       }
+
+      // Pin the images the app is running before the build takes their tags
+      // over. A `build:` service's new image reuses the old tag
+      // (`<project>-<service>`), so once the build succeeds that tag names the
+      // new release: rolling only the source back would bring the app up on the
+      // failed release's image and crash-loop on a "successful" rollback. This
+      // has to happen before the build — afterwards the old image has no
+      // reference left to grab it by.
+      preservedImages = this.preserveRunningImages(appName, entry.installPath, job);
 
       // ── Build new images in tmp dir ───────────────────────────────────────
       this.log(job, 'Building new images');
@@ -1840,7 +1888,14 @@ export class AppInstaller {
           } else if (fs.existsSync(oldBackupDir)) {
             fs.renameSync(oldBackupDir, finalDir);
           }
-          this.run(['docker', 'compose', '-p', appName, 'up', '-d'], finalDir, 120_000);
+          // Point every tag back at the image the app was actually running
+          // before this update built over it, so the restored source and the
+          // restored image are the same release. Falls back to rebuilding from
+          // the restored source when an old image is no longer on disk.
+          const rebuild = !this.restorePreservedImages(preservedImages, finalDir, job);
+          const upArgs = ['docker', 'compose', '-p', appName, 'up', '-d'];
+          if (rebuild) upArgs.push('--build');
+          this.run(upArgs, finalDir, rebuild ? 600_000 : 120_000);
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
             name: p.name,
             service: p.service,
@@ -1860,6 +1915,12 @@ export class AppInstaller {
         }
         throw upErr;
       }
+
+      // The new stack is up: the previous images are no longer a rollback
+      // target. Untag them before the reclaim below, which removes by image ID
+      // and would be refused while a second reference exists.
+      this.dropPreservedImageTags(preservedImages);
+      preservedImages = [];
 
       // Capture the new stack's image IDs from its permanent compose file so
       // cleanup below never removes an image the new containers depend on.
@@ -1951,6 +2012,7 @@ export class AppInstaller {
       this.log(job, `Update complete → ${newVersion}`);
 
     } catch (err) {
+      this.dropPreservedImageTags(preservedImages);
       if (fs.existsSync(tmpDir)) {
         this.safeRmrf(tmpDir, job, 'update temp dir');
       }
@@ -2699,6 +2761,122 @@ export class AppInstaller {
    * container back down (issue #283). Returns a de-duplicated list of image
    * IDs, or `[]` on any error (nothing to reclaim / docker unavailable).
    */
+  /**
+   * Tag every image the app is *currently* running under a private
+   * `<repo>:cg-rollback-<id>` name, and return the pairs.
+   *
+   * A `build:` service's new image reuses the tag of the one in production
+   * (`<project>-<service>:latest`), so once the update's build succeeds that
+   * tag names the new release. Rolling only the source directory back would
+   * bring the app up on the failed release's image. Holding a second tag keeps
+   * the old image addressable *and* alive — under the containerd image store an
+   * untagged image is not kept around as a `<none>` image to find later.
+   *
+   * Only images this app builds are preserved: compose names them
+   * `<project>-<service>`, and a pulled tag (`postgres:16-alpine`) is never
+   * overwritten by a build, so it needs no protection. Best-effort throughout —
+   * anything that cannot be preserved is simply absent from the result, and the
+   * rollback rebuilds from the restored source instead.
+   */
+  private preserveRunningImages(
+    appName: string,
+    dir: string,
+    job: JobState,
+  ): PreservedImage[] {
+    let rows: unknown[];
+    try {
+      const { stdout } = this.run(
+        ['docker', 'compose', '-p', appName, 'images', '--format', 'json'],
+        dir,
+        15_000,
+      );
+      rows = parseJsonRows(stdout);
+    } catch {
+      return [];
+    }
+
+    const preserved: PreservedImage[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (typeof row !== 'object' || row === null) continue;
+      const r = row as { ID?: unknown; Repository?: unknown; Tag?: unknown };
+      const id = typeof r.ID === 'string' ? r.ID.trim() : '';
+      const repo = typeof r.Repository === 'string' ? r.Repository.trim() : '';
+      const tag = typeof r.Tag === 'string' && r.Tag.trim() ? r.Tag.trim() : 'latest';
+      if (!id || !repo.startsWith(`${appName}-`)) continue;
+      const ref = `${repo}:${tag}`;
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      const backupRef = `${repo}:${ROLLBACK_TAG_PREFIX}${id.replace(/^sha256:/, '').slice(0, 12)}`;
+      try {
+        this.run(['docker', 'image', 'tag', id, backupRef], dir, 15_000);
+        preserved.push({ ref, backupRef });
+      } catch (err) {
+        // Recorded with no backup reference: the rollback must know this tag is
+        // unprotected and rebuild, rather than read an empty list as "no built
+        // images, nothing at risk".
+        preserved.push({ ref, backupRef: '' });
+        this.log(
+          job,
+          `Warning: could not preserve image "${ref}" for rollback (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        );
+      }
+    }
+    return preserved;
+  }
+
+  /**
+   * Put each preserved image back on the reference the update's build took
+   * over. Returns true when nothing is at risk (an empty list — the app builds
+   * no images) or every reference is back on its original image; false when at
+   * least one could not be, so the caller rebuilds from the rolled-back source
+   * rather than starting the failed release's build.
+   */
+  private restorePreservedImages(
+    images: PreservedImage[],
+    dir: string,
+    job: JobState,
+  ): boolean {
+    let allRestored = true;
+    for (const { ref, backupRef } of images) {
+      if (!backupRef) {
+        allRestored = false;
+        this.log(job, `Image "${ref}" was not preserved — rebuilding from the rolled-back source`);
+        continue;
+      }
+      try {
+        this.run(['docker', 'image', 'tag', backupRef, ref], dir, 15_000);
+        this.log(job, `Restored image "${ref}" to the pre-update build`);
+      } catch (err) {
+        allRestored = false;
+        this.log(
+          job,
+          `Warning: could not restore image "${ref}" (${
+            err instanceof Error ? err.message : String(err)
+          }) — rebuilding from the rolled-back source instead`,
+        );
+      }
+    }
+    return allRestored;
+  }
+
+  /**
+   * Drop the private rollback tags. Removing a reference only untags the image
+   * while another tag remains, so this never deletes an image the app still
+   * uses. Must run before the post-update image reclaim: an extra tag would
+   * make `docker image rm <id>` refuse.
+   */
+  private dropPreservedImageTags(images: PreservedImage[]): void {
+    for (const { backupRef } of images) {
+      if (!backupRef) continue;
+      try {
+        this.run(['docker', 'image', 'rm', backupRef], os.tmpdir(), 15_000);
+      } catch { /* already gone — non-fatal */ }
+    }
+  }
+
   private captureComposeImageIds(appName: string, dir: string): string[] {
     try {
       const { stdout } = this.run(

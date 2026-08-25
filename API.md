@@ -3259,6 +3259,8 @@ If the updated release also ships content at a bind path (a tracked `.gitkeep`, 
 
 Update scratch directories (`.cg-update-*`, `<appDir>-old-*`, `<appDir>-failed-*`) left behind by a crash mid-update are swept on gateway boot.
 
+A rollback restores the previous **image** as well as the previous source. A `build:` service's new image reuses the running one's tag (`<project>-<service>:latest`), so before building, the update tags each of the app's built images `<project>-<service>:cg-rollback-<id>` — that keeps the old image addressable and alive (under the containerd image store an untagged image is not retained as a `<none>` image). A rollback points the tag back at it, so the app returns on the exact release it was serving; the private tag is dropped once the update settles either way. If an image cannot be restored, the rollback rebuilds from the rolled-back source instead of starting the failed release's build, and logs which reference it could not restore.
+
 If the app declares an agent, its registration follows the new release: an agent whose name changed is deregistered under the old name before the new one is registered, and an agent the release no longer declares is deregistered entirely. Either way the agent's directory and session history are preserved (only the `workspace` symlink and the `config.json` entry are removed), and `MEMORY.md` is carried forward — written after the new registration exists, so it survives a rename.
 
 The update target depends on the app's `source`:
