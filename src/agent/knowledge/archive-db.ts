@@ -520,6 +520,39 @@ export class ArchiveDB {
   }
 
   /**
+   * OR-based FTS5 near-duplicate search: "is anything like this already here?"
+   * Node-side (`node:sqlite`) twin of `findSimilarSharedNotes`'s query shape in
+   * `mcp/tools/memory/archive-reader.ts` (Bun/`bun:sqlite`, same on-disk file) —
+   * keep the two matching. Unlike `search()` above (implicit AND — every token
+   * must match), terms are OR'd and capped at 12: a near-duplicate rarely repeats
+   * every single word of the seed text, so an AND match would almost never hit.
+   */
+  searchSimilar(seedText: string, limit = 3): ArchiveChunkRow[] {
+    const match = seedText
+      .split(/[^\p{L}\p{N}_]+/u)
+      .filter(Boolean)
+      .slice(0, 12)
+      .map((t) => `"${t.replace(/"/g, '""')}"`)
+      .join(' OR ');
+    if (!match) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT c.id, c.path, c.start_line, c.end_line, c.text, c.updated_at
+         FROM kb_chunks_fts f JOIN kb_chunks c ON c.rowid_id = f.rowid
+         WHERE kb_chunks_fts MATCH ? ORDER BY bm25(kb_chunks_fts) LIMIT ?`,
+      )
+      .all(match, limit) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: r.id as string,
+      path: r.path as string,
+      startLine: r.start_line as number,
+      endLine: r.end_line as number,
+      text: r.text as string,
+      updatedAt: r.updated_at as number,
+    }));
+  }
+
+  /**
    * Close the handle AND drop it from the singleton cache, so a later
    * `forPath(samePath)` opens a fresh handle instead of returning this closed one
    * (whose statements would throw). Mirrors `evict()`.

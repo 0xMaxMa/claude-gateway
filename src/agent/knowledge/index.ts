@@ -21,8 +21,10 @@ export {
   sharedNotesDir,
 } from './config';
 export type { KnowledgeSharedConfig, ResolvedKnowledgeSharedCfg } from './types';
-export { writeSharedNote, sharedNoteFilename } from './shared-writer';
+export { writeSharedNote, sharedNoteFilename, sharedNoteExists, readSharedNote, MAX_SHARED_NOTE_SIZE } from './shared-writer';
 export { makeSharedPromoter } from './shared-promote';
+export { findSimilarSharedNotes } from './shared-dedup';
+export type { SimilarSharedNote } from './shared-dedup';
 export {
   compileWiki,
   parseWikiPage,

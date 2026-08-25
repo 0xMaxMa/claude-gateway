@@ -178,4 +178,10 @@ test('memory_shared_create: near-duplicate content is nudged for confirmation on
     confirm: true,
   });
   expect(JSON.parse(textOf(confirmed)).created).toBe(true);
+
+  // #386: confirming past a near-dup nudge should link the related note(s)
+  // found, not leave a disconnected duplicate — so /knowledge/graph gets a
+  // real edge instead of staying empty.
+  const written = fs.readFileSync(path.join(vaultDir, 'notes', 'paging-oncall-playbook.md'), 'utf8');
+  expect(written).toContain('[[oncall-escalation-runbook]]');
 }, 20000);
