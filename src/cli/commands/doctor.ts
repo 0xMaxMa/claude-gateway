@@ -135,7 +135,7 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
       );
     }
   }
-  process.stderr.write([`${c.brand('claude-gateway')} ${c.bold('doctor')}`, ...lines, ''].join('\n'));
+  process.stderr.write([`${c.bold('claude-gateway doctor')}`, ...lines, ''].join('\n'));
   printJson({ ok: allOk, checks }, flags);
   return allOk ? 0 : 1;
 }

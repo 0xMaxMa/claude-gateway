@@ -259,6 +259,9 @@ function printGeneralHelp(): void {
   const c = paletteFor(process.stderr);
   // readVersion() falls back to 'unknown'; render that as a plain banner rather than "vunknown".
   const version = readVersion();
+  // The brand tone is reserved for this banner — the one place the program
+  // introduces itself. Elsewhere the name is just bold, so colour stays a
+  // signal rather than decoration.
   const name = c.brand('claude-gateway');
   const banner =
     version === 'unknown'
@@ -286,7 +289,7 @@ function printGeneralHelp(): void {
 function printNounHelp(noun: string): void {
   const cmds = GENERATED_COMMANDS.filter((c) => c.noun === noun);
   const p = paletteFor(process.stderr);
-  const lines = [`${p.brand('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
+  const lines = [`${p.bold('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
   // Pad before colouring so escape codes never count toward the column width.
   for (const c of cmds) lines.push(`  ${p.cyan(usageFor(c).padEnd(48))} ${c.summary}`);
   process.stderr.write(lines.join('\n') + '\n');
@@ -295,7 +298,7 @@ function printNounHelp(noun: string): void {
 function printCommandHelp(c: GeneratedCommand): void {
   const p = paletteFor(process.stderr);
   const lines = [
-    `${p.brand('claude-gateway')} ${p.cyan(usageFor(c))}`,
+    `${p.bold('claude-gateway')} ${p.cyan(usageFor(c))}`,
     '',
     `  ${c.summary}`,
     `  ${p.dim(`${c.method} ${c.path}  (auth: ${c.auth})`)}`,

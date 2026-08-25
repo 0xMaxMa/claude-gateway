@@ -154,6 +154,17 @@ describe('binary dispatch — help colouring', () => {
     expect(stderr).toMatch(/\x1b\[1m\x1b\[38;5;208mclaude-gateway\x1b\[0m/);
   }, TIMEOUT_MS);
 
+  it('reserves the brand tone for the general help banner', async () => {
+    // Colour is a signal, not decoration: the orange name marks the one place
+    // the program introduces itself, so subcommand help stays plain bold.
+    const env = colourEnv();
+    env.TERM = 'xterm-256color';
+    const { stderr } = await run(['crons', '--help'], env);
+    // eslint-disable-next-line no-control-regex
+    expect(stderr).toMatch(/\x1b\[1mclaude-gateway\x1b\[0m/);
+    expect(stderr).not.toContain('38;5;208');
+  }, TIMEOUT_MS);
+
   it('degrades the brand tone on a 16-colour terminal', async () => {
     const env = colourEnv();
     env.TERM = 'xterm';
