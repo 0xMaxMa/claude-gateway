@@ -18,7 +18,7 @@ import * as crypto from 'crypto';
 import { ArchiveDB, ChunkWithMeta } from './archive-db';
 import { chunkMarkdown } from './chunk';
 import { classifyOrigin } from './provenance';
-import { parseEntryBlocks, isArchiveTierPath, type EntryBlock } from './lifecycle';
+import { parseEntryBlocks, isArchiveTierPath, wholeNoteEntryBlock, type EntryBlock } from './lifecycle';
 import {
   resolveArchiveConfig,
   resolveSharedConfig,
@@ -179,12 +179,20 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
     const mtime = Math.floor(stat.mtimeMs);
     const origin = opts.originFn(rel);
     const chunks = chunkMarkdown(content, opts.chunkTokens, opts.chunkOverlap);
-    // Entry-lifecycle identity (planning-66): only archive-tier files get an
-    // entry_hash (evergreen Lane-1, pinned files and the shared vault are exempt,
-    // so the GC can never consider them). Each FTS chunk inherits the entry_hash of
-    // the markdown block it starts in; blocks are the clean, movable unit the GC
-    // operates on (chunks are overlapping token windows and must never be moved).
-    const blocks = opts.source === 'memory' && isArchiveTierPath(rel) ? parseEntryBlocks(content) : [];
+    // Entry-lifecycle identity (planning-66 / issue #392). Personal archive-tier
+    // files get one entry per bullet/header block (evergreen Lane-1 and pinned
+    // files are exempt, so the GC can never consider them). Shared-vault notes
+    // (issue #392 part D) get ONE whole-file block each — a shared note's unit of
+    // identity is the whole file, matching every other shared-KB operation. Each
+    // FTS chunk inherits the entry_hash of the block it starts in; blocks are the
+    // clean, movable unit the GC operates on (chunks are overlapping token windows
+    // and must never be moved).
+    const blocks =
+      opts.source === 'memory' && isArchiveTierPath(rel)
+        ? parseEntryBlocks(content)
+        : opts.source === 'shared'
+          ? wholeNoteEntryBlock(content)
+          : [];
     const rows: ChunkWithMeta[] = chunks.map((c) => ({
       chunk: {
         id: `${rel}#${c.startLine}-${c.endLine}`,

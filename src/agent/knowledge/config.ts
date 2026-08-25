@@ -9,11 +9,15 @@
 
 import * as os from 'os';
 import * as path from 'path';
+import { resolveStalenessConfig, STALENESS_DEFAULTS } from '../dreaming/config';
+import { isValidTimezone } from '../skill-learning/config';
 import type {
   KnowledgeArchiveConfig,
   ResolvedKnowledgeArchiveCfg,
   KnowledgeSharedConfig,
   ResolvedKnowledgeSharedCfg,
+  KnowledgeReflectionConfig,
+  ResolvedKnowledgeReflectionCfg,
 } from './types';
 
 export const ARCHIVE_DEFAULTS: ResolvedKnowledgeArchiveCfg = {
@@ -74,6 +78,7 @@ export const SHARED_DEFAULTS: ResolvedKnowledgeSharedCfg = {
   root: path.join(os.homedir(), '.claude-gateway', 'shared', 'kb'),
   mode: 'auto', // promote durable memories to the shared vault; gated by the K4 applier (#330). Set 'propose' for dry-run.
   graph: false, // K5 graph/dashboards are opt-in
+  staleness: STALENESS_DEFAULTS, // issue #392 part D
 };
 
 /**
@@ -113,6 +118,42 @@ export function resolveSharedConfig(
     root,
     mode: mode === 'auto' ? 'auto' : 'propose', // anything but 'auto' ⇒ propose
     graph: pick(agentCfg?.graph, globalCfg?.graph, d.graph) === true,
+    // issue #392 part D: reuses the exact dreaming-staleness resolve/shape.
+    staleness: resolveStalenessConfig(agentCfg?.staleness, globalCfg?.staleness),
+  };
+}
+
+// ── Weekly shared-KB reflection pass (issue #392 part C) ────────────────────
+
+export const REFLECTION_DEFAULTS: ResolvedKnowledgeReflectionCfg = {
+  enabled: true,
+  dayOfWeek: 0, // Sunday
+  hour: 4,
+  minute: 0,
+  timezone: 'UTC',
+  maxClustersPerRun: 5,
+  reviewModel: 'claude-haiku-4-5-20251001',
+};
+
+export function resolveReflectionConfig(
+  agentCfg?: KnowledgeReflectionConfig,
+  globalCfg?: KnowledgeReflectionConfig,
+): ResolvedKnowledgeReflectionCfg {
+  const d = REFLECTION_DEFAULTS;
+  const rawTz = pick(agentCfg?.timezone, globalCfg?.timezone, d.timezone);
+  return {
+    enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
+    dayOfWeek: numOr(pick(agentCfg?.dayOfWeek, globalCfg?.dayOfWeek, d.dayOfWeek), d.dayOfWeek, 0, 6),
+    hour: numOr(pick(agentCfg?.hour, globalCfg?.hour, d.hour), d.hour, 0, 23),
+    minute: numOr(pick(agentCfg?.minute, globalCfg?.minute, d.minute), d.minute, 0, 59),
+    timezone: isValidTimezone(rawTz) ? rawTz : d.timezone,
+    maxClustersPerRun: numOr(
+      pick(agentCfg?.maxClustersPerRun, globalCfg?.maxClustersPerRun, d.maxClustersPerRun),
+      d.maxClustersPerRun,
+      0,
+      1000,
+    ),
+    reviewModel: pick(agentCfg?.reviewModel, globalCfg?.reviewModel, d.reviewModel),
   };
 }
 

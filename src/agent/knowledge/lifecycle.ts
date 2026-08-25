@@ -27,12 +27,15 @@ import * as crypto from 'crypto';
 export const PINNED_PREFIX = 'memory/pinned/';
 
 /**
- * True when a workspace-relative path is a GC-eligible archive-tier entry source
- * (planning-66). The archive tier is `memory/**.md`, EXCEPT:
+ * True when a workspace-relative path is a GC-eligible PERSONAL archive-tier
+ * entry source (planning-66). The archive tier is `memory/**.md`, EXCEPT:
  *   - evergreen Lane-1 (`MEMORY.md`/`USER.md` at the root) — never touched,
  *   - pinned files (`memory/pinned/**`) — searchable but never aged out.
- * Only these files get an `entry_hash` + lifecycle row; everything else (evergreen,
- * pinned, the shared vault) has no lifecycle, so the GC can never consider it.
+ * Only these files get an `entry_hash` + lifecycle row; evergreen and pinned
+ * files have no lifecycle, so the GC can never consider them. The SHARED vault
+ * has its own, separate lifecycle (issue #392 part D, `wholeNoteEntryBlock` +
+ * `shared-staleness.ts`) — every shared note is eligible, gated by this
+ * function only for the PERSONAL `memory/**` tree.
  */
 export function isArchiveTierPath(rel: string): boolean {
   const p = rel.replace(/\\/g, '/');
@@ -147,6 +150,30 @@ export function supersededIds(text: string): Set<number> {
 export interface Supersession {
   targetHash: string;
   bySpec: string; // the superseding entry's hash
+}
+
+/**
+ * Whole-file entry-block for the shared KB (issue #392, part D). Unlike the
+ * personal archive (one entry per bullet/header), a shared note's unit of
+ * identity is the WHOLE FILE — shared notes are freeform prose, not bulleted
+ * lists, and every other shared-KB operation (create/get/update/delete,
+ * near-dup search, wikilink graph) already treats one note = one fact/topic.
+ * Leading blank lines and a leading HTML comment (e.g. a `<!-- staled ... -->`
+ * marker written by the staleness GC when a note is moved) are skipped so the
+ * hashed text is stable across a move — mirrors `parseEntryBlocks` treating a
+ * leading comment as non-block prose. Returns `[]` for empty/comment-only
+ * content (nothing to give an identity to).
+ */
+export function wholeNoteEntryBlock(content: string): EntryBlock[] {
+  const lines = content.split('\n');
+  let start = 0;
+  while (start < lines.length && (BLANK_RE.test(lines[start]) || /^<!--.*-->\s*$/.test(lines[start]))) {
+    start++;
+  }
+  if (start >= lines.length) return [];
+  const text = lines.slice(start).join('\n');
+  if (!text.trim()) return [];
+  return [{ text, startLine: start + 1, endLine: lines.length, entryHash: entryHash(text) }];
 }
 
 /**

@@ -13,7 +13,7 @@ import type { KnowledgeSharedConfig } from './types';
  * dashboard gets real edges — `wiki.ts` already resolves `[[links]]` into
  * graph edges, no parser change needed.
  */
-function mergeIntoNote(existing: string, addition: string, relatedNames: string[] = []): string {
+export function mergeIntoNote(existing: string, addition: string, relatedNames: string[] = []): string {
   const trimmedAddition = addition.trim();
   const links = relatedNames.length ? `\n\nRelated: ${relatedNames.map((n) => `[[${n}]]`).join(' ')}` : '';
   if (!existing.trim()) return `${trimmedAddition}${links}`;
@@ -29,9 +29,10 @@ function mergeIntoNote(existing: string, addition: string, relatedNames: string[
  * once a merge would cross the cap the note is left as-is (best-effort: a
  * skipped promotion never fails the local dream, same as any other error here).
  */
-function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: string, content: string): void {
-  if (content.length > MAX_SHARED_NOTE_SIZE) return;
+export function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: string, content: string): boolean {
+  if (content.length > MAX_SHARED_NOTE_SIZE) return false;
   writeSharedNote(cfg, name, content);
+  return true;
 }
 
 /**

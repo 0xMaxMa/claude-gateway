@@ -42,6 +42,23 @@ export function readSharedNote(cfg: ResolvedKnowledgeSharedCfg, name: string): s
   }
 }
 
+/**
+ * Delete a shared note's file (issue #392 part D — the staleness GC moves a
+ * note's content elsewhere, then removes the original). Returns true if a file
+ * was actually removed, false if it didn't exist. Best-effort: any other error
+ * (permissions, race) is swallowed and reported as false, mirroring the rest of
+ * this module's "never throws into the caller's control flow" stance.
+ */
+export function deleteSharedNoteFile(cfg: ResolvedKnowledgeSharedCfg, name: string): boolean {
+  const target = path.join(sharedNotesDir(cfg), sharedNoteFilename(name));
+  try {
+    fs.unlinkSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Monotonic per-process counter so concurrent writes within one process still get
 // distinct temp names (combined with pid for cross-process uniqueness).
 let tmpCounter = 0;
