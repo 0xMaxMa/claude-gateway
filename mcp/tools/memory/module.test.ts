@@ -62,3 +62,20 @@ test('memory_shared_write: succeeds normally when GATEWAY_AGENT_ID is set', asyn
   const body = JSON.parse((result.content[0] as { text: string }).text);
   expect(body.written).toBe(true);
 });
+
+// claude-gateway#381: the tool descriptions must disclose the actual on-disk
+// filename BEFORE a caller writes, not just leave it discoverable from the
+// returned `path` after the fact — the agentId prefix is load-bearing for
+// memory_shared_delete's ownership scoping (see archive-writer.ts's
+// sharedNoteSlug) and was previously undocumented.
+test('memory_shared_write description discloses the <agentId>-<reason>.md filename scheme', () => {
+  const mod = new MemoryModule();
+  const tool = mod.getTools().find((t) => t.name === 'memory_shared_write');
+  expect(tool?.description).toContain('<your-agent-id>-<reason>.md');
+});
+
+test('memory_shared_delete description cross-references the same filename scheme', () => {
+  const mod = new MemoryModule();
+  const tool = mod.getTools().find((t) => t.name === 'memory_shared_delete');
+  expect(tool?.description).toContain('<your-agent-id>-<reason>.md');
+});

@@ -75,14 +75,14 @@ export class MemoryModule implements ToolModule {
       {
         name: 'memory_shared_write',
         description:
-          'Create or update one note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected and unrelated. Notes are identified by "reason" (per-agent, stable): calling again with the same "reason" targets the SAME note. By default this fails if a note for that "reason" already exists — pass force:true to overwrite it (update). The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
+          'Create or update one note in the shared, cross-agent knowledge base RIGHT NOW, instead of waiting for the nightly automatic promotion. This is an explicit, agent-initiated write (works even when shared-KB mode is "propose") — not a bypass of nightly auto-promotion, which is unaffected and unrelated. Notes are identified by "reason" (per-agent, stable): calling again with the same "reason" targets the SAME note. The note is saved as "<your-agent-id>-<reason>.md" in the shared vault — the agent id is always prefixed to the filename and cannot be omitted; this keeps notes from colliding across agents and scopes memory_shared_delete to only the notes you wrote. By default this fails if a note for that "reason" already exists — pass force:true to overwrite it (update). The note becomes searchable via memory_search (corpus "shared" or "all") shortly after this call returns.',
         inputSchema: {
           type: 'object',
           properties: {
             content: { type: 'string', description: 'Full note body to write into the shared KB. Max 100KB.' },
             reason: {
               type: 'string',
-              description: 'Short slug identifying this note, e.g. "deploy-runbook". Stable identity — reuse it to update the same note later.',
+              description: 'Short slug identifying this note, e.g. "deploy-runbook". Stable identity — reuse it to update the same note later. Saved as "<your-agent-id>-<reason>.md", not a literal "<reason>.md".',
             },
             force: {
               type: 'boolean',
@@ -96,7 +96,7 @@ export class MemoryModule implements ToolModule {
       {
         name: 'memory_shared_delete',
         description:
-          'Delete one note this agent previously wrote to the shared knowledge base via memory_shared_write, by its "reason". Only notes this agent itself wrote can be targeted (identity is scoped to the calling agent) — this cannot delete another agent\'s notes or notes the nightly dreaming pipeline promoted.',
+          'Delete one note this agent previously wrote to the shared knowledge base via memory_shared_write, by its "reason". Only notes this agent itself wrote can be targeted — identity is scoped to the calling agent via the same "<your-agent-id>-<reason>.md" filename memory_shared_write uses — so this cannot delete another agent\'s notes or notes the nightly dreaming pipeline promoted.',
         inputSchema: {
           type: 'object',
           properties: {
