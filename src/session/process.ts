@@ -126,6 +126,7 @@ export class SessionProcess extends EventEmitter {
   // this field exists for no longer applies. Read via
   // hasLikelyOutstandingBackgroundWork().
   private lastBackgroundAgentDispatchAt: number | null = null;
+  private backgroundWaitTimer: ReturnType<typeof setTimeout> | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
   backend: 'pty-shell' | 'headless' = 'headless';
@@ -1295,6 +1296,40 @@ export class SessionProcess extends EventEmitter {
 
   get isProcessing(): boolean { return this._processing; }
 
+  /**
+   * Extend Telegram's working state only while a parent session is waiting for
+   * background Agent/Workflow work. A bounded expiry releases the state if the
+   * child task never sends its completion notification.
+   */
+  retainBackgroundWorkingState(): boolean {
+    if (this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
+
+    const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
+    try {
+      fs.mkdirSync(this.typingDir, { recursive: true });
+      fs.writeFileSync(processingPath, String(Date.now()));
+    } catch (err) {
+      this.logger.warn('Failed to retain .processing sentinel for background work', {
+        chatId: this.chatId,
+        error: (err as Error).message,
+      });
+    }
+
+    if (this.backgroundWaitTimer === null) {
+      const elapsed = Date.now() - this.lastBackgroundAgentDispatchAt!;
+      const remaining = Math.max(0, BACKGROUND_AGENT_GRACE_MS - elapsed);
+      this.backgroundWaitTimer = setTimeout(() => {
+        this.backgroundWaitTimer = null;
+        this.lastBackgroundAgentDispatchAt = null;
+        if (!this._processing) {
+          try { fs.rmSync(processingPath, { force: true }); } catch {}
+          this.emit('backgroundWorkExpired');
+        }
+      }, remaining);
+    }
+    return true;
+  }
+
   setProcessing(active: boolean): void {
     if (this._processing !== active) {
       this._processing = active;
@@ -1304,6 +1339,10 @@ export class SessionProcess extends EventEmitter {
         // it (moot either way). isProcessing now covers this session correctly
         // on its own, so the idle-window concern this field exists for is over.
         this.lastBackgroundAgentDispatchAt = null;
+        if (this.backgroundWaitTimer !== null) {
+          clearTimeout(this.backgroundWaitTimer);
+          this.backgroundWaitTimer = null;
+        }
       }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
