@@ -219,6 +219,10 @@ const VOLUME_TAR_TIMEOUT_MS = 300_000;
 // OCI image used for the throwaway tar helper. Small, ubiquitous, already a
 // transitive dependency of most stacks, so it is almost always cache-warm.
 const BACKUP_HELPER_IMAGE = 'alpine';
+// Ceiling for the root helper that moves a bind path the gateway user cannot
+// rename itself. The move is a single rename(2) — instant — so this only bounds
+// a stuck container (or a cold pull of the helper image) during an update swap.
+const BIND_MOVE_TIMEOUT_MS = 120_000;
 // Per-app ceiling for the boot-time `compose up --wait` during restore. Runs in
 // the background (non-blocking), so this only bounds how long a hung container
 // keeps its child process alive — not the gateway's responsiveness. Shorter than
@@ -261,6 +265,35 @@ const UUID_RE_SRC = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const STALE_UPDATE_DIR_RE = new RegExp(
   `^\\.cg-update-.+-${UUID_RE_SRC}$|-(?:old|failed)-${UUID_RE_SRC}$`,
 );
+
+/**
+ * A filesystem call that failed because the gateway user lacks the rights, not
+ * because the path is wrong. Containers running as their image's uid leave
+ * files and directories the gateway user can neither delete nor rename, and
+ * those are the two codes the kernel reports for it.
+ */
+export function isPermissionError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
+/**
+ * Deepest directory containing both paths.
+ *
+ * Used to pick a **single** mount for the root helper that moves a bind path:
+ * mounting each parent separately would put the two paths on different mount
+ * points, where `rename(2)` fails EXDEV and `mv` degrades to a copy.
+ */
+export function commonAncestorDir(a: string, b: string): string {
+  const left = path.resolve(a).split(path.sep);
+  const right = path.resolve(b).split(path.sep);
+  const shared: string[] = [];
+  for (let i = 0; i < Math.min(left.length, right.length) - 1; i++) {
+    if (left[i] !== right[i]) break;
+    shared.push(left[i]);
+  }
+  return shared.join(path.sep) || path.sep;
+}
 
 /**
  * Rows from a `docker compose … --format json` call. Compose has emitted both a
@@ -1853,6 +1886,7 @@ export class AppInstaller {
       const finalDir = entry.installPath;
       const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
       let swapped = false;
+      let startedContainers = false;
       let failedDir: string | null = null;
       const movedBindMounts: string[] = [];
       try {
@@ -1875,16 +1909,35 @@ export class AppInstaller {
 
         // ── Start new containers ────────────────────────────────────────────
         this.log(job, 'Starting new containers');
+        startedContainers = true;
         this.composeUp(appName, finalDir, job);
       } catch (upErr) {
-        this.log(job, 'New containers failed — rolling back to previous version');
+        // The catch spans the whole swap, so a failure here is not necessarily a
+        // container failure — saying it is sends diagnosis to the wrong
+        // subsystem (a bind-mount move that threw looked exactly like a crashed
+        // container in the job log).
+        this.log(job, startedContainers
+          ? 'New containers failed — rolling back to previous version'
+          : `Update failed during the directory swap — rolling back to previous version: ${(upErr as Error).message}`);
         let rollbackFailed = false;
         failedDir = `${finalDir}-failed-${crypto.randomUUID()}`;
         try {
           if (swapped) {
             fs.renameSync(finalDir, failedDir);
             fs.renameSync(oldBackupDir, finalDir);
-            this.restoreBindMounts(failedDir, finalDir, movedBindMounts, job);
+            const unrestored = this.restoreBindMounts(failedDir, finalDir, movedBindMounts, job);
+            if (unrestored.length > 0) {
+              // Throwing here is deliberate: it skips both the container start
+              // below and the safeRmrf of failedDir, so the only copy of that
+              // data stays on disk. Starting the app on a half-restored
+              // directory is worse than not starting it — postgres on an empty
+              // pgdata initialises a fresh cluster and then looks healthy.
+              throw new Error(
+                `live bind-mount data for ${unrestored.map((r) => `"${r}"`).join(', ')} could not be moved back `
+                + `— it is still in "${failedDir}", which has been kept. Move those paths back into `
+                + `"${finalDir}" before starting the app.`,
+              );
+            }
           } else if (fs.existsSync(oldBackupDir)) {
             fs.renameSync(oldBackupDir, finalDir);
           }
@@ -2484,7 +2537,7 @@ export class AppInstaller {
       const code = (err as NodeJS.ErrnoException).code;
       // Containers running as root leave root-owned files (e.g. postgres pgdata)
       // that the gateway user cannot delete — fs.rmSync surfaces EACCES or EPERM.
-      if (code === 'EACCES' || code === 'EPERM') {
+      if (isPermissionError(err)) {
         console.warn(`[installer] ${code} removing "${dirPath}" — falling back to sudo rm -rf`);
         this.run(['sudo', 'rm', '-rf', dirPath]);
       } else {
@@ -2603,7 +2656,7 @@ export class AppInstaller {
       destStat = null;
     }
     if (destStat === null) {
-      fs.renameSync(source, destination);
+      this.moveBindPath(source, destination, rel, job);
       moved?.push(rel);
       return;
     }
@@ -2617,17 +2670,30 @@ export class AppInstaller {
       // into the restored previous app dir. Exact rollback beats the renames,
       // which are same-filesystem and only walk a directory the release also
       // ships content in.
-      for (const name of fs.readdirSync(source)) {
-        this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
+      let entries: string[] | null;
+      try {
+        entries = fs.readdirSync(source);
+      } catch (err) {
+        // The live directory is one the app's container owns and the gateway
+        // user cannot even list (postgres leaves pgdata 0700). There is no way
+        // to merge into it entry by entry, so preserve it wholesale — the same
+        // trade the non-directory collision below already makes.
+        if (!isPermissionError(err)) throw err;
+        entries = null;
       }
-      return;
+      if (entries !== null) {
+        for (const name of entries) {
+          this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
+        }
+        return;
+      }
     }
     this.log(
       job,
       `Warning: preserved existing bind-mount data at "${rel}" — the updated release's copy of that path was discarded`,
     );
     fs.rmSync(destination, { recursive: true, force: true });
-    fs.renameSync(source, destination);
+    this.moveBindPath(source, destination, rel, job);
     moved?.push(rel);
   }
 
@@ -2635,10 +2701,20 @@ export class AppInstaller {
    * Undo {@link moveBindMounts} after a failed update: replay the recorded
    * renames backwards so the restored previous app dir gets its state back.
    */
-  private restoreBindMounts(fromDir: string, toDir: string, moved: string[], job: JobState): void {
+  /**
+   * Undo {@link moveBindMounts}. Returns the paths it could **not** move back:
+   * those still live only under `fromDir`, so the caller must keep that
+   * directory rather than clean it up.
+   *
+   * A path that is missing at the source, or already present at the
+   * destination, is not a failure — it needs no move and is not reported.
+   */
+  private restoreBindMounts(fromDir: string, toDir: string, moved: string[], job: JobState): string[] {
+    const unrestored: string[] = [];
     for (const rel of [...moved].reverse()) {
       if (!this.isSafeBindRel(fromDir, toDir, rel)) {
         this.log(job, `Warning: skipping bind-mount path outside the app directory: "${rel}"`);
+        unrestored.push(rel);
         continue;
       }
       const source = path.resolve(fromDir, rel);
@@ -2646,11 +2722,68 @@ export class AppInstaller {
       if (!fs.existsSync(source) || fs.existsSync(destination)) continue;
       try {
         this.ensureDirWithinNoSymlink(toDir, path.dirname(destination));
-        fs.renameSync(source, destination);
+        this.moveBindPath(source, destination, rel, job);
       } catch (err) {
         this.log(job, `Warning: could not restore bind-mount path "${rel}": ${(err as Error).message}`);
+        unrestored.push(rel);
       }
     }
+    return unrestored;
+  }
+
+  /**
+   * Move one bind-mount path between app directories.
+   *
+   * `rename(2)` on a **directory** needs write permission on the directory
+   * itself — the kernel has to update its `..` entry — not just on the two
+   * parents. A bind mount the app's own container created is owned by that
+   * image's uid (postgres initdb leaves its data directory mode 0700), so the
+   * gateway user cannot rename it and the update swap failed with EACCES on
+   * every attempt.
+   *
+   * The same host-vs-container ownership split is already handled elsewhere in
+   * this file — backups tar through a root helper container, {@link rmrf} falls
+   * back to `sudo rm -rf`. The swap was the one path still doing it bare, so
+   * the fallback here matches the backup mechanism: a throwaway root container.
+   *
+   * The helper mounts the **nearest common ancestor** of the two paths rather
+   * than each parent separately, and that is load-bearing: two bind mounts are
+   * two mount points, so `rename(2)` across them fails EXDEV and busybox `mv`
+   * silently degrades to copy-then-unlink. Measured by inode, two mounts give a
+   * new inode (a copy) where one mount preserves it (a real rename). For a
+   * database directory the degraded path means duplicating it on disk and
+   * losing the atomicity the swap depends on.
+   */
+  private moveBindPath(source: string, destination: string, rel: string, job: JobState): void {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (err) {
+      if (!isPermissionError(err)) throw err;
+    }
+    const base = commonAncestorDir(source, destination);
+    const from = path.relative(base, source);
+    const to = path.relative(base, destination);
+    if (base === path.parse(base).root || from === '' || to === ''
+      || from.split(path.sep).includes('..') || to.split(path.sep).includes('..')) {
+      throw new Error(`Cannot move bind-mount path "${rel}" as root: unsafe mount base "${base}"`);
+    }
+    this.log(
+      job,
+      `Bind-mount path "${rel}" is not writable by the gateway user (created by the app's container) `
+      + '— moving it with a root helper container',
+    );
+    this.run(
+      [
+        'docker', 'run', '--rm',
+        '-v', `${base}:/mnt`,
+        BACKUP_HELPER_IMAGE,
+        'mv', path.posix.join('/mnt', from.split(path.sep).join('/')),
+        path.posix.join('/mnt', to.split(path.sep).join('/')),
+      ],
+      undefined,
+      BIND_MOVE_TIMEOUT_MS,
+    );
   }
 
   /**
