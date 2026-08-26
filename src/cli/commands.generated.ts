@@ -144,7 +144,75 @@ export const GENERATED_COMMANDS: GeneratedCommand[] = [
     "args": [
       "id"
     ],
-    "flags": [],
+    "flags": [
+      {
+        "name": "name",
+        "in": "body",
+        "description": "Job name"
+      },
+      {
+        "name": "type",
+        "in": "body",
+        "description": "command | agent"
+      },
+      {
+        "name": "schedule",
+        "in": "body",
+        "description": "5-field cron expression (scheduleKind=cron)"
+      },
+      {
+        "name": "scheduleKind",
+        "in": "body",
+        "description": "cron | at"
+      },
+      {
+        "name": "scheduleAt",
+        "in": "body",
+        "description": "ISO-8601 timestamp (scheduleKind=at)"
+      },
+      {
+        "name": "timezone",
+        "in": "body",
+        "description": "IANA timezone for the schedule"
+      },
+      {
+        "name": "command",
+        "in": "body",
+        "description": "Shell command (type=command)"
+      },
+      {
+        "name": "prompt",
+        "in": "body",
+        "description": "Agent prompt (type=agent)"
+      },
+      {
+        "name": "telegram",
+        "in": "body",
+        "description": "Telegram chat id for the result"
+      },
+      {
+        "name": "discord",
+        "in": "body",
+        "description": "Discord channel id for the result"
+      },
+      {
+        "name": "timeoutMs",
+        "in": "body",
+        "description": "Per-run timeout in milliseconds"
+      },
+      {
+        "name": "deleteAfterRun",
+        "in": "body",
+        "boolean": true,
+        "description": "Delete the job after its next run"
+      },
+      {
+        "name": "enabled",
+        "in": "body",
+        "boolean": true,
+        "description": "Enable or disable the job"
+      }
+    ],
     "summary": "Update a cron job",
     "auth": "key"
   }

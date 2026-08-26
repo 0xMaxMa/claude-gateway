@@ -8,7 +8,7 @@
   },
   "main": "dist/index.js",
   "bin": {
-    "claude-gateway": "./dist/index.js"
+    "claude-gateway": "./dist/entry.js"
   },
   "engines": {
     "node": ">=22"
@@ -28,7 +28,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start",
+    "start": "node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/entry.js gateway start",
     "postinstall": "if command -v bun >/dev/null 2>&1; then bun install --cwd mcp; else echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'; fi",
     "pretest": "npm run build",
     "test": "NODE_OPTIONS=--max-old-space-size=2560 jest",

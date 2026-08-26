@@ -95,8 +95,13 @@ function claudeBinDir(): string | null {
  *  Returns null — with a message — when the entry point can't be located, so a
  *  broken install never produces a unit that silently fails at boot. */
 export function resolveLaunchSpec(flags: Record<string, string | boolean>): LaunchSpec | null {
-  // dist/cli/commands/service.js → dist/index.js
-  const entry = path.resolve(__dirname, '..', '..', 'index.js');
+  // dist/cli/commands/service.js → dist/entry.js, the thin dispatcher that
+  // loads only the side it needs. index.js is still a working boot entry and is
+  // used when a partially-updated install predates the split, so a unit is
+  // never written pointing at a file that is not there.
+  const dir = path.resolve(__dirname, '..', '..');
+  const thin = path.join(dir, 'entry.js');
+  const entry = fs.existsSync(thin) ? thin : path.join(dir, 'index.js');
   const node = process.execPath;
   if (!path.isAbsolute(node) || !fs.existsSync(entry)) {
     process.stderr.write(

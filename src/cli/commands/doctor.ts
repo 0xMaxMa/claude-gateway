@@ -52,8 +52,25 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const baseUrl = resolveUrl({ flagUrl, env: process.env, config });
   checks.push({ name: 'url', ok: true, detail: baseUrl });
 
+  // Resolved once and shared with the alt-address block below: both ask the
+  // same question ("where does the gateway on this host listen?") and reading
+  // the pidfile twice could answer it two different ways mid-command.
+  const localUrl = resolveLocalUrl({ env: process.env, config });
+
   const manager = detectManager();
-  checks.push({ name: 'manager', ok: manager !== 'unknown', detail: manager });
+  // How the gateway on THIS host is supervised is a verdict only while this
+  // host is what is being diagnosed. Pointed at another gateway (--url or
+  // $CLAUDE_GATEWAY_URL), a laptop with no local install reports `unknown` and
+  // used to fail the whole command even though config, key, url and health all
+  // passed — the same false verdict this command already avoids for the
+  // publicHealth row.
+  const diagnosingThisHost = baseUrl === localUrl;
+  checks.push({
+    name: 'manager',
+    ok: manager !== 'unknown',
+    detail: diagnosingThisHost ? manager : `${manager} (local; not the target of this check)`,
+    info: !diagnosingThisHost,
+  });
 
   const health = await probeHealth(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
@@ -69,7 +86,6 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // somewhere else. Passing the flag through would make it echo the target back
   // as its own alternative, and then offer this host's publicUrl as context for
   // a question about another host entirely.
-  const localUrl = resolveLocalUrl({ env: process.env, config });
   const publicUrl = (config.publicUrl ?? '').replace(/\/+$/, '');
   const alt =
     baseUrl === localUrl

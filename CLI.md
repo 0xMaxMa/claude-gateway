@@ -150,5 +150,5 @@ build until `claude-gateway gateway restart`.
 | `claude-gateway crons run <id>` | POST | `/v1/crons/:id/run` | key | Trigger a cron job now |
 | `claude-gateway crons runs <id> [--limit <v>]` | GET | `/v1/crons/:id/runs` | key | Get cron job run history |
 | `claude-gateway crons status` | GET | `/v1/crons/status` | key | Cron scheduler status |
-| `claude-gateway crons update <id>` | PUT | `/v1/crons/:id` | key | Update a cron job |
+| `claude-gateway crons update <id> [--name <v>] [--type <v>] [--schedule <v>] [--scheduleKind <v>] [--scheduleAt <v>] [--timezone <v>] [--command <v>] [--prompt <v>] [--telegram <v>] [--discord <v>] [--timeoutMs <v>] [--deleteAfterRun] [--enabled]` | PUT | `/v1/crons/:id` | key | Update a cron job |
 

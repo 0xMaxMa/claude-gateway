@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { probeHealth } from '../health';
-import { detectManager, defaultPidfilePath } from '../manager';
+import { detectManager, defaultPidfilePath, pidLooksLikeGateway } from '../manager';
 import { printJson } from '../output';
 import { writeCommandHelp } from '../output';
 
@@ -89,6 +89,17 @@ function gatewayAction(action: 'restart' | 'stop'): Promise<number> {
         return Promise.resolve(0);
       case 'foreground': {
         const pid = parseInt(fs.readFileSync(defaultPidfilePath(), 'utf8').trim(), 10);
+        // The pidfile only proves some process holds this pid. A gateway lost
+        // to SIGKILL or the OOM killer leaves the file behind, and once the pid
+        // is recycled this branch would SIGTERM an unrelated process and report
+        // success. Confirm it is a gateway before signalling it.
+        if (!pidLooksLikeGateway(pid)) {
+          process.stderr.write(
+            `Pidfile names pid ${pid}, but that process does not look like a gateway — refusing to signal it. ` +
+              `The gateway likely died without cleaning up; remove ${defaultPidfilePath()} if it is stale.\n`,
+          );
+          return Promise.resolve(1);
+        }
         process.kill(pid, 'SIGTERM');
         if (action === 'restart') {
           process.stderr.write(

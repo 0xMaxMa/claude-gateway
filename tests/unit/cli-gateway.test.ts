@@ -2,13 +2,14 @@ jest.mock('../../src/cli/manager', () => ({
   detectManager: jest.fn(),
   defaultPidfilePath: () => '/tmp/fake-gateway.pid',
   readLocalGateway: () => ({ pid: 1 }),
+  pidLooksLikeGateway: jest.fn(() => true),
 }));
 jest.mock('fs', () => ({ readFileSync: jest.fn() }));
 jest.mock('child_process', () => ({ execFileSync: jest.fn() }));
 
 import * as fs from 'fs';
 import { execFileSync } from 'child_process';
-import { detectManager } from '../../src/cli/manager';
+import { detectManager, pidLooksLikeGateway } from '../../src/cli/manager';
 import { runGatewayLifecycle } from '../../src/cli/commands/gateway';
 import type { CliConfigView } from '../../src/cli/http-client';
 
@@ -192,5 +193,68 @@ describe('cli gateway status', () => {
     await runGatewayLifecycle(['status'], { json: true }, config);
 
     expect(stdout.join('').trim().split('\n')).toHaveLength(1);
+  });
+});
+
+/**
+ * The pidfile records a number, not an identity. A gateway killed with SIGKILL
+ * or reaped by the OOM killer never removes it, and the kernel eventually hands
+ * that pid to something else — at which point `detectManager()` still answers
+ * `foreground` (signal-0 succeeds) and this branch would SIGTERM a stranger
+ * while reporting a successful stop.
+ */
+describe('cli gateway foreground stop verifies the pid', () => {
+  const config: CliConfigView = {};
+  let killSpy: jest.SpyInstance;
+  let errSpy: jest.SpyInstance;
+  let stderr: string[];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    stderr = [];
+    killSpy = jest.spyOn(process, 'kill').mockImplementation(() => true as never);
+    errSpy = jest.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => {
+      stderr.push(c.toString());
+      return true;
+    });
+    (detectManager as jest.Mock).mockReturnValue('foreground');
+    (fs.readFileSync as jest.Mock).mockReturnValue('4242\n10850\n');
+  });
+
+  afterEach(() => {
+    killSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  // U-GW-375a — the case the guard exists for.
+  it('U-GW-375a: refuses to signal a pid that is not a gateway', async () => {
+    (pidLooksLikeGateway as jest.Mock).mockReturnValue(false);
+
+    const code = await runGatewayLifecycle(['stop'], {}, config);
+
+    expect(code).toBe(1);
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(stderr.join('')).toContain('does not look like a gateway');
+  });
+
+  // U-GW-375b — and still stops a real one, so the guard is not just "never
+  // signal anything".
+  it('U-GW-375b: still stops a verified gateway', async () => {
+    (pidLooksLikeGateway as jest.Mock).mockReturnValue(true);
+
+    const code = await runGatewayLifecycle(['stop'], {}, config);
+
+    expect(code).toBe(0);
+    expect(killSpy).toHaveBeenCalledWith(4242, 'SIGTERM');
+  });
+
+  // U-GW-375c — restart takes the same branch, so it needs the same guard.
+  it('U-GW-375c: restart refuses an unverified pid too', async () => {
+    (pidLooksLikeGateway as jest.Mock).mockReturnValue(false);
+
+    const code = await runGatewayLifecycle(['restart'], {}, config);
+
+    expect(code).toBe(1);
+    expect(killSpy).not.toHaveBeenCalled();
   });
 });

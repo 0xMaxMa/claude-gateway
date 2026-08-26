@@ -130,10 +130,30 @@ function stripSlash(url: string): string {
  *  wins over `$PORT`, which describes the CLI's own shell and may have nothing
  *  to do with the shell the server was started from. */
 function bindUrl(cfg: CliConfigView, env: NodeJS.ProcessEnv, knownPort?: number): string {
-  let host = cfg.bind || '127.0.0.1';
+  // Same precedence the server resolves its own bind with (resolveBindHost in
+  // api/gateway-router): $GATEWAY_BIND → gateway.bind → loopback. The variable
+  // is visible here because the entry point loads ~/.claude-gateway/.env into
+  // process.env on every invocation, CLI runs included. Reading only the config
+  // file made the CLI dial 127.0.0.1 while the gateway listened on the address
+  // from .env, so `gateway status` and `service install`'s health check called
+  // a perfectly healthy gateway down.
+  let host = (env.GATEWAY_BIND || '').trim() || (cfg.bind || '').trim() || '127.0.0.1';
+  // A wildcard bind is not a dialable address; the loopback the server also
+  // listens on is.
   if (host === '0.0.0.0' || host === '::' || host === '[::]') host = '127.0.0.1';
   const port = knownPort ?? (parseInt(env.PORT || String(DEFAULT_PORT), 10) || DEFAULT_PORT);
-  return `http://${host}:${port}`;
+  return `http://${hostForUrl(host)}:${port}`;
+}
+
+/** An IPv6 literal has to be bracketed inside a URL authority, or the colons
+ *  read as a port separator: `http://::1:10850` is rejected by `fetch()` as an
+ *  invalid URL, and every command then failed with a parse error naming a URL
+ *  the user never typed. Only `::`/`[::]` were handled before, so any other
+ *  literal (`::1`, `fd00::1`) was interpolated bare. Already-bracketed and
+ *  zone-suffixed forms are left as they are. */
+function hostForUrl(host: string): string {
+  if (host.startsWith('[')) return host;
+  return host.includes(':') ? `[${host}]` : host;
 }
 
 /**

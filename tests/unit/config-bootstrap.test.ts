@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ensureConfigExists } from '../../src/config/bootstrap';
+import { ensureConfigExists, firstRunNotice } from '../../src/config/bootstrap';
 import { loadConfig } from '../../src/config/loader';
 
 const TEMPLATE_PATH = path.join(__dirname, '../../config.template.json');
@@ -87,5 +87,41 @@ describe('config-bootstrap', () => {
     expect(result.created).toBe(false);
     expect(result.adminKey).toBeUndefined();
     expect(JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toEqual(winner);
+  });
+});
+
+/**
+ * The first-run notice. `ensureConfigExists` writes config.json 0600 to keep
+ * the generated admin key from other local users; printing that key to stdout
+ * put a second, unprotected copy in the service journal, which outlives the
+ * process and is readable by anyone who can read logs.
+ */
+describe('firstRunNotice', () => {
+  const KEY = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
+
+  // U-CB-375a — the property that matters, asserted against the real generated
+  // key rather than a placeholder.
+  it('U-CB-375a: never contains the admin key', () => {
+    const text = firstRunNotice('/home/u/.claude-gateway/config.json', KEY).join('\n');
+
+    expect(text).not.toContain(KEY);
+    // Nor any workable prefix of it — a long fragment is as good as the key.
+    expect(text).not.toContain(KEY.slice(0, 16));
+  });
+
+  // U-CB-375b — but it must still identify which key was generated, or an
+  // operator holding two of them cannot tell which one this install uses.
+  it('U-CB-375b: identifies the key by its last four characters only', () => {
+    const text = firstRunNotice('/home/u/.claude-gateway/config.json', KEY).join('\n');
+
+    expect(text).toContain(`…${KEY.slice(-4)}`);
+    expect(text).not.toContain(KEY.slice(-8));
+  });
+
+  it('U-CB-375c: points at the file the key actually lives in', () => {
+    const text = firstRunNotice('/etc/cg/config.json', KEY).join('\n');
+
+    expect(text).toContain('/etc/cg/config.json');
+    expect(text).toContain('0600');
   });
 });

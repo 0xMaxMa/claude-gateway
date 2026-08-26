@@ -18,6 +18,9 @@ export interface DetectDeps {
   /** True if a process with this pid is alive; injectable for tests. */
   isAlive?: (pid: number) => boolean;
   readPidfile?: (p: string) => string | null;
+  /** The command line of a live process, or null when it cannot be read;
+   *  injectable for tests. See pidLooksLikeGateway(). */
+  readCmdline?: (pid: number) => string | null;
 }
 
 function realExec(args: string[]): string {
@@ -32,6 +35,47 @@ function realIsAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/** Process command line, NUL-separated on Linux, space-joined elsewhere.
+ *  `/proc` first because it needs no subprocess; `ps` covers macOS/BSD. */
+function realReadCmdline(pid: number): string | null {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+  } catch {
+    /* not Linux, or the process is gone — fall through to ps */
+  }
+  try {
+    return execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort check that `pid` is a gateway and not an unrelated process that
+ * inherited a recycled pid.
+ *
+ * readLocalGateway() deliberately stops at signal-0 — it runs on every CLI
+ * invocation and must stay cheap — but that only proves *something* holds the
+ * pid. A gateway lost to SIGKILL or the OOM killer leaves its pidfile behind,
+ * and once the kernel reuses that pid, anything reading the file would call a
+ * stranger "the gateway". Only callers about to act on the pid destructively
+ * (`gateway stop`, `gateway restart`) pay for this second check.
+ *
+ * Returns false when the command line cannot be read at all: an unverifiable
+ * pid is treated as not-a-gateway, because the cost of being wrong is
+ * terminating someone else's process.
+ */
+export function pidLooksLikeGateway(pid: number, deps: Pick<DetectDeps, 'readCmdline'> = {}): boolean {
+  const cmdline = (deps.readCmdline ?? realReadCmdline)(pid);
+  if (!cmdline) return false;
+  // Either the installed binary/package path, or a checkout started straight
+  // from its entry point (`node /opt/gw/dist/index.js gateway start`), whose
+  // directory need not be named after the project.
+  return /claude-gateway/.test(cmdline) || /(^|[\\/])(dist|src)[\\/]index\.(js|ts)\b/.test(cmdline);
 }
 
 function realReadPidfile(p: string): string | null {

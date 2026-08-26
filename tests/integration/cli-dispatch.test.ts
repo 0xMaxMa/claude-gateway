@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 
 /**
- * Dispatcher regression test — runs the *real* binary (dist/index.js), not
+ * Dispatcher regression test — runs the *real* binary (dist/entry.js, the one
+ * package.json points `bin` at), not
  * runCli(), because the bug this guards against lives in the entry point:
  * before this, `claude-gateway` with no command (or a typo, or `--help`) fell
  * through to main() and started a server on the gateway port. Anything that
@@ -13,7 +14,10 @@ import * as path from 'path';
  * Requires a build; `npm test` runs `npm run build` first (pretest).
  */
 
-const ENTRY = path.resolve(__dirname, '../../dist/index.js');
+const ENTRY = path.resolve(__dirname, '../../dist/entry.js');
+/** The pre-split entry. Service units written before `entry.js` existed still
+ *  run this one, so it has to keep booting and keep dispatching. */
+const LEGACY_ENTRY = path.resolve(__dirname, '../../dist/index.js');
 const TIMEOUT_MS = 20_000;
 
 interface RunResult {
@@ -32,12 +36,16 @@ function terminalEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   delete env.PM2_HOME;
   delete env.pm_id;
   delete env.FORCE_COLOR;
+  // Set in every process the gateway spawns. Inherited from the developer's own
+  // shell it classifies the child as a supervised descendant, so these assertions
+  // depended on where the suite happened to be run from.
+  delete env.CLAUDE_GATEWAY_CHILD;
   return env;
 }
 
-function run(args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
+function run(args: string[], env: NodeJS.ProcessEnv, entry: string = ENTRY): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [ENTRY, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [entry, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
@@ -207,6 +215,11 @@ describe('binary dispatch — legacy supervised units still boot', () => {
     const child = spawn(process.execPath, [ENTRY], {
       env: {
         ...process.env,
+        // Inherited when the suite runs inside a gateway-spawned shell, where it
+        // makes classifyInvocation() answer 'cli' — this launch would then never
+        // reach the legacy path and the test failed for a reason that had nothing
+        // to do with the code under test.
+        CLAUDE_GATEWAY_CHILD: '',
         HOME: home,
         // Marks the launch as systemd-supervised, which is exactly the pre-1.8
         // unit shape (`ExecStart=/usr/local/bin/claude-gateway`, no command).
@@ -238,5 +251,39 @@ describe('binary dispatch — legacy supervised units still boot', () => {
       child.kill('SIGKILL');
       fs.rmSync(home, { recursive: true, force: true });
     }
+  }, TIMEOUT_MS);
+});
+
+/**
+ * The entry-point split (src/entry.ts). The CLI used to be dispatched from
+ * src/index.ts, whose module scope pulls in the entire server graph, so every
+ * CLI invocation paid for it and inherited its failures.
+ */
+describe('entry point does not load the server on the CLI path', () => {
+  // I-CD-375a — the observable proof. dist/index.js loads better-sqlite3's
+  // node:sqlite dependency at module scope, and Node announces that on stderr
+  // before the CLI has written a byte. A clean stderr means the server graph
+  // was never required.
+  it('I-CD-375a: `--help` through the real bin writes nothing to stderr', async () => {
+    const viaBin = await run(['--help'], terminalEnv());
+    expect(viaBin.code).toBe(0);
+    expect(viaBin.stdout).toContain('claude-gateway');
+    expect(viaBin.stderr).toBe('');
+
+    // Same command through the pre-split entry still works, and still shows the
+    // noise — which is what makes the assertion above meaningful rather than
+    // vacuous. If Node ever stops warning, this line fails and says so.
+    const viaLegacy = await run(['--help'], terminalEnv(), LEGACY_ENTRY);
+    expect(viaLegacy.code).toBe(0);
+    expect(viaLegacy.stdout).toContain('claude-gateway');
+    expect(viaLegacy.stderr).toContain('ExperimentalWarning');
+  }, TIMEOUT_MS);
+
+  // I-CD-375b — an old service unit runs `dist/index.js gateway start`; the
+  // split must not strand those installs. Dispatch there still has to work.
+  it('I-CD-375b: the pre-split entry still dispatches CLI commands', async () => {
+    const res = await run(['--version'], terminalEnv(), LEGACY_ENTRY);
+    expect(res.code).toBe(0);
+    expect(res.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
   }, TIMEOUT_MS);
 });

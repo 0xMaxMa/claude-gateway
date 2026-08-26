@@ -70,6 +70,22 @@ afterEach(() => {
 });
 
 describe('service — generated launch configuration', () => {
+  /**
+   * The unit launches the thin entry (dist/entry.js), which decides between the
+   * CLI and the server before either is loaded. index.js remains a working boot
+   * entry, and is used when a partially-updated install has no entry.js yet —
+   * writing a unit that points at a file which is not there would leave the
+   * service failing at boot with nothing to explain it.
+   */
+  // U-SV-375a
+  it('U-SV-375a: launches entry.js, falling back to index.js when it is absent', () => {
+    mockExistsSync.mockImplementation(() => true);
+    expect(resolveLaunchSpec({})!.entry).toMatch(/entry\.js$/);
+
+    mockExistsSync.mockImplementation((p) => !String(p).endsWith('entry.js'));
+    expect(resolveLaunchSpec({})!.entry).toMatch(/index\.js$/);
+  });
+
   it('renders a unit whose ExecStart is absolute and explicitly says `gateway start`', () => {
     const spec = resolveLaunchSpec({});
     expect(spec).not.toBeNull();
@@ -80,7 +96,10 @@ describe('service — generated launch configuration', () => {
     expect(execStart).toContain('gateway start');
     // A unit that just runs the binary with no command would now print help
     // and exit 0 on the legacy path — never generate one.
-    expect(execStart).toMatch(/^ExecStart="\/.*" "\/.*index\.js" gateway start --config "\/.*"$/);
+    // entry.js is the thin dispatcher the bin points at; index.js is the
+    // fallback used when a partially-updated install predates the split. Either
+    // is a valid launch target, so the shape is what this asserts.
+    expect(execStart).toMatch(/^ExecStart="\/.*" "\/.*(entry|index)\.js" gateway start --config "\/.*"$/);
     expect(unit).toContain('WantedBy=default.target');
     expect(unit).toContain('Restart=on-failure');
   });

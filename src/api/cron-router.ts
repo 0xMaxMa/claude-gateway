@@ -176,7 +176,37 @@ export function createCronRouter(manager: CronManager, apiKeys?: ApiKey[], known
   // Update job
   defineRoute(
     router,
-    { method: 'PUT', path: '/v1/crons/:id', auth: 'key', summary: 'Update a cron job', cli: { noun: 'crons', verb: 'update', args: ['id'] } },
+    {
+      method: 'PUT',
+      path: '/v1/crons/:id',
+      auth: 'key',
+      summary: 'Update a cron job',
+      cli: {
+        noun: 'crons',
+        verb: 'update',
+        args: ['id'],
+        // Declared so the fields are reachable as flags at all. Without them the
+        // CLI had nothing to build a body from, so `crons update <id> --name x`
+        // sent an empty PUT that the manager applied as a no-op and the CLI
+        // printed as success. Mirrors CronJobUpdate; `agentId` is absent because
+        // ownership is not transferable.
+        flags: [
+          { name: 'name', in: 'body', description: 'Job name' },
+          { name: 'type', in: 'body', description: 'command | agent' },
+          { name: 'schedule', in: 'body', description: '5-field cron expression (scheduleKind=cron)' },
+          { name: 'scheduleKind', in: 'body', description: 'cron | at' },
+          { name: 'scheduleAt', in: 'body', description: 'ISO-8601 timestamp (scheduleKind=at)' },
+          { name: 'timezone', in: 'body', description: 'IANA timezone for the schedule' },
+          { name: 'command', in: 'body', description: 'Shell command (type=command)' },
+          { name: 'prompt', in: 'body', description: 'Agent prompt (type=agent)' },
+          { name: 'telegram', in: 'body', description: 'Telegram chat id for the result' },
+          { name: 'discord', in: 'body', description: 'Discord channel id for the result' },
+          { name: 'timeoutMs', in: 'body', description: 'Per-run timeout in milliseconds' },
+          { name: 'deleteAfterRun', in: 'body', boolean: true, description: 'Delete the job after its next run' },
+          { name: 'enabled', in: 'body', boolean: true, description: 'Enable or disable the job' },
+        ],
+      },
+    },
     async (req: Request, res: Response) => {
       const job = manager.get(req.params.id);
       if (!job) {

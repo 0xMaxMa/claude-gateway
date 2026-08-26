@@ -214,6 +214,46 @@ describe('cli doctor', () => {
     });
   });
 
+  /**
+   * The `manager` row answers "how is the gateway on THIS host supervised?".
+   * That is a verdict only while this host is the subject. Pointed elsewhere it
+   * used to fail the whole command from a laptop with no local install, even
+   * with config, key, url and health all green — the same false verdict the
+   * command already avoids for publicHealth.
+   */
+  describe('manager row is a verdict only about this host', () => {
+    // U-DR-375a
+    it('U-DR-375a: --url elsewhere makes manager informational, and doctor still passes', async () => {
+      (detectManager as jest.Mock).mockReturnValue('unknown');
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({ url: 'http://other-host:8080', json: true }, configWithKey);
+
+      const body = report();
+      const manager = body.checks.find((c) => c.name === 'manager')!;
+      expect(manager.info).toBe(true);
+      expect(manager.ok).toBe(false);
+      expect(manager.detail).toContain('not the target');
+      // The whole point: an advisory row must not decide the exit code.
+      expect(body.ok).toBe(true);
+    });
+
+    // U-DR-375b — the row stays a real verdict when this host IS the subject,
+    // so the fix cannot be "mark it informational and never fail again".
+    it('U-DR-375b: diagnosing this host keeps manager as a verdict', async () => {
+      (detectManager as jest.Mock).mockReturnValue('unknown');
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({ json: true }, configWithKey);
+
+      const body = report();
+      const manager = body.checks.find((c) => c.name === 'manager')!;
+      expect(manager.info).toBeFalsy();
+      expect(manager.detail).toBe('unknown');
+      expect(body.ok).toBe(false);
+    });
+  });
+
   it('honours the global --json flag like every other command', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 

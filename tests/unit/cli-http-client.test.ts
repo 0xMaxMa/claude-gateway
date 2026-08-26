@@ -15,13 +15,65 @@ jest.mock('os', () => {
 import { resolveUrl, resolveUrlPlan, resolveLocalUrl, resolveReachableUrl, resolveKey, buildRequestUrl, loadCliConfig, request, expandHome, DEFAULT_PORT } from '../../src/cli/http-client';
 import type { ApiKey } from '../../src/types';
 
+/** No gateway running on this host — injected wherever a test would otherwise
+ *  read the real pidfile and describe the developer's machine. */
+const dead = () => null;
+
+describe('cli http-client bind resolution', () => {
+  const live = () => ({ pid: 7, port: 10850 });
+
+  // U-HC-375a — the server resolves its bind as $GATEWAY_BIND → gateway.bind →
+  // loopback (resolveBindHost, api/gateway-router). The CLI read the config
+  // alone, so a gateway bound through ~/.claude-gateway/.env was dialled at
+  // 127.0.0.1 and reported down by `gateway status` while it was serving fine.
+  it('U-HC-375a: $GATEWAY_BIND wins over gateway.bind, matching the server', () => {
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: '192.168.1.10' }, config: {}, localGateway: live })).toBe(
+      'http://192.168.1.10:10850',
+    );
+    expect(
+      resolveLocalUrl({ env: { GATEWAY_BIND: '192.168.1.10' }, config: { bind: '10.0.0.1' }, localGateway: live }),
+    ).toBe('http://192.168.1.10:10850');
+  });
+
+  it('U-HC-375b: a blank $GATEWAY_BIND falls through to the config, then to loopback', () => {
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: '   ' }, config: { bind: '10.0.0.1' }, localGateway: live })).toBe(
+      'http://10.0.0.1:10850',
+    );
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: '' }, config: {}, localGateway: live })).toBe('http://127.0.0.1:10850');
+  });
+
+  it('U-HC-375c: a wildcard bind is dialled on loopback, from either source', () => {
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: '0.0.0.0' }, config: {}, localGateway: live })).toBe(
+      'http://127.0.0.1:10850',
+    );
+    expect(resolveLocalUrl({ env: {}, config: { bind: '::' }, localGateway: live })).toBe('http://127.0.0.1:10850');
+  });
+
+  // U-HC-375d — bare IPv6 produced `http://::1:10850`, which fetch() rejects as
+  // an invalid URL, so every command failed with a parse error naming a URL the
+  // user never typed.
+  it('U-HC-375d: an IPv6 literal is bracketed and the result parses', () => {
+    const url = resolveLocalUrl({ env: {}, config: { bind: '::1' }, localGateway: live });
+    expect(url).toBe('http://[::1]:10850');
+    expect(new URL(url).hostname).toBe('[::1]');
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: 'fd00::1' }, config: {}, localGateway: live })).toBe(
+      'http://[fd00::1]:10850',
+    );
+  });
+
+  it('U-HC-375e: an already-bracketed literal is left alone, not double-wrapped', () => {
+    expect(resolveLocalUrl({ env: { GATEWAY_BIND: '[fd00::1]' }, config: {}, localGateway: live })).toBe(
+      'http://[fd00::1]:10850',
+    );
+  });
+});
+
 describe('cli http-client resolveUrl', () => {
   it('prefers --url over everything', () => {
     expect(resolveUrl({ flagUrl: 'http://flag:1', env: { CLAUDE_GATEWAY_URL: 'http://env:2' }, config: { publicUrl: 'http://cfg:3' } })).toBe('http://flag:1');
   });
 
   it('falls back to $CLAUDE_GATEWAY_URL, then publicUrl', () => {
-    const dead = () => null;
     expect(resolveUrl({ env: { CLAUDE_GATEWAY_URL: 'http://env:2' }, config: { publicUrl: 'http://cfg:3' }, localGateway: dead })).toBe('http://env:2');
     expect(resolveUrl({ env: {}, config: { publicUrl: 'http://cfg:3' }, localGateway: dead })).toBe('http://cfg:3');
   });
@@ -113,18 +165,26 @@ describe('cli http-client resolveUrl', () => {
     });
   });
 
+  // `localGateway` is injected in these three: left out, resolveUrl() reads the
+  // real ~/.claude-gateway/gateway.pid, so on a machine with a gateway actually
+  // running the recorded port wins over $PORT and the assertions describe that
+  // host rather than the code. They passed only where no gateway was live.
   it('composes from bind + port when nothing explicit is set', () => {
-    expect(resolveUrl({ env: {}, config: { bind: '127.0.0.1' } })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
-    expect(resolveUrl({ env: { PORT: '9999' }, config: { bind: '127.0.0.1' } })).toBe('http://127.0.0.1:9999');
+    expect(resolveUrl({ env: {}, config: { bind: '127.0.0.1' }, localGateway: dead })).toBe(
+      `http://127.0.0.1:${DEFAULT_PORT}`,
+    );
+    expect(resolveUrl({ env: { PORT: '9999' }, config: { bind: '127.0.0.1' }, localGateway: dead })).toBe(
+      'http://127.0.0.1:9999',
+    );
   });
 
   it('rewrites a wildcard bind to loopback for dialing', () => {
-    expect(resolveUrl({ env: {}, config: { bind: '0.0.0.0' } })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
-    expect(resolveUrl({ env: {}, config: { bind: '::' } })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+    expect(resolveUrl({ env: {}, config: { bind: '0.0.0.0' }, localGateway: dead })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+    expect(resolveUrl({ env: {}, config: { bind: '::' }, localGateway: dead })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
   });
 
   it('defaults to loopback:10850 with an empty config', () => {
-    expect(resolveUrl({ env: {}, config: {} })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+    expect(resolveUrl({ env: {}, config: {}, localGateway: dead })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
   });
 
   it('strips a trailing slash', () => {
@@ -152,9 +212,14 @@ describe('cli http-client resolveLocalUrl', () => {
     expect(resolveLocalUrl({ flagUrl: 'http://other:1/', env: {}, config: { publicUrl: 'http://cfg:3' } })).toBe('http://other:1');
   });
 
+  // Same reason as above: without `localGateway` this reads the real pidfile.
   it('rewrites a wildcard bind to loopback and honours $PORT', () => {
-    expect(resolveLocalUrl({ env: { PORT: '9999' }, config: { bind: '0.0.0.0' } })).toBe('http://127.0.0.1:9999');
-    expect(resolveLocalUrl({ env: {}, config: { bind: '::' } })).toBe(`http://127.0.0.1:${DEFAULT_PORT}`);
+    expect(resolveLocalUrl({ env: { PORT: '9999' }, config: { bind: '0.0.0.0' }, localGateway: dead })).toBe(
+      'http://127.0.0.1:9999',
+    );
+    expect(resolveLocalUrl({ env: {}, config: { bind: '::' }, localGateway: dead })).toBe(
+      `http://127.0.0.1:${DEFAULT_PORT}`,
+    );
   });
 });
 

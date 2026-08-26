@@ -16,6 +16,18 @@ import { runChannels } from './commands/channels';
 /** Flags that are always boolean regardless of command — never consume the next
  *  token as a value (see parseCliArgs). */
 const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print']);
+/** Flags every command accepts, on top of whatever the generated manifest
+ *  declares for that command. Anything outside this set and the command's own
+ *  flags is a typo, and is reported rather than dropped: a resource command
+ *  builds its query/body from `cmd.flags` alone, so an unrecognised flag would
+ *  otherwise be parsed, ignored, and reported as success. */
+const GLOBAL_FLAG_NAMES: ReadonlySet<string> = new Set([
+  ...GLOBAL_BOOLEAN_FLAGS,
+  'url',
+  'key',
+  'config',
+  'data',
+]);
 const HELP_ALIASES = new Set(['help', '--help', '-h']);
 const VERSION_ALIASES = new Set(['version', '--version', '-V']);
 
@@ -148,6 +160,19 @@ async function runResourceCommand(
     }
     body = parsed as Record<string, unknown>;
   }
+  const known = new Set([...GLOBAL_FLAG_NAMES, ...cmd.flags.map((f) => f.name)]);
+  const unknown = Object.keys(flags).filter((name) => !known.has(name));
+  if (unknown.length) {
+    // Same treatment as an unknown verb: refuse and show what is accepted. A
+    // mistyped flag used to reach the API as a missing field (`crons create
+    // --schedul ...` created a job with no schedule) or, on a command whose
+    // manifest declares no flags, as an empty body the server applied as a
+    // no-op — both exiting 0 as though they had worked.
+    process.stderr.write(`Unknown flag(s): ${unknown.map((f) => `--${f}`).join(' ')}\n\n`);
+    printCommandHelp(cmd, false);
+    return 1;
+  }
+
   const missingRequired: string[] = [];
   for (const f of cmd.flags) {
     const val = flags[f.name];
@@ -335,5 +360,5 @@ function printCommandHelp(c: GeneratedCommand, requested: boolean): void {
       lines.push(`    --${f.name.padEnd(16)} ${f.in}${f.required ? ' (required)' : ''}  ${f.description ?? ''}`.trimEnd());
     }
   }
-  process.stderr.write(lines.join('\n') + '\n');
+  stream.write(lines.join('\n') + '\n');
 }

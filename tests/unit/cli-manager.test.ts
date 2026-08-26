@@ -1,4 +1,4 @@
-import { detectManager, localGatewayIsLive, readLocalGateway } from '../../src/cli/manager';
+import { detectManager, localGatewayIsLive, readLocalGateway, pidLooksLikeGateway } from '../../src/cli/manager';
 
 describe('cli manager detectManager', () => {
   it('detects the user service first — `service install` creates a user unit', () => {
@@ -135,5 +135,42 @@ describe('readLocalGateway', () => {
     expect(readLocalGateway({ readPidfile: () => null, isAlive: () => true })).toBeNull();
     expect(readLocalGateway({ readPidfile: () => 'not-a-pid\n9000', isAlive: () => true })).toBeNull();
     expect(readLocalGateway({ readPidfile: () => '4242\n9000', isAlive: () => false })).toBeNull();
+  });
+});
+
+/**
+ * pidLooksLikeGateway() — the guard `gateway stop|restart` uses before it
+ * signals the pid in the pidfile. readLocalGateway() stops at signal-0, which
+ * only proves *something* holds that pid; a gateway lost to SIGKILL or the OOM
+ * killer leaves its pidfile behind, and once the kernel recycles the pid,
+ * stopping "the gateway" would terminate a stranger.
+ */
+describe('pidLooksLikeGateway', () => {
+  // U-MG-375a
+  it('U-MG-375a: recognises the installed binary and a checkout entry point', () => {
+    const cases = [
+      'node /usr/lib/node_modules/@0xmaxma/claude-gateway/dist/entry.js gateway start',
+      '/usr/local/bin/claude-gateway gateway start',
+      'node /opt/gw/dist/index.js gateway start',
+      'ts-node /opt/gw/src/index.ts gateway start',
+    ];
+    for (const cmdline of cases) {
+      expect(pidLooksLikeGateway(4242, { readCmdline: () => cmdline })).toBe(true);
+    }
+  });
+
+  // U-MG-375b — the case the guard exists for.
+  it('U-MG-375b: rejects an unrelated process that inherited the pid', () => {
+    const cases = ['/usr/bin/postgres -D /var/lib/postgresql', 'sshd: ubuntu@pts/3', 'vim notes.md'];
+    for (const cmdline of cases) {
+      expect(pidLooksLikeGateway(4242, { readCmdline: () => cmdline })).toBe(false);
+    }
+  });
+
+  // U-MG-375c — an unverifiable pid is treated as not-a-gateway: the cost of
+  // guessing wrong is killing someone else's process, so silence means no.
+  it('U-MG-375c: an unreadable command line is not a gateway', () => {
+    expect(pidLooksLikeGateway(4242, { readCmdline: () => null })).toBe(false);
+    expect(pidLooksLikeGateway(4242, { readCmdline: () => '' })).toBe(false);
   });
 });

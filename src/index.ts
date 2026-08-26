@@ -5,26 +5,16 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { loadGatewayDotenv } from './load-dotenv';
 
 // Load ~/.claude-gateway/.env so global installs pick up env vars without
-// needing shell exports or running via npm start.
-(function loadDotenv() {
-  const envFile = path.join(os.homedir(), '.claude-gateway', '.env');
-  if (!fs.existsSync(envFile)) return;
-  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
-    if (!(key in process.env)) process.env[key] = val;
-  }
-})();
+// needing shell exports or running via npm start. Shared with src/entry.ts,
+// which does the same before dispatching to the CLI.
+loadGatewayDotenv();
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
-import { ensureConfigExists } from './config/bootstrap';
+import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
@@ -587,10 +577,8 @@ async function main(): Promise<void> {
   const templatePath = path.join(__dirname, '..', 'config.template.json');
   const bootstrap = ensureConfigExists(CONFIG_PATH, templatePath);
   if (bootstrap.created) {
-    console.log(`[gateway] No config found — created one at ${CONFIG_PATH}`);
-    console.log(`[gateway] Admin API key (save this now — it will not be shown again):`);
-    console.log(`[gateway]   ${bootstrap.adminKey}`);
-    console.log(`[gateway] The CLI (claude-gateway agents create, etc.) picks this up automatically from ${CONFIG_PATH}.`);
+    // The key itself is never printed — see firstRunNotice().
+    for (const line of firstRunNotice(CONFIG_PATH, bootstrap.adminKey ?? '')) console.log(line);
   }
 
   // ── Auto-migrate config (add missing fields from template) ────────────────
