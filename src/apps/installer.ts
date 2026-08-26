@@ -1890,7 +1890,7 @@ export class AppInstaller {
       const finalDir = entry.installPath;
       const oldBackupDir = `${finalDir}-old-${crypto.randomUUID()}`;
       let swapped = false;
-      let startedContainers = false;
+      let reachedContainerStart = false;
       let failedDir: string | null = null;
       const movedBindMounts: string[] = [];
       try {
@@ -1913,14 +1913,14 @@ export class AppInstaller {
 
         // ── Start new containers ────────────────────────────────────────────
         this.log(job, 'Starting new containers');
-        startedContainers = true;
+        reachedContainerStart = true;
         this.composeUp(appName, finalDir, job);
       } catch (upErr) {
         // The catch spans the whole swap, so a failure here is not necessarily a
         // container failure — saying it is sends diagnosis to the wrong
         // subsystem (a bind-mount move that threw looked exactly like a crashed
         // container in the job log).
-        this.log(job, startedContainers
+        this.log(job, reachedContainerStart
           ? 'New containers failed — rolling back to previous version'
           : `Update failed during the directory swap — rolling back to previous version: ${(upErr as Error).message}`);
         let rollbackFailed = false;
@@ -2691,6 +2691,11 @@ export class AppInstaller {
         entries = null;
       }
       if (entries !== null) {
+        // Each child that needs the root helper costs its own container. That
+        // is bounded by the live directory's own entry count, and only reached
+        // when a release ships tracked content *inside* a path whose children
+        // the gateway user cannot rename — rare enough not to trade the exact
+        // rollback above for one wholesale move.
         for (const name of entries) {
           this.moveBindEntry(fromDir, toDir, `${rel}/${name}`, job, moved);
         }
