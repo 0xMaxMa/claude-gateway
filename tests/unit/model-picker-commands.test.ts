@@ -193,6 +193,29 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(persistedModel()).toBe('claude-opus-5');
   }, 15000);
 
+  it('restarts the running session so the new model actually takes effect', async () => {
+    // setModel only rewrites config. The session process was spawned with the
+    // old model on its command line, so without a restart "Model set to X" is
+    // a false success and the next turn still runs the previous model. The
+    // Telegram picker's set_model path has always restarted; the channel
+    // command has to do the same.
+    const port = await startRunner();
+    const restarted: string[] = [];
+    const priv = runner as unknown as {
+      sessions: Map<string, { source: string }>;
+      restartProcess: (key: string) => Promise<void>;
+    };
+    priv.sessions.set(chatId, { source: 'discord' });
+    priv.restartProcess = async (key: string) => { restarted.push(key); };
+
+    await postChannelMessage(port, chatId, '/model opus', 'discord');
+    await waitForForward();
+
+    expect(restarted).toEqual([chatId]);
+    expect(forwardText()).toContain('Restarting');
+    priv.sessions.delete(chatId); // keep teardown off the fake session
+  }, 15000);
+
   it('refuses an unknown model rather than persisting a typo into config.json', async () => {
     const port = await startRunner();
 

@@ -32,6 +32,18 @@ const CATALOG_TIMEOUT_MS = 5_000;
  */
 const CATALOG_TTL_MS = 60_000;
 
+/**
+ * How long a catalog stays usable once fetches start failing.
+ *
+ * Falling straight back to the static list on a blip is worse than it sounds:
+ * the static list is the provisioning-time one, so a user running a model that
+ * exists only upstream would watch their own model disappear from its picker,
+ * and `contextWindowFor` would size their context against the 200k default. A
+ * catalog fetched minutes ago is much closer to the truth than that. The bound
+ * stops it becoming an unbounded pin on a list nobody can refresh.
+ */
+const CATALOG_STALE_MS = 60 * 60_000;
+
 /** Fallback context window for a model no catalog — live or static — describes. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
@@ -200,6 +212,10 @@ export async function fetchModelCatalog(
   if (cache && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
   if (inFlight) return inFlight;
 
+  // A catalog that is merely stale is still better than the static list, but
+  // only while a fetch is actually failing — a successful one below replaces it.
+  const stale = cache && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
+
   const base = catalogBaseUrl();
   if (!base) return null; // standalone deployment — static list is the catalog
 
@@ -224,14 +240,15 @@ export async function fetchModelCatalog(
         headers,
         signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
       });
-      if (!res.ok) return null;
+      if (!res.ok) return stale;
       const parsed = parseModelCatalog(await res.json(), fallback);
-      // Only a usable catalog is cached. Caching a failure would pin the static
-      // list for a full TTL after one blip.
-      if (parsed) cache = { models: parsed, fetchedAt: Date.now() };
-      return parsed;
+      // Only a usable catalog is cached, and the cache stamp uses the same
+      // clock the TTL check above read. Caching a failure would pin the
+      // fallback for a full TTL after one blip.
+      if (parsed) cache = { models: parsed, fetchedAt: now };
+      return parsed ?? stale;
     } catch {
-      return null; // unreachable, timed out, or unparseable — fall back
+      return stale; // unreachable, timed out, or unparseable
     } finally {
       inFlight = null;
     }

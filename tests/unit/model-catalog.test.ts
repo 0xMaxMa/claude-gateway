@@ -235,6 +235,40 @@ describe('model catalog — fetch policy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('serves the last good catalog while fetches are failing', async () => {
+    // Dropping to the static list on a blip would make a user's own model
+    // vanish from its picker when that model exists only upstream.
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'live' }] }));
+    await fetchModelCatalog(STATIC);
+
+    fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+    const afterTtl = await fetchModelCatalog(STATIC, Date.now() + 61_000);
+
+    expect(afterTtl!.map((m) => m.id)).toEqual(['live']);
+  });
+
+  it('stops serving a stale catalog once it is too old', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'live' }] }));
+    await fetchModelCatalog(STATIC);
+
+    fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+    // Past the one-hour bound: an unrefreshable list must not be pinned forever.
+    await expect(fetchModelCatalog(STATIC, Date.now() + 61 * 60_000)).resolves.toBeNull();
+  });
+
+  it('a later success replaces the stale catalog', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValueOnce(ok({ data: [{ id: 'old' }] }));
+    await fetchModelCatalog(STATIC);
+
+    fetchMock.mockResolvedValue(ok({ data: [{ id: 'new' }] }));
+    const refreshed = await fetchModelCatalog(STATIC, Date.now() + 61_000);
+
+    expect(refreshed!.map((m) => m.id)).toEqual(['new']);
+  });
+
   it('shares one request between concurrent callers', async () => {
     process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
     let release!: (v: unknown) => void;

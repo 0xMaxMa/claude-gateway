@@ -760,9 +760,14 @@ export class AgentRunner extends EventEmitter {
       // Live catalog first, static list as the fallback (issue #409). The
       // picker is a UI action, so a slow or unreachable catalog must not hang
       // it — fetchModelCatalog is bounded and never rejects.
-      void this.availableModels().then((availableModels) => {
-        respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
-      });
+      void this.availableModels()
+        .then((availableModels) => {
+          respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
+        })
+        // Without this the request would hang and the picker with it: the
+        // receiver is blocked on this response. Every other async branch in
+        // this handler answers on rejection too.
+        .catch((err) => respond({ success: false, error: String(err) }, 500));
       return;
     }
 
@@ -815,15 +820,7 @@ export class AgentRunner extends EventEmitter {
         return;
       }
 
-      let restarted = false;
-      const restartPromises: Promise<void>[] = [];
-      for (const [key, session] of this.sessions) {
-        if (session.source !== 'api') {
-          restarted = true;
-          restartPromises.push(this.restartProcess(key));
-        }
-      }
-      await Promise.all(restartPromises);
+      const restarted = await this.restartChannelSessions();
 
       respond({ success: true, model: newModel, restarted });
       return;
@@ -2111,7 +2108,13 @@ export class AgentRunner extends EventEmitter {
       return;
     }
     await this.setModel(match.id);
-    this.writeAutoForward(chatId, `Model set to ${match.label} (${match.id}).`);
+    // Same restart the Telegram picker's set_model does — the running session
+    // was spawned with the old model and would otherwise keep using it.
+    const restarted = await this.restartChannelSessions();
+    this.writeAutoForward(
+      chatId,
+      `Model set to ${match.label} (${match.id}).${restarted ? ' Restarting the session…' : ''}`,
+    );
   }
 
   /**
@@ -3830,6 +3833,23 @@ export class AgentRunner extends EventEmitter {
     persist('assistant', responseText, forcePersist);
 
     return { result, responseText };
+  }
+
+  /**
+   * Restart every non-api session so a model change actually takes effect.
+   *
+   * `setModel` only rewrites config — a session process was spawned with the
+   * old model on its command line and keeps using it until it is restarted.
+   * Reporting "model set" without this is a false success: the next turn still
+   * runs on the previous model. Returns whether anything was restarted.
+   */
+  private async restartChannelSessions(): Promise<boolean> {
+    const restartPromises: Promise<void>[] = [];
+    for (const [key, session] of this.sessions) {
+      if (session.source !== 'api') restartPromises.push(this.restartProcess(key));
+    }
+    await Promise.all(restartPromises);
+    return restartPromises.length > 0;
   }
 
   /**
