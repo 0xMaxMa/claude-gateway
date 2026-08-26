@@ -8,6 +8,8 @@ import {
   ArchiveDB,
   SharedReflectionManager,
   connectedComponents,
+  msUntilNextDailyTime,
+  isConsolidationDay,
   indexSharedArchive,
   sharedDbPath,
   sharedNoteExists,
@@ -112,6 +114,59 @@ describe('SharedReflectionManager (issue #392 part C)', () => {
       const res = await manager(cfg).reflectOnce();
       expect(res.clustersConsidered).toBe(0);
       expect(res.clustersProcessed).toBe(0);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+// ── issue #398: daily staleness GC, weekly LLM consolidation ────────────────
+
+describe('reflection cadence split (issue #398)', () => {
+  test('msUntilNextDailyTime lands on the next occurrence today, not next week', () => {
+    // 2026-08-25T09:00:00Z is a Tuesday; the 04:00 UTC slot has passed.
+    const now = new Date('2026-08-25T09:00:00Z');
+    const delay = msUntilNextDailyTime(4, 0, 'UTC', now);
+    expect(delay).toBe(19 * 60 * 60 * 1000); // 09:00 → 04:00 tomorrow
+    expect(delay).toBeLessThan(24 * 60 * 60 * 1000);
+  });
+
+  test('msUntilNextDailyTime waits for later today when the slot has not passed', () => {
+    const now = new Date('2026-08-25T01:30:00Z');
+    expect(msUntilNextDailyTime(4, 0, 'UTC', now)).toBe(2.5 * 60 * 60 * 1000);
+  });
+
+  test('isConsolidationDay is true only on the configured weekday', () => {
+    expect(isConsolidationDay(0, 'UTC', new Date('2026-08-30T04:00:00Z'))).toBe(true); // Sunday
+    expect(isConsolidationDay(0, 'UTC', new Date('2026-08-25T04:00:00Z'))).toBe(false); // Tuesday
+  });
+
+  test('a GC-only run never calls the reviewer and leaves the consolidation watermark alone', async () => {
+    const cfg = tmpCfg();
+    try {
+      writeSharedNote(cfg, 'a', 'Primary deploy policy. Related [[b]].');
+      writeSharedNote(cfg, 'b', 'Primary deploy policy. Related [[a]].');
+      let calls = 0;
+      const m = new SharedReflectionManager({
+        sharedCfg: cfg,
+        reflectionCfg,
+        spawnFn: async () => {
+          calls++;
+          return { stdout: JSON.stringify({ result: '{"action":"none"}' }), timedOut: false };
+        },
+      });
+
+      const daily = await m.reflectOnce(Date.now(), { consolidate: false });
+      expect(daily.outcome).toBe('ran');
+      expect(daily.clustersConsidered).toBe(0);
+      expect(calls).toBe(0); // no model spend on a GC-only day
+
+      // The weekly run still sees the cluster: a GC-only pass must not advance
+      // the watermark past work it never consolidated.
+      const weekly = await m.reflectOnce();
+      expect(weekly.outcome).toBe('ran');
+      expect(weekly.clustersConsidered).toBe(1);
+      expect(calls).toBe(1);
     } finally {
       cleanup(cfg);
     }

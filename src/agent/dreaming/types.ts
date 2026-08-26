@@ -96,7 +96,13 @@ export interface DreamProposal {
   file?: DreamFile;
   /** Tier this op writes to; absent ⇒ 'durable' (back-compat). */
   tier?: DreamTier;
-  /** For `episodic` ops: the `memory/<topic>.md` slug (`^[a-z0-9-]{1,64}$`). */
+  /**
+   * Kebab slug (`^[a-z0-9-]{1,64}$`). For `episodic` ops it routes the write to
+   * `memory/<topic>.md`. For durable `add`s it is optional and names the FACT,
+   * giving shared promotion a stable note identity instead of the free-form
+   * `reason` (issue #398). Every non-promotion consumer gates on
+   * `tier === 'episodic'` first, so a durable topic never changes local routing.
+   */
   topic?: string;
   /** Substring anchor for `replace`/`remove`. */
   target?: string;

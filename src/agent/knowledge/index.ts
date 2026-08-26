@@ -41,7 +41,12 @@ export { findSimilarSharedNotes } from './shared-dedup';
 export type { SimilarSharedNote } from './shared-dedup';
 export { runSharedStalenessGc, retireSharedNote, STALE_NOTE_PREFIX } from './shared-staleness';
 export type { SharedStalenessResult } from './shared-staleness';
-export { SharedReflectionManager, connectedComponents, msUntilNextWeeklyTime } from './reflection';
+export {
+  SharedReflectionManager,
+  connectedComponents,
+  msUntilNextDailyTime,
+  isConsolidationDay,
+} from './reflection';
 export type { ReflectionResult, SharedReflectionManagerDeps } from './reflection';
 export { wholeNoteEntryBlock } from './lifecycle';
 export {

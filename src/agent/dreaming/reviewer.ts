@@ -45,7 +45,7 @@ Rules:
 - A run that proposes NOTHING is a valid, good outcome.
 
 Respond with STRICT JSON only (no prose, no markdown fences), matching:
-{"summary":"one line describing what this dream found","proposals":[{"op":"add"|"replace"|"remove","file":"MEMORY.md"|"USER.md","target":"substring to match for replace/remove","content":"new text for add/replace","reason":"why","score":0.0-1.0,"recallCount":N}]}
+{"summary":"one line describing what this dream found","proposals":[{"op":"add"|"replace"|"remove","file":"MEMORY.md"|"USER.md","target":"substring to match for replace/remove","content":"new text for add/replace","topic":"<lowercase-kebab-slug naming the FACT>","reason":"why","score":0.0-1.0,"recallCount":N}]}
 
 - proposals: [] when nothing is worth changing.
 - "add": provide file + content. "replace": provide file + target (existing substring) + content. "remove": provide file + target.
@@ -60,7 +60,8 @@ MEMORY TIERS — route each op by what it is:
 - DURABLE semantic facts (user preferences, standing rules, identity, hard-won lessons — standing context needed in FUTURE unrelated sessions) → file "MEMORY.md" or "USER.md".
 - EPISODIC task-log (a record of what HAPPENED: completed work, PR/issue status, dated events) → tier "episodic". NEVER put task-log in MEMORY.md.
 - Litmus: "standing context for future unrelated sessions?" → MEMORY.md. "a record of a thing that happened?" → episodic.
-For an EPISODIC op use exactly: {"op":"add","tier":"episodic","topic":"<lowercase-kebab-slug>","content":"...","reason":"...","score":0.0-1.0,"recallCount":N}. topic MUST match ^[a-z0-9-]{1,64}$. Episodic ops are always "add" (never replace/remove). Durable ops keep the "file" form above (no "tier" needed).`;
+For an EPISODIC op use exactly: {"op":"add","tier":"episodic","topic":"<lowercase-kebab-slug>","content":"...","reason":"...","score":0.0-1.0,"recallCount":N}. topic MUST match ^[a-z0-9-]{1,64}$. Episodic ops are always "add" (never replace/remove). Durable ops keep the "file" form above (no "tier" needed).
+On a durable "add", also set "topic" to a short kebab-slug naming the FACT itself (e.g. "deploy-requires-manual-bootstrap"), matching ^[a-z0-9-]{1,64}$. It names what the fact IS, so the same fact earns the same slug on a later night; "reason" stays free-form and must NOT be an editing instruction like "insert after the cron section".`;
 
 function buildPrompt(input: DreamReviewerInput): string {
   const overBudget =
@@ -193,10 +194,16 @@ function coerceProposal(raw: unknown): DreamProposal | null {
   // add/replace need content; replace/remove need a target anchor.
   if ((op === 'add' || op === 'replace') && !content) return null;
   if ((op === 'replace' || op === 'remove') && !target) return null;
+  // An optional `topic` slug names the fact itself. Used as the shared-note
+  // identity when promoting (issue #398) — a far more stable key than `reason`,
+  // which is prompted as free-form justification. An invalid slug is dropped
+  // rather than rejecting the op: the durable write itself never needs it.
+  const durableTopic = isValidTopicSlug(o['topic']) ? o['topic'] : undefined;
   return {
     op: op as DreamProposal['op'],
     file: file as DreamProposal['file'],
     tier: 'durable',
+    topic: durableTopic,
     target: target === undefined ? undefined : capStr(target),
     content: content === undefined ? undefined : capStr(content),
     reason: typeof o['reason'] === 'string' ? capStr(o['reason']) : '',

@@ -22,6 +22,7 @@ import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
 import { entryHash } from '../../src/agent/knowledge/lifecycle';
 import { runSharedStalenessGc, retireSharedNote, STALE_NOTE_PREFIX } from '../../src/agent/knowledge/shared-staleness';
 import { STALENESS_DEFAULTS } from '../../src/agent/dreaming/config';
+import { DatabaseSync } from 'node:sqlite';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -178,6 +179,91 @@ describe('retireSharedNote (shared by the TTL GC and the reflection merge, issue
     const cfg = tmpSharedCfg();
     try {
       expect(retireSharedNote(cfg, 'nope', '<!-- x -->')).toBe(false);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+// ── issue #398: lifecycle rows for sources the indexer hash-skips ───────────
+
+/**
+ * Drop every lifecycle row while leaving `kb_sources` current — the exact state
+ * of any vault indexed before the lifecycle table existed, and the state the
+ * hash guard used to make permanent (issue #398).
+ */
+function dropLifecycleRows(cfg: ResolvedKnowledgeSharedCfg): void {
+  ArchiveDB.evict(sharedDbPath(cfg));
+  const handle = new DatabaseSync(sharedDbPath(cfg));
+  try {
+    handle.exec('DELETE FROM kb_entry_lifecycle');
+  } finally {
+    handle.close();
+  }
+}
+
+describe('lifecycle backfill for unchanged sources (issue #398)', () => {
+  test('a note indexed BEFORE lifecycle existed gets a row on the next index pass', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'legacy-note', 'Prod deploys need a one-time bootstrap before the first release.');
+      indexSharedArchive(cfg);
+
+      // Simulate the real-world state: the source row is present and current
+      // (so the hash guard skips the file) but its lifecycle row was never
+      // written, exactly as for every note that predates the feature.
+      dropLifecycleRows(cfg);
+      expect(db(cfg).listLifecycle()).toHaveLength(0);
+
+      indexSharedArchive(cfg);
+
+      const rows = db(cfg).listLifecycle();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].path).toBe('legacy-note.md');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a backfilled row keeps the note\'s real age instead of resetting it to now', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'old-note', 'An operational lesson recorded a long time ago.');
+      const notePath = path.join(sharedNotesDir(cfg), 'old-note.md');
+      const oldMtime = Date.now() - 200 * DAY;
+      fs.utimesSync(notePath, oldMtime / 1000, oldMtime / 1000);
+
+      indexSharedArchive(cfg);
+      dropLifecycleRows(cfg);
+      indexSharedArchive(cfg);
+
+      const [row] = db(cfg).listLifecycle();
+      expect(row).toBeDefined();
+      // Age preserved from mtime: seeding "now" would restart the TTL clock and
+      // push any reclamation out by another full staleTtlDays.
+      expect(Math.abs(row.firstSeen - oldMtime)).toBeLessThan(2000);
+      expect(Date.now() - row.firstSeen).toBeGreaterThan(190 * DAY);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a backfilled note is visible to the GC and ages out normally', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'forgotten-note', 'A fact nobody has looked up in a very long time.');
+      const notePath = path.join(sharedNotesDir(cfg), 'forgotten-note.md');
+      const oldMtime = Date.now() - 200 * DAY;
+      fs.utimesSync(notePath, oldMtime / 1000, oldMtime / 1000);
+
+      indexSharedArchive(cfg);
+      dropLifecycleRows(cfg); // pre-#398 state: indexed, but no lifecycle row
+
+      const res = runSharedStalenessGc(cfg, { ...STALENESS_DEFAULTS, staleTtlDays: 90 });
+
+      expect(res.invalidated).toBe(1);
+      expect(sharedNoteExists(cfg, 'forgotten-note')).toBe(false);
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}forgotten-note`)).toBe(true);
     } finally {
       cleanup(cfg);
     }

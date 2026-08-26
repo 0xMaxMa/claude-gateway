@@ -561,11 +561,11 @@ export class ArchiveDB {
    * must match), terms are OR'd and capped at 12: a near-duplicate rarely repeats
    * every single word of the seed text, so an AND match would almost never hit.
    */
-  searchSimilar(seedText: string, limit = 3): ArchiveChunkRow[] {
+  searchSimilar(seedText: string, limit = 3, maxTerms = 12): ArchiveChunkRow[] {
     const match = seedText
       .split(/[^\p{L}\p{N}_]+/u)
       .filter(Boolean)
-      .slice(0, 12)
+      .slice(0, maxTerms)
       .map((t) => `"${t.replace(/"/g, '""')}"`)
       .join(' OR ');
     if (!match) return [];
@@ -584,6 +584,25 @@ export class ArchiveDB {
       text: r.text as string,
       updatedAt: r.updated_at as number,
     }));
+  }
+
+  /**
+   * Ensure lifecycle rows exist for a source the indexer did NOT re-chunk
+   * (issue #398). `reindexInto` skips unchanged files by content hash and
+   * `continue`s before entry blocks are ever computed, so a note that predates
+   * the lifecycle feature — or any note untouched since — never got a row, and
+   * the staleness GC (which selects only from `kb_entry_lifecycle`) could not
+   * see it. A live vault sat at 2 lifecycle rows for 40 indexed notes.
+   *
+   * `firstSeen` must be the source's mtime, NOT the backfill time: seeding
+   * "now" would reset every existing note's age and push any reclamation out by
+   * another full `staleTtlDays`. The upsert preserves `first_seen` on conflict,
+   * so repeated backfills are idempotent.
+   */
+  backfillLifecycle(sourcePath: string, blocks: Array<{ entryHash: string; firstSeen: number }>): void {
+    for (const b of blocks) {
+      this.stmts.upsertLifecycle.run(b.entryHash, sourcePath, b.firstSeen);
+    }
   }
 
   /**

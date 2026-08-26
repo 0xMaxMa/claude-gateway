@@ -38,19 +38,8 @@ import type { ResolvedKnowledgeSharedCfg, ResolvedKnowledgeReflectionCfg } from 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-/**
- * ms until the next `dayOfWeek`/`hour`/`minute` in `timezone` (0=Sunday). If
- * that exact moment is right now or already passed this week, rolls to next
- * week. Mirrors `history/cleanup.ts`'s `msUntilNextTime` but adds the
- * day-of-week dimension a weekly (not daily) cadence needs.
- */
-export function msUntilNextWeeklyTime(
-  dayOfWeek: number,
-  hour: number,
-  minute: number,
-  timezone: string,
-  now: Date = new Date(),
-): number {
+/** Local-calendar parts of `now` in `timezone` (weekday index + ms into day). */
+function localParts(timezone: string, now: Date): { day: number; msIntoDay: number } {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     weekday: 'short',
@@ -60,18 +49,38 @@ export function msUntilNextWeeklyTime(
     second: '2-digit',
   });
   const parts = fmt.formatToParts(now);
-  const curDay = WEEKDAY_INDEX[parts.find((p) => p.type === 'weekday')?.value ?? 'Sun'] ?? 0;
-  const curHour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10) % 24;
-  const curMinute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
-  const curSecond = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+  const day = WEEKDAY_INDEX[parts.find((p) => p.type === 'weekday')?.value ?? 'Sun'] ?? 0;
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10) % 24;
+  const minute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  const second = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+  return { day, msIntoDay: ((hour * 60 + minute) * 60 + second) * 1000 + (now.getTime() % 1000) };
+}
 
-  const msIntoDay = ((curHour * 60 + curMinute) * 60 + curSecond) * 1000 + (now.getTime() % 1000);
-  const targetMsIntoDay = (hour * 60 + minute) * 60 * 1000;
+/**
+ * Delay until the next `hour:minute` in `timezone`, today or tomorrow (issue
+ * #398). The reflection timer fires DAILY now: staleness GC is wall-clock work
+ * with no model call, and gating it on the weekly consolidation slot left a
+ * retired-then-retrieved note missing from the active set for up to seven days.
+ */
+export function msUntilNextDailyTime(
+  hour: number,
+  minute: number,
+  timezone: string,
+  now: Date = new Date(),
+): number {
+  const { msIntoDay } = localParts(timezone, now);
+  const target = (hour * 60 + minute) * 60 * 1000;
+  const delay = target - msIntoDay;
+  return delay > 0 ? delay : delay + DAY_MS;
+}
 
-  const dayDelta = (((dayOfWeek - curDay) % 7) + 7) % 7;
-  let delay = dayDelta * DAY_MS + (targetMsIntoDay - msIntoDay);
-  if (delay <= 0) delay += 7 * DAY_MS; // today-and-passed, or would be exactly now
-  return delay;
+/**
+ * True when `now` falls on the configured consolidation weekday in `timezone`.
+ * The LLM half keeps its weekly cadence — it costs one model call per cluster,
+ * and batching a week of edits into one pass is what keeps that spend bounded.
+ */
+export function isConsolidationDay(dayOfWeek: number, timezone: string, now: Date = new Date()): boolean {
+  return localParts(timezone, now).day === dayOfWeek;
 }
 
 /**
@@ -250,8 +259,19 @@ export class SharedReflectionManager {
     this.deps.logger?.info(msg, data);
   }
 
-  /** Run one reflection cycle. Never throws. */
-  async reflectOnce(now: number = Date.now()): Promise<ReflectionResult> {
+  /**
+   * Run one reflection cycle. Never throws.
+   *
+   * `consolidate: false` runs the staleness GC only and skips the graph/LLM
+   * consolidation — the daily mode introduced in issue #398. GC is wall-clock
+   * driven and free; consolidation costs a model call per cluster and stays on
+   * its weekly slot.
+   */
+  async reflectOnce(
+    now: number = Date.now(),
+    opts: { consolidate?: boolean } = {},
+  ): Promise<ReflectionResult> {
+    const consolidate = opts.consolidate ?? true;
     const { sharedCfg, reflectionCfg } = this.deps;
     if (!sharedCfg.enabled || sharedCfg.mode !== 'auto' || !reflectionCfg.enabled) {
       return { outcome: 'skipped-disabled', ...ZERO_RESULT };
@@ -274,6 +294,16 @@ export class SharedReflectionManager {
       result.invalidated = staleness.invalidated;
       result.promoted = staleness.promoted;
       const revision = db.getRevision();
+      if (!consolidate) {
+        // GC-only pass: leave the watermark alone so the next consolidation run
+        // still sees everything written since IT last ran.
+        this.log('reflect: staleness pass complete (consolidation deferred to its weekly slot)', {
+          revision,
+          invalidated: result.invalidated,
+          promoted: result.promoted,
+        });
+        return { ...result, outcome: 'ran', clustersConsidered: 0, clustersDeferred: 0 };
+      }
       if (revisionBeforeGc === state.lastRevision && result.invalidated === 0 && result.promoted === 0) {
         this.log('reflect: shared KB unchanged since last run, skipping consolidation', { revision });
         return { outcome: 'skipped-unchanged', ...ZERO_RESULT };
@@ -366,9 +396,16 @@ export class SharedReflectionManager {
     if (!this.deps.reflectionCfg.enabled) return;
     const schedule = (): void => {
       const { dayOfWeek, hour, minute, timezone } = this.deps.reflectionCfg;
-      const delay = msUntilNextWeeklyTime(dayOfWeek, hour, minute, timezone);
+      // Daily timer (issue #398): every fire runs the staleness GC; only the
+      // configured weekday also runs the LLM consolidation, so weekly model
+      // spend is unchanged while retrieval-driven restore drops from a
+      // worst-case 7-day latency to 1 day.
+      const delay = msUntilNextDailyTime(hour, minute, timezone);
       this.timer = setTimeout(() => {
-        void this.reflectOnce(Date.now()).catch(() => {
+        const firedAt = new Date();
+        void this.reflectOnce(firedAt.getTime(), {
+          consolidate: isConsolidationDay(dayOfWeek, timezone, firedAt),
+        }).catch(() => {
           /* best-effort */
         });
         schedule();
