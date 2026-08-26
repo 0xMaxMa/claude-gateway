@@ -58,12 +58,19 @@ describe('isBuiltinCommand', () => {
       yes('/model');
     });
 
+    it('matches the model picker — Discord has one now (issue #409)', () => {
+      yes('/models');
+      // /model must stay distinct: `\b` sits between 'l' and 's' nowhere, so
+      // the /model pattern cannot swallow /models and route it to the wrong
+      // handler.
+      yes('/model claude-opus-5');
+    });
+
     it('does not match telegram-only commands', () => {
       no('/rename');
       no('/start');
       no('/help');
       no('/status');
-      no('/models');
     });
 
     it('does not match plain messages', () => {
@@ -116,35 +123,56 @@ describe('isBuiltinCommand', () => {
       }
     });
 
-    it('shared commands match on all three channels', () => {
-      const sharedCmds = Object.entries(BUILTIN_COMMANDS)
-        .filter(([, def]) => def.channels.length === 3)
-        .map(([cmd]) => `/${cmd}`);
-
-      for (const cmd of sharedCmds) {
-        expect(isBuiltinCommand(cmd, 'telegram')).toBe(true);
-        expect(isBuiltinCommand(cmd, 'discord')).toBe(true);
-        expect(isBuiltinCommand(cmd, 'api')).toBe(true);
+    it('every command matches on exactly the channels it declares', () => {
+      // Counting channels ("commands with 3 entries are on telegram/discord/api")
+      // silently mis-asserted as soon as a command gained a fourth channel or
+      // took 'line' as its third. Assert the declaration itself instead.
+      const allChannels = ['telegram', 'discord', 'line', 'slack', 'api'] as const;
+      for (const [cmd, def] of Object.entries(BUILTIN_COMMANDS)) {
+        for (const ch of allChannels) {
+          expect({ cmd, ch, matched: isBuiltinCommand(`/${cmd}`, ch) })
+            .toEqual({ cmd, ch, matched: def.channels.includes(ch) });
+        }
       }
     });
   });
 
-  // ── LINE — regression for the empty-regex blocker (fixed 2026-06-23) ───────
-  // No BUILTIN_COMMANDS entry lists 'line', so buildRegex('line') had no parts.
-  // `new RegExp('')` matches EVERY string, which misrouted ALL LINE messages
-  // into the command handler — they never reached the agent. The guard returns
-  // /(?!)/ (matches nothing) instead. A channel with zero registered commands
-  // must treat ordinary text (and even slash-looking text) as NOT a command.
-  describe('line (no registered commands)', () => {
+  // ── LINE ──────────────────────────────────────────────────────────────────
+  describe('line', () => {
+    it('matches the model picker and /model (issue #409)', () => {
+      expect(isBuiltinCommand('/models', 'line')).toBe(true);
+      expect(isBuiltinCommand('/model', 'line')).toBe(true);
+      expect(isBuiltinCommand('/model claude-opus-5', 'line')).toBe(true);
+    });
+
     it('never treats a normal message as a command', () => {
       expect(isBuiltinCommand('hi', 'line')).toBe(false);
       expect(isBuiltinCommand('สวัสดี', 'line')).toBe(false);
       expect(isBuiltinCommand('', 'line')).toBe(false);
     });
 
-    it('does not match even telegram command syntax on the line channel', () => {
+    it('does not match commands LINE has no handler for', () => {
       expect(isBuiltinCommand('/session', 'line')).toBe(false);
       expect(isBuiltinCommand('/help', 'line')).toBe(false);
+    });
+  });
+
+  // ── Zero-command channel — regression for the empty-regex blocker ──────────
+  // buildRegex for a channel with no registered commands used to produce
+  // `new RegExp('')`, which matches EVERY string: all of that channel's
+  // messages were misrouted into the command handler and never reached the
+  // agent. The guard returns /(?!)/ (matches nothing) instead. LINE was the
+  // channel that exposed this; it has commands now, so Slack — which has none —
+  // is what keeps the guard covered.
+  describe('slack (no registered commands)', () => {
+    it('never treats a normal message as a command', () => {
+      expect(isBuiltinCommand('hi', 'slack')).toBe(false);
+      expect(isBuiltinCommand('', 'slack')).toBe(false);
+    });
+
+    it('does not match command syntax from other channels', () => {
+      expect(isBuiltinCommand('/session', 'slack')).toBe(false);
+      expect(isBuiltinCommand('/models', 'slack')).toBe(false);
     });
   });
 });

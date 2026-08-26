@@ -878,10 +878,12 @@ const BOT_COMMANDS = [
   { command: 'help', description: 'What this bot can do' },
 ]
 
-// Available AI models for /models command. Fallback only — the picker normally
-// uses the live list from the gateway (get_models); this is shown if that call
-// fails. Keep in sync with DEFAULT_MODELS (src/agent/runner.ts) and
-// config.template.json gateway.models.
+// Available AI models for /models command. Last-resort fallback: the picker
+// normally uses get_models, which itself resolves the live catalog and only
+// then falls back to config.json's gateway.models (issue #409). This copy is
+// reached only when the gateway call itself fails, so it is two fallbacks deep
+// and will drift — keep it roughly in step with DEFAULT_MODELS
+// (src/agent/runner.ts) and config.template.json gateway.models.
 const AVAILABLE_MODELS = [
   { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable[1m]' },
   { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus[1m]' },

@@ -21,6 +21,10 @@ async function postCallback(inbound: InboundMessage): Promise<void> {
     user: inbound.senderId,
     message_id: inbound.messageId ?? '',
     ts: new Date(inbound.ts).toISOString(),
+    // 'direct' | 'group'. The gateway gates agent-global commands on this:
+    // Discord's guild gate checks guild/channel/mention but never the user, so
+    // a command that changes state for every chat must be DM-only.
+    chat_type: inbound.chatType,
   };
 
   if (inbound.attachmentFileId) {
