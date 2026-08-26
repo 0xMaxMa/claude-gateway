@@ -10,6 +10,8 @@ import {
   makeSharedPromoter,
   ArchiveDB,
   findSimilarSharedNotes,
+  writeSharedNote,
+  sharedNoteExists,
   MAX_SHARED_NOTE_SIZE,
 } from '../../src/agent/knowledge';
 import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
@@ -339,15 +341,52 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
     }
   });
 
-  test('an instruction-shaped reason with no topic is skipped instead of becoming a note name', () => {
+  test('an instruction-shaped reason falls back to a content-derived name, keeping the fact', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
         reason: 'insert after cron config, before the pty_shell memory section',
-        content: 'Some prose that would otherwise have been stored under that name.',
+        content: 'Cron jobs default to allow_tools false, so bash and curl are blocked until set.',
+      });
+      // Named from the fact, not from the editing instruction.
+      expect(noteFiles(cfg)).toEqual([
+        'cron-jobs-default-to-allow_tools-false-so-bash-and-curl-are-blocked-until-set.md',
+      ]);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an instruction-shaped reason whose content has nothing nameable is skipped and logged', () => {
+    const cfg = tmpSharedCfg();
+    const skips: Array<Record<string, unknown> | undefined> = [];
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_msg, data) => skips.push(data),
+      })!;
+      promote({ reason: 'insert after the index section', content: 'it is on.' });
+      expect(noteFiles(cfg)).toEqual([]);
+      expect(skips).toHaveLength(1);
+      expect(skips[0]?.why).toBe('no-usable-name');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a skipped index-pointer promotion is reported, not silently dropped', () => {
+    const cfg = tmpSharedCfg();
+    const skips: Array<Record<string, unknown> | undefined> = [];
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_msg, data) => skips.push(data),
+      })!;
+      promote({
+        reason: 'feedback memories about testing',
+        content: '- [a.md](a.md) — one hook\n- [b.md](b.md) — another hook',
       });
       expect(noteFiles(cfg)).toEqual([]);
+      expect(skips[0]?.why).toBe('index-pointer-only');
     } finally {
       cleanup(cfg);
     }
@@ -362,6 +401,133 @@ describe('makeSharedPromoter — note identity (issue #398)', () => {
         content: 'Add-on billing is charged per seat, not per organization.',
       });
       expect(noteFiles(cfg)).toEqual(['add-on-billing-is-charged-per-seat.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+// ── issue #398 review follow-ups ───────────────────────────────────────────
+
+describe('makeSharedPromoter — graph edges below the merge bar (#398 review)', () => {
+  test('a NEW note still carries Related: links to notes in the 0.25-0.5 band', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'ci-runner-cannot-clean-workspace',
+        content:
+          'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
+          'job fails with a permission error on every pull request and needs manual intervention.',
+      });
+      indexSharedArchive(cfg);
+
+      promote({
+        reason: 'reset-docker-volume-permissions-before-release',
+        content:
+          'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
+          'release job cannot write its artifacts and the upload step reports an empty bundle.',
+      });
+
+      // Not merged (below 0.5) but related (above 0.25) — the new note must not
+      // land as a disconnected node in the knowledge graph.
+      expect(noteFiles(cfg).length).toBe(2);
+      const fresh = fs.readFileSync(
+        path.join(sharedNotesDir(cfg), 'reset-docker-volume-permissions-before-release.md'),
+        'utf8',
+      );
+      expect(fresh).toContain('[[ci-runner-cannot-clean-workspace]]');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — containment is scored against the whole note (#398 review)', () => {
+  test('a restatement still merges into a long note whose matched chunk alone would miss the bar', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // A long, much-merged note: the topical sentence sits far from the padding
+      // that FTS is most likely to surface as the matching chunk.
+      const padding = Array.from(
+        { length: 40 },
+        (_, i) => `Unrelated historical remark number ${i} about scheduling, dashboards and reporting cadence.`,
+      ).join('\n\n');
+      writeSharedNote(
+        cfg,
+        'incus-rolling-upgrade-blocked',
+        `${padding}\n\nAn incus rolling upgrade reports blocked while the cluster sits in a midstate; this is ` +
+          'expected and resolves once every member has been upgraded.',
+      );
+      indexSharedArchive(cfg);
+
+      promote({
+        reason: 'incus-upgrade-midstate-expected',
+        content:
+          'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
+          'member has been upgraded.',
+      });
+
+      expect(noteFiles(cfg)).toEqual(['incus-rolling-upgrade-blocked.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — retired notes (#398 review)', () => {
+  test('never merges a fresh fact into a stale__ note', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(
+        cfg,
+        'stale__incus-rolling-upgrade-blocked',
+        '<!-- staled 2026-08-01 (aged out, 0 retrievals) -->\n' +
+          'An incus rolling upgrade reports blocked while the cluster sits in a midstate; this is expected ' +
+          'and resolves once every member has been upgraded.',
+      );
+      indexSharedArchive(cfg);
+
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'incus-upgrade-midstate-expected',
+        content:
+          'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
+          'member has been upgraded.',
+      });
+
+      const files = noteFiles(cfg);
+      expect(files).toContain('incus-upgrade-midstate-expected.md');
+      const retired = fs.readFileSync(
+        path.join(sharedNotesDir(cfg), 'stale__incus-rolling-upgrade-blocked.md'),
+        'utf8',
+      );
+      expect(retired).not.toContain('stays blocked until every');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a recurrence of a RETIRED name folds the retired body back and removes the twin', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(
+        cfg,
+        'stale__deploy-runbook',
+        '<!-- staled 2026-08-01 (aged out, 0 retrievals) -->\nThe prod cluster runs in region eu-west.',
+      );
+      indexSharedArchive(cfg);
+
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({ topic: 'deploy-runbook', reason: 'r', content: 'Prod now also runs a warm standby in eu-north.' });
+
+      expect(sharedNoteExists(cfg, 'deploy-runbook')).toBe(true);
+      expect(sharedNoteExists(cfg, 'stale__deploy-runbook')).toBe(false);
+      const restored = fs.readFileSync(path.join(sharedNotesDir(cfg), 'deploy-runbook.md'), 'utf8');
+      expect(restored).toContain('region eu-west'); // retired knowledge preserved
+      expect(restored).toContain('warm standby in eu-north');
+      expect(restored).not.toContain('<!-- staled');
     } finally {
       cleanup(cfg);
     }

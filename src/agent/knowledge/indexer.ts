@@ -178,13 +178,7 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
       // straight past the block computation below left every note that predates
       // the lifecycle feature — or was simply never edited since — invisible to
       // the staleness GC forever. Seeded from mtime so real ages are preserved.
-      db.backfillLifecycle(
-        rel,
-        entryBlocksFor(opts.source, rel, content).map((b) => ({
-          entryHash: b.entryHash,
-          firstSeen: mtime,
-        })),
-      );
+      db.backfillLifecycle(rel, mtime, () => entryBlocksFor(opts.source, rel, content));
       continue;
     }
 

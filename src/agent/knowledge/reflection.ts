@@ -36,6 +36,12 @@ import { makeClaudeSpawn, type ClaudeSpawnFn } from '../skill-learning/reviewer'
 import type { ResolvedKnowledgeSharedCfg, ResolvedKnowledgeReflectionCfg } from './types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * Floor on the re-arm delay. `msUntilNextDailyTime` measures against the local
+ * clock, so a timer that fires a millisecond early yields a ~1ms delay and runs
+ * the slot twice; anything below this is treated as "this slot already ran".
+ */
+const MIN_RESCHEDULE_MS = 60_000;
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 /** Local-calendar parts of `now` in `timezone` (weekday index + ms into day). */
@@ -400,12 +406,19 @@ export class SharedReflectionManager {
       // configured weekday also runs the LLM consolidation, so weekly model
       // spend is unchanged while retrieval-driven restore drops from a
       // worst-case 7-day latency to 1 day.
-      const delay = msUntilNextDailyTime(hour, minute, timezone);
+      //
+      // The slot's own calendar day is decided HERE, from the target instant,
+      // not from whenever the timer happens to fire: a fire nudged across local
+      // midnight by a host suspend or an event-loop stall would otherwise skip
+      // consolidation for a further week. `MIN_RESCHEDULE_MS` covers the mirror
+      // case — a timer that fires a hair EARLY would compute a ~1ms delay and
+      // run the same slot twice, which is harmless for the GC but pays for a
+      // duplicate consolidation (issue #398 review).
+      const delay = Math.max(msUntilNextDailyTime(hour, minute, timezone), MIN_RESCHEDULE_MS);
+      const target = new Date(Date.now() + delay);
+      const consolidate = isConsolidationDay(dayOfWeek, timezone, target);
       this.timer = setTimeout(() => {
-        const firedAt = new Date();
-        void this.reflectOnce(firedAt.getTime(), {
-          consolidate: isConsolidationDay(dayOfWeek, timezone, firedAt),
-        }).catch(() => {
+        void this.reflectOnce(Date.now(), { consolidate }).catch(() => {
           /* best-effort */
         });
         schedule();

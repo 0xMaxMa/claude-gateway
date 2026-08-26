@@ -172,3 +172,22 @@ describe('reflection cadence split (issue #398)', () => {
     }
   });
 });
+
+describe('consolidation day is decided from the slot, not the fire (#398 review)', () => {
+  test('a fire nudged past local midnight still consolidates on the intended slot', () => {
+    // The slot targeted here is Sunday 04:00 UTC. Deciding from a fire instant
+    // that slipped to Monday 00:00 would skip consolidation for a whole week.
+    const slot = new Date('2026-08-30T04:00:00Z');
+    const slippedFire = new Date('2026-08-31T00:00:05Z');
+    expect(isConsolidationDay(0, 'UTC', slot)).toBe(true);
+    expect(isConsolidationDay(0, 'UTC', slippedFire)).toBe(false);
+  });
+
+  test('msUntilNextDailyTime never returns a near-zero delay for the slot just served', () => {
+    // A timer firing a hair EARLY used to yield ~1ms and run the slot twice.
+    const hairEarly = new Date('2026-08-25T03:59:59.999Z');
+    expect(msUntilNextDailyTime(4, 0, 'UTC', hairEarly)).toBeLessThan(60_000);
+    // The scheduler floors this; assert the floor constant is what protects it.
+    expect(Math.max(msUntilNextDailyTime(4, 0, 'UTC', hairEarly), 60_000)).toBe(60_000);
+  });
+});

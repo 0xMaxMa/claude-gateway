@@ -25,6 +25,7 @@ export interface StalenessConfig {
   minRetrievalKeep?: number;
   supersession?: boolean;
   recordRetrievals?: boolean;
+  maxInvalidationsPerRun?: number;
 }
 
 /** Fully-resolved staleness config (defaults applied, values sanitized). */
@@ -35,6 +36,15 @@ export interface ResolvedStalenessCfg {
   minRetrievalKeep: number;
   supersession: boolean;
   recordRetrievals: boolean;
+  /**
+   * Ceiling on how many entries ONE run may soft-invalidate (issue #398 review).
+   * Ages are wall-clock, so the first run after any change that widens what the
+   * GC can see — such as backfilling lifecycle rows for previously invisible
+   * sources — would otherwise relocate every already-expired entry at once.
+   * Restores (promote-back) are never capped: they only ever undo an earlier
+   * invalidation. `0` disables invalidation entirely.
+   */
+  maxInvalidationsPerRun: number;
 }
 
 /** Partial config as it appears under `gateway.dreaming` / a per-agent override. */

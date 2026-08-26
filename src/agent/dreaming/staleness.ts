@@ -72,7 +72,12 @@ const ZERO: StalenessResult = {
  */
 export function decideStaleness(
   rows: LifecycleRow[],
-  cfg: { staleTtlDays: number; keepImportance: number; minRetrievalKeep: number },
+  cfg: {
+    staleTtlDays: number;
+    keepImportance: number;
+    minRetrievalKeep: number;
+    maxInvalidationsPerRun?: number;
+  },
   now: number,
   isEligiblePath: (path: string) => boolean = isArchiveTierPath,
 ): { invalidate: LifecycleRow[]; promote: LifecycleRow[] } {
@@ -92,6 +97,16 @@ export function decideStaleness(
     } else if (r.lastRetrieved != null && r.lastRetrieved > r.invalidAt) {
       promote.push(r);
     }
+  }
+  // Cap what ONE run may retire (issue #398 review): aging is wall-clock driven,
+  // so the first run after the GC's visibility widens would otherwise relocate
+  // every already-expired entry in a single night. Oldest-idle first, so the cap
+  // defers the freshest candidates rather than an arbitrary slice. Restores are
+  // never capped — they only undo an earlier invalidation.
+  const cap = cfg.maxInvalidationsPerRun;
+  if (cap !== undefined && invalidate.length > cap) {
+    invalidate.sort((a, b) => (a.lastRetrieved ?? a.firstSeen) - (b.lastRetrieved ?? b.firstSeen));
+    invalidate.length = cap;
   }
   return { invalidate, promote };
 }

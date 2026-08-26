@@ -1,10 +1,18 @@
-import { writeSharedNote, sharedNoteExists, readSharedNote, MAX_SHARED_NOTE_SIZE } from './shared-writer';
+import {
+  writeSharedNote,
+  sharedNoteExists,
+  readSharedNote,
+  deleteSharedNoteFile,
+  MAX_SHARED_NOTE_SIZE,
+} from './shared-writer';
 import {
   findSimilarSharedNotes,
   filterNearDuplicates,
   buildSeedText,
+  significantTokens,
   MIN_RELATED_CONTAINMENT,
 } from './shared-dedup';
+import { STALE_NOTE_PREFIX } from './shared-staleness';
 import { resolveSharedConfig } from './config';
 import type { KnowledgeSharedConfig } from './types';
 
@@ -34,9 +42,15 @@ export function mergeIntoNote(existing: string, addition: string, relatedNames: 
  * once a merge would cross the cap the note is left as-is (best-effort: a
  * skipped promotion never fails the local dream, same as any other error here).
  */
-export function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: string, content: string): boolean {
-  if (content.length > MAX_SHARED_NOTE_SIZE) return false;
-  writeSharedNote(cfg, name, content);
+export function writeCapped(
+  cfg: Parameters<typeof writeSharedNote>[0],
+  name: string,
+  content: string,
+  relatedNames: string[] = [],
+): boolean {
+  const body = relatedNames.length ? mergeIntoNote('', content, relatedNames) : content;
+  if (body.length > MAX_SHARED_NOTE_SIZE) return false;
+  writeSharedNote(cfg, name, body);
   return true;
 }
 
@@ -91,6 +105,27 @@ export function isInstructionShapedName(name: string): boolean {
 }
 
 /**
+ * A note name derived from the fact itself — the fallback when the proposal has
+ * no `topic` and its `reason` reads as an editing instruction.
+ *
+ * Dropping such a promotion outright (the first cut of issue #398) silently lost
+ * genuine facts whose reason merely happened to start with an edit verb, e.g.
+ * "Update the deploy section after the API change". Naming from the content
+ * keeps the fact; only content with nothing nameable in it is given up on.
+ */
+export function deriveNameFromContent(content: string): string | undefined {
+  const firstSentence = content
+    .replace(/^[\s>*-]+/, '')
+    .replace(/`+/g, '')
+    .split(/(?<=[.!?])\s|\n/)[0]
+    ?.trim();
+  if (!firstSentence) return undefined;
+  const name = firstSentence.slice(0, 80).trim();
+  // Needs real topic words, not just scaffolding, to be a usable identity.
+  return significantTokens(name).size >= 3 ? name : undefined;
+}
+
+/**
  * Build the per-agent→shared promotion function used after the dreaming applier
  * writes an `add` to local memory (K3↔K4). Returns `undefined` when the shared
  * KB is disabled or in `propose` (dry-run) mode — callers then skip promotion.
@@ -118,27 +153,47 @@ export function isInstructionShapedName(name: string): boolean {
 export function makeSharedPromoter(
   // Kept for call-site compatibility (src/index.ts, gateway-router.ts) though no
   // longer used for naming — issue #386 moved note identity off the agent id, and
-  // issue #398 moved it to the proposal's `topic` slug (falling back to `reason`),
-  // so a recurring fact maps to the same shared note whichever agent dreamed it.
+  // issue #398 moved it to the proposal's `topic` slug (falling back to `reason`,
+  // then to the fact itself), so a recurring fact maps to the same shared note
+  // whichever agent dreamed it.
   _agentId: string,
   agentCfg: KnowledgeSharedConfig | undefined,
   globalCfg: KnowledgeSharedConfig | undefined,
+  // Promotion can decline for several reasons and used to do so in total silence,
+  // which made "why did the shared vault stop growing?" undiagnosable from the
+  // outside (issue #398 review). Optional so existing call sites keep working.
+  logger?: { info: (msg: string, data?: Record<string, unknown>) => void },
 ): ((p: { reason: string; content?: string; topic?: string }) => void) | undefined {
   const sharedCfg = resolveSharedConfig(agentCfg, globalCfg);
   if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
+  const skip = (why: string, data: Record<string, unknown> = {}): void => {
+    logger?.info('shared promotion skipped', { agentId: _agentId, why, ...data });
+  };
   return (p: { reason: string; content?: string; topic?: string }) => {
     const content = (p.content ?? '').trim();
-    // A durable proposal may carry an explicit `topic` slug (mirroring the
-    // episodic contract) — a far more stable note identity than a free-form
-    // reason, which the reviewer prompt never asked to be a name.
-    const name = (p.topic ?? '').trim() || p.reason.trim();
-    if (!content || !name) return;
+    if (!content) return;
 
-    // An index pointer is a per-agent navigation aid, not a shareable fact.
-    if (isIndexPointerOnly(content)) return;
-    // A name that reads as an edit instruction would create a note no future
-    // occurrence of the same fact can ever match. Skipping beats writing junk.
-    if (!p.topic && isInstructionShapedName(name)) return;
+    // An index pointer is a per-agent navigation aid, not a shareable fact: its
+    // links resolve only inside the promoting agent's own workspace.
+    if (isIndexPointerOnly(content)) {
+      skip('index-pointer-only', { reason: p.reason });
+      return;
+    }
+
+    // Identity, best first: an explicit `topic` slug (mirroring the episodic
+    // contract), then the free-form `reason`, then the fact itself. A reason that
+    // reads as an editing instruction would produce a note name no later
+    // occurrence of the same fact could match, so it is passed over — but the
+    // fact is still promoted under a content-derived name.
+    const explicit = (p.topic ?? '').trim();
+    const reason = p.reason.trim();
+    const name =
+      explicit ||
+      (reason && !isInstructionShapedName(reason) ? reason : deriveNameFromContent(content));
+    if (!name) {
+      skip('no-usable-name', { reason: p.reason });
+      return;
+    }
 
     try {
       // Same name recurred: this IS the same fact — update it, never duplicate.
@@ -153,16 +208,29 @@ export function makeSharedPromoter(
       // whether an UNATTENDED merge is justified. Below the bar the fact gets
       // its own note — two notes are recoverable, two unrelated facts fused
       // into one are not (issue #398).
+      //
+      // Retired (`stale__*`) notes are excluded as targets: they are indexed
+      // like any other file, and merging a fresh fact into one would write it
+      // straight into the set the GC has already moved out of the active vault.
       const seed = buildSeedText(name, content);
-      const candidates = findSimilarSharedNotes(sharedCfg, seed, 3);
-      const mergeable = filterNearDuplicates(seed, candidates);
+      const candidates = findSimilarSharedNotes(sharedCfg, seed, 3).filter(
+        (c) => !c.name.startsWith(STALE_NOTE_PREFIX),
+      );
+      // Score against each candidate's FULL body, not the matched chunk: a long
+      // note that a recurring topic has merged into spreads the seed across
+      // chunks and would score far below its real containment.
+      const bodyOf = (c: { name: string }): string => readSharedNote(sharedCfg, c.name) ?? '';
+      const mergeable = filterNearDuplicates(seed, candidates, undefined, bodyOf);
+      // Wikilinks clear a LOWER bar than merges: a link is an additive "these
+      // are related" claim, while a merge asserts they are the same fact and
+      // destroys the distinction. Computed for BOTH outcomes — a new note that
+      // has related neighbours must still carry its edges, or the graph gains a
+      // disconnected node exactly in the 0.25–0.5 band (issue #398 review).
+      const linkable = filterNearDuplicates(seed, candidates, MIN_RELATED_CONTAINMENT, bodyOf);
+
       if (mergeable.length > 0) {
         const primary = mergeable[0];
-        // Wikilinks use the LOWER bar: a link is an additive "these are related"
-        // claim, unlike a merge, so it is worth making on weaker evidence.
-        const related = filterNearDuplicates(seed, candidates, MIN_RELATED_CONTAINMENT).filter(
-          (c) => c.name !== primary.name,
-        );
+        const related = linkable.filter((c) => c.name !== primary.name);
         const existing = readSharedNote(sharedCfg, primary.name) ?? '';
         writeCapped(
           sharedCfg,
@@ -172,7 +240,18 @@ export function makeSharedPromoter(
         return;
       }
 
-      writeCapped(sharedCfg, name, content);
+      // Creating fresh. If this exact name was retired earlier, the recurrence IS
+      // the promote-back signal: fold the retired body back in and drop the
+      // `stale__` twin. Leaving it would strand that copy forever (the GC's
+      // restore refuses once the active name exists again) AND leave two files
+      // sharing one `entry_hash`, whose single lifecycle row's `path` would then
+      // flip between them on every index pass.
+      const staleTwin = `${STALE_NOTE_PREFIX}${name}`;
+      const retired = sharedNoteExists(sharedCfg, staleTwin) ? readSharedNote(sharedCfg, staleTwin) : null;
+      const body = retired ? mergeIntoNote(retired.replace(/^<!--.*-->\s*/, ''), content) : content;
+      if (writeCapped(sharedCfg, name, body, linkable.map((r) => r.name)) && retired) {
+        deleteSharedNoteFile(sharedCfg, staleTwin);
+      }
     } catch {
       /* best-effort — a promotion failure never affects the local dream */
     }

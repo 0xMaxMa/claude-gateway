@@ -16,6 +16,7 @@ import { CronScheduler } from '../cron/scheduler';
 import { CronManager } from '../cron/manager';
 import { generateDashboardHtml, generateLoginHtml } from '../ui/web-ui';
 import { resolveSharedConfig, sharedVaultDir, buildGraphModel, demoGraphModel, demoGraphModelSized, readVaultPages, makeSharedPromoter } from '../agent/knowledge';
+import { createLogger } from '../logger';
 import { parseDreamReport } from '../agent/dreaming/report';
 import { acceptDreamProposals } from '../agent/dreaming/accept';
 import { resolveMemoryBudget } from '../agent/workspace-loader';
@@ -1174,6 +1175,7 @@ export class GatewayRouter {
           agentId,
           this.configs.get(agentId)?.knowledge?.shared,
           this.gatewayConfig?.gateway?.knowledge?.shared,
+          createLogger(agentId, this.gatewayConfig?.gateway?.logDir ?? '/tmp'),
         );
 
         const result = acceptDreamProposals(workspaceDir, ts, indexes, {

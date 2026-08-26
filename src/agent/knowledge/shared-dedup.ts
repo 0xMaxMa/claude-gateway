@@ -118,14 +118,24 @@ export const MIN_MERGE_CONTAINMENT = 0.5;
  */
 export const MIN_RELATED_CONTAINMENT = 0.25;
 
-/** Candidates that clear `minContainment` against the seed, best first. */
+/**
+ * Candidates that clear `minContainment` against the seed, best first.
+ *
+ * `resolveText` decides WHAT the candidate is scored against. It defaults to the
+ * FTS snippet, but callers that can read the note should pass its full body: a
+ * snippet is one 500-char chunk, so an established note that a recurring topic
+ * has merged into for months spreads the seed's tokens across several chunks and
+ * scores far below its true containment — turning the bar into "much stricter
+ * than 0.5" for exactly the notes that most need to match (issue #398 review).
+ */
 export function filterNearDuplicates(
   seedText: string,
   candidates: SimilarSharedNote[],
   minContainment = MIN_MERGE_CONTAINMENT,
+  resolveText: (c: SimilarSharedNote) => string = (c) => c.snippet,
 ): SimilarSharedNote[] {
   return candidates
-    .map((c) => ({ c, score: containmentScore(seedText, c.snippet) }))
+    .map((c) => ({ c, score: containmentScore(seedText, resolveText(c)) }))
     .filter((x) => x.score >= minContainment)
     .sort((x, y) => y.score - x.score)
     .map((x) => x.c);

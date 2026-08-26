@@ -291,3 +291,62 @@ describe('lifecycle backfill stays cheap on repeat passes (issue #398)', () => {
     }
   });
 });
+
+describe('one run cannot retire the whole vault (#398 review)', () => {
+  test('invalidations are capped per run, oldest-idle first, and resume next run', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const old = Date.now() - 200 * DAY;
+      for (let i = 0; i < 5; i++) {
+        writeSharedNote(cfg, `aged-${i}`, `An expired operational fact number ${i} nobody reads.`);
+        const f = path.join(sharedNotesDir(cfg), `aged-${i}.md`);
+        // aged-0 is the oldest, aged-4 the freshest.
+        const t = (old - (5 - i) * DAY) / 1000;
+        fs.utimesSync(f, t, t);
+      }
+      indexSharedArchive(cfg);
+
+      const capped = { ...STALENESS_DEFAULTS, staleTtlDays: 90, maxInvalidationsPerRun: 2 };
+      const first = runSharedStalenessGc(cfg, capped);
+      expect(first.invalidated).toBe(2);
+      // Oldest-idle first: the cap defers the freshest, it does not slice arbitrarily.
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}aged-0`)).toBe(true);
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}aged-1`)).toBe(true);
+      expect(sharedNoteExists(cfg, 'aged-4')).toBe(true);
+
+      const second = runSharedStalenessGc(cfg, capped);
+      expect(second.invalidated).toBe(2); // the rest resume on later runs
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('backfill guard compares hashes, not row counts (#398 review)', () => {
+  test('a path with rows left over from earlier versions still gets its CURRENT block backfilled', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'evolving-note', 'First version of this operational fact.');
+      indexSharedArchive(cfg);
+      writeSharedNote(cfg, 'evolving-note', 'Second and quite different version of this operational fact.');
+      indexSharedArchive(cfg);
+
+      // Two rows now exist for the path (replaceSource never deletes the old
+      // one). Drop ONLY the current version's row: a count-based guard would see
+      // 1 row >= 1 block and wrongly skip the backfill.
+      const current = entryHash('Second and quite different version of this operational fact.');
+      ArchiveDB.evict(sharedDbPath(cfg));
+      const handle = new DatabaseSync(sharedDbPath(cfg));
+      handle.prepare('DELETE FROM kb_entry_lifecycle WHERE entry_hash = ?').run(current);
+      const before = handle.prepare('SELECT COUNT(*) AS c FROM kb_entry_lifecycle').get() as { c: number };
+      handle.close();
+      expect(before.c).toBeGreaterThan(0); // stale rows remain, so a count guard would pass
+
+      indexSharedArchive(cfg);
+
+      expect(db(cfg).listLifecycle().some((r) => r.entryHash === current)).toBe(true);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
