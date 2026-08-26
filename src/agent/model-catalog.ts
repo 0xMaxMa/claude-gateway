@@ -53,21 +53,22 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 interface CatalogCache {
   models: ModelConfig[];
   fetchedAt: number;
+  key: string;
 }
 
 let cache: CatalogCache | null = null;
 /** In-flight fetch, so N concurrent callers make one request, not N. */
 let inFlight: Promise<ModelConfig[] | null> | null = null;
+let inFlightKey: string | null = null;
 let warnedInsecureUrl = false;
 
 /** Reset module state. Tests only — each case needs a clean cache. */
 export function resetModelCatalogCache(): void {
   cache = null;
   inFlight = null;
+  inFlightKey = null;
   warnedInsecureUrl = false;
 }
-
-// ── configuration ───────────────────────────────────────────────────────────
 
 // Parsed `env` block of the Claude Code CLI config. The CLI applies that block
 // internally rather than to the OS environment, so a value set only there is
@@ -184,11 +185,12 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
     const r = row as { id?: unknown; model_id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; token_multiplier?: unknown; kind?: unknown; type?: unknown };
-    const idValue = typeof r.id === 'string' ? r.id : r.model_id;
-    const id = typeof idValue === 'string' ? idValue.trim() : '';
+    // Prefer a non-empty trimmed `id`; older proxies use `model_id` instead.
+    // Do not let a blank/whitespace `id` mask a usable fallback field.
+    const primaryId = typeof r.id === 'string' ? r.id.trim() : '';
+    const fallbackId = typeof r.model_id === 'string' ? r.model_id.trim() : '';
+    const id = primaryId || fallbackId;
     if (!id) continue;
-    usableCount++;
-    if (seen.has(id)) continue;
     // A proxy that fronts image generation alongside chat may serve one
     // catalog for both — the image tool asks for its half with
     // `/v1/models?kind=image`. An image model in the chat picker is selectable
@@ -199,17 +201,22 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
     // sent because this repo has no way to know the proxy's chat kind value,
     // and guessing one risks an empty catalog on every deployment.
     const kind = [r.kind, r.type].find((v) => typeof v === 'string' && v.trim());
-    if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.toLowerCase())) continue;
+    if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.trim().toLowerCase())) continue;
     usableCount++;
+    if (seen.has(id)) continue;
     seen.add(id);
     const staticEntry = known.get(id);
     if (staticEntry) continue;
     liveCount++;
 
     const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim()) ?? id;
-    const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && v > 0);
-    const multiplierValue = typeof r.multiplier === 'number' ? r.multiplier : r.token_multiplier;
-    const multiplier = typeof multiplierValue === 'number' ? multiplierValue : undefined;
+    const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    const multiplierValue = typeof r.multiplier === 'number' && Number.isFinite(r.multiplier)
+      ? r.multiplier
+      : r.token_multiplier;
+    const multiplier = typeof multiplierValue === 'number' && Number.isFinite(multiplierValue) && multiplierValue > 0
+      ? multiplierValue
+      : undefined;
 
     models.push({
       id,
@@ -241,14 +248,15 @@ export async function fetchModelCatalog(
   fallback: ModelConfig[],
   now: number = Date.now(),
 ): Promise<ModelConfig[] | null> {
-  if (cache && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
-  if (inFlight) return inFlight;
+  const base = catalogBaseUrl();
+  const key = `${base} ${JSON.stringify(fallback)}`;
+  if (cache && cache.key === key && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
+  if (inFlight && inFlightKey === key) return inFlight;
 
   // A catalog that is merely stale is still better than the static list, but
   // only while a fetch is actually failing — a successful one below replaces it.
-  const stale = cache && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
+  const stale = cache && cache.key === key && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
 
-  const base = catalogBaseUrl();
   if (!base) return null; // standalone deployment — static list is the catalog
 
   if (!baseUrlIsSecure(base)) {
@@ -262,6 +270,7 @@ export async function fetchModelCatalog(
     return null;
   }
 
+  inFlightKey = key;
   inFlight = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -277,12 +286,13 @@ export async function fetchModelCatalog(
       // Only a usable catalog is cached, and the cache stamp uses the same
       // clock the TTL check above read. Caching a failure would pin the
       // fallback for a full TTL after one blip.
-      if (parsed) cache = { models: parsed, fetchedAt: now };
+      if (parsed) cache = { models: parsed, fetchedAt: now, key };
       return parsed ?? stale;
     } catch {
       return stale; // unreachable, timed out, or unparseable
     } finally {
       inFlight = null;
+      inFlightKey = null;
     }
   })();
   return inFlight;
