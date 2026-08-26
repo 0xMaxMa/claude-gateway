@@ -837,10 +837,14 @@ async function main(): Promise<void> {
   console.log(`[gateway] Listening on port ${PORT}`);
 
   // Write the pidfile so the CLI can detect a foreground gateway (and SIGTERM it
-  // for `gateway stop/restart`). Best-effort — never fail boot over it.
+  // for `gateway stop/restart`). The listening port goes on the second line:
+  // $PORT lives in the shell that launched the server, so a CLI run from
+  // anywhere else cannot otherwise learn where to reach it. The real bound port
+  // is used rather than the requested one, which is 0 when the OS picks.
+  // Best-effort — never fail boot over it.
   try {
     fs.mkdirSync(path.dirname(PIDFILE_PATH), { recursive: true });
-    fs.writeFileSync(PIDFILE_PATH, String(process.pid));
+    fs.writeFileSync(PIDFILE_PATH, `${process.pid}\n${router.listeningPort() ?? PORT}\n`);
   } catch (e) {
     globalLogger.warn?.('Could not write pidfile', { path: PIDFILE_PATH, error: (e as Error).message });
   }

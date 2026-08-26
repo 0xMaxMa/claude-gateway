@@ -10,7 +10,7 @@ jest.mock('../../src/packages/registry', () => ({
   runNativeUpdate: jest.fn(),
   updateAvailable: jest.requireActual('../../src/packages/registry').updateAvailable,
 }));
-jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(() => 'systemd-user'), localGatewayIsLive: () => true }));
+jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(() => 'systemd-user'), readLocalGateway: () => ({ pid: 1 }) }));
 
 import {
   resolveCurrent,

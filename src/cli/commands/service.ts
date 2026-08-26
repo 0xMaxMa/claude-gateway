@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { createRl, ask, printFilePreview } from '../prompt';
+import { probeHealth } from '../health';
 import { printJson } from '../output';
 
 /**
@@ -220,18 +221,7 @@ async function confirm(
 async function waitForHealth(config: CliConfigView, flags: Record<string, string | boolean>): Promise<boolean> {
   const baseUrl = resolveLocalUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
   for (let attempt = 0; attempt < HEALTH_ATTEMPTS; attempt++) {
-    const controller = new AbortController();
-    // Cleared in `finally`: while the service is still starting every probe
-    // rejects, and a skipped clearTimeout would leak one timer per attempt.
-    const timer = setTimeout(() => controller.abort(), 2000);
-    try {
-      const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-      if (res.ok) return true;
-    } catch {
-      /* not up yet */
-    } finally {
-      clearTimeout(timer);
-    }
+    if ((await probeHealth(baseUrl, 2000)).ok) return true;
     await new Promise((resolve) => setTimeout(resolve, HEALTH_INTERVAL_MS));
   }
   return false;

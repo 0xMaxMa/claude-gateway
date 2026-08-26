@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { ApiKey } from '../types';
-import { localGatewayIsLive } from './manager';
+import { readLocalGateway, LocalGateway } from './manager';
 
 /**
  * CLI HTTP client — resolves where to talk to the gateway and which key to use,
@@ -64,13 +64,23 @@ export interface ResolveInputs {
   /** process.env (injectable for tests). */
   env?: NodeJS.ProcessEnv;
   config?: CliConfigView;
-  /** Is a gateway process alive on this host? Injectable for tests; defaults
-   *  to the pidfile check in `manager.ts`. */
-  localIsLive?: () => boolean;
+  /** The gateway process running on this host (with the port it listens on),
+   *  or null when there is none. Injectable for tests; defaults to the pidfile
+   *  read in `manager.ts`. */
+  localGateway?: () => LocalGateway | null;
+}
+
+/** Where a command will be sent, and where to retry if that address is dead. */
+export interface UrlPlan {
+  baseUrl: string;
+  /** A second address for the *same* gateway, tried once when `baseUrl` cannot
+   *  be reached at all. Absent when there is no second address, or when the
+   *  caller named one explicitly. */
+  fallbackUrl?: string;
 }
 
 /**
- * Resolve the base URL of the gateway. Precedence:
+ * Resolve where the CLI should talk to the gateway. Precedence:
  *   --url  →  $CLAUDE_GATEWAY_URL  →  http://<bind>:<port> *when a gateway is
  *   running on this host*  →  config.gateway.publicUrl  →  http://<bind>:<port>
  *
@@ -83,30 +93,51 @@ export interface ResolveInputs {
  * local gateway wins; `--url` and `$CLAUDE_GATEWAY_URL` still override, for
  * deliberately exercising the proxy path or reaching another host.
  *
+ * Liveness comes from a pidfile, which can lie: a gateway killed without
+ * cleanup leaves one behind, and the OS may reissue that pid to an unrelated
+ * process. The local address would then be preferred and nothing would answer
+ * it, so `publicUrl` is returned as `fallbackUrl` — the same gateway by its
+ * other name — for the caller to retry once. That cost is paid only when the
+ * local address is genuinely unreachable.
+ *
  * A bind of 0.0.0.0 / :: is a listen address, not a dial address, so it is
- * rewritten to loopback for the client. Port comes from $PORT (default 10850).
- * The returned URL has no trailing slash.
+ * rewritten to loopback for the client. The port comes from the pidfile when a
+ * gateway is running (see readLocalGateway), else $PORT, else 10850. The
+ * returned URLs have no trailing slash.
  */
-export function resolveUrl(i: ResolveInputs = {}): string {
+export function resolveUrlPlan(i: ResolveInputs = {}): UrlPlan {
   const env = i.env ?? process.env;
   const cfg = i.config ?? {};
   const explicit = i.flagUrl || env.CLAUDE_GATEWAY_URL;
-  let url: string;
-  if (explicit) {
-    url = explicit;
-  } else if (cfg.publicUrl && !(i.localIsLive ?? localGatewayIsLive)()) {
-    url = cfg.publicUrl;
-  } else {
-    url = bindUrl(cfg, env);
-  }
+  // An address the caller named is the address used, with no second guess:
+  // silently retrying somewhere else would defeat the point of naming it.
+  if (explicit) return { baseUrl: stripSlash(explicit) };
+
+  const publicUrl = cfg.publicUrl ? stripSlash(cfg.publicUrl) : undefined;
+  const local = (i.localGateway ?? readLocalGateway)();
+  if (!local) return { baseUrl: publicUrl ?? bindUrl(cfg, env) };
+
+  const baseUrl = bindUrl(cfg, env, local.port);
+  return publicUrl && publicUrl !== baseUrl ? { baseUrl, fallbackUrl: publicUrl } : { baseUrl };
+}
+
+/** The base URL alone — see resolveUrlPlan() for the precedence and why. */
+export function resolveUrl(i: ResolveInputs = {}): string {
+  return resolveUrlPlan(i).baseUrl;
+}
+
+function stripSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
-/** `http://<bind>:<port>` — where a gateway on THIS host actually listens. */
-function bindUrl(cfg: CliConfigView, env: NodeJS.ProcessEnv): string {
+/** `http://<bind>:<port>` — where a gateway on THIS host actually listens.
+ *  `knownPort` is the port a running gateway reported through its pidfile; it
+ *  wins over `$PORT`, which describes the CLI's own shell and may have nothing
+ *  to do with the shell the server was started from. */
+function bindUrl(cfg: CliConfigView, env: NodeJS.ProcessEnv, knownPort?: number): string {
   let host = cfg.bind || '127.0.0.1';
   if (host === '0.0.0.0' || host === '::' || host === '[::]') host = '127.0.0.1';
-  const port = parseInt(env.PORT || String(DEFAULT_PORT), 10) || DEFAULT_PORT;
+  const port = knownPort ?? (parseInt(env.PORT || String(DEFAULT_PORT), 10) || DEFAULT_PORT);
   return `http://${host}:${port}`;
 }
 
@@ -124,8 +155,9 @@ function bindUrl(cfg: CliConfigView, env: NodeJS.ProcessEnv): string {
  */
 export function resolveLocalUrl(i: ResolveInputs = {}): string {
   const env = i.env ?? process.env;
-  const url = i.flagUrl || bindUrl(i.config ?? {}, env);
-  return url.replace(/\/+$/, '');
+  if (i.flagUrl) return stripSlash(i.flagUrl);
+  const local = (i.localGateway ?? readLocalGateway)();
+  return stripSlash(bindUrl(i.config ?? {}, env, local?.port));
 }
 
 /**
@@ -155,6 +187,20 @@ export interface RequestOptions {
   body?: unknown;
   /** Abort the request after this many ms (default 30000). */
   timeoutMs?: number;
+  /** A second address for the same gateway, tried once when `baseUrl` cannot be
+   *  reached at all (see resolveUrlPlan). An HTTP error is never retried — the
+   *  gateway answered, and repeating the call elsewhere would hide that. */
+  fallbackBaseUrl?: string;
+  /** Called before the retry, so the switch is never silent. Injectable for
+   *  tests; defaults to a one-line note on stderr. */
+  onFallback?: (from: string, to: string, reason: string) => void;
+}
+
+/** A request that never reached a server (DNS, refused, timeout) — as opposed
+ *  to one the gateway answered with an error status. Only the former is worth
+ *  retrying at a different address. */
+class TransportError extends Error {
+  readonly transport = true;
 }
 
 export interface RequestResult {
@@ -186,7 +232,23 @@ export function buildRequestUrl(baseUrl: string, apiPath: string, query?: Record
  * so command wrappers can surface it and exit non-zero.
  */
 export async function request(opts: RequestOptions): Promise<RequestResult> {
-  const url = buildRequestUrl(opts.baseUrl, opts.path, opts.query);
+  try {
+    return await attempt(opts.baseUrl, opts);
+  } catch (err) {
+    if (!opts.fallbackBaseUrl || !(err instanceof TransportError)) throw err;
+    const notify =
+      opts.onFallback ??
+      ((from, to, reason) =>
+        process.stderr.write(`Cannot reach the gateway at ${from} (${reason}); retrying at ${to}.\n`));
+    notify(opts.baseUrl, opts.fallbackBaseUrl, (err as Error).message);
+    return attempt(opts.fallbackBaseUrl, opts);
+  }
+}
+
+/** One request against one base URL. Throws TransportError when nothing
+ *  answered, a plain Error when the gateway answered with a non-2xx. */
+async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestResult> {
+  const url = buildRequestUrl(baseUrl, opts.path, opts.query);
   const headers: Record<string, string> = {};
   if (opts.key) headers['Authorization'] = `Bearer ${opts.key}`;
   const hasBody = opts.body !== undefined && opts.method.toUpperCase() !== 'GET';
@@ -205,7 +267,7 @@ export async function request(opts: RequestOptions): Promise<RequestResult> {
   } catch (err) {
     clearTimeout(timer);
     const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${opts.timeoutMs ?? 30_000}ms` : (err as Error).message;
-    throw new Error(`Cannot reach gateway at ${opts.baseUrl}: ${reason}`);
+    throw new TransportError(`Cannot reach gateway at ${baseUrl}: ${reason}`);
   }
   clearTimeout(timer);
 

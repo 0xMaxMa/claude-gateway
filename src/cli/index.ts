@@ -2,7 +2,7 @@ import * as path from 'path';
 import { parseCliArgs } from './args';
 import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
-import { loadCliConfig, resolveUrl, resolveKey, request, CliConfigView } from './http-client';
+import { loadCliConfig, resolveUrlPlan, resolveKey, request, CliConfigView } from './http-client';
 import { printResult } from './output';
 import { paletteFor, Paint } from './colors';
 import { runGatewayLifecycle } from './commands/gateway';
@@ -159,12 +159,13 @@ async function runResourceCommand(
     return 1;
   }
 
-  const baseUrl = resolveUrl({ flagUrl: strFlag(flags.url), env: process.env, config });
+  const { baseUrl, fallbackUrl } = resolveUrlPlan({ flagUrl: strFlag(flags.url), env: process.env, config });
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
   const result = await request({
     method: cmd.method,
     path: apiPath,
     baseUrl,
+    fallbackBaseUrl: fallbackUrl,
     key,
     query,
     body: cmd.method === 'GET' ? undefined : body,
@@ -197,9 +198,9 @@ async function runApiPassthrough(
       return 1;
     }
   }
-  const baseUrl = resolveUrl({ flagUrl: strFlag(flags.url), env: process.env, config });
+  const { baseUrl, fallbackUrl } = resolveUrlPlan({ flagUrl: strFlag(flags.url), env: process.env, config });
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
-  const result = await request({ method, path: apiPath, baseUrl, key, body });
+  const result = await request({ method, path: apiPath, baseUrl, fallbackBaseUrl: fallbackUrl, key, body });
   printResult(result.data, flags.json === true);
   return 0;
 }
@@ -231,10 +232,15 @@ function usageFor(c: GeneratedCommand): string {
 /** Two-column rows in the general help. The name column is padded to
  *  NAME_W; a name wider than that puts its description on the next line.
  *  Wide enough for the longest name (`service install|status|uninstall`, 32)
- *  plus a readable gap, so no core command wraps. */
-const NAME_W = 36;
+ *  plus a readable gap, so no core command wraps. Exported for the test that
+ *  holds this table and the dispatcher to the same set of commands. */
+export const NAME_W = 36;
 
-const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
+/** Usage strings in a resource noun's help (`crons list --limit <v>`) run much
+ *  longer than a core command name, so that listing gets its own width. */
+export const NOUN_NAME_W = 48;
+
+export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['gateway status|restart|stop', 'Manage the gateway process (manager-aware)'],
   ['service install|status|uninstall', 'Run the gateway as a systemd-user or PM2 service'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
@@ -248,10 +254,13 @@ const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /** Render one `  name   description` row, padding before colouring so ANSI
- *  escapes never count toward the column width. */
-function helpRow(name: string, desc: string, paint: Paint): string[] {
-  if (name.length > NAME_W) return [`  ${paint(name)}`, `  ${' '.repeat(NAME_W)}${desc}`];
-  return [`  ${paint(name.padEnd(NAME_W))}${desc}`];
+ *  escapes never count toward the column width. A name at or past `width` puts
+ *  its description on the next line, aligned with the others, rather than
+ *  pushing it out of the column — which is what the two-line form is for.
+ *  Shared by every help listing so they cannot drift apart. */
+export function helpRow(name: string, desc: string, paint: Paint, width = NAME_W): string[] {
+  if (name.length >= width) return [`  ${paint(name)}`, `  ${' '.repeat(width)}${desc}`];
+  return [`  ${paint(name.padEnd(width))}${desc}`];
 }
 
 function printGeneralHelp(): void {
@@ -290,8 +299,7 @@ function printNounHelp(noun: string): void {
   const cmds = GENERATED_COMMANDS.filter((c) => c.noun === noun);
   const p = paletteFor(process.stderr);
   const lines = [`${p.bold('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
-  // Pad before colouring so escape codes never count toward the column width.
-  for (const c of cmds) lines.push(`  ${p.cyan(usageFor(c).padEnd(48))} ${c.summary}`);
+  for (const c of cmds) lines.push(...helpRow(usageFor(c), c.summary, p.cyan, NOUN_NAME_W));
   process.stderr.write(lines.join('\n') + '\n');
 }
 

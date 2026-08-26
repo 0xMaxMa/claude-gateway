@@ -103,6 +103,18 @@ writes on boot, a file read and a signal-0 — no subprocess), the local bind wi
 \`publicUrl\`. \`--url\` and \`$CLAUDE_GATEWAY_URL\` still override, for deliberately exercising the
 proxy path or reaching another host.
 
+The port comes from that same pidfile, whose second line is the port the gateway actually bound.
+\`$PORT\` describes the shell running the CLI, not the shell the server was started from: after
+\`PORT=9000 make start\` in one terminal, a plain CLI in another would otherwise address port
+10850, where nothing listens. \`$PORT\` is still the fallback when no gateway is running, or when
+the pidfile predates the port line.
+
+A pidfile can also outlive its gateway — killed without cleanup, and the pid reissued to some
+unrelated process. The local address is still preferred, but \`publicUrl\` names the same gateway,
+so a local address that cannot be reached **at all** is retried once there, with a line on stderr
+saying so. An address that answered — including with an error — is never retried: the gateway was
+reached, and asking somewhere else would only hide its answer.
+
 \`gateway status\` and \`service install\` go further: they report on the gateway *process* on this
 host, so they resolve \`--url\` → \`http://<bind>:<port>\` and ignore \`$CLAUDE_GATEWAY_URL\` and
 \`publicUrl\` entirely — a proxy still answering from a different instance would otherwise report a

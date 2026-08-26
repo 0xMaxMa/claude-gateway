@@ -1,4 +1,5 @@
 import { CliConfigView, resolveUrl, resolveLocalUrl, resolveKey } from '../http-client';
+import { probeHealth, HealthProbe } from '../health';
 import { detectManager } from '../manager';
 import { printJson } from '../output';
 import { paletteFor } from '../colors';
@@ -16,49 +17,6 @@ interface Check {
   /** Informational only: reported, but never fails the command. Used for the
    *  URL the CLI is *not* using — its state is context, not a verdict. */
   info?: boolean;
-}
-
-interface ProbeResult {
-  /** True only for a 2xx — the CLI can actually use this URL. */
-  ok: boolean;
-  /** True when something answered at all, whatever the status. */
-  answered: boolean;
-  /** The HTTP status, when there was one. */
-  status?: number;
-  detail: string;
-}
-
-/** Probe `<baseUrl>/health`.
- *
- *  An HTTP status is reported verbatim rather than collapsed into "no
- *  response": a reverse proxy that replies 401 is *up*, and saying otherwise
- *  sends the operator to debug a proxy that is working fine.
- *
- *  The abort timer is cleared in `finally`: a rejected fetch would otherwise
- *  skip clearTimeout and leave a live timer holding the event loop open — and
- *  an unreachable gateway is exactly the case `doctor` is run for. */
-async function probe(baseUrl: string, timeoutMs = 3000): Promise<ProbeResult> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-    if (res.ok) return { ok: true, answered: true, detail: 'gateway responding' };
-    return {
-      ok: false,
-      answered: true,
-      status: res.status,
-      detail: `HTTP ${res.status} (answered, but not a healthy gateway)`,
-    };
-  } catch (err) {
-    const aborted = (err as { name?: string } | undefined)?.name === 'AbortError';
-    return {
-      ok: false,
-      answered: false,
-      detail: aborted ? `no response (timed out after ${timeoutMs}ms)` : 'no response',
-    };
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export async function runDoctor(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
@@ -79,7 +37,7 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const manager = detectManager();
   checks.push({ name: 'manager', ok: manager !== 'unknown', detail: manager });
 
-  const health = await probe(baseUrl);
+  const health = await probeHealth(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
   // A gateway fronted by a reverse proxy has two addresses for one process.
@@ -88,7 +46,12 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // — appear as a single contradictory line with nothing to explain it. The
   // second probe is informational: the CLI does not use that address, so its
   // state must not decide this command's exit code.
-  const localUrl = resolveLocalUrl({ flagUrl, env: process.env, config });
+  // Deliberately resolved without `flagUrl`: this is the address of the gateway
+  // *on this host*, which is the useful context when the CLI has been pointed
+  // somewhere else. Passing the flag through would make it echo the target back
+  // as its own alternative, and then offer this host's publicUrl as context for
+  // a question about another host entirely.
+  const localUrl = resolveLocalUrl({ env: process.env, config });
   const publicUrl = (config.publicUrl ?? '').replace(/\/+$/, '');
   const alt =
     baseUrl === localUrl
@@ -99,10 +62,10 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
         ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
         : undefined;
 
-  let altHealth: ProbeResult | undefined;
+  let altHealth: HealthProbe | undefined;
   if (alt) {
     checks.push({ name: alt.urlName, ok: true, detail: alt.url, info: true });
-    altHealth = await probe(alt.url);
+    altHealth = await probeHealth(alt.url);
     checks.push({ name: alt.healthName, ok: altHealth.ok, detail: altHealth.detail, info: true });
   }
 

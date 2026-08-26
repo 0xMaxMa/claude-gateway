@@ -76,20 +76,45 @@ export function detectManager(deps: DetectDeps = {}): Manager {
   return 'unknown';
 }
 
+/** A gateway process running on this host, as recorded by its pidfile. */
+export interface LocalGateway {
+  pid: number;
+  /** The port it is listening on, when the pidfile records one. Absent for a
+   *  pidfile written by an older version (pid only). */
+  port?: number;
+}
+
 /**
- * True when a gateway process is alive on THIS host, per the pidfile the
- * server writes on boot. Every manager runs the same entry point, so the
- * pidfile is present under systemd and PM2 too, not only in the foreground.
+ * The gateway process alive on THIS host, per the pidfile the server writes on
+ * boot, or null when there is none. Every manager runs the same entry point, so
+ * the pidfile is present under systemd and PM2 too, not only in the foreground.
+ *
+ * Pidfile format is one field per line: pid, then the listening port. The port
+ * matters because the CLI cannot otherwise know it — `$PORT` is set in whatever
+ * shell launched the server, not necessarily in the one running the CLI, so
+ * deriving the port from the CLI's own environment can address a port nothing
+ * listens on. A pidfile from an older version has no second line; the port is
+ * then simply unknown and callers fall back to the environment.
  *
  * Deliberately cheap — one file read and one signal-0 — because `resolveUrl()`
  * consults it on every CLI invocation. `detectManager()` is not usable there:
  * it shells out to systemctl and pm2.
  */
-export function localGatewayIsLive(deps: Pick<DetectDeps, 'pidfilePath' | 'isAlive' | 'readPidfile'> = {}): boolean {
+export function readLocalGateway(deps: Pick<DetectDeps, 'pidfilePath' | 'isAlive' | 'readPidfile'> = {}): LocalGateway | null {
   const isAlive = deps.isAlive ?? realIsAlive;
   const readPidfile = deps.readPidfile ?? realReadPidfile;
   const raw = readPidfile(deps.pidfilePath ?? defaultPidfilePath());
-  if (!raw) return false;
-  const pid = parseInt(raw.trim(), 10);
-  return pid > 0 && isAlive(pid);
+  if (!raw) return null;
+  const [pidLine, portLine] = raw.split('\n');
+  const pid = parseInt((pidLine ?? '').trim(), 10);
+  if (!(pid > 0) || !isAlive(pid)) return null;
+  const port = parseInt((portLine ?? '').trim(), 10);
+  // Port 0 means "let the OS choose" and is never a dialable address, so it is
+  // treated as unrecorded rather than written into a URL.
+  return { pid, port: port > 0 && port < 65536 ? port : undefined };
+}
+
+/** True when a gateway process is alive on this host. See readLocalGateway(). */
+export function localGatewayIsLive(deps: Pick<DetectDeps, 'pidfilePath' | 'isAlive' | 'readPidfile'> = {}): boolean {
+  return readLocalGateway(deps) !== null;
 }

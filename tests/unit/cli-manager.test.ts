@@ -1,4 +1,4 @@
-import { detectManager, localGatewayIsLive } from '../../src/cli/manager';
+import { detectManager, localGatewayIsLive, readLocalGateway } from '../../src/cli/manager';
 
 describe('cli manager detectManager', () => {
   it('detects the user service first — `service install` creates a user unit', () => {
@@ -110,5 +110,30 @@ describe('localGatewayIsLive', () => {
     expect(localGatewayIsLive({ readPidfile: () => 'not-a-pid', isAlive: () => true })).toBe(false);
     expect(localGatewayIsLive({ readPidfile: () => '0', isAlive: () => true })).toBe(false);
     expect(localGatewayIsLive({ readPidfile: () => '4242', isAlive: () => false })).toBe(false);
+  });
+});
+
+describe('readLocalGateway', () => {
+  it('reads the pid and the port the gateway recorded', () => {
+    expect(readLocalGateway({ readPidfile: () => '4242\n9000\n', isAlive: (pid) => pid === 4242 })).toEqual({ pid: 4242, port: 9000 });
+  });
+
+  /** A pidfile written before the port line existed still identifies a live
+   *  gateway; only the port is unknown, and callers fall back to $PORT. */
+  it('reports no port for a pid-only pidfile', () => {
+    expect(readLocalGateway({ readPidfile: () => '4242\n', isAlive: () => true })).toEqual({ pid: 4242, port: undefined });
+  });
+
+  it('ignores a port that cannot be dialled', () => {
+    // 0 means "the OS picks" and is never an address; the rest is junk.
+    for (const line of ['0', '-1', '70000', 'not-a-port', '']) {
+      expect(readLocalGateway({ readPidfile: () => `4242\n${line}\n`, isAlive: () => true })?.port).toBeUndefined();
+    }
+  });
+
+  it('is null when the pidfile is missing, junk, or names a dead process', () => {
+    expect(readLocalGateway({ readPidfile: () => null, isAlive: () => true })).toBeNull();
+    expect(readLocalGateway({ readPidfile: () => 'not-a-pid\n9000', isAlive: () => true })).toBeNull();
+    expect(readLocalGateway({ readPidfile: () => '4242\n9000', isAlive: () => false })).toBeNull();
   });
 });

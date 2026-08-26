@@ -1,6 +1,6 @@
-jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(), localGatewayIsLive: jest.fn(() => true) }));
+jest.mock('../../src/cli/manager', () => ({ detectManager: jest.fn(), readLocalGateway: jest.fn(() => ({ pid: 1 })) }));
 
-import { detectManager, localGatewayIsLive } from '../../src/cli/manager';
+import { detectManager, readLocalGateway } from '../../src/cli/manager';
 import { runDoctor } from '../../src/cli/commands/doctor';
 import type { CliConfigView } from '../../src/cli/http-client';
 
@@ -28,7 +28,7 @@ describe('cli doctor', () => {
       return true;
     });
     (detectManager as jest.Mock).mockReset().mockReturnValue('systemd');
-    (localGatewayIsLive as jest.Mock).mockReset().mockReturnValue(true);
+    (readLocalGateway as jest.Mock).mockReset().mockReturnValue({ pid: 1 });
   });
 
   afterEach(() => {
@@ -153,7 +153,7 @@ describe('cli doctor', () => {
     });
 
     it('falls back to publicUrl when no gateway is live on this host', async () => {
-      (localGatewayIsLive as jest.Mock).mockReturnValue(false);
+      (readLocalGateway as jest.Mock).mockReturnValue(null);
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 
       await runDoctor({}, proxied);
@@ -184,6 +184,23 @@ describe('cli doctor', () => {
         if (prev === undefined) delete process.env.CLAUDE_GATEWAY_URL;
         else process.env.CLAUDE_GATEWAY_URL = prev;
       }
+    });
+
+    /** `--url` names the gateway to diagnose. Answering with *this* host's
+     *  publicUrl as context is noise about a machine nobody asked about; the
+     *  gateway running here is the one useful thing to mention. */
+    it('never offers this host\'s publicUrl as context for a --url pointing elsewhere', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({ url: 'http://other-host:8080' }, proxied);
+
+      const body = report();
+      expect(body.checks.find((c) => c.name === 'url')?.detail).toBe('http://other-host:8080');
+      expect(body.checks.map((c) => c.name)).not.toContain('publicUrl');
+      expect(JSON.stringify(body)).not.toContain('proxy.example.com');
+      // The local gateway is still worth naming — it is on the machine running
+      // the command, and its state is not implied by the remote answer.
+      expect(body.checks.find((c) => c.name === 'localUrl')?.detail).toBe('http://127.0.0.1:10850');
     });
 
     it('skips the second probe when there is only one address', async () => {

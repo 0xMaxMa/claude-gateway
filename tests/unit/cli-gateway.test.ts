@@ -1,7 +1,7 @@
 jest.mock('../../src/cli/manager', () => ({
   detectManager: jest.fn(),
   defaultPidfilePath: () => '/tmp/fake-gateway.pid',
-  localGatewayIsLive: () => true,
+  readLocalGateway: () => ({ pid: 1 }),
 }));
 jest.mock('fs', () => ({ readFileSync: jest.fn() }));
 jest.mock('child_process', () => ({ execFileSync: jest.fn() }));
@@ -148,7 +148,12 @@ describe('cli gateway status', () => {
 
     expect(code).toBe(0);
     expect(String(fetchSpy.mock.calls[0][0])).toBe('http://127.0.0.1:10850/health');
-    expect(JSON.parse(stdout.join(''))).toEqual({ manager: 'systemd-user', url: 'http://127.0.0.1:10850', health: 'up' });
+    expect(JSON.parse(stdout.join(''))).toEqual({
+      manager: 'systemd-user',
+      url: 'http://127.0.0.1:10850',
+      health: 'up',
+      detail: 'gateway responding',
+    });
   });
 
   it('reports health down and exits non-zero when the probe fails', async () => {
@@ -158,6 +163,19 @@ describe('cli gateway status', () => {
 
     expect(code).toBe(1);
     expect(JSON.parse(stdout.join('')).health).toBe('down');
+    expect(JSON.parse(stdout.join('')).detail).toBe('no response');
+  });
+
+  /** `health` alone cannot tell an address that rejected the request apart from
+   *  one that answered nothing, and that is the whole difference between a
+   *  misconfigured proxy and a gateway that is not running. */
+  it('keeps the HTTP status of an address that answered but is not healthy', async () => {
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 401 } as Response);
+
+    const code = await runGatewayLifecycle(['status'], {}, config);
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout.join(''))).toMatchObject({ health: 'down', detail: 'HTTP 401 (answered, but not a healthy gateway)' });
   });
 
   it('honours an explicit --url for checking another host', async () => {

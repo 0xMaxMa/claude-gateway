@@ -120,8 +120,11 @@ describe('binary dispatch — help layout', () => {
     expect(longest).toMatch(/service install\|status\|uninstall {2,}Run the gateway as a systemd-user or PM2 service/);
 
     // All descriptions start in the same column, so the block reads as a table.
-    const starts = new Set(rows.map((l) => l.length - l.replace(/^ {2}\S.*?(?= {2}\S)/, '').length));
-    expect(starts.size).toBe(1);
+    const descriptionColumn = (line: string) => {
+      const gap = line.slice(2).search(/ {2,}\S/);
+      return 2 + gap + line.slice(2 + gap).match(/^ +/)![0].length;
+    };
+    expect(new Set(rows.map(descriptionColumn)).size).toBe(1);
   }, TIMEOUT_MS);
 });
 

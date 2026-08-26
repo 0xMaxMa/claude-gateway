@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
+import { probeHealth } from '../health';
 import { detectManager, defaultPidfilePath } from '../manager';
 import { printJson } from '../output';
 
@@ -49,21 +50,12 @@ async function gatewayStatus(flags: Record<string, string | boolean>, config: Cl
   // probing config.publicUrl would report a reverse proxy (possibly fronting a
   // different instance) rather than the gateway this command just detected.
   const baseUrl = resolveLocalUrl({ flagUrl: typeof flags.url === 'string' ? flags.url : undefined, env: process.env, config });
-  let health: 'up' | 'down' = 'down';
-  const controller = new AbortController();
-  // Cleared in `finally`: a rejected fetch would otherwise skip clearTimeout and
-  // leave a live timer holding the event loop open until it fires.
-  const timer = setTimeout(() => controller.abort(), 3000);
-  try {
-    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-    if (res.ok) health = 'up';
-  } catch {
-    health = 'down';
-  } finally {
-    clearTimeout(timer);
-  }
-  printJson({ manager, url: baseUrl, health }, flags);
-  return health === 'up' ? 0 : 1;
+  // `detail` carries what `health` cannot: an address answering 401 or 500 is
+  // not the same failure as one answering nothing, and collapsing both into
+  // "down" throws away the only clue about which one it is.
+  const probe = await probeHealth(baseUrl);
+  printJson({ manager, url: baseUrl, health: probe.ok ? 'up' : 'down', detail: probe.detail }, flags);
+  return probe.ok ? 0 : 1;
 }
 
 function gatewayAction(action: 'restart' | 'stop'): Promise<number> {

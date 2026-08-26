@@ -1307,6 +1307,14 @@ export class GatewayRouter {
     });
   }
 
+  /** The port the HTTP server is actually listening on, or null when it is not
+   *  listening. Differs from the requested port when 0 was passed (the OS picks
+   *  a free one), which is what the pidfile must record. */
+  listeningPort(): number | null {
+    const addr = this.server?.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
+  }
+
   async start(port: number): Promise<void> {
     // Bind resolution precedence: GATEWAY_BIND env → gateway.bind config →
     // localhost-only default. The default is "127.0.0.1" so the dashboard/API

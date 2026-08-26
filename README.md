@@ -533,6 +533,8 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 
 Absolute, externally-reachable origin of the gateway (for example `https://gateway.example.com`, or `https://host.example.com/gateway` behind an ingress path prefix). The process cannot infer its own public URL — it binds localhost by default and sits behind a reverse proxy — so it must be set explicitly for features that hand out a phone-openable link. Currently that is the `/cli` terminal viewer; when `publicUrl` is unset, `/cli` replies that the viewer is not configured. Leave it blank to keep `/cli` disabled. A trailing slash is optional. Use an `https://` origin — Telegram Mini Apps require HTTPS.
 
+The CLI does **not** route through this URL when it runs on the gateway's own host: both addresses are the same server, and the public one only adds a reverse-proxy hop that may enforce its own authentication. It talks to the local bind instead, keeping `publicUrl` as a fallback if that address cannot be reached. Pass `--url` to exercise the proxy path deliberately. See [CLI.md](./CLI.md) for the full precedence.
+
 ```json
 {
   "gateway": {
