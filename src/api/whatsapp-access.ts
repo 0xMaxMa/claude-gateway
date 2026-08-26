@@ -36,6 +36,18 @@ export interface WhatsAppMessageLike {
     remoteJid?: string | null;
     /** Sender within a group (absent for 1:1 DMs, where remoteJid IS the sender). */
     participant?: string | null;
+    /**
+     * Phone-number JID for `participant`, present when WhatsApp's Linked ID
+     * (LID) privacy system reports `participant` as a `@lid` address instead
+     * of the classic `@s.whatsapp.net` phone JID.
+     */
+    participantPn?: string | null;
+    /**
+     * Phone-number JID for `remoteJid` on a 1:1 chat, present when LID
+     * privacy reports `remoteJid` itself as `@lid` instead of the classic
+     * `@s.whatsapp.net` form.
+     */
+    senderPn?: string | null;
     fromMe?: boolean | null;
   } | null;
   message?: {
@@ -69,13 +81,23 @@ export function resolveWhatsAppSource(msg: WhatsAppMessageLike | undefined | nul
 
   if (remoteJid.endsWith('@g.us')) {
     // Group: the sender is `participant`, the conversation is the group JID itself.
-    const participant = msg?.key?.participant ?? '';
+    // `participant` arrives as a `@lid` address (not the classic phone JID)
+    // for some senders under WhatsApp's Linked ID privacy system — prefer
+    // `participantPn` (the real phone-number JID) when Baileys supplies it.
+    const participant = msg?.key?.participantPn || msg?.key?.participant || '';
     if (!participant) return { conversationId: '', senderId: '', kind: 'other', mentionedJids: [] };
     return { conversationId: remoteJid, senderId: participant, kind: 'group', mentionedJids };
   }
-  if (remoteJid.endsWith('@s.whatsapp.net')) {
-    // DM: sender and conversation are the same JID.
-    return { conversationId: remoteJid, senderId: remoteJid, kind: 'user', mentionedJids: [] };
+  if (remoteJid.endsWith('@s.whatsapp.net') || remoteJid.endsWith('@lid')) {
+    // DM: sender and conversation are (normally) the same JID. Under
+    // WhatsApp's Linked ID (LID) privacy system, `remoteJid` itself can
+    // arrive as `<id>@lid` instead of the classic `<phone>@s.whatsapp.net`
+    // — reply on whichever JID we actually received the message on
+    // (`remoteJid`), but gate on the real phone-number JID (`senderPn`, when
+    // Baileys supplies it): allowlists are documented and configured in
+    // phone-number JID form and would never match a bare `@lid`.
+    const senderId = msg?.key?.senderPn || remoteJid;
+    return { conversationId: remoteJid, senderId, kind: 'user', mentionedJids: [] };
   }
   // Broadcast lists, status updates, newsletters, etc. — not a supported source.
   return { conversationId: '', senderId: '', kind: 'other', mentionedJids: [] };
@@ -126,10 +148,21 @@ export function isWhatsAppConversationAllowed(
  * (which infers "was mentioned" from the event *type* being `app_mention`)
  * Baileys hands every message's mentioned-JID list directly on
  * `contextInfo.mentionedJid` — no separate text-scanning heuristic needed,
- * just check the bot's own JID is in that list.
+ * just check one of the bot's own JIDs is in that list.
+ *
+ * Under WhatsApp's Linked ID (LID) privacy system a group can report the
+ * mentioned bot using its `@lid` identity even though `sock.user.id` (the
+ * phone-number JID we log in with) is the classic `@s.whatsapp.net` form —
+ * two different strings for the same bot. Pass `botLid` (`sock.user.lid`)
+ * alongside `botJid` (`sock.user.id`) so either form matches; omit it if
+ * unknown (older Baileys / non-LID accounts) and only `botJid` is checked.
  */
-export function wasBotMentioned(mentionedJids: string[], botJid: string | undefined): boolean {
-  if (!botJid) return false;
+export function wasBotMentioned(
+  mentionedJids: string[],
+  botJid: string | undefined,
+  botLid?: string | null,
+): boolean {
+  if (!botJid && !botLid) return false;
   // WhatsApp JIDs occasionally carry a ":<device>" suffix on the *user* part
   // (multi-device, e.g. "66811112222:5@s.whatsapp.net") — strip only that
   // segment, not everything after the first colon, or the "@server" half
@@ -139,6 +172,6 @@ export function wasBotMentioned(mentionedJids: string[], botJid: string | undefi
     const [userPart, server] = jid.split('@');
     return server ? `${userPart.split(':')[0]}@${server}` : userPart.split(':')[0];
   };
-  const normalizedBot = normalize(botJid);
-  return mentionedJids.some((jid) => normalize(jid) === normalizedBot);
+  const botIdentities = [botJid, botLid].filter((v): v is string => !!v).map(normalize);
+  return mentionedJids.some((jid) => botIdentities.includes(normalize(jid)));
 }

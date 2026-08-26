@@ -15,6 +15,9 @@ import { _resetPendingSenders, getPendingSenders } from '../../src/api/pending-s
 const mockSock = {
   ev: { on: jest.fn() },
   user: { id: '66899990000:5@s.whatsapp.net' },
+  // waitForSocketOpen polls this before requestPairingCode — real Baileys
+  // sockets open asynchronously, but there's nothing async to wait for here.
+  ws: { isOpen: true },
   sendMessage: jest.fn(async () => undefined),
   requestPairingCode: jest.fn(async () => 'ABCD-1234'),
   logout: jest.fn(async () => undefined),
@@ -142,6 +145,33 @@ describe('WhatsAppManager', () => {
     expect(mockSock.requestPairingCode).toHaveBeenCalledWith('+15551234567');
     expect(manager.getStatus().pairingCode).toBe('ABCD-1234');
     expect(manager.getStatus().qr).toBeUndefined();
+  });
+
+  it('requestPairingCode() waits for ws.isOpen before sending the request', async () => {
+    // Baileys' real socket opens its WebSocket asynchronously — requestPairingCode
+    // must not fire until ws.isOpen flips true, or it hits "Connection Closed" on
+    // a not-yet-open socket (the bug this wait fixes).
+    (mockSock as { ws: { isOpen: boolean } }).ws.isOpen = false;
+    const pending = manager.requestPairingCode('+15551234567');
+    // Give the poll loop a couple of ticks to run — it must NOT have called
+    // requestPairingCode yet while the socket is still closed.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(mockSock.requestPairingCode).not.toHaveBeenCalled();
+    (mockSock as { ws: { isOpen: boolean } }).ws.isOpen = true;
+    const code = await pending;
+    expect(code).toBe('ABCD-1234');
+    expect(mockSock.requestPairingCode).toHaveBeenCalledWith('+15551234567');
+  });
+
+  it('waitForSocketOpen() throws a clear error if the socket never opens (short timeout, not the full 10s default)', async () => {
+    (mockSock as { ws: { isOpen: boolean } }).ws.isOpen = false;
+    const waitForSocketOpen = (
+      manager as unknown as { waitForSocketOpen: (sock: unknown, timeoutMs?: number) => Promise<void> }
+    ).waitForSocketOpen.bind(manager);
+    await expect(waitForSocketOpen(mockSock, 300)).rejects.toThrow(
+      'WhatsApp socket did not open in time for the pairing-code request',
+    );
+    (mockSock as { ws: { isOpen: boolean } }).ws.isOpen = true;
   });
 
   it('connection open → linked, captures the phone number from sock.user.id', async () => {

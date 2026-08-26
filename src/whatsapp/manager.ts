@@ -197,11 +197,36 @@ export class WhatsAppManager {
 
     if (pairingPhoneNumber && !state.creds.registered) {
       try {
+        // sock.ws only finishes its handshake asynchronously after
+        // baileys.default() returns — requestPairingCode sends over that raw
+        // socket immediately, so calling it before ws.isOpen throws
+        // "Connection Closed" nearly every time (the comment above used to
+        // assume "the socket is up" meant "the connection is open"; it
+        // doesn't — those are two different moments).
+        await this.waitForSocketOpen(sock);
         this.pairingCode = await sock.requestPairingCode(pairingPhoneNumber);
       } catch (err) {
         this.logger.error('requestPairingCode failed', { error: (err as Error).message });
         throw err;
       }
+    }
+  }
+
+  /**
+   * Poll `sock.ws.isOpen` until the underlying WebSocket handshake completes
+   * (or `timeoutMs` elapses). There's no Baileys-emitted event for "ws is
+   * open but not yet authenticated" to await instead — `connection.update`
+   * only fires once the higher-level handshake is further along, which is
+   * later than requestPairingCode needs.
+   */
+  private async waitForSocketOpen(sock: WASocket, timeoutMs = 10_000): Promise<void> {
+    const start = Date.now();
+    while (!sock.ws?.isOpen) {
+      if (this.stopping) throw new Error('WhatsApp connection stopped before it opened');
+      if (Date.now() - start > timeoutMs) {
+        throw new Error('WhatsApp socket did not open in time for the pairing-code request');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
 
@@ -302,7 +327,10 @@ export class WhatsAppManager {
       // Group mention gate — mirrors Slack/LINE's requireMention (default true, no effect on DMs).
       if (resolved.kind === 'group' && cfg?.requireMention !== false) {
         const botJid = this.sock?.user?.id;
-        if (!wasBotMentioned(resolved.mentionedJids, botJid)) continue;
+        // `sock.user.lid` is the bot's own @lid identity under WhatsApp's Linked
+        // ID privacy system — groups can report the mention using either form.
+        const botLid = this.sock?.user?.lid;
+        if (!wasBotMentioned(resolved.mentionedJids, botJid, botLid)) continue;
       }
 
       const content = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';

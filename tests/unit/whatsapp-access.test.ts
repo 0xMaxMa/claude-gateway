@@ -108,6 +108,39 @@ describe('resolveWhatsAppSource()', () => {
   test('an unrecognized JID suffix (broadcast/status/newsletter) → other', () => {
     expect(resolveWhatsAppSource({ key: { remoteJid: 'status@broadcast' } }).kind).toBe('other');
   });
+
+  test('DM under LID privacy (remoteJid ends @lid) → kind user, senderId prefers senderPn', () => {
+    const lid = '30271718084720@lid';
+    expect(resolveWhatsAppSource({ key: { remoteJid: lid, senderPn: USER } })).toEqual({
+      conversationId: lid, // reply on the JID we actually received the message on
+      senderId: USER, // gate on the real phone-number JID, matching allowlist entries
+      kind: 'user',
+      mentionedJids: [],
+    });
+  });
+
+  test('DM under LID privacy without senderPn → falls back to the @lid JID (never dropped as "other")', () => {
+    const lid = '30271718084720@lid';
+    expect(resolveWhatsAppSource({ key: { remoteJid: lid } })).toEqual({
+      conversationId: lid,
+      senderId: lid,
+      kind: 'user',
+      mentionedJids: [],
+    });
+  });
+
+  test('group participant under LID privacy → senderId prefers participantPn', () => {
+    const lidParticipant = '30271718084720@lid';
+    const resolved = resolveWhatsAppSource({
+      key: { remoteJid: GROUP, participant: lidParticipant, participantPn: USER },
+    });
+    expect(resolved).toEqual({
+      conversationId: GROUP,
+      senderId: USER,
+      kind: 'group',
+      mentionedJids: [],
+    });
+  });
 });
 
 describe('isWhatsAppConversationAllowed()', () => {
@@ -151,5 +184,24 @@ describe('wasBotMentioned()', () => {
   });
   test('no bot JID configured → false (never claim a mention without knowing our own identity)', () => {
     expect(wasBotMentioned([BOT_JID], undefined)).toBe(false);
+  });
+
+  describe('LID privacy — bot mentioned by its @lid identity', () => {
+    const BOT_LID = '99988877766@lid';
+    test('mentionedJid carries the bot LID, not its phone JID → true when botLid is passed', () => {
+      expect(wasBotMentioned([BOT_LID], BOT_JID, BOT_LID)).toBe(true);
+    });
+    test('mentionedJid carries the bot LID but botLid was not passed → false (cannot match)', () => {
+      expect(wasBotMentioned([BOT_LID], BOT_JID)).toBe(false);
+    });
+    test('either identity still matches its own form (phone JID mention still works when botLid is also known)', () => {
+      expect(wasBotMentioned([BOT_JID], BOT_JID, BOT_LID)).toBe(true);
+    });
+    test('mention is some other LID entirely → false', () => {
+      expect(wasBotMentioned(['11122233344@lid'], BOT_JID, BOT_LID)).toBe(false);
+    });
+    test('no botJid but botLid known → still matches on LID', () => {
+      expect(wasBotMentioned([BOT_LID], undefined, BOT_LID)).toBe(true);
+    });
   });
 });
