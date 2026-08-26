@@ -16,6 +16,7 @@ import { SlackClient } from '../api/slack-client';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
+import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
 import { runRecovery, toRecoveryOutcome, type RecoveryEffects, type RecoveryRequest } from './recovery-executor';
 import { initialBudget, type BudgetState } from './recovery-policy';
@@ -756,8 +757,12 @@ export class AgentRunner extends EventEmitter {
     }
 
     if (command === 'get_models') {
-      const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-      respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
+      // Live catalog first, static list as the fallback (issue #409). The
+      // picker is a UI action, so a slow or unreachable catalog must not hang
+      // it — fetchModelCatalog is bounded and never rejects.
+      void this.availableModels().then((availableModels) => {
+        respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
+      });
       return;
     }
 
@@ -867,9 +872,7 @@ export class AgentRunner extends EventEmitter {
           return respond({ success: true, text: 'No active session found.' });
         }
         const effectiveModel = this.agentConfig.claude.model;
-        const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-        const modelConfig = availableModels.find(m => m.id === effectiveModel);
-        const contextWindow = modelConfig?.contextWindow ?? 200000;
+        const contextWindow = await this.contextWindowFor(effectiveModel);
         const contextTokens = meta.lastInputTokens ?? 0;
         const usedPct = Math.round((contextTokens / contextWindow) * 100);
         let msgs: string;
@@ -2047,9 +2050,68 @@ export class AgentRunner extends EventEmitter {
     } else if (content.startsWith('/rename')) {
       const name = content.replace('/rename', '').trim();
       await this.handleCommandRename(agentId, chatId, name);
+    } else if (content.startsWith('/models')) {
+      await this.handleCommandModels(chatId);
+    } else if (content.startsWith('/model')) {
+      await this.handleCommandModel(chatId, content.replace('/model', '').trim());
     } else if (content.startsWith('/stop')) {
       await this.handleCommandStop(chatId);
     }
+  }
+
+  /**
+   * /models — the model picker for channels without an inline keyboard.
+   *
+   * Telegram never reaches this: its receiver answers `/models` itself with a
+   * button keyboard and does not forward the message. Discord and LINE have no
+   * picker of their own, so they get the list as text plus the command that
+   * selects from it (issue #409).
+   *
+   * A channel listed in BUILTIN_COMMANDS but missing a branch here is worse
+   * than one not listed at all — the gate swallows the message and the user
+   * gets silence instead of the agent's reply. `/model` on Discord was in
+   * exactly that state before this.
+   */
+  private async handleCommandModels(chatId: string): Promise<void> {
+    const models = await this.availableModels();
+    const current = this.agentConfig.claude.model;
+    const lines = [`Current model: ${current}`, ''];
+    for (const m of models) {
+      const marker = m.id === current ? '✅ ' : '• ';
+      lines.push(`${marker}${m.label} — \`${m.id}\``);
+    }
+    lines.push('', 'Switch with /model <id or alias>');
+    this.writeAutoForward(chatId, lines.join('\n'));
+  }
+
+  /**
+   * /model — show the current model, or switch to one from the catalog.
+   *
+   * An unrecognised argument is refused rather than persisted: unlike the API
+   * (where the caller is authenticated and the provider validates the id), a
+   * typo in a chat message would otherwise be written into config.json and
+   * break the agent's next spawn. Anything the catalog knows — including a
+   * model that exists only upstream and not in the static list — is accepted.
+   */
+  private async handleCommandModel(chatId: string, arg: string): Promise<void> {
+    const current = this.agentConfig.claude.model;
+    if (!arg) {
+      this.writeAutoForward(chatId, `Current model: ${current}\n\nUse /models to see the list.`);
+      return;
+    }
+    const models = await this.availableModels();
+    const wanted = arg.toLowerCase();
+    const match = models.find((m) => m.id.toLowerCase() === wanted || m.alias.toLowerCase() === wanted);
+    if (!match) {
+      this.writeAutoForward(chatId, `Unknown model "${arg}". Use /models to see the list.`);
+      return;
+    }
+    if (match.id === current) {
+      this.writeAutoForward(chatId, `Already using ${match.label} (${match.id}).`);
+      return;
+    }
+    await this.setModel(match.id);
+    this.writeAutoForward(chatId, `Model set to ${match.label} (${match.id}).`);
   }
 
   /**
@@ -2084,9 +2146,7 @@ export class AgentRunner extends EventEmitter {
     }
 
     const effectiveModel = this.agentConfig.claude.model;
-    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    const modelConfig = availableModels.find(m => m.id === effectiveModel);
-    const contextWindow = modelConfig?.contextWindow ?? 200000;
+    const contextWindow = await this.contextWindowFor(effectiveModel);
     const contextTokens = meta.lastInputTokens ?? 0;
     const usedPct = Math.round((contextTokens / contextWindow) * 100);
 
@@ -2220,9 +2280,7 @@ export class AgentRunner extends EventEmitter {
     const name = meta?.name ?? 'Session';
 
     const compactModel = this.agentConfig.claude.model;
-    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    const modelConfig = availableModels.find(m => m.id === compactModel);
-    const contextWindow = modelConfig?.contextWindow ?? 200000;
+    const contextWindow = await this.contextWindowFor(compactModel);
 
     this.writeAutoForward(chatId, `⏳ Compacting session "${name}"...`);
 
@@ -3684,9 +3742,7 @@ export class AgentRunner extends EventEmitter {
           result = { sessionId, sessionName: null, messageCount, archivedCount: 0, contextUsedPct: 0, model: effectiveModel };
           responseText = `Session: (unnamed)\nMessages: ${messageCount}\nContext used: 0%\nModel: ${effectiveModel}`;
         } else {
-          const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-          const modelConfig = availableModels.find((m) => m.id === effectiveModel);
-          const contextWindow = modelConfig?.contextWindow ?? 200000;
+          const contextWindow = await this.contextWindowFor(effectiveModel);
           const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
           result = { sessionId, sessionName: meta.name, messageCount, archivedCount: meta.archivedCount ?? 0, contextUsedPct, model: effectiveModel };
           responseText = [
@@ -3741,9 +3797,7 @@ export class AgentRunner extends EventEmitter {
         const ch = 'api' as const;
         const activeSession = this.sessions.get(sessionId);
         const compactEffectiveModel = opts?.model ?? activeSession?.modelOverride ?? this.agentConfig.claude.model;
-        const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-        const modelConfig = availableModels.find((m) => m.id === compactEffectiveModel);
-        const contextWindow = modelConfig?.contextWindow ?? 200000;
+        const contextWindow = await this.contextWindowFor(compactEffectiveModel);
         const compactor = new SessionCompactor(this.sessionStore);
         const compactResult = await compactor.compact(agentId, storeChatId, sessionId, compactEffectiveModel, contextWindow, ch);
         await this.sessionStore.updateSessionMeta(agentId, storeChatId, sessionId, {
@@ -3776,6 +3830,28 @@ export class AgentRunner extends EventEmitter {
     persist('assistant', responseText, forcePersist);
 
     return { result, responseText };
+  }
+
+  /**
+   * The model list this gateway offers: the live catalog when one is reachable,
+   * the configured/static list otherwise (issue #409). Cached upstream, so the
+   * six callers that only want one model's context window pay for at most one
+   * fetch a minute between them.
+   */
+  private async availableModels(): Promise<ModelConfig[]> {
+    const staticModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    return (await fetchModelCatalog(staticModels)) ?? staticModels;
+  }
+
+  /**
+   * Context window for a model id. Resolving this through the live catalog is
+   * what keeps `/session`'s "context used" percentage and `/compact`'s window
+   * honest for a model that exists only upstream — before, any such model fell
+   * through to the 200k default no matter how large its real window.
+   */
+  private async contextWindowFor(modelId: string): Promise<number> {
+    const models = await this.availableModels();
+    return models.find((m) => m.id === modelId)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
   }
 
   async setModel(newModel: string): Promise<void> {
@@ -3832,9 +3908,7 @@ export class AgentRunner extends EventEmitter {
     const meta = index?.sessions.find((s) => s.id === sessionId);
     if (!meta) return null;
     const effectiveModel = this.agentConfig.claude.model;
-    const availableModels = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
-    const modelConfig = availableModels.find((m) => m.id === effectiveModel);
-    const contextWindow = modelConfig?.contextWindow ?? 200000;
+    const contextWindow = await this.contextWindowFor(effectiveModel);
     const contextUsedPct = Math.round(((meta.lastInputTokens ?? 0) / contextWindow) * 100);
     return {
       sessionId: meta.id,

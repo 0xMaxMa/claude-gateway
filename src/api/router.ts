@@ -14,6 +14,7 @@ import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
+import { fetchModelCatalog } from '../agent/model-catalog';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -553,10 +554,15 @@ export function createApiRouter(
   /**
    * GET /api/v1/models
    *
-   * List all supported Claude models from gateway config (falls back to defaults).
+   * List the models this gateway offers. Fetches the live catalog when a base
+   * URL is configured and falls back to the gateway's configured/static list —
+   * without the fetch this endpoint could only ever report what was written
+   * into config.json at provisioning time (issue #409).
    */
-  router.get('/v1/models', auth, (_req: Request, res: Response) => {
-    res.json({ models: (models ?? []).map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
+  router.get('/v1/models', auth, async (_req: Request, res: Response) => {
+    const staticModels = models ?? [];
+    const available = (await fetchModelCatalog(staticModels)) ?? staticModels;
+    res.json({ models: available.map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
   });
 
   /**

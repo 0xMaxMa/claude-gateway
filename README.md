@@ -1160,8 +1160,10 @@ paired, the following commands are available in a private chat:
 
 | Command | Description |
 |---------|-------------|
-| `/model` | Show the current AI model |
-| `/models` | Switch AI model — shows an inline keyboard; selecting a model triggers a graceful restart and notifies when back online; **Dismiss** closes the picker without changing the model |
+| `/model` | Show the current AI model. On Discord and LINE, `/model <id or alias>` also switches to any model in the list — an id the list does not contain is refused rather than written into `config.json` |
+| `/models` | Switch AI model. On Telegram this is an inline keyboard; selecting a model triggers a graceful restart and notifies when back online, and **Dismiss** closes the picker without changing the model. Discord and LINE have no inline keyboard, so they get the same list as text plus `/model <id or alias>` to pick from it |
+
+The list behind both commands is the live catalog from `{ANTHROPIC_BASE_URL}/v1/models` when a base URL is configured, falling back to `gateway.models` in `config.json` — see [GET /api/v1/models](API.md#get-apiv1models). Before this, `config.json`'s list was written once at provisioning and never re-read, so a catalog that changed upstream could never reach the picker.
 
 **Account**
 
