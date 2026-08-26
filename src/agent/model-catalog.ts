@@ -174,13 +174,11 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
       : null);
   if (!Array.isArray(rows)) return null;
 
-  const known = new Map(fallback.map((m) => [m.id, m]));
   const seen = new Set<string>();
   // Config is authoritative: retain every curated entry, including local [1m]
   // variants, before adding upstream-only rows.
   const models: ModelConfig[] = [...fallback];
   for (const m of fallback) seen.add(m.id);
-  let liveCount = 0;
   let usableCount = 0;
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
@@ -205,9 +203,6 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
     usableCount++;
     if (seen.has(id)) continue;
     seen.add(id);
-    const staticEntry = known.get(id);
-    if (staticEntry) continue;
-    liveCount++;
 
     const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim()) ?? id;
     const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);

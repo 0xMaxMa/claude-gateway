@@ -1587,6 +1587,7 @@ bot.on('callback_query:data', async ctx => {
         keyboard.text(`${m.id === (modelData.model ?? '') ? '✅ ' : ''}${m.label}`, `model:${id}`).row()
       }
       if (liveModels.length) keyboard.text('More models', 'models:more:0').row()
+      keyboard.text('Dismiss', 'models:dismiss')
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(`Current model: ${modelData.model ?? ''}\nSelect a model:`, { reply_markup: keyboard })
     } catch {
