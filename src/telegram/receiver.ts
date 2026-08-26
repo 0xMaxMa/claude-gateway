@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import { AgentConfig } from '../types';
 import { createLogger } from '../logger';
+import { stopChildProcess, STOP_GRACE_MS } from '../utils/stop-child';
 
 const AUTO_RESTART_DELAY_MS = 5_000;
 const MAX_RESTARTS = 3;
@@ -87,13 +88,25 @@ export class TelegramReceiver {
     }, delay);
   }
 
-  stop(): void {
+  /**
+   * Stop the receiver and resolve only once the child has actually exited.
+   * Escalates SIGTERM → SIGKILL so a wedged child cannot outlive the gateway's
+   * shutdown. See issue #405.
+   */
+  stop(): Promise<void> {
     this.stopping = true;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
-    this.process?.kill('SIGTERM');
+
+    return stopChildProcess(this.process, {
+      onEscalate: (pid) =>
+        this.logger.warn(
+          `TelegramReceiver did not exit within ${STOP_GRACE_MS}ms of SIGTERM; sending SIGKILL`,
+          { pid },
+        ),
+    });
   }
 
   isRunning(): boolean {

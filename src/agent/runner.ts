@@ -2766,7 +2766,10 @@ export class AgentRunner extends EventEmitter {
 
   stopTelegramReceiver(): void {
     if (!this.receiver) return;
-    this.receiver.stop();
+    // Hot-remove is a config-change response, not a shutdown: detach immediately
+    // and let teardown finish in the background rather than blocking the caller
+    // for the SIGKILL grace period. stop() never rejects.
+    void this.receiver.stop();
     this.receiver = null;
     this.logger.info('TelegramReceiver stopped', { agentId: this.agentConfig.id });
   }
@@ -2785,7 +2788,10 @@ export class AgentRunner extends EventEmitter {
 
   stopDiscordReceiver(): void {
     if (!this.discordReceiver) return;
-    this.discordReceiver.stop();
+    // Hot-remove is a config-change response, not a shutdown: detach immediately
+    // and let teardown finish in the background rather than blocking the caller
+    // for the SIGKILL grace period. stop() never rejects.
+    void this.discordReceiver.stop();
     this.discordReceiver = null;
     this.logger.info('DiscordReceiver stopped', { agentId: this.agentConfig.id });
   }
@@ -2808,10 +2814,17 @@ export class AgentRunner extends EventEmitter {
       clearTimeout(buf.timer);
     }
     this.channelCoalesce.clear();
-    this.receiver?.stop();
-    this.discordReceiver?.stop();
+    // Receiver teardown now resolves only once the child has exited, so it must
+    // be awaited or shutdown() can exit the gateway out from under a receiver
+    // that is still shutting down (issue #405). Run it concurrently with session
+    // teardown rather than serially — both are bounded, neither depends on the
+    // other, and shutdown latency is user-visible.
+    const receiversStopped = [this.receiver?.stop(), this.discordReceiver?.stop()];
     this.stopLineReply();
-    await Promise.all([...this.sessions.values()].map((s) => s.stop()));
+    await Promise.all([
+      ...receiversStopped,
+      ...[...this.sessions.values()].map((s) => s.stop()),
+    ]);
     this.sessions.clear();
   }
 
