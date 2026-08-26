@@ -195,6 +195,8 @@ describe('AppInstaller', () => {
       calls?: Array<{ args: string[]; cwd?: string }>;
       /** Extra `./<rel>:<target>` binds the release declares, e.g. a pgdata dir. */
       extraBinds?: Array<{ rel: string; target: string }>;
+      /** Release also carries a tracked file inside each `extraBinds` path. */
+      shipExtraBinds?: boolean;
       /** Return true to make `compose up --wait` fail (a crashed new release). */
       failUp?: () => boolean;
       /** Return true to make the root move-helper container fail. */
@@ -234,6 +236,15 @@ ${(opts.extraBinds ?? []).map((b) => `      - ./${b.rel}:${b.target}`).join('\n'
             fs.writeFileSync(path.join(cwd, 'data', 'photos', '.gitkeep'), '', 'utf-8');
             fs.mkdirSync(path.join(cwd, 'config'), { recursive: true });
             fs.writeFileSync(path.join(cwd, 'config', 'app.conf'), 'release-default', 'utf-8');
+          }
+          if (opts.shipExtraBinds) {
+            // Named per release, so a test can tell the file this checkout
+            // shipped from the one the *installed* release left in the live dir.
+            for (const b of opts.extraBinds ?? []) {
+              const dir = path.join(cwd, ...b.rel.split('/'));
+              fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(path.join(dir, `release-${state.version}.marker`), '', 'utf-8');
+            }
           }
           opts.onCheckout?.(cwd);
         }
@@ -1946,6 +1957,7 @@ services:
     function setup(appName: string, hostPort: number, extra: {
       failUp?: () => boolean;
       failRootMove?: () => boolean;
+      shipExtraBinds?: boolean;
     } = {}) {
       const state = { head: 'a'.repeat(40), version: '1.0.0' };
       const calls: Array<{ args: string[]; cwd?: string }> = [];
@@ -2026,6 +2038,37 @@ services:
 
       expect(job.status).toBe('completed');
       expect(calls.filter((c) => c.args[0] === 'run' && c.args.includes('mv'))).toHaveLength(0);
+    });
+
+    itAsUser('preserves a live data dir it cannot even list when the release ships that path', async () => {
+      // A container-owned dir is unreadable as well as unrenamable to the
+      // gateway user (postgres leaves pgdata 0700 under its own uid, so the
+      // gateway user gets ---). Merging the release's own file into it entry by
+      // entry is then impossible; the live data must still win.
+      const appName = 'pg-merge-app';
+      const { state, spawn } = setup(appName, 5435, { shipExtraBinds: true });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/pg-merge-app', appName,
+      );
+      const pgdata = seedLockedBind(entry.installPath);
+      fs.chmodSync(pgdata, 0o000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('completed');
+      const moved = path.join((await registry.get(appName))!.installPath, ...PG_BIND.rel.split('/'));
+      locked.push(moved);
+      fs.chmodSync(moved, 0o700);
+      expect(fs.readFileSync(path.join(moved, 'PG_VERSION'), 'utf-8')).toBe('16');
+      // The live directory came across whole: it still holds what the installed
+      // release left in it, and the *new* release's file inside that path is
+      // the thing that gives way.
+      expect(fs.existsSync(path.join(moved, 'release-1.0.0.marker'))).toBe(true);
+      expect(fs.existsSync(path.join(moved, 'release-2.0.0.marker'))).toBe(false);
+      expect(job.logs.join('\n')).toContain(`preserved existing bind-mount data at "${PG_BIND.rel}"`);
     });
 
     itAsUser('reports a swap failure as a swap failure, not as a container failure', async () => {

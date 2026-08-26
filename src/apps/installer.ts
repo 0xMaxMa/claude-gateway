@@ -283,6 +283,10 @@ export function isPermissionError(err: unknown): boolean {
  * Used to pick a **single** mount for the root helper that moves a bind path:
  * mounting each parent separately would put the two paths on different mount
  * points, where `rename(2)` fails EXDEV and `mv` degrades to a copy.
+ *
+ * When one path contains the other the answer is the deeper path's parent
+ * rather than the path itself — a mount one level broader than strictly needed,
+ * never a narrower one. Callers here pass siblings, where it is exact.
  */
 export function commonAncestorDir(a: string, b: string): string {
   const left = path.resolve(a).split(path.sep);
@@ -2739,9 +2743,9 @@ export class AppInstaller {
   /**
    * Move one bind-mount path between app directories.
    *
-   * `rename(2)` on a **directory** needs write permission on the directory
-   * itself — the kernel has to update its `..` entry — not just on the two
-   * parents. A bind mount the app's own container created is owned by that
+   * `rename(2)` that moves a **directory** to a different parent needs write
+   * permission on the directory itself — the kernel has to update its `..`
+   * entry — not just on the two parents, which is exactly what the swap does. A bind mount the app's own container created is owned by that
    * image's uid (postgres initdb leaves its data directory mode 0700), so the
    * gateway user cannot rename it and the update swap failed with EACCES on
    * every attempt.
@@ -2758,6 +2762,11 @@ export class AppInstaller {
    * new inode (a copy) where one mount preserves it (a real rename). For a
    * database directory the degraded path means duplicating it on disk and
    * losing the atomicity the swap depends on.
+   *
+   * The single mount is therefore the apps root, not one app's directory — the
+   * two app directories are siblings under it. The helper is a throwaway
+   * container whose only command is the `mv`, and it is reached only after the
+   * gateway user's own rename was refused.
    */
   private moveBindPath(source: string, destination: string, rel: string, job: JobState): void {
     try {
@@ -2769,8 +2778,10 @@ export class AppInstaller {
     const base = commonAncestorDir(source, destination);
     const from = path.relative(base, source);
     const to = path.relative(base, destination);
-    if (base === path.parse(base).root || from === '' || to === ''
+    if (base === path.parse(base).root || base.includes(':') || from === '' || to === ''
       || from.split(path.sep).includes('..') || to.split(path.sep).includes('..')) {
+      // A colon would be read as the mount separator by `docker -v`, silently
+      // mounting something other than what was asked for.
       throw new Error(`Cannot move bind-mount path "${rel}" as root: unsafe mount base "${base}"`);
     }
     this.log(
