@@ -23,6 +23,7 @@ import { decideMenuCancel } from './menu-cancel';
 import { shouldAdoptOrphanWake } from './orphan-wake';
 import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
+import { buildSubmitDiag } from './submit-diag';
 
 const POLL_MS = 200;
 const STARTUP_QUIET_MS = 600;
@@ -91,6 +92,15 @@ interface ActiveTurn {
   enterRetries: number;
   sawBusy: boolean;
   sawAssistant: boolean;
+  /** True once the literal "esc to interrupt" busy marker has been seen this
+   *  turn (distinct from `sawBusy`, which also flips from echo-immune assistant
+   *  records). Lets the submit-retry diagnostics tell a genuine swallowed Enter
+   *  (marker never seen, draft still on screen) apart from a busy-marker-drift
+   *  false-positive (#370). */
+  sawBusyMarker: boolean;
+  /** Timestamp (ms) of the first assistant record this turn, 0 if none yet —
+   *  the record-timing discriminator for the submit-retry diagnostics (#370). */
+  firstRecordAt: number;
   lastProgressAt: number;
   texts: string[];
   usage: UsageInfo | null;
@@ -433,6 +443,10 @@ class Driver {
     }
     if (this.turn) {
       this.turn.sawAssistant = true;
+      // First transcript output of this turn — the record-timing signal that
+      // distinguishes a busy-marker-drift false-positive from a genuine
+      // swallowed Enter in the submit-retry diagnostics (#370).
+      if (this.turn.firstRecordAt === 0) this.turn.firstRecordAt = Date.now();
       // Transcript output is the authoritative "Claude is working" signal, and it
       // is echo-immune (only Claude writes assistant records). Set sawBusy from it
       // so the fallback end-of-turn (tick(): sawBusy && sawAssistant) and the
@@ -504,6 +518,11 @@ class Driver {
     const turn = this.turn;
     if (!turn) return;
     this.turn = null;
+    // #370 instrumentation: a turn that hit ≥1 Enter-retry yet still completed
+    // successfully is the signature of a busy-marker-drift false-positive
+    // (cause 2) — the Enter was NOT actually swallowed. Log it to pair with the
+    // give-up snapshot. Gated on a retry having fired, so it never runs per-turn.
+    if (!isError && turn.enterRetries > 0) this.logSubmitDiag('recovered', turn, Date.now());
     // Clear any armed interrupt-settle — the turn is ending now regardless of how
     // (interrupt path, normal turn_duration, or error), so a stale flag must not
     // linger and block the next trySubmit().
@@ -526,6 +545,35 @@ class Driver {
       this.idleNotified = true;
       this.emitter.emitSessionIdle(this.args.sessionId);
     }
+  }
+
+  /** Emit one structured, prod-safe diagnostic line for the swallowed-Enter
+   *  submit-retry path (#370). Captures the give-up decision inputs so a genuine
+   *  swallowed Enter (cause 1: draft still on screen, marker never seen) can be
+   *  told apart in prod logs from a busy-marker-drift false-positive (cause 2:
+   *  draft empty, records appear right after). Never logs raw draft text — only
+   *  its length + a stable hash. Behavior-neutral: reads screen/turn state only.
+   *  Confined to the retry / give-up / recovery sites (never per-tick) to keep
+   *  log noise low. */
+  private logSubmitDiag(event: 'retry' | 'giveup' | 'recovered', turn: ActiveTurn, now: number): void {
+    const snapshot = buildSubmitDiag({
+      event,
+      enterRetries: turn.enterRetries,
+      sawBusy: turn.sawBusy,
+      sawBusyMarker: turn.sawBusyMarker,
+      sawAssistant: turn.sawAssistant,
+      recordsDelta: this.tailer.seenRecords - turn.recordsAtStart,
+      draft: this.screen.inputDraft(),
+      quietMs: this.screen.quietMs(),
+      msSinceSubmit: turn.submittedAt > 0 ? now - turn.submittedAt : null,
+      msSinceStart: now - turn.startedAt,
+      msSinceFirstRecord: turn.firstRecordAt > 0 ? now - turn.firstRecordAt : null,
+      hasPrompt: this.screen.hasPrompt(),
+      dialog: this.screen.detectDialog(),
+      fromMenuSelection: turn.fromMenuSelection,
+      probeRounds: turn.probe ? turn.probe.rounds : null,
+    });
+    logWarn(`submit-diag ${JSON.stringify(snapshot)}`);
   }
 
   // ---- turn submission -----------------------------------------------------
@@ -551,6 +599,8 @@ class Driver {
       enterRetries: 0,
       sawBusy: false,
       sawAssistant: false,
+      sawBusyMarker: false,
+      firstRecordAt: 0,
       lastProgressAt: now,
       texts: [],
       usage: null,
@@ -781,6 +831,10 @@ class Driver {
 
     if (this.screen.consumeBusySeen() || this.screen.isBusy()) {
       turn.sawBusy = true;
+      // Both checks above match only the literal "esc to interrupt" marker, so
+      // this is the one place the marker (not an assistant record) proves Claude
+      // is working — record it for the submit-retry diagnostics (#370).
+      turn.sawBusyMarker = true;
       turn.lastProgressAt = now;
       // Real activity resumed — a probe that ran out of rounds during this
       // stall gets a fresh budget if the turn genuinely stalls again later.
@@ -833,11 +887,13 @@ class Driver {
       // the exact retry this state needs and wedging the turn into the
       // 30-min watchdog (review round 2, finding 1).
       if (turn.enterRetries < MAX_ENTER_RETRIES) {
+        this.logSubmitDiag('retry', turn, now);
         turn.enterRetries++;
         turn.submittedAt = now;
         logWarn(`Enter appears swallowed — retry ${turn.enterRetries}/${MAX_ENTER_RETRIES}`);
         this.host.writeRaw('\r');
       } else {
+        this.logSubmitDiag('giveup', turn, now);
         this.finishTurn(true, 'failed to submit turn to the TUI input');
       }
       return;
