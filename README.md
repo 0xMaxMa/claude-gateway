@@ -715,6 +715,8 @@ curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq 
 
 Apps can also be installed from a GitHub URL (`github_url` + `commit`) or a local path (`local_path`) for development. Updates use a **blue-green swap with automatic rollback** — the old containers stay intact until the new version passes its healthcheck.
 
+The swap carries live bind-mount data forward into the new app directory. A data directory the app's own container created is owned by that image's uid (postgres leaves its `pgdata` mode 0700), and `rename(2)` on a directory needs write permission on the directory itself — so the gateway user cannot move it. Those paths are moved by a throwaway root helper container instead, mounting the nearest common ancestor of the two app directories so the move stays a real rename rather than a copy; each escalation is logged in the job. If a rollback cannot move such a path back, the update does **not** restart the app on a half-restored directory: the `-failed-` directory holding the live data is kept, the job fails with `ROLLBACK FAILED`, and the log names the paths and the directory to recover them from.
+
 **Reverse proxy configuration:**
 
 The gateway proxies `/app/:name/:portName/*` to the app containers. Two env vars control how the gateway reaches them:

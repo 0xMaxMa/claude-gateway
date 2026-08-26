@@ -3139,7 +3139,7 @@ curl -H "X-Api-Key: my-key" \
 
 **`status` values:** `pending` | `running` | `completed` | `failed`
 
-When `status` is `failed`, `error` contains the failure message. If the containers started but failed the healthcheck, container logs are appended to `logs` before rollback:
+When `status` is `failed`, `error` contains the failure message. If the containers started but failed the healthcheck, container logs are appended to `logs` before rollback. An update that fails before the new containers start says so (`Update failed during the directory swap`) rather than reporting a container failure. Rollback is normally invisible, with one deliberate exception: if live bind-mount data cannot be moved back into the restored app directory, the app is **not** restarted on a half-restored directory — the `-failed-` directory still holding that data is kept, `error` reports `Update failed and rollback also failed`, and the logs name the paths and the directory to recover them from:
 
 ```json
 {
