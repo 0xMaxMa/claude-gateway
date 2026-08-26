@@ -19,6 +19,12 @@
  * Pure helpers, kept out of claude-pty-shell.ts so they are unit-testable without
  * importing that module (which starts the driver on load) — same reason
  * `submit-diag.ts` exists.
+ *
+ * Scope note: only the swallowed-Enter retry's draft arm consults these. The
+ * diagnostics in `submit-diag.ts` still report the raw `inputDraft()`, so a
+ * phantom still shows up there as `draftLen > 0` and is still labelled
+ * `cause1-swallowed` — feeding the phantom into that snapshot is a follow-up,
+ * kept separate because the two changes ship on independent branches.
  */
 
 /**

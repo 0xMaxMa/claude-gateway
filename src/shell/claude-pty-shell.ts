@@ -20,7 +20,7 @@ import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
 import { preTrustWorkspace, checkAuthStatus } from './trust';
 import { decideMenuCancel } from './menu-cancel';
-import { classifyPhantomDraft, unsubmittedDraft } from './draft-phantom';
+import { classifyPhantomDraft, unsubmittedDraft as discountPhantom } from './draft-phantom';
 import { shouldAdoptOrphanWake } from './orphan-wake';
 import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
@@ -99,7 +99,10 @@ interface ActiveTurn {
   /** Text that `inputDraft()` reported before this turn's paste and that the full
    *  Ctrl+U budget provably could NOT change — i.e. screen furniture the reader
    *  mistook for a live draft, not text sitting in the input box. Null when the
-   *  input cleared normally (the overwhelmingly common case). Consumed by
+   *  input cleared normally (the overwhelmingly common case). Captured once,
+   *  pre-paste, and never refreshed: a phantom that only appears mid-turn is not
+   *  recorded, so this fails toward the pre-#370 behavior (counting it as a draft)
+   *  rather than toward discounting something unproven. Consumed by
    *  {@link Driver.unsubmittedDraft}. */
   phantomDraft: string | null;
   /** Snapshot of tailer.seenRecords at turn start — used to detect per-turn output. */
@@ -634,15 +637,17 @@ class Driver {
    * refusing to submit would break far more turns than it saves.
    */
   private async clearInput(): Promise<string | null> {
+    // Read once and reuse: two reads of a live screen can disagree, and `before`
+    // must be the very value the burst below is judged against.
+    const before = this.screen.inputDraft();
     // Fast path (the common case): the input is already empty, so send a single
     // Ctrl+U as a harmless no-op — exactly the pre-#296 behavior — and skip the
     // settle loop entirely so a clean submit gains no latency.
-    if (this.screen.inputDraft() === '') {
+    if (before === '') {
       this.host.writeRaw('\x15');
       return null;
     }
     // A draft is present: clear it a line at a time until the input reads empty.
-    const before = this.screen.inputDraft();
     for (let i = 0; i < INPUT_CLEAR_MAX_KEYS; i++) {
       this.host.writeRaw('\x15'); // Ctrl+U: clear one input line
       await new Promise((r) => setTimeout(r, INPUT_CLEAR_SETTLE_MS));
@@ -684,9 +689,23 @@ class Driver {
    * turn's unsubmitted text. Anything else — including a real draft that merely
    * *looks* like a menu, which Ctrl+U does clear — counts as before, so the #296
    * fix this arm exists for is untouched.
+   *
+   * SCOPE: this closes the draft arm only. The branch's other arm (no new records
+   * since turn start) is untouched, and fires on its own — 3 of the 7 give-ups in
+   * the prod sample had `recordsDelta === 0` and are unaffected by this. What it
+   * does cover is the 4 give-ups (and all 4 recoveries) where the draft arm was the
+   * sole trigger, i.e. where a `\r` was written into an on-screen overlay for
+   * nothing.
+   *
+   * TRADE-OFF: a draft that is genuinely in the input box but that Ctrl+U cannot
+   * move (a TUI momentarily not accepting input) is misread as a phantom, and with
+   * the records arm also quiet the turn then waits out the 30-min watchdog instead
+   * of erroring in ~12s. The branch's own preconditions make that narrow — it
+   * requires `!sawBusy` and `quietMs > 1500`, which a TUI busy enough to drop
+   * keystrokes does not satisfy — but it is the price of discounting anything here.
    */
   private unsubmittedDraft(turn: ActiveTurn): string {
-    return unsubmittedDraft(this.screen.inputDraft(), turn.phantomDraft);
+    return discountPhantom(this.screen.inputDraft(), turn.phantomDraft);
   }
 
   // ---- periodic liveness poll ----------------------------------------------
@@ -876,7 +895,9 @@ class Driver {
       // pre-paste Ctrl+U burst proved it cannot touch — an overlay's
       // caret row the draft reader cannot tell from the input box. Without
       // that, (b) is permanently true whenever an overlay is up, so the
-      // branch fires on turns whose Enter went through (#370).
+      // branch fires on turns whose Enter went through (#370). Arm (a) is
+      // unchanged and still fires on its own, so this narrows the branch
+      // rather than gating it.
       //
       // The interactivePromptBlocking() suppression applies ONLY to a
       // menu-selection turn: there a live menu genuinely can still be on
