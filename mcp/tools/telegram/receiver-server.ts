@@ -1228,8 +1228,9 @@ bot.command('models', async ctx => {
     const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
     const availableRaw = validModelRows(modelsData.models)
     const availableModels = availableRaw.length ? availableRaw : validModelRows(AVAILABLE_MODELS)
-    const configuredRaw = validModelRows(modelsData.configuredModels)
-    const configuredModels = configuredRaw.length ? configuredRaw : availableModels
+    const configuredModels = Array.isArray(modelsData.configuredModels)
+      ? validModelRows(modelsData.configuredModels)
+      : availableModels
     const liveModels = validModelRows(modelsData.liveModels)
 
     const keyboard = new InlineKeyboard()
@@ -1536,8 +1537,10 @@ bot.on('callback_query:data', async ctx => {
         body: JSON.stringify({ command: 'get_models' }),
       })
       if (!res.ok) throw new Error('model request failed')
-      const data = await res.json() as { liveModels?: unknown }
-      const liveModels = validModelRows(data.liveModels)
+      const data = await res.json() as { liveModels?: unknown; models?: unknown }
+      const liveModels = Array.isArray(data.liveModels)
+        ? validModelRows(data.liveModels)
+        : validModelRows(data.models)
       const page = Number(moreMatch[1])
       const pageSize = 16
       const totalPages = Math.max(1, Math.ceil(liveModels.length / pageSize))
@@ -1577,11 +1580,15 @@ bot.on('callback_query:data', async ctx => {
       ])
       if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
       const modelData = await modelRes.json() as { model?: string }
-      const modelsData = await modelsRes.json() as { configuredModels?: unknown; liveModels?: unknown }
-      const configuredModels = validModelRows(modelsData.configuredModels)
-      const liveModels = validModelRows(modelsData.liveModels)
+      const modelsData = await modelsRes.json() as { configuredModels?: unknown; liveModels?: unknown; models?: unknown }
+      const configuredModels = Array.isArray(modelsData.configuredModels)
+        ? validModelRows(modelsData.configuredModels)
+        : validModelRows(AVAILABLE_MODELS)
+      const liveModels = Array.isArray(modelsData.liveModels)
+        ? validModelRows(modelsData.liveModels)
+        : validModelRows(modelsData.models).filter(m => !configuredModels.some(c => c.id === m.id))
       const keyboard = new InlineKeyboard()
-      for (const m of configuredModels.length ? configuredModels : validModelRows(AVAILABLE_MODELS)) {
+      for (const m of configuredModels) {
         const id = safeModelId(m.id)
         if (!id) continue
         keyboard.text(`${m.id === (modelData.model ?? '') ? '✅ ' : ''}${m.label}`, `model:${id}`).row()

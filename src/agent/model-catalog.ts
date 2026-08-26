@@ -176,9 +176,13 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
 
   const seen = new Set<string>();
   // Config is authoritative: retain every curated entry, including local [1m]
-  // variants, before adding upstream-only rows.
-  const models: ModelConfig[] = [...fallback];
-  for (const m of fallback) seen.add(m.id);
+  // variants, before adding upstream-only rows. Preserve first duplicate/order.
+  const models: ModelConfig[] = [];
+  for (const m of fallback) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    models.push(m);
+  }
   let usableCount = 0;
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
@@ -266,7 +270,8 @@ export async function fetchModelCatalog(
   }
 
   inFlightKey = key;
-  inFlight = (async (): Promise<ModelConfig[] | null> => {
+  let request!: Promise<ModelConfig[] | null>;
+  request = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       const token = catalogAuthToken();
@@ -286,9 +291,12 @@ export async function fetchModelCatalog(
     } catch {
       return stale; // unreachable, timed out, or unparseable
     } finally {
-      inFlight = null;
-      inFlightKey = null;
+      if (inFlight === request) {
+        inFlight = null;
+        inFlightKey = null;
+      }
     }
   })();
-  return inFlight;
+  inFlight = request;
+  return request;
 }
