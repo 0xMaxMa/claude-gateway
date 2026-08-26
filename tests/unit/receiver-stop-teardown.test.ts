@@ -9,6 +9,10 @@ interface MockChildProcess extends EventEmitter {
   killed: boolean;
   kill: jest.Mock;
   pid: number;
+  // A real ChildProcess has these as null until the child exits; stopChildProcess
+  // reads them to detect an already-dead child, so the mock must model them.
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
   /** When false the child ignores SIGTERM, as a wedged long-poll would. */
   exitsOnTerm: boolean;
 }
@@ -21,7 +25,13 @@ function makeMockProcess(): MockChildProcess {
   proc.stderr = new EventEmitter();
   proc.killed = false;
   proc.pid = 4242;
+  proc.exitCode = null;
+  proc.signalCode = null;
   proc.exitsOnTerm = true;
+  proc.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    proc.exitCode = code;
+    proc.signalCode = signal;
+  });
   proc.kill = jest.fn((signal?: string) => {
     if (signal === 'SIGTERM' && !proc.exitsOnTerm) return true;
     proc.killed = true;
@@ -42,6 +52,8 @@ import { TelegramReceiver } from '../../src/telegram/receiver';
 import { DiscordReceiver } from '../../src/discord/receiver';
 import { AgentConfig } from '../../src/types';
 import { findOrphanedReceivers } from '../../src/utils/orphan-receivers';
+import { stopChildProcess } from '../../src/utils/stop-child';
+import type { ChildProcess } from 'child_process';
 
 const LOG_DIR = '/tmp/claude-gateway-test-logs';
 
@@ -191,7 +203,10 @@ describe('sweep needle matches the real receiver spawn path (issue #405)', () =>
     spawn.mockClear();
 
     make().start();
-    const spawnedPath = (spawn.mock.calls[0] as [string, string[]])[1][0];
+    const [cmd, argv] = spawn.mock.calls[0] as [string, string[]];
+    // Reconstruct the argv exactly as `ps` would render it, so this breaks if
+    // either the runtime or the script path changes shape.
+    const command = [cmd, ...argv].join(' ');
 
     // Exactly how src/index.ts derives mcpToolsDir, from this module's own
     // depth. Both entry points sit one directory below the package root, so
@@ -200,7 +215,45 @@ describe('sweep needle matches the real receiver spawn path (issue #405)', () =>
 
     // If either path derivation moves, the sweep silently reclaims nothing —
     // so assert through the matcher itself rather than comparing strings.
-    const found = findOrphanedReceivers(`  1234       1 bun ${spawnedPath}`, mcpToolsDir);
+    const found = findOrphanedReceivers(`  1234       1 ${command}`, mcpToolsDir);
     expect(found.map((o) => o.pid)).toEqual([1234]);
+  });
+  it('U-RS-405h: an already-exited child resolves at once instead of idling out the grace period', async () => {
+    jest.useFakeTimers();
+    try {
+      const receiver = new TelegramReceiver(makeAgentConfig(), 4321, LOG_DIR);
+      receiver.start();
+      const proc = lastProcess!;
+      // Node clears the handle on exit: kill() then returns false WITHOUT
+      // throwing and no further 'exit' fires, so a naive implementation waits
+      // out the full grace period and SIGKILLs a dead pid.
+      proc.exitCode = 0;
+      proc.kill.mockImplementation(() => false);
+
+      let resolved = false;
+      const stopped = stopChildProcess(proc as unknown as ChildProcess).then(() => { resolved = true; });
+
+      await Promise.resolve();
+      expect(resolved).toBe(true);
+      expect(proc.kill).not.toHaveBeenCalled();
+
+      await stopped;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+  it('U-RS-405i: a child that does not expose exitCode is treated as alive and still signalled', async () => {
+    // Regression guard: a strict `!== null` early-return here silently skipped
+    // teardown entirely for any ChildProcess-like object lacking the field —
+    // the child was never signalled at all. Absent must mean alive.
+    const proc = new EventEmitter() as unknown as ChildProcess & { kill: jest.Mock };
+    proc.kill = jest.fn(() => {
+      setImmediate(() => (proc as unknown as EventEmitter).emit('exit', 0, 'SIGTERM'));
+      return true;
+    });
+
+    await stopChildProcess(proc);
+
+    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
   });
 });

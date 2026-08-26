@@ -29,6 +29,20 @@ export function stopChildProcess(
   const graceMs = opts.graceMs ?? STOP_GRACE_MS;
 
   return new Promise<void>((resolve) => {
+    // An already-exited child never emits another 'exit', and `kill()` on it
+    // returns false *without throwing* (Node has cleared its handle) — so the
+    // catch below would not fire and the promise would idle for the whole grace
+    // period before "escalating" with a SIGKILL that does nothing.
+    //
+    // Loose `!= null` is deliberate: a real ChildProcess always exposes both
+    // fields as null while running, but anything that does not expose them at
+    // all must be treated as ALIVE and signalled, never assumed dead and
+    // silently skipped. Failing safe here means attempting the kill.
+    if (proc.exitCode != null || proc.signalCode != null) {
+      resolve();
+      return;
+    }
+
     let settled = false;
     const finish = () => {
       if (settled) return;
@@ -46,10 +60,11 @@ export function stopChildProcess(
     }, graceMs);
 
     proc.once('exit', finish);
+    // Returns false rather than throwing if the child died in the moment before
+    // this line; the exit event that clears the handle also settles us.
     try {
       proc.kill('SIGTERM');
     } catch {
-      // Already exited between the caller's null-check and here.
       finish();
     }
   });

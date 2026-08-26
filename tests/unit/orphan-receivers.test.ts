@@ -56,7 +56,10 @@ describe('orphaned receiver sweep (issue #405)', () => {
     const ps = [
       psLine(5001, 1, `bun ${TOOLS}/telegram/send.ts`),
       psLine(5002, 1, 'node /usr/lib/node_modules/npm/bin/npm-cli.js'),
-      psLine(5003, 1, `grep -r receiver-server.ts ${TOOLS}`),
+      psLine(5003, 1, `grep -r receiver-server.ts ${TOOLS}/`),
+      psLine(5005, 1, `bun test ${TOOLS}/telegram/receiver-server.ts`),
+      psLine(5006, 1, `vim ${TOOLS}/telegram/receiver-server.ts`),
+      psLine(5007, 1, `bun ${TOOLS}/telegram/deep/receiver-server.ts`),
       psLine(5004, 1, `bun ${TOOLS}/telegram/receiver-server.ts`),
     ].join('\n');
 
@@ -129,7 +132,7 @@ describe('orphaned receiver sweep (issue #405)', () => {
       wait,
     });
 
-    expect(result).toEqual({ reclaimed: [], forced: [] });
+    expect(result).toEqual({ reclaimed: [], forced: [], failed: [] });
     expect(kill).not.toHaveBeenCalled();
     expect(wait).not.toHaveBeenCalled();
   });
@@ -193,6 +196,71 @@ describe('orphaned receiver sweep (issue #405)', () => {
 
     expect(signals).toEqual([[9100, 'SIGTERM']]);
     expect(result.forced).toEqual([]);
-    expect(result.reclaimed.map((o) => o.pid)).toEqual([9100]);
+    // Not reclaimed: escalation never happened, so it may still be alive. The
+    // boot log must not claim a win it cannot back up.
+    expect(result.reclaimed).toEqual([]);
+    expect(result.failed).toEqual([
+      { pid: 9100, reason: 'escalation skipped: ps disappeared mid-sweep' },
+    ]);
+  });
+
+  // ── U-OR-405m: EPERM must never be counted as a win ────────────────────────
+  it('U-OR-405m: reports an orphan owned by another user as failed, not reclaimed', async () => {
+    const eperm = () => {
+      const err = new Error('EPERM') as NodeJS.ErrnoException;
+      err.code = 'EPERM';
+      throw err;
+    };
+
+    const result = await sweepOrphanedReceivers(TOOLS, {
+      listProcesses: async () => psLine(9200, 1, `bun ${TOOLS}/telegram/receiver-server.ts`),
+      kill: eperm,
+      wait: async () => {},
+    });
+
+    // Pre-fix this returned reclaimed:[9200] and the boot log announced it as
+    // reclaimed while the process was still alive and still polling its token.
+    expect(result.reclaimed).toEqual([]);
+    expect(result.forced).toEqual([]);
+    expect(result.failed).toEqual([{ pid: 9200, reason: 'EPERM (owned by another user)' }]);
+  });
+
+  it('U-OR-405n: an EPERM orphan is not escalated to SIGKILL either', async () => {
+    const line = psLine(9300, 1, `bun ${TOOLS}/discord/receiver-server.ts`);
+    const signals: Array<[number, string]> = [];
+
+    const result = await sweepOrphanedReceivers(TOOLS, {
+      listProcesses: async () => line, // still there on the re-list
+      kill: (pid, signal) => {
+        signals.push([pid, signal]);
+        const err = new Error('EPERM') as NodeJS.ErrnoException;
+        err.code = 'EPERM';
+        throw err;
+      },
+      wait: async () => {},
+    });
+
+    expect(signals).toEqual([[9300, 'SIGTERM']]); // no pointless SIGKILL
+    expect(result.failed.map((f) => f.pid)).toEqual([9300]);
+  });
+
+  // ── U-OR-405o: argv shape, not substring ──────────────────────────────────
+  it('U-OR-405o: only matches the exact `bun <toolsDir>/<channel>/receiver-server.ts` shape', () => {
+    const cases: Array<[string, boolean]> = [
+      [`bun ${TOOLS}/telegram/receiver-server.ts`, true],
+      [`/home/u/.bun/bin/bun ${TOOLS}/discord/receiver-server.ts`, true],
+      [`bun test ${TOOLS}/telegram/receiver-server.ts`, false],
+      [`node ${TOOLS}/telegram/receiver-server.ts`, false],
+      [`grep -r receiver-server.ts ${TOOLS}/`, false],
+      [`bun ${TOOLS}/receiver-server.ts`, false],
+      [`bun ${TOOLS}/telegram/nested/receiver-server.ts`, false],
+      [`bun ${TOOLS}/telegram/receiver-server.ts.bak`, false],
+      ['bun', false],
+    ];
+
+    for (const [command, shouldMatch] of cases) {
+      const found = findOrphanedReceivers(psLine(1, 1, command), TOOLS);
+      expect([command, found.length > 0]).toEqual([command, shouldMatch]);
+    }
   });
 });

@@ -28,13 +28,30 @@ export interface SweepDeps {
 }
 
 export interface SweepResult {
+  /** Orphans that are gone as a result of this sweep. */
   reclaimed: OrphanedReceiver[];
   /** Orphans that ignored SIGTERM and had to be SIGKILLed. */
   forced: number[];
+  /**
+   * Orphans that could NOT be terminated — most realistically EPERM, when a
+   * previous gateway ran under a different account or under sudo. Reported
+   * separately so the boot log never claims to have reclaimed a process that is
+   * still alive and still polling its bot token.
+   */
+  failed: Array<{ pid: number; reason: string }>;
 }
 
-/** Grace period between SIGTERM and SIGKILL for an orphan. */
-export const ORPHAN_SIGKILL_GRACE_MS = 2_000;
+/**
+ * Grace period between SIGTERM and SIGKILL for an orphan.
+ *
+ * Must stay comfortably above the receivers' own exit deadline — both
+ * `mcp/tools/discord/receiver-server.ts` and `mcp/tools/telegram/receiver-server.ts`
+ * force-exit on a 2000ms timer after SIGTERM, and Discord's is unconditional. A
+ * 2000ms grace would be a dead heat, so healthy receivers would routinely be
+ * SIGKILLed and counted as wedged, making the "needed SIGKILL" figure useless as
+ * a signal.
+ */
+export const ORPHAN_SIGKILL_GRACE_MS = 5_000;
 
 const defaultListProcesses = (): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -54,6 +71,17 @@ const defaultKill = (pid: number, signal: NodeJS.Signals): void => {
 const defaultWait = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/** ESRCH means the process is already gone — the one "failure" that is a success. */
+function isAlreadyGone(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | undefined)?.code === 'ESRCH';
+}
+
+function describeKillError(err: unknown): string {
+  const e = err as NodeJS.ErrnoException | undefined;
+  if (e?.code === 'EPERM') return 'EPERM (owned by another user)';
+  return e?.code ?? (e instanceof Error ? e.message : String(err));
+}
+
 /**
  * Find receiver processes spawned from `receiverToolsDir` that have been
  * reparented to init.
@@ -64,14 +92,24 @@ const defaultWait = (ms: number): Promise<void> =>
  *   live gateway always has that gateway's pid as its parent, including when the
  *   gateway itself is a systemd service whose own ppid is 1. So this never
  *   matches a receiver another running gateway still owns.
- * - The tools-directory prefix keeps a gateway from killing receivers belonging
- *   to a different checkout on the same host. `receiverToolsDir` is the very
- *   `<install>/mcp/tools` the receivers are spawned from, and matching includes
- *   the trailing separator, so `/opt/gw/mcp/tools` cannot match a receiver under
- *   `/opt/gw-research/mcp/tools`.
+ *
+ *   Caveat: on a host where an ancestor has called `prctl(PR_SET_CHILD_SUBREAPER)`
+ *   — `systemd --user` for user services, `docker run --init` / tini, s6 —
+ *   orphans reparent to that subreaper rather than to pid 1, and this sweep finds
+ *   nothing. The gateway still shuts down cleanly there (gap 1 covers the signal
+ *   paths); what is lost is the SIGKILL/OOM recovery, and such a host has a
+ *   supervisor that generally reaps the process group itself.
+ *
+ * - The argv must *execute* the receiver from this installation's own tools
+ *   directory. Matching is on argv tokens in the exact shape the receivers are
+ *   spawned with (`bun <toolsDir>/<channel>/receiver-server.ts`) rather than a
+ *   substring test, so a detached `grep -r receiver-server.ts <toolsDir>/`, an
+ *   editor, or a `bun test` over the same file is not mistaken for a receiver and
+ *   killed. `tests/unit/receiver-stop-teardown.test.ts` pins this shape against
+ *   the receivers' real spawn arguments.
  */
 export function findOrphanedReceivers(psOutput: string, receiverToolsDir: string): OrphanedReceiver[] {
-  const needle = path.resolve(receiverToolsDir) + path.sep;
+  const toolsDir = path.resolve(receiverToolsDir);
   const found: OrphanedReceiver[] = [];
 
   for (const line of psOutput.split('\n')) {
@@ -85,13 +123,31 @@ export function findOrphanedReceivers(psOutput: string, receiverToolsDir: string
 
     if (ppid !== 1) continue;
     if (pid === process.pid) continue;
-    if (!command.includes(needle)) continue;
-    if (!command.includes('receiver-server.ts')) continue;
+    if (!isReceiverInvocation(command, toolsDir)) continue;
 
     found.push({ pid, command });
   }
 
   return found;
+}
+
+/**
+ * True when `command` is the gateway spawning a receiver of its own — i.e.
+ * `bun <toolsDir>/<channel>/receiver-server.ts`, the script as the runtime's
+ * first argument, with exactly one directory level for the channel.
+ */
+function isReceiverInvocation(command: string, toolsDir: string): boolean {
+  const tokens = command.split(/\s+/);
+  if (tokens.length < 2) return false;
+  if (path.basename(tokens[0]) !== 'bun') return false;
+
+  const script = tokens[1];
+  const relative = path.relative(toolsDir, script);
+  // Outside the tools directory (`..`) or on another root (absolute) — not ours.
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+
+  const segments = relative.split(path.sep);
+  return segments.length === 2 && segments[1] === 'receiver-server.ts';
 }
 
 /**
@@ -102,12 +158,8 @@ export function findOrphanedReceivers(psOutput: string, receiverToolsDir: string
  *
  * Rejects if the process list cannot be read at all — the caller must decide
  * whether that is fatal (it is not: boot continues, loudly). Once the sweep is
- * under way it stops throwing, so a partial failure degrades to "fewer orphans
- * reclaimed this boot" rather than a failed startup.
- *
- * `reclaimed` lists the orphans that were signalled. In the ordinary path they
- * are gone by the time this resolves; if escalation had to be skipped, a wedged
- * one may still be alive and the next boot will retry it.
+ * under way it stops throwing, and anything it could not terminate is reported
+ * in `failed` rather than silently counted as reclaimed.
  */
 export async function sweepOrphanedReceivers(
   receiverToolsDir: string,
@@ -118,14 +170,17 @@ export async function sweepOrphanedReceivers(
   const wait = deps.wait ?? defaultWait;
 
   const orphans = findOrphanedReceivers(await listProcesses(), receiverToolsDir);
-  if (orphans.length === 0) return { reclaimed: [], forced: [] };
+  if (orphans.length === 0) return { reclaimed: [], forced: [], failed: [] };
+
+  const failed = new Map<number, string>();
 
   for (const orphan of orphans) {
-    // ESRCH: it exited between the listing and now — already reclaimed.
     try {
       kill(orphan.pid, 'SIGTERM');
-    } catch {
-      /* already gone */
+    } catch (err) {
+      // ESRCH: it exited between the listing and now — already reclaimed.
+      // Anything else (EPERM in practice) means we cannot touch it at all.
+      if (!isAlreadyGone(err)) failed.set(orphan.pid, describeKillError(err));
     }
   }
 
@@ -140,24 +195,41 @@ export async function sweepOrphanedReceivers(
     survivors = new Set(
       findOrphanedReceivers(await listProcesses(), receiverToolsDir).map((o) => o.pid),
     );
-  } catch {
+  } catch (err) {
     // The second listing failed even though the first succeeded. Skipping
     // escalation leaves a wedged receiver alive, which the next boot will retry;
     // guessing from stale pids could kill an unrelated process. Prefer the
-    // recoverable failure.
-    return { reclaimed: orphans, forced: [] };
+    // recoverable failure — but report the survivors as unreclaimed, not as won.
+    const reason = `escalation skipped: ${(err as Error).message}`;
+    for (const orphan of orphans) {
+      if (!failed.has(orphan.pid)) failed.set(orphan.pid, reason);
+    }
+    return finish(orphans, [], failed);
   }
 
   const forced: number[] = [];
   for (const orphan of orphans) {
+    if (failed.has(orphan.pid)) continue; // could not be signalled at all
     if (!survivors.has(orphan.pid)) continue; // exited on SIGTERM, as expected
     try {
       kill(orphan.pid, 'SIGKILL');
       forced.push(orphan.pid);
-    } catch {
-      /* raced us to exit between the listing and now */
+    } catch (err) {
+      if (!isAlreadyGone(err)) failed.set(orphan.pid, describeKillError(err));
     }
   }
 
-  return { reclaimed: orphans, forced };
+  return finish(orphans, forced, failed);
+}
+
+function finish(
+  orphans: OrphanedReceiver[],
+  forced: number[],
+  failed: Map<number, string>,
+): SweepResult {
+  return {
+    reclaimed: orphans.filter((o) => !failed.has(o.pid)),
+    forced,
+    failed: [...failed].map(([pid, reason]) => ({ pid, reason })),
+  };
 }

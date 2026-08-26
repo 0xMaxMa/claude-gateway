@@ -623,8 +623,15 @@ shutdown path. Two mechanisms keep them from outliving it:
   never be handled in-process, so at startup the gateway terminates any
   `receiver-server.ts` process that was spawned from *its own* installation and
   has been reparented to `init` (proof that its supervisor is gone), logging how
-  many it reclaimed. Receivers belonging to another checkout on the same host, or
-  to a gateway that is still running, are never touched.
+  many it reclaimed — and separately warning about any it could **not** reclaim,
+  since those are still running. Receivers belonging to another checkout on the
+  same host, or to a gateway that is still running, are never touched.
+
+  On a host where an ancestor is a child subreaper (`systemd --user`,
+  `docker run --init`/tini, s6), orphans reparent to that subreaper instead of to
+  `init` and the sweep finds nothing. Clean shutdown still works; what is lost is
+  the `SIGKILL`/OOM recovery — though such a host usually has a supervisor that
+  reaps the process group itself.
 
 ### Session Persistence
 

@@ -630,6 +630,28 @@ async function main(): Promise<void> {
   const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
   const logDir = expandTilde(config.gateway.logDir);
 
+  // Signals are wired HERE, not after startup finishes. Boot spawns receivers
+  // one agent at a time and can take a while (the orphan sweep alone waits out a
+  // grace period), and until a handler exists a SIGHUP during that window kills
+  // the gateway by default disposition and orphans every receiver started so
+  // far — the same failure this file fixes (issue #405).
+  //
+  // The full teardown closes over components that do not exist yet, so the
+  // handler delegates to it once available and otherwise does the subset that
+  // matters this early: stopping the runners, which are what own receivers.
+  let fullShutdown: ((signal: string) => Promise<void>) | null = null;
+  const bootShutdown = async (signal: string): Promise<void> => {
+    if (fullShutdown) return fullShutdown(signal);
+    console.log(`[gateway] Received ${signal} during startup, shutting down...`);
+    for (const scheduler of schedulers) scheduler.stop();
+    await Promise.allSettled([...agentRunners.values()].map((runner) => runner.stop()));
+    console.log('[gateway] Startup shutdown complete.');
+  };
+  registeredShutdown = registerShutdownSignals({
+    run: bootShutdown,
+    onBegin: () => { isShuttingDown = true; },
+  });
+
   // Initial sync: copy shared and module skills to ~/.claude/skills/ so the Skill tool sees them
   syncSharedSkills(sharedSkillsDir, personalSkillsDir, globalLogger);
   syncModuleSkills(mcpToolsDir, personalSkillsDir, globalLogger);
@@ -697,6 +719,15 @@ async function main(): Promise<void> {
       for (const orphan of sweep.reclaimed) {
         globalLogger.info('Reclaimed orphaned receiver', { pid: orphan.pid, command: orphan.command });
       }
+    }
+    // Never fold these into the reclaimed count: they are still alive and still
+    // polling their bot tokens, which is exactly what an operator needs to know.
+    if (sweep.failed.length > 0) {
+      console.warn(
+        `[gateway] Could NOT reclaim ${sweep.failed.length} orphaned receiver process${sweep.failed.length === 1 ? '' : 'es'} — still running: ` +
+          sweep.failed.map((f) => `${f.pid} (${f.reason})`).join(', '),
+      );
+      globalLogger.warn('Orphaned receivers could not be reclaimed', { failed: sweep.failed });
     }
   } catch (err) {
     // A host whose process list cannot be read must still boot — but never
@@ -968,23 +999,34 @@ async function main(): Promise<void> {
     configWatcher.stop();
     socketServer.stopAll();
 
-    await router.stop();
+    // Every teardown below must run even if an earlier one throws. Previously a
+    // rejection here propagated and the process hung with its children still
+    // parented — recoverable. Now that a failed shutdown exits the process, an
+    // unguarded throw would *guarantee* the remaining receivers reparent to
+    // init: precisely the bug this file is fixing (issue #405).
+    const settled = await Promise.allSettled([
+      router.stop(),
+      // Runners stop concurrently, not serially. Teardown is now awaited, and
+      // the Discord receiver always takes ~2s to exit (its receiver-server
+      // force-exits on an unconditional timer), so serial stops would multiply
+      // that by the agent count and risk a supervisor's stop timeout (docker
+      // stop's 10s default, TimeoutStopSec) SIGKILLing the gateway mid-teardown
+      // — re-orphaning the very receivers this protects.
+      ...[...agentRunners.values()].map((runner) => runner.stop()),
+    ]);
 
-    for (const runner of agentRunners.values()) {
-      await runner.stop();
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        console.error('[gateway] Shutdown step failed:', result.reason);
+      }
     }
 
     console.log('[gateway] Shutdown complete.');
   };
 
-  // Wires SIGTERM/SIGINT/SIGHUP and returns the deduplicated shutdown, which the
-  // module-level crash handlers below reuse so there is only ever one teardown.
-  // SIGHUP matters most here: without a handler Node terminates the gateway
-  // outright and every receiver child is orphaned (issue #405).
-  registeredShutdown = registerShutdownSignals({
-    run: runShutdown,
-    onBegin: () => { isShuttingDown = true; },
-  });
+  // Hand the fully-wired teardown to the handlers registered at the top of
+  // main(). From here a signal tears down everything; before it, the boot subset.
+  fullShutdown = runShutdown;
 }
 
 async function emergencyShutdown(label: string, detail: unknown): Promise<void> {
