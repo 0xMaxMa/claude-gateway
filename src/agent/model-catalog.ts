@@ -165,19 +165,30 @@ export function baseUrlIsSecure(raw: string): boolean {
  * live model that lost those fields would silently report against 200k.
  */
 export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): ModelConfig[] | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const rows = (body as { data?: unknown; models?: unknown }).data
-    ?? (body as { models?: unknown }).models;
+  const rows = Array.isArray(body)
+    ? body
+    : (typeof body === 'object' && body !== null
+      ? ((body as { data?: unknown; models?: unknown }).data
+        ?? (body as { models?: unknown }).models)
+      : null);
   if (!Array.isArray(rows)) return null;
 
   const known = new Map(fallback.map((m) => [m.id, m]));
   const seen = new Set<string>();
-  const models: ModelConfig[] = [];
+  // Config is authoritative: retain every curated entry, including local [1m]
+  // variants, before adding upstream-only rows.
+  const models: ModelConfig[] = [...fallback];
+  for (const m of fallback) seen.add(m.id);
+  let liveCount = 0;
+  let usableCount = 0;
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
-    const r = row as { id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; kind?: unknown; type?: unknown };
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id || seen.has(id)) continue;
+    const r = row as { id?: unknown; model_id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; token_multiplier?: unknown; kind?: unknown; type?: unknown };
+    const idValue = typeof r.id === 'string' ? r.id : r.model_id;
+    const id = typeof idValue === 'string' ? idValue.trim() : '';
+    if (!id) continue;
+    usableCount++;
+    if (seen.has(id)) continue;
     // A proxy that fronts image generation alongside chat may serve one
     // catalog for both — the image tool asks for its half with
     // `/v1/models?kind=image`. An image model in the chat picker is selectable
@@ -189,28 +200,31 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
     // and guessing one risks an empty catalog on every deployment.
     const kind = [r.kind, r.type].find((v) => typeof v === 'string' && v.trim());
     if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.toLowerCase())) continue;
+    usableCount++;
     seen.add(id);
-
     const staticEntry = known.get(id);
-    const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim())
-      ?? staticEntry?.label ?? id;
+    if (staticEntry) continue;
+    liveCount++;
+
+    const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim()) ?? id;
     const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && v > 0);
-    const multiplier = typeof r.multiplier === 'number' ? r.multiplier : staticEntry?.multiplier;
+    const multiplierValue = typeof r.multiplier === 'number' ? r.multiplier : r.token_multiplier;
+    const multiplier = typeof multiplierValue === 'number' ? multiplierValue : undefined;
 
     models.push({
       id,
       label: String(label),
       // A live-only model has no curated alias. Falling back to the id keeps
       // `/model <alias>` working for it rather than leaving the field empty.
-      alias: (typeof r.alias === 'string' && r.alias.trim()) || staticEntry?.alias || id,
-      contextWindow: (ctx as number | undefined) ?? staticEntry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      alias: (typeof r.alias === 'string' && r.alias.trim()) || id,
+      contextWindow: (ctx as number | undefined) ?? DEFAULT_CONTEXT_WINDOW,
       ...(multiplier === undefined ? {} : { multiplier }),
     });
   }
   // An empty catalog is treated as a failed fetch, not as "this deployment has
   // no models": an empty picker is strictly worse than a stale one, and an
   // upstream returning [] is far more likely to be broken than correct.
-  return models.length > 0 ? models : null;
+  return usableCount > 0 ? models : null;
 }
 
 // ── fetch ───────────────────────────────────────────────────────────────────

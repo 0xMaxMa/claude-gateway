@@ -1219,15 +1219,22 @@ bot.command('models', async ctx => {
       }),
     ])
     const modelData = (await modelRes.json()) as { model?: string }
-    const modelsData = (await modelsRes.json()) as { models?: { id: string; label: string }[] }
+    const modelsData = (await modelsRes.json()) as {
+      models?: { id: string; label: string }[]
+      configuredModels?: { id: string; label: string }[]
+      liveModels?: { id: string; label: string }[]
+    }
     const currentModel = modelData.model ?? ''
     const availableModels = modelsData.models ?? AVAILABLE_MODELS
+    const configuredModels = modelsData.configuredModels ?? availableModels
+    const liveModels = modelsData.liveModels ?? []
 
     const keyboard = new InlineKeyboard()
-    for (const m of availableModels) {
+    for (const m of configuredModels) {
       const prefix = m.id === currentModel ? '\u2705 ' : ''
       keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
     }
+    if (liveModels.length) keyboard.text('More models', 'models:more:0').row()
     keyboard.text('Dismiss', 'models:dismiss')
 
     await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
@@ -1486,6 +1493,71 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
     await ctx.deleteMessage().catch(() => {})
+    return
+  }
+
+  const moreMatch = /^models:more:(\d+)$/.exec(data)
+  if (moreMatch) {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    try {
+      const res = await fetch(CALLBACK_URL_BASE + '/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'get_models' }),
+      })
+      const data = await res.json() as { liveModels?: { id: string; label: string }[] }
+      const liveModels = Array.isArray(data.liveModels) ? data.liveModels : []
+      const page = Number(moreMatch[1])
+      const pageSize = 16
+      const totalPages = Math.max(1, Math.ceil(liveModels.length / pageSize))
+      const safePage = Math.min(page, totalPages - 1)
+      const keyboard = new InlineKeyboard()
+      for (const [index, m] of liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).entries()) {
+        keyboard.text(m.id, `model:${m.id}`)
+        if (index % 2 === 1) keyboard.row()
+      }
+      if (liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).length % 2 === 1) keyboard.row()
+      keyboard.text('«', safePage === 0 ? 'models:back' : `models:more:${safePage - 1}`)
+      if (safePage < totalPages - 1) keyboard.text('»', `models:more:${safePage + 1}`)
+      keyboard.row().text('Dismiss', 'models:dismiss')
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(`More models (live) — page ${safePage + 1}/${totalPages}:`, { reply_markup: keyboard })
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  if (data === 'models:back') {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) return
+    try {
+      const [modelRes, modelsRes] = await Promise.all([
+        fetch(CALLBACK_URL_BASE + '/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.callbackQuery.message?.chat.id) }) }),
+        fetch(CALLBACK_URL_BASE + '/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'get_models' }) }),
+      ])
+      const modelData = await modelRes.json() as { model?: string }
+      const modelsData = await modelsRes.json() as { configuredModels?: { id: string; label: string }[] }
+      const keyboard = new InlineKeyboard()
+      for (const m of (modelsData.configuredModels ?? AVAILABLE_MODELS)) {
+        keyboard.text(`${m.id === (modelData.model ?? '') ? '✅ ' : ''}${m.label}`, `model:${m.id}`).row()
+      }
+      keyboard.text('Dismiss', 'models:dismiss')
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(`Current model: ${modelData.model ?? ''}\nSelect a model:`, { reply_markup: keyboard })
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
     return
   }
 

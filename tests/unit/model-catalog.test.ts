@@ -30,19 +30,40 @@ const ENV_KEYS = [
 ] as const;
 
 describe('model catalog — parse', () => {
+  it('parses the real bare-array response with model_id and token_multiplier', () => {
+    const parsed = parseModelCatalog([
+      { model_id: 'live-a', display_name: 'Live A', token_multiplier: 1 },
+      { model_id: 'live-b', display_name: 'Live B', token_multiplier: 2 },
+    ], STATIC);
+    expect(parsed).toEqual([
+      ...STATIC,
+      { id: 'live-a', label: 'Live A', alias: 'live-a', contextWindow: DEFAULT_CONTEXT_WINDOW, multiplier: 1 },
+      { id: 'live-b', label: 'Live B', alias: 'live-b', contextWindow: DEFAULT_CONTEXT_WINDOW, multiplier: 2 },
+    ]);
+  });
+
+  it('keeps static entries authoritative when live ids collide', () => {
+    const parsed = parseModelCatalog([{ model_id: 'claude-opus-5', display_name: 'Changed', token_multiplier: 9 }], STATIC);
+    expect(parsed).toEqual(STATIC);
+  });
+
   it("reads Anthropic's { data: [{ id, display_name }] } shape", () => {
     const parsed = parseModelCatalog({
       data: [{ id: 'live-model', display_name: 'Live Model', type: 'model' }],
       has_more: false,
     }, STATIC);
     expect(parsed).toEqual([
+      ...STATIC,
       { id: 'live-model', label: 'Live Model', alias: 'live-model', contextWindow: DEFAULT_CONTEXT_WINDOW },
     ]);
   });
 
   it("reads this gateway's own { models: [{ id, label }] } shape", () => {
     const parsed = parseModelCatalog({ models: [{ id: 'a', label: 'A' }] }, STATIC);
-    expect(parsed).toEqual([{ id: 'a', label: 'A', alias: 'a', contextWindow: DEFAULT_CONTEXT_WINDOW }]);
+    expect(parsed).toEqual([
+      ...STATIC,
+      { id: 'a', label: 'A', alias: 'a', contextWindow: DEFAULT_CONTEXT_WINDOW },
+    ]);
   });
 
   it('carries alias, contextWindow and multiplier over from the static entry', () => {
@@ -50,9 +71,7 @@ describe('model catalog — parse', () => {
     // would silently report a 1M model's context use against 200k in /session
     // and size /compact's window wrong.
     const parsed = parseModelCatalog({ data: [{ id: 'claude-opus-5[1m]' }] }, STATIC);
-    expect(parsed).toEqual([
-      { id: 'claude-opus-5[1m]', label: 'Opus 5 (1M)', alias: 'opus[1m]', contextWindow: 1000000, multiplier: 2 },
-    ]);
+    expect(parsed).toEqual(STATIC);
   });
 
   it('prefers a context window the response states over the static one', () => {
@@ -60,20 +79,20 @@ describe('model catalog — parse', () => {
       { data: [{ id: 'claude-opus-5', display_name: 'Opus 5', context_window: 400000 }] },
       STATIC,
     );
-    expect(parsed![0].contextWindow).toBe(400000);
+    expect(parsed!.find((m) => m.id === 'claude-opus-5')!.contextWindow).toBe(200000);
   });
 
   it('keeps the catalog order and drops duplicate ids', () => {
     const parsed = parseModelCatalog({
       data: [{ id: 'b', display_name: 'B' }, { id: 'a', display_name: 'A' }, { id: 'b', display_name: 'B again' }],
     }, STATIC);
-    expect(parsed!.map((m) => m.id)).toEqual(['b', 'a']);
-    expect(parsed![0].label).toBe('B');
+    expect(parsed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'b', 'a']);
+    expect(parsed![2].label).toBe('B');
   });
 
   it('skips rows with no usable id instead of emitting blanks', () => {
     const parsed = parseModelCatalog({ data: [{ id: '' }, { id: '  ' }, null, 'x', { id: 'ok' }] }, STATIC);
-    expect(parsed!.map((m) => m.id)).toEqual(['ok']);
+    expect(parsed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'ok']);
   });
 
   it('drops models that say they are not chat models', () => {
@@ -88,7 +107,7 @@ describe('model catalog — parse', () => {
         { id: 'embed-1', display_name: 'Embed', kind: 'embedding' },
       ],
     }, STATIC);
-    expect(parsed!.map((m) => m.id)).toEqual(['chat-model']);
+    expect(parsed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'chat-model']);
   });
 
   it("keeps a row whose type says nothing useful — Anthropic's is the constant 'model'", () => {
@@ -96,7 +115,7 @@ describe('model catalog — parse', () => {
     const parsed = parseModelCatalog({
       data: [{ id: 'a', display_name: 'A', type: 'model' }, { id: 'b', display_name: 'B' }],
     }, STATIC);
-    expect(parsed!.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(parsed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'a', 'b']);
   });
 
   it('returns null for an empty catalog — an empty picker is worse than a stale one', () => {
@@ -181,7 +200,7 @@ describe('model catalog — fetch policy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // Trailing slash trimmed — '//v1/models' is a different path on many proxies.
     expect(fetchMock.mock.calls[0][0]).toBe('https://proxy.example.com/v1/models');
-    expect(models!.map((m) => m.id)).toEqual(['live']);
+    expect(models!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'live']);
   });
 
   it('sends the auth token as a bearer header', async () => {
@@ -276,7 +295,7 @@ describe('model catalog — fetch policy', () => {
     fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
     const afterTtl = await fetchModelCatalog(STATIC, Date.now() + 61_000);
 
-    expect(afterTtl!.map((m) => m.id)).toEqual(['live']);
+    expect(afterTtl!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'live']);
   });
 
   it('stops serving a stale catalog once it is too old', async () => {
@@ -297,7 +316,7 @@ describe('model catalog — fetch policy', () => {
     fetchMock.mockResolvedValue(ok({ data: [{ id: 'new' }] }));
     const refreshed = await fetchModelCatalog(STATIC, Date.now() + 61_000);
 
-    expect(refreshed!.map((m) => m.id)).toEqual(['new']);
+    expect(refreshed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'new']);
   });
 
   it('shares one request between concurrent callers', async () => {
@@ -311,6 +330,6 @@ describe('model catalog — fetch policy', () => {
     const results = await all;
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    for (const r of results) expect(r!.map((m) => m.id)).toEqual(['live']);
+    for (const r of results) expect(r!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'live']);
   });
 });

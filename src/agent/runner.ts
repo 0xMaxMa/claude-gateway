@@ -762,7 +762,14 @@ export class AgentRunner extends EventEmitter {
       // it — fetchModelCatalog is bounded and never rejects.
       void this.availableModels()
         .then((availableModels) => {
-          respond({ models: availableModels.map(m => ({ id: m.id, label: m.label })) });
+          const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
+          const configured = availableModels.filter(m => configuredIds.has(m.id));
+          const live = availableModels.filter(m => !configuredIds.has(m.id));
+          respond({
+            models: availableModels.map(m => ({ id: m.id, label: m.label })),
+            configuredModels: configured.map(m => ({ id: m.id, label: m.label })),
+            liveModels: live.map(m => ({ id: m.id, label: m.label })),
+          });
         })
         // Without this the request would hang and the picker with it: the
         // receiver is blocked on this response. Every other async branch in
@@ -2075,11 +2082,21 @@ export class AgentRunner extends EventEmitter {
    */
   private async handleCommandModels(chatId: string): Promise<void> {
     const models = await this.availableModels();
+    const configuredIds = new Set((this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).map(m => m.id));
+    const configured = models.filter(m => configuredIds.has(m.id));
+    const live = models.filter(m => !configuredIds.has(m.id));
     const current = this.agentConfig.claude.model;
-    const lines = [`Current model: ${current}`, ''];
-    for (const m of models) {
+    const lines = [`Current model: ${current}`, '', 'Configured models'];
+    for (const m of configured) {
       const marker = m.id === current ? '✅ ' : '• ';
       lines.push(`${marker}${m.label} — \`${m.id}\``);
+    }
+    if (live.length) {
+      lines.push('', 'More models (live)');
+      for (const m of live) {
+        const marker = m.id === current ? '✅ ' : '• ';
+        lines.push(`${marker}${m.label} — \`${m.id}\``);
+      }
     }
     lines.push('', 'Switch with /model <id or alias>');
     this.writeAutoForward(chatId, lines.join('\n'));

@@ -91,8 +91,8 @@ describe('GET /api/v1/models', () => {
     const res = await request(buildApp(STATIC_MODELS)).get('/api/v1/models').set(AUTH);
 
     expect(res.status).toBe(200);
-    expect(res.body.models.map((m: { id: string }) => m.id)).toEqual(['byok/some-model']);
-    expect(res.body.models[0].name).toBe('Some BYOK Model');
+    expect(res.body.models.map((m: { id: string }) => m.id)).toEqual(['claude-sonnet-4-6', 'byok/some-model']);
+    expect(res.body.models[1].name).toBe('Some BYOK Model');
   });
 
   it('falls back to the configured list when the catalog is unreachable', async () => {
