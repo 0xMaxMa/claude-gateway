@@ -14,6 +14,8 @@ import {
   STATUS_MESSAGES,
   ERROR_MESSAGES,
   STATUS_EMOJI,
+  isNotModifiedError,
+  isMessageGoneError,
   TYPING_INTERVAL_MS,
   STATUS_INTERVAL_MS,
   STALLED_TIMEOUT_MS,
@@ -324,24 +326,32 @@ describe('createWorkingStateManager', () => {
       expect(bot.sendMessage).toHaveBeenCalledTimes(1)
     })
 
-    test('U-TY-403d: a transient failure keeps the id rather than posting a replacement', async () => {
+    test('U-TY-403d: a transient failure keeps the id, and says so in the log', async () => {
       const bot = makeBotApi()
       bot.editMessageText.mockRejectedValue(new Error('ETIMEDOUT: socket hang up'))
       const fsApi = makeFsApi()
       const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => {})
 
-      mgr.start(CHAT_ID)
+      try {
+        mgr.start(CHAT_ID)
 
-      const state = mgr.states.get(CHAT_ID)!
-      state.statusMessageId = 56
+        const state = mgr.states.get(CHAT_ID)!
+        state.statusMessageId = 56
 
-      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
-      await Promise.resolve()
-      await Promise.resolve()
+        jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+        await Promise.resolve()
+        await Promise.resolve()
 
-      // The message is still in the chat; a replacement would leave a duplicate.
-      expect(state.statusMessageId).toBe(56)
-      expect(bot.sendMessage).not.toHaveBeenCalled()
+        // The message is still in the chat; a replacement would leave a duplicate.
+        expect(state.statusMessageId).toBe(56)
+        expect(bot.sendMessage).not.toHaveBeenCalled()
+        // An unclassified failure must leave a trace — a silently swallowed one
+        // is what let the duplicate loop run unnoticed in the first place.
+        expect(logged).toHaveBeenCalledWith(expect.stringContaining('ETIMEDOUT'))
+      } finally {
+        logged.mockRestore()
+      }
     })
 
     test('resets statusMessageId to null when editMessageText fails (message deleted)', async () => {
@@ -360,6 +370,52 @@ describe('createWorkingStateManager', () => {
       await Promise.resolve()
 
       expect(state.statusMessageId).toBeNull()
+    })
+  })
+
+  // The two classifiers decide whether a failed edit means "keep editing this
+  // message" or "it is gone, send a new one" — getting that backwards is what
+  // produced issue #403. They match on Telegram's English descriptions because
+  // both cases are HTTP 400 and the code cannot separate them, so the exact
+  // strings are pinned here rather than only exercised through the timer loop.
+  describe('edit-failure classification (#403)', () => {
+    const NOT_MODIFIED =
+      "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"
+
+    test('U-TY-403e: recognises the not-modified rejection, however it is thrown', () => {
+      expect(isNotModifiedError(new Error(NOT_MODIFIED))).toBe(true)
+      // grammY surfaces the API text on `description`, with `message` wrapping it.
+      expect(isNotModifiedError({ description: NOT_MODIFIED, error_code: 400 })).toBe(true)
+      expect(isNotModifiedError({ message: `Call to 'editMessageText' failed! (400: ${NOT_MODIFIED})` })).toBe(true)
+    })
+
+    test('U-TY-403f: a not-modified rejection is never read as a gone message', () => {
+      expect(isMessageGoneError(new Error(NOT_MODIFIED))).toBe(false)
+    })
+
+    test('U-TY-403g: recognises the descriptions that mean the message cannot be edited', () => {
+      for (const description of [
+        'Bad Request: message to edit not found',
+        'Bad Request: message to be edited not found',
+        "Bad Request: message can't be edited",
+        'Bad Request: message not found',
+      ]) {
+        expect(isMessageGoneError({ description, error_code: 400 })).toBe(true)
+        expect(isNotModifiedError({ description, error_code: 400 })).toBe(false)
+      }
+    })
+
+    test('U-TY-403h: a transient failure matches neither, so the id is kept', () => {
+      for (const err of [
+        new Error('ETIMEDOUT: socket hang up'),
+        { description: 'Too Many Requests: retry after 5', error_code: 429 },
+        { description: 'Bad Gateway', error_code: 502 },
+        undefined,
+        null,
+      ]) {
+        expect(isNotModifiedError(err)).toBe(false)
+        expect(isMessageGoneError(err)).toBe(false)
+      }
     })
   })
 
