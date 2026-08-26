@@ -242,6 +242,108 @@ describe('createWorkingStateManager', () => {
       expect(bot.editMessageText).toHaveBeenCalledWith(CHAT_ID, 77, expect.any(String))
     })
 
+    // ── Issue #403 ──────────────────────────────────────────────────────────
+    // Past one hour the elapsed line renders as `Xh Ym`, so with a steady detail
+    // the status text stops changing while the timer keeps firing every 10s.
+    // Telegram rejects an edit whose text is identical to the message's current
+    // text, and treating that rejection as "the message is gone" made the next
+    // tick post a replacement — roughly five duplicates a minute for the rest of
+    // the turn.
+
+    test('U-TY-403a: identical text issues no edit at all', async () => {
+      const bot = makeBotApi()
+      bot.sendMessage.mockResolvedValue({ message_id: 90 })
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      // A turn that started over an hour ago: `Xh Ym` has no seconds, so ten
+      // seconds of wall clock leaves the rendered text byte-identical.
+      state.startedAt = Date.now() - 3_600_000
+      state.lastDetail = 'Running: the same tool as a moment ago'
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+
+      expect(bot.editMessageText).not.toHaveBeenCalled()
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    test('U-TY-403b: a "message is not modified" rejection keeps the status message', async () => {
+      const bot = makeBotApi()
+      bot.editMessageText.mockRejectedValue(
+        new Error('Bad Request: message is not modified: specified new message content and reply markup are exactly the same'),
+      )
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      state.statusMessageId = 55
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(bot.editMessageText).toHaveBeenCalled()
+      // The message is intact and already correct — keep editing it.
+      expect(state.statusMessageId).toBe(55)
+      expect(bot.sendMessage).not.toHaveBeenCalled()
+    })
+
+    test('U-TY-403c: a turn past one hour keeps exactly one status message', async () => {
+      const bot = makeBotApi()
+      bot.sendMessage.mockResolvedValue({ message_id: 91 })
+      // Whatever slips past the identical-text guard is rejected the way
+      // Telegram rejects it, so both guards are exercised together.
+      bot.editMessageText.mockRejectedValue(new Error('Bad Request: message is not modified'))
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      state.startedAt = Date.now() - 3_600_000
+      state.lastDetail = 'Running: a long tool call'
+
+      for (let tick = 0; tick < 12; tick++) {
+        jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+
+      // Two minutes of ticks, one status message. Pre-fix this posted a fresh
+      // message on roughly every other tick.
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    test('U-TY-403d: a transient failure keeps the id rather than posting a replacement', async () => {
+      const bot = makeBotApi()
+      bot.editMessageText.mockRejectedValue(new Error('ETIMEDOUT: socket hang up'))
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      state.statusMessageId = 56
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The message is still in the chat; a replacement would leave a duplicate.
+      expect(state.statusMessageId).toBe(56)
+      expect(bot.sendMessage).not.toHaveBeenCalled()
+    })
+
     test('resets statusMessageId to null when editMessageText fails (message deleted)', async () => {
       const bot = makeBotApi()
       bot.editMessageText.mockRejectedValue(new Error('message not found'))
