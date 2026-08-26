@@ -16,6 +16,7 @@ import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
 import { SlackClient } from '../api/slack-client';
+import { WhatsAppCloudClient } from '../api/whatsapp-cloud-client';
 import { WhatsAppManager, type WhatsAppStatus } from '../whatsapp/manager';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
@@ -239,6 +240,11 @@ export class AgentRunner extends EventEmitter {
   // it exists only so writeAutoForward's fallback/command-reply path (below) has
   // somewhere to actually deliver Slack messages instead of silently dropping them.
   private slackOutbound: SlackClient | null = null;
+  // WhatsApp Cloud mirrors Slack exactly: webhook-based, real credentials, no
+  // reply-token TTL to work around — a plain client so writeAutoForward's
+  // fallback/command-reply path has somewhere to deliver messages instead of
+  // silently dropping them (see the Slack comment just above).
+  private whatsAppCloudOutbound: WhatsAppCloudClient | null = null;
   // Constructed once in start() (needs this.callbackPort, only resolved once
   // startCallbackServer() runs — same reason DiscordReceiver/TelegramReceiver
   // are built there too, not in the constructor) and then kept for the
@@ -481,7 +487,9 @@ export class AgentRunner extends EventEmitter {
                 ? 'slack'
                 : meta['source'] === 'whatsapp'
                   ? 'whatsapp'
-                  : 'telegram') as ChatChannel;
+                  : meta['source'] === 'whatsapp_cloud'
+                    ? 'whatsapp_cloud'
+                    : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
 
           // Slack: remember the current message's thread context so the
@@ -1138,7 +1146,7 @@ export class AgentRunner extends EventEmitter {
         for (const entry of entries) {
           const meta = entry.meta ?? {};
           const content = entry.content ?? '';
-          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : '');
+          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : meta['document_path'] ? '(document)' : '');
           const userTs = Date.now();
           await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
             role: 'user',
@@ -1164,6 +1172,19 @@ export class AgentRunner extends EventEmitter {
               // discardEphemeralStaging). Only after a SUCCESSFUL copy: the catch
               // below keeps the original path as the agent's only route to the bytes.
               if (meta['media_ephemeral'] === '1') AgentRunner.discardEphemeralStaging(stagedPath);
+            } catch {
+              // Non-fatal — leave the original path so host agents still read it
+            }
+          }
+          // WhatsApp Cloud documents (PDF today — see MediaStore.isAllowedMime):
+          // same MediaStore copy + path-rewrite as image_path above, parallel
+          // key so an inbound document doesn't collide with an inbound image
+          // in the same turn.
+          if (meta['document_path']) {
+            try {
+              const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['document_path']);
+              mediaFiles.push(rel);
+              meta['document_path'] = MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, rel);
             } catch {
               // Non-fatal — leave the original path so host agents still read it
             }
@@ -1389,6 +1410,7 @@ export class AgentRunner extends EventEmitter {
     const meta = params.meta ?? {};
     const optionalAttrs = [
       'image_path',
+      'document_path', // WhatsApp Cloud: inbound PDF document (see MediaStore.isAllowedMime)
       'attachment_file_id',
       'attachment_kind',
       'attachment_mime',
@@ -1725,7 +1747,9 @@ export class AgentRunner extends EventEmitter {
               ? 'mcp__gateway__slack_reply'
               : source === 'whatsapp'
                 ? 'mcp__gateway__whatsapp_reply'
-                : 'mcp__gateway__telegram_reply';
+                : source === 'whatsapp_cloud'
+                  ? 'mcp__gateway__whatsapp_cloud_reply'
+                  : 'mcp__gateway__telegram_reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -2036,11 +2060,13 @@ export class AgentRunner extends EventEmitter {
                   channelSrcForResult !== 'discord' &&
                   channelSrcForResult !== 'slack' &&
                   channelSrcForResult !== 'whatsapp' &&
+                  channelSrcForResult !== 'whatsapp_cloud' &&
                   (hasMarkdown(channelText) || containsTelegramHtml(channelText))
                 ) {
                   // Telegram HTML entities — Slack has its own mrkdwn format and
                   // would display these tags literally, so Slack skips this and
-                  // falls through to the plain-text branch below. WhatsApp has
+                  // falls through to the plain-text branch below. WhatsApp (and
+                  // WhatsApp Cloud, same lightweight markup) has
                   // its own lightweight markup (*bold*/_italic_/~strike~, not
                   // HTML), same reasoning.
                   this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html', replySendFailed);
@@ -2968,6 +2994,20 @@ export class AgentRunner extends EventEmitter {
       });
       return;
     }
+    // WhatsApp Cloud mirrors Slack exactly (no .forward consumer, a real REST
+    // client that can open a fresh connection per call — unlike Baileys'
+    // `whatsapp` above, there's no live socket to reuse or reason to).
+    if (this.channelFor(chatId) === 'whatsapp_cloud') {
+      if (this.whatsAppCloudOutbound) {
+        void this.whatsAppCloudOutbound.sendText(chatId, text).catch((err: unknown) => {
+          this.logger.warn('WhatsApp Cloud auto-forward failed', {
+            chatId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+      return;
+    }
     const typingDir = this.getTypingDir(chatId);
     const forwardPath = path.join(typingDir, `${chatId}.forward`);
     try {
@@ -3073,6 +3113,7 @@ export class AgentRunner extends EventEmitter {
     // line_reply tool keeps the plain reply-first → push-fallback path).
     this.startLineReply();
     this.startSlackOutbound();
+    this.startWhatsAppCloudOutbound();
     // Unconditional construction (unlike every credential-gated channel
     // above) — WhatsAppManager checks disk for a previously-linked session
     // itself; there's no config field to gate on. A brand-new agent that's
@@ -3132,6 +3173,10 @@ export class AgentRunner extends EventEmitter {
     // it up, same reasoning as LineReplyManager above.
     this.stopSlackOutbound();
     this.startSlackOutbound();
+    // WhatsApp Cloud credentials may have changed (or been cleared) — rebuild
+    // to pick it up, same reasoning as Slack above.
+    this.stopWhatsAppCloudOutbound();
+    this.startWhatsAppCloudOutbound();
     // WhatsApp has no credential to rebuild on — just push the new config
     // (access-control fields) into the already-running manager.
     this.whatsapp?.updateAgentConfig(newConfig);
@@ -3172,6 +3217,21 @@ export class AgentRunner extends EventEmitter {
 
   stopSlackOutbound(): void {
     this.slackOutbound = null;
+  }
+
+  startWhatsAppCloudOutbound(): void {
+    const cfg = this.agentConfig.whatsapp_cloud;
+    if (!cfg?.accessToken || !cfg?.phoneNumberId || !cfg?.appSecret || !cfg?.verifyToken) return;
+    if (this.whatsAppCloudOutbound) return; // already running
+    this.whatsAppCloudOutbound = new WhatsAppCloudClient({
+      accessToken: cfg.accessToken,
+      phoneNumberId: cfg.phoneNumberId,
+      logDir: this.gatewayConfig.gateway.logDir,
+    });
+  }
+
+  stopWhatsAppCloudOutbound(): void {
+    this.whatsAppCloudOutbound = null;
   }
 
   startLineReply(): void {

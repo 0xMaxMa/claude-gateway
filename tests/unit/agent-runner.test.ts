@@ -5855,3 +5855,110 @@ describe('AgentRunner — history cleanup scheduler timezone', () => {
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'Asia/Bangkok' }));
   }, 15000);
 });
+
+// ── channelSource / replyToolName — whatsapp_cloud regression ─────────────────
+// Coverage for the exact failure mode src/history/types.ts's CHAT_CHANNELS doc
+// comment warns about: a channelSource ternary with no 'whatsapp_cloud' branch
+// silently falls back to 'telegram' (every whatsapp_cloud session lands in the
+// wrong history bucket), and a replyToolName ternary with the same gap never
+// recognizes 'mcp__gateway__whatsapp_cloud_reply' as a reply (the plain-text
+// auto-forward fallback then double-posts every reply). Both ternaries live in
+// src/agent/runner.ts; this is the SAME test file/suite the Slack channel's
+// launch would have used had this exact regression been caught for it.
+describe('AgentRunner — channelSource / replyToolName (whatsapp_cloud)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  async function postWhatsAppCloud(port: number, chatId: string, content: string): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        meta: {
+          source: 'whatsapp_cloud',
+          chat_id: chatId,
+          message_id: '1',
+          user: chatId,
+          ts: new Date().toISOString(),
+        },
+      }),
+    });
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-wacloud-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'), {
+      whatsapp_cloud: {
+        accessToken: 'wa-cloud-token',
+        phoneNumberId: 'wa-cloud-phone-id',
+        appSecret: 'wa-cloud-secret',
+        verifyToken: 'wa-cloud-verify',
+      },
+    });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('channelSource resolves to whatsapp_cloud, not the telegram fallback', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    const chatId = '66812340001';
+
+    await postWhatsAppCloud(port, chatId, 'hello');
+    await waitForSession(runner, chatId);
+    await new Promise(r => setTimeout(r, 80));
+
+    // Pre-fix (no 'whatsapp_cloud' branch in the channelSource ternary) this
+    // message would have silently landed under 'telegram-<chatId>' instead.
+    const page = runner.getHistoryDb().getMessages(`whatsapp_cloud-${chatId}`);
+    expect(page.messages.length).toBeGreaterThan(0);
+    expect(page.messages[0]!.content).toBe('hello');
+
+    const telegramPage = runner.getHistoryDb().getMessages(`telegram-${chatId}`);
+    expect(telegramPage.messages).toHaveLength(0);
+  }, 15000);
+
+  it('replyToolName resolves mcp__gateway__whatsapp_cloud_reply — no duplicate plain-text auto-forward', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    const chatId = '66812340002';
+
+    await postWhatsAppCloud(port, chatId, 'please reply');
+    await waitForSession(runner, chatId);
+    await new Promise(r => setTimeout(r, 80));
+
+    const session = getSessions(runner).get(chatId)!;
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_wacloud_1',
+          name: 'mcp__gateway__whatsapp_cloud_reply',
+          input: { chat_id: chatId, text: 'hi back' },
+        }],
+      },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'hi back' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    const page = runner.getHistoryDb().getMessages(`whatsapp_cloud-${chatId}`);
+    const assistantRows = page.messages.filter(m => m.role === 'assistant');
+    // Pre-fix (no 'whatsapp_cloud' branch in replyToolName), the tool_use name
+    // never matches replyToolName, replyCalled stays false, and the 'result'
+    // event's plain-text fallback ALSO writes an assistant row — landing two
+    // rows instead of one.
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]!.content).toBe('hi back');
+  }, 15000);
+});

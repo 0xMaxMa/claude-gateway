@@ -200,6 +200,10 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
   // useMultiFileAuthState() persists Baileys' creds.json — not just
   // message-turn state like the other channels' subdirs.
   whatsapp: '.whatsapp-state',
+  // WhatsApp Cloud has no on-disk session (real Meta-issued credentials live
+  // in config.json, not here — see AgentConfig.whatsapp_cloud's doc comment),
+  // so unlike `whatsapp` above this is single-purpose: message-turn state only.
+  whatsapp_cloud: '.whatsapp-cloud-state',
 };
 
 export class SessionProcess extends EventEmitter {
@@ -744,6 +748,13 @@ export class SessionProcess extends EventEmitter {
             // to work around), so no refresh-mode env is needed — the subprocess
             // always sends directly.
             SLACK_BOT_TOKEN: this.agentConfig.slack?.botToken ?? '',
+            // WhatsApp Cloud outbound: whatsapp_cloud_reply posts via the Graph
+            // API directly from the subprocess — same reasoning as Slack above
+            // (real credentials, no reply-token TTL, no gateway-side reply
+            // manager to defer to), so both the token and phone number id must
+            // be forwarded explicitly.
+            WHATSAPP_CLOUD_ACCESS_TOKEN: this.agentConfig.whatsapp_cloud?.accessToken ?? '',
+            WHATSAPP_CLOUD_PHONE_NUMBER_ID: this.agentConfig.whatsapp_cloud?.phoneNumberId ?? '',
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.

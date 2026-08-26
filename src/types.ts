@@ -179,6 +179,42 @@ export interface AgentConfig {
      */
     pairing?: boolean;
   };
+  /**
+   * WhatsApp — via the official Meta WhatsApp Business Cloud API (webhook +
+   * bearer-token REST, NOT the unofficial Baileys device-link bridge — see
+   * `whatsapp` above). Real, first-class credentials issued by Meta, so this
+   * channel follows the Slack template (webhook-based with real credentials)
+   * rather than the Baileys `whatsapp` block's on-disk-session pattern.
+   *
+   * DM-only: the Cloud API has no group concept (a WhatsApp Business number
+   * cannot be added to a group chat the way a personal/linked number can),
+   * so there is no groupPolicy/groupAllowlist/requireMention here — every
+   * inbound sender is a bare phone-number string, never a JID.
+   */
+  whatsapp_cloud?: {
+    /** Permanent (or long-lived) access token — Bearer auth for the Graph API. */
+    accessToken: string;
+    /** The WhatsApp Business phone number id (Meta's numeric id, not the phone number itself). */
+    phoneNumberId: string;
+    /** App Secret — verifies X-Hub-Signature-256 (HMAC-SHA256 of the raw request body). */
+    appSecret: string;
+    /** Verify token — compared against `hub.verify_token` on the GET webhook handshake. */
+    verifyToken: string;
+    /**
+     * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
+     * Gates inbound senders — a bare phone-number string (e.g. "66812345678"),
+     * NOT a JID. `dmAllowlist` entries must be bare digits.
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed sender phone numbers — bare digits (E.164 without the leading "+"), never JIDs. */
+    dmAllowlist?: string[];
+    /**
+     * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
+     * exactly). Default true (absent ⇒ on). Only has an effect under
+     * `allowlist` (closed-default).
+     */
+    pairing?: boolean;
+  };
   claude: {
     model: string;
     /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */

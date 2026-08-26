@@ -48,6 +48,31 @@ async function verifySlackBotToken(botToken: string): Promise<{ ok: boolean; err
   }
 }
 
+/**
+ * Standalone Graph API credential check for the WhatsApp Cloud connect
+ * flow's Save-time validation — mirrors verifySlackBotToken's placement and
+ * style directly above. Not WhatsAppCloudClient (src/api/whatsapp-cloud-client.ts)
+ * for the same reason: that class needs a logDir-backed logger this router
+ * has no other reason to plumb through for one validation call.
+ */
+async function verifyWhatsAppCloudCredentials(
+  accessToken: string,
+  phoneNumberId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v20.0/${encodeURIComponent(phoneNumberId)}?access_token=${encodeURIComponent(accessToken)}`,
+    );
+    const json = (await res.json()) as { error?: { message?: string } };
+    if (json.error) {
+      return { ok: false, error: json.error.message ?? 'unknown error' };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'network error' };
+  }
+}
+
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 const AGENT_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -782,6 +807,18 @@ export function createApiRouter(
         whatsapp_group_allowlist: cfg.whatsapp?.groupAllowlist ?? [],
         whatsapp_require_mention: cfg.whatsapp?.requireMention ?? null,
         whatsapp_pairing: cfg.whatsapp?.pairing ?? true,
+        // WhatsApp Business Cloud API — webhook-based with real credentials
+        // (mirrors Slack's shape/semantics field-for-field), gated on
+        // appSecret the way Slack gates on signingSecret. DM-only: no
+        // group_policy/group_allowlist/require_mention fields exist for
+        // this channel (see AgentConfig.whatsapp_cloud's doc comment).
+        whatsapp_cloud_connected: !!cfg.whatsapp_cloud?.appSecret,
+        whatsapp_cloud_access_token_preview: cfg.whatsapp_cloud?.accessToken ? maskToken(cfg.whatsapp_cloud.accessToken) : null,
+        whatsapp_cloud_phone_number_id: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.phoneNumberId ?? null) : null,
+        whatsapp_cloud_webhook_path: cfg.whatsapp_cloud?.appSecret ? `/webhooks/whatsapp_cloud/${id}` : null,
+        whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
+        whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
+        whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
       }));
     res.json({ agents });
   });
@@ -1495,8 +1532,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1734,6 +1771,70 @@ export function createApiRouter(
       whatsapp_group_policy !== undefined || whatsapp_group_allowlist !== undefined ||
       whatsapp_require_mention !== undefined || whatsapp_pairing !== undefined;
 
+    // WhatsApp Business Cloud API — same validation shape as Slack above
+    // (webhook-based, real credentials), but FOUR fields must be provided
+    // together or all cleared together, not two.
+    if (whatsapp_cloud_access_token !== undefined && whatsapp_cloud_access_token !== null && typeof whatsapp_cloud_access_token !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_access_token must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_phone_number_id !== undefined && whatsapp_cloud_phone_number_id !== null && typeof whatsapp_cloud_phone_number_id !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_phone_number_id must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_app_secret !== undefined && whatsapp_cloud_app_secret !== null && typeof whatsapp_cloud_app_secret !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_app_secret must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_verify_token !== undefined && whatsapp_cloud_verify_token !== null && typeof whatsapp_cloud_verify_token !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_verify_token must be a string or null' });
+      return;
+    }
+    const whatsappCloudTouched = whatsapp_cloud_access_token !== undefined || whatsapp_cloud_phone_number_id !== undefined ||
+      whatsapp_cloud_app_secret !== undefined || whatsapp_cloud_verify_token !== undefined;
+    if (whatsappCloudTouched) {
+      const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+      const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+      const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+      const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+      const allSet = at !== '' && pid !== '' && sec !== '' && vt !== '';
+      const allClear = at === '' && pid === '' && sec === '' && vt === '';
+      if (!allSet && !allClear) {
+        res.status(400).json({
+          error: 'whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, and whatsapp_cloud_verify_token must be provided together',
+        });
+        return;
+      }
+      // Reject bad/expired credentials at Save time instead of persisting them
+      // silently, same reasoning as verifySlackBotToken's Save-time check above.
+      if (allSet) {
+        const verify = await verifyWhatsAppCloudCredentials(at, pid);
+        if (!verify.ok) {
+          res.status(400).json({
+            error: `Invalid WhatsApp Cloud credentials — Graph API check failed: ${verify.error ?? 'unknown error'}`,
+          });
+          return;
+        }
+      }
+    }
+    if (whatsapp_cloud_dm_policy !== undefined && whatsapp_cloud_dm_policy !== null &&
+        !(typeof whatsapp_cloud_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_cloud_dm_policy))) {
+      res.status(400).json({ error: "whatsapp_cloud_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_cloud_dm_allowlist !== undefined && whatsapp_cloud_dm_allowlist !== null &&
+        !(Array.isArray(whatsapp_cloud_dm_allowlist) && whatsapp_cloud_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_cloud_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_cloud_pairing !== undefined && whatsapp_cloud_pairing !== null &&
+        typeof whatsapp_cloud_pairing !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_cloud_pairing must be a boolean or null' });
+      return;
+    }
+    const whatsappCloudAccessTouched = whatsapp_cloud_dm_policy !== undefined || whatsapp_cloud_dm_allowlist !== undefined ||
+      whatsapp_cloud_pairing !== undefined;
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1885,6 +1986,45 @@ export function createApiRouter(
             else existing.pairing = whatsapp_pairing;
           }
           (agent as Record<string, unknown>).whatsapp = existing;
+        }
+        // WhatsApp Cloud — credential block follows the SLACK pattern (delete
+        // the whole block if all 4 cleared, else merge), the OPPOSITE of the
+        // Baileys `whatsapp` block just above: Cloud API credentials are real,
+        // Meta-issued secrets, not an on-disk device-link session, so there's
+        // no "meaningful before ever linking" case to unconditionally create for.
+        if (whatsappCloudTouched) {
+          const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+          const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+          const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+          const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+          if (at === '' && pid === '' && sec === '' && vt === '') {
+            delete (agent as Record<string, unknown>).whatsapp_cloud;
+          } else {
+            const existing = agent.whatsapp_cloud as Record<string, unknown> | undefined;
+            agent.whatsapp_cloud = { ...(existing ?? {}), accessToken: at, phoneNumberId: pid, appSecret: sec, verifyToken: vt };
+          }
+        }
+        // Access fields — merge into the existing whatsapp_cloud block (re-read
+        // after the credential block above, which may have just created or
+        // deleted it). Skip silently when no whatsapp_cloud channel exists;
+        // policy without credentials is meaningless (same comment Slack's
+        // access block uses).
+        if (whatsappCloudAccessTouched) {
+          const existing = agent.whatsapp_cloud as Record<string, unknown> | undefined;
+          if (existing) {
+            if (whatsapp_cloud_dm_policy !== undefined) {
+              if (whatsapp_cloud_dm_policy === null) delete existing.dmPolicy;
+              else existing.dmPolicy = whatsapp_cloud_dm_policy;
+            }
+            if (whatsapp_cloud_dm_allowlist !== undefined) {
+              if (whatsapp_cloud_dm_allowlist === null) delete existing.dmAllowlist;
+              else existing.dmAllowlist = whatsapp_cloud_dm_allowlist;
+            }
+            if (whatsapp_cloud_pairing !== undefined) {
+              if (whatsapp_cloud_pairing === null) delete existing.pairing;
+              else existing.pairing = whatsapp_cloud_pairing;
+            }
+          }
         }
       });
     } catch (err) {
@@ -2117,6 +2257,41 @@ export function createApiRouter(
         for (const jid of whatsapp_group_allowlist) clearPendingSender('whatsapp', agentId, jid);
       }
     }
+    if (whatsappCloudTouched) {
+      const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+      const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+      const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+      const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+      if (at && pid && sec && vt) {
+        cfg.whatsapp_cloud = { ...(cfg.whatsapp_cloud ?? {}), accessToken: at, phoneNumberId: pid, appSecret: sec, verifyToken: vt };
+      } else {
+        delete cfg.whatsapp_cloud;
+      }
+      // WhatsApp Cloud is webhook-based — no receiver to start/stop. The
+      // webhook router reads config live via runner.getAgentConfig(); just
+      // keep the runner's copy in sync (same as Slack/LINE above).
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+    }
+    if (whatsappCloudAccessTouched && cfg.whatsapp_cloud) {
+      if (whatsapp_cloud_dm_policy !== undefined) {
+        if (whatsapp_cloud_dm_policy === null) delete cfg.whatsapp_cloud.dmPolicy;
+        else cfg.whatsapp_cloud.dmPolicy = whatsapp_cloud_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (whatsapp_cloud_dm_allowlist !== undefined) {
+        if (whatsapp_cloud_dm_allowlist === null) delete cfg.whatsapp_cloud.dmAllowlist;
+        else cfg.whatsapp_cloud.dmAllowlist = whatsapp_cloud_dm_allowlist as string[];
+      }
+      if (whatsapp_cloud_pairing !== undefined) {
+        if (whatsapp_cloud_pairing === null) delete cfg.whatsapp_cloud.pairing;
+        else cfg.whatsapp_cloud.pairing = whatsapp_cloud_pairing as boolean;
+      }
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Anyone just added to the allowlist is now allowed — drop them from
+      // the in-memory knock list so the discovery UI stops surfacing them.
+      if (Array.isArray(whatsapp_cloud_dm_allowlist)) {
+        for (const id of whatsapp_cloud_dm_allowlist) clearPendingSender('whatsapp_cloud', agentId, id);
+      }
+    }
 
     res.json({
       agent: {
@@ -2170,6 +2345,15 @@ export function createApiRouter(
         whatsapp_group_allowlist: cfg.whatsapp?.groupAllowlist ?? [],
         whatsapp_require_mention: cfg.whatsapp?.requireMention ?? null,
         whatsapp_pairing: cfg.whatsapp?.pairing ?? true,
+        // WhatsApp Cloud — same shape/semantics as Slack above, mirrors the
+        // GET /agents list response exactly.
+        whatsapp_cloud_connected: !!cfg.whatsapp_cloud?.appSecret,
+        whatsapp_cloud_access_token_preview: cfg.whatsapp_cloud?.accessToken ? maskToken(cfg.whatsapp_cloud.accessToken) : null,
+        whatsapp_cloud_phone_number_id: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.phoneNumberId ?? null) : null,
+        whatsapp_cloud_webhook_path: cfg.whatsapp_cloud?.appSecret ? `/webhooks/whatsapp_cloud/${agentId}` : null,
+        whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
+        whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
+        whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
       },
     });
   });
@@ -2397,6 +2581,35 @@ export function createApiRouter(
     const { agentId, senderId } = req.params as { agentId: string; senderId: string };
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     clearPendingSender('whatsapp', agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp_cloud/pending
+   * Recently denied WhatsApp Cloud senders (Tier 1 allowlist discovery aid).
+   * Admin only. Mirrors GET .../slack/pending exactly, keyed under the
+   * 'whatsapp_cloud' channel namespace in the shared pending-senders store.
+   */
+  router.get('/v1/agents/:agentId/whatsapp_cloud/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders('whatsapp_cloud', agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/whatsapp_cloud/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). Mirrors
+   * DELETE .../slack/pending/:senderId exactly. The id is a bare WhatsApp
+   * Cloud phone-number string (no groups on this channel).
+   */
+  router.delete('/v1/agents/:agentId/whatsapp_cloud/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender('whatsapp_cloud', agentId, senderId);
     res.json({ ok: true });
   });
 
@@ -2846,7 +3059,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack/whatsapp chats' });
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack/whatsapp/whatsapp_cloud chats' });
       return;
     }
     try {
@@ -3036,7 +3249,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack/whatsapp chats' });
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack/whatsapp/whatsapp_cloud chats' });
       return;
     }
 
@@ -3913,6 +4126,10 @@ function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: st
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
   if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
   if (fullChatId.startsWith('slack-')) return { source: 'slack', rawChatId: fullChatId.slice(6) };
+  // Checked BEFORE the plain 'whatsapp-' branch below: 'whatsapp_cloud-' does
+  // NOT collide with it (the char after "whatsapp" differs, '_' vs '-'), but
+  // ordering this first keeps the two visually adjacent and unambiguous.
+  if (fullChatId.startsWith('whatsapp_cloud-')) return { source: 'whatsapp_cloud', rawChatId: fullChatId.slice(15) };
   if (fullChatId.startsWith('whatsapp-')) return { source: 'whatsapp', rawChatId: fullChatId.slice(9) };
   return { source: 'api', rawChatId: fullChatId };
 }
