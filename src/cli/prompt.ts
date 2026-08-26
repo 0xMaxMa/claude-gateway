@@ -46,22 +46,38 @@ export function printFilePreview(
   write('─'.repeat(SEPARATOR_WIDTH));
 }
 
-/** Open $VISUAL/$EDITOR/vim/vi/nano on a temp copy of `content`; returns the
- *  edited text, or null if no editor could be launched. */
+/**
+ * Open $VISUAL/$EDITOR/vim/vi/nano on a temp copy of `content`; returns the
+ * edited text, or null if no editor could be launched.
+ *
+ * The scratch file lives in a fresh `mkdtemp` directory (mode 0700) rather than
+ * at a fixed path under the shared temp directory. A predictable name such as
+ * `/tmp/claude-gateway-AGENTS.md` can be pre-created by another local user as a
+ * symlink: the write then lands on whatever the link points at, and the
+ * read-back feeds that user's content into the file the wizard uploads.
+ */
 export function editInEditor(content: string, tmpName: string): string | null {
-  const tmpFile = path.join(os.tmpdir(), `claude-gateway-${tmpName}`);
-  fs.writeFileSync(tmpFile, content, 'utf8');
-  const candidates = [process.env['VISUAL'], process.env['EDITOR'], 'vim', 'vi', 'nano'].filter(Boolean) as string[];
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate, [tmpFile], { stdio: 'inherit' });
-    if (!result.error) {
-      const edited = fs.readFileSync(tmpFile, 'utf8');
-      fs.unlinkSync(tmpFile);
-      return edited;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-gateway-'));
+  // `basename` so a caller's key can never escape the scratch directory.
+  const tmpFile = path.join(dir, path.basename(tmpName) || 'draft');
+  const cleanup = (): void => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best effort — the directory is per-invocation and 0700 */
     }
+  };
+  try {
+    fs.writeFileSync(tmpFile, content, 'utf8');
+    const candidates = [process.env['VISUAL'], process.env['EDITOR'], 'vim', 'vi', 'nano'].filter(Boolean) as string[];
+    for (const candidate of candidates) {
+      const result = spawnSync(candidate, [tmpFile], { stdio: 'inherit' });
+      if (!result.error) return fs.readFileSync(tmpFile, 'utf8');
+    }
+    return null;
+  } finally {
+    cleanup();
   }
-  try { fs.unlinkSync(tmpFile); } catch { /* nothing written */ }
-  return null;
 }
 
 /** Preview each file and let the user accept / edit / skip it. Required files

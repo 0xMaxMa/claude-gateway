@@ -132,12 +132,21 @@ async function runResourceCommand(
   const query: Record<string, string | undefined> = {};
   let body: Record<string, unknown> | undefined;
   if (typeof flags.data === 'string') {
+    let parsed: unknown;
     try {
-      body = JSON.parse(flags.data);
+      parsed = JSON.parse(flags.data);
     } catch {
       process.stderr.write('Invalid --data: must be a JSON object.\n');
       return 1;
     }
+    // `JSON.parse` also accepts primitives and arrays. Merging flags into one
+    // of those throws further down (`'name' in 5`), surfacing a TypeError
+    // instead of the message above.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      process.stderr.write('Invalid --data: must be a JSON object.\n');
+      return 1;
+    }
+    body = parsed as Record<string, unknown>;
   }
   const missingRequired: string[] = [];
   for (const f of cmd.flags) {

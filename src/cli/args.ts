@@ -1,13 +1,26 @@
 /**
  * CLI argument parser — splits tokens into positionals and flags.
  *
- * Supports `--flag value`, `--flag=value`, and boolean `--flag` (when the next
- * token is another flag or absent). Mirrors the lightweight style already used
- * in src/index.ts (no heavy dependency).
+ * Supports `--flag value`, `--flag=value`, boolean `--flag` (when the next
+ * token is another flag or absent), and single-dash aliases such as `-h`.
+ * Mirrors the lightweight style already used in src/index.ts (no dependency).
  */
 export interface ParsedArgs {
   positionals: string[];
   flags: Record<string, string | boolean>;
+}
+
+/** Single-dash aliases, expanded to the long name before anything else sees
+ *  them. `-h` is already honoured as a bare top-level token; without this it
+ *  fell through to a positional, so `crons -h` reported "Unknown command". */
+export const SHORT_ALIASES: Readonly<Record<string, string>> = { h: 'help', V: 'version' };
+
+const SHORT_FLAG = /^-[A-Za-z]$/;
+
+/** True for anything that reads as a flag rather than a value: `--name`,
+ *  `--name=value`, or a single-dash letter. A token like `-5` is a value. */
+function looksLikeFlag(token: string): boolean {
+  return token.startsWith('--') || SHORT_FLAG.test(token);
 }
 
 /**
@@ -23,8 +36,8 @@ export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string>
   const flags: Record<string, string | boolean> = {};
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    if (tok.startsWith('--')) {
-      const body = tok.slice(2);
+    if (looksLikeFlag(tok)) {
+      const body = tok.startsWith('--') ? tok.slice(2) : (SHORT_ALIASES[tok.slice(1)] ?? tok.slice(1));
       const eq = body.indexOf('=');
       if (eq !== -1) {
         flags[body.slice(0, eq)] = body.slice(eq + 1);
@@ -35,7 +48,7 @@ export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string>
         continue;
       }
       const next = tokens[i + 1];
-      if (next !== undefined && !next.startsWith('--')) {
+      if (next !== undefined && !looksLikeFlag(next)) {
         flags[body] = next;
         i++;
       } else {

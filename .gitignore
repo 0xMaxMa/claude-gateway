@@ -52,3 +52,6 @@ tests/e2e/pr58-api-e2e.sh
 release.md
 restart
 docker-stats.sh
+
+# Diagnostics bundles written into the working directory by `debug-bundle`.
+debug-bundle-*.txt

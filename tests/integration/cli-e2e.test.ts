@@ -94,8 +94,25 @@ afterEach(() => {
 // Never let a real ~/.claude-gateway/config.json leak in — force an empty config.
 const base = (extra: string[]) => ['--config', '/nonexistent-config.json', '--url', baseUrl, '--key', KEY, ...extra];
 
+/**
+ * The CLI's result document, ignoring anything else that reached stdout.
+ *
+ * The spy is on `process.stdout.write` for the whole process, so an async
+ * writer left behind by an earlier test file in the same Jest worker can drop a
+ * structured log record into the middle of the capture. Parsing the raw
+ * concatenation then fails with "unexpected non-whitespace character" on a run
+ * that has nothing to do with the CLI.
+ */
 function lastJson(): unknown {
-  return JSON.parse(stdout.join(''));
+  const isLogRecord = (chunk: string): boolean => {
+    try {
+      const parsed: unknown = JSON.parse(chunk);
+      return !!parsed && typeof parsed === 'object' && 'ts' in parsed && 'level' in parsed;
+    } catch {
+      return false;
+    }
+  };
+  return JSON.parse(stdout.filter((chunk) => !isLogRecord(chunk)).join(''));
 }
 
 describe('cli e2e — friendly resource commands', () => {
@@ -180,6 +197,16 @@ describe('cli e2e — crons create/update/delete/get/runs/status', () => {
     const revertCode = await runCli(['crons', 'update', 'job-2', '--data', '{"enabled":true}', ...base([])]);
     expect(revertCode).toBe(0);
     expect(lastJson()).toEqual({ job: expect.objectContaining({ id: 'job-2', enabled: true }) });
+  });
+
+  /** `JSON.parse` accepts primitives and arrays too, and merging declared flags
+   *  into one of those threw `Cannot use 'in' operator` — an internal message
+   *  where the intended one was already written a few lines above. */
+  it.each(['5', '"text"', 'null', '[1,2]'])('`--data %s` is rejected as not an object', async (data) => {
+    const code = await runCli(['crons', 'create', '--data', data, ...base([])]);
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Invalid --data: must be a JSON object.');
+    expect(stderr.join('')).not.toMatch(/in' operator|TypeError/);
   });
 
   it('`crons update <unknown>` 404s and exits non-zero', async () => {
@@ -285,10 +312,24 @@ describe('cli e2e — help/version', () => {
     expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
   });
 
-  it('`gateway --help` and `service --help` exit 0 while their bare forms exit 1', async () => {
-    expect(await runCli(['gateway', '--help'])).toBe(0);
-    expect(await runCli(['gateway'])).toBe(1);
-    expect(await runCli(['service', '--help'])).toBe(0);
-    expect(await runCli(['service'])).toBe(1);
+  // Every noun, not a hand-picked few: `agents` and `channels` returned 1 for
+  // `--help` because this pinned only the three that were already right.
+  // `update` is absent by design: a bare `update` performs the update, so it is
+  // not a verb-less usage error the way these are.
+  it.each(['gateway', 'service', 'crons', 'agents', 'channels', 'claude'])(
+    '`%s --help` exits 0 while its bare form exits 1',
+    async (noun) => {
+      expect(await runCli([noun, '--help'])).toBe(0);
+      expect(await runCli([noun])).toBe(1);
+    },
+  );
+
+  it('`update --help` exits 0 without performing an update', async () => {
+    expect(await runCli(['update', '--help'])).toBe(0);
+  });
+
+  it('honours `-h` as a short alias, not a command name', async () => {
+    expect(await runCli(['crons', '-h'])).toBe(0);
+    expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
   });
 });

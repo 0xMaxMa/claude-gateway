@@ -2,8 +2,9 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { loadCliConfig } from '../http-client';
+import { expandHome, loadCliConfig } from '../http-client';
 import { redactLine } from '../redact';
+import { paletteFor } from '../colors';
 
 /**
  * `debug-bundle` — collect a small, redacted diagnostics bundle for a session
@@ -40,10 +41,14 @@ export function selectDiagnosticLines(content: string, maxLines = MAX_DIAG_LINES
   return picked.length > maxLines ? picked.slice(picked.length - maxLines) : picked;
 }
 
+/** The config file stores `logDir` exactly as written, and the shipped template
+ *  writes `~/.claude-gateway/logs`. The server expands that itself on boot, so
+ *  the literal tilde survives on disk and only bites a reader that forgets to
+ *  expand it — `readdirSync('~/...')` throws ENOENT and looks like "no logs". */
 function resolveLogDir(flags: Record<string, string | boolean>): string {
-  if (typeof flags.logDir === 'string') return flags.logDir;
+  if (typeof flags.logDir === 'string') return expandHome(flags.logDir);
   const cfg = loadCliConfig(typeof flags.config === 'string' ? flags.config : undefined);
-  if (cfg.logDir) return cfg.logDir;
+  if (cfg.logDir) return expandHome(cfg.logDir);
   return path.join(os.homedir(), '.claude-gateway', 'logs');
 }
 
@@ -85,7 +90,26 @@ function gatewayVersion(): string {
   }
 }
 
+function printHelp(): void {
+  const c = paletteFor(process.stderr);
+  process.stderr.write(
+    `${c.bold('claude-gateway debug-bundle')} — write a small redacted diagnostics bundle\n\n` +
+      'Usage: claude-gateway debug-bundle [--session <id>] [--logDir <path>] [--config <path>]\n\n' +
+      'Flags:\n' +
+      '  --session <id>   Bundle this session instead of the most recent one\n' +
+      '  --logDir <path>  Read logs from here instead of the configured directory\n' +
+      '  --config <path>  Read logDir from this config file\n\n' +
+      'Writes debug-bundle-<stamp>.txt into the current directory.\n',
+  );
+}
+
 export async function runDebugBundle(flags: Record<string, string | boolean>): Promise<number> {
+  // `--help` must stay read-only: every other command prints and returns, and
+  // this one writes a file into the working directory as its side effect.
+  if (flags.help === true) {
+    printHelp();
+    return 0;
+  }
   const logDir = resolveLogDir(flags);
   const sessionFilter = typeof flags.session === 'string' ? flags.session : undefined;
 

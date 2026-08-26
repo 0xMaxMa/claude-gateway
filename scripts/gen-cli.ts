@@ -142,7 +142,9 @@ are set. \`--json\` output on stdout is never coloured.
 | \`claude-gateway api <METHOD> <path>\` | Escape hatch: call any endpoint directly |
 
 A bare \`claude-gateway gateway\` (or \`crons\`, \`service\`, …) prints its verbs and exits **1** —
-you forgot the verb. The same listing with \`--help\` exits **0**.
+you forgot the verb. The same listing with \`--help\` exits **0**, and \`-h\` is accepted wherever
+\`--help\` is. \`--help\` never has a side effect: \`debug-bundle --help\` prints usage rather than
+writing a bundle.
 
 ## Running as a service
 

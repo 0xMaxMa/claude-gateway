@@ -19,7 +19,21 @@ interface Check {
   info?: boolean;
 }
 
+function printHelp(): void {
+  const c = paletteFor(process.stderr);
+  process.stderr.write(
+    `${c.bold('claude-gateway doctor')} — check config, key resolution, manager and connectivity\n\n` +
+      'Usage: claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]\n\n' +
+      `Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and never\n` +
+      'fail the command. The key itself is never printed.\n',
+  );
+}
+
 export async function runDoctor(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
+  if (flags.help === true) {
+    printHelp();
+    return 0;
+  }
   const checks: Check[] = [];
 
   const hasKeys = !!(config.keys && config.keys.length);
@@ -73,7 +87,9 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const c = paletteFor(process.stderr);
   // Pad before colouring so escape codes never count toward the column width.
   const lines = checks.map((chk) => {
-    const mark = chk.ok ? c.green('[ok]') : chk.info ? c.dim('[--]') : c.red('[!!]');
+    // `info` is checked first: an advisory row is marked `[--]` whether it
+    // passed or not, so the reader can tell the verdict rows from the context.
+    const mark = chk.info ? c.dim('[--]') : chk.ok ? c.green('[ok]') : c.red('[!!]');
     return `  ${mark} ${c.bold(chk.name.padEnd(12))} ${chk.detail}`;
   });
   // Name the right component. A public URL that answered with a status is not

@@ -1,4 +1,4 @@
-import { CliConfigView, resolveUrl, resolveKey, request } from '../http-client';
+import { CliConfigView, resolveUrlPlan, resolveReachableUrl, resolveKey, request } from '../http-client';
 import { printResult } from '../output';
 
 /**
@@ -28,7 +28,8 @@ export async function runChannels(
   const verb = positionals[0];
   if (!verb || flags.help === true) {
     printHelp();
-    return verb ? 0 : 1;
+    // An explicit `--help` succeeds; a missing verb is a usage error.
+    return flags.help === true ? 0 : 1;
   }
 
   const agentId = typeof flags.agent === 'string' ? flags.agent : undefined;
@@ -44,7 +45,9 @@ export async function runChannels(
     return 1;
   }
 
-  const baseUrl = resolveUrl({ flagUrl: strFlag(flags.url), env: process.env, config });
+  const baseUrl = await resolveReachableUrl(
+    resolveUrlPlan({ flagUrl: strFlag(flags.url), env: process.env, config }),
+  );
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
   const compact = flags.json === true;
 

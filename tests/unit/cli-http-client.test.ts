@@ -12,7 +12,7 @@ jest.mock('os', () => {
   };
 });
 
-import { resolveUrl, resolveUrlPlan, resolveLocalUrl, resolveKey, buildRequestUrl, loadCliConfig, request, DEFAULT_PORT } from '../../src/cli/http-client';
+import { resolveUrl, resolveUrlPlan, resolveLocalUrl, resolveReachableUrl, resolveKey, buildRequestUrl, loadCliConfig, request, expandHome, DEFAULT_PORT } from '../../src/cli/http-client';
 import type { ApiKey } from '../../src/types';
 
 describe('cli http-client resolveUrl', () => {
@@ -296,5 +296,116 @@ describe('cli http-client request fallback', () => {
         onFallback: () => undefined,
       }),
     ).rejects.toThrow(/Cannot reach gateway at https:\/\/public\/gw/);
+  });
+});
+
+describe('cli http-client expandHome', () => {
+  it('expands a leading ~ and leaves everything else alone', () => {
+    mockHomeDir = '/home/tester';
+    expect(expandHome('~/logs')).toBe(path.join('/home/tester', 'logs'));
+    expect(expandHome('~')).toBe('/home/tester');
+    expect(expandHome('/absolute/logs')).toBe('/absolute/logs');
+    expect(expandHome('relative/logs')).toBe('relative/logs');
+    // Only a *leading* tilde: `~` inside a path is an ordinary character.
+    expect(expandHome('/var/~/logs')).toBe('/var/~/logs');
+    mockHomeDir = null;
+  });
+});
+
+/**
+ * The per-request fallback suits one-shot commands. `agents` and `channels`
+ * thread one base URL through a whole interactive session, so they settle on a
+ * reachable address up front instead — without it, a stale pidfile stranded
+ * every request in the session on a dead address while `crons` recovered.
+ */
+describe('cli http-client resolveReachableUrl', () => {
+  const saved = global.fetch;
+  let errs: string[];
+  let errSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    errs = [];
+    errSpy = jest.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      errs.push(chunk.toString());
+      return true;
+    });
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    global.fetch = saved;
+  });
+
+  it('returns the primary untouched when there is no fallback (never probes)', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await expect(resolveReachableUrl({ baseUrl: 'https://public/gw' })).resolves.toBe('https://public/gw');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the primary when it answers', async () => {
+    global.fetch = jest.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
+    await expect(
+      resolveReachableUrl({ baseUrl: 'http://127.0.0.1:10850', fallbackUrl: 'https://public/gw' }),
+    ).resolves.toBe('http://127.0.0.1:10850');
+    expect(errs.join('')).toBe('');
+  });
+
+  it('keeps the primary even on a non-2xx — the gateway was reached', async () => {
+    global.fetch = jest.fn(async () => new Response('nope', { status: 401 })) as unknown as typeof fetch;
+    await expect(
+      resolveReachableUrl({ baseUrl: 'http://127.0.0.1:10850', fallbackUrl: 'https://public/gw' }),
+    ).resolves.toBe('http://127.0.0.1:10850');
+  });
+
+  it('switches to the fallback, and says so, when nothing answers', async () => {
+    global.fetch = jest.fn(async () => {
+      throw new Error('connect ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    await expect(
+      resolveReachableUrl({ baseUrl: 'http://127.0.0.1:10850', fallbackUrl: 'https://public/gw' }),
+    ).resolves.toBe('https://public/gw');
+    expect(errs.join('')).toMatch(/Cannot reach the gateway at http:\/\/127\.0\.0\.1:10850 .*using https:\/\/public\/gw/);
+  });
+});
+
+/**
+ * `fetch` resolves once the response headers arrive, so clearing the abort
+ * timer there left the body read unbounded: a gateway that wedged after its
+ * headers hung the CLI forever instead of failing at the deadline.
+ */
+describe('cli http-client request body deadline', () => {
+  const saved = global.fetch;
+  afterEach(() => {
+    global.fetch = saved;
+  });
+
+  it('aborts a body that never arrives, and does not fall back over it', async () => {
+    const onFallback = jest.fn();
+    global.fetch = jest.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: () =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    })) as unknown as typeof fetch;
+
+    await expect(
+      request({
+        method: 'GET',
+        path: '/v1/crons',
+        baseUrl: 'http://127.0.0.1:10850',
+        fallbackBaseUrl: 'https://public/gw',
+        onFallback,
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow(/answered but the response body failed: timed out after 50ms/);
+    // The gateway responded; retrying elsewhere would only re-ask the same process.
+    expect(onFallback).not.toHaveBeenCalled();
   });
 });

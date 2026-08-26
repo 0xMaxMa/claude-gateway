@@ -1,5 +1,11 @@
 import { parseCliArgs } from '../../src/cli/args';
-import { classifyInvocation, isGatewayStartInvocation } from '../../src/cli/command-names';
+import {
+  CHILD_MARKER,
+  claimSupervisorEnv,
+  classifyInvocation,
+  isGatewayStartInvocation,
+  isSupervised,
+} from '../../src/cli/command-names';
 
 describe('cli args parseCliArgs', () => {
   it('separates positionals from flags', () => {
@@ -33,6 +39,87 @@ describe('cli args parseCliArgs', () => {
 
   it('--flag=value form still wins over a declared boolean set', () => {
     expect(parseCliArgs(['--force=true'], new Set(['force']))).toEqual({ positionals: [], flags: { force: 'true' } });
+  });
+
+  // `-h` used to fall through to positionals, so `crons -h` reported
+  // "Unknown command: crons -h" even though `-h` is a documented alias.
+  it('expands single-dash aliases to their long names', () => {
+    expect(parseCliArgs(['crons', '-h'])).toEqual({ positionals: ['crons'], flags: { help: true } });
+    expect(parseCliArgs(['-V'])).toEqual({ positionals: [], flags: { version: true } });
+  });
+
+  it('does not let a short flag be swallowed as another flag\'s value', () => {
+    expect(parseCliArgs(['--url', '-h'])).toEqual({ positionals: [], flags: { url: true, help: true } });
+  });
+
+  it('still treats a dash-prefixed non-letter as a value, not a flag', () => {
+    expect(parseCliArgs(['--offset', '-5'])).toEqual({ positionals: [], flags: { offset: '-5' } });
+  });
+});
+
+/**
+ * The supervisor markers systemd and PM2 set are inherited by every descendant,
+ * and the gateway spawns agents that have shell access. Without a way to tell
+ * the service main process from its own great-grandchildren, a bare
+ * `claude-gateway` typed in an agent's shell booted a second server on the
+ * gateway's port.
+ */
+describe('cli command-names isSupervised', () => {
+  it('accepts a service main process: markers, no child stamp, no terminal', () => {
+    expect(isSupervised({ INVOCATION_ID: 'abc' })).toBe(true);
+    expect(isSupervised({ pm_id: '0' })).toBe(true);
+    expect(isSupervised({ PM2_HOME: '/home/u/.pm2' })).toBe(true);
+  });
+
+  it('rejects a descendant of a running gateway', () => {
+    expect(isSupervised({ INVOCATION_ID: 'abc', [CHILD_MARKER]: '1' })).toBe(false);
+    expect(isSupervised({ pm_id: '0', [CHILD_MARKER]: '1' })).toBe(false);
+  });
+
+  it('rejects an invocation with a terminal attached — no supervisor gives a service one', () => {
+    expect(isSupervised({ PM2_HOME: '/home/u/.pm2' }, { hasTty: true })).toBe(false);
+  });
+
+  it('is false without any marker', () => {
+    expect(isSupervised({})).toBe(false);
+  });
+});
+
+describe('cli command-names claimSupervisorEnv', () => {
+  it('removes the inherited markers and records the supervisor', () => {
+    const env: NodeJS.ProcessEnv = { INVOCATION_ID: 'abc', PATH: '/usr/bin' };
+    claimSupervisorEnv(env);
+    expect(env.INVOCATION_ID).toBeUndefined();
+    expect(env.CLAUDE_GATEWAY_SUPERVISOR).toBe('systemd');
+    expect(env[CHILD_MARKER]).toBe('1');
+    expect(env.PATH).toBe('/usr/bin');
+  });
+
+  it('classifies pm2 from either of its markers', () => {
+    const byHome: NodeJS.ProcessEnv = { PM2_HOME: '/home/u/.pm2' };
+    claimSupervisorEnv(byHome);
+    expect(byHome.CLAUDE_GATEWAY_SUPERVISOR).toBe('pm2');
+    expect(byHome.PM2_HOME).toBeUndefined();
+
+    const byId: NodeJS.ProcessEnv = { pm_id: '0' };
+    claimSupervisorEnv(byId);
+    expect(byId.CLAUDE_GATEWAY_SUPERVISOR).toBe('pm2');
+  });
+
+  // The end-to-end property: a child of a booted gateway never legacy-boots,
+  // whatever it inherited.
+  it('leaves an environment in which a bare invocation goes to the CLI', () => {
+    const env: NodeJS.ProcessEnv = { INVOCATION_ID: 'abc' };
+    expect(classifyInvocation([], env)).toBe('legacy-boot');
+    claimSupervisorEnv(env);
+    expect(classifyInvocation([], env)).toBe('cli');
+  });
+
+  it('records nothing when no supervisor started us', () => {
+    const env: NodeJS.ProcessEnv = {};
+    claimSupervisorEnv(env);
+    expect(env.CLAUDE_GATEWAY_SUPERVISOR).toBeUndefined();
+    expect(env[CHILD_MARKER]).toBe('1');
   });
 });
 

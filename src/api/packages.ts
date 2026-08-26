@@ -158,8 +158,12 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
       const to = getNpmListVersion(packageName);
 
       if (name === 'claude-gateway') {
-        const isSystemd = !!process.env.INVOCATION_ID;
-        const isPm2 = !!process.env.PM2_HOME || process.env.pm_id !== undefined;
+        // `claimSupervisorEnv()` scrubs the inherited markers at boot and records
+        // the supervisor in their place; the raw markers are still honoured for
+        // a server embedded without going through that entry point.
+        const claimed = process.env.CLAUDE_GATEWAY_SUPERVISOR;
+        const isSystemd = claimed === 'systemd' || !!process.env.INVOCATION_ID;
+        const isPm2 = claimed === 'pm2' || !!process.env.PM2_HOME || process.env.pm_id !== undefined;
         const isManaged = isSystemd || isPm2;
 
         res.json({

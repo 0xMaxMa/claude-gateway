@@ -223,6 +223,29 @@ describe('cli doctor', () => {
     expect(report().ok).toBe(true);
   });
 
+  /**
+   * The mark used to be chosen with `ok` first, so an informational row that
+   * passed rendered `[ok]` — indistinguishable from a verdict row, which is the
+   * one thing the marker exists to convey.
+   */
+  it('marks every informational row [--], whether it passed or failed', async () => {
+    const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+    global.fetch = jest.fn(async (url: unknown) =>
+      String(url).startsWith('http://127.0.0.1')
+        ? ({ ok: true, status: 200 } as Response)
+        : ({ ok: false, status: 401 } as Response),
+    ) as unknown as typeof fetch;
+
+    await runDoctor({}, proxied);
+
+    const lines = stderr.join('').split('\n');
+    const markOf = (name: string): string => lines.find((l) => l.includes(name))?.trim().slice(0, 4) ?? '';
+    // publicUrl passes, publicHealth fails — both are context, both are [--].
+    expect(markOf('publicUrl')).toBe('[--]');
+    expect(markOf('publicHealth')).toBe('[--]');
+    expect(markOf('health ')).toBe('[ok]');
+  });
+
   it('never prints the resolved API key itself, on stdout or stderr', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
 

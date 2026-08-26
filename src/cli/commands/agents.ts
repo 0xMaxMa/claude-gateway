@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import { CliConfigView, resolveUrl, resolveKey, request } from '../http-client';
+import { CliConfigView, resolveUrlPlan, resolveReachableUrl, resolveKey, request } from '../http-client';
 import { buildUpdatePrompt } from '../../agent/create-agent-prompts';
 import { ask, askMultiline, createRl, previewAndAccept, printFilePreview, editInEditor } from '../prompt';
 import { printResult } from '../output';
@@ -53,9 +53,12 @@ export async function runAgents(
   const verb = positionals[0];
   if (!verb || flags.help === true) {
     printHelp();
-    return verb ? 0 : 1;
+    // An explicit `--help` succeeds; a missing verb is a usage error.
+    return flags.help === true ? 0 : 1;
   }
-  const baseUrl = resolveUrl({ flagUrl: strFlag(flags.url), env: process.env, config });
+  const baseUrl = await resolveReachableUrl(
+    resolveUrlPlan({ flagUrl: strFlag(flags.url), env: process.env, config }),
+  );
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
   const compact = flags.json === true;
 
@@ -209,7 +212,15 @@ async function runUpdate(flags: Record<string, string | boolean>, baseUrl: strin
 
     while (true) {
       agents = await fetchAgents(baseUrl, key);
-      const agent = agents.find((a) => a.id === agentId)!;
+      // Re-fetched every iteration, so the agent can disappear mid-session —
+      // deleted by another operator, or dropped from this key's scope by a
+      // config reload. Without this guard the next line throws an opaque
+      // TypeError out through the generic handler in `runCli`.
+      const agent = agents.find((a) => a.id === agentId);
+      if (!agent) {
+        process.stderr.write(`Agent '${agentId}' is no longer available (or not accessible with this key).\n`);
+        return 1;
+      }
       const connected = Object.entries(UPDATE_CHANNELS).filter(([, def]) => agent[def.connectedKey] === true);
 
       console.log('What do you want to do?');

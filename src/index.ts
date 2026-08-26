@@ -51,7 +51,7 @@ import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
-import { classifyInvocation } from './cli/command-names';
+import { claimSupervisorEnv, classifyInvocation } from './cli/command-names';
 import { defaultPidfilePath } from './cli/manager';
 
 function expandTilde(p: string): string {
@@ -1095,7 +1095,9 @@ process.on('uncaughtException', (err) => {
 // The one exception is a supervised no-command launch from a pre-1.8 unit file,
 // which still boots (with a warning) so existing installs don't restart-loop.
 // The CLI runner remains lazy-loaded and is never imported on the server path.
-const invocation = classifyInvocation(process.argv.slice(2), process.env);
+const invocation = classifyInvocation(process.argv.slice(2), process.env, {
+  hasTty: process.stdin.isTTY === true,
+});
 if (invocation === 'legacy-boot') {
   process.stderr.write(
     'DEPRECATED: starting the gateway with no command. Update this service to run ' +
@@ -1104,15 +1106,23 @@ if (invocation === 'legacy-boot') {
   );
 }
 if (invocation === 'boot' || invocation === 'legacy-boot') {
+  // Before anything can spawn a child: the supervisor markers we were launched
+  // with are inherited, and a descendant that still sees them would classify a
+  // bare invocation as a service launch and boot a second server.
+  claimSupervisorEnv(process.env);
   main().catch((err) => {
     emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
   });
 } else {
   import('./cli')
     .then(({ runCli }) => runCli(process.argv.slice(2)))
-    .then((code) => process.exit(code))
-    .catch((err) => {
+    .then(async (code) => {
+      const { exitAfterFlush } = await import('./cli/output');
+      await exitAfterFlush(code);
+    })
+    .catch(async (err) => {
       process.stderr.write(`Error: ${err?.message ?? err}\n`);
-      process.exit(1);
+      const { exitAfterFlush } = await import('./cli/output');
+      await exitAfterFlush(1);
     });
 }

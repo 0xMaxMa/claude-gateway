@@ -129,4 +129,48 @@ describe('cli debug-bundle', () => {
     expect(content).not.toContain('unrelated.log');
     expect(content).not.toContain('session-included.txt');
   });
+
+  /**
+   * The shipped config template writes `logDir: "~/.claude-gateway/logs"` and
+   * the server expands the tilde itself, so the literal survives on disk. Read
+   * back unexpanded, `readdirSync` throws ENOENT, the catch turns it into an
+   * empty list, and the command reports "no session logs" on a host full of
+   * them — which is what it did on every default install.
+   *
+   * Asserted through the message rather than by planting logs under the real
+   * home directory: the point is which path was read, and `os.homedir()` is not
+   * redirectable here (Jest's `process.env` is a copy libuv never sees).
+   */
+  it('expands a leading ~ in the configured logDir', async () => {
+    const configFile = path.join(cwdDir, 'config.json');
+    const relative = `gw-test-${process.pid}-absent`;
+    fs.writeFileSync(configFile, JSON.stringify({ gateway: { logDir: `~/${relative}` } }));
+
+    const code = await runDebugBundle({ config: configFile });
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain(`No session logs found in ${path.join(os.homedir(), relative)}`);
+    expect(stderr.join('')).not.toContain('~/');
+  });
+
+  it('expands a leading ~ in --logDir too', async () => {
+    const relative = `gw-test-${process.pid}-flag-absent`;
+
+    const code = await runDebugBundle({ logDir: `~/${relative}` });
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain(`No session logs found in ${path.join(os.homedir(), relative)}`);
+  });
+
+  /** `--help` is read-only everywhere else; here it used to run the whole
+   *  collection and leave a file in the user's working directory. */
+  it('--help prints usage without writing a bundle', async () => {
+    writeSessionLog('session-a.log', 'WARN something\n');
+
+    const code = await runDebugBundle({ logDir, help: true });
+
+    expect(code).toBe(0);
+    expect(stderr.join('')).toMatch(/claude-gateway debug-bundle —/);
+    expect(fs.readdirSync(cwdDir).filter((f) => f.startsWith('debug-bundle-'))).toEqual([]);
+  });
 });

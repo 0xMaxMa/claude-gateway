@@ -19,7 +19,7 @@ export const DEFAULT_PORT = 10850;
 /** Expand a leading `~` to the home directory. Env vars (e.g. `GATEWAY_CONFIG`
  *  set via Docker/systemd) are not shell-expanded, so a literal `~` must be
  *  resolved here or the path silently fails to resolve. */
-function expandHome(p: string): string {
+export function expandHome(p: string): string {
   if (p.startsWith('~/') || p === '~') {
     return path.join(os.homedir(), p.slice(2));
   }
@@ -255,23 +255,38 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
   if (hasBody) headers['Content-Type'] = 'application/json';
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
+  let text: string;
   try {
-    res = await fetch(url, {
-      method: opts.method.toUpperCase(),
-      headers,
-      body: hasBody ? JSON.stringify(opts.body) : undefined,
-      signal: controller.signal,
-    });
-  } catch (err) {
+    try {
+      res = await fetch(url, {
+        method: opts.method.toUpperCase(),
+        headers,
+        body: hasBody ? JSON.stringify(opts.body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
+      throw new TransportError(`Cannot reach gateway at ${baseUrl}: ${reason}`);
+    }
+    try {
+      // Inside the same deadline: `fetch` resolves once the headers arrive, so
+      // a gateway that wedges mid-body would otherwise hang the CLI forever.
+      text = await res.text();
+    } catch (err) {
+      // Not a TransportError — the gateway answered, so falling back to another
+      // address would only re-ask the same wedged process through a proxy.
+      const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err as Error).message;
+      throw new Error(`Gateway at ${baseUrl} answered but the response body failed: ${reason}`);
+    }
+  } finally {
+    // In `finally`: a rejected fetch or body read would otherwise leave a live
+    // timer holding the event loop open.
     clearTimeout(timer);
-    const reason = (err as Error)?.name === 'AbortError' ? `timed out after ${opts.timeoutMs ?? 30_000}ms` : (err as Error).message;
-    throw new TransportError(`Cannot reach gateway at ${baseUrl}: ${reason}`);
   }
-  clearTimeout(timer);
 
-  const text = await res.text();
   let data: unknown = text;
   const ctype = res.headers.get('content-type') || '';
   if (ctype.includes('application/json') || (text.startsWith('{') || text.startsWith('['))) {
@@ -293,4 +308,29 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
   }
 
   return { status: res.status, ok: res.ok, data };
+}
+
+/**
+ * Resolve a plan down to one base URL that something is actually answering on.
+ *
+ * `request()` carries the stale-pidfile fallback per call, which suits the
+ * one-shot commands. The interactive flows (`agents`, `channels`) thread a
+ * single base URL through many helpers and many requests, so they settle the
+ * question once up front instead: if the local address answers nothing, the
+ * whole session runs against `publicUrl`.
+ *
+ * Costs one extra `/health` round trip, and only when a fallback exists at all
+ * — that is, only when a pidfile pointed at a gateway on this host.
+ */
+export async function resolveReachableUrl(plan: UrlPlan): Promise<string> {
+  if (!plan.fallbackUrl) return plan.baseUrl;
+  const { probeHealth } = await import('./health');
+  const probe = await probeHealth(plan.baseUrl);
+  // `answered` rather than `ok`: a 401 or 500 means the gateway is there, and
+  // asking a different address would only hide its answer.
+  if (probe.answered) return plan.baseUrl;
+  process.stderr.write(
+    `Cannot reach the gateway at ${plan.baseUrl} (${probe.detail}); using ${plan.fallbackUrl}.\n`,
+  );
+  return plan.fallbackUrl;
 }
