@@ -9,6 +9,7 @@ import {
   SharedReflectionManager,
   connectedComponents,
   msUntilNextDailyTime,
+  nextReflectionDelay,
   isConsolidationDay,
   indexSharedArchive,
   sharedDbPath,
@@ -183,11 +184,23 @@ describe('consolidation day is decided from the slot, not the fire (#398 review)
     expect(isConsolidationDay(0, 'UTC', slippedFire)).toBe(false);
   });
 
-  test('msUntilNextDailyTime never returns a near-zero delay for the slot just served', () => {
-    // A timer firing a hair EARLY used to yield ~1ms and run the slot twice.
+  test('a fire a hair early re-arms on tomorrow, not on the slot it just served', () => {
+    // The delay the scheduler actually uses, not a floor applied next to it: a
+    // floor only postponed the duplicate run of the SAME slot (#398 review).
     const hairEarly = new Date('2026-08-25T03:59:59.999Z');
-    expect(msUntilNextDailyTime(4, 0, 'UTC', hairEarly)).toBeLessThan(60_000);
-    // The scheduler floors this; assert the floor constant is what protects it.
-    expect(Math.max(msUntilNextDailyTime(4, 0, 'UTC', hairEarly), 60_000)).toBe(60_000);
+    expect(msUntilNextDailyTime(4, 0, 'UTC', hairEarly)).toBeLessThan(60_000); // raw is near-zero
+    const delay = nextReflectionDelay(4, 0, 'UTC', hairEarly);
+    const nextFire = new Date(hairEarly.getTime() + delay);
+    // Must land on TOMORROW's 04:00 slot — never a second visit to today's.
+    expect(nextFire.toISOString()).toBe('2026-08-26T04:00:00.000Z');
+    expect(delay).toBeGreaterThan(23 * 60 * 60 * 1000);
+  });
+
+  test('a normal re-arm is left exactly as computed', () => {
+    // The roll-forward must fire ONLY for the just-served slot, or every daily
+    // run would drift a day and the GC would stop running nightly.
+    const now = new Date('2026-08-25T01:30:00Z');
+    expect(nextReflectionDelay(4, 0, 'UTC', now)).toBe(msUntilNextDailyTime(4, 0, 'UTC', now));
+    expect(nextReflectionDelay(4, 0, 'UTC', now)).toBe(2.5 * 60 * 60 * 1000);
   });
 });

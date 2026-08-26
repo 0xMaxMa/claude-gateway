@@ -8,6 +8,7 @@ import {
   sharedDbPath,
   indexSharedArchive,
   makeSharedPromoter,
+  mergeIntoNote,
   ArchiveDB,
   findSimilarSharedNotes,
   writeSharedNote,
@@ -531,5 +532,119 @@ describe('makeSharedPromoter — retired notes (#398 review)', () => {
     } finally {
       cleanup(cfg);
     }
+  });
+});
+
+describe('makeSharedPromoter — declines are never silent (#398 review)', () => {
+  test('a write refused by the size cap is logged and leaves the vault untouched', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      promote({ reason: 'r', topic: 'oversize-fact', content: 'x'.repeat(MAX_SHARED_NOTE_SIZE + 1) });
+
+      expect(noteFiles(cfg)).toEqual([]); // nothing written
+      expect(logs.map((l) => l.why)).toContain('note-size-cap');
+      expect(logs[0]?.agentId).toBe('agentA');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an unexpected write failure is logged rather than swallowed whole', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      // Make the notes dir unwritable so the atomic write throws inside the
+      // promoter's catch-all. The dream itself must still be unaffected.
+      fs.mkdirSync(sharedNotesDir(cfg), { recursive: true });
+      fs.chmodSync(sharedNotesDir(cfg), 0o500);
+      expect(() => promote({ reason: 'r', topic: 'blocked-write', content: 'A fact that cannot be written.' })).not.toThrow();
+      fs.chmodSync(sharedNotesDir(cfg), 0o700);
+
+      expect(logs.map((l) => l.why)).toContain('write-failed');
+    } finally {
+      try {
+        fs.chmodSync(sharedNotesDir(cfg), 0o700);
+      } catch {
+        /* already restored */
+      }
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — a retired twin is folded in on BOTH write paths (#398 review)', () => {
+  // The GC keeps retired notes searchable (#392), so a `stale__` twin left next
+  // to a live note of the same name answers every query twice — forever, since
+  // the GC's own restore refuses once the active name exists again.
+  function seedRetiredTwin(cfg: ResolvedKnowledgeSharedCfg, name: string, body: string): void {
+    writeSharedNote(cfg, `stale__${name}`, `<!-- staled 2026-01-01 (aged out, 0 retrievals) -->\n${body}`);
+  }
+
+  test('folds and removes the twin when the fact recurs under a name that is live again', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // The live note was recreated by some other writer (e.g. memory_shared_create),
+      // which is exactly how a twin ends up beside an active note.
+      writeSharedNote(cfg, 'deploy-bootstrap', 'Deploy needs a manual bootstrap step.');
+      seedRetiredTwin(cfg, 'deploy-bootstrap', 'The bootstrap script provisions the vault token.');
+
+      promote({ reason: 'r', topic: 'deploy-bootstrap', content: 'Bootstrap must run before the first deploy.' });
+
+      expect(sharedNoteExists(cfg, 'stale__deploy-bootstrap')).toBe(false); // twin gone
+      expect(noteFiles(cfg)).toEqual(['deploy-bootstrap.md']);
+      const body = fs.readFileSync(path.join(sharedNotesDir(cfg), 'deploy-bootstrap.md'), 'utf8');
+      expect(body).toContain('manual bootstrap step'); // the live note survived
+      expect(body).toContain('provisions the vault token'); // the retired body came back
+      expect(body).toContain('before the first deploy'); // and the new fact landed
+      expect(body).not.toContain('<!-- staled'); // marker stripped, not inlined
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('keeps the twin when the merged note would not fit, and says so', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      writeSharedNote(cfg, 'huge-topic', 'a'.repeat(MAX_SHARED_NOTE_SIZE - 100));
+      seedRetiredTwin(cfg, 'huge-topic', 'b'.repeat(1000));
+
+      promote({ reason: 'r', topic: 'huge-topic', content: 'A short new fact about the huge topic.' });
+
+      // Losing the retired copy to a write that never landed would be data loss.
+      expect(sharedNoteExists(cfg, 'stale__huge-topic')).toBe(true);
+      expect(logs.map((l) => l.why)).toContain('note-size-cap');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('mergeIntoNote — edges are not lost to an already-recorded fact (#398 review)', () => {
+  test('a fact already present still gains links it does not have yet', () => {
+    const existing = 'The deploy runbook lives in ops/deploy.md.';
+    const merged = mergeIntoNote(existing, 'The deploy runbook lives in ops/deploy.md.', ['rollback-policy']);
+    expect(merged).toContain('[[rollback-policy]]');
+    expect(merged.match(/The deploy runbook lives/g)).toHaveLength(1); // not duplicated
+  });
+
+  test('a link already in the note is never appended a second time', () => {
+    const existing = 'Fact one.\n\nRelated: [[rollback-policy]]';
+    expect(mergeIntoNote(existing, 'Fact one.', ['rollback-policy'])).toBe(existing);
+    // ...and a genuinely new addition only carries the links that are missing.
+    const merged = mergeIntoNote(existing, 'Fact two.', ['rollback-policy', 'oncall-rotation']);
+    expect(merged.match(/\[\[rollback-policy\]\]/g)).toHaveLength(1);
+    expect(merged).toContain('[[oncall-rotation]]');
   });
 });

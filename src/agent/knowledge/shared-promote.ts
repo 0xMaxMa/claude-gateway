@@ -28,9 +28,16 @@ import type { KnowledgeSharedConfig } from './types';
  */
 export function mergeIntoNote(existing: string, addition: string, relatedNames: string[] = []): string {
   const trimmedAddition = addition.trim();
-  const links = relatedNames.length ? `\n\nRelated: ${relatedNames.map((n) => `[[${n}]]`).join(' ')}` : '';
+  // Only link what is not linked yet: a recurring fact that merges into the same
+  // note night after night would otherwise stack a duplicate `Related:` line on
+  // every pass (issue #398 review).
+  const missing = relatedNames.filter((n) => !existing.includes(`[[${n}]]`));
+  const links = missing.length ? `\n\nRelated: ${missing.map((n) => `[[${n}]]`).join(' ')}` : '';
   if (!existing.trim()) return `${trimmedAddition}${links}`;
-  if (existing.includes(trimmedAddition)) return existing; // already recorded, nothing to add
+  // Already recorded verbatim: there is nothing to append — but the note must
+  // still gain edges it is missing, or a fact that recurs under a name it
+  // already occupies stays a disconnected node forever (issue #398 review).
+  if (existing.includes(trimmedAddition)) return links ? `${existing.trim()}${links}` : existing;
   return `${existing.trim()}\n\n${trimmedAddition}${links}`;
 }
 
@@ -151,12 +158,12 @@ export function deriveNameFromContent(content: string): string | undefined {
  * it's the same accepted tradeoff, not a new class of risk.
  */
 export function makeSharedPromoter(
-  // Kept for call-site compatibility (src/index.ts, gateway-router.ts) though no
-  // longer used for naming — issue #386 moved note identity off the agent id, and
-  // issue #398 moved it to the proposal's `topic` slug (falling back to `reason`,
-  // then to the fact itself), so a recurring fact maps to the same shared note
-  // whichever agent dreamed it.
-  _agentId: string,
+  // No longer used for NAMING — issue #386 moved note identity off the agent id,
+  // and issue #398 moved it to the proposal's `topic` slug (falling back to
+  // `reason`, then to the fact itself), so a recurring fact maps to the same
+  // shared note whichever agent dreamed it. Still carried because every declined
+  // promotion is logged with the agent that proposed it.
+  agentId: string,
   agentCfg: KnowledgeSharedConfig | undefined,
   globalCfg: KnowledgeSharedConfig | undefined,
   // Promotion can decline for several reasons and used to do so in total silence,
@@ -167,7 +174,7 @@ export function makeSharedPromoter(
   const sharedCfg = resolveSharedConfig(agentCfg, globalCfg);
   if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
   const skip = (why: string, data: Record<string, unknown> = {}): void => {
-    logger?.info('shared promotion skipped', { agentId: _agentId, why, ...data });
+    logger?.info('shared promotion skipped', { agentId, why, ...data });
   };
   return (p: { reason: string; content?: string; topic?: string }) => {
     const content = (p.content ?? '').trim();
@@ -196,10 +203,31 @@ export function makeSharedPromoter(
     }
 
     try {
+      // A `stale__` twin of THIS name means the GC retired this fact and it has
+      // now recurred — the recurrence itself is the promote-back signal. Resolved
+      // BEFORE the update/create split because both paths put a live file back at
+      // `name`, and once that file exists the GC's own restore refuses forever
+      // (`moveNoteFromStale` bails on `sharedNoteExists`). A twin left behind is
+      // not inert: retired notes stay indexed and searchable by design (#392), so
+      // the same fact would answer every query twice, permanently (issue #398
+      // review — the create path handled this, the update path did not).
+      const staleTwin = `${STALE_NOTE_PREFIX}${name}`;
+      const retired = sharedNoteExists(sharedCfg, staleTwin)
+        ? (readSharedNote(sharedCfg, staleTwin) ?? '').replace(/^<!--[\s\S]*?-->\s*/, '').trim()
+        : '';
+      // Only drop the twin once its content is safely in the live note: a write
+      // refused by the size cap must leave the retired copy where it is.
+      const dropTwinIfWritten = (written: boolean): void => {
+        if (written && retired) deleteSharedNoteFile(sharedCfg, staleTwin);
+      };
+
       // Same name recurred: this IS the same fact — update it, never duplicate.
       if (sharedNoteExists(sharedCfg, name)) {
         const existing = readSharedNote(sharedCfg, name) ?? '';
-        writeCapped(sharedCfg, name, mergeIntoNote(existing, content));
+        const withRetired = retired ? mergeIntoNote(existing, retired) : existing;
+        const written = writeCapped(sharedCfg, name, mergeIntoNote(withRetired, content));
+        if (!written) skip('note-size-cap', { reason: p.reason, note: name });
+        dropTwinIfWritten(written);
         return;
       }
 
@@ -232,28 +260,30 @@ export function makeSharedPromoter(
         const primary = mergeable[0];
         const related = linkable.filter((c) => c.name !== primary.name);
         const existing = readSharedNote(sharedCfg, primary.name) ?? '';
-        writeCapped(
-          sharedCfg,
-          primary.name,
-          mergeIntoNote(existing, content, related.map((r) => r.name)),
-        );
+        if (
+          !writeCapped(
+            sharedCfg,
+            primary.name,
+            mergeIntoNote(existing, content, related.map((r) => r.name)),
+          )
+        ) {
+          skip('note-size-cap', { reason: p.reason, note: primary.name });
+        }
         return;
       }
 
-      // Creating fresh. If this exact name was retired earlier, the recurrence IS
-      // the promote-back signal: fold the retired body back in and drop the
-      // `stale__` twin. Leaving it would strand that copy forever (the GC's
-      // restore refuses once the active name exists again) AND leave two files
-      // sharing one `entry_hash`, whose single lifecycle row's `path` would then
-      // flip between them on every index pass.
-      const staleTwin = `${STALE_NOTE_PREFIX}${name}`;
-      const retired = sharedNoteExists(sharedCfg, staleTwin) ? readSharedNote(sharedCfg, staleTwin) : null;
-      const body = retired ? mergeIntoNote(retired.replace(/^<!--.*-->\s*/, ''), content) : content;
-      if (writeCapped(sharedCfg, name, body, linkable.map((r) => r.name)) && retired) {
-        deleteSharedNoteFile(sharedCfg, staleTwin);
-      }
-    } catch {
-      /* best-effort — a promotion failure never affects the local dream */
+      // Creating fresh. Folding a retired twin back in here also stops two files
+      // from sharing one `entry_hash`, whose single lifecycle row's `path` would
+      // otherwise flip between them on every index pass.
+      const body = retired ? mergeIntoNote(retired, content) : content;
+      const written = writeCapped(sharedCfg, name, body, linkable.map((r) => r.name));
+      if (!written) skip('note-size-cap', { reason: p.reason, note: name });
+      dropTwinIfWritten(written);
+    } catch (err) {
+      // Best-effort — a promotion failure never affects the local dream. It must
+      // not be invisible either: a vault that silently stops growing was the
+      // undiagnosable failure issue #398 set out to close.
+      skip('write-failed', { reason: p.reason, error: (err as Error)?.message });
     }
   };
 }

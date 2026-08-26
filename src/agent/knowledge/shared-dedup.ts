@@ -91,6 +91,11 @@ export function significantTokens(text: string): Set<string> {
  * (not Jaccard) on purpose: a short new fact merging into a long established
  * note is a legitimate near-duplicate, and Jaccard would punish it for the
  * candidate's length alone.
+ *
+ * Note the asymmetry in the inputs: `seed` is the truncated query text
+ * (`buildSeedText`), while `candidate` should be a full note body. The score is
+ * therefore "how much of the QUERY this note already says" — the candidate is
+ * never penalised for saying more.
  */
 export function containmentScore(seed: string, candidate: string): number {
   const a = significantTokens(seed);
@@ -106,6 +111,14 @@ export function containmentScore(seed: string, candidate: string): number {
  * separate note when two really were duplicates is a tidy-up cost, while merging
  * two unrelated facts destroys both (the reader can no longer tell which note
  * the fact belongs to). Errors are pushed to the recoverable side.
+ *
+ * Read this against what the seed actually IS. Callers score against
+ * `buildSeedText`'s output, which is capped at `SEED_TERM_BUDGET` significant
+ * tokens (a minority from the name, the rest from the fact) — so the bar is "half
+ * of the fact's first ~11 topic words are already in this note", not "half of the
+ * whole fact". That is looser than the bare number reads, and deliberately so:
+ * the cap is what keeps the FTS query itself affordable, and the same truncation
+ * has to apply on both sides for the score to mean anything.
  */
 export const MIN_MERGE_CONTAINMENT = 0.5;
 

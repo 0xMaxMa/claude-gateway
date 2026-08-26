@@ -36,7 +36,7 @@ export {
   deleteSharedNoteFile,
   MAX_SHARED_NOTE_SIZE,
 } from './shared-writer';
-export { makeSharedPromoter } from './shared-promote';
+export { makeSharedPromoter, mergeIntoNote } from './shared-promote';
 export { findSimilarSharedNotes } from './shared-dedup';
 export type { SimilarSharedNote } from './shared-dedup';
 export { runSharedStalenessGc, retireSharedNote, STALE_NOTE_PREFIX } from './shared-staleness';
@@ -45,6 +45,7 @@ export {
   SharedReflectionManager,
   connectedComponents,
   msUntilNextDailyTime,
+  nextReflectionDelay,
   isConsolidationDay,
 } from './reflection';
 export type { ReflectionResult, SharedReflectionManagerDeps } from './reflection';

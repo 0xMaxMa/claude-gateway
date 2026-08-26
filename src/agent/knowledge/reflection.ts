@@ -37,11 +37,11 @@ import type { ResolvedKnowledgeSharedCfg, ResolvedKnowledgeReflectionCfg } from 
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /**
- * Floor on the re-arm delay. `msUntilNextDailyTime` measures against the local
- * clock, so a timer that fires a millisecond early yields a ~1ms delay and runs
- * the slot twice; anything below this is treated as "this slot already ran".
+ * A re-arm delay at or below this is read as "the slot we just served is still a
+ * hair in the future" rather than as a real wait — `msUntilNextDailyTime` measures
+ * against the local clock and Node timers may fire marginally early.
  */
-const MIN_RESCHEDULE_MS = 60_000;
+const JUST_SERVED_WINDOW_MS = 60_000;
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 /** Local-calendar parts of `now` in `timezone` (weekday index + ms into day). */
@@ -78,6 +78,25 @@ export function msUntilNextDailyTime(
   const target = (hour * 60 + minute) * 60 * 1000;
   const delay = target - msIntoDay;
   return delay > 0 ? delay : delay + DAY_MS;
+}
+
+/**
+ * The delay `startReflecting` actually re-arms on, and the single place the
+ * "slot already ran" case is decided (issue #398 review).
+ *
+ * A timer that fires a hair EARLY leaves the slot a millisecond in the FUTURE,
+ * so re-arming on the raw value runs the same slot a second time. Flooring the
+ * delay does not fix that — it only postpones the duplicate by the floor — so
+ * a raw delay inside `JUST_SERVED_WINDOW_MS` rolls forward a full day instead.
+ */
+export function nextReflectionDelay(
+  hour: number,
+  minute: number,
+  timezone: string,
+  now: Date = new Date(),
+): number {
+  const raw = msUntilNextDailyTime(hour, minute, timezone, now);
+  return raw <= JUST_SERVED_WINDOW_MS ? raw + DAY_MS : raw;
 }
 
 /**
@@ -393,10 +412,13 @@ export class SharedReflectionManager {
   }
 
   /**
-   * Start the weekly reflection scheduler: a self-rescheduling unref'd timer,
-   * mirroring `DreamingManager.startDreaming` but weekly and gated on
-   * `reflectionCfg.enabled` only (the shared/mode gate is re-checked inside
-   * `reflectOnce` every fire, so a config flip mid-week takes effect next run).
+   * Start the reflection scheduler: a self-rescheduling unref'd timer, mirroring
+   * `DreamingManager.startDreaming` and gated on `reflectionCfg.enabled` only
+   * (the shared/mode gate is re-checked inside `reflectOnce` every fire, so a
+   * config flip takes effect on the next run).
+   *
+   * The timer is DAILY as of issue #398: every fire runs the staleness GC, and
+   * only a fire whose slot lands on `dayOfWeek` also runs LLM consolidation.
    */
   startReflecting(): void {
     if (!this.deps.reflectionCfg.enabled) return;
@@ -410,11 +432,10 @@ export class SharedReflectionManager {
       // The slot's own calendar day is decided HERE, from the target instant,
       // not from whenever the timer happens to fire: a fire nudged across local
       // midnight by a host suspend or an event-loop stall would otherwise skip
-      // consolidation for a further week. `MIN_RESCHEDULE_MS` covers the mirror
-      // case — a timer that fires a hair EARLY would compute a ~1ms delay and
-      // run the same slot twice, which is harmless for the GC but pays for a
-      // duplicate consolidation (issue #398 review).
-      const delay = Math.max(msUntilNextDailyTime(hour, minute, timezone), MIN_RESCHEDULE_MS);
+      // consolidation for a further week. `nextReflectionDelay` covers the mirror
+      // case — a fire a hair EARLY leaves the slot barely in the future, and
+      // re-arming on that raw delay would serve the same slot twice.
+      const delay = nextReflectionDelay(hour, minute, timezone);
       const target = new Date(Date.now() + delay);
       const consolidate = isConsolidationDay(dayOfWeek, timezone, target);
       this.timer = setTimeout(() => {
