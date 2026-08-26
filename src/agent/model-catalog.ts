@@ -44,6 +44,9 @@ const CATALOG_TTL_MS = 60_000;
  */
 const CATALOG_STALE_MS = 60 * 60_000;
 
+/** Model kinds that are not selectable as a chat model. See parseModelCatalog. */
+const NON_CHAT_KINDS = new Set(['image', 'video', 'audio', 'speech', 'embedding', 'embeddings', 'rerank', 'moderation']);
+
 /** Fallback context window for a model no catalog — live or static — describes. */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
@@ -127,7 +130,11 @@ export function baseUrlIsSecure(raw: string): boolean {
   }
   if (u.protocol === 'https:') return true;
   if (u.protocol !== 'http:') return false;
-  const h = u.hostname.toLowerCase();
+  // WHATWG URL keeps the brackets on an IPv6 host, so `hostname` for
+  // http://[::1]:8080 is '[::1]', not '::1'. Comparing against the bare form
+  // never matched, and an IPv6-loopback proxy was rejected as insecure.
+  // mcp/tools/image/module.ts has the same bug in its copy of this check.
+  const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   return (
     h === 'localhost' ||
     h === 'host.docker.internal' ||
@@ -168,9 +175,20 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
   const models: ModelConfig[] = [];
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
-    const r = row as { id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown };
+    const r = row as { id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; kind?: unknown; type?: unknown };
     const id = typeof r.id === 'string' ? r.id.trim() : '';
     if (!id || seen.has(id)) continue;
+    // A proxy that fronts image generation alongside chat may serve one
+    // catalog for both — the image tool asks for its half with
+    // `/v1/models?kind=image`. An image model in the chat picker is selectable
+    // and cannot chat, so drop anything that says what it is and does not say
+    // chat. A row with no kind/type is kept: most catalogs (Anthropic's
+    // included, where `type` is the constant "model") say nothing useful here,
+    // and dropping those would empty the list. No request-side `kind=chat` is
+    // sent because this repo has no way to know the proxy's chat kind value,
+    // and guessing one risks an empty catalog on every deployment.
+    const kind = [r.kind, r.type].find((v) => typeof v === 'string' && v.trim());
+    if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.toLowerCase())) continue;
     seen.add(id);
 
     const staticEntry = known.get(id);

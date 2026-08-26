@@ -11,6 +11,7 @@ import express from 'express';
 import request from 'supertest';
 import { createApiRouter } from '../../src/api/router';
 import { resetModelCatalogCache, resetSettingsEnvCache } from '../../src/agent/model-catalog';
+import { DEFAULT_MODELS } from '../../src/agent/runner';
 import type { AgentConfig, ApiKey, ModelConfig } from '../../src/types';
 
 const AGENT_ID = 'alfred';
@@ -109,10 +110,37 @@ describe('GET /api/v1/models', () => {
     expect(res.status).toBe(401);
   });
 
-  it('does not 500 when the gateway has no configured models at all', async () => {
+  it('reports the defaults when the gateway has no configured models', async () => {
+    // Previously `[]`: the endpoint said "no models" while the chat picker,
+    // which falls back to DEFAULT_MODELS, showed the full list.
     const res = await request(buildApp()).get('/api/v1/models').set(AUTH);
 
     expect(res.status).toBe(200);
-    expect(res.body.models).toEqual([]);
+    expect(res.body.models.map((m: { id: string }) => m.id)).toEqual(DEFAULT_MODELS.map((m) => m.id));
+  });
+
+  it('enriches the catalog from the same list the runner uses, so the shared cache is not degraded', async () => {
+    // fetchModelCatalog caches one parsed catalog per process, and its
+    // alias/contextWindow/multiplier come from whichever caller's list
+    // populated the cache first. With `?? []` here, one request on a gateway
+    // that has no `gateway.models` cached a catalog with every alias set to
+    // its id and every context window at the 200k default — and the picker and
+    // every contextWindowFor() call read that for the next 60 seconds.
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    const oneMillion = DEFAULT_MODELS.find((m) => m.contextWindow === 1000000)!;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: oneMillion.id, display_name: oneMillion.label }] }),
+    });
+
+    const res = await request(buildApp()).get('/api/v1/models').set(AUTH);
+
+    expect(res.body.models[0]).toEqual({
+      id: oneMillion.id,
+      name: oneMillion.label,
+      alias: oneMillion.alias,
+      contextWindow: 1000000,
+      multiplier: oneMillion.multiplier ?? 1,
+    });
   });
 });

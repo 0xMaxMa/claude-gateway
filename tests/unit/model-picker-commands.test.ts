@@ -46,6 +46,7 @@ function makeMockProcess(): MockChildProcess {
 jest.mock('child_process', () => ({ spawn: jest.fn(() => makeMockProcess()) }));
 
 import { AgentRunner } from '../../src/agent/runner';
+import { SessionStore } from '../../src/session/store';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { resetModelCatalogCache, resetSettingsEnvCache } from '../../src/agent/model-catalog';
 
@@ -80,13 +81,17 @@ function callbackPort(runner: AgentRunner): number {
 
 async function postChannelMessage(
   port: number, chatId: string, content: string, source: string,
+  extraMeta: Record<string, string> = { chat_type: 'direct' },
 ): Promise<void> {
   await fetch(`http://127.0.0.1:${port}/channel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       content,
-      meta: { chat_id: chatId, message_id: '1', user: 'testuser', source, ts: new Date().toISOString() },
+      meta: {
+        chat_id: chatId, message_id: '1', user: 'testuser', source,
+        ts: new Date().toISOString(), ...extraMeta,
+      },
     }),
   });
 }
@@ -216,6 +221,72 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     priv.sessions.delete(chatId); // keep teardown off the fake session
   }, 15000);
 
+  it('refuses to switch models from a group chat', async () => {
+    // /model <x> rewrites config.json for the whole agent and restarts every
+    // session in every chat. Discord's guild gate checks guild, channel and
+    // mention — never the user — so any member of an allowlisted channel could
+    // otherwise switch the model out from under everyone and kill their turns.
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/model opus', 'discord', { chat_type: 'group' });
+    await waitForForward();
+
+    expect(forwardText()).toContain('direct message');
+    expect(persistedModel()).toBe('claude-sonnet-4-6');
+  }, 15000);
+
+  it('fails closed when the channel reports no chat type at all', async () => {
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/model opus', 'discord', {});
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-sonnet-4-6');
+  }, 15000);
+
+  it('still lists models in a group chat — reading changes nothing', async () => {
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/models', 'discord', { chat_type: 'group' });
+    await waitForForward();
+
+    expect(forwardText()).toContain('Sonnet 4.6');
+  }, 15000);
+
+  it('accepts LINE 1:1 chats, which report their kind as "user"', async () => {
+    const port = await startRunner();
+    const answers: string[] = [];
+    (runner as unknown as { lineReply: unknown }).lineReply = {
+      onInbound: jest.fn(),
+      onAnswer: (_id: string, text: string) => { answers.push(text); },
+      disposeAll: jest.fn(),
+    };
+
+    await postChannelMessage(port, chatId, '/model opus', 'line', { line_chat_type: 'user' });
+    await waitFor(() => answers.length > 0, 8000);
+
+    expect(persistedModel()).toBe('claude-opus-5');
+  }, 15000);
+
+  it('can still switch back to a configured model the live catalog omits', async () => {
+    // The catalog replaces the list rather than merging, so a configured model
+    // upstream does not list vanishes from /models. Without keeping it
+    // *addressable*, a user who moves to a live-only model is trapped there.
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    (global as unknown as { fetch: unknown }).fetch = jest.fn(async (url: string, init?: unknown) => {
+      if (String(url).endsWith('/v1/models')) {
+        return { ok: true, json: async () => ({ data: [{ id: 'byok/some-model', display_name: 'Some BYOK Model' }] }) };
+      }
+      return realFetch(url as never, init as never);
+    });
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/model opus', 'discord');
+    await waitForForward();
+
+    expect(persistedModel()).toBe('claude-opus-5');
+  }, 15000);
+
   it('refuses an unknown model rather than persisting a typo into config.json', async () => {
     const port = await startRunner();
 
@@ -283,6 +354,44 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
 
     expect(forwardText()).toContain('byok/some-model');
     expect(persistedModel()).toBe('byok/some-model');
+  }, 15000);
+
+  it('keeps a configured model\'s real context window when the catalog omits it', async () => {
+    // The catalog replaces the list, so a configured model upstream does not
+    // list is absent from it. Falling straight to DEFAULT_CONTEXT_WINDOW there
+    // reports /session context use against a fifth of the real window and
+    // hands SessionCompactor a window small enough to compact far too early.
+    const bigModel = { id: 'local-1m', label: 'Local 1M', alias: 'local1m', contextWindow: 1000000 };
+    agentConfig.claude.model = bigModel.id;
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    (global as unknown as { fetch: unknown }).fetch = jest.fn(async (url: string, init?: unknown) => {
+      if (String(url).endsWith('/v1/models')) {
+        // Upstream knows nothing about the locally-configured 1M id.
+        return { ok: true, json: async () => ({ data: [{ id: 'byok/some-model', display_name: 'Some BYOK Model' }] }) };
+      }
+      return realFetch(url as never, init as never);
+    });
+
+    runner = new AgentRunner(agentConfig, {
+      gateway: { logDir: path.join(tmpDir, 'logs'), timezone: 'UTC', models: [...STATIC_MODELS, bigModel] },
+      agents: [],
+    } as unknown as GatewayConfig);
+    await runner.start();
+
+    // Channel-scoped: /session reads the index for the inbound channel, so the
+    // meta has to be written under 'discord', not the store's 'telegram' default.
+    const store = new SessionStore(path.resolve(agentConfig.workspace, '..', '..'));
+    const index = await store.getOrCreateIndex(agentConfig.id, chatId, 'discord');
+    await store.updateSessionMeta(agentConfig.id, chatId, index.activeSessionId, {
+      lastInputTokens: 50000, name: 'ctx', messageCount: 3,
+    }, 'discord');
+
+    await postChannelMessage(callbackPort(runner), chatId, '/session', 'discord');
+    await waitForForward();
+
+    // 50000 / 1000000 = 5%. Against the 200k default it would read 25%.
+    expect(forwardText()).toContain('5%');
+    expect(forwardText()).not.toContain('25%');
   }, 15000);
 
   // ── get_models: the HTTP command the Telegram receiver's keyboard calls ────

@@ -457,7 +457,7 @@ export class AgentRunner extends EventEmitter {
           // Check if this is a built-in channel command
           const trimmedContent = content.trim();
           if (isBuiltinCommand(trimmedContent, channelSource)) {
-            this.handleSessionCommand(chatId, trimmedContent)
+            this.handleSessionCommand(chatId, trimmedContent, meta)
               .then(() => this.writeTypingDone(chatId))
               .catch((err) => {
                 this.logger.error('Session command failed', { error: (err as Error).message });
@@ -2030,7 +2030,11 @@ export class AgentRunner extends EventEmitter {
   /**
    * Dispatch a session management command to the appropriate handler.
    */
-  private async handleSessionCommand(chatId: string, content: string): Promise<void> {
+  private async handleSessionCommand(
+    chatId: string,
+    content: string,
+    meta: Record<string, string> = {},
+  ): Promise<void> {
     const agentId = this.agentConfig.id;
 
     if (content.startsWith('/sessions')) {
@@ -2050,7 +2054,7 @@ export class AgentRunner extends EventEmitter {
     } else if (content.startsWith('/models')) {
       await this.handleCommandModels(chatId);
     } else if (content.startsWith('/model')) {
-      await this.handleCommandModel(chatId, content.replace('/model', '').trim());
+      await this.handleCommandModel(chatId, content.replace('/model', '').trim(), meta);
     } else if (content.startsWith('/stop')) {
       await this.handleCommandStop(chatId);
     }
@@ -2090,13 +2094,26 @@ export class AgentRunner extends EventEmitter {
    * break the agent's next spawn. Anything the catalog knows — including a
    * model that exists only upstream and not in the static list — is accepted.
    */
-  private async handleCommandModel(chatId: string, arg: string): Promise<void> {
+  private async handleCommandModel(
+    chatId: string,
+    arg: string,
+    meta: Record<string, string> = {},
+  ): Promise<void> {
     const current = this.agentConfig.claude.model;
     if (!arg) {
       this.writeAutoForward(chatId, `Current model: ${current}\n\nUse /models to see the list.`);
       return;
     }
-    const models = await this.availableModels();
+    if (!this.isDirectChat(meta)) {
+      this.writeAutoForward(
+        chatId,
+        'Switching models is only available in a direct message with the bot — '
+        + 'it changes the model for every chat of this agent and restarts them. '
+        + 'Use /models here to see the list.',
+      );
+      return;
+    }
+    const models = await this.selectableModels();
     const wanted = arg.toLowerCase();
     const match = models.find((m) => m.id.toLowerCase() === wanted || m.alias.toLowerCase() === wanted);
     if (!match) {
@@ -3836,6 +3853,28 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Whether an inbound channel message came from a 1:1 chat with the bot.
+   *
+   * Gates the one channel command that reaches past its own chat: `/model <x>`
+   * rewrites `config.json` for the whole agent and restarts every session in
+   * every chat. The channel access gates do not cover that. Discord's, in a
+   * guild, checks the guild, the channel, and a mention — never the user
+   * (`allowFrom` in mcp/tools/discord/access.ts is DM-only), so without this
+   * any member of an allowlisted channel could switch the model out from under
+   * everyone else and kill their in-flight turns. LINE forwards group and room
+   * messages the same way. Telegram's receiver answers `/model` itself behind
+   * a private-chat + allowlist check and does not forward it here.
+   *
+   * Fails closed: a channel that does not report a chat type cannot switch.
+   * Listing models (`/models`, bare `/model`) is unaffected — it reads nothing
+   * and changes nothing.
+   */
+  private isDirectChat(meta: Record<string, string>): boolean {
+    const kind = meta['chat_type'] ?? meta['line_chat_type'] ?? meta['slack_chat_type'];
+    return kind === 'direct' || kind === 'user';
+  }
+
+  /**
    * Restart every non-api session so a model change actually takes effect.
    *
    * `setModel` only rewrites config — a session process was spawned with the
@@ -3871,7 +3910,32 @@ export class AgentRunner extends EventEmitter {
    */
   private async contextWindowFor(modelId: string): Promise<number> {
     const models = await this.availableModels();
-    return models.find((m) => m.id === modelId)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    // Configured list second, not just as the catalog's fallback: the catalog
+    // *replaces* the list rather than merging with it, so a configured model
+    // the upstream catalog does not list (the local `[1m]` ids are exactly
+    // that shape) would otherwise drop to the 200k default — reporting
+    // /session context use against a fifth of the real window and handing
+    // SessionCompactor a window small enough to compact far too early.
+    return models.find((m) => m.id === modelId)?.contextWindow
+      ?? (this.gatewayConfig.gateway.models ?? DEFAULT_MODELS).find((m) => m.id === modelId)?.contextWindow
+      ?? DEFAULT_CONTEXT_WINDOW;
+  }
+
+  /**
+   * Models `/model <arg>` may switch to: what the catalog offers, plus the
+   * configured list.
+   *
+   * The union is only for *resolution*, never for the `/models` listing — the
+   * listing has to reflect what upstream actually offers, or a model removed
+   * upstream would linger in the picker forever, which is the bug this all
+   * started from. Without the union a user who switches to a live-only model
+   * is trapped: their previous configured model is no longer nameable.
+   */
+  private async selectableModels(): Promise<ModelConfig[]> {
+    const live = await this.availableModels();
+    const configured = this.gatewayConfig.gateway.models ?? DEFAULT_MODELS;
+    const ids = new Set(live.map((m) => m.id));
+    return [...live, ...configured.filter((m) => !ids.has(m.id))];
   }
 
   async setModel(newModel: string): Promise<void> {

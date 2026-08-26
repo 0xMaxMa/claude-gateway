@@ -15,6 +15,7 @@ import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
 import { fetchModelCatalog } from '../agent/model-catalog';
+import { DEFAULT_MODELS } from '../agent/runner';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -560,7 +561,18 @@ export function createApiRouter(
    * into config.json at provisioning time (issue #409).
    */
   router.get('/v1/models', auth, async (_req: Request, res: Response) => {
-    const staticModels = models ?? [];
+    // `?? DEFAULT_MODELS`, not `?? []`, and that is load-bearing rather than
+    // cosmetic. fetchModelCatalog caches one parsed catalog per process, and
+    // the alias/contextWindow/multiplier on it are inherited from whichever
+    // caller's list populated the cache first. AgentRunner passes
+    // `gateway.models ?? DEFAULT_MODELS`; if this route passed `[]` on a
+    // gateway whose config has no `gateway.models`, one request here would
+    // cache a catalog with every alias set to its id and every context window
+    // at the 200k default — and the picker and all six contextWindowFor()
+    // callers would read that degraded list for the next 60 seconds. It also
+    // makes this endpoint agree with the picker on an unconfigured gateway
+    // instead of reporting no models at all.
+    const staticModels = models ?? DEFAULT_MODELS;
     const available = (await fetchModelCatalog(staticModels)) ?? staticModels;
     res.json({ models: available.map((m) => ({ id: m.id, name: m.label, alias: m.alias, contextWindow: m.contextWindow, multiplier: m.multiplier ?? 1 })) });
   });

@@ -76,6 +76,29 @@ describe('model catalog — parse', () => {
     expect(parsed!.map((m) => m.id)).toEqual(['ok']);
   });
 
+  it('drops models that say they are not chat models', () => {
+    // A proxy fronting image generation alongside chat may serve one catalog
+    // for both — the image tool asks for its half with `?kind=image`. An image
+    // model in the chat picker is selectable and cannot chat.
+    const parsed = parseModelCatalog({
+      data: [
+        { id: 'chat-model', display_name: 'Chat' },
+        { id: 'flux-1', display_name: 'Flux', kind: 'image' },
+        { id: 'whisper', display_name: 'Whisper', type: 'audio' },
+        { id: 'embed-1', display_name: 'Embed', kind: 'embedding' },
+      ],
+    }, STATIC);
+    expect(parsed!.map((m) => m.id)).toEqual(['chat-model']);
+  });
+
+  it("keeps a row whose type says nothing useful — Anthropic's is the constant 'model'", () => {
+    // Dropping unlabelled rows would empty most catalogs.
+    const parsed = parseModelCatalog({
+      data: [{ id: 'a', display_name: 'A', type: 'model' }, { id: 'b', display_name: 'B' }],
+    }, STATIC);
+    expect(parsed!.map((m) => m.id)).toEqual(['a', 'b']);
+  });
+
   it('returns null for an empty catalog — an empty picker is worse than a stale one', () => {
     expect(parseModelCatalog({ data: [] }, STATIC)).toBeNull();
     expect(parseModelCatalog({ models: [] }, STATIC)).toBeNull();
@@ -99,6 +122,14 @@ describe('model catalog — base URL safety', () => {
     expect(baseUrlIsSecure('http://127.0.0.1:1234')).toBe(true);
     expect(baseUrlIsSecure('http://host.docker.internal')).toBe(true);
     expect(baseUrlIsSecure('http://10.0.0.4')).toBe(true);
+  });
+
+  it('accepts an IPv6 loopback host, whose URL hostname keeps its brackets', () => {
+    // new URL('http://[::1]:8080').hostname is '[::1]', so comparing against
+    // the bare '::1' never matched and a local IPv6 proxy was rejected as
+    // insecure — with a misleading cleartext warning.
+    expect(new URL('http://[::1]:8080').hostname).toBe('[::1]');
+    expect(baseUrlIsSecure('http://[::1]:8080')).toBe(true);
   });
 
   it('rejects http to a public host and anything unparseable', () => {
