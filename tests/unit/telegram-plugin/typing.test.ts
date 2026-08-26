@@ -14,6 +14,8 @@ import {
   STATUS_MESSAGES,
   ERROR_MESSAGES,
   STATUS_EMOJI,
+  isNotModifiedError,
+  isMessageGoneError,
   TYPING_INTERVAL_MS,
   STATUS_INTERVAL_MS,
   STALLED_TIMEOUT_MS,
@@ -242,6 +244,116 @@ describe('createWorkingStateManager', () => {
       expect(bot.editMessageText).toHaveBeenCalledWith(CHAT_ID, 77, expect.any(String))
     })
 
+    // ── Issue #403 ──────────────────────────────────────────────────────────
+    // Past one hour the elapsed line renders as `Xh Ym`, so with a steady detail
+    // the status text stops changing while the timer keeps firing every 10s.
+    // Telegram rejects an edit whose text is identical to the message's current
+    // text, and treating that rejection as "the message is gone" made the next
+    // tick post a replacement — roughly five duplicates a minute for the rest of
+    // the turn.
+
+    test('U-TY-403a: identical text issues no edit at all', async () => {
+      const bot = makeBotApi()
+      bot.sendMessage.mockResolvedValue({ message_id: 90 })
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      // A turn that started over an hour ago: `Xh Ym` has no seconds, so ten
+      // seconds of wall clock leaves the rendered text byte-identical.
+      state.startedAt = Date.now() - 3_600_000
+      state.lastDetail = 'Running: the same tool as a moment ago'
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+
+      expect(bot.editMessageText).not.toHaveBeenCalled()
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    test('U-TY-403b: a "message is not modified" rejection keeps the status message', async () => {
+      const bot = makeBotApi()
+      bot.editMessageText.mockRejectedValue(
+        new Error('Bad Request: message is not modified: specified new message content and reply markup are exactly the same'),
+      )
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      state.statusMessageId = 55
+
+      jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(bot.editMessageText).toHaveBeenCalled()
+      // The message is intact and already correct — keep editing it.
+      expect(state.statusMessageId).toBe(55)
+      expect(bot.sendMessage).not.toHaveBeenCalled()
+    })
+
+    test('U-TY-403c: a turn past one hour keeps exactly one status message', async () => {
+      const bot = makeBotApi()
+      bot.sendMessage.mockResolvedValue({ message_id: 91 })
+      // Whatever slips past the identical-text guard is rejected the way
+      // Telegram rejects it, so both guards are exercised together.
+      bot.editMessageText.mockRejectedValue(new Error('Bad Request: message is not modified'))
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+
+      mgr.start(CHAT_ID)
+
+      const state = mgr.states.get(CHAT_ID)!
+      state.startedAt = Date.now() - 3_600_000
+      state.lastDetail = 'Running: a long tool call'
+
+      for (let tick = 0; tick < 12; tick++) {
+        jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+
+      // Two minutes of ticks, one status message. Pre-fix this posted a fresh
+      // message on roughly every other tick.
+      expect(bot.sendMessage).toHaveBeenCalledTimes(1)
+    })
+
+    test('U-TY-403d: a transient failure keeps the id, and says so in the log', async () => {
+      const bot = makeBotApi()
+      bot.editMessageText.mockRejectedValue(new Error('ETIMEDOUT: socket hang up'))
+      const fsApi = makeFsApi()
+      const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi)
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => {})
+
+      try {
+        mgr.start(CHAT_ID)
+
+        const state = mgr.states.get(CHAT_ID)!
+        state.statusMessageId = 56
+
+        jest.advanceTimersByTime(STATUS_INTERVAL_MS)
+        await Promise.resolve()
+        await Promise.resolve()
+
+        // The message is still in the chat; a replacement would leave a duplicate.
+        expect(state.statusMessageId).toBe(56)
+        expect(bot.sendMessage).not.toHaveBeenCalled()
+        // An unclassified failure must leave a trace — a silently swallowed one
+        // is what let the duplicate loop run unnoticed in the first place.
+        expect(logged).toHaveBeenCalledWith(expect.stringContaining('ETIMEDOUT'))
+      } finally {
+        logged.mockRestore()
+      }
+    })
+
     test('resets statusMessageId to null when editMessageText fails (message deleted)', async () => {
       const bot = makeBotApi()
       bot.editMessageText.mockRejectedValue(new Error('message not found'))
@@ -258,6 +370,52 @@ describe('createWorkingStateManager', () => {
       await Promise.resolve()
 
       expect(state.statusMessageId).toBeNull()
+    })
+  })
+
+  // The two classifiers decide whether a failed edit means "keep editing this
+  // message" or "it is gone, send a new one" — getting that backwards is what
+  // produced issue #403. They match on Telegram's English descriptions because
+  // both cases are HTTP 400 and the code cannot separate them, so the exact
+  // strings are pinned here rather than only exercised through the timer loop.
+  describe('edit-failure classification (#403)', () => {
+    const NOT_MODIFIED =
+      "Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"
+
+    test('U-TY-403e: recognises the not-modified rejection, however it is thrown', () => {
+      expect(isNotModifiedError(new Error(NOT_MODIFIED))).toBe(true)
+      // grammY surfaces the API text on `description`, with `message` wrapping it.
+      expect(isNotModifiedError({ description: NOT_MODIFIED, error_code: 400 })).toBe(true)
+      expect(isNotModifiedError({ message: `Call to 'editMessageText' failed! (400: ${NOT_MODIFIED})` })).toBe(true)
+    })
+
+    test('U-TY-403f: a not-modified rejection is never read as a gone message', () => {
+      expect(isMessageGoneError(new Error(NOT_MODIFIED))).toBe(false)
+    })
+
+    test('U-TY-403g: recognises the descriptions that mean the message cannot be edited', () => {
+      for (const description of [
+        'Bad Request: message to edit not found',
+        'Bad Request: message to be edited not found',
+        "Bad Request: message can't be edited",
+        'Bad Request: message not found',
+      ]) {
+        expect(isMessageGoneError({ description, error_code: 400 })).toBe(true)
+        expect(isNotModifiedError({ description, error_code: 400 })).toBe(false)
+      }
+    })
+
+    test('U-TY-403h: a transient failure matches neither, so the id is kept', () => {
+      for (const err of [
+        new Error('ETIMEDOUT: socket hang up'),
+        { description: 'Too Many Requests: retry after 5', error_code: 429 },
+        { description: 'Bad Gateway', error_code: 502 },
+        undefined,
+        null,
+      ]) {
+        expect(isNotModifiedError(err)).toBe(false)
+        expect(isMessageGoneError(err)).toBe(false)
+      }
     })
   })
 

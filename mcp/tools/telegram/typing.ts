@@ -173,6 +173,47 @@ export const STATUS_EMOJI: Record<string, string> = {
   error:    '😱',
 }
 
+/**
+ * Telegram reports failures as `description` on a GrammyError; anything else
+ * thrown here (a network error, a plain Error in tests) carries `message`.
+ *
+ * Read structurally rather than with `err instanceof GrammyError &&
+ * err.error_code`, the convention in receiver-server.ts, for two reasons: this
+ * module deliberately has no grammy import — it takes an injected BotApi so
+ * tests can drive it — and the two cases below are both HTTP 400, so the code
+ * alone cannot tell them apart. The description is the only thing that can.
+ */
+function errorText(err: unknown): string {
+  if (typeof err === 'object' && err !== null) {
+    const e = err as { description?: unknown; message?: unknown }
+    if (typeof e.description === 'string') return e.description
+    if (typeof e.message === 'string') return e.message
+  }
+  return String(err)
+}
+
+/**
+ * Telegram rejects an edit whose new text is byte-identical to what the
+ * message already shows. That is not a failure to recover from — the message
+ * is intact and already correct — so the status loop must keep editing it
+ * rather than concluding it is gone and posting a replacement.
+ */
+export function isNotModifiedError(err: unknown): boolean {
+  return /message is not modified/i.test(errorText(err))
+}
+
+/**
+ * The message can never be edited again: deleted, or past Telegram's edit
+ * window. Only these justify dropping the id and sending a fresh message.
+ * A transient failure (network, 429) deliberately does NOT — the message is
+ * still there, and re-sending would leave a duplicate behind.
+ */
+export function isMessageGoneError(err: unknown): boolean {
+  return /message to (?:edit|be edited) not found|message can'?t be edited|message not found/i.test(
+    errorText(err),
+  )
+}
+
 export function parseStatusFile(content: string): { status: string; detail?: string } {
   try {
     const parsed = JSON.parse(content);
@@ -193,6 +234,10 @@ export interface WorkingState {
   currentReaction: string | null
   lastDetail: string | null
   recentDetails: string[]
+  /** Text the status message currently displays. An edit that would rewrite a
+   *  message with the exact text it already has is rejected by Telegram, so it
+   *  is never issued. */
+  lastStatusText: string | null
   /** Last stage an incident was raised for — dedupes the turn-trace watchdog
    *  so one contiguous stalled episode emits a single incident, not one per
    *  15s tick. Reset to null once the turn is no longer stalled. */
@@ -618,6 +663,7 @@ export function createWorkingStateManager(
       currentReaction: null,
       lastDetail: null,
       recentDetails: [],
+      lastStatusText: null,
       lastIncidentStage: null,
     }
     states.set(chatId, state)
@@ -650,13 +696,44 @@ export function createWorkingStateManager(
         if (s.statusMessageId === null) {
           try {
             const sent = await botApi.sendMessage(chatId, text)
-            s.statusMessageId = sent.message_id
-          } catch {}
-        } else {
-          await botApi.editMessageText(chatId, s.statusMessageId, text).catch(async () => {
+            // Re-read rather than writing through the captured `s`: the turn
+            // can end while the send is in flight, and the state this records
+            // against must be the live one or none at all.
             const current = states.get(chatId)
-            if (current) current.statusMessageId = null
-          })
+            if (current) {
+              current.statusMessageId = sent.message_id
+              current.lastStatusText = text
+            }
+          } catch {}
+        } else if (text !== s.lastStatusText) {
+          // Nothing to say, so nothing is sent. The cost is that a status
+          // message deleted by hand is not noticed until the next edit — but
+          // the elapsed line advances every minute even at `Xh Ym`, so that
+          // wait is bounded, and it buys immunity from the duplicate loop.
+          try {
+            await botApi.editMessageText(chatId, s.statusMessageId, text)
+            s.lastStatusText = text
+          } catch (err) {
+            const current = states.get(chatId)
+            if (!current) {
+              // The turn ended while the edit was in flight.
+            } else if (isNotModifiedError(err)) {
+              // The message already shows this text — nothing to recover from.
+              current.lastStatusText = text
+            } else if (isMessageGoneError(err)) {
+              current.statusMessageId = null
+              current.lastStatusText = null
+            } else {
+              // Keep the id — the message is still there, and the next tick
+              // edits it again; re-sending would leave a duplicate behind.
+              // Logged because a silently swallowed edit failure is exactly
+              // what let the duplicate loop run unnoticed: if Telegram ever
+              // returns something this does not classify, it should be
+              // visible in the receiver log rather than inferred from
+              // symptoms.
+              console.error(`[typing] status edit failed (retrying next tick): ${errorText(err)}`)
+            }
+          }
         }
       } finally {
         statusUpdatePending = false

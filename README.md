@@ -631,7 +631,9 @@ While an agent is working, the gateway sends real-time status updates to Telegra
 - **Elapsed time** — total time since the agent started working
 - **Auto-cleanup** — status message is deleted when the agent finishes
 
-Status updates are sent every 5-10 seconds (first update at 5s, then every 10s).
+Status updates are sent every 5-10 seconds (first update at 5s, then every 10s). A single
+message is **edited in place** for the whole turn; a tick with nothing new to show issues no
+update at all, and the message is replaced only if it is deleted or becomes uneditable.
 
 ---
 
