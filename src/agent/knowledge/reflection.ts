@@ -36,21 +36,16 @@ import { makeClaudeSpawn, type ClaudeSpawnFn } from '../skill-learning/reviewer'
 import type { ResolvedKnowledgeSharedCfg, ResolvedKnowledgeReflectionCfg } from './types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * A re-arm delay at or below this is read as "the slot we just served is still a
+ * hair in the future" rather than as a real wait — `msUntilNextDailyTime` measures
+ * against the local clock and Node timers may fire marginally early.
+ */
+const JUST_SERVED_WINDOW_MS = 60_000;
 const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-/**
- * ms until the next `dayOfWeek`/`hour`/`minute` in `timezone` (0=Sunday). If
- * that exact moment is right now or already passed this week, rolls to next
- * week. Mirrors `history/cleanup.ts`'s `msUntilNextTime` but adds the
- * day-of-week dimension a weekly (not daily) cadence needs.
- */
-export function msUntilNextWeeklyTime(
-  dayOfWeek: number,
-  hour: number,
-  minute: number,
-  timezone: string,
-  now: Date = new Date(),
-): number {
+/** Local-calendar parts of `now` in `timezone` (weekday index + ms into day). */
+function localParts(timezone: string, now: Date): { day: number; msIntoDay: number } {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     weekday: 'short',
@@ -60,18 +55,57 @@ export function msUntilNextWeeklyTime(
     second: '2-digit',
   });
   const parts = fmt.formatToParts(now);
-  const curDay = WEEKDAY_INDEX[parts.find((p) => p.type === 'weekday')?.value ?? 'Sun'] ?? 0;
-  const curHour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10) % 24;
-  const curMinute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
-  const curSecond = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+  const day = WEEKDAY_INDEX[parts.find((p) => p.type === 'weekday')?.value ?? 'Sun'] ?? 0;
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10) % 24;
+  const minute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  const second = parseInt(parts.find((p) => p.type === 'second')?.value ?? '0', 10);
+  return { day, msIntoDay: ((hour * 60 + minute) * 60 + second) * 1000 + (now.getTime() % 1000) };
+}
 
-  const msIntoDay = ((curHour * 60 + curMinute) * 60 + curSecond) * 1000 + (now.getTime() % 1000);
-  const targetMsIntoDay = (hour * 60 + minute) * 60 * 1000;
+/**
+ * Delay until the next `hour:minute` in `timezone`, today or tomorrow (issue
+ * #398). The reflection timer fires DAILY now: staleness GC is wall-clock work
+ * with no model call, and gating it on the weekly consolidation slot left a
+ * retired-then-retrieved note missing from the active set for up to seven days.
+ */
+export function msUntilNextDailyTime(
+  hour: number,
+  minute: number,
+  timezone: string,
+  now: Date = new Date(),
+): number {
+  const { msIntoDay } = localParts(timezone, now);
+  const target = (hour * 60 + minute) * 60 * 1000;
+  const delay = target - msIntoDay;
+  return delay > 0 ? delay : delay + DAY_MS;
+}
 
-  const dayDelta = (((dayOfWeek - curDay) % 7) + 7) % 7;
-  let delay = dayDelta * DAY_MS + (targetMsIntoDay - msIntoDay);
-  if (delay <= 0) delay += 7 * DAY_MS; // today-and-passed, or would be exactly now
-  return delay;
+/**
+ * The delay `startReflecting` actually re-arms on, and the single place the
+ * "slot already ran" case is decided (issue #398 review).
+ *
+ * A timer that fires a hair EARLY leaves the slot a millisecond in the FUTURE,
+ * so re-arming on the raw value runs the same slot a second time. Flooring the
+ * delay does not fix that — it only postpones the duplicate by the floor — so
+ * a raw delay inside `JUST_SERVED_WINDOW_MS` rolls forward a full day instead.
+ */
+export function nextReflectionDelay(
+  hour: number,
+  minute: number,
+  timezone: string,
+  now: Date = new Date(),
+): number {
+  const raw = msUntilNextDailyTime(hour, minute, timezone, now);
+  return raw <= JUST_SERVED_WINDOW_MS ? raw + DAY_MS : raw;
+}
+
+/**
+ * True when `now` falls on the configured consolidation weekday in `timezone`.
+ * The LLM half keeps its weekly cadence — it costs one model call per cluster,
+ * and batching a week of edits into one pass is what keeps that spend bounded.
+ */
+export function isConsolidationDay(dayOfWeek: number, timezone: string, now: Date = new Date()): boolean {
+  return localParts(timezone, now).day === dayOfWeek;
 }
 
 /**
@@ -250,8 +284,19 @@ export class SharedReflectionManager {
     this.deps.logger?.info(msg, data);
   }
 
-  /** Run one reflection cycle. Never throws. */
-  async reflectOnce(now: number = Date.now()): Promise<ReflectionResult> {
+  /**
+   * Run one reflection cycle. Never throws.
+   *
+   * `consolidate: false` runs the staleness GC only and skips the graph/LLM
+   * consolidation — the daily mode introduced in issue #398. GC is wall-clock
+   * driven and free; consolidation costs a model call per cluster and stays on
+   * its weekly slot.
+   */
+  async reflectOnce(
+    now: number = Date.now(),
+    opts: { consolidate?: boolean } = {},
+  ): Promise<ReflectionResult> {
+    const consolidate = opts.consolidate ?? true;
     const { sharedCfg, reflectionCfg } = this.deps;
     if (!sharedCfg.enabled || sharedCfg.mode !== 'auto' || !reflectionCfg.enabled) {
       return { outcome: 'skipped-disabled', ...ZERO_RESULT };
@@ -274,6 +319,16 @@ export class SharedReflectionManager {
       result.invalidated = staleness.invalidated;
       result.promoted = staleness.promoted;
       const revision = db.getRevision();
+      if (!consolidate) {
+        // GC-only pass: leave the watermark alone so the next consolidation run
+        // still sees everything written since IT last ran.
+        this.log('reflect: staleness pass complete (consolidation deferred to its weekly slot)', {
+          revision,
+          invalidated: result.invalidated,
+          promoted: result.promoted,
+        });
+        return { ...result, outcome: 'ran', clustersConsidered: 0, clustersDeferred: 0 };
+      }
       if (revisionBeforeGc === state.lastRevision && result.invalidated === 0 && result.promoted === 0) {
         this.log('reflect: shared KB unchanged since last run, skipping consolidation', { revision });
         return { outcome: 'skipped-unchanged', ...ZERO_RESULT };
@@ -357,18 +412,34 @@ export class SharedReflectionManager {
   }
 
   /**
-   * Start the weekly reflection scheduler: a self-rescheduling unref'd timer,
-   * mirroring `DreamingManager.startDreaming` but weekly and gated on
-   * `reflectionCfg.enabled` only (the shared/mode gate is re-checked inside
-   * `reflectOnce` every fire, so a config flip mid-week takes effect next run).
+   * Start the reflection scheduler: a self-rescheduling unref'd timer, mirroring
+   * `DreamingManager.startDreaming` and gated on `reflectionCfg.enabled` only
+   * (the shared/mode gate is re-checked inside `reflectOnce` every fire, so a
+   * config flip takes effect on the next run).
+   *
+   * The timer is DAILY as of issue #398: every fire runs the staleness GC, and
+   * only a fire whose slot lands on `dayOfWeek` also runs LLM consolidation.
    */
   startReflecting(): void {
     if (!this.deps.reflectionCfg.enabled) return;
     const schedule = (): void => {
       const { dayOfWeek, hour, minute, timezone } = this.deps.reflectionCfg;
-      const delay = msUntilNextWeeklyTime(dayOfWeek, hour, minute, timezone);
+      // Daily timer (issue #398): every fire runs the staleness GC; only the
+      // configured weekday also runs the LLM consolidation, so weekly model
+      // spend is unchanged while retrieval-driven restore drops from a
+      // worst-case 7-day latency to 1 day.
+      //
+      // The slot's own calendar day is decided HERE, from the target instant,
+      // not from whenever the timer happens to fire: a fire nudged across local
+      // midnight by a host suspend or an event-loop stall would otherwise skip
+      // consolidation for a further week. `nextReflectionDelay` covers the mirror
+      // case — a fire a hair EARLY leaves the slot barely in the future, and
+      // re-arming on that raw delay would serve the same slot twice.
+      const delay = nextReflectionDelay(hour, minute, timezone);
+      const target = new Date(Date.now() + delay);
+      const consolidate = isConsolidationDay(dayOfWeek, timezone, target);
       this.timer = setTimeout(() => {
-        void this.reflectOnce(Date.now()).catch(() => {
+        void this.reflectOnce(Date.now(), { consolidate }).catch(() => {
           /* best-effort */
         });
         schedule();

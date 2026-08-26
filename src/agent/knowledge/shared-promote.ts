@@ -1,5 +1,18 @@
-import { writeSharedNote, sharedNoteExists, readSharedNote, MAX_SHARED_NOTE_SIZE } from './shared-writer';
-import { findSimilarSharedNotes } from './shared-dedup';
+import {
+  writeSharedNote,
+  sharedNoteExists,
+  readSharedNote,
+  deleteSharedNoteFile,
+  MAX_SHARED_NOTE_SIZE,
+} from './shared-writer';
+import {
+  findSimilarSharedNotes,
+  filterNearDuplicates,
+  buildSeedText,
+  significantTokens,
+  MIN_RELATED_CONTAINMENT,
+} from './shared-dedup';
+import { STALE_NOTE_PREFIX } from './shared-staleness';
 import { resolveSharedConfig } from './config';
 import type { KnowledgeSharedConfig } from './types';
 
@@ -15,9 +28,16 @@ import type { KnowledgeSharedConfig } from './types';
  */
 export function mergeIntoNote(existing: string, addition: string, relatedNames: string[] = []): string {
   const trimmedAddition = addition.trim();
-  const links = relatedNames.length ? `\n\nRelated: ${relatedNames.map((n) => `[[${n}]]`).join(' ')}` : '';
+  // Only link what is not linked yet: a recurring fact that merges into the same
+  // note night after night would otherwise stack a duplicate `Related:` line on
+  // every pass (issue #398 review).
+  const missing = relatedNames.filter((n) => !existing.includes(`[[${n}]]`));
+  const links = missing.length ? `\n\nRelated: ${missing.map((n) => `[[${n}]]`).join(' ')}` : '';
   if (!existing.trim()) return `${trimmedAddition}${links}`;
-  if (existing.includes(trimmedAddition)) return existing; // already recorded, nothing to add
+  // Already recorded verbatim: there is nothing to append — but the note must
+  // still gain edges it is missing, or a fact that recurs under a name it
+  // already occupies stays a disconnected node forever (issue #398 review).
+  if (existing.includes(trimmedAddition)) return links ? `${existing.trim()}${links}` : existing;
   return `${existing.trim()}\n\n${trimmedAddition}${links}`;
 }
 
@@ -29,10 +49,87 @@ export function mergeIntoNote(existing: string, addition: string, relatedNames: 
  * once a merge would cross the cap the note is left as-is (best-effort: a
  * skipped promotion never fails the local dream, same as any other error here).
  */
-export function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: string, content: string): boolean {
-  if (content.length > MAX_SHARED_NOTE_SIZE) return false;
-  writeSharedNote(cfg, name, content);
+export function writeCapped(
+  cfg: Parameters<typeof writeSharedNote>[0],
+  name: string,
+  content: string,
+  relatedNames: string[] = [],
+): boolean {
+  const body = relatedNames.length ? mergeIntoNote('', content, relatedNames) : content;
+  if (body.length > MAX_SHARED_NOTE_SIZE) return false;
+  writeSharedNote(cfg, name, body);
   return true;
+}
+
+// ── What may be promoted, and under what name (issue #398) ─────────────────
+
+/** A `MEMORY.md` index bullet: `- [label](target.md) — hook`. */
+const INDEX_POINTER_LINE_RE = /^\s*[-*]\s*\[[^\]]*\]\([^)]*\)\s*(?:[-–—:].*)?$/;
+
+/**
+ * True when the content is nothing but `MEMORY.md` index pointers.
+ *
+ * The memory-tiering convention writes a fact to its own file AND a one-line
+ * pointer into the `MEMORY.md` index. Both land as durable `add`s, so both used
+ * to be promoted — and the pointer's links resolve only inside the promoting
+ * agent's own workspace, making it dead weight in a shared vault (issue #398:
+ * 30 of 40 live notes were pointer-only, with all 32 link targets dangling).
+ *
+ * The trailing hook text is deliberately NOT rescued into a note of its own: an
+ * index hook is written to be read next to the file it points at, so promoting
+ * it alone would put a decontextualized fragment in front of every other agent.
+ * A dream that proposes the fact itself as prose still promotes normally — only
+ * navigation scaffolding is dropped.
+ */
+export function isIndexPointerOnly(content: string): boolean {
+  const lines = content
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+  return lines.every((l) => INDEX_POINTER_LINE_RE.test(l));
+}
+
+/** Leading verbs that make a `reason` an edit instruction rather than a topic. */
+const INSTRUCTION_VERB_RE =
+  /^(insert|append|prepend|add|put|place|move|update|replace|remove|delete|keep|group)\b/i;
+/** Anchors an edit instruction points AT — a position or a file, not a subject. */
+const EDIT_ANCHOR_RE = /\b(before|after|above|below|between|index|section|\.md)\b/i;
+
+/**
+ * True when a note name reads as an instruction for editing a file rather than
+ * as the name of a fact ("insert after cron config, before the pty_shell
+ * section"). `reason` is prompted as free-form justification (`reviewer.ts`) but
+ * issue #386 repurposed it as the shared note's identity, so such strings became
+ * note names that no future occurrence of the same fact can ever match.
+ *
+ * Two signals are required — an imperative edit verb AND a positional/file
+ * anchor — because either alone is common in legitimate names ("Add-on billing
+ * is per seat", "the section header is user-visible").
+ */
+export function isInstructionShapedName(name: string): boolean {
+  return INSTRUCTION_VERB_RE.test(name.trim()) && EDIT_ANCHOR_RE.test(name);
+}
+
+/**
+ * A note name derived from the fact itself — the fallback when the proposal has
+ * no `topic` and its `reason` reads as an editing instruction.
+ *
+ * Dropping such a promotion outright (the first cut of issue #398) silently lost
+ * genuine facts whose reason merely happened to start with an edit verb, e.g.
+ * "Update the deploy section after the API change". Naming from the content
+ * keeps the fact; only content with nothing nameable in it is given up on.
+ */
+export function deriveNameFromContent(content: string): string | undefined {
+  const firstSentence = content
+    .replace(/^[\s>*-]+/, '')
+    .replace(/`+/g, '')
+    .split(/(?<=[.!?])\s|\n/)[0]
+    ?.trim();
+  if (!firstSentence) return undefined;
+  const name = firstSentence.slice(0, 80).trim();
+  // Needs real topic words, not just scaffolding, to be a usable identity.
+  return significantTokens(name).size >= 3 ? name : undefined;
 }
 
 /**
@@ -61,46 +158,132 @@ export function writeCapped(cfg: Parameters<typeof writeSharedNote>[0], name: st
  * it's the same accepted tradeoff, not a new class of risk.
  */
 export function makeSharedPromoter(
-  // Kept for call-site compatibility (src/index.ts, gateway-router.ts) though no
-  // longer used for naming — issue #386 moved note identity to `reason` so a
-  // recurring fact maps to the same shared note regardless of which agent dreamed it.
-  _agentId: string,
+  // No longer used for NAMING — issue #386 moved note identity off the agent id,
+  // and issue #398 moved it to the proposal's `topic` slug (falling back to
+  // `reason`, then to the fact itself), so a recurring fact maps to the same
+  // shared note whichever agent dreamed it. Still carried because every declined
+  // promotion is logged with the agent that proposed it.
+  agentId: string,
   agentCfg: KnowledgeSharedConfig | undefined,
   globalCfg: KnowledgeSharedConfig | undefined,
-): ((p: { reason: string; content?: string }) => void) | undefined {
+  // Promotion can decline for several reasons and used to do so in total silence,
+  // which made "why did the shared vault stop growing?" undiagnosable from the
+  // outside (issue #398 review). Optional so existing call sites keep working.
+  logger?: { info: (msg: string, data?: Record<string, unknown>) => void },
+): ((p: { reason: string; content?: string; topic?: string }) => void) | undefined {
   const sharedCfg = resolveSharedConfig(agentCfg, globalCfg);
   if (!sharedCfg.enabled || sharedCfg.mode !== 'auto') return undefined;
-  return (p: { reason: string; content?: string }) => {
+  const skip = (why: string, data: Record<string, unknown> = {}): void => {
+    logger?.info('shared promotion skipped', { agentId, why, ...data });
+  };
+  return (p: { reason: string; content?: string; topic?: string }) => {
     const content = (p.content ?? '').trim();
-    const name = p.reason.trim();
-    if (!content || !name) return;
+    if (!content) return;
+
+    // An index pointer is a per-agent navigation aid, not a shareable fact: its
+    // links resolve only inside the promoting agent's own workspace.
+    if (isIndexPointerOnly(content)) {
+      skip('index-pointer-only', { reason: p.reason });
+      return;
+    }
+
+    // Identity, best first: an explicit `topic` slug (mirroring the episodic
+    // contract), then the free-form `reason`, then the fact itself. A reason that
+    // reads as an editing instruction would produce a note name no later
+    // occurrence of the same fact could match, so it is passed over — but the
+    // fact is still promoted under a content-derived name.
+    const explicit = (p.topic ?? '').trim();
+    const reason = p.reason.trim();
+    const name =
+      explicit ||
+      (reason && !isInstructionShapedName(reason) ? reason : deriveNameFromContent(content));
+    if (!name) {
+      skip('no-usable-name', { reason: p.reason });
+      return;
+    }
 
     try {
-      // Same reason recurred: this IS the same fact — update it, never duplicate.
+      // A `stale__` twin of THIS name means the GC retired this fact and it has
+      // now recurred — the recurrence itself is the promote-back signal. Resolved
+      // BEFORE the update/create split because both paths put a live file back at
+      // `name`, and once that file exists the GC's own restore refuses forever
+      // (`moveNoteFromStale` bails on `sharedNoteExists`). A twin left behind is
+      // not inert: retired notes stay indexed and searchable by design (#392), so
+      // the same fact would answer every query twice, permanently (issue #398
+      // review — the create path handled this, the update path did not).
+      const staleTwin = `${STALE_NOTE_PREFIX}${name}`;
+      const retired = sharedNoteExists(sharedCfg, staleTwin)
+        ? (readSharedNote(sharedCfg, staleTwin) ?? '').replace(/^<!--[\s\S]*?-->\s*/, '').trim()
+        : '';
+      // Only drop the twin once its content is safely in the live note: a write
+      // refused by the size cap must leave the retired copy where it is.
+      const dropTwinIfWritten = (written: boolean): void => {
+        if (written && retired) deleteSharedNoteFile(sharedCfg, staleTwin);
+      };
+
+      // Same name recurred: this IS the same fact — update it, never duplicate.
       if (sharedNoteExists(sharedCfg, name)) {
         const existing = readSharedNote(sharedCfg, name) ?? '';
-        writeCapped(sharedCfg, name, mergeIntoNote(existing, content));
+        const withRetired = retired ? mergeIntoNote(existing, retired) : existing;
+        const written = writeCapped(sharedCfg, name, mergeIntoNote(withRetired, content));
+        if (!written) skip('note-size-cap', { reason: p.reason, note: name });
+        dropTwinIfWritten(written);
         return;
       }
 
-      // New reason, but content overlaps an existing note: fold into the closest
-      // match (rather than creating a near-duplicate under a different name), and
-      // link any OTHER related notes the search turned up.
-      const similar = findSimilarSharedNotes(sharedCfg, `${name} ${content}`, 3);
-      if (similar.length > 0) {
-        const [primary, ...related] = similar;
+      // New name, but the content may already live in another note. FTS is
+      // recall only; `filterNearDuplicates` is the precision bar that decides
+      // whether an UNATTENDED merge is justified. Below the bar the fact gets
+      // its own note — two notes are recoverable, two unrelated facts fused
+      // into one are not (issue #398).
+      //
+      // Retired (`stale__*`) notes are excluded as targets: they are indexed
+      // like any other file, and merging a fresh fact into one would write it
+      // straight into the set the GC has already moved out of the active vault.
+      const seed = buildSeedText(name, content);
+      const candidates = findSimilarSharedNotes(sharedCfg, seed, 3).filter(
+        (c) => !c.name.startsWith(STALE_NOTE_PREFIX),
+      );
+      // Score against each candidate's FULL body, not the matched chunk: a long
+      // note that a recurring topic has merged into spreads the seed across
+      // chunks and would score far below its real containment.
+      const bodyOf = (c: { name: string }): string => readSharedNote(sharedCfg, c.name) ?? '';
+      const mergeable = filterNearDuplicates(seed, candidates, undefined, bodyOf);
+      // Wikilinks clear a LOWER bar than merges: a link is an additive "these
+      // are related" claim, while a merge asserts they are the same fact and
+      // destroys the distinction. Computed for BOTH outcomes — a new note that
+      // has related neighbours must still carry its edges, or the graph gains a
+      // disconnected node exactly in the 0.25–0.5 band (issue #398 review).
+      const linkable = filterNearDuplicates(seed, candidates, MIN_RELATED_CONTAINMENT, bodyOf);
+
+      if (mergeable.length > 0) {
+        const primary = mergeable[0];
+        const related = linkable.filter((c) => c.name !== primary.name);
         const existing = readSharedNote(sharedCfg, primary.name) ?? '';
-        writeCapped(
-          sharedCfg,
-          primary.name,
-          mergeIntoNote(existing, content, related.map((r) => r.name)),
-        );
+        if (
+          !writeCapped(
+            sharedCfg,
+            primary.name,
+            mergeIntoNote(existing, content, related.map((r) => r.name)),
+          )
+        ) {
+          skip('note-size-cap', { reason: p.reason, note: primary.name });
+        }
         return;
       }
 
-      writeCapped(sharedCfg, name, content);
-    } catch {
-      /* best-effort — a promotion failure never affects the local dream */
+      // Creating fresh. Folding a retired twin back in here also stops two files
+      // from sharing one `entry_hash`, whose single lifecycle row's `path` would
+      // otherwise flip between them on every index pass.
+      const body = retired ? mergeIntoNote(retired, content) : content;
+      const written = writeCapped(sharedCfg, name, body, linkable.map((r) => r.name));
+      if (!written) skip('note-size-cap', { reason: p.reason, note: name });
+      dropTwinIfWritten(written);
+    } catch (err) {
+      // Best-effort — a promotion failure never affects the local dream. It must
+      // not be invisible either: a vault that silently stops growing was the
+      // undiagnosable failure issue #398 set out to close.
+      skip('write-failed', { reason: p.reason, error: (err as Error)?.message });
     }
   };
 }

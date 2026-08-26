@@ -62,7 +62,9 @@ export class ArchiveDB {
     insertChunk: StatementSync;
     insertRecall: StatementSync;
     insertProvenance: StatementSync;
-    upsertLifecycle: StatementSync;
+    chunkHashStats: StatementSync;
+  countMissingLifecycle: StatementSync;
+  upsertLifecycle: StatementSync;
   };
 
   private constructor(dbPath: string, tokenizer: string) {
@@ -97,6 +99,19 @@ export class ArchiveDB {
       ),
       // Age survives reindex: first_seen is written ONCE (never reset); a later
       // reindex of the same entry only refreshes its current path (planning-66).
+      // Counting rows BY PATH would be wrong as a backfill guard: `replaceSource`
+      // never deletes lifecycle rows, so an often-edited file accumulates rows
+      // from every past version and the count clears the bar while the CURRENT
+      // blocks' hashes are still absent (issue #398 review). Compare hashes.
+      chunkHashStats: this.db.prepare(
+        `SELECT COUNT(*) AS total, COUNT(entry_hash) AS withHash FROM kb_chunks WHERE path = ?`,
+      ),
+      countMissingLifecycle: this.db.prepare(
+        `SELECT COUNT(*) AS c FROM (
+           SELECT DISTINCT entry_hash FROM kb_chunks WHERE path = ? AND entry_hash IS NOT NULL
+         ) t
+         WHERE NOT EXISTS (SELECT 1 FROM kb_entry_lifecycle l WHERE l.entry_hash = t.entry_hash)`,
+      ),
       upsertLifecycle: this.db.prepare(
         `INSERT INTO kb_entry_lifecycle (entry_hash, path, first_seen) VALUES (?, ?, ?)
          ON CONFLICT(entry_hash) DO UPDATE SET path = excluded.path`,
@@ -179,6 +194,7 @@ export class ArchiveDB {
         invalid_at      INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_invalid ON kb_entry_lifecycle(invalid_at);
+      CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_path ON kb_entry_lifecycle(path);
       CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_superseded ON kb_entry_lifecycle(superseded_by);
 
       -- Append-only retrieval log (planning-66). The Bun read path appends a row
@@ -561,11 +577,20 @@ export class ArchiveDB {
    * must match), terms are OR'd and capped at 12: a near-duplicate rarely repeats
    * every single word of the seed text, so an AND match would almost never hit.
    */
-  searchSimilar(seedText: string, limit = 3): ArchiveChunkRow[] {
+  /**
+   * Near-duplicate RECALL: OR the seed's first `maxTerms` tokens and rank by
+   * BM25. Loose by construction — a real near-duplicate rarely repeats every
+   * word of the seed — so a caller that acts on the result unattended must apply
+   * its own precision bar (`filterNearDuplicates`). The nightly promoter passes
+   * `SEED_TERM_BUDGET` (16) with a name/content-balanced seed; the Bun-side twin
+   * in `mcp/tools/memory/archive-reader.ts` still uses 12 with a raw seed, which
+   * is fine because its result is shown to a human who must confirm the write.
+   */
+  searchSimilar(seedText: string, limit = 3, maxTerms = 12): ArchiveChunkRow[] {
     const match = seedText
       .split(/[^\p{L}\p{N}_]+/u)
       .filter(Boolean)
-      .slice(0, 12)
+      .slice(0, maxTerms)
       .map((t) => `"${t.replace(/"/g, '""')}"`)
       .join(' OR ');
     if (!match) return [];
@@ -584,6 +609,60 @@ export class ArchiveDB {
       text: r.text as string,
       updatedAt: r.updated_at as number,
     }));
+  }
+
+  /**
+   * Ensure lifecycle rows exist for a source the indexer did NOT re-chunk
+   * (issue #398). `reindexInto` skips unchanged files by content hash and
+   * `continue`s before entry blocks are ever computed, so a note that predates
+   * the lifecycle feature — or any note untouched since — never got a row, and
+   * the staleness GC (which selects only from `kb_entry_lifecycle`) could not
+   * see it. A live vault sat at 2 lifecycle rows for 40 indexed notes.
+   *
+   * `firstSeen` must be the source's mtime, NOT the backfill time: seeding
+   * "now" would reset every existing note's age and push any reclamation out by
+   * another full `staleTtlDays`. The upsert preserves `first_seen` on conflict,
+   * so repeated backfills are idempotent.
+   */
+  backfillLifecycle(
+    sourcePath: string,
+    firstSeen: number,
+    // A THUNK, not an array: parsing entry blocks costs a full line scan plus a
+    // sha256 per block, and this runs for every unchanged source on every index
+    // pass. Passing the parsed blocks eagerly would pay that cost even when the
+    // cheap SQL guard below proves there is nothing to do (issue #398 review).
+    blocksFor: () => Array<{ entryHash: string }>,
+  ): void {
+    // The file is unchanged, so its indexed chunks already carry the current
+    // blocks' hashes — the missing rows can be counted in SQL without parsing.
+    // A chunk row with no `entry_hash` predates that column, in which case the
+    // DB cannot answer and the blocks have to be parsed.
+    const stats = this.stmts.chunkHashStats.get(sourcePath) as
+      | { total: number; withHash: number }
+      | undefined;
+    const knowable = (stats?.total ?? 0) > 0 && (stats?.withHash ?? 0) > 0;
+    if (knowable) {
+      const missing = this.stmts.countMissingLifecycle.get(sourcePath) as { c: number } | undefined;
+      if ((missing?.c ?? 0) === 0) return;
+    }
+
+    const blocks = blocksFor();
+    if (blocks.length === 0) return;
+    // One transaction, not one implicit commit per row.
+    this.db.exec('BEGIN');
+    try {
+      for (const b of blocks) {
+        this.stmts.upsertLifecycle.run(b.entryHash, sourcePath, firstSeen);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* txn already unwound */
+      }
+      throw err;
+    }
   }
 
   /**

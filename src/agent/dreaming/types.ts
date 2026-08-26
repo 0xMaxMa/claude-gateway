@@ -25,6 +25,7 @@ export interface StalenessConfig {
   minRetrievalKeep?: number;
   supersession?: boolean;
   recordRetrievals?: boolean;
+  maxInvalidationsPerRun?: number;
 }
 
 /** Fully-resolved staleness config (defaults applied, values sanitized). */
@@ -35,6 +36,15 @@ export interface ResolvedStalenessCfg {
   minRetrievalKeep: number;
   supersession: boolean;
   recordRetrievals: boolean;
+  /**
+   * Ceiling on how many entries ONE run may soft-invalidate (issue #398 review).
+   * Ages are wall-clock, so the first run after any change that widens what the
+   * GC can see — such as backfilling lifecycle rows for previously invisible
+   * sources — would otherwise relocate every already-expired entry at once.
+   * Restores (promote-back) are never capped: they only ever undo an earlier
+   * invalidation. `0` disables invalidation entirely.
+   */
+  maxInvalidationsPerRun: number;
 }
 
 /** Partial config as it appears under `gateway.dreaming` / a per-agent override. */
@@ -96,7 +106,13 @@ export interface DreamProposal {
   file?: DreamFile;
   /** Tier this op writes to; absent ⇒ 'durable' (back-compat). */
   tier?: DreamTier;
-  /** For `episodic` ops: the `memory/<topic>.md` slug (`^[a-z0-9-]{1,64}$`). */
+  /**
+   * Kebab slug (`^[a-z0-9-]{1,64}$`). For `episodic` ops it routes the write to
+   * `memory/<topic>.md`. For durable `add`s it is optional and names the FACT,
+   * giving shared promotion a stable note identity instead of the free-form
+   * `reason` (issue #398). Every non-promotion consumer gates on
+   * `tier === 'episodic'` first, so a durable topic never changes local routing.
+   */
   topic?: string;
   /** Substring anchor for `replace`/`remove`. */
   target?: string;

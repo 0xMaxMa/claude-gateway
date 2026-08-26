@@ -18,6 +18,7 @@ export const STALENESS_DEFAULTS: ResolvedStalenessCfg = {
   minRetrievalKeep: 1,
   supersession: true,
   recordRetrievals: true,
+  maxInvalidationsPerRun: 50,
 };
 
 export const DREAMING_DEFAULTS: ResolvedDreamingCfg = {
@@ -77,6 +78,12 @@ export function resolveStalenessConfig(
     minRetrievalKeep: numOr(pick(agentCfg?.minRetrievalKeep, globalCfg?.minRetrievalKeep, d.minRetrievalKeep), d.minRetrievalKeep, 0, Infinity),
     supersession: bool(agentCfg?.supersession, globalCfg?.supersession, d.supersession),
     recordRetrievals: bool(agentCfg?.recordRetrievals, globalCfg?.recordRetrievals, d.recordRetrievals),
+    maxInvalidationsPerRun: numOr(
+      pick(agentCfg?.maxInvalidationsPerRun, globalCfg?.maxInvalidationsPerRun, d.maxInvalidationsPerRun),
+      d.maxInvalidationsPerRun,
+      0,
+      Infinity,
+    ),
   };
 }
 

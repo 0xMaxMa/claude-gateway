@@ -367,6 +367,7 @@ async function startAgent(
         agentConfig.id,
         agentConfig.knowledge?.shared,
         gatewayConfig.gateway.knowledge?.shared,
+        logger,
       ),
     });
     dreaming.startDreaming(); // unref'd nightly self-rescheduling timer

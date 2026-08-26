@@ -8,8 +8,11 @@ import {
   sharedDbPath,
   indexSharedArchive,
   makeSharedPromoter,
+  mergeIntoNote,
   ArchiveDB,
   findSimilarSharedNotes,
+  writeSharedNote,
+  sharedNoteExists,
   MAX_SHARED_NOTE_SIZE,
 } from '../../src/agent/knowledge';
 import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
@@ -192,5 +195,456 @@ describe('findSimilarSharedNotes (Node-side near-dup search, node:sqlite)', () =
     } finally {
       cleanup(cfg);
     }
+  });
+});
+
+// ── issue #398: what may be promoted, and what may be merged unattended ─────
+
+describe('makeSharedPromoter — index pointers are not shareable facts (issue #398)', () => {
+  test('content that is only MEMORY.md index pointers is not promoted at all', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // A descriptive (NOT instruction-shaped) reason, so this test isolates the
+      // content filter rather than piggybacking on the name guard below.
+      promote({
+        reason: 'feedback memories about testing and rollback',
+        content:
+          '- [testing_state_data_bugs.md](testing_state_data_bugs.md) — data/state bugs need Docker E2E\n' +
+          '- [rollback_completeness.md](rollback_completeness.md) — rollback must restore images too',
+      });
+      expect(noteFiles(cfg)).toEqual([]);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a real fact that merely CONTAINS a link still promotes', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'runner-permission-blocker',
+        content:
+          'The shared CI runner cannot clean its workspace between jobs, so every run fails the recap step.\n' +
+          '- [runbook.md](runbook.md) — manual cleanup steps',
+      });
+      expect(noteFiles(cfg)).toEqual(['runner-permission-blocker.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — unattended merges need a real similarity bar (issue #398)', () => {
+  test('a fact sharing only incidental words with an existing note gets its OWN note, not a merge', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'ci-runner-cannot-clean-workspace',
+        content:
+          'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
+          'job fails with a permission error on every pull request and needs manual intervention.',
+      });
+      indexSharedArchive(cfg);
+
+      // A DIFFERENT fact that deliberately repeats a few of the same words
+      // ("docker", "volume", "job", "cannot") so FTS recall still returns the
+      // note above — this is exactly the case the old `similar.length > 0`
+      // check merged. Containment is ~0.27, far below the merge bar.
+      promote({
+        reason: 'reset-docker-volume-permissions-before-release',
+        content:
+          'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
+          'release job cannot write its artifacts and the upload step reports an empty bundle.',
+      });
+
+      expect(noteFiles(cfg).length).toBe(2);
+      const first = fs.readFileSync(
+        path.join(sharedNotesDir(cfg), 'ci-runner-cannot-clean-workspace.md'),
+        'utf8',
+      );
+      expect(first).not.toContain('must be reset before each release');
+      expect(first).not.toContain('Related:');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a genuine restatement of the same fact still merges into the existing note', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'incus-rolling-upgrade-blocked',
+        content:
+          'An incus rolling upgrade reports blocked while the cluster sits in a midstate; this is expected ' +
+          'and resolves once every member has been upgraded.',
+      });
+      indexSharedArchive(cfg);
+
+      promote({
+        reason: 'incus-upgrade-midstate-expected',
+        content:
+          'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
+          'member has been upgraded.',
+      });
+
+      expect(noteFiles(cfg)).toEqual(['incus-rolling-upgrade-blocked.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a long reason no longer starves the promoted content out of the similarity seed', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'postgres-bootstrap-required',
+        content:
+          'The production database needs a one-time bootstrap before the first deploy; the develop ' +
+          'environment silently skipped it and the migration then failed.',
+      });
+      indexSharedArchive(cfg);
+
+      // 12+ leading tokens of pure justification prose: under the old
+      // first-12-tokens seed the content below never reached the query at all.
+      promote({
+        reason:
+          'durable operational lesson observed repeatedly across several separate deployment sessions this month',
+        content:
+          'Production database bootstrap is a one-time step required before the first deploy; develop ' +
+          'silently skipped the bootstrap and its migration failed.',
+      });
+
+      expect(noteFiles(cfg)).toEqual(['postgres-bootstrap-required.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — note identity (issue #398)', () => {
+  test('a durable topic slug is preferred over the free-form reason as the note name', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        topic: 'prod-deploy-needs-bootstrap',
+        reason: 'insert after the cron section, before the memory notes',
+        content: 'Production needs a one-time bootstrap before its first deploy.',
+      });
+      expect(noteFiles(cfg)).toEqual(['prod-deploy-needs-bootstrap.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an instruction-shaped reason falls back to a content-derived name, keeping the fact', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'insert after cron config, before the pty_shell memory section',
+        content: 'Cron jobs default to allow_tools false, so bash and curl are blocked until set.',
+      });
+      // Named from the fact, not from the editing instruction.
+      expect(noteFiles(cfg)).toEqual([
+        'cron-jobs-default-to-allow_tools-false-so-bash-and-curl-are-blocked-until-set.md',
+      ]);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an instruction-shaped reason whose content has nothing nameable is skipped and logged', () => {
+    const cfg = tmpSharedCfg();
+    const skips: Array<Record<string, unknown> | undefined> = [];
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_msg, data) => skips.push(data),
+      })!;
+      promote({ reason: 'insert after the index section', content: 'it is on.' });
+      expect(noteFiles(cfg)).toEqual([]);
+      expect(skips).toHaveLength(1);
+      expect(skips[0]?.why).toBe('no-usable-name');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a skipped index-pointer promotion is reported, not silently dropped', () => {
+    const cfg = tmpSharedCfg();
+    const skips: Array<Record<string, unknown> | undefined> = [];
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_msg, data) => skips.push(data),
+      })!;
+      promote({
+        reason: 'feedback memories about testing',
+        content: '- [a.md](a.md) — one hook\n- [b.md](b.md) — another hook',
+      });
+      expect(noteFiles(cfg)).toEqual([]);
+      expect(skips[0]?.why).toBe('index-pointer-only');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a descriptive reason that merely starts with a verb is NOT mistaken for an instruction', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'add-on billing is charged per seat',
+        content: 'Add-on billing is charged per seat, not per organization.',
+      });
+      expect(noteFiles(cfg)).toEqual(['add-on-billing-is-charged-per-seat.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+// ── issue #398 review follow-ups ───────────────────────────────────────────
+
+describe('makeSharedPromoter — graph edges below the merge bar (#398 review)', () => {
+  test('a NEW note still carries Related: links to notes in the 0.25-0.5 band', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'ci-runner-cannot-clean-workspace',
+        content:
+          'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
+          'job fails with a permission error on every pull request and needs manual intervention.',
+      });
+      indexSharedArchive(cfg);
+
+      promote({
+        reason: 'reset-docker-volume-permissions-before-release',
+        content:
+          'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
+          'release job cannot write its artifacts and the upload step reports an empty bundle.',
+      });
+
+      // Not merged (below 0.5) but related (above 0.25) — the new note must not
+      // land as a disconnected node in the knowledge graph.
+      expect(noteFiles(cfg).length).toBe(2);
+      const fresh = fs.readFileSync(
+        path.join(sharedNotesDir(cfg), 'reset-docker-volume-permissions-before-release.md'),
+        'utf8',
+      );
+      expect(fresh).toContain('[[ci-runner-cannot-clean-workspace]]');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — containment is scored against the whole note (#398 review)', () => {
+  test('a restatement still merges into a long note whose matched chunk alone would miss the bar', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // A long, much-merged note: the topical sentence sits far from the padding
+      // that FTS is most likely to surface as the matching chunk.
+      const padding = Array.from(
+        { length: 40 },
+        (_, i) => `Unrelated historical remark number ${i} about scheduling, dashboards and reporting cadence.`,
+      ).join('\n\n');
+      writeSharedNote(
+        cfg,
+        'incus-rolling-upgrade-blocked',
+        `${padding}\n\nAn incus rolling upgrade reports blocked while the cluster sits in a midstate; this is ` +
+          'expected and resolves once every member has been upgraded.',
+      );
+      indexSharedArchive(cfg);
+
+      promote({
+        reason: 'incus-upgrade-midstate-expected',
+        content:
+          'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
+          'member has been upgraded.',
+      });
+
+      expect(noteFiles(cfg)).toEqual(['incus-rolling-upgrade-blocked.md']);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — retired notes (#398 review)', () => {
+  test('never merges a fresh fact into a stale__ note', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(
+        cfg,
+        'stale__incus-rolling-upgrade-blocked',
+        '<!-- staled 2026-08-01 (aged out, 0 retrievals) -->\n' +
+          'An incus rolling upgrade reports blocked while the cluster sits in a midstate; this is expected ' +
+          'and resolves once every member has been upgraded.',
+      );
+      indexSharedArchive(cfg);
+
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({
+        reason: 'incus-upgrade-midstate-expected',
+        content:
+          'Incus rolling upgrade blocked in midstate is expected: the cluster stays blocked until every ' +
+          'member has been upgraded.',
+      });
+
+      const files = noteFiles(cfg);
+      expect(files).toContain('incus-upgrade-midstate-expected.md');
+      const retired = fs.readFileSync(
+        path.join(sharedNotesDir(cfg), 'stale__incus-rolling-upgrade-blocked.md'),
+        'utf8',
+      );
+      expect(retired).not.toContain('stays blocked until every');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a recurrence of a RETIRED name folds the retired body back and removes the twin', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(
+        cfg,
+        'stale__deploy-runbook',
+        '<!-- staled 2026-08-01 (aged out, 0 retrievals) -->\nThe prod cluster runs in region eu-west.',
+      );
+      indexSharedArchive(cfg);
+
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      promote({ topic: 'deploy-runbook', reason: 'r', content: 'Prod now also runs a warm standby in eu-north.' });
+
+      expect(sharedNoteExists(cfg, 'deploy-runbook')).toBe(true);
+      expect(sharedNoteExists(cfg, 'stale__deploy-runbook')).toBe(false);
+      const restored = fs.readFileSync(path.join(sharedNotesDir(cfg), 'deploy-runbook.md'), 'utf8');
+      expect(restored).toContain('region eu-west'); // retired knowledge preserved
+      expect(restored).toContain('warm standby in eu-north');
+      expect(restored).not.toContain('<!-- staled');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — declines are never silent (#398 review)', () => {
+  test('a write refused by the size cap is logged and leaves the vault untouched', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      promote({ reason: 'r', topic: 'oversize-fact', content: 'x'.repeat(MAX_SHARED_NOTE_SIZE + 1) });
+
+      expect(noteFiles(cfg)).toEqual([]); // nothing written
+      expect(logs.map((l) => l.why)).toContain('note-size-cap');
+      expect(logs[0]?.agentId).toBe('agentA');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('an unexpected write failure is logged rather than swallowed whole', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      // Make the notes dir unwritable so the atomic write throws inside the
+      // promoter's catch-all. The dream itself must still be unaffected.
+      fs.mkdirSync(sharedNotesDir(cfg), { recursive: true });
+      fs.chmodSync(sharedNotesDir(cfg), 0o500);
+      expect(() => promote({ reason: 'r', topic: 'blocked-write', content: 'A fact that cannot be written.' })).not.toThrow();
+      fs.chmodSync(sharedNotesDir(cfg), 0o700);
+
+      expect(logs.map((l) => l.why)).toContain('write-failed');
+    } finally {
+      try {
+        fs.chmodSync(sharedNotesDir(cfg), 0o700);
+      } catch {
+        /* already restored */
+      }
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('makeSharedPromoter — a retired twin is folded in on BOTH write paths (#398 review)', () => {
+  // The GC keeps retired notes searchable (#392), so a `stale__` twin left next
+  // to a live note of the same name answers every query twice — forever, since
+  // the GC's own restore refuses once the active name exists again.
+  function seedRetiredTwin(cfg: ResolvedKnowledgeSharedCfg, name: string, body: string): void {
+    writeSharedNote(cfg, `stale__${name}`, `<!-- staled 2026-01-01 (aged out, 0 retrievals) -->\n${body}`);
+  }
+
+  test('folds and removes the twin when the fact recurs under a name that is live again', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const promote = makeSharedPromoter('agentA', cfg, undefined)!;
+      // The live note was recreated by some other writer (e.g. memory_shared_create),
+      // which is exactly how a twin ends up beside an active note.
+      writeSharedNote(cfg, 'deploy-bootstrap', 'Deploy needs a manual bootstrap step.');
+      seedRetiredTwin(cfg, 'deploy-bootstrap', 'The bootstrap script provisions the vault token.');
+
+      promote({ reason: 'r', topic: 'deploy-bootstrap', content: 'Bootstrap must run before the first deploy.' });
+
+      expect(sharedNoteExists(cfg, 'stale__deploy-bootstrap')).toBe(false); // twin gone
+      expect(noteFiles(cfg)).toEqual(['deploy-bootstrap.md']);
+      const body = fs.readFileSync(path.join(sharedNotesDir(cfg), 'deploy-bootstrap.md'), 'utf8');
+      expect(body).toContain('manual bootstrap step'); // the live note survived
+      expect(body).toContain('provisions the vault token'); // the retired body came back
+      expect(body).toContain('before the first deploy'); // and the new fact landed
+      expect(body).not.toContain('<!-- staled'); // marker stripped, not inlined
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('keeps the twin when the merged note would not fit, and says so', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const logs: Array<Record<string, unknown>> = [];
+      const promote = makeSharedPromoter('agentA', cfg, undefined, {
+        info: (_m, d) => void logs.push(d ?? {}),
+      })!;
+      writeSharedNote(cfg, 'huge-topic', 'a'.repeat(MAX_SHARED_NOTE_SIZE - 100));
+      seedRetiredTwin(cfg, 'huge-topic', 'b'.repeat(1000));
+
+      promote({ reason: 'r', topic: 'huge-topic', content: 'A short new fact about the huge topic.' });
+
+      // Losing the retired copy to a write that never landed would be data loss.
+      expect(sharedNoteExists(cfg, 'stale__huge-topic')).toBe(true);
+      expect(logs.map((l) => l.why)).toContain('note-size-cap');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('mergeIntoNote — edges are not lost to an already-recorded fact (#398 review)', () => {
+  test('a fact already present still gains links it does not have yet', () => {
+    const existing = 'The deploy runbook lives in ops/deploy.md.';
+    const merged = mergeIntoNote(existing, 'The deploy runbook lives in ops/deploy.md.', ['rollback-policy']);
+    expect(merged).toContain('[[rollback-policy]]');
+    expect(merged.match(/The deploy runbook lives/g)).toHaveLength(1); // not duplicated
+  });
+
+  test('a link already in the note is never appended a second time', () => {
+    const existing = 'Fact one.\n\nRelated: [[rollback-policy]]';
+    expect(mergeIntoNote(existing, 'Fact one.', ['rollback-policy'])).toBe(existing);
+    // ...and a genuinely new addition only carries the links that are missing.
+    const merged = mergeIntoNote(existing, 'Fact two.', ['rollback-policy', 'oncall-rotation']);
+    expect(merged.match(/\[\[rollback-policy\]\]/g)).toHaveLength(1);
+    expect(merged).toContain('[[oncall-rotation]]');
   });
 });

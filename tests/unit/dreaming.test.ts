@@ -135,6 +135,38 @@ describe('dreaming/reviewer: coerceReview', () => {
     expect(r.tokensSpent).toBe(120);
   });
 
+  it('D-REV-1b (#398): a durable add keeps a valid topic slug and drops an invalid one', () => {
+    const r = coerceReview(
+      {
+        proposals: [
+          {
+            op: 'add',
+            file: 'MEMORY.md',
+            content: 'Prod needs a one-time bootstrap.',
+            topic: 'prod-needs-bootstrap',
+            reason: 'insert after the cron section',
+            score: 0.9,
+            recallCount: 3,
+          },
+          {
+            op: 'add',
+            file: 'MEMORY.md',
+            content: 'Another durable fact.',
+            topic: 'Not A Slug!',
+            reason: 'r',
+            score: 0.9,
+            recallCount: 3,
+          },
+        ],
+      },
+      10,
+    );
+    expect(r.proposals).toHaveLength(2); // an unusable slug never rejects the op itself
+    expect(r.proposals[0].topic).toBe('prod-needs-bootstrap');
+    expect(r.proposals[0].tier).toBe('durable');
+    expect(r.proposals[1].topic).toBeUndefined();
+  });
+
   it('D-REV-2: malformed / invalid proposals are dropped', () => {
     const r = coerceReview(
       {

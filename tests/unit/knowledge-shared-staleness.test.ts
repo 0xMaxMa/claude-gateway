@@ -22,6 +22,7 @@ import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
 import { entryHash } from '../../src/agent/knowledge/lifecycle';
 import { runSharedStalenessGc, retireSharedNote, STALE_NOTE_PREFIX } from '../../src/agent/knowledge/shared-staleness';
 import { STALENESS_DEFAULTS } from '../../src/agent/dreaming/config';
+import { DatabaseSync } from 'node:sqlite';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -178,6 +179,172 @@ describe('retireSharedNote (shared by the TTL GC and the reflection merge, issue
     const cfg = tmpSharedCfg();
     try {
       expect(retireSharedNote(cfg, 'nope', '<!-- x -->')).toBe(false);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+// ── issue #398: lifecycle rows for sources the indexer hash-skips ───────────
+
+/**
+ * Drop every lifecycle row while leaving `kb_sources` current — the exact state
+ * of any vault indexed before the lifecycle table existed, and the state the
+ * hash guard used to make permanent (issue #398).
+ */
+function dropLifecycleRows(cfg: ResolvedKnowledgeSharedCfg): void {
+  ArchiveDB.evict(sharedDbPath(cfg));
+  const handle = new DatabaseSync(sharedDbPath(cfg));
+  try {
+    handle.exec('DELETE FROM kb_entry_lifecycle');
+  } finally {
+    handle.close();
+  }
+}
+
+describe('lifecycle backfill for unchanged sources (issue #398)', () => {
+  test('a note indexed BEFORE lifecycle existed gets a row on the next index pass', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'legacy-note', 'Prod deploys need a one-time bootstrap before the first release.');
+      indexSharedArchive(cfg);
+
+      // Simulate the real-world state: the source row is present and current
+      // (so the hash guard skips the file) but its lifecycle row was never
+      // written, exactly as for every note that predates the feature.
+      dropLifecycleRows(cfg);
+      expect(db(cfg).listLifecycle()).toHaveLength(0);
+
+      indexSharedArchive(cfg);
+
+      const rows = db(cfg).listLifecycle();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].path).toBe('legacy-note.md');
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a backfilled row keeps the note\'s real age instead of resetting it to now', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'old-note', 'An operational lesson recorded a long time ago.');
+      const notePath = path.join(sharedNotesDir(cfg), 'old-note.md');
+      const oldMtime = Date.now() - 200 * DAY;
+      fs.utimesSync(notePath, oldMtime / 1000, oldMtime / 1000);
+
+      indexSharedArchive(cfg);
+      dropLifecycleRows(cfg);
+      indexSharedArchive(cfg);
+
+      const [row] = db(cfg).listLifecycle();
+      expect(row).toBeDefined();
+      // Age preserved from mtime: seeding "now" would restart the TTL clock and
+      // push any reclamation out by another full staleTtlDays.
+      expect(Math.abs(row.firstSeen - oldMtime)).toBeLessThan(2000);
+      expect(Date.now() - row.firstSeen).toBeGreaterThan(190 * DAY);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+
+  test('a backfilled note is visible to the GC and ages out normally', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'forgotten-note', 'A fact nobody has looked up in a very long time.');
+      const notePath = path.join(sharedNotesDir(cfg), 'forgotten-note.md');
+      const oldMtime = Date.now() - 200 * DAY;
+      fs.utimesSync(notePath, oldMtime / 1000, oldMtime / 1000);
+
+      indexSharedArchive(cfg);
+      dropLifecycleRows(cfg); // pre-#398 state: indexed, but no lifecycle row
+
+      const res = runSharedStalenessGc(cfg, { ...STALENESS_DEFAULTS, staleTtlDays: 90 });
+
+      expect(res.invalidated).toBe(1);
+      expect(sharedNoteExists(cfg, 'forgotten-note')).toBe(false);
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}forgotten-note`)).toBe(true);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('lifecycle backfill stays cheap on repeat passes (issue #398)', () => {
+  test('a source whose rows already exist is not re-upserted', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'settled-note', 'A fact that has been indexed for a while now.');
+      indexSharedArchive(cfg);
+
+      // Age the row artificially. A wasteful re-upsert would be harmless to
+      // first_seen (ON CONFLICT preserves it) but WOULD bump `path`, so assert
+      // on write volume the only way the schema exposes it: the index revision
+      // counter must not move for a pass that had nothing to do.
+      const before = db(cfg).getRevision();
+      indexSharedArchive(cfg);
+      indexSharedArchive(cfg);
+      expect(db(cfg).getRevision()).toBe(before);
+      expect(db(cfg).listLifecycle()).toHaveLength(1);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('one run cannot retire the whole vault (#398 review)', () => {
+  test('invalidations are capped per run, oldest-idle first, and resume next run', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      const old = Date.now() - 200 * DAY;
+      for (let i = 0; i < 5; i++) {
+        writeSharedNote(cfg, `aged-${i}`, `An expired operational fact number ${i} nobody reads.`);
+        const f = path.join(sharedNotesDir(cfg), `aged-${i}.md`);
+        // aged-0 is the oldest, aged-4 the freshest.
+        const t = (old - (5 - i) * DAY) / 1000;
+        fs.utimesSync(f, t, t);
+      }
+      indexSharedArchive(cfg);
+
+      const capped = { ...STALENESS_DEFAULTS, staleTtlDays: 90, maxInvalidationsPerRun: 2 };
+      const first = runSharedStalenessGc(cfg, capped);
+      expect(first.invalidated).toBe(2);
+      // Oldest-idle first: the cap defers the freshest, it does not slice arbitrarily.
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}aged-0`)).toBe(true);
+      expect(sharedNoteExists(cfg, `${STALE_NOTE_PREFIX}aged-1`)).toBe(true);
+      expect(sharedNoteExists(cfg, 'aged-4')).toBe(true);
+
+      const second = runSharedStalenessGc(cfg, capped);
+      expect(second.invalidated).toBe(2); // the rest resume on later runs
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});
+
+describe('backfill guard compares hashes, not row counts (#398 review)', () => {
+  test('a path with rows left over from earlier versions still gets its CURRENT block backfilled', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'evolving-note', 'First version of this operational fact.');
+      indexSharedArchive(cfg);
+      writeSharedNote(cfg, 'evolving-note', 'Second and quite different version of this operational fact.');
+      indexSharedArchive(cfg);
+
+      // Two rows now exist for the path (replaceSource never deletes the old
+      // one). Drop ONLY the current version's row: a count-based guard would see
+      // 1 row >= 1 block and wrongly skip the backfill.
+      const current = entryHash('Second and quite different version of this operational fact.');
+      ArchiveDB.evict(sharedDbPath(cfg));
+      const handle = new DatabaseSync(sharedDbPath(cfg));
+      handle.prepare('DELETE FROM kb_entry_lifecycle WHERE entry_hash = ?').run(current);
+      const before = handle.prepare('SELECT COUNT(*) AS c FROM kb_entry_lifecycle').get() as { c: number };
+      handle.close();
+      expect(before.c).toBeGreaterThan(0); // stale rows remain, so a count guard would pass
+
+      indexSharedArchive(cfg);
+
+      expect(db(cfg).listLifecycle().some((r) => r.entryHash === current)).toBe(true);
     } finally {
       cleanup(cfg);
     }

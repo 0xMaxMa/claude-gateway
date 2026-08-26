@@ -71,7 +71,10 @@ function coerceProposal(o: Record<string, unknown>): DreamProposal | null {
   if (!DREAM_FILES.has(file)) return null;
   if (op === 'add' && !content) return null;
   if ((op === 'replace' || op === 'remove') && !target) return null;
-  return { op, file, tier: 'durable', target, content, reason, score, recallCount };
+  // A durable `topic` slug (issue #398) is optional and only used as the shared
+  // note's identity when promoting; an invalid one is dropped, never fatal.
+  const topic = isValidTopicSlug(o.topic) ? o.topic : undefined;
+  return { op, file, tier: 'durable', topic, target, content, reason, score, recallCount };
 }
 
 /**

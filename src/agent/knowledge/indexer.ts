@@ -171,12 +171,17 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
 
     const hash = sha256(content);
     const existing = db.getSource(rel);
+    const mtime = Math.floor(stat.mtimeMs);
     if (existing && existing.hash === hash) {
       result.filesSkipped++; // hash-guarded: unchanged, no re-chunk
+      // ...but DO make sure its lifecycle rows exist (issue #398). Skipping
+      // straight past the block computation below left every note that predates
+      // the lifecycle feature — or was simply never edited since — invisible to
+      // the staleness GC forever. Seeded from mtime so real ages are preserved.
+      db.backfillLifecycle(rel, mtime, () => entryBlocksFor(opts.source, rel, content));
       continue;
     }
 
-    const mtime = Math.floor(stat.mtimeMs);
     const origin = opts.originFn(rel);
     const chunks = chunkMarkdown(content, opts.chunkTokens, opts.chunkOverlap);
     // Entry-lifecycle identity (planning-66 / issue #392). Personal archive-tier
@@ -187,12 +192,7 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
     // FTS chunk inherits the entry_hash of the block it starts in; blocks are the
     // clean, movable unit the GC operates on (chunks are overlapping token windows
     // and must never be moved).
-    const blocks =
-      opts.source === 'memory' && isArchiveTierPath(rel)
-        ? parseEntryBlocks(content)
-        : opts.source === 'shared'
-          ? wholeNoteEntryBlock(content)
-          : [];
+    const blocks = entryBlocksFor(opts.source, rel, content);
     const rows: ChunkWithMeta[] = chunks.map((c) => ({
       chunk: {
         id: `${rel}#${c.startLine}-${c.endLine}`,
@@ -242,6 +242,24 @@ function reindexInto(db: ArchiveDB, opts: ReindexOpts): IndexResult {
  * No-op when shared KB is disabled. Runs OFF the gateway event loop, same as the
  * per-agent indexer.
  */
+/**
+ * Entry blocks a source contributes to `kb_entry_lifecycle`. Personal
+ * archive-tier files get one entry per bullet/header block (evergreen Lane-1 and
+ * pinned files are exempt, so the GC can never consider them); shared-vault
+ * notes get ONE whole-file block each, matching every other shared-KB operation.
+ * Each FTS chunk inherits the entry_hash of the block it starts in; blocks are
+ * the clean, movable unit the GC operates on (chunks are overlapping token
+ * windows and must never be moved).
+ *
+ * Shared by the re-chunk path and the hash-skip backfill path (issue #398) so
+ * the two can never disagree about what an entry is.
+ */
+function entryBlocksFor(source: string, rel: string, content: string): EntryBlock[] {
+  if (source === 'memory' && isArchiveTierPath(rel)) return parseEntryBlocks(content);
+  if (source === 'shared') return wholeNoteEntryBlock(content);
+  return [];
+}
+
 export function indexSharedArchive(
   agentCfg?: KnowledgeSharedConfig,
   globalCfg?: KnowledgeSharedConfig,
