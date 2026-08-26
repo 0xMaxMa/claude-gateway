@@ -1964,6 +1964,11 @@ export class AppInstaller {
           this.log(job, `ROLLBACK FAILED — app "${appName}" may be in a broken state: ${(rollbackErr as Error).message}`);
         }
         if (rollbackFailed) {
+          // The success path above sets 'running'. Leaving the registry on the
+          // pre-update 'running' here would report a healthy app that is not
+          // running at all — and this branch now includes the case where the
+          // app was deliberately not restarted.
+          await this.registry.updateStatus(appName, 'error').catch(() => {});
           throw new Error(`Update failed and rollback also failed — app "${appName}" may be in a broken state. Check job logs for details.`);
         }
         throw upErr;

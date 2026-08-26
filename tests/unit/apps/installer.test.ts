@@ -2091,10 +2091,12 @@ services:
       locked.push(kept);
       expect(fs.readFileSync(path.join(kept, 'PG_VERSION'), 'utf-8')).toBe('16');
 
-      // And the app was not restarted on the half-restored directory.
+      // And the app was not restarted on the half-restored directory …
       const rollbackUps = calls.filter((c) => c.args[0] === 'compose'
         && c.args.includes('up') && !c.args.includes('--wait'));
       expect(rollbackUps).toHaveLength(0);
+      // … so it must not still be advertised as running.
+      expect((await registry.get(appName))?.status).toBe('error');
     });
   });
 
