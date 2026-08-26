@@ -15,6 +15,7 @@ import { SkillsModule } from '../../mcp/tools/skills/module';
 import { loadSkills, renderSkillsSection } from '../../src/skills/loader';
 import { watchSkills } from '../../src/skills/watcher';
 import { detectSkillCommand, formatSkillContext } from '../../src/skills/invoker';
+import { waitForCondition } from '../helpers/wait-for';
 
 let tmpDir: string;
 let workspaceDir: string;
@@ -345,8 +346,9 @@ describe('E2E: Skill Hot-Reload', () => {
       debounceMs: 50,
     });
 
-    // Wait for watcher to initialize
-    await new Promise((r) => setTimeout(r, 200));
+    // chokidar runs with ignoreInitial, so a write that lands before its scan
+    // finishes produces no event at all — await the readiness it exposes.
+    await watcher.ready;
 
     // Create skill via MCP tool (writes file to disk)
     await mod.handleTool('skill_create', {
@@ -355,8 +357,8 @@ describe('E2E: Skill Hot-Reload', () => {
       content: 'Test hot reload',
     });
 
-    // Wait for watcher to detect and reload
-    await new Promise((r) => setTimeout(r, 600));
+    // Wait for the reload rather than for 600ms of wall clock.
+    await waitForCondition(() => reloadCount >= 1);
 
     await watcher.close();
 
@@ -387,14 +389,14 @@ describe('E2E: Skill Hot-Reload', () => {
       debounceMs: 50,
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await watcher.ready;
 
     // Delete via MCP tool
     await mod.handleTool('skill_delete', {
       name: 'to-hot-delete',
     });
 
-    await new Promise((r) => setTimeout(r, 600));
+    await waitForCondition(() => reloadCount >= 1);
 
     await watcher.close();
 

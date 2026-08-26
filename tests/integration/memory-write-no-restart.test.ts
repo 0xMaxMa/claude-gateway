@@ -21,6 +21,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { waitForCondition } from '../helpers/wait-for';
+
 // ── Mock child_process to prevent real subprocess spawns ──────────────────────
 
 interface MockStdin {
@@ -74,6 +76,7 @@ import {
 } from '../../src/agent/workspace-loader';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { SessionProcess } from '../../src/session/process';
+import type { WatchHandle } from '../../src/watch/factory';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -115,18 +118,6 @@ function hasPendingRestart(runner: AgentRunner, chatId: string): boolean {
   return (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts.has(chatId);
 }
 
-async function waitForCondition(predicate: () => boolean, timeoutMs = 3000, intervalMs = 25): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      if (predicate()) return;
-    } catch {
-      // keep polling while files settle
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms waiting for condition`);
-}
 
 // Faithful mirror of the src/index.ts watchWorkspace callback: always recompose
 // CLAUDE.md, then branch the restart strategy on classifyWorkspaceRestart.
@@ -134,7 +125,7 @@ function wireWorkspaceWatcher(
   runner: AgentRunner,
   workspaceDir: string,
   opts: { mcpToolsDir: string; sharedSkillsDir: string },
-): { close: () => Promise<void> | void } {
+): WatchHandle {
   return watchWorkspace(workspaceDir, async (changedFiles) => {
     const updated = await loadWorkspace(workspaceDir, opts);
     await fs.promises.writeFile(path.join(workspaceDir, 'CLAUDE.md'), updated.systemPrompt, 'utf8');
@@ -159,7 +150,7 @@ describe('Memory-write session-drop fix (issue #321)', () => {
   let agentConfig: AgentConfig;
   let gatewayConfig: GatewayConfig;
   let runner: AgentRunner;
-  let watcher: { close: () => Promise<void> | void };
+  let watcher: WatchHandle;
 
   beforeEach(() => {
     process.env.CHANNEL_COALESCE_WINDOW_MS = '20';
@@ -198,7 +189,7 @@ describe('Memory-write session-drop fix (issue #321)', () => {
     await runner.start();
     const port = getCallbackPort(runner);
     await sendChannelPost(port, chatId, 'hello');
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCondition(() => getSessions(runner).has(chatId));
     const sess = getSessions(runner).get(chatId)!;
     expect(sess).toBeDefined();
     sess.setProcessing(false); // idle bystander
@@ -212,7 +203,7 @@ describe('Memory-write session-drop fix (issue #321)', () => {
     const restartSpy = jest.spyOn(runner, 'restartOrDefer');
 
     watcher = wireWorkspaceWatcher(runner, workspaceDir, { mcpToolsDir, sharedSkillsDir });
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     fs.writeFileSync(path.join(workspaceDir, 'MEMORY.md'), '# Memory\nfact learned by the agent\n');
 
@@ -236,7 +227,7 @@ describe('Memory-write session-drop fix (issue #321)', () => {
     const stopSpy = jest.spyOn(sess, 'stop');
 
     watcher = wireWorkspaceWatcher(runner, workspaceDir, { mcpToolsDir, sharedSkillsDir });
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     fs.writeFileSync(path.join(workspaceDir, 'SOUL.md'), '# Soul\nrevised identity\n');
 
@@ -252,7 +243,7 @@ describe('Memory-write session-drop fix (issue #321)', () => {
     await bootIdleSession('chat:mw3');
 
     watcher = wireWorkspaceWatcher(runner, workspaceDir, { mcpToolsDir, sharedSkillsDir });
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     fs.writeFileSync(path.join(workspaceDir, 'HEARTBEAT.md'), '# Heartbeat\nchanged\n');
 

@@ -34,6 +34,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { loadWorkspace } from '../../src/agent/workspace-loader';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── env guard ───────────────────────────────────────────────────────────────
 
@@ -101,18 +102,7 @@ function makeGatewayConfig(): GatewayConfig {
 }
 
 /** Wait for a runner condition with polling */
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 10000,
-  intervalMs = 500,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(`waitFor timeout (${timeoutMs}ms)`);
-}
+
 
 // ─── E2E tests ────────────────────────────────────────────────────────────────
 

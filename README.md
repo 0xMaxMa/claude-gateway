@@ -30,7 +30,7 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 - 🔐 **Access control** — allowlist, open, or pairing-based Telegram access policies
 - 🌐 **HTTP API** — REST API with key-based auth for external integrations
 - 🛍️ **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
-- ⬆️ **Self-update API** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call; no SSH or shell access needed
+- ⬆️ **Self-update** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call (no SSH or shell access needed), or from the terminal with `claude-gateway update` / `claude-gateway claude update`
 - 💾 **Session persistence** — conversation history saved and restored across restarts
 - 🖥️ **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; a `/cli` chat command (Telegram/Discord/LINE) opens the same viewer for a single agent, agent-scoped and without an admin key; app-agents always stay headless
 
@@ -80,28 +80,64 @@ EOF
 
 All variables are optional. Full list: [`.env.example`](.env.example)
 
-**3. Create an agent**
-
-Add an agent entry to `~/.claude-gateway/config.json` manually (see [`config.template.json`](config.template.json) for the format), or clone the repo and run `make create-agent` for the interactive wizard (see **For development** below).
-
-**4. Start**
+**3. Start**
 
 ```bash
-claude-gateway
+claude-gateway gateway start
 ```
 
-**Run as a service with PM2 (optional)**
+`claude-gateway` on its own prints help — starting the server is always the explicit
+`gateway start`, so a stray or mistyped command can never leave a gateway listening.
 
-To keep the gateway running after logout or system restarts, use [PM2](https://pm2.keymetrics.io):
+No config file needed — on first run, if `~/.claude-gateway/config.json` doesn't exist yet, the gateway creates it automatically with `"agents": []` and a fresh random admin API key, and prints that key once:
+
+```
+[gateway] No config found — created one at ~/.claude-gateway/config.json
+[gateway] Admin API key (save this now — it will not be shown again):
+[gateway]   <random-hex-key>
+[gateway] The CLI (claude-gateway agents create, etc.) picks this up automatically from ~/.claude-gateway/config.json.
+```
+
+Save that key somewhere safe — it isn't shown again (though you can always read it back from `config.json` on disk). See [`config.template.json`](config.template.json) for the full config format (models list, more options) if you want to customize it by hand later.
+
+**4. Create an agent**
 
 ```bash
-npm install -g pm2
-pm2 start $(which claude-gateway) --name gateway
-pm2 save       # persist the process list
-pm2 startup    # register PM2 to start on boot (follow the printed command)
+claude-gateway agents create
 ```
 
-Useful commands:
+Interactive wizard — describe the agent, Claude generates the workspace files, review and accept them, then optionally connect a Telegram or Discord bot. Hot-reloads immediately, no restart needed. The CLI picks up the admin key from `config.json` automatically — no need to pass `--key`. (You can also add an agent entry to `config.json` by hand instead — same template link as above.)
+
+**Run as a service (optional)**
+
+To keep the gateway running after you log out or the machine reboots, let the CLI install the
+service for you. It shows the exact unit it will write, asks before installing, and verifies
+`/health` afterwards:
+
+```bash
+claude-gateway service install              # systemd *user* unit — no sudo
+claude-gateway service install --print      # just show what it would install
+claude-gateway service status
+claude-gateway service uninstall            # asks first — this stops a running gateway
+```
+
+Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
+non-interactive run is refused rather than left hanging).
+
+The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
+`loginctl enable-linger $USER` once if it must keep running while you're logged out.
+Prefer [PM2](https://pm2.keymetrics.io)? `claude-gateway service install --manager pm2` registers
+and saves the process instead (run `pm2 startup` separately for boot-time start).
+
+Once installed, drive it through the CLI — it detects whichever manager owns the process:
+
+```bash
+claude-gateway gateway status   # manager, URL, health
+claude-gateway gateway restart
+claude-gateway gateway stop
+```
+
+Managing PM2 directly still works too:
 
 ```bash
 pm2 status           # check gateway status
@@ -122,30 +158,32 @@ npm install          # also runs bun install in mcp/
 npm run build
 ```
 
-### Create an agent
-
-The interactive wizard handles everything — workspace files, config, bot token, and pairing:
-
-```bash
-make create-agent
-```
-
-Steps:
-1. Choose an agent name
-2. Describe the agent — Claude generates workspace files
-3. Review and accept generated files
-4. Choose a channel: **Telegram** or **Discord**
-5. Paste the bot token — wizard verifies it automatically
-6. Send any message to the bot to complete pairing
-7. Agent sends a welcome message
-
-### 4. Start the gateway
+### Start the gateway
 
 ```bash
 npm start
 ```
 
-Config is auto-loaded from `~/.claude-gateway/config.json`. Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
+Config is auto-loaded from `~/.claude-gateway/config.json` — if it doesn't exist yet, `npm start` creates it automatically with `"agents": []` and a fresh admin key (see the Start step in the npm-install path above). Bot tokens are auto-loaded from `~/.claude-gateway/agents/<id>/.env`.
+
+### Create an agent
+
+The interactive wizard handles everything — workspace files, bot token, and pairing:
+
+```bash
+claude-gateway agents create
+```
+
+Steps:
+1. Choose an agent id and describe its role — Claude generates workspace files
+2. Review and accept the generated files
+3. Optionally connect a channel: **Telegram** or **Discord** — paste the bot token, wizard verifies it automatically
+4. Agent hot-reloads immediately — send any message to the bot, then approve pairing:
+   ```bash
+   claude-gateway channels approve --agent <id> --channel telegram --code <code>
+   ```
+
+To manage an existing agent — regenerate `AGENTS.md`, or connect/update/disconnect Telegram, Discord, LINE, or Slack — run `claude-gateway agents update`.
 
 ---
 
@@ -295,7 +333,7 @@ Access policy is configured per-channel in the agent's workspace state file, not
 |-------|-----------|
 | `allowlist` | Only user IDs in `allowFrom` can DM the agent (**default**) |
 | `open` | Anyone can DM the agent |
-| `pairing` | New users DM the bot to receive a pairing code; approve with `npm run pair` |
+| `pairing` | New users DM the bot to receive a pairing code; approve with `claude-gateway channels approve` |
 
 ### `gateway.headless`
 
@@ -495,6 +533,8 @@ Network interface the HTTP/WebSocket server binds to. Defaults to `127.0.0.1` (l
 
 Absolute, externally-reachable origin of the gateway (for example `https://gateway.example.com`, or `https://host.example.com/gateway` behind an ingress path prefix). The process cannot infer its own public URL — it binds localhost by default and sits behind a reverse proxy — so it must be set explicitly for features that hand out a phone-openable link. Currently that is the `/cli` terminal viewer; when `publicUrl` is unset, `/cli` replies that the viewer is not configured. Leave it blank to keep `/cli` disabled. A trailing slash is optional. Use an `https://` origin — Telegram Mini Apps require HTTPS.
 
+The CLI does **not** route through this URL when it runs on the gateway's own host: both addresses are the same server, and the public one only adds a reverse-proxy hop that may enforce its own authentication. It talks to the local bind instead, keeping `publicUrl` as a fallback if that address cannot be reached. Pass `--url` to exercise the proxy path deliberately. See [CLI.md](./CLI.md) for the full precedence.
+
 ```json
 {
   "gateway": {
@@ -663,7 +703,48 @@ update at all, and the message is replaced only if it is deleted or becomes uned
 
 ---
 
+## Command Line (CLI)
+
+The `claude-gateway` binary doubles as a command-line client for a running gateway — a friendlier alternative to hand-built `curl` calls. It works the same whether the gateway was started with `make start`, pm2, or systemd (it resolves the target from your config). Run it with no arguments to see what it can do; **only `gateway start` boots the server**.
+
+```bash
+claude-gateway                             # help (never starts a server)
+claude-gateway gateway start               # run the gateway in the foreground
+claude-gateway gateway status              # is it running? which manager owns it?
+claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
+claude-gateway update check                # newer claude-gateway published?
+claude-gateway claude update               # update Claude Code via its own updater
+claude-gateway doctor                      # check config / key / connectivity
+claude-gateway agents create               # interactive wizard — new agent + optional channel
+claude-gateway channels pending --agent alfred   # incoming Telegram/Discord pairing requests
+claude-gateway crons list                  # friendly <noun> <verb> commands
+claude-gateway crons run <jobId>
+claude-gateway debug-bundle                # small redacted bundle for a stuck session (works even if the server is down)
+claude-gateway api GET /v1/agents          # escape hatch: call any endpoint directly
+```
+
+> **Upgrading from < 1.8:** a service unit that runs the binary with no command still starts the
+> gateway, with a deprecation warning. Point `ExecStart` at `claude-gateway gateway start`, or
+> reinstall the unit with `claude-gateway service install`.
+
+Working on the CLI itself? The globally installed `claude-gateway` is the published npm package, not
+your checkout, so a bare `claude-gateway` still runs whatever version is on your `PATH`. Use `make cli`
+to build and exercise the local sources instead:
+
+```bash
+make cli ARGS="--help"
+make cli ARGS="gateway status"
+```
+
+Commands are **generated from the same route manifest the server mounts**, so every endpoint exposed as a friendly command stays in sync with the API automatically. Global flags: `--url`, `--key`, `--json`, `--data <json>`, `--help`.
+
+See **[CLI.md](./CLI.md)** for the full command reference.
+
+---
+
 ## HTTP API
+
+> For day-to-day operation, prefer the **[CLI](#command-line-cli)** above (`claude-gateway <noun> <verb>`) — it resolves the URL and key for you and is easier to read. This section is the **raw HTTP reference** for programmatic clients and integrations.
 
 When `gateway.api.keys` is configured, the gateway exposes a REST API for external clients.
 
@@ -712,7 +793,7 @@ Pass API key via `X-Api-Key: <key>` or `Authorization: Bearer <key>` header.
 | `POST` | `/api/v1/apps/:name/reconfigure` | Change env vars / host ports on an installed app, with rollback → `jobId` (admin) |
 | `GET` | `/app/:name/:portName/*` | Reverse proxy to installed app (no auth) |
 
-**Wizard API** — create agents programmatically with the same flow as the interactive `make create-agent` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
+**Wizard API** — create agents programmatically with the same flow as the interactive `claude-gateway agents create` terminal wizard. The wizard generates workspace files via Claude, writes them on confirm, and optionally pairs a Telegram/Discord bot. State is in-memory with a 30-minute TTL; nothing is written until `/confirm`. See [API.md](./API.md) for the full wizard flow.
 
 See **[API.md](./API.md)** for full reference with request/response schemas and curl examples.
 
@@ -772,7 +853,7 @@ See **[API.md — App Store section](./API.md#app-store-api)** for the full refe
 
 ```
 claude-gateway/
-├── Makefile                            ← make start / create-agent / update-agent / pair / mcp-install
+├── Makefile                            ← make start / cli / mcp-install / release / pm2-* / system-*
 ├── config.template.json                ← config template (source of truth for migration)
 │
 ├── src/                                ← Gateway core (TypeScript, compiled to dist/)
@@ -836,12 +917,10 @@ claude-gateway/
 │       └── web-ui.ts                   ← live HTML dashboard
 │
 ├── scripts/
-│   ├── create-agent.ts                 ← interactive agent creation wizard (with channel selection)
-│   ├── create-agent-prompts.ts         ← agent workspace generation prompts
-│   ├── update-agent.ts                 ← update agent.md or manage channels (add/remove)
-│   ├── interactive-select.ts           ← interactive selection UI helper
-│   ├── pair.ts                         ← approve channel pairing (Telegram / Discord)
-│   └── setup-claude-settings.js        ← enables channelsEnabled in Claude Code
+│   ├── gen-cli.ts                       ← generates src/cli/commands.generated.ts + CLI.md from the route registry
+│   ├── mock-line-webhook.ts             ← local LINE webhook simulator for dev testing
+│   ├── release.sh                       ← interactive release (make release)
+│   └── setup-claude-settings.js         ← enables channelsEnabled in Claude Code
 │
 └── mcp/                                ← MCP server (runs in Bun, separate node_modules)
     ├── package.json                    ← dependencies: grammy, @modelcontextprotocol/sdk
@@ -1015,9 +1094,9 @@ toggle **on**, so pairing works out of the box — no setup needed.
 1. Ask the user to DM the bot — they receive a 6-character pairing code
 2. Approve it:
    ```bash
-   npm run pair -- --agent=alfred --code=abc123 --channel=discord
+   claude-gateway channels approve --agent alfred --channel discord --code abc123
    ```
-   (omit `--channel` or use `--channel=telegram` for Telegram)
+   (use `--channel telegram` for Telegram; omit `--channel` on `channels pending` to check both)
 3. The bot confirms pairing within 5 seconds
 4. Lock down after everyone is paired (optional) — turn the pairing toggle off
    so unknown senders are dropped silently (the base policy is already
@@ -1034,7 +1113,7 @@ automatically on read to `{ dmPolicy: "allowlist", pairing: true }`.
 
 To manage channels (add/remove Telegram or Discord) on an existing agent:
 ```bash
-make update-agent   # choose "Manage channels"
+claude-gateway agents update   # choose "Connect/update a channel" or "Disconnect a channel"
 ```
 
 ---
@@ -1234,6 +1313,23 @@ npm test
 # Type check without building
 npm run typecheck
 ```
+
+### Writing tests that wait
+
+Two rules, enforced by `tests/unit/test-timing-hygiene.test.ts`:
+
+- **Wait for a signal, never for a duration.** `createWatcher()` / `watchWorkspace()` /
+  `watchSkills()` return a handle with a `ready` promise; the PTY wrapper announces itself
+  with a `system/init` event. Sleeping "long enough" instead is a bet on how fast the machine
+  is — and chokidar runs with `ignoreInitial: true`, so a write that lands before its initial
+  scan finishes emits *nothing* and the test waits out its whole deadline for an event that
+  will never arrive.
+- **Poll with the shared helper**, `tests/helpers/wait-for.ts`, rather than a local copy. Its
+  timeout is a safety net sized so only a broken build hits it, and on a timeout it reports
+  the predicate it was waiting on instead of a bare "timeout exceeded".
+
+A fixed sleep is still fine for asserting that something *doesn't* happen — there the sleep
+only bounds how hard the test looks, so a slow machine can't turn correct behaviour red.
 
 ---
 

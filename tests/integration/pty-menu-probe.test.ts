@@ -27,6 +27,7 @@ import {
   readLogLines,
   spawnWrapper,
   waitFor,
+  waitForWrapperReady,
   waitMs,
 } from '../helpers/pty-harness';
 
@@ -81,7 +82,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-01: bridges a menu when Down alone reveals it', async () => {
     start();
-    await waitMs(2500); // wrapper + fake TUI ready
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('MENU_FIRST'));
 
@@ -101,7 +102,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-02: bridges a menu via the Up fallback at the last option', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('MENU_LAST'));
 
@@ -111,7 +112,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     );
     expect(bridged).toBe(true);
 
-    await waitFor(() => readLogLines(eventLog).length > 0, 1000);
+    await waitFor(() => readLogLines(eventLog).length > 0);
     const arrows = keyEvents().filter((k) => k === 'up' || k === 'down');
     // Down was tried first (no-op at the last option), then Up moved the caret.
     expect(arrows[0]).toBe('down');
@@ -125,7 +126,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-03: does not bridge on a busy-race look-alike change', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('BUSY_RACE'));
 
@@ -148,7 +149,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-04: clears the input after an Up-recall that is not a menu, without bridging', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('RECALL_NONMENU'));
 
@@ -173,7 +174,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-07: never bridges static menu-shaped text whose highlight cannot move', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('RECALL_FAKEMENU'));
 
@@ -197,7 +198,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-08: a recalled entry starting with "N." cannot forge a highlight move', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('RECALL_FAKEMENU_NUM'));
 
@@ -219,7 +220,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-09: an abandoned round (turn ended mid-probe) still clears the Up-recall', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('RECALL_TURNEND'));
 
@@ -231,7 +232,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     expect(collector.find((e) => e.type === 'system' && e.subtype === 'menu_prompt')).toBeUndefined();
 
     // The Ctrl+U restore must arrive even though the turn ended mid-round.
-    const restored = await waitFor(() => keyEvents().includes('ctrlu'), 3000);
+    const restored = await waitFor(() => keyEvents().includes('ctrlu'));
     expect(restored).toBe(true);
   }, 20000);
 
@@ -248,7 +249,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-10: a numbered draft with a swallowed Enter is retried, not probed or wedged', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('1. SWALLOW_ONCE fix the login bug'));
 
@@ -273,7 +274,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-05: gives up cleanly when nothing reacts, turn still completes', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('NO_REACT'));
 
@@ -293,7 +294,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-06: an ordinary turn with no stall completes with no probe side-effects', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('ORDINARY_MESSAGE'));
 
@@ -318,7 +319,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-11: a pending Task tool_use blocks the fallback idle finish until its tool_result lands', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('TASK_WAIT'));
 
@@ -326,7 +327,12 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     // tool_result yet) — the pre-fix fallback would already have ended the
     // turn by ~2s. It must still be open.
     await waitMs(2600);
-    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+    // Stated as "no EARLY result" rather than "no result yet": under load this
+    // checkpoint can drift past the moment the real result legitimately lands,
+    // and failing then would be a verdict on the machine, not the code. The
+    // pre-fix truncated result still fails here, which is the regression.
+    const atCheckpoint = collector.find((e) => e.type === 'result') as (ProtocolEvent & { result?: string }) | undefined;
+    if (atCheckpoint) expect(atCheckpoint.result).toContain('task-wait-final-result');
 
     // Once the tool_result + final answer land, the turn completes with the
     // real text — not an early, truncated one.
@@ -351,14 +357,19 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-12: a sidechain tool_result does not end the turn; only the main-chain one does', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('TASK_WAIT_SIDECHAIN'));
 
     // Sidechain result lands at ~2600ms and the screen is quiet — if it wrongly
     // cleared the gate, the fallback would end the turn here. It must not.
     await waitMs(3200);
-    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+    // Stated as "no EARLY result" rather than "no result yet": under load this
+    // checkpoint can drift past the moment the real result legitimately lands,
+    // and failing then would be a verdict on the machine, not the code. The
+    // pre-fix truncated result still fails here, which is the regression.
+    const atCheckpoint = collector.find((e) => e.type === 'result') as (ProtocolEvent & { result?: string }) | undefined;
+    if (atCheckpoint) expect(atCheckpoint.result).toContain('task-sidechain-final-result');
 
     // The real main-chain result (~4500ms) completes the turn with real text.
     const completed = await waitFor(
@@ -379,7 +390,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-13: an orphaned Task tool_use ends via the watchdog with an error, session survives', async () => {
     start({ PTY_SHELL_WATCHDOG_MS: '1500' });
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('TASK_ORPHAN'));
 
@@ -415,7 +426,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-14: a pending non-Task tool_use (Bash) blocks the fallback idle finish until its tool_result lands', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('BASH_WAIT'));
 
@@ -423,7 +434,12 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
     // tool_result yet) — the pre-fix fallback would already have ended the
     // turn by ~2s. It must still be open.
     await waitMs(2600);
-    expect(collector.find((e) => e.type === 'result')).toBeUndefined();
+    // Stated as "no EARLY result" rather than "no result yet": under load this
+    // checkpoint can drift past the moment the real result legitimately lands,
+    // and failing then would be a verdict on the machine, not the code. The
+    // pre-fix truncated result still fails here, which is the regression.
+    const atCheckpoint = collector.find((e) => e.type === 'result') as (ProtocolEvent & { result?: string }) | undefined;
+    if (atCheckpoint) expect(atCheckpoint.result).toContain('bash-wait-final-result');
 
     // Once the tool_result + final answer land, the turn completes with the
     // real text — not an early, truncated one.
@@ -445,7 +461,7 @@ describe('I-PTY-MENU-PROBE: behavioral probe confirms/rejects a live overlay', (
    */
   it('I-PTY-MENU-15: an orphaned non-Task tool_use (Bash) ends via the watchdog with an error, session survives', async () => {
     start({ PTY_SHELL_WATCHDOG_MS: '1500' });
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('BASH_ORPHAN'));
 

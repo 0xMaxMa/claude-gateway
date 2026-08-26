@@ -1,7 +1,7 @@
 /**
  * Integration tests for multi-agent plugin isolation.
  * Tests that two plugin instances with separate state dirs are fully isolated.
- * Also tests scripts/pair.ts behavior via direct function simulation.
+ * Also tests the pairing-approval flow (see lib/pairing.ts) via direct function simulation.
  */
 import * as fs from 'fs'
 import * as path from 'path'
@@ -39,7 +39,7 @@ function makeAgentState(baseDir: string, agentId: string) {
 }
 
 /**
- * Simulate what scripts/pair.ts does (without reading config file)
+ * Simulate the pairing-approval flow (see lib/pairing.ts) without reading the config file
  */
 function doPair(stateDir: string, code: string, now = Date.now()): { success: boolean; error?: string } {
   const accessFile = path.join(stateDir, 'access.json')
@@ -166,7 +166,7 @@ describe('Multi-agent Plugin Isolation', () => {
     expect(filesA).toContain('111')
   })
 
-  describe('scripts/pair.ts simulation', () => {
+  describe('pairing-approval simulation', () => {
     test('pair --agent=A --code=<valid> → updates A access.json + writes approved/<senderId>', () => {
       const agentA = makeAgentState(baseDir, 'agent-a')
       const now = Date.now()

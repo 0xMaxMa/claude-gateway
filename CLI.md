@@ -1,0 +1,154 @@
+# Claude Gateway — CLI Reference
+
+> **Auto-generated from the route manifest** (`scripts/gen-cli.ts`). Do not edit by hand.
+> Every command is a thin client over the HTTP API; see `API.md` for the raw HTTP reference.
+
+The `claude-gateway` binary accepts friendly `<noun> <verb>` subcommands.
+
+**Starting the gateway is explicit.** `claude-gateway gateway start` runs the server in the
+foreground; every other invocation — no arguments, `--help`, or a typo — prints help or an
+error and exits, so exploring the CLI can never leave a stray server on the gateway port.
+
+> **Upgrading from &lt; 1.8:** a service unit whose `ExecStart` runs the binary with no command
+> still starts the server, with a deprecation warning. Change it to `claude-gateway gateway start`
+> (or reinstall the unit with `claude-gateway service install`); a future release will drop the shim.
+
+## Global flags
+
+| Flag | Meaning |
+|------|---------|
+| `--url <url>` | Gateway base URL (else `$CLAUDE_GATEWAY_URL`, else `http://<bind>:<port>` when a gateway is running on this host, else `config.gateway.publicUrl`) |
+| `--key <key>` | API key (else `$CLAUDE_GATEWAY_API_KEY`, else the first admin key in config) |
+| `--json` | Print the raw JSON response only (stdout reserved for JSON) |
+| `--data <json>` | JSON object merged into the request body (write commands) |
+| `--help` | Show help for the command |
+
+**Which address the CLI uses.** `config.gateway.publicUrl` describes *this* gateway as seen from
+outside, so on the gateway's own host both addresses are the same server — the public one just adds
+a reverse-proxy hop. Routing through it makes every command depend on that proxy, and a proxy that
+enforces its own authentication (which the CLI has no credentials for) answers `401` to commands
+that work over loopback. So when a gateway is running on this host (detected from the pidfile it
+writes on boot, a file read and a signal-0 — no subprocess), the local bind wins over
+`publicUrl`. `--url` and `$CLAUDE_GATEWAY_URL` still override, for deliberately exercising the
+proxy path or reaching another host.
+
+The port comes from that same pidfile, whose second line is the port the gateway actually bound.
+`$PORT` describes the shell running the CLI, not the shell the server was started from: after
+`PORT=9000 make start` in one terminal, a plain CLI in another would otherwise address port
+10850, where nothing listens. `$PORT` is still the fallback when no gateway is running, or when
+the pidfile predates the port line.
+
+A pidfile can also outlive its gateway — killed without cleanup, and the pid reissued to some
+unrelated process. The local address is still preferred, but `publicUrl` names the same gateway,
+so a local address that cannot be reached **at all** is retried once there, with a line on stderr
+saying so. An address that answered — including with an error — is never retried: the gateway was
+reached, and asking somewhere else would only hide its answer.
+
+`agents` and `channels` settle the address once, at the start of the session, rather than per
+request: they thread one base URL through an interactive flow, so a mid-wizard switch would be
+worse than a single decision up front. The rule for choosing is the same one described above.
+
+`gateway status` and `service install` go further: they report on the gateway *process* on this
+host, so they resolve `--url` → `http://<bind>:<port>` and ignore `$CLAUDE_GATEWAY_URL` and
+`publicUrl` entirely — a proxy still answering from a different instance would otherwise report a
+dead local service as healthy.
+
+`doctor` probes the address the CLI will use (that check decides its exit code) and adds an
+**informational** probe of the other address whenever the two differ, marked `[--]`. A public URL
+that rejects an unauthenticated `/health` is reported, but never fails `doctor` — the CLI is not
+using that address.
+
+**Colour.** Help and diagnostic text is coloured only when the stream it is going to is a
+terminal — stdout for a requested help listing, stderr for everything else — so piping either one
+strips the escapes. Set `NO_COLOR` to turn colour off, or `FORCE_COLOR=1` to keep it through a
+pipe; `NO_COLOR` wins if both are set. Result output is never coloured at all: `printResult`
+does not touch the palette, so `--json` piped into `jq` is unaffected by any of this.
+
+## Lifecycle & diagnostics (do not require a running server)
+
+| Command | Description |
+|---------|-------------|
+| `claude-gateway gateway start` | Run the gateway in the foreground (the only command that boots it) |
+| `claude-gateway gateway status` | Show the owning manager and `/health` on the local bind address |
+| `claude-gateway gateway restart` | Restart via the owning manager (systemd-user/systemd-system/pm2/foreground) |
+| `claude-gateway gateway stop` | Stop the gateway |
+| `claude-gateway doctor` | Check config, key resolution, owning manager, and connectivity |
+| `claude-gateway debug-bundle` | Write a small redacted diagnostics bundle for a stuck session |
+| `claude-gateway api <METHOD> <path>` | Escape hatch: call any endpoint directly |
+
+A bare `claude-gateway gateway` (or `crons`, `service`, …) prints its verbs and exits **1** —
+you forgot the verb. The same listing with `--help` exits **0**, and `-h` is accepted wherever
+`--help` is. `--help` never has a side effect: `debug-bundle --help` prints usage rather than
+writing a bundle.
+
+**Where help goes.** A listing you asked for (`--help`, or a bare `claude-gateway`) is the
+command's result and goes to **stdout**, so `claude-gateway --help | less` and
+`claude-gateway crons --help | grep create` work. The same listing printed *because* the
+invocation was wrong goes to **stderr** with a non-zero exit, leaving stdout carrying results
+only. Single-dash tokens other than `-h`/`-V` are values, not flags, so a `-5` argument is
+never mistaken for one.
+
+## Running as a service
+
+| Command | Description |
+|---------|-------------|
+| `claude-gateway service install [--manager systemd\|pm2] [--config <path>] [--yes] [--print]` | Generate and start a service |
+| `claude-gateway service status [--manager systemd\|pm2]` | Report installed/enabled/active state as JSON |
+| `claude-gateway service uninstall [--manager systemd\|pm2] [--yes]` | Stop and remove the service |
+
+- `systemd` (the default) installs a **user** unit at `~/.config/systemd/user/claude-gateway.service` —
+  no `sudo`, and it runs as the user that owns `~/.claude-gateway`. Run
+  `loginctl enable-linger <user>` once if it must survive logout.
+- Every path in the generated unit (node, entry point, config, working directory) is absolute, and
+  `ExecStart` always uses the explicit `gateway start` command. No secrets are written into the
+  unit — the gateway reads `~/.claude-gateway/.env` itself.
+- `--print` shows exactly what would be installed and exits without touching anything. Install and
+  uninstall both ask for confirmation unless `--yes` is given (uninstall stops a running gateway),
+  and refuse to run non-interactively without it.
+- `install` verifies `/health` on the **local bind address**, and `uninstall` reports the state the
+  manager actually reports afterwards — never the state that was intended.
+- After installing, `gateway restart`/`stop` detect and drive that same service.
+
+## Versions & updates
+
+| Command | Description |
+|---------|-------------|
+| `claude-gateway version` | Print the installed gateway version |
+| `claude-gateway update check` | Read-only: installed vs. published gateway version |
+| `claude-gateway update [--yes]` | Show current → target, confirm, then `npm install -g` the latest |
+| `claude-gateway claude version` | Print the installed Claude Code version |
+| `claude-gateway claude update check` | Read-only version check for Claude Code |
+| `claude-gateway claude update [--yes]` | Update Claude Code through its own native updater |
+
+Both use the same detection and install strategy as the dashboard's Update button
+(`src/packages/registry.ts`). Claude Code is updated by its native updater, never by
+`npm install -g` — that would install a second copy that isn't the binary on `PATH`.
+Updating the gateway replaces the files on disk; the running process keeps serving the previous
+build until `claude-gateway gateway restart`.
+
+## Agents & channels (require a running server)
+
+| Command | Description |
+|---------|-------------|
+| `claude-gateway agents list` | List agents accessible by this key |
+| `claude-gateway agents create [id] [--description <v>]` | Interactive wizard — generate workspace files, confirm, optionally connect Telegram/Discord |
+| `claude-gateway agents update [--agent <id>]` | Regenerate AGENTS.md, or connect/update/disconnect Telegram/Discord/LINE/Slack |
+| `claude-gateway channels pending --agent <id> [--channel telegram\|discord]` | List incoming pairing requests |
+| `claude-gateway channels approve --agent <id> --channel <v> --code <v>` | Approve a pending pairing request |
+| `claude-gateway channels deny --agent <id> --channel <v> --code <v>` | Deny and remove a pending pairing request |
+
+## Resource commands
+
+### `crons`
+
+| Command | Method | Path | Auth | Description |
+|---------|--------|------|------|-------------|
+| `claude-gateway crons create --agentId <v> --name <v> [--type <v>] [--schedule <v>] [--scheduleKind <v>] [--scheduleAt <v>] [--command <v>] [--prompt <v>]` | POST | `/v1/crons` | key | Create a cron job |
+| `claude-gateway crons delete <id>` | DELETE | `/v1/crons/:id` | key | Delete a cron job |
+| `claude-gateway crons get <id>` | GET | `/v1/crons/:id` | key | Get a single cron job |
+| `claude-gateway crons list [--agent <v>]` | GET | `/v1/crons` | key | List cron jobs accessible by this key |
+| `claude-gateway crons run <id>` | POST | `/v1/crons/:id/run` | key | Trigger a cron job now |
+| `claude-gateway crons runs <id> [--limit <v>]` | GET | `/v1/crons/:id/runs` | key | Get cron job run history |
+| `claude-gateway crons status` | GET | `/v1/crons/status` | key | Cron scheduler status |
+| `claude-gateway crons update <id> [--name <v>] [--type <v>] [--schedule <v>] [--scheduleKind <v>] [--scheduleAt <v>] [--timezone <v>] [--command <v>] [--prompt <v>] [--telegram <v>] [--discord <v>] [--timeoutMs <v>] [--deleteAfterRun] [--enabled]` | PUT | `/v1/crons/:id` | key | Update a cron job |
+

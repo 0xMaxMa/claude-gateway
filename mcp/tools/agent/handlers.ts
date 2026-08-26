@@ -26,7 +26,7 @@ const FENCE_CLOSE_REGEX = /^```$/;
 const STANDARD_STUB_FILES = ['HEARTBEAT.md', 'MEMORY.md', 'SOUL.md', 'USER.md'];
 
 // ---------------------------------------------------------------------------
-// Path helpers (local copies — same as scripts/create-agent.ts)
+// Path helpers
 // ---------------------------------------------------------------------------
 
 export function expandHome(p: string): string {

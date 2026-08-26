@@ -5,7 +5,7 @@
 import {
   buildUpdatePrompt,
   buildGenerationPrompt,
-} from '../../scripts/create-agent-prompts';
+} from '../../src/agent/create-agent-prompts';
 
 describe('buildUpdatePrompt', () => {
   // U-UA-01: update prompt instructs to REMOVE acknowledge rule (now infra-driven)

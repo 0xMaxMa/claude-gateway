@@ -217,7 +217,11 @@ export function loadConfig(configPath: string): GatewayConfig {
     }
   }
 
-  if (interpolatedAgents.length === 0) {
+  // A genuinely empty "agents": [] is a valid bootstrap state (start the gateway,
+  // then use `claude-gateway agents create` to add the first one). Only error when
+  // agents WERE declared but every single one got filtered out — that's a real
+  // misconfiguration (e.g. a missing ${VAR}), not an intentional empty install.
+  if (interpolatedAgents.length === 0 && (config.agents as unknown[]).length > 0) {
     const bakPath = configPath + '.bak';
     const migrationHint = fs.existsSync(bakPath)
       ? ` A migration backup exists at "${bakPath}" — this may be a migration issue where credential fields were incorrectly injected into your agents. Check the backup and restore if needed.`

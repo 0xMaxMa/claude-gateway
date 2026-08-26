@@ -3,7 +3,7 @@ export
 
 .DEFAULT_GOAL := help
 
-.PHONY: help start stop create-agent update-agent pair mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
+.PHONY: help start start-dev cli stop mcp-install release pm2-start pm2-stop pm2-restart pm2-startup pm2-remove pm2-logs system-start system-stop system-restart system-logs
 
 help: ## Show this help message
 	@echo "----------------------------------------"
@@ -17,7 +17,11 @@ start: ## Build and start the gateway
 
 start-dev: ## Dev mode — tsc --watch + hot-reload /dashboard on save (no gateway restart needed)
 	npm run build
-	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+	@trap 'kill 0' EXIT; ./node_modules/.bin/tsc --watch & DEV_MODE=1 node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start
+
+cli: ## Run a CLI command against the local build — make cli ARGS="gateway status"
+	npm run build
+	@node --no-warnings=ExperimentalWarning dist/index.js $(ARGS)
 
 stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 	@echo "Stopping claude-gateway..."
@@ -30,15 +34,6 @@ stop: ## Stop claude-gateway (node dist/index.js) and all spawned children
 		&& { echo "WARNING: some processes still alive:"; pgrep -af "[n]ode dist/index\.js|[b]un .*/claude-gateway/mcp/|[c]laude .*--mcp-config .*/claude-gateway/"; exit 1; } \
 		|| echo "Stopped"
 
-create-agent: ## Run the interactive wizard to create a new agent
-	./node_modules/.bin/ts-node scripts/create-agent.ts
-
-update-agent: ## Update agent.md or manage channels for an existing agent
-	./node_modules/.bin/ts-node scripts/update-agent.ts
-
-pair: ## Approve a channel pairing (e.g. make pair agent=alfred code=abc123 channel=telegram)
-	./node_modules/.bin/ts-node scripts/pair.ts --agent=$(agent) --code=$(code) --channel=$(or $(channel),telegram)
-
 mcp-install: ## Install MCP gateway dependencies
 	cd mcp && bun install
 	node scripts/setup-claude-settings.js
@@ -49,7 +44,7 @@ release: ## Interactive release — choose patch/minor/major with version previe
 pm2-start: ## Build and start gateway via pm2 (auto-restart on crash, saves process list)
 	npm run build
 	-pm2 delete gateway
-	pm2 start node --name gateway -- --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js
+	pm2 start node --name gateway -- --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/index.js gateway start
 	pm2 save
 
 pm2-stop: ## Stop gateway via pm2

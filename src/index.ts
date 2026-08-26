@@ -5,25 +5,16 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { loadGatewayDotenv } from './load-dotenv';
 
 // Load ~/.claude-gateway/.env so global installs pick up env vars without
-// needing shell exports or running via npm start.
-(function loadDotenv() {
-  const envFile = path.join(os.homedir(), '.claude-gateway', '.env');
-  if (!fs.existsSync(envFile)) return;
-  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
-    if (!(key in process.env)) process.env[key] = val;
-  }
-})();
+// needing shell exports or running via npm start. Shared with src/entry.ts,
+// which does the same before dispatching to the CLI.
+loadGatewayDotenv();
 
 import { loadConfig } from './config/loader';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
+import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
@@ -50,13 +41,10 @@ import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
 import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
+import { claimSupervisorEnv, classifyInvocation } from './cli/command-names';
+import { defaultPidfilePath } from './cli/manager';
+import { expandHome as expandTilde } from './utils/paths';
 
-function expandTilde(p: string): string {
-  if (p === '~' || p.startsWith('~/')) {
-    return path.join(os.homedir(), p.slice(1));
-  }
-  return p;
-}
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
 function parseArgs(argv: string[]): Record<string, string | boolean> {
@@ -86,6 +74,9 @@ const CONFIG_PATH: string = expandTilde(
 );
 
 const PORT = parseInt((process.env.PORT ?? '10850'), 10);
+
+// Pidfile lets the CLI detect a foreground gateway (see src/cli/manager.ts).
+const PIDFILE_PATH = defaultPidfilePath();
 
 // ─── Startup summary table ────────────────────────────────────────────────────
 interface StartupResult {
@@ -582,8 +573,15 @@ async function main(): Promise<void> {
   const gatewayAgentsDir = path.join(path.dirname(CONFIG_PATH), 'agents');
   loadAgentEnvFiles(gatewayAgentsDir);
 
-  // ── Auto-migrate config (add missing fields from template) ────────────────
+  // ── First run: create config.json with a fresh admin key if none exists ───
   const templatePath = path.join(__dirname, '..', 'config.template.json');
+  const bootstrap = ensureConfigExists(CONFIG_PATH, templatePath);
+  if (bootstrap.created) {
+    // The key itself is never printed — see firstRunNotice().
+    for (const line of firstRunNotice(CONFIG_PATH, bootstrap.adminKey ?? '')) console.log(line);
+  }
+
+  // ── Auto-migrate config (add missing fields from template) ────────────────
   const templateJson = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
   const templateVersion: string = templateJson.configVersion ?? '0.0.0';
   try {
@@ -821,6 +819,19 @@ async function main(): Promise<void> {
   await router.start(PORT);
   console.log(`[gateway] Listening on port ${PORT}`);
 
+  // Write the pidfile so the CLI can detect a foreground gateway (and SIGTERM it
+  // for `gateway stop/restart`). The listening port goes on the second line:
+  // $PORT lives in the shell that launched the server, so a CLI run from
+  // anywhere else cannot otherwise learn where to reach it. The real bound port
+  // is used rather than the requested one, which is 0 when the OS picks.
+  // Best-effort — never fail boot over it.
+  try {
+    fs.mkdirSync(path.dirname(PIDFILE_PATH), { recursive: true });
+    fs.writeFileSync(PIDFILE_PATH, `${process.pid}\n${router.listeningPort() ?? PORT}\n`);
+  } catch (e) {
+    globalLogger.warn?.('Could not write pidfile', { path: PIDFILE_PATH, error: (e as Error).message });
+  }
+
   // Wire installer callbacks now that the router is available
   installerCallbacks.registerRoutes = (appName, ports) => {
     for (const port of ports) {
@@ -1021,6 +1032,13 @@ async function main(): Promise<void> {
       }
     }
 
+    // Remove the pidfile so the CLI does not treat a stale pid as a live gateway.
+    try {
+      fs.unlinkSync(PIDFILE_PATH);
+    } catch {
+      /* already gone — fine */
+    }
+
     console.log('[gateway] Shutdown complete.');
   };
 
@@ -1054,6 +1072,40 @@ process.on('uncaughtException', (err) => {
   emergencyShutdown('uncaughtException', err).finally(() => process.exit(1));
 });
 
-main().catch((err) => {
-  emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
+// Starting the gateway is intentionally explicit: only `gateway start` enters
+// the server boot path. Every other invocation (including no args, --help, and
+// typos) runs through the CLI so it cannot accidentally create a live server.
+// The one exception is a supervised no-command launch from a pre-1.8 unit file,
+// which still boots (with a warning) so existing installs don't restart-loop.
+// The CLI runner remains lazy-loaded and is never imported on the server path.
+const invocation = classifyInvocation(process.argv.slice(2), process.env, {
+  hasTty: process.stdin.isTTY === true,
 });
+if (invocation === 'legacy-boot') {
+  process.stderr.write(
+    'DEPRECATED: starting the gateway with no command. Update this service to run ' +
+      '`claude-gateway gateway start` (or reinstall with `claude-gateway service install`); ' +
+      'a future release will print help and exit instead of starting.\n',
+  );
+}
+if (invocation === 'boot' || invocation === 'legacy-boot') {
+  // Before anything can spawn a child: the supervisor markers we were launched
+  // with are inherited, and a descendant that still sees them would classify a
+  // bare invocation as a service launch and boot a second server.
+  claimSupervisorEnv(process.env);
+  main().catch((err) => {
+    emergencyShutdown('Fatal error in main()', err).finally(() => process.exit(1));
+  });
+} else {
+  import('./cli')
+    .then(({ runCli }) => runCli(process.argv.slice(2)))
+    .then(async (code) => {
+      const { exitAfterFlush } = await import('./cli/output');
+      await exitAfterFlush(code);
+    })
+    .catch(async (err) => {
+      process.stderr.write(`Error: ${err?.message ?? err}\n`);
+      const { exitAfterFlush } = await import('./cli/output');
+      await exitAfterFlush(1);
+    });
+}

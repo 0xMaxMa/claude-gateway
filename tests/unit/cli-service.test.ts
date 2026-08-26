@@ -1,0 +1,342 @@
+jest.mock('child_process', () => ({ execFileSync: jest.fn() }));
+jest.mock('fs', () => ({
+  existsSync: jest.fn(),
+  mkdirSync: jest.fn(),
+  writeFileSync: jest.fn(),
+  unlinkSync: jest.fn(),
+}));
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
+import { renderSystemdUnit, pm2StartArgs, resolveLaunchSpec, runService, servicePath } from '../../src/cli/commands/service';
+
+/**
+ * `service install` writes a unit that systemd will start at boot, with no
+ * shell and no inherited environment. The two things that make such a unit
+ * work are absolute paths and an explicit start command — a relative path or a
+ * bare `claude-gateway` (which now prints help) yields a unit that silently
+ * fails or restart-loops. These tests pin both, plus the confirmation gate.
+ */
+
+const mockExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>;
+const mockExistsSync = fs.existsSync as jest.MockedFunction<typeof fs.existsSync>;
+const mockWriteFileSync = fs.writeFileSync as jest.MockedFunction<typeof fs.writeFileSync>;
+
+const unitPath = path.join(os.homedir(), '.config', 'systemd', 'user', 'claude-gateway.service');
+
+/**
+ * Assert nothing was *changed*. Read-only probes are fine and expected —
+ * resolving the unit's PATH runs `which claude`, and uninstall reads the
+ * current state before deciding what to do — so this checks for the verbs that
+ * actually mutate a service, not for any subprocess at all.
+ */
+const MUTATING_VERBS = ['enable', 'disable', 'daemon-reload', 'delete', 'save', 'start', 'stop', 'restart'];
+function expectNoStateChange(): void {
+  for (const [file, args] of mockExecFileSync.mock.calls as unknown as Array<[string, string[]]>) {
+    if (file === 'sudo') throw new Error('unexpected privilege escalation');
+    for (const verb of args ?? []) expect(MUTATING_VERBS).not.toContain(verb);
+  }
+}
+
+let stdout: string[];
+let stderr: string[];
+let outSpy: jest.SpyInstance;
+let errSpy: jest.SpyInstance;
+let ttyDescriptor: PropertyDescriptor | undefined;
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockExistsSync.mockReturnValue(true);
+  stdout = [];
+  stderr = [];
+  outSpy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    stdout.push(chunk.toString());
+    return true;
+  });
+  errSpy = jest.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    stderr.push(chunk.toString());
+    return true;
+  });
+  ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+});
+
+afterEach(() => {
+  outSpy.mockRestore();
+  errSpy.mockRestore();
+  if (ttyDescriptor) Object.defineProperty(process.stdin, 'isTTY', ttyDescriptor);
+});
+
+describe('service — generated launch configuration', () => {
+  /**
+   * The unit launches the thin entry (dist/entry.js), which decides between the
+   * CLI and the server before either is loaded. index.js remains a working boot
+   * entry, and is used when a partially-updated install has no entry.js yet —
+   * writing a unit that points at a file which is not there would leave the
+   * service failing at boot with nothing to explain it.
+   */
+  // U-SV-375a
+  it('U-SV-375a: launches entry.js, falling back to index.js when it is absent', () => {
+    mockExistsSync.mockImplementation(() => true);
+    expect(resolveLaunchSpec({})!.entry).toMatch(/entry\.js$/);
+
+    mockExistsSync.mockImplementation((p) => !String(p).endsWith('entry.js'));
+    expect(resolveLaunchSpec({})!.entry).toMatch(/index\.js$/);
+  });
+
+  it('renders a unit whose ExecStart is absolute and explicitly says `gateway start`', () => {
+    const spec = resolveLaunchSpec({});
+    expect(spec).not.toBeNull();
+    const unit = renderSystemdUnit(spec!);
+
+    const execStart = unit.split('\n').find((line) => line.startsWith('ExecStart='));
+    expect(execStart).toBeDefined();
+    expect(execStart).toContain('gateway start');
+    // A unit that just runs the binary with no command would now print help
+    // and exit 0 on the legacy path — never generate one.
+    // entry.js is the thin dispatcher the bin points at; index.js is the
+    // fallback used when a partially-updated install predates the split. Either
+    // is a valid launch target, so the shape is what this asserts.
+    expect(execStart).toMatch(/^ExecStart="\/.*" "\/.*(entry|index)\.js" gateway start --config "\/.*"$/);
+    expect(unit).toContain('WantedBy=default.target');
+    expect(unit).toContain('Restart=on-failure');
+  });
+
+  it('never writes a secret into the unit — only paths', () => {
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!);
+    for (const line of unit.split('\n').filter((l) => l.startsWith('Environment='))) {
+      expect(line).toMatch(/^Environment="(HOME|PATH|GATEWAY_CONFIG)=/);
+    }
+  });
+
+  it('leaves WorkingDirectory unquoted — systemd rejects a quoted path there', () => {
+    // Verified with `systemd-analyze verify`: quoting this one yields
+    // "WorkingDirectory= path is not absolute". Every *other* value is quoted,
+    // so this exception needs a test or it reads like an oversight and gets
+    // "fixed" into a broken unit.
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!);
+    const line = unit.split('\n').find((l) => l.startsWith('WorkingDirectory='));
+    expect(line).toBeDefined();
+    expect(line).not.toContain('"');
+    expect(line!.slice('WorkingDirectory='.length).startsWith('/')).toBe(true);
+  });
+
+  it('escapes quotes and backslashes in a config path so the value cannot break out', () => {
+    const unit = renderSystemdUnit({
+      node: '/usr/bin/node',
+      entry: '/opt/cg/dist/index.js',
+      cwd: '/home/u/.claude-gateway',
+      config: '/home/u/we"ird\\path/config.json',
+      home: '/home/u',
+      pathEnv: '/usr/bin',
+    });
+    expect(unit).toContain('we\\"ird\\\\path');
+  });
+
+  it('honours --config and $GATEWAY_CONFIG for the unit config path', () => {
+    expect(resolveLaunchSpec({ config: '/custom/cg.json' })!.config).toBe('/custom/cg.json');
+    const prev = process.env.GATEWAY_CONFIG;
+    process.env.GATEWAY_CONFIG = '/env/cg.json';
+    try {
+      expect(resolveLaunchSpec({})!.config).toBe('/env/cg.json');
+    } finally {
+      if (prev === undefined) delete process.env.GATEWAY_CONFIG;
+      else process.env.GATEWAY_CONFIG = prev;
+    }
+  });
+
+  it('refuses to generate anything when the entry point is missing', () => {
+    mockExistsSync.mockReturnValue(false);
+    expect(resolveLaunchSpec({})).toBeNull();
+  });
+
+  it('pins a boot-safe PATH instead of inheriting the interactive shell PATH', () => {
+    const dirs = servicePath().split(':');
+    // The node that will run the gateway must be first — a unit started at boot
+    // has no nvm/shell rc to put it there.
+    expect(dirs[0]).toBe(path.dirname(process.execPath));
+    expect(dirs).toContain('/usr/bin');
+    expect(new Set(dirs).size).toBe(dirs.length); // no duplicates
+    for (const dir of dirs) expect(path.isAbsolute(dir)).toBe(true);
+  });
+
+  it('starts the PM2 process with the same explicit command', () => {
+    const args = pm2StartArgs(resolveLaunchSpec({})!);
+    expect(args.slice(-4)).toEqual(['gateway', 'start', '--config', resolveLaunchSpec({})!.config]);
+    expect(args).toContain('--name');
+  });
+});
+
+describe('service install — confirmation gate', () => {
+  it('refuses to install non-interactively without --yes and writes nothing', async () => {
+    const code = await runService(['install'], { manager: 'systemd' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/--yes/);
+  });
+
+  it('--print shows the unit and exits 0 without touching disk or systemd', async () => {
+    const code = await runService(['install'], { manager: 'systemd', print: true });
+    expect(code).toBe(0);
+    expect(stderr.join('')).toContain('gateway start');
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+  });
+
+  it('--print for pm2 shows the exact argv without registering anything', async () => {
+    const code = await runService(['install'], { manager: 'pm2', print: true });
+    expect(code).toBe(0);
+    expect(stderr.join('')).toContain('pm2 start');
+    expectNoStateChange();
+  });
+
+  it('probes the local bind for health, never config.publicUrl', async () => {
+    // A proxy in front of a still-running old instance would answer for a
+    // service that never started — install must not call that success.
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      await runService(['install'], { manager: 'systemd', yes: true }, { publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' });
+      const probed = fetchSpy.mock.calls.map((c) => String(c[0]));
+      expect(probed.length).toBeGreaterThan(0);
+      for (const url of probed) {
+        expect(url).not.toContain('proxy.example.com');
+        expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/health$/);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('--yes installs the user unit, enables it, and reports it (health probed)', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(unitPath, expect.stringContaining('gateway start'), expect.objectContaining({ mode: 0o600 }));
+      expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'daemon-reload'], expect.anything());
+      expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'enable', '--now', 'claude-gateway.service'], expect.anything());
+      // user scope only — installing a service must never need sudo
+      expect(mockExecFileSync).not.toHaveBeenCalledWith('sudo', expect.anything(), expect.anything());
+      expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ manager: 'systemd-user', health: 'up' }));
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe('service — argument validation', () => {
+  it('a bare `service` is a usage error (1); `service --help` is a help request (0)', async () => {
+    expect(await runService([], {})).toBe(1);
+    expect(await runService([], { help: true })).toBe(0);
+  });
+
+  it('rejects an unknown action and an unknown manager without running anything', async () => {
+    expect(await runService(['frobnicate'], { manager: 'systemd' })).toBe(1);
+    expect(await runService(['install'], { manager: 'nope' })).toBe(1);
+    expectNoStateChange();
+  });
+});
+
+describe('service uninstall', () => {
+  /** systemd reports the unit as installed+active until it is removed. */
+  function unitIsLive(): void {
+    mockExistsSync.mockReturnValue(true);
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+      if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+  }
+
+  it('refuses to stop a running service non-interactively without --yes', async () => {
+    unitIsLive();
+    const code = await runService(['uninstall'], { manager: 'systemd' });
+    expect(code).toBe(1);
+    expectNoStateChange();
+    expect(fs.unlinkSync).not.toHaveBeenCalled();
+  });
+
+  it('refuses the pm2 path the same way', async () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(JSON.stringify([{ name: 'gateway', pm2_env: { status: 'online' } }])) as never);
+    const code = await runService(['uninstall'], { manager: 'pm2' });
+    expect(code).toBe(1);
+    expectNoStateChange();
+  });
+
+  it('does not prompt at all when nothing is installed', async () => {
+    // Asking to stop a service that isn't there just trains people to answer
+    // these prompts without reading them.
+    mockExistsSync.mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+    expect(await runService(['uninstall'], { manager: 'systemd' })).toBe(0);
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/nothing to remove/);
+  });
+
+  it('says PM2 is not installed rather than blaming its process list', async () => {
+    mockExecFileSync.mockImplementation((() => {
+      const err = new Error('spawnSync pm2 ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    }) as unknown as typeof execFileSync);
+    expect(await runService(['uninstall'], { manager: 'pm2' })).toBe(0);
+    expect(stderr.join('')).toMatch(/PM2 is not installed/);
+  });
+
+  it('disables the unit, removes the file, and reloads systemd', async () => {
+    // installed before the call, gone after it
+    mockExistsSync.mockReturnValueOnce(true).mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+
+    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+
+    expect(code).toBe(0);
+    expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'disable', '--now', 'claude-gateway.service'], expect.anything());
+    expect(fs.unlinkSync).toHaveBeenCalledWith(unitPath);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ installed: false }));
+  });
+
+  it('is idempotent when the unit file vanished between the state read and the unlink', async () => {
+    mockExistsSync.mockReturnValueOnce(true).mockReturnValue(false);
+    mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+    (fs.unlinkSync as jest.Mock).mockImplementation(() => {
+      const err = new Error('ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    });
+    expect(await runService(['uninstall'], { manager: 'systemd', yes: true })).toBe(0);
+  });
+
+  it('reports the observed state, not the intent, when the unit survives removal', async () => {
+    // `disable --now` failing is swallowed (it may simply not be installed), so
+    // the report has to come from systemd, or a still-running service would be
+    // announced as stopped.
+    unitIsLive();
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+      if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+      if (file === 'systemctl' && args.includes('disable')) throw new Error('permission denied');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+
+    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, installed: true }));
+    expect(stderr.join('')).toMatch(/still present/);
+  });
+});
+
+describe('service — --print is install-only', () => {
+  it('rejects --print on status and uninstall instead of ignoring it', async () => {
+    // Silently accepting it would let someone believe `uninstall --print` was
+    // a dry run.
+    expect(await runService(['uninstall'], { manager: 'systemd', print: true })).toBe(1);
+    expect(await runService(['status'], { manager: 'systemd', print: true })).toBe(1);
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/--print only applies to/);
+  });
+});

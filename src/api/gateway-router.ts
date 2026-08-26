@@ -31,6 +31,7 @@ import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
+import { createMetaRouter } from './meta-router';
 import { createWorkspaceRouter } from './workspace-router';
 import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
@@ -736,6 +737,13 @@ export class GatewayRouter {
       this.app.use('/api', cronRouter);
     }
 
+    // Mount the route manifest endpoint (GET /api/v1/_meta/routes) — serves the
+    // registry populated by the converted routers above, for CLI cross-checking.
+    if (this.gatewayConfig?.gateway?.api?.keys?.length) {
+      const metaRouter = createMetaRouter(this.gatewayConfig.gateway.api.keys);
+      this.app.use('/api', metaRouter);
+    }
+
     // Mount apps router (admin routes for installing/managing apps)
     if (
       this.appsRegistry &&
@@ -1297,6 +1305,14 @@ export class GatewayRouter {
         watchers: getWatcherHealth(),
       });
     });
+  }
+
+  /** The port the HTTP server is actually listening on, or null when it is not
+   *  listening. Differs from the requested port when 0 was passed (the OS picks
+   *  a free one), which is what the pidfile must record. */
+  listeningPort(): number | null {
+    const addr = this.server?.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
   }
 
   async start(port: number): Promise<void> {

@@ -6,7 +6,7 @@ import {
   parseGeneratedFiles,
   buildGenerationPrompt,
   buildUpdatePrompt,
-} from '../../scripts/create-agent-prompts';
+} from '../../src/agent/create-agent-prompts';
 
 describe('create-agent-prompts', () => {
   // ---------------------------------------------------------------------------

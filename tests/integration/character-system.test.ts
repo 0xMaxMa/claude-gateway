@@ -13,6 +13,7 @@ import { MemoryManager } from '../../src/memory/manager';
 import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -65,19 +66,6 @@ function makeGatewayConfig(): GatewayConfig {
   };
 }
 
-/** Wait up to timeoutMs for predicate to return true */
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 3000,
-  intervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error('waitFor timeout exceeded');
-}
 
 let _updateIdCounter = 80000;
 function nextUpdateId(): number {
@@ -95,8 +83,8 @@ describe('Character System Integration', () => {
     delete process.env.CLAUDE_BIN;
   });
 
-  // ── I-CS-02: hot-reload: modify SOUL.md → onChange fires within 500ms ────
-  it('I-CS-02: hot-reload: modify SOUL.md → onChange callback fires (within 500ms)', async () => {
+  // ── I-CS-02: hot-reload: modify SOUL.md → onChange fires ────────────────
+  it('I-CS-02: hot-reload: modify SOUL.md → onChange callback fires', async () => {
     const workspace = createTempWorkspace('cs02-');
     try {
       let callbackCount = 0;
@@ -109,8 +97,10 @@ describe('Character System Integration', () => {
         await handle.ready;
         fs.writeFileSync(path.join(workspace, 'SOUL.md'), '# Soul\nUpdated personality.', 'utf-8');
 
-        // Wait for callback (debounce is 300ms; allow extra headroom under load)
-        await waitFor(() => callbackCount > 0, 8000);
+        // What is under test is that the callback fires at all — the title used
+        // to promise "within 500ms", which asserted the machine's speed rather
+        // than the watcher's behaviour.
+        await waitFor(() => callbackCount > 0);
         expect(callbackCount).toBeGreaterThan(0);
       } finally {
         handle.close();
@@ -211,7 +201,7 @@ describe('Character System Integration', () => {
       await waitFor(() => {
         const stats = router.getAgentStats();
         return (stats.find((s) => s.id === 'agent-cs06')?.messagesSent ?? 0) > 0;
-      }, 3000);
+      });
 
       const res = await supertest(router.getApp()).get('/status');
       expect(res.status).toBe(200);
@@ -255,7 +245,7 @@ describe('Character System Integration', () => {
       await waitFor(() => {
         const stats = router.getAgentStats();
         return (stats.find((s) => s.id === 'agent-cs07')?.messagesSent ?? 0) > 0;
-      }, 3000);
+      });
 
       // Check after output
       res = await supertest(router.getApp()).get('/status');
