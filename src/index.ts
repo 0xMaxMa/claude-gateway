@@ -43,6 +43,8 @@ import { createLogger } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
 import { AgentConfig, GatewayConfig } from './types';
 import { AppsRegistry } from './apps/registry';
+import { sweepOrphanedReceivers } from './utils/orphan-receivers';
+import { registerShutdownSignals } from './shutdown-signals';
 import { RegistryClient } from './apps/registry-client';
 import { AppInstaller } from './apps/installer';
 import { AgentManager } from './apps/agent-manager';
@@ -676,6 +678,33 @@ async function main(): Promise<void> {
     reflectionVaultsStarted: new Set(),
   };
 
+  // Reclaim receivers a previous gateway generation left behind before spawning
+  // this one's. An exit that bypasses shutdown() — SIGKILL, the OOM killer, or a
+  // SIGHUP on a pre-#405 build — reparents them to init, where they keep polling
+  // their channel forever. Signal handling alone cannot cover SIGKILL/OOM, so
+  // this sweep is the only path that recovers from them. See issue #405.
+  //
+  // Deliberately awaited before any agent starts: an orphan and a fresh receiver
+  // polling the same bot token at once would race for every update, so the old
+  // one must be gone before the new one exists.
+  try {
+    const sweep = await sweepOrphanedReceivers(mcpToolsDir);
+    if (sweep.reclaimed.length > 0) {
+      const forced = sweep.forced.length > 0 ? ` (${sweep.forced.length} needed SIGKILL)` : '';
+      console.log(
+        `[gateway] Reclaimed ${sweep.reclaimed.length} orphaned receiver process${sweep.reclaimed.length === 1 ? '' : 'es'}${forced}`,
+      );
+      for (const orphan of sweep.reclaimed) {
+        globalLogger.info('Reclaimed orphaned receiver', { pid: orphan.pid, command: orphan.command });
+      }
+    }
+  } catch (err) {
+    // A host whose process list cannot be read must still boot — but never
+    // silently: an unreadable `ps` means orphans are accumulating unseen.
+    console.warn(`[gateway] Failed to sweep orphaned receivers: ${(err as Error).message}`);
+    globalLogger.warn('Failed to sweep orphaned receivers', { error: (err as Error).message });
+  }
+
   for (const agentConfig of config.agents) {
     // Expand ~ in workspace path so all downstream code uses absolute paths
     agentConfig.workspace = expandTilde(agentConfig.workspace);
@@ -928,9 +957,7 @@ async function main(): Promise<void> {
   configWatcher.start();
 
   // Graceful shutdown — idempotent: safe to call from multiple signal/error sources.
-  const shutdown = async (signal: string) => {
-    if (isShuttingDown) return;
-    isShuttingDown = true;
+  const runShutdown = async (signal: string) => {
     console.log(`[gateway] Received ${signal}, shutting down...`);
 
     for (const scheduler of schedulers) {
@@ -950,11 +977,14 @@ async function main(): Promise<void> {
     console.log('[gateway] Shutdown complete.');
   };
 
-  // Expose shutdown to the module-level crash handlers registered below.
-  registeredShutdown = shutdown;
-
-  process.on('SIGTERM', () => shutdown('SIGTERM').then(() => process.exit(0)));
-  process.on('SIGINT', () => shutdown('SIGINT').then(() => process.exit(0)));
+  // Wires SIGTERM/SIGINT/SIGHUP and returns the deduplicated shutdown, which the
+  // module-level crash handlers below reuse so there is only ever one teardown.
+  // SIGHUP matters most here: without a handler Node terminates the gateway
+  // outright and every receiver child is orphaned (issue #405).
+  registeredShutdown = registerShutdownSignals({
+    run: runShutdown,
+    onBegin: () => { isShuttingDown = true; },
+  });
 }
 
 async function emergencyShutdown(label: string, detail: unknown): Promise<void> {

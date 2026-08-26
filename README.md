@@ -607,6 +607,25 @@ Tools are **prefixed by channel name** to avoid collisions. Each module controls
 | `TELEGRAM_RECEIVER_MODE` | `receiver-server.ts` | Polls Telegram, handles commands, POSTs to callback — **no MCP** |
 | `TELEGRAM_SEND_ONLY` | `server.ts` | Exposes MCP tools (`telegram_*`, `cron_*`) — **no polling** |
 
+#### Receiver lifecycle
+
+Receivers are child processes, so they only stop when the gateway runs its
+shutdown path. Two mechanisms keep them from outliving it:
+
+- **`SIGTERM`, `SIGINT` and `SIGHUP` all run the same graceful shutdown.**
+  `SIGHUP` matters because Node's default action for it terminates the process
+  *without* running handlers — so before this was wired, closing a tmux pane or
+  dropping an SSH session killed the gateway and left every receiver reparented
+  to `init`. Teardown escalates `SIGTERM` → `SIGKILL` after a short grace period,
+  so a receiver wedged in an in-flight long-poll cannot survive it.
+
+- **A boot-time sweep reclaims leftovers.** `SIGKILL` and the OOM killer can
+  never be handled in-process, so at startup the gateway terminates any
+  `receiver-server.ts` process that was spawned from *its own* installation and
+  has been reparented to `init` (proof that its supervisor is gone), logging how
+  many it reclaimed. Receivers belonging to another checkout on the same host, or
+  to a gateway that is still running, are never touched.
+
 ### Session Persistence
 
 History is persisted to `SessionStore` (`.jsonl` files) after each message. When a session is spawned after an idle restart, history is injected into the initial prompt so Claude resumes the conversation seamlessly.
