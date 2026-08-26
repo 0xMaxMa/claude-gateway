@@ -29,6 +29,24 @@ function makeCallbacks(): InstallerCallbacks & {
 }
 
 /**
+ * Stand-in for the root helper container the installer falls back to when the
+ * gateway user cannot rename a bind path. Root is not bound by the mode bits
+ * that stopped the gateway user, so the double replays the move and restores
+ * the original mode — it deliberately does **not** create the destination
+ * parent, so a fix that forgot to would still fail here.
+ */
+function simulateRootMv(args: string[]): void {
+  const base = args[args.indexOf('-v') + 1].split(':')[0];
+  const toContainerPath = (p: string) => path.join(base, ...p.replace(/^\/mnt\//, '').split('/'));
+  const from = toContainerPath(args[args.length - 2]);
+  const to = toContainerPath(args[args.length - 1]);
+  const mode = fs.statSync(from).mode & 0o777;
+  fs.chmodSync(from, 0o700);
+  fs.renameSync(from, to);
+  fs.chmodSync(to, mode);
+}
+
+/**
  * Create a minimal valid app dir with app.yaml and optional Dockerfile.
  */
 function makeAppDir(dir: string, appName: string, port = 5000): string {
@@ -175,6 +193,20 @@ describe('AppInstaller', () => {
       failConfig?: () => boolean;
       onCheckout?: (cwd: string) => void;
       calls?: Array<{ args: string[]; cwd?: string }>;
+      /** Extra `./<rel>:<target>` binds the release declares, e.g. a pgdata dir. */
+      extraBinds?: Array<{ rel: string; target: string }>;
+      /** Release also carries a tracked file inside each `extraBinds` path. */
+      shipExtraBinds?: boolean;
+      /** Return true to make `compose up --wait` fail (a crashed new release). */
+      failUp?: () => boolean;
+      /** Return true to make the root move-helper container fail. */
+      failRootMove?: () => boolean;
+      /**
+       * Image ID `compose images` reports for the app's built service, so the
+       * update has a pre-update build to preserve and a rollback has one to
+       * put back. Absent, the app builds nothing and none of that runs.
+       */
+      builtImageId?: string;
     }) {
       const { appName, state, hostPort } = opts;
       return jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
@@ -194,6 +226,7 @@ services:
     volumes:
       - ./data/photos:/photos
       - ./config/app.conf:/etc/app.conf
+${(opts.extraBinds ?? []).map((b) => `      - ./${b.rel}:${b.target}`).join('\n')}
     ports:
       - name: api
         host: ${hostPort}
@@ -210,10 +243,39 @@ services:
             fs.mkdirSync(path.join(cwd, 'config'), { recursive: true });
             fs.writeFileSync(path.join(cwd, 'config', 'app.conf'), 'release-default', 'utf-8');
           }
+          if (opts.shipExtraBinds) {
+            // Named per release, so a test can tell the file this checkout
+            // shipped from the one the *installed* release left in the live dir.
+            for (const b of opts.extraBinds ?? []) {
+              const dir = path.join(cwd, ...b.rel.split('/'));
+              fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(path.join(dir, `release-${state.version}.marker`), '', 'utf-8');
+            }
+          }
           opts.onCheckout?.(cwd);
         }
         if (cmd === 'docker') {
           opts.calls?.push({ args, cwd: spawnOpts?.cwd });
+          if (args[0] === 'run' && args.includes('mv')) {
+            if (opts.failRootMove?.()) {
+              return { stdout: '', stderr: 'docker: daemon unreachable', status: 1 };
+            }
+            simulateRootMv(args);
+            return { stdout: '', stderr: '', status: 0 };
+          }
+          if (args[0] === 'compose' && args.includes('up') && args.includes('--wait')
+            && opts.failUp?.()) {
+            return { stdout: '', stderr: 'dependency failed to start', status: 1 };
+          }
+          if (args[0] === 'compose' && args.includes('images') && args.includes('--format')
+            && opts.builtImageId) {
+            return {
+              stdout: JSON.stringify([
+                { ID: opts.builtImageId, Repository: `${appName}-app`, Tag: 'latest' },
+              ]),
+              stderr: '', status: 0,
+            };
+          }
           if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
             if (opts.failConfig?.()) {
               return { stdout: '', stderr: 'docker daemon unreachable', status: 1 };
@@ -222,6 +284,9 @@ services:
               stdout: JSON.stringify({ services: { app: { volumes: [
                 { type: 'bind', source: path.join(spawnOpts.cwd, 'data', 'photos') },
                 { type: 'bind', source: path.join(spawnOpts.cwd, 'config', 'app.conf') },
+                ...(opts.extraBinds ?? []).map((b) => ({
+                  type: 'bind', source: path.join(spawnOpts.cwd!, ...b.rel.split('/')),
+                })),
               ] } } }),
               stderr: '', status: 0,
             };
@@ -1319,11 +1384,7 @@ services:
       await waitForJob(installer, installer.install({ localPath: makeAppDir(srcDir, 'keep-app') }), 5000);
       const live = (await registry.get('keep-app'))!.installPath;
 
-      const stale = [
-        path.join(appsDir, `.cg-update-keep-app-${uuid}`),
-        path.join(appsDir, `keep-app-old-${uuid}`),
-        path.join(appsDir, `keep-app-failed-${uuid}`),
-      ];
+      const stale = [path.join(appsDir, `.cg-update-keep-app-${uuid}`)];
       const decoys = [
         path.join(appsDir, 'my-old-app'),
         path.join(appsDir, 'cg-update-not-a-uuid'),
@@ -1336,6 +1397,39 @@ services:
       for (const d of stale) expect(fs.existsSync(d)).toBe(false);
       for (const d of decoys) expect(fs.existsSync(d)).toBe(true);
       expect(fs.existsSync(live)).toBe(true);
+    });
+
+    it('never sweeps a release snapshot — it can hold the only copy of a bind mount', async () => {
+      // The boot sweep deletes with rmrf, which falls back to `sudo rm -rf`.
+      // A -failed- dir is kept on purpose when a rollback could not move a bind
+      // path back; an -old- dir left by a crash mid-swap still holds the paths
+      // that had not moved yet. Sweeping either root-deletes a live database.
+      const uuid = '11111111-2222-4333-8444-555555555555';
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: makeAppDir(srcDir, 'keep-app') }), 5000);
+
+      const snapshots = [
+        path.join(appsDir, `keep-app-old-${uuid}`),
+        path.join(appsDir, `keep-app-failed-${uuid}`),
+      ];
+      for (const d of snapshots) {
+        fs.mkdirSync(path.join(d, 'postgres', 'pgdata'), { recursive: true });
+        fs.writeFileSync(path.join(d, 'postgres', 'pgdata', 'PG_VERSION'), '16');
+      }
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const swept = await installer.sweepStaleUpdateDirs();
+
+      try {
+        expect(swept).toEqual([]);
+        for (const d of snapshots) {
+          expect(fs.existsSync(path.join(d, 'postgres', 'pgdata', 'PG_VERSION'))).toBe(true);
+          // Kept silently is how a leak goes unnoticed — it has to be reported.
+          expect(warn.mock.calls.some((c) => String(c[0]).includes(d))).toBe(true);
+        }
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('keeps relative bind mounts at the permanent path across an update (issue #396)', async () => {
@@ -1876,6 +1970,290 @@ services:
   });
 
   // ── Rollback cleanup of root-owned / undeletable app dirs (issue #261) ─────
+  describe('update() — container-owned bind mounts (#406)', () => {
+    // rename(2) on a directory needs write permission on the directory itself
+    // (the kernel updates its `..` entry), so a data dir the app's container
+    // created — postgres leaves pgdata 0700 under its own uid — cannot be moved
+    // by the gateway user. Mode 0500 reproduces exactly that for the test user;
+    // running as root would bypass the mode bits and prove nothing.
+    const runningAsRoot = process.getuid?.() === 0;
+    const itAsUser = runningAsRoot ? it.skip : it;
+    const PG_BIND = { rel: 'postgres/pgdata', target: '/var/lib/postgresql/data' };
+    const locked: string[] = [];
+
+    afterEach(() => {
+      // Leave nothing in the OS temp dir that the test user cannot clean up.
+      for (const dir of locked.splice(0)) {
+        try { fs.chmodSync(dir, 0o700); } catch { /* already gone */ }
+      }
+    });
+
+    /** Seed the live data dir exactly as postgres initdb leaves it. */
+    function seedLockedBind(installPath: string): string {
+      const pgdata = path.join(installPath, ...PG_BIND.rel.split('/'));
+      fs.mkdirSync(pgdata, { recursive: true });
+      fs.writeFileSync(path.join(pgdata, 'PG_VERSION'), '16', 'utf-8');
+      fs.chmodSync(pgdata, 0o500);
+      locked.push(pgdata);
+      return pgdata;
+    }
+
+    function setup(appName: string, hostPort: number, extra: {
+      failUp?: () => boolean;
+      failRootMove?: () => boolean;
+      shipExtraBinds?: boolean;
+      builtImageId?: string;
+    } = {}) {
+      const state = { head: 'a'.repeat(40), version: '1.0.0' };
+      const calls: Array<{ args: string[]; cwd?: string }> = [];
+      const spawn = statefulAppSpawn({
+        appName, state, hostPort, calls, extraBinds: [PG_BIND], ...extra,
+      });
+      return { state, calls, spawn };
+    }
+
+    itAsUser('completes the update and keeps the live data, moving it with a root helper', async () => {
+      const appName = 'pg-app';
+      const { state, calls, spawn } = setup(appName, 5430);
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/pg-app', appName,
+      );
+      seedLockedBind(entry.installPath);
+
+      calls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('completed');
+      const updated = await registry.get(appName);
+      expect(updated?.version).toBe('2.0.0');
+      // The database directory came across intact.
+      const moved = path.join(updated!.installPath, ...PG_BIND.rel.split('/'));
+      expect(fs.readFileSync(path.join(moved, 'PG_VERSION'), 'utf-8')).toBe('16');
+      // …and the escalation was announced, not silent.
+      expect(job.logs.join('\n')).toContain('moving it with a root helper container');
+    });
+
+    itAsUser('mounts one common ancestor so the helper does a rename, not a copy', async () => {
+      // Mounting each parent separately puts the paths on two mount points,
+      // where rename(2) fails EXDEV and busybox `mv` degrades to copy+unlink —
+      // duplicating a database directory on disk and losing the swap's atomicity.
+      const appName = 'pg-mount-app';
+      const { state, calls, spawn } = setup(appName, 5431);
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/pg-mount-app', appName,
+      );
+      seedLockedBind(entry.installPath);
+
+      calls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      await waitForJob(installer, installer.update(appName), 5000);
+
+      const mvCalls = calls.filter((c) => c.args[0] === 'run' && c.args.includes('mv'));
+      expect(mvCalls).toHaveLength(1);
+      const mounts = mvCalls[0].args.filter((a, i) => mvCalls[0].args[i - 1] === '-v');
+      expect(mounts).toHaveLength(1);
+      const [source, target] = mounts[0].split(':');
+      const [from, to] = mvCalls[0].args.slice(-2);
+      // Both endpoints resolve inside that one mount — which is what keeps the
+      // move a rename. The destination is the live app dir's pgdata; the source
+      // is the same path under the swapped-aside previous dir.
+      expect(from.startsWith(`${target}/`)).toBe(true);
+      expect(to.startsWith(`${target}/`)).toBe(true);
+      expect(path.join(source, ...to.slice(target.length + 1).split('/')))
+        .toBe(path.join(entry.installPath, ...PG_BIND.rel.split('/')));
+      const hostFrom = path.join(source, ...from.slice(target.length + 1).split('/'));
+      expect(path.relative(source, hostFrom).split(path.sep)[0]).toContain('-old-');
+    });
+
+    itAsUser('does not reach for the helper when the gateway user can rename the path', async () => {
+      const appName = 'plain-app';
+      const { state, calls, spawn } = setup(appName, 5432);
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      await installWithLiveState(installer, 'https://github.com/test/plain-app', appName);
+
+      calls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('completed');
+      expect(calls.filter((c) => c.args[0] === 'run' && c.args.includes('mv'))).toHaveLength(0);
+    });
+
+    itAsUser('preserves a live data dir it cannot even list when the release ships that path', async () => {
+      // A container-owned dir is unreadable as well as unrenamable to the
+      // gateway user (postgres leaves pgdata 0700 under its own uid, so the
+      // gateway user gets ---). Merging the release's own file into it entry by
+      // entry is then impossible; the live data must still win.
+      const appName = 'pg-merge-app';
+      const { state, spawn } = setup(appName, 5435, { shipExtraBinds: true });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/pg-merge-app', appName,
+      );
+      const pgdata = seedLockedBind(entry.installPath);
+      fs.chmodSync(pgdata, 0o000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('completed');
+      const moved = path.join((await registry.get(appName))!.installPath, ...PG_BIND.rel.split('/'));
+      locked.push(moved);
+      fs.chmodSync(moved, 0o700);
+      expect(fs.readFileSync(path.join(moved, 'PG_VERSION'), 'utf-8')).toBe('16');
+      // The live directory came across whole: it still holds what the installed
+      // release left in it, and the *new* release's file inside that path is
+      // the thing that gives way.
+      expect(fs.existsSync(path.join(moved, 'release-1.0.0.marker'))).toBe(true);
+      expect(fs.existsSync(path.join(moved, 'release-2.0.0.marker'))).toBe(false);
+      expect(job.logs.join('\n')).toContain(`preserved existing bind-mount data at "${PG_BIND.rel}"`);
+    });
+
+    itAsUser('reports a swap failure as a swap failure, not as a container failure', async () => {
+      const appName = 'swap-fail-app';
+      let helperDown = false;
+      const { state, spawn } = setup(appName, 5433, { failRootMove: () => helperDown });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/swap-fail-app', appName,
+      );
+      seedLockedBind(entry.installPath);
+
+      helperDown = true;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('failed');
+      const logs = job.logs.join('\n');
+      expect(logs).toContain('Update failed during the directory swap');
+      expect(logs).not.toContain('New containers failed');
+      // The move never happened, so the previous app dir is whole and the
+      // rollback cleaned up after itself.
+      const restored = (await registry.get(appName))!.installPath;
+      expect(fs.existsSync(path.join(restored, ...PG_BIND.rel.split('/'), 'PG_VERSION'))).toBe(true);
+      expect(fs.readdirSync(appsDir).filter((d) => d.includes('-failed-'))).toHaveLength(0);
+    });
+
+    itAsUser('keeps the failed dir and refuses to restart when live data cannot be moved back', async () => {
+      // The move fix is what puts a container-owned directory on the restore
+      // path for the first time. If restore then fails, the old code warned,
+      // deleted the only copy with safeRmrf, and reported a clean rollback.
+      const appName = 'rollback-loss-app';
+      let updating = false;
+      // The move out succeeds; the helper is unavailable by the time the
+      // rollback needs it to move the data back.
+      let helperCalls = 0;
+      const { state, calls, spawn } = setup(appName, 5434, {
+        failUp: () => updating,
+        failRootMove: () => updating && ++helperCalls > 1,
+      });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/rollback-loss-app', appName,
+      );
+      seedLockedBind(entry.installPath);
+
+      calls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      updating = true;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('failed');
+      const logs = job.logs.join('\n');
+      expect(logs).toContain('ROLLBACK FAILED');
+      expect(logs).toContain(PG_BIND.rel);
+
+      // The only copy of the data is still on disk, in the kept -failed- dir.
+      const failedDirs = fs.readdirSync(appsDir).filter((d) => d.includes('-failed-'));
+      expect(failedDirs).toHaveLength(1);
+      const kept = path.join(appsDir, failedDirs[0], ...PG_BIND.rel.split('/'));
+      locked.push(kept);
+      expect(fs.readFileSync(path.join(kept, 'PG_VERSION'), 'utf-8')).toBe('16');
+
+      // And the app was not restarted on the half-restored directory …
+      const rollbackUps = calls.filter((c) => c.args[0] === 'compose'
+        && c.args.includes('up') && !c.args.includes('--wait'));
+      expect(rollbackUps).toHaveLength(0);
+      // … so it must not still be advertised as running.
+      expect((await registry.get(appName))?.status).toBe('error');
+    });
+
+    itAsUser('leaves the image tags on the previous release when it keeps the failed dir', async () => {
+      // The recovery the job log prints is "move those paths back, then start
+      // the app". Doing that has to bring up the release the restored source
+      // actually is: `<app>-<service>:latest` still naming the failed release's
+      // build is the crash-loop preserveRunningImages exists to prevent — and
+      // with a database, a migration that does not go backwards.
+      const appName = 'rollback-image-app';
+      const imageId = 'sha256:abcdef0123456789';
+      let updating = false;
+      let helperCalls = 0;
+      const { state, calls, spawn } = setup(appName, 5436, {
+        failUp: () => updating,
+        failRootMove: () => updating && ++helperCalls > 1,
+        builtImageId: imageId,
+      });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/rollback-image-app', appName,
+      );
+      seedLockedBind(entry.installPath);
+
+      calls.length = 0;
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      updating = true;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('failed');
+      const kept = fs.readdirSync(appsDir).filter((d) => d.includes('-failed-'));
+      expect(kept).toHaveLength(1);
+      locked.push(path.join(appsDir, kept[0], ...PG_BIND.rel.split('/')));
+
+      const ref = `${appName}-app:latest`;
+      const backupRef = `${appName}-app:cg-rollback-${imageId.replace(/^sha256:/, '').slice(0, 12)}`;
+      const tagged = calls.filter((c) => c.args[0] === 'image' && c.args[1] === 'tag');
+      expect(tagged.map((c) => c.args.slice(2))).toContainEqual([backupRef, ref]);
+      // And the private rollback tag must survive: it is the last reference
+      // keeping the pre-update image alive for the manual recovery.
+      expect(calls.filter((c) => c.args[0] === 'image' && c.args[1] === 'rm'
+        && c.args[2] === backupRef)).toHaveLength(0);
+      expect(job.logs.join('\n')).toContain('kept for manual recovery');
+    });
+
+    itAsUser('names the release files a preserved live directory displaces', async () => {
+      // The live copy winning is correct, but the release's own file inside
+      // that path (an init.sql, an entrypoint script) is deleted on every
+      // update. A warning that does not say which file makes that invisible.
+      const appName = 'pg-discard-app';
+      const { state, spawn } = setup(appName, 5437, { shipExtraBinds: true });
+      const installer = makeInstaller(spawn as typeof successSpawn);
+      const { entry } = await installWithLiveState(
+        installer, 'https://github.com/test/pg-discard-app', appName,
+      );
+      const pgdata = seedLockedBind(entry.installPath);
+      fs.chmodSync(pgdata, 0o000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+
+      expect(job.status).toBe('completed');
+      const moved = path.join((await registry.get(appName))!.installPath, ...PG_BIND.rel.split('/'));
+      locked.push(moved);
+      expect(job.logs.join('\n')).toContain('"release-2.0.0.marker"');
+    });
+  });
+
   describe('install rollback — undeletable (root-owned) app directory', () => {
     // Emulate the prod failure: a GitHub install clones successfully, a
     // container leaves behind a directory the gateway user cannot traverse

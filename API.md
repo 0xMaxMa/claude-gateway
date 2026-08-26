@@ -3139,7 +3139,7 @@ curl -H "X-Api-Key: my-key" \
 
 **`status` values:** `pending` | `running` | `completed` | `failed`
 
-When `status` is `failed`, `error` contains the failure message. If the containers started but failed the healthcheck, container logs are appended to `logs` before rollback:
+When `status` is `failed`, `error` contains the failure message. If the containers started but failed the healthcheck, container logs are appended to `logs` before rollback. An update that fails before the new containers start says so (`Update failed during the directory swap`) rather than reporting a container failure. Rollback is normally invisible, with one deliberate exception: if live bind-mount data cannot be moved back into the restored app directory, the app is **not** restarted on a half-restored directory — the `-failed-` directory still holding that data is kept, `error` reports `Update failed and rollback also failed`, and the logs name the paths and the directory to recover them from:
 
 ```json
 {
@@ -3255,11 +3255,13 @@ Start an async update. Uses blue/green swap: the new version is cloned and built
 
 Starting *after* the swap is what keeps relative bind mounts (`./postgres/pgdata`) pointing at the app's permanent directory — a stack started from the staging path would bind newly created empty data and a stateful service would re-initialise (issue #396). App-owned bind directories are carried across the swap by rename, preserving inode and ownership.
 
-If the updated release also ships content at a bind path (a tracked `.gitkeep`, seed files, an `init.sql`), the two are merged: **existing data always wins**, and release-provided files the previous version did not have are kept. A collision on a non-directory path preserves the existing file and logs a warning naming it — the release's copy of that one path is discarded, so a config file you bind-mount from the repo must be re-applied by hand after the update.
+If the updated release also ships content at a bind path (a tracked `.gitkeep`, seed files, an `init.sql`), the two are merged: **existing data always wins**, and release-provided files the previous version did not have are kept. A collision on a non-directory path — or a live directory the gateway user cannot even list, which no entry-by-entry merge can reach — preserves the existing data and logs a warning naming both the path and the release files being discarded, so a config file you bind-mount from the repo must be re-applied by hand after the update.
 
-Update scratch directories (`.cg-update-*`, `<appDir>-old-*`, `<appDir>-failed-*`) left behind by a crash mid-update are swept on gateway boot.
+The `.cg-update-*` staging checkout left behind by a crash mid-update is swept on gateway boot. Release snapshots (`<appDir>-old-*`, `<appDir>-failed-*`) are **not**: either can hold the only copy of live bind-mount data, and the sweep deletes with `sudo rm -rf`. They are reported on the gateway console at boot and left for you to recover or remove.
 
 A rollback restores the previous **image** as well as the previous source. A `build:` service's new image reuses the running one's tag (`<project>-<service>:latest`), so before building, the update tags each of the app's built images `<project>-<service>:cg-rollback-<id>` — that keeps the old image addressable and alive (under the containerd image store an untagged image is not retained as a `<none>` image). A rollback points the tag back at it, so the app returns on the exact release it was serving; the private tag is dropped once the update settles either way. If an image cannot be restored, the rollback rebuilds from the rolled-back source instead of starting the failed release's build, and logs which reference it could not restore.
+
+The image tags are put back **before** the rollback decides whether to restart the app, so the deliberate no-restart case above still leaves `<project>-<service>:latest` naming the release the restored source actually is — finishing that recovery by hand cannot bring old source up on the failed release's build. In that case the private `cg-rollback-*` tags are also **kept** rather than dropped, since they are the last reference holding the pre-update image; the job log names them.
 
 If the app declares an agent, its registration follows the new release: an agent whose name changed is deregistered under the old name before the new one is registered, and an agent the release no longer declares is deregistered entirely. Either way the agent's directory and session history are preserved (only the `workspace` symlink and the `config.json` entry are removed), and `MEMORY.md` is carried forward — written after the new registration exists, so it survives a rename.
 
