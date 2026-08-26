@@ -17,6 +17,7 @@ import { AgentConfig, GatewayConfig } from '../../src/types';
 import { ContextIsolationGuard, WorkspaceConflictError, TokenConflictError } from '../../src/agent/context-isolation';
 import { SessionStore } from '../../src/session/store';
 import { SessionProcess } from '../../src/session/process';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -71,18 +72,6 @@ function makeGatewayConfig(logDir: string): GatewayConfig {
   };
 }
 
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 4000,
-  intervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error('waitFor timeout exceeded');
-}
 
 // ─── test suite ─────────────────────────────────────────────────────────────
 
@@ -244,7 +233,7 @@ describe('Multi-Agent (Option A)', () => {
     await waitFor(async () => {
       const stats = router.getAgentStats();
       return (stats.find((s) => s.id === 'ma05-alpha')?.messagesSent ?? 0) > alphaBaseline;
-    }, 3000);
+    });
 
     const stats = router.getAgentStats();
     expect(stats).toHaveLength(2);

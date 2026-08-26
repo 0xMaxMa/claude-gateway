@@ -1,8 +1,11 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import express from 'express';
 import * as http from 'http';
 import { createCronRouter } from '../../src/api/cron-router';
 import { createMetaRouter } from '../../src/api/meta-router';
 import { runCli } from '../../src/cli';
+import { GENERATED_NOUNS } from '../../src/cli/commands.generated';
 import { ApiKey } from '../../src/types';
 
 /**
@@ -253,17 +256,37 @@ describe('cli e2e — auth', () => {
   });
 });
 
+/**
+ * Every command that should answer `--help` with exit 0: the dispatcher's own
+ * `case` labels plus the generated resource nouns, parsed out of the source so
+ * this list cannot be a stale copy of the real one.
+ *
+ * `version` is excluded — it is matched before the switch and prints a version
+ * string, not a help listing.
+ */
+function helpableCommands(): string[] {
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/cli/index.ts'), 'utf8');
+  const start = src.indexOf('switch (command) {');
+  const body = src.slice(start, src.indexOf('\n    }', start));
+  const cases = [...body.matchAll(/case '([^']+)':/g)].map((m) => m[1]);
+  expect(cases.length).toBeGreaterThan(5); // a refactor must not silently empty this
+  return [...new Set([...cases, ...GENERATED_NOUNS])];
+}
+
 describe('cli e2e — help/version', () => {
-  it('no command prints general help to stderr and exits 0', async () => {
+  it('no command prints general help to stdout and exits 0', async () => {
     const code = await runCli([]);
     expect(code).toBe(0);
-    expect(stderr.join('')).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
+    // Requested help is the command's result, so it is pipeable like any other
+    // output; only help shown *because of* an error stays on stderr.
+    expect(stdout.join('')).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
+    expect(stderr.join('')).toBe('');
   });
 
   it('`help` prints the same general help and exits 0', async () => {
     const code = await runCli(['help']);
     expect(code).toBe(0);
-    expect(stderr.join('')).toMatch(/Usage: claude-gateway <command>/);
+    expect(stdout.join('')).toMatch(/Usage: claude-gateway <command>/);
   });
 
   it('`version` prints the package version to stdout and exits 0', async () => {
@@ -295,34 +318,40 @@ describe('cli e2e — help/version', () => {
 
   it('general help documents `gateway start` as the way to start the server', async () => {
     await runCli([]);
-    const help = stderr.join('');
+    const help = stdout.join('');
     expect(help).toMatch(/gateway start/);
     expect(help).toMatch(/service install\|status\|uninstall/);
     expect(help).toMatch(/update \[check\]/);
   });
 
-  it('`<noun> --help` is a help request (exit 0); a bare `<noun>` is a usage error (exit 1)', async () => {
-    // Both print the same verb listing — only the exit code distinguishes
-    // "you asked for help" from "you forgot the verb".
+  it('`<noun> --help` is a help request (stdout, exit 0); a bare `<noun>` is a usage error (stderr, exit 1)', async () => {
+    // Both print the same verb listing. The exit code says which one happened,
+    // and so does the stream: a request is output, an error is diagnostics.
     expect(await runCli(['crons', '--help'])).toBe(0);
-    expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
+    expect(stdout.join('')).toMatch(/claude-gateway crons — commands:/);
+    expect(stderr.join('')).toBe('');
 
+    stdout = [];
     stderr = [];
     expect(await runCli(['crons'])).toBe(1);
     expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
+    expect(stdout.join('')).toBe('');
   });
 
-  // Every noun, not a hand-picked few: `agents` and `channels` returned 1 for
-  // `--help` because this pinned only the three that were already right.
-  // `update` is absent by design: a bare `update` performs the update, so it is
-  // not a verb-less usage error the way these are.
-  it.each(['gateway', 'service', 'crons', 'agents', 'channels', 'claude'])(
-    '`%s --help` exits 0 while its bare form exits 1',
-    async (noun) => {
-      expect(await runCli([noun, '--help'])).toBe(0);
-      expect(await runCli([noun])).toBe(1);
-    },
-  );
+  // Read from the dispatcher, never restated here. Hand-listing is what let
+  // `agents`/`channels` return 1 for `--help`, and then let `api` do the same
+  // after the list was "fixed" by growing from three names to six.
+  it.each(helpableCommands())('`%s --help` exits 0', async (command) => {
+    expect(await runCli([command, '--help'])).toBe(0);
+  });
+
+  // A verb-less invocation is a usage error only for commands that take a verb.
+  // `update`, `doctor` and `debug-bundle` do their work with no verb at all, so
+  // a bare call is the command running, not a user who forgot something.
+  const VERBLESS = new Set(['update', 'doctor', 'debug-bundle']);
+  it.each(helpableCommands().filter((c) => !VERBLESS.has(c)))('a bare `%s` exits 1', async (command) => {
+    expect(await runCli([command])).toBe(1);
+  });
 
   it('`update --help` exits 0 without performing an update', async () => {
     expect(await runCli(['update', '--help'])).toBe(0);
@@ -330,6 +359,6 @@ describe('cli e2e — help/version', () => {
 
   it('honours `-h` as a short alias, not a command name', async () => {
     expect(await runCli(['crons', '-h'])).toBe(0);
-    expect(stderr.join('')).toMatch(/claude-gateway crons — commands:/);
+    expect(stdout.join('')).toMatch(/claude-gateway crons — commands:/);
   });
 });

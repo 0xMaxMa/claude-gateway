@@ -15,12 +15,12 @@ export interface ParsedArgs {
  *  fell through to a positional, so `crons -h` reported "Unknown command". */
 export const SHORT_ALIASES: Readonly<Record<string, string>> = { h: 'help', V: 'version' };
 
-const SHORT_FLAG = /^-[A-Za-z]$/;
-
 /** True for anything that reads as a flag rather than a value: `--name`,
- *  `--name=value`, or a single-dash letter. A token like `-5` is a value. */
+ *  `--name=value`, or one of the aliases above. A token like `-5` is a value,
+ *  and so is an unrecognised `-x` — treating every `-letter` as a flag would
+ *  silently swallow the token after it as that flag's value. */
 function looksLikeFlag(token: string): boolean {
-  return token.startsWith('--') || SHORT_FLAG.test(token);
+  return token.startsWith('--') || (token.length === 2 && token[0] === '-' && token[1] in SHORT_ALIASES);
 }
 
 /**
@@ -37,7 +37,7 @@ export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string>
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (looksLikeFlag(tok)) {
-      const body = tok.startsWith('--') ? tok.slice(2) : (SHORT_ALIASES[tok.slice(1)] ?? tok.slice(1));
+      const body = tok.startsWith('--') ? tok.slice(2) : SHORT_ALIASES[tok.slice(1)];
       const eq = body.indexOf('=');
       if (eq !== -1) {
         flags[body.slice(0, eq)] = body.slice(eq + 1);

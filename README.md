@@ -1312,6 +1312,23 @@ npm test
 npm run typecheck
 ```
 
+### Writing tests that wait
+
+Two rules, enforced by `tests/unit/test-timing-hygiene.test.ts`:
+
+- **Wait for a signal, never for a duration.** `createWatcher()` / `watchWorkspace()` /
+  `watchSkills()` return a handle with a `ready` promise; the PTY wrapper announces itself
+  with a `system/init` event. Sleeping "long enough" instead is a bet on how fast the machine
+  is — and chokidar runs with `ignoreInitial: true`, so a write that lands before its initial
+  scan finishes emits *nothing* and the test waits out its whole deadline for an event that
+  will never arrive.
+- **Poll with the shared helper**, `tests/helpers/wait-for.ts`, rather than a local copy. Its
+  timeout is a safety net sized so only a broken build hits it, and on a timeout it reports
+  the predicate it was waiting on instead of a bare "timeout exceeded".
+
+A fixed sleep is still fine for asserting that something *doesn't* happen — there the sleep
+only bounds how hard the test looks, so a slow machine can't turn correct behaviour red.
+
 ---
 
 ## Troubleshooting

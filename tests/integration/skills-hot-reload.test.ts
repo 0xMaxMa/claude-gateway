@@ -74,6 +74,8 @@ import { loadWorkspace } from '../../src/agent/workspace-loader';
 import { watchSkills } from '../../src/skills/watcher';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { SessionProcess } from '../../src/session/process';
+import type { WatchHandle } from '../../src/watch/factory';
+import { waitForCondition } from '../helpers/wait-for';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -157,7 +159,7 @@ function wireSkillsWatcher(
   workspaceDir: string,
   sharedSkillsDir: string,
   mcpToolsDir: string,
-): { close: () => Promise<void> | void } {
+): WatchHandle {
   const workspaceSkillsDir = path.join(workspaceDir, 'skills');
   return watchSkills({
     dirs: [workspaceSkillsDir, mcpToolsDir, sharedSkillsDir],
@@ -186,22 +188,6 @@ function hasPendingRestart(runner: AgentRunner, chatId: string): boolean {
   return (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts.has(chatId);
 }
 
-async function waitForCondition(
-  predicate: () => boolean,
-  timeoutMs = 3000,
-  intervalMs = 25,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      if (predicate()) return;
-    } catch {
-      // Predicate may throw while files are still being written; keep polling.
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms waiting for condition`);
-}
 
 // ── Test suite ────────────────────────────────────────────────────────────────
 
@@ -213,7 +199,7 @@ describe('Skills hot-reload end-to-end', () => {
   let agentConfig: AgentConfig;
   let gatewayConfig: GatewayConfig;
   let runner: AgentRunner;
-  let watcher: { close: () => Promise<void> | void };
+  let watcher: WatchHandle;
 
   beforeEach(() => {
     // Plain text is now coalesced too (#290) — shrink the debounce so a lone
@@ -255,7 +241,7 @@ describe('Skills hot-reload end-to-end', () => {
     await runner.start();
     const port = getCallbackPort(runner);
     await sendChannelPost(port, chatId, 'hello');
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCondition(() => getSessions(runner).has(chatId));
     const sess = getSessions(runner).get(chatId)!;
     expect(sess).toBeDefined();
     // Simulate turn completed so restartOrDefer() stops the session immediately.
@@ -272,8 +258,7 @@ describe('Skills hot-reload end-to-end', () => {
     await bootRunnerWithIdleSession('chat:hr1');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
 
-    // Give the watcher a moment to attach before writing.
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
     writeSkillFile(sharedSkillsDir, 'hr1-skill');
 
     // The onChange armed a deferred restart rather than stopping the session.
@@ -295,7 +280,7 @@ describe('Skills hot-reload end-to-end', () => {
 
     await bootRunnerWithIdleSession('chat:hr2');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     // Modify: rewrite with different description.
     const skillFile = path.join(sharedSkillsDir, 'hr2-skill', 'SKILL.md');
@@ -319,7 +304,7 @@ describe('Skills hot-reload end-to-end', () => {
 
     await bootRunnerWithIdleSession('chat:hr3');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     deleteSkillFile(sharedSkillsDir, 'hr3-skill');
 
@@ -338,13 +323,13 @@ describe('Skills hot-reload end-to-end', () => {
     await runner.start();
     const port = getCallbackPort(runner);
     await sendChannelPost(port, 'chat:hr4', 'hi');
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCondition(() => getSessions(runner).has('chat:hr4'));
     const sess = getSessions(runner).get('chat:hr4')!;
     // Session is processing (isProcessing === true from sendChannelPost) — with
     // skipBusy:true it is left running (skipped), not deferred and not stopped.
 
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     writeSkillFile(sharedSkillsDir, 'hr4-skill');
 
@@ -365,7 +350,7 @@ describe('Skills hot-reload end-to-end', () => {
   it('HR5: skill added under workspace skills dir also defers idle session', async () => {
     await bootRunnerWithIdleSession('chat:hr5');
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     // Workspace skills: <workspace>/skills/<skill-name>/SKILL.md
     const workspaceSkillsDir = path.join(workspaceDir, 'skills');
@@ -395,14 +380,14 @@ describe('Skills hot-reload end-to-end', () => {
     await runner.start();
     const port = getCallbackPort(runner);
     await sendChannelPost(port, 'chat:hr6', 'hi');
-    await new Promise((r) => setTimeout(r, 100));
+    await waitForCondition(() => getSessions(runner).has('chat:hr6'));
     const sess = getSessions(runner).get('chat:hr6')!;
     expect(sess).toBeDefined();
     // Session is busy (isProcessing === true from sendChannelPost), as if it is
     // mid-turn editing its own SKILL.md.
 
     watcher = wireSkillsWatcher(runner, workspaceDir, sharedSkillsDir, mcpToolsDir);
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.ready;
 
     writeSkillFile(sharedSkillsDir, 'hr6-skill');
 

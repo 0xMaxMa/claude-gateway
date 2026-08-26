@@ -3,7 +3,7 @@ import { parseCliArgs } from './args';
 import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrlPlan, resolveKey, request, CliConfigView } from './http-client';
-import { printResult } from './output';
+import { printResult, helpStream, writeCommandHelp } from './output';
 import { paletteFor, Paint } from './colors';
 import { runGatewayLifecycle } from './commands/gateway';
 import { runService } from './commands/service';
@@ -33,7 +33,7 @@ export async function runCli(argv: string[]): Promise<number> {
   const wantHelp = flags.help === true;
 
   if (!command || HELP_ALIASES.has(command)) {
-    printGeneralHelp();
+    printGeneralHelp(true);
     return 0;
   }
   if (VERSION_ALIASES.has(command)) {
@@ -44,7 +44,7 @@ export async function runCli(argv: string[]): Promise<number> {
   // old service units used. There is nothing to run, so this is the same
   // "here's what I can do" answer as a bare invocation, never a server boot.
   if (command.startsWith('-')) {
-    printGeneralHelp();
+    printGeneralHelp(true);
     return 0;
   }
 
@@ -75,7 +75,7 @@ export async function runCli(argv: string[]): Promise<number> {
     // Resource nouns (generated).
     if (!GENERATED_NOUNS.includes(command)) {
       process.stderr.write(`Unknown command: ${command}\n\n`);
-      printGeneralHelp();
+      printGeneralHelp(false);
       return 1;
     }
     return await runResourceCommand(command, rest, wantHelp, config);
@@ -97,17 +97,17 @@ async function runResourceCommand(
   if (!verb) {
     // `crons --help` is a help request (exit 0); a bare `crons` is a usage
     // error (exit 1) even though both print the same listing.
-    printNounHelp(noun);
+    printNounHelp(noun, wantHelp);
     return wantHelp ? 0 : 1;
   }
   const cmd = GENERATED_COMMANDS.find((c) => c.noun === noun && c.verb === verb);
   if (!cmd) {
     process.stderr.write(`Unknown command: ${noun} ${verb}\n\n`);
-    printNounHelp(noun);
+    printNounHelp(noun, false);
     return 1;
   }
   if (wantHelp) {
-    printCommandHelp(cmd);
+    printCommandHelp(cmd, true);
     return 0;
   }
 
@@ -120,7 +120,7 @@ async function runResourceCommand(
   if (restPositionals.length < cmd.args.length) {
     const missing = cmd.args.slice(restPositionals.length).map((a) => `<${a}>`).join(' ');
     process.stderr.write(`Missing argument(s): ${missing}\n\n`);
-    printCommandHelp(cmd);
+    printCommandHelp(cmd, false);
     return 1;
   }
   let apiPath = cmd.path;
@@ -164,7 +164,7 @@ async function runResourceCommand(
   }
   if (missingRequired.length) {
     process.stderr.write(`Missing required flag(s): ${missingRequired.join(' ')}\n\n`);
-    printCommandHelp(cmd);
+    printCommandHelp(cmd, false);
     return 1;
   }
 
@@ -190,9 +190,15 @@ async function runApiPassthrough(
 ): Promise<number> {
   const method = (positionals[0] || '').toUpperCase();
   const apiPath = positionals[1];
-  if (!method || !apiPath) {
-    process.stderr.write('Usage: claude-gateway api <METHOD> <path> [--data <json>] [--query k=v]\n');
-    return 1;
+  if (!method || !apiPath || flags.help === true) {
+    // An explicit `--help` succeeds; missing arguments are a usage error.
+    writeCommandHelp(
+      flags.help === true,
+      'api',
+      'call any gateway endpoint directly (escape hatch)',
+      'claude-gateway api <METHOD> <path> [--data <json>] [--query k=v]',
+    );
+    return flags.help === true ? 0 : 1;
   }
   if (!apiPath.startsWith('/')) {
     process.stderr.write('Path must start with "/" (e.g. /v1/agents)\n');
@@ -272,9 +278,10 @@ export function helpRow(name: string, desc: string, paint: Paint, width = NAME_W
   return [`  ${paint(name.padEnd(width))}${desc}`];
 }
 
-function printGeneralHelp(): void {
+function printGeneralHelp(requested: boolean): void {
   const nouns = [...GENERATED_NOUNS].sort();
-  const c = paletteFor(process.stderr);
+  const stream = helpStream(requested);
+  const c = paletteFor(stream);
   // readVersion() falls back to 'unknown'; render that as a plain banner rather than "vunknown".
   const version = readVersion();
   // The brand tone is reserved for this banner — the one place the program
@@ -301,19 +308,21 @@ function printGeneralHelp(): void {
     '',
     `${c.bold('Global flags:')} --url <url>  --key <key>  --json (compact/minified output)  --data <json>  --help`,
   ];
-  process.stderr.write(lines.join('\n') + '\n');
+  stream.write(lines.join('\n') + '\n');
 }
 
-function printNounHelp(noun: string): void {
+function printNounHelp(noun: string, requested: boolean): void {
   const cmds = GENERATED_COMMANDS.filter((c) => c.noun === noun);
-  const p = paletteFor(process.stderr);
+  const stream = helpStream(requested);
+  const p = paletteFor(stream);
   const lines = [`${p.bold('claude-gateway')} ${p.cyan(noun)} — commands:`, ''];
   for (const c of cmds) lines.push(...helpRow(usageFor(c), c.summary, p.cyan, NOUN_NAME_W));
-  process.stderr.write(lines.join('\n') + '\n');
+  stream.write(lines.join('\n') + '\n');
 }
 
-function printCommandHelp(c: GeneratedCommand): void {
-  const p = paletteFor(process.stderr);
+function printCommandHelp(c: GeneratedCommand, requested: boolean): void {
+  const stream = helpStream(requested);
+  const p = paletteFor(stream);
   const lines = [
     `${p.bold('claude-gateway')} ${p.cyan(usageFor(c))}`,
     '',

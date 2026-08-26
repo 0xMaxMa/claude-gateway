@@ -7,6 +7,8 @@
  * the default is pretty-printed for humans. Either way the output is valid
  * JSON. Shared so every command formats its result identically.
  */
+
+import { paletteFor } from './colors';
 export function printResult(data: unknown, compact: boolean): void {
   if (typeof data === 'string') {
     process.stdout.write(data + '\n');
@@ -57,4 +59,45 @@ export async function exitAfterFlush(code: number, timeoutMs = 2000): Promise<ne
     if (timer) clearTimeout(timer);
   }
   process.exit(code);
+}
+
+/**
+ * Where a help listing goes.
+ *
+ * An explicitly requested `--help` exits 0: it *is* the command's result, so it
+ * belongs on stdout, where it can be paged, grepped or redirected like any
+ * other output. The same listing printed because the invocation was wrong is
+ * diagnostic and stays on stderr, so stdout still carries results only. Both
+ * cases previously went to stderr, which left `claude-gateway --help | less`
+ * showing an empty screen.
+ */
+export function helpStream(requested: boolean): NodeJS.WriteStream {
+  return requested ? process.stdout : process.stderr;
+}
+
+/**
+ * The shared shape of a command's help: a bold `claude-gateway <command>`
+ * banner naming what it does, then its usage line, then anything specific.
+ *
+ * Every command renders through this so the surface reads as one program —
+ * `doctor` and `agents` grew a banner while `gateway` and `update` printed a
+ * bare `Usage:` line, which is the kind of drift a shared renderer prevents.
+ * The brand tone stays reserved for the general help banner.
+ */
+export function writeCommandHelp(
+  requested: boolean,
+  command: string,
+  summary: string,
+  usage: string,
+  extra: string[] = [],
+): void {
+  const stream = helpStream(requested);
+  const c = paletteFor(stream);
+  const lines = [
+    `${c.bold(`claude-gateway ${command}`)} — ${summary}`,
+    '',
+    `${c.bold('Usage:')} ${usage}`,
+    ...(extra.length ? ['', ...extra] : []),
+  ];
+  stream.write(lines.join('\n') + '\n');
 }

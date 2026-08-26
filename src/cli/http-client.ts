@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import type { ApiKey } from '../types';
 import { readLocalGateway, LocalGateway } from './manager';
+import { expandHome } from '../utils/paths';
+import { probeHealth } from './health';
 
 /**
  * CLI HTTP client — resolves where to talk to the gateway and which key to use,
@@ -16,15 +18,8 @@ import { readLocalGateway, LocalGateway } from './manager';
 
 export const DEFAULT_PORT = 10850;
 
-/** Expand a leading `~` to the home directory. Env vars (e.g. `GATEWAY_CONFIG`
- *  set via Docker/systemd) are not shell-expanded, so a literal `~` must be
- *  resolved here or the path silently fails to resolve. */
-export function expandHome(p: string): string {
-  if (p.startsWith('~/') || p === '~') {
-    return path.join(os.homedir(), p.slice(2));
-  }
-  return p;
-}
+export { expandHome };
+
 
 /** The slice of gateway config the CLI cares about. */
 export interface CliConfigView {
@@ -324,7 +319,6 @@ async function attempt(baseUrl: string, opts: RequestOptions): Promise<RequestRe
  */
 export async function resolveReachableUrl(plan: UrlPlan): Promise<string> {
   if (!plan.fallbackUrl) return plan.baseUrl;
-  const { probeHealth } = await import('./health');
   const probe = await probeHealth(plan.baseUrl);
   // `answered` rather than `ok`: a 401 or 500 means the gateway is there, and
   // asking a different address would only hide its answer.

@@ -19,7 +19,13 @@ import { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { makeTurnJson, readLogLines, spawnWrapper, waitForLogEntries, waitMs } from '../helpers/pty-harness';
+import {
+  makeTurnJson,
+  readLogLines,
+  spawnWrapper,
+  waitForLogEntries,
+  waitForWrapperReady,
+} from '../helpers/pty-harness';
 
 const MOCK_TUI_BIN = path.resolve(__dirname, '../helpers/mock-claude-tui-input.js');
 
@@ -48,7 +54,8 @@ describe('I-PTY-INPUT-CLEAR: input is cleared fully before a paste', () => {
    */
   it('I-PTY-INPUT-01: does not concatenate a stale multi-line draft with the next message', async () => {
     start({ FAKE_TUI_STALE_DRAFT: 'STALEONE\\nSTALETWO' });
-    await waitMs(2500); // wrapper + fake TUI ready (stale draft sitting in the input)
+    // Ready = the stale draft is sitting in the input, waiting to contaminate.
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('FRESHMESSAGE'));
 
@@ -68,7 +75,7 @@ describe('I-PTY-INPUT-CLEAR: input is cleared fully before a paste', () => {
    */
   it('I-PTY-INPUT-02: submits a clean message unchanged when the input starts empty', async () => {
     start();
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('HELLO_WORLD'));
 

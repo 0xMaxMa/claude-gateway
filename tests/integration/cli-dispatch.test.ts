@@ -25,7 +25,7 @@ interface RunResult {
 /** Env with every supervisor marker stripped, so a test never accidentally
  *  takes the legacy-boot path (which would start a real server). */
 function terminalEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  // NO_COLOR keeps stderr assertions byte-exact regardless of the developer's
+  // NO_COLOR keeps the help assertions byte-exact regardless of the developer's
   // own FORCE_COLOR; the colour path has its own tests below.
   const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1', ...extra };
   delete env.INVOCATION_ID;
@@ -67,17 +67,21 @@ describe('binary dispatch — discovery never starts a server', () => {
   const env = () => terminalEnv({ GATEWAY_CONFIG: path.join(os.tmpdir(), 'cg-dispatch-should-never-be-read.json') });
 
   it('a bare `claude-gateway` prints help and exits 0', async () => {
-    const { code, stderr } = await run([], env());
+    const { code, stdout, stderr } = await run([], env());
     expect(code).toBe(0);
-    expect(stderr).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
-    expect(stderr).toMatch(/gateway start/);
+    // Help the user asked for is the result, so it is on stdout and pipeable.
+    expect(stdout).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
+    expect(stdout).toMatch(/gateway start/);
+    // Not `toBe('')`: Node writes its own warnings there. What matters is that
+    // the help itself is not duplicated onto stderr.
+    expect(stderr).not.toMatch(/control a running gateway/);
   }, TIMEOUT_MS);
 
   it('`--help` and `-h` print help and exit 0', async () => {
     for (const flag of ['--help', '-h']) {
-      const { code, stderr } = await run([flag], env());
+      const { code, stdout } = await run([flag], env());
       expect(code).toBe(0);
-      expect(stderr).toMatch(/Usage: claude-gateway <command>/);
+      expect(stdout).toMatch(/Usage: claude-gateway <command>/);
     }
   }, TIMEOUT_MS);
 
@@ -97,9 +101,9 @@ describe('binary dispatch — discovery never starts a server', () => {
   }, TIMEOUT_MS);
 
   it('a flag-only invocation still reaches the CLI rather than main()', async () => {
-    const { code, stderr } = await run(['--config', '/nonexistent-config.json'], env());
+    const { code, stdout } = await run(['--config', '/nonexistent-config.json'], env());
     expect(code).toBe(0);
-    expect(stderr).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
+    expect(stdout).toMatch(/claude-gateway v\d+\.\d+\.\d+ — control a running gateway/);
   }, TIMEOUT_MS);
 });
 
@@ -108,8 +112,8 @@ describe('binary dispatch — help layout', () => {
    *  longest (`service install|status|uninstall`) used to wrap its description
    *  onto the next line. */
   it('keeps each core command and its description on one line, with a visible gap', async () => {
-    const { stderr } = await run(['--help'], terminalEnv());
-    const rows = stderr
+    const { stdout } = await run(['--help'], terminalEnv());
+    const rows = stdout
       .split('\n')
       .filter((l) => /^ {2}\S/.test(l) && / {2,}\S/.test(l.slice(2)))
       .filter((l) => !l.includes('Run `claude-gateway'));
@@ -131,10 +135,12 @@ describe('binary dispatch — help layout', () => {
 describe('binary dispatch — help colouring', () => {
   const base = () => terminalEnv({ GATEWAY_CONFIG: path.join(os.tmpdir(), 'cg-colour-should-never-be-read.json') });
 
-  it('emits no ANSI escapes when stderr is piped', async () => {
+  it('emits no ANSI escapes when the help stream is piped', async () => {
     const env = base();
     delete env.NO_COLOR; // not a TTY, so colour must still stay off on its own
-    const { stderr } = await run(['--help'], env);
+    const { stdout, stderr } = await run(['--help'], env);
+    // eslint-disable-next-line no-control-regex
+    expect(stdout).not.toMatch(/\x1b\[/);
     // eslint-disable-next-line no-control-regex
     expect(stderr).not.toMatch(/\x1b\[/);
   }, TIMEOUT_MS);
@@ -151,10 +157,10 @@ describe('binary dispatch — help colouring', () => {
   it('paints the program name in the brand tone when FORCE_COLOR is set', async () => {
     const env = colourEnv();
     env.TERM = 'xterm-256color'; // pinned: the palette degrades on a 16-colour TERM
-    const { code, stderr } = await run(['--help'], env);
+    const { code, stdout } = await run(['--help'], env);
     expect(code).toBe(0);
     // eslint-disable-next-line no-control-regex
-    expect(stderr).toMatch(/\x1b\[1m\x1b\[38;5;208mclaude-gateway\x1b\[0m/);
+    expect(stdout).toMatch(/\x1b\[1m\x1b\[38;5;208mclaude-gateway\x1b\[0m/);
   }, TIMEOUT_MS);
 
   it('reserves the brand tone for the general help banner', async () => {
@@ -162,27 +168,27 @@ describe('binary dispatch — help colouring', () => {
     // the program introduces itself, so subcommand help stays plain bold.
     const env = colourEnv();
     env.TERM = 'xterm-256color';
-    const { stderr } = await run(['crons', '--help'], env);
+    const { stdout } = await run(['crons', '--help'], env);
     // eslint-disable-next-line no-control-regex
-    expect(stderr).toMatch(/\x1b\[1mclaude-gateway\x1b\[0m/);
-    expect(stderr).not.toContain('38;5;208');
+    expect(stdout).toMatch(/\x1b\[1mclaude-gateway\x1b\[0m/);
+    expect(stdout).not.toContain('38;5;208');
   }, TIMEOUT_MS);
 
   it('degrades the brand tone on a 16-colour terminal', async () => {
     const env = colourEnv();
     env.TERM = 'xterm';
     delete env.COLORTERM;
-    const { stderr } = await run(['--help'], env);
+    const { stdout } = await run(['--help'], env);
     // eslint-disable-next-line no-control-regex
-    expect(stderr).toMatch(/\x1b\[1m\x1b\[33mclaude-gateway\x1b\[0m/);
+    expect(stdout).toMatch(/\x1b\[1m\x1b\[33mclaude-gateway\x1b\[0m/);
   }, TIMEOUT_MS);
 
   it('NO_COLOR wins over FORCE_COLOR', async () => {
     const env = colourEnv();
     env.NO_COLOR = '1';
-    const { stderr } = await run(['--help'], env);
+    const { stdout } = await run(['--help'], env);
     // eslint-disable-next-line no-control-regex
-    expect(stderr).not.toMatch(/\x1b\[/);
+    expect(stdout).not.toMatch(/\x1b\[/);
   }, TIMEOUT_MS);
 
   it('colour never changes the plain-text column layout', async () => {

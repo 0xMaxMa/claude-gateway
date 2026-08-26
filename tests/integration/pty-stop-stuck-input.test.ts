@@ -23,6 +23,8 @@ import {
   makeTurnJson,
   spawnWrapper as spawnHarnessWrapper,
   waitForLogEntries,
+  waitForResults,
+  waitForWrapperReady,
   waitMs,
 } from '../helpers/pty-harness';
 
@@ -61,17 +63,15 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
   it('I-PTY-STOP-01: baseline — two sequential messages each submitted clean', async () => {
     wrapper = spawnWrapper(inputLog);
 
-    // Wait for wrapper to start (TUI ready takes ~2s)
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('FIRST_MESSAGE'));
     // Wait for fake TUI to log FIRST_MESSAGE
     await waitForLogEntries(inputLog, 1, 4000);
 
-    // fake TUI shows esc-to-interrupt (300ms) then ❯ (idle)
-    // Driver's FALLBACK_IDLE_QUIET_MS=2000ms must elapse before turn ends
-    // Total: 300ms (fake busy) + 2000ms (quiet) + margin = 3000ms
-    await waitMs(3000);
+    // The wrapper emits one `result` per finished turn — wait for that rather
+    // than for 300ms of fake-busy + FALLBACK_IDLE_QUIET_MS + a guessed margin.
+    await waitForResults(wrapper, 1);
 
     wrapper.stdin!.write(makeTurnJson('SECOND_MESSAGE'));
     const lines = await waitForLogEntries(inputLog, 2, 5000);
@@ -89,7 +89,7 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
    */
   it('I-PTY-STOP-02: /stop during paste → M2 submitted without M1 stuck text', async () => {
     wrapper = spawnWrapper(inputLog);
-    await waitMs(2000); // wait for TUI ready
+    await waitForWrapperReady(wrapper);
 
     // Send M1 — wrapper will paste it into PTY then wait SUBMIT_ENTER_DELAY_MS (300ms)
     wrapper.stdin!.write(makeTurnJson('STUCK_MESSAGE'));
@@ -97,8 +97,9 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
     await waitMs(50);
     process.kill(wrapper.pid!, 'SIGINT');
 
-    // Wait for interrupt to settle (interrupting flag clears after turn ends)
-    await waitMs(3500);
+    // The interrupted turn still ends with a `result` — that event, not a
+    // fixed 3.5s, is when the interrupting flag has cleared.
+    await waitForResults(wrapper, 1);
 
     // Send M2
     wrapper.stdin!.write(makeTurnJson('CLEAN_MESSAGE'));
@@ -119,15 +120,15 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
    */
   it('I-PTY-STOP-03: message after /stop settles is submitted without stuck text', async () => {
     wrapper = spawnWrapper(inputLog);
-    await waitMs(2500);
+    await waitForWrapperReady(wrapper);
 
     // Send M1 and fire SIGINT during its paste window
     wrapper.stdin!.write(makeTurnJson('INTERRUPTED_MESSAGE'));
     await waitMs(80);
     process.kill(wrapper.pid!, 'SIGINT');
 
-    // Wait for interrupt to fully settle (Ctrl+U fired, turn ended, queue cleared)
-    await waitMs(4000);
+    // Interrupt fully settled = the turn ended (Ctrl+U fired, queue cleared).
+    await waitForResults(wrapper, 1);
 
     // Send a fresh message AFTER interrupt settled
     wrapper.stdin!.write(makeTurnJson('POST_STOP_MESSAGE'));
@@ -152,14 +153,15 @@ describe('I-PTY-STOP: /stop does not leave stuck text in PTY input', () => {
    */
   it('I-PTY-STOP-04: turn ends via fallback with no busy marker, so the next message submits', async () => {
     wrapper = spawnWrapperNoMarker(inputLog);
-    await waitMs(2500); // TUI ready
+    await waitForWrapperReady(wrapper);
 
     wrapper.stdin!.write(makeTurnJson('FIRST_NO_MARKER'));
     await waitForLogEntries(inputLog, 1, 5000);
 
-    // Fallback needs the assistant record (~300ms) + FALLBACK_IDLE_QUIET_MS (2000ms)
-    // + margin. If the fallback is broken (pre-fix), the turn never ends here.
-    await waitMs(3200);
+    // The fallback must end the turn for M2 to submit at all. Waiting for the
+    // `result` asserts exactly that — and on the pre-fix code it never arrives,
+    // which is the proven-red behaviour described above.
+    await waitForResults(wrapper, 1);
 
     wrapper.stdin!.write(makeTurnJson('SECOND_NO_MARKER'));
     const lines = await waitForLogEntries(inputLog, 2, 6000);

@@ -11,6 +11,7 @@ import {
 import { detectManager } from '../manager';
 import { createRl, ask } from '../prompt';
 import { printJson } from '../output';
+import { writeCommandHelp } from '../output';
 
 /**
  * `update [check]` (the gateway itself) and `claude version|update [check]`
@@ -143,8 +144,7 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
   return 0;
 }
 
-const UPDATE_USAGE = 'Usage: claude-gateway update [check] [--yes]\n';
-const CLAUDE_USAGE = 'Usage: claude-gateway claude <version|update [check]> [--yes]\n';
+
 
 /** `claude-gateway update [check]` — the gateway's own package. */
 export async function runUpdate(
@@ -154,7 +154,13 @@ export async function runUpdate(
 ): Promise<number> {
   const verb = positionals[0];
   if (flags.help === true) {
-    process.stderr.write(UPDATE_USAGE);
+    writeCommandHelp(
+      true,
+      'update',
+      "check for or install a newer claude-gateway",
+      'claude-gateway update [check] [--yes]',
+      ['  check is read-only; the bare form installs after confirming.'],
+    );
     return 0;
   }
   if (!verb) return update(id, flags);
@@ -170,7 +176,12 @@ export async function runClaude(
 ): Promise<number> {
   const [verb, sub] = positionals;
   if (!verb || flags.help === true) {
-    process.stderr.write(CLAUDE_USAGE);
+    writeCommandHelp(
+      flags.help === true,
+      'claude',
+      'inspect or update the Claude Code binary',
+      'claude-gateway claude <version|update [check]> [--yes]',
+    );
     return flags.help === true ? 0 : 1;
   }
   if (verb === 'version') {

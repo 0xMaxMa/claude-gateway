@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { expandHome, loadCliConfig } from '../http-client';
 import { redactLine } from '../redact';
-import { paletteFor } from '../colors';
+import { writeCommandHelp } from '../output';
 
 /**
  * `debug-bundle` — collect a small, redacted diagnostics bundle for a session
@@ -52,14 +52,26 @@ function resolveLogDir(flags: Record<string, string | boolean>): string {
   return path.join(os.homedir(), '.claude-gateway', 'logs');
 }
 
-function listSessionLogs(dir: string): Array<{ file: string; mtimeMs: number }> {
+/**
+ * Session logs in `dir`, or the reason the directory could not be read.
+ *
+ * The read used to be wrapped in a bare `catch { return [] }`, which reported
+ * every failure as "no session logs found". That is how the unexpanded `~`
+ * stayed invisible: an ENOENT on a path that was never resolved looked exactly
+ * like an empty directory, and a permission problem still would. The caller
+ * needs the errno to say anything useful, so it is returned rather than eaten.
+ */
+function listSessionLogs(dir: string): { logs: Array<{ file: string; mtimeMs: number }>; error?: string } {
   let names: string[];
   try {
     names = fs.readdirSync(dir);
-  } catch {
-    return [];
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === 'ENOENT') return { logs: [], error: `${dir} does not exist` };
+    if (e.code === 'ENOTDIR') return { logs: [], error: `${dir} is not a directory` };
+    return { logs: [], error: `${dir} could not be read (${e.code ?? e.message})` };
   }
-  return names
+  const logs = names
     .filter((n) => n.endsWith('.log') && /session/i.test(n))
     .map((n) => {
       const file = path.join(dir, n);
@@ -71,6 +83,7 @@ function listSessionLogs(dir: string): Array<{ file: string; mtimeMs: number }> 
       }
       return { file, mtimeMs };
     });
+  return { logs };
 }
 
 function claudeCodeVersion(): string {
@@ -91,15 +104,18 @@ function gatewayVersion(): string {
 }
 
 function printHelp(): void {
-  const c = paletteFor(process.stderr);
-  process.stderr.write(
-    `${c.bold('claude-gateway debug-bundle')} — write a small redacted diagnostics bundle\n\n` +
-      'Usage: claude-gateway debug-bundle [--session <id>] [--logDir <path>] [--config <path>]\n\n' +
-      'Flags:\n' +
-      '  --session <id>   Bundle this session instead of the most recent one\n' +
-      '  --logDir <path>  Read logs from here instead of the configured directory\n' +
-      '  --config <path>  Read logDir from this config file\n\n' +
-      'Writes debug-bundle-<stamp>.txt into the current directory.\n',
+  writeCommandHelp(
+    true,
+    'debug-bundle',
+    'write a small redacted diagnostics bundle',
+    'claude-gateway debug-bundle [--session <id>] [--logDir <path>] [--config <path>]',
+    [
+      '  --session <id>   Bundle this session instead of the most recent one',
+      '  --logDir <path>  Read logs from here instead of the configured directory',
+      '  --config <path>  Read logDir from this config file',
+      '',
+      '  Writes debug-bundle-<stamp>.txt into the current directory.',
+    ],
   );
 }
 
@@ -113,7 +129,14 @@ export async function runDebugBundle(flags: Record<string, string | boolean>): P
   const logDir = resolveLogDir(flags);
   const sessionFilter = typeof flags.session === 'string' ? flags.session : undefined;
 
-  let logs = listSessionLogs(logDir);
+  const found = listSessionLogs(logDir);
+  // A directory that could not be read is a different answer from one holding
+  // no logs, and only one of them is the operator's to fix.
+  if (found.error) {
+    process.stderr.write(`Cannot read session logs: ${found.error}\n`);
+    return 1;
+  }
+  let logs = found.logs;
   if (sessionFilter) {
     logs = logs.filter((l) => path.basename(l.file).includes(sessionFilter));
     if (!logs.length) {

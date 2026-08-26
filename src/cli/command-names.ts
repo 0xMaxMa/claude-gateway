@@ -56,38 +56,52 @@ export function isGatewayStartInvocation(argv: readonly string[]): boolean {
  * True when this process *is* the service main process of a supervisor we
  * generate units for.
  *
- * `INVOCATION_ID`, `PM2_HOME` and `pm_id` are inherited by every descendant,
- * so on their own they identify the whole process tree rather than its root.
- * That matters because the gateway spawns agents that have shell access: a
- * bare `claude-gateway` typed in one of those shells would otherwise take the
- * legacy-boot path and start a second server on the gateway's port. Two
- * signals rule that out:
+ * The supervisor variables are inherited by every descendant, so on their own
+ * they identify the whole process tree rather than its root. That matters
+ * because the gateway spawns agents that have shell access: a bare
+ * `claude-gateway` typed in one of those shells would otherwise take the
+ * legacy-boot path and start a second server on the gateway's port.
  *
- * - `CHILD_MARKER`, which a booting gateway stamps on its own environment
- *   (`claimSupervisorEnv`) after scrubbing the inherited supervisor markers.
- *   Any descendant carries it; a service main process never does.
- * - An attached terminal. Neither systemd nor PM2 gives a service one, so a
- *   TTY means a human is typing — covering an operator whose shell profile
- *   exports `PM2_HOME`.
+ * `CHILD_MARKER` settles it: a booting gateway stamps it on its own environment
+ * (`claimSupervisorEnv`), so every descendant carries it and a service main
+ * process never does. It is checked first and nothing else can override it.
+ *
+ * The remaining variables are not equal evidence, so they are not weighed
+ * equally:
+ *
+ * - `INVOCATION_ID` and `pm_id` are *identity*: the supervisor mints them per
+ *   invocation, and they cannot be set by a shell profile. They are trusted on
+ *   their own — including when a terminal is attached, so a legacy unit with
+ *   `StandardInput=tty` still boots rather than printing help at its service
+ *   manager.
+ * - `PM2_HOME` is *configuration* — where PM2 keeps its data. An operator can
+ *   reasonably export it from a shell profile, where it says nothing about how
+ *   this process was launched. It counts only when no terminal is attached.
  */
 export function isSupervised(env: InvocationEnv, signals: InvocationSignals = {}): boolean {
   if (env[CHILD_MARKER]) return false;
-  if (signals.hasTty) return false;
-  return !!(env.INVOCATION_ID || env.PM2_HOME || env.pm_id !== undefined);
+  if (env.INVOCATION_ID || env.pm_id !== undefined) return true;
+  return !!env.PM2_HOME && !signals.hasTty;
 }
 
 /**
- * Take ownership of the supervisor markers at boot: remove them so they are not
- * inherited, and leave a record of which supervisor started us.
+ * Take ownership of the supervisor markers at boot: record which supervisor
+ * started us, drop the ones that would misidentify a descendant as a service,
+ * and stamp `CHILD_MARKER` so no descendant can classify itself as one.
  *
  * Called once, on the boot path only, after the invocation has been classified.
  * Doing it here rather than at each `spawn()` covers every child the server
  * creates, including ones added later.
+ *
+ * `PM2_HOME` is deliberately left in place. Unlike the other two it is not a
+ * launch marker but the location of PM2's own data directory, and the gateway
+ * spawns agents with shells: stripping it would silently point any `pm2` they
+ * run at the default `~/.pm2` instead of the configured one. `CHILD_MARKER`
+ * already prevents it from being misread here.
  */
 export function claimSupervisorEnv(env: NodeJS.ProcessEnv): void {
   const supervisor = env.INVOCATION_ID ? 'systemd' : env.PM2_HOME || env.pm_id !== undefined ? 'pm2' : null;
   delete env.INVOCATION_ID;
-  delete env.PM2_HOME;
   delete env.pm_id;
   if (supervisor) env[SUPERVISOR_MARKER] = supervisor;
   env[CHILD_MARKER] = '1';

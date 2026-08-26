@@ -4,6 +4,7 @@ import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { probeHealth } from '../health';
 import { detectManager, defaultPidfilePath } from '../manager';
 import { printJson } from '../output';
+import { writeCommandHelp } from '../output';
 
 /**
  * `gateway start|status|restart|stop` — whole-process lifecycle.
@@ -21,8 +22,14 @@ export async function runGatewayLifecycle(
 ): Promise<number> {
   const verb = positionals[0];
   if (!verb) {
-    process.stderr.write('Usage: claude-gateway gateway <start|status|restart|stop>\n');
     // `gateway --help` is a help request (0); a bare `gateway` is a usage error (1).
+    writeCommandHelp(
+      flags.help === true,
+      'gateway',
+      'manage the gateway process on this host',
+      'claude-gateway gateway <start|status|restart|stop>',
+      ['  start is the only command that boots a server; the rest are manager-aware.'],
+    );
     return flags.help === true ? 0 : 1;
   }
 

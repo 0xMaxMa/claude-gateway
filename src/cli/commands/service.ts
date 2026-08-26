@@ -6,6 +6,8 @@ import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { createRl, ask, printFilePreview } from '../prompt';
 import { probeHealth } from '../health';
 import { printJson } from '../output';
+import { expandHome } from '../../utils/paths';
+import { writeCommandHelp } from '../output';
 
 /**
  * `service install|status|uninstall` — run the gateway under a process manager.
@@ -36,10 +38,6 @@ export interface LaunchSpec {
   config: string;
   home: string;
   pathEnv: string;
-}
-
-function expandHome(value: string): string {
-  return value === '~' || value.startsWith('~/') ? path.join(os.homedir(), value.slice(1)) : value;
 }
 
 function gatewayHome(): string {
@@ -463,9 +461,8 @@ async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<nu
 
 // ─── entry point ──────────────────────────────────────────────────────────────
 
-const USAGE =
-  'Usage: claude-gateway service <install|status|uninstall> [--manager systemd|pm2] [--config <path>] [--yes] [--print]\n' +
-  '  systemd installs a user unit in ~/.config/systemd/user (no sudo).\n';
+const USAGE_LINE =
+  'claude-gateway service <install|status|uninstall> [--manager systemd|pm2] [--config <path>] [--yes] [--print]';
 
 /** Pick the manager to act on when `--manager` is omitted. `status`/`uninstall`
  *  act on whatever is actually installed; `install` always defaults to systemd
@@ -496,8 +493,14 @@ export async function runService(
 ): Promise<number> {
   const action = positionals[0] as ServiceAction | undefined;
   if (!action) {
-    process.stderr.write(USAGE);
     // `service --help` is a help request (0); a bare `service` is a usage error (1).
+    writeCommandHelp(
+      flags.help === true,
+      'service',
+      'run the gateway as a systemd-user or PM2 service',
+      USAGE_LINE,
+      ['  systemd installs a user unit in ~/.config/systemd/user (no sudo).'],
+    );
     return flags.help === true ? 0 : 1;
   }
   if (action !== 'install' && action !== 'status' && action !== 'uninstall') {

@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { printResult, exitAfterFlush } from '../../src/cli/output';
+import { printResult, exitAfterFlush, helpStream, writeCommandHelp } from '../../src/cli/output';
 
 describe('cli output printResult', () => {
   let written: string[];
@@ -84,5 +84,36 @@ describe('cli output exitAfterFlush', () => {
     );
     expect(res.status).toBe(3);
     expect(res.bytes).toBe(6);
+  });
+});
+
+/**
+ * `--help` used to go to stderr in every case, so `claude-gateway --help | less`
+ * showed an empty screen. An explicitly requested help listing is the command's
+ * result and belongs on stdout; the same listing shown because the invocation
+ * was wrong is diagnostic and stays on stderr, which keeps stdout carrying
+ * results only.
+ */
+describe('cli output help routing', () => {
+  it('sends requested help to stdout and error help to stderr', () => {
+    expect(helpStream(true)).toBe(process.stdout);
+    expect(helpStream(false)).toBe(process.stderr);
+  });
+
+  it('renders every command help through one banner shape', () => {
+    const out: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation((c: string | Uint8Array) => {
+      out.push(c.toString());
+      return true;
+    });
+    try {
+      writeCommandHelp(true, 'gateway', 'manage the gateway process', 'claude-gateway gateway <verb>', ['  extra']);
+    } finally {
+      spy.mockRestore();
+    }
+    const text = out.join('');
+    expect(text).toContain('claude-gateway gateway — manage the gateway process');
+    expect(text).toContain('Usage: claude-gateway gateway <verb>');
+    expect(text).toContain('  extra');
   });
 });

@@ -19,6 +19,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { MAX_HISTORY_LIMIT } from '../../src/history/db';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -71,18 +72,6 @@ function makeGatewayConfig(logDir: string): GatewayConfig {
   };
 }
 
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 5000,
-  intervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error('waitFor timeout exceeded');
-}
 
 /** Send a message and wait for response, return session_id */
 async function sendMessage(

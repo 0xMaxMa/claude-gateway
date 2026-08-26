@@ -149,7 +149,10 @@ describe('cli debug-bundle', () => {
     const code = await runDebugBundle({ config: configFile });
 
     expect(code).toBe(1);
-    expect(stderr.join('')).toContain(`No session logs found in ${path.join(os.homedir(), relative)}`);
+    // The point of the test is which path was read; the message now also says
+    // why it could not be read, instead of implying the directory was empty.
+    expect(stderr.join('')).toContain(path.join(os.homedir(), relative));
+    expect(stderr.join('')).toContain('does not exist');
     expect(stderr.join('')).not.toContain('~/');
   });
 
@@ -159,7 +162,8 @@ describe('cli debug-bundle', () => {
     const code = await runDebugBundle({ logDir: `~/${relative}` });
 
     expect(code).toBe(1);
-    expect(stderr.join('')).toContain(`No session logs found in ${path.join(os.homedir(), relative)}`);
+    expect(stderr.join('')).toContain(path.join(os.homedir(), relative));
+    expect(stderr.join('')).toContain('does not exist');
   });
 
   /** `--help` is read-only everywhere else; here it used to run the whole
@@ -170,7 +174,61 @@ describe('cli debug-bundle', () => {
     const code = await runDebugBundle({ logDir, help: true });
 
     expect(code).toBe(0);
-    expect(stderr.join('')).toMatch(/claude-gateway debug-bundle —/);
+    // Requested help is output, not diagnostics, so it goes to stdout.
+    expect(stdout.join('')).toMatch(/claude-gateway debug-bundle —/);
     expect(fs.readdirSync(cwdDir).filter((f) => f.startsWith('debug-bundle-'))).toEqual([]);
+  });
+});
+
+/**
+ * A bare `catch { return [] }` reported every failure as "no session logs
+ * found". That is how an unexpanded `~` stayed invisible: an ENOENT on a path
+ * that was never resolved is indistinguishable from an empty directory.
+ */
+describe('debug-bundle unreadable log directory', () => {
+  const run = async (logDir: string): Promise<{ code: number; err: string }> => {
+    const chunks: string[] = [];
+    const spy = jest.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => {
+      chunks.push(c.toString());
+      return true;
+    });
+    try {
+      const code = await runDebugBundle({ logDir });
+      return { code, err: chunks.join('') };
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  it('says the directory does not exist rather than that it holds no logs', async () => {
+    const missing = path.join(os.tmpdir(), 'gw-no-such-dir-' + process.pid);
+    const { code, err } = await run(missing);
+    expect(code).toBe(1);
+    expect(err).toContain('does not exist');
+    expect(err).not.toContain('No session logs found');
+  });
+
+  it('says the path is not a directory when it is a file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-notdir-'));
+    const file = path.join(dir, 'a-file');
+    fs.writeFileSync(file, 'x');
+    try {
+      const { code, err } = await run(file);
+      expect(code).toBe(1);
+      expect(err).toContain('is not a directory');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still reports an empty-but-readable directory as having no logs', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-empty-'));
+    try {
+      const { code, err } = await run(dir);
+      expect(code).toBe(1);
+      expect(err).toContain('No session logs found');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -99,7 +99,9 @@ describe('cli command-names claimSupervisorEnv', () => {
     const byHome: NodeJS.ProcessEnv = { PM2_HOME: '/home/u/.pm2' };
     claimSupervisorEnv(byHome);
     expect(byHome.CLAUDE_GATEWAY_SUPERVISOR).toBe('pm2');
-    expect(byHome.PM2_HOME).toBeUndefined();
+    // PM2_HOME stays: it tells `pm2` where its data lives, and the gateway
+    // spawns shells that may run it. See cli-supervisor.test.ts.
+    expect(byHome.PM2_HOME).toBe('/home/u/.pm2');
 
     const byId: NodeJS.ProcessEnv = { pm_id: '0' };
     claimSupervisorEnv(byId);
@@ -166,5 +168,33 @@ describe('cli command-names classifyInvocation', () => {
   it('does not treat a supervised --help/--version as a boot request', () => {
     expect(classifyInvocation(['--help'], systemd)).toBe('cli');
     expect(classifyInvocation(['--version'], systemd)).toBe('cli');
+  });
+});
+
+/**
+ * Treating every `-letter` as a flag would silently consume the token after it.
+ * Only the declared aliases parse as flags; anything else is a value, which is
+ * what it was before short flags existed.
+ */
+describe('parseCliArgs single-dash tokens', () => {
+  it('expands the declared aliases', () => {
+    expect(parseCliArgs(['-h']).flags).toEqual({ help: true });
+    expect(parseCliArgs(['-V']).flags).toEqual({ version: true });
+  });
+
+  it('leaves an unrecognised single-dash token as a positional, taking nothing with it', () => {
+    const { positionals, flags } = parseCliArgs(['-x', 'value']);
+    expect(positionals).toEqual(['-x', 'value']);
+    expect(flags).toEqual({});
+  });
+
+  it('keeps negative numbers and a bare dash as values', () => {
+    expect(parseCliArgs(['--limit', '-5']).flags).toEqual({ limit: '-5' });
+    expect(parseCliArgs(['-']).positionals).toEqual(['-']);
+    expect(parseCliArgs(['-5']).positionals).toEqual(['-5']);
+  });
+
+  it('does not let an alias be swallowed as the previous flag\u2019s value', () => {
+    expect(parseCliArgs(['--url', '-h']).flags).toEqual({ url: true, help: true });
   });
 });

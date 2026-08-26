@@ -13,6 +13,7 @@ import { AgentRunner } from '../../src/agent/runner';
 import { GatewayRouter } from '../../src/api/gateway-router';
 import { AgentConfig, GatewayConfig } from '../../src/types';
 import { loadWorkspace } from '../../src/agent/workspace-loader';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -60,18 +61,6 @@ function makeGatewayConfig(logDir: string, apiKeys: import('../../src/types').Ap
   };
 }
 
-async function waitFor(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs = 3000,
-  intervalMs = 50,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error('waitFor timeout exceeded');
-}
 
 // ─── test suite ─────────────────────────────────────────────────────────────
 
@@ -322,7 +311,7 @@ describe('Gateway E2E (Option A — monitoring only)', () => {
     await waitFor(async () => {
       const stats = router.getAgentStats();
       return (stats.find((s) => s.id === 'agent-09')?.messagesSent ?? 0) > 0;
-    }, 3000);
+    });
 
     const stats = router.getAgentStats();
     const agentStats = stats.find((s) => s.id === 'agent-09');

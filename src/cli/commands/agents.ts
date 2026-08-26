@@ -2,7 +2,7 @@ import { spawnSync } from 'child_process';
 import { CliConfigView, resolveUrlPlan, resolveReachableUrl, resolveKey, request } from '../http-client';
 import { buildUpdatePrompt } from '../../agent/create-agent-prompts';
 import { ask, askMultiline, createRl, previewAndAccept, printFilePreview, editInEditor } from '../prompt';
-import { printResult } from '../output';
+import { printResult, writeCommandHelp } from '../output';
 
 /** Files the wizard always returns; only AGENTS.md is required to confirm. */
 const WIZARD_OPTIONAL_FILES = new Set(['SOUL.md', 'USER.md', 'MEMORY.md']);
@@ -52,8 +52,8 @@ export async function runAgents(
 ): Promise<number> {
   const verb = positionals[0];
   if (!verb || flags.help === true) {
-    printHelp();
     // An explicit `--help` succeeds; a missing verb is a usage error.
+    printHelp(flags.help === true);
     return flags.help === true ? 0 : 1;
   }
   const baseUrl = await resolveReachableUrl(
@@ -74,7 +74,7 @@ export async function runAgents(
       return runUpdate(flags, baseUrl, key);
     default:
       process.stderr.write(`Unknown: agents ${verb} (expected list|create|update)\n\n`);
-      printHelp();
+      printHelp(false);
       return 1;
   }
 }
@@ -356,13 +356,10 @@ function strFlag(v: string | boolean | undefined): string | undefined {
 
 
 
-function printHelp(): void {
-  const lines = [
-    'claude-gateway agents — create and manage agents',
-    '',
-    '  agents list                          List agents accessible by this key',
+function printHelp(requested: boolean): void {
+  writeCommandHelp(requested, 'agents', 'create and manage agents', 'claude-gateway agents <list|create|update> [--flags]', [
+    '  agents list                           List agents accessible by this key',
     '  agents create [id] [--description v]  Interactive wizard (workspace files + optional channel)',
     '  agents update [--agent <id>]          Regenerate AGENTS.md, connect/update/disconnect channels',
-  ];
-  process.stderr.write(lines.join('\n') + '\n');
+  ]);
 }

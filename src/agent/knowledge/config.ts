@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { resolveStalenessConfig, STALENESS_DEFAULTS } from '../dreaming/config';
 import { isValidTimezone } from '../skill-learning/config';
+import { expandHome } from '../../utils/paths';
 import type {
   KnowledgeArchiveConfig,
   ResolvedKnowledgeArchiveCfg,
@@ -92,12 +93,6 @@ const PROJECT_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
 /** Reserved path segments that must never be used as a project key. */
 const RESERVED_PROJECT_KEYS = new Set(['.', '..']);
 
-/** Expand a leading `~` to the home dir (mirrors config path handling elsewhere). */
-function expandHome(p: string): string {
-  if (p === '~') return os.homedir();
-  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
-  return p;
-}
 
 export function resolveSharedConfig(
   agentCfg?: KnowledgeSharedConfig,

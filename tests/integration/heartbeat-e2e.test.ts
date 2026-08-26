@@ -17,6 +17,7 @@ import { GatewayRouter } from '../../src/api/gateway-router';
 import { CronScheduler } from '../../src/cron/scheduler';
 import { HeartbeatHistory } from '../../src/heartbeat/history';
 import { AgentConfig, GatewayConfig, HeartbeatResult } from '../../src/types';
+import { waitForCondition as waitFor } from '../helpers/wait-for';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -101,18 +102,7 @@ function startMockTelegramServer(): Promise<{
 }
 
 /** Wait up to timeoutMs for predicate to return true. */
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 3000,
-  intervalMs = 30,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error('waitFor timeout exceeded');
-}
+
 
 // ─── shared mock Telegram server ──────────────────────────────────────────────
 
@@ -257,7 +247,7 @@ describe('Heartbeat E2E (I-HB)', () => {
     expect(results[0].suppressed).toBe(false);
 
     // Wait for mock subprocess to POST to mock Telegram
-    await waitFor(() => getTelegramMessages().length > 0, 3000);
+    await waitFor(() => getTelegramMessages().length > 0);
     const msgs = getTelegramMessages();
     expect(msgs.length).toBeGreaterThan(0);
     const sent = msgs.find((m) =>

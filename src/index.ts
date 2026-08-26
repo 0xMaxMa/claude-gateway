@@ -53,13 +53,8 @@ import { SocketServer, parseTimeoutMs } from './apps/socket-server';
 import { parseAppYaml, AppYamlService, AppYamlScript } from './apps/compose-generator';
 import { claimSupervisorEnv, classifyInvocation } from './cli/command-names';
 import { defaultPidfilePath } from './cli/manager';
+import { expandHome as expandTilde } from './utils/paths';
 
-function expandTilde(p: string): string {
-  if (p === '~' || p.startsWith('~/')) {
-    return path.join(os.homedir(), p.slice(1));
-  }
-  return p;
-}
 
 // ─── Simple argument parsing (no heavy deps) ──────────────────────────────────
 function parseArgs(argv: string[]): Record<string, string | boolean> {

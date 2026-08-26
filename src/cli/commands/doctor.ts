@@ -1,7 +1,7 @@
 import { CliConfigView, resolveUrl, resolveLocalUrl, resolveKey } from '../http-client';
 import { probeHealth, HealthProbe } from '../health';
 import { detectManager } from '../manager';
-import { printJson } from '../output';
+import { printJson, helpStream, writeCommandHelp } from '../output';
 import { paletteFor } from '../colors';
 
 /**
@@ -20,12 +20,16 @@ interface Check {
 }
 
 function printHelp(): void {
-  const c = paletteFor(process.stderr);
-  process.stderr.write(
-    `${c.bold('claude-gateway doctor')} — check config, key resolution, manager and connectivity\n\n` +
-      'Usage: claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]\n\n' +
-      `Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and never\n` +
-      'fail the command. The key itself is never printed.\n',
+  const c = paletteFor(helpStream(true));
+  writeCommandHelp(
+    true,
+    'doctor',
+    'check config, key resolution, manager and connectivity',
+    'claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]',
+    [
+      `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and`,
+      '  never fail the command. The key itself is never printed.',
+    ],
   );
 }
 

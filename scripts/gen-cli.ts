@@ -115,6 +115,10 @@ so a local address that cannot be reached **at all** is retried once there, with
 saying so. An address that answered — including with an error — is never retried: the gateway was
 reached, and asking somewhere else would only hide its answer.
 
+\`agents\` and \`channels\` settle the address once, at the start of the session, rather than per
+request: they thread one base URL through an interactive flow, so a mid-wizard switch would be
+worse than a single decision up front. The rule for choosing is the same one described above.
+
 \`gateway status\` and \`service install\` go further: they report on the gateway *process* on this
 host, so they resolve \`--url\` → \`http://<bind>:<port>\` and ignore \`$CLAUDE_GATEWAY_URL\` and
 \`publicUrl\` entirely — a proxy still answering from a different instance would otherwise report a
@@ -125,9 +129,11 @@ dead local service as healthy.
 that rejects an unauthenticated \`/health\` is reported, but never fails \`doctor\` — the CLI is not
 using that address.
 
-**Colour.** Help and diagnostic text on stderr is coloured only when stderr is a terminal. Set
-\`NO_COLOR\` to turn it off, or \`FORCE_COLOR=1\` to keep it through a pipe; \`NO_COLOR\` wins if both
-are set. \`--json\` output on stdout is never coloured.
+**Colour.** Help and diagnostic text is coloured only when the stream it is going to is a
+terminal — stdout for a requested help listing, stderr for everything else — so piping either one
+strips the escapes. Set \`NO_COLOR\` to turn colour off, or \`FORCE_COLOR=1\` to keep it through a
+pipe; \`NO_COLOR\` wins if both are set. Result output is never coloured at all: \`printResult\`
+does not touch the palette, so \`--json\` piped into \`jq\` is unaffected by any of this.
 
 ## Lifecycle & diagnostics (do not require a running server)
 
@@ -145,6 +151,13 @@ A bare \`claude-gateway gateway\` (or \`crons\`, \`service\`, …) prints its ve
 you forgot the verb. The same listing with \`--help\` exits **0**, and \`-h\` is accepted wherever
 \`--help\` is. \`--help\` never has a side effect: \`debug-bundle --help\` prints usage rather than
 writing a bundle.
+
+**Where help goes.** A listing you asked for (\`--help\`, or a bare \`claude-gateway\`) is the
+command's result and goes to **stdout**, so \`claude-gateway --help | less\` and
+\`claude-gateway crons --help | grep create\` work. The same listing printed *because* the
+invocation was wrong goes to **stderr** with a non-zero exit, leaving stdout carrying results
+only. Single-dash tokens other than \`-h\`/\`-V\` are values, not flags, so a \`-5\` argument is
+never mistaken for one.
 
 ## Running as a service
 
