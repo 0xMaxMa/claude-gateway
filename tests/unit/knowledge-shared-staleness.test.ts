@@ -269,3 +269,25 @@ describe('lifecycle backfill for unchanged sources (issue #398)', () => {
     }
   });
 });
+
+describe('lifecycle backfill stays cheap on repeat passes (issue #398)', () => {
+  test('a source whose rows already exist is not re-upserted', () => {
+    const cfg = tmpSharedCfg();
+    try {
+      writeSharedNote(cfg, 'settled-note', 'A fact that has been indexed for a while now.');
+      indexSharedArchive(cfg);
+
+      // Age the row artificially. A wasteful re-upsert would be harmless to
+      // first_seen (ON CONFLICT preserves it) but WOULD bump `path`, so assert
+      // on write volume the only way the schema exposes it: the index revision
+      // counter must not move for a pass that had nothing to do.
+      const before = db(cfg).getRevision();
+      indexSharedArchive(cfg);
+      indexSharedArchive(cfg);
+      expect(db(cfg).getRevision()).toBe(before);
+      expect(db(cfg).listLifecycle()).toHaveLength(1);
+    } finally {
+      cleanup(cfg);
+    }
+  });
+});

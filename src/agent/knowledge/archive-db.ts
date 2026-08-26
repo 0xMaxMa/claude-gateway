@@ -62,7 +62,8 @@ export class ArchiveDB {
     insertChunk: StatementSync;
     insertRecall: StatementSync;
     insertProvenance: StatementSync;
-    upsertLifecycle: StatementSync;
+    countLifecycleForPath: StatementSync;
+  upsertLifecycle: StatementSync;
   };
 
   private constructor(dbPath: string, tokenizer: string) {
@@ -97,6 +98,9 @@ export class ArchiveDB {
       ),
       // Age survives reindex: first_seen is written ONCE (never reset); a later
       // reindex of the same entry only refreshes its current path (planning-66).
+      countLifecycleForPath: this.db.prepare(
+        `SELECT COUNT(*) AS c FROM kb_entry_lifecycle WHERE path = ?`,
+      ),
       upsertLifecycle: this.db.prepare(
         `INSERT INTO kb_entry_lifecycle (entry_hash, path, first_seen) VALUES (?, ?, ?)
          ON CONFLICT(entry_hash) DO UPDATE SET path = excluded.path`,
@@ -179,6 +183,10 @@ export class ArchiveDB {
         invalid_at      INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_invalid ON kb_entry_lifecycle(invalid_at);
+      -- The hash-skip backfill (issue #398) asks "does this source already have
+      -- its rows?" once per unchanged source per index pass; without this index
+      -- that check is a full table scan.
+      CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_path ON kb_entry_lifecycle(path);
       CREATE INDEX IF NOT EXISTS idx_kb_lifecycle_superseded ON kb_entry_lifecycle(superseded_by);
 
       -- Append-only retrieval log (planning-66). The Bun read path appends a row
@@ -600,8 +608,26 @@ export class ArchiveDB {
    * so repeated backfills are idempotent.
    */
   backfillLifecycle(sourcePath: string, blocks: Array<{ entryHash: string; firstSeen: number }>): void {
-    for (const b of blocks) {
-      this.stmts.upsertLifecycle.run(b.entryHash, sourcePath, b.firstSeen);
+    if (blocks.length === 0) return;
+    // Fast path: this runs for EVERY unchanged source on EVERY index pass, and a
+    // large personal archive is hundreds of files' worth of blocks. One indexed
+    // lookup beats re-upserting rows that are already correct.
+    const have = this.stmts.countLifecycleForPath.get(sourcePath) as { c: number } | undefined;
+    if ((have?.c ?? 0) >= blocks.length) return;
+    // One transaction, not one implicit commit per row.
+    this.db.exec('BEGIN');
+    try {
+      for (const b of blocks) {
+        this.stmts.upsertLifecycle.run(b.entryHash, sourcePath, b.firstSeen);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* txn already unwound */
+      }
+      throw err;
     }
   }
 

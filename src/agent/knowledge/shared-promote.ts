@@ -117,8 +117,9 @@ export function isInstructionShapedName(name: string): boolean {
  */
 export function makeSharedPromoter(
   // Kept for call-site compatibility (src/index.ts, gateway-router.ts) though no
-  // longer used for naming — issue #386 moved note identity to `reason` so a
-  // recurring fact maps to the same shared note regardless of which agent dreamed it.
+  // longer used for naming — issue #386 moved note identity off the agent id, and
+  // issue #398 moved it to the proposal's `topic` slug (falling back to `reason`),
+  // so a recurring fact maps to the same shared note whichever agent dreamed it.
   _agentId: string,
   agentCfg: KnowledgeSharedConfig | undefined,
   globalCfg: KnowledgeSharedConfig | undefined,
