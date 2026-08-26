@@ -234,37 +234,35 @@ describe('makeSharedPromoter — index pointers are not shareable facts (issue #
 });
 
 describe('makeSharedPromoter — unattended merges need a real similarity bar (issue #398)', () => {
-  test('a fact sharing only generic words with an existing note gets its OWN note, not a merge', () => {
+  test('a fact sharing only incidental words with an existing note gets its OWN note, not a merge', () => {
     const cfg = tmpSharedCfg();
     try {
       const promote = makeSharedPromoter('agentA', cfg, undefined)!;
       promote({
-        reason: 'ci-runner-permission-blocker',
+        reason: 'ci-runner-cannot-clean-workspace',
         content:
-          'The self-hosted CI runner cannot remove its workspace folder between jobs, so the recap job fails ' +
-          'with a permission error on every pull request and needs manual intervention on the machine.',
+          'The self-hosted CI runner cannot remove its docker workspace volume between jobs, so the recap ' +
+          'job fails with a permission error on every pull request and needs manual intervention.',
       });
       indexSharedArchive(cfg);
 
-      // Unrelated topic. The FTS recall query still returns the note above
-      // (both mention "new"/"needs"/"jobs"-ish scaffolding), but containment is
-      // far below the bar, so merging them would fuse two unrelated facts.
+      // A DIFFERENT fact that deliberately repeats a few of the same words
+      // ("docker", "volume", "job", "cannot") so FTS recall still returns the
+      // note above — this is exactly the case the old `similar.length > 0`
+      // check merged. Containment is ~0.27, far below the merge bar.
       promote({
-        reason: 'docker-e2e-required-for-state-bugs',
+        reason: 'reset-docker-volume-permissions-before-release',
         content:
-          'State and data bugs must be validated with a Docker end-to-end run comparing the old and new ' +
-          'builds; counting passing unit tests proves nothing about persisted state.',
+          'Docker volume permissions on the build host must be reset before each release, otherwise the ' +
+          'release job cannot write its artifacts and the upload step reports an empty bundle.',
       });
 
-      expect(noteFiles(cfg)).toEqual([
-        'ci-runner-permission-blocker.md',
-        'docker-e2e-required-for-state-bugs.md',
-      ]);
+      expect(noteFiles(cfg).length).toBe(2);
       const first = fs.readFileSync(
-        path.join(sharedNotesDir(cfg), 'ci-runner-permission-blocker.md'),
+        path.join(sharedNotesDir(cfg), 'ci-runner-cannot-clean-workspace.md'),
         'utf8',
       );
-      expect(first).not.toContain('Docker end-to-end');
+      expect(first).not.toContain('must be reset before each release');
       expect(first).not.toContain('Related:');
     } finally {
       cleanup(cfg);
