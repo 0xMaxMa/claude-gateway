@@ -1198,6 +1198,62 @@ bot.command('model', async ctx => {
   }
 })
 
+/** Fetches current model + configured/live model lists. Shared by /models, models:back and models:more so all three agree on fallback behavior. */
+async function fetchModelMenuData(chatId: string): Promise<{
+  currentModel: string
+  configuredModels: Array<{ id: string; label: string }>
+  liveModels: Array<{ id: string; label: string }>
+} | null> {
+  if (!CALLBACK_URL_BASE) return null
+  const [modelRes, modelsRes] = await Promise.all([
+    fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_model', chat_id: chatId }),
+    }),
+    fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_models' }),
+    }),
+  ])
+  if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
+  const modelData = (await modelRes.json()) as { model?: string }
+  const modelsData = (await modelsRes.json()) as {
+    models?: unknown
+    configuredModels?: unknown
+    liveModels?: unknown
+  }
+  const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
+  const availableRaw = validModelRows(modelsData.models)
+  const availableModels = availableRaw.length ? availableRaw : validModelRows(AVAILABLE_MODELS)
+  const configuredModels = Array.isArray(modelsData.configuredModels)
+    ? validModelRows(modelsData.configuredModels)
+    : availableModels
+  const liveModels = Array.isArray(modelsData.liveModels)
+    ? validModelRows(modelsData.liveModels)
+    : availableModels.filter(m => !configuredModels.some(c => c.id === m.id))
+  return { currentModel, configuredModels, liveModels }
+}
+
+/** Builds the root /models keyboard: one row per configured model, plus "More models..." when live-only models exist. */
+function buildModelsRootKeyboard(
+  currentModel: string,
+  configuredModels: Array<{ id: string; label: string }>,
+  liveModels: Array<{ id: string; label: string }>,
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+  for (const m of configuredModels) {
+    const id = safeModelId(m.id)
+    if (!id) continue
+    const prefix = m.id === currentModel ? '\u2705 ' : ''
+    keyboard.text(`${prefix}${m.label}`, `model:${id}`).row()
+  }
+  if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
+  keyboard.text('Dismiss', 'models:dismiss')
+  return keyboard
+}
+
 // /models — show model selection keyboard (receiver mode only)
 bot.command('models', async ctx => {
   if (ctx.chat?.type !== 'private') return
@@ -1206,42 +1262,10 @@ bot.command('models', async ctx => {
   if (!CALLBACK_URL_BASE) return
 
   try {
-    const [modelRes, modelsRes] = await Promise.all([
-      fetch(CALLBACK_URL_BASE + '/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
-      }),
-      fetch(CALLBACK_URL_BASE + '/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_models' }),
-      }),
-    ])
-    if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
-    const modelData = (await modelRes.json()) as { model?: string }
-    const modelsData = (await modelsRes.json()) as {
-      models?: unknown
-      configuredModels?: unknown
-      liveModels?: unknown
-    }
-    const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
-    const availableRaw = validModelRows(modelsData.models)
-    const availableModels = availableRaw.length ? availableRaw : validModelRows(AVAILABLE_MODELS)
-    const configuredModels = Array.isArray(modelsData.configuredModels)
-      ? validModelRows(modelsData.configuredModels)
-      : availableModels
-    const liveModels = validModelRows(modelsData.liveModels)
-
-    const keyboard = new InlineKeyboard()
-    for (const m of configuredModels) {
-      const prefix = m.id === currentModel ? '\u2705 ' : ''
-      keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
-    }
-    if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
-    keyboard.text('Dismiss', 'models:dismiss')
-
-    await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
+    const menu = await fetchModelMenuData(String(ctx.chat.id))
+    if (!menu) return
+    const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
+    await ctx.reply(`Current model: ${menu.currentModel}\nSelect a model:`, {
       reply_markup: keyboard,
     })
   } catch (err) {
@@ -1531,25 +1555,13 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     try {
-      const [modelRes, modelsRes] = await Promise.all([
-        fetch(CALLBACK_URL_BASE + '/command', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.callbackQuery.message?.chat.id) }),
-        }),
-        fetch(CALLBACK_URL_BASE + '/command', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: 'get_models' }),
-        }),
-      ])
-      if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
-      const modelData = await modelRes.json() as { model?: string }
-      const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
-      const data = await modelsRes.json() as { liveModels?: unknown; models?: unknown }
-      const liveModels = Array.isArray(data.liveModels)
-        ? validModelRows(data.liveModels)
-        : validModelRows(data.models)
+      const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+      const menu = await fetchModelMenuData(chatId)
+      if (!menu) {
+        await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+        return
+      }
+      const { currentModel, liveModels } = menu
       const page = Number(moreMatch[1])
       const pageSize = 16
       const totalPages = Math.max(1, Math.ceil(liveModels.length / pageSize))
@@ -1558,7 +1570,7 @@ bot.on('callback_query:data', async ctx => {
       for (const [index, m] of liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).entries()) {
         const modelCallback = safeModelId(m.id)
         if (!modelCallback) continue
-        keyboard.text(`${m.id === currentModel ? '✅ ' : ''}${m.id}`, `model:${modelCallback}`)
+        keyboard.text(`${m.id === currentModel ? '\u2705 ' : ''}${m.id}`, `model:${modelCallback}`)
         if (index % 2 === 1) keyboard.row()
       }
       if (liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).length % 2 === 1) keyboard.row()
@@ -1583,29 +1595,15 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     try {
-      const [modelRes, modelsRes] = await Promise.all([
-        fetch(CALLBACK_URL_BASE + '/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.callbackQuery.message?.chat.id) }) }),
-        fetch(CALLBACK_URL_BASE + '/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'get_models' }) }),
-      ])
-      if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
-      const modelData = await modelRes.json() as { model?: string }
-      const modelsData = await modelsRes.json() as { configuredModels?: unknown; liveModels?: unknown; models?: unknown }
-      const configuredModels = Array.isArray(modelsData.configuredModels)
-        ? validModelRows(modelsData.configuredModels)
-        : validModelRows(AVAILABLE_MODELS)
-      const liveModels = Array.isArray(modelsData.liveModels)
-        ? validModelRows(modelsData.liveModels)
-        : validModelRows(modelsData.models).filter(m => !configuredModels.some(c => c.id === m.id))
-      const keyboard = new InlineKeyboard()
-      for (const m of configuredModels) {
-        const id = safeModelId(m.id)
-        if (!id) continue
-        keyboard.text(`${m.id === (modelData.model ?? '') ? '✅ ' : ''}${m.label}`, `model:${id}`).row()
+      const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+      const menu = await fetchModelMenuData(chatId)
+      if (!menu) {
+        await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+        return
       }
-      if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
-      keyboard.text('Dismiss', 'models:dismiss')
+      const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
       await ctx.answerCallbackQuery().catch(() => {})
-      await ctx.editMessageText(`Current model: ${modelData.model ?? ''}\nSelect a model:`, { reply_markup: keyboard })
+      await ctx.editMessageText(`Current model: ${menu.currentModel}\nSelect a model:`, { reply_markup: keyboard })
     } catch {
       await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
     }

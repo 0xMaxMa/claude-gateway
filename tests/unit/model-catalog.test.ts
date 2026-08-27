@@ -77,7 +77,7 @@ describe('model catalog — parse', () => {
     expect(parsed).toEqual(STATIC);
   });
 
-  it('prefers a context window the response states over the static one', () => {
+  it('keeps the static context window even when the response states a different one', () => {
     const parsed = parseModelCatalog(
       { data: [{ id: 'claude-opus-5', display_name: 'Opus 5', context_window: 400000 }] },
       STATIC,

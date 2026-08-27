@@ -266,7 +266,7 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
       from: '1.2.0',
       to: '1.3.1',
       updated: true,
-      warning: 'service will restart',
+      warning: 'process will stop — restart manually',
     });
 
     // Restore
