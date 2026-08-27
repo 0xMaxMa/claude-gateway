@@ -1291,6 +1291,39 @@ describe('SessionProcess', () => {
     nowSpy.mockRestore();
   });
 
+  it('BG11: when one message dispatches two background tools, the LONGER grace wins regardless of array order (#415 review)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    // Agent (15-min grace) listed BEFORE a persistent Monitor (24h grace) in the
+    // same assistant message — the shorter-lived tool must not shadow the longer one.
+    const multiDispatchLine = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_bg_agent', name: 'Agent', input: {} },
+          { type: 'tool_use', id: 'toolu_bg_monitor', name: 'Monitor', input: { persistent: true } },
+        ],
+      },
+      stop_reason: 'tool_use',
+    });
+
+    const sp = makeSp('chat:bg-multi-dispatch', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(multiDispatchLine + '\n'));
+    sp.setProcessing(false);
+
+    // Past the Agent-only 15-min window — must still be retained because of the
+    // persistent Monitor also dispatched in the same message.
+    nowSpy.mockReturnValue(T0 + 60 * 60 * 1000); // +1h
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------

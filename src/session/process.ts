@@ -88,10 +88,9 @@ function computeBackgroundGraceMs(toolName: string, input: unknown): number {
       : 0;
   // A little headroom past the monitor's own timeout so a notification that
   // arrives right at expiry isn't racing the retention window's own expiry.
-  return Math.min(
-    BACKGROUND_MONITOR_MAX_GRACE_MS,
-    Math.max(BACKGROUND_AGENT_GRACE_MS, declaredTimeout + BACKGROUND_AGENT_GRACE_MS),
-  );
+  // declaredTimeout is always >= 0, so declaredTimeout + BACKGROUND_AGENT_GRACE_MS
+  // is always >= BACKGROUND_AGENT_GRACE_MS — no separate floor needed.
+  return Math.min(BACKGROUND_MONITOR_MAX_GRACE_MS, declaredTimeout + BACKGROUND_AGENT_GRACE_MS);
 }
 
 // Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
@@ -931,14 +930,23 @@ export class SessionProcess extends EventEmitter {
             // so restartOrDefer can tell "genuinely idle" apart from "idle because
             // it just fired off async work and is waiting on a task-notification".
             // Only the final (non-partial) message carries a fully materialised
-            // tool_use block, same as the reply-mirror check above.
+            // tool_use block, same as the reply-mirror check above. A single
+            // message can dispatch more than one background tool at once (e.g. a
+            // sub-agent Task alongside a persistent Monitor) — take the MAX grace
+            // across all of them, not just the first match, so a longer-lived
+            // dispatch later in the array can't be shadowed by a shorter one
+            // earlier in it (#415 review).
             if (!isPartial && !this.queryMode) {
+              let dispatchedGraceMs: number | null = null;
               for (const block of obj.message.content) {
                 if (block.type === 'tool_use' && typeof block.name === 'string' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
-                  this.lastBackgroundAgentDispatchAt = Date.now();
-                  this.backgroundGraceMs = computeBackgroundGraceMs(block.name, block.input);
-                  break;
+                  const graceMs = computeBackgroundGraceMs(block.name, block.input);
+                  dispatchedGraceMs = dispatchedGraceMs === null ? graceMs : Math.max(dispatchedGraceMs, graceMs);
                 }
+              }
+              if (dispatchedGraceMs !== null) {
+                this.lastBackgroundAgentDispatchAt = Date.now();
+                this.backgroundGraceMs = dispatchedGraceMs;
               }
             }
 
@@ -1117,6 +1125,7 @@ export class SessionProcess extends EventEmitter {
       this.process = null;
       this._exited = true;
       this.lastBackgroundAgentDispatchAt = null;
+      this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
       this.clearBackgroundWaitTimer();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
@@ -1386,6 +1395,7 @@ export class SessionProcess extends EventEmitter {
       this.backgroundWaitTimer = setTimeout(() => {
         this.backgroundWaitTimer = null;
         this.lastBackgroundAgentDispatchAt = null;
+        this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
         if (!this._processing) {
           try { fs.rmSync(processingPath, { force: true }); } catch {}
           this.emit('backgroundWorkExpired');
@@ -1405,6 +1415,7 @@ export class SessionProcess extends EventEmitter {
         // it (moot either way). isProcessing now covers this session correctly
         // on its own, so the idle-window concern this field exists for is over.
         this.lastBackgroundAgentDispatchAt = null;
+        this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
         this.clearBackgroundWaitTimer();
       }
       this.emit('processingChange', active);
@@ -1517,6 +1528,7 @@ export class SessionProcess extends EventEmitter {
   async stop(): Promise<void> {
     this.stopping = true;
     this.lastBackgroundAgentDispatchAt = null;
+    this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
     this.clearBackgroundWaitTimer();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
