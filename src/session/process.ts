@@ -942,12 +942,12 @@ export class SessionProcess extends EventEmitter {
             // across all of them, not just the first match, so a longer-lived
             // dispatch later in the array can't be shadowed by a shorter one
             // earlier in it (#415 review). The same shadowing risk exists ACROSS
-            // messages within one turn too: a persistent Monitor dispatched
-            // earlier in the turn must not be forgotten just because a later
-            // message in the SAME turn dispatches an unrelated, shorter-lived
-            // Agent/Workflow before the turn ends — so a still-outstanding
-            // Monitor-class dispatch is preserved rather than overwritten by a
-            // later non-Monitor one (manual review round).
+            // messages and turns too: a still-outstanding Monitor with a longer
+            // remaining protection window must never be overwritten by a LATER,
+            // less-protective dispatch — whether that later one is Agent/Workflow
+            // or even another, shorter-lived Monitor — so the decision compares
+            // the two dispatches' actual expiry times rather than just "is the
+            // new one Monitor" (manual review round).
             if (!isPartial && !this.queryMode) {
               let dispatchedGraceMs: number | null = null;
               let dispatchedIsMonitor = false;
@@ -960,14 +960,23 @@ export class SessionProcess extends EventEmitter {
               }
               if (dispatchedGraceMs !== null) {
                 const now = Date.now();
-                const existingMonitorStillOutstanding =
-                  this.backgroundDispatchIsMonitor &&
-                  this.lastBackgroundAgentDispatchAt !== null &&
-                  now - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs;
-                if (!existingMonitorStillOutstanding || dispatchedIsMonitor) {
+                const existingIsProtectiveMonitor =
+                  this.backgroundDispatchIsMonitor && this.isTrackedDispatchStillOutstanding();
+                const newExpiry = now + dispatchedGraceMs;
+                const existingExpiry = existingIsProtectiveMonitor
+                  ? this.lastBackgroundAgentDispatchAt! + this.backgroundGraceMs
+                  : -Infinity;
+                if (!existingIsProtectiveMonitor || newExpiry >= existingExpiry) {
                   this.lastBackgroundAgentDispatchAt = now;
                   this.backgroundGraceMs = dispatchedGraceMs;
                   this.backgroundDispatchIsMonitor = dispatchedIsMonitor;
+                  // The tracked deadline just changed — any timer already armed
+                  // by retainBackgroundWorkingState() against the OLD deadline is
+                  // now stale and must not be left to fire on the old schedule
+                  // (it would wipe this fresh dispatch out early). Clearing here
+                  // forces the next retainBackgroundWorkingState() call to re-arm
+                  // against the new deadline (manual review round).
+                  this.clearBackgroundWaitTimer();
                 }
               }
             }
@@ -1146,10 +1155,7 @@ export class SessionProcess extends EventEmitter {
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       this._exited = true;
-      this.lastBackgroundAgentDispatchAt = null;
-      this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
-      this.backgroundDispatchIsMonitor = false;
-      this.clearBackgroundWaitTimer();
+      this.resetBackgroundDispatchState();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
       // stopped or restarted mid-turn (without a final result/session_idle).
@@ -1389,6 +1395,32 @@ export class SessionProcess extends EventEmitter {
     }
   }
 
+  // The single predicate for "is the currently tracked background dispatch
+  // still within its own grace window" — shared by hasLikelyOutstandingBackgroundWork()
+  // (the read path restartOrDefer/startIdleCleaner/retainBackgroundWorkingState
+  // all trust) and the dispatch-overwrite decision below, so the two can never
+  // silently disagree (manual review round).
+  private isTrackedDispatchStillOutstanding(): boolean {
+    return (
+      this.lastBackgroundAgentDispatchAt !== null &&
+      Date.now() - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs
+    );
+  }
+
+  // Clears the three fields that together describe "is there a background
+  // dispatch we should still treat as outstanding" back to their defaults, and
+  // the timer armed against them. Centralised (rather than repeated at each
+  // lifecycle site) so a future field added to this trio can't be forgotten at
+  // one of them (manual review round — this is exactly the kind of scattered
+  // reset that let an earlier version of this file's stale-timer bug slip
+  // through unnoticed).
+  private resetBackgroundDispatchState(): void {
+    this.lastBackgroundAgentDispatchAt = null;
+    this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+    this.backgroundDispatchIsMonitor = false;
+    this.clearBackgroundWaitTimer();
+  }
+
   /**
    * Extend Telegram's working state only while a parent session is waiting for
    * background Agent/Workflow/Monitor work. A bounded expiry (BACKGROUND_AGENT_GRACE_MS,
@@ -1417,9 +1449,7 @@ export class SessionProcess extends EventEmitter {
       const remaining = Math.max(0, this.backgroundGraceMs - elapsed);
       this.backgroundWaitTimer = setTimeout(() => {
         this.backgroundWaitTimer = null;
-        this.lastBackgroundAgentDispatchAt = null;
-        this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
-        this.backgroundDispatchIsMonitor = false;
+        this.resetBackgroundDispatchState();
         if (!this._processing) {
           try { fs.rmSync(processingPath, { force: true }); } catch {}
           this.emit('backgroundWorkExpired');
@@ -1447,9 +1477,7 @@ export class SessionProcess extends EventEmitter {
         // arriving during a persistent Monitor's run silently strips its
         // SIGKILL/eviction protection early).
         if (!this.backgroundDispatchIsMonitor) {
-          this.lastBackgroundAgentDispatchAt = null;
-          this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
-          this.clearBackgroundWaitTimer();
+          this.resetBackgroundDispatchState();
         }
       }
       this.emit('processingChange', active);
@@ -1548,8 +1576,7 @@ export class SessionProcess extends EventEmitter {
    */
   hasLikelyOutstandingBackgroundWork(): boolean {
     if (this._processing) return false;
-    if (this.lastBackgroundAgentDispatchAt === null) return false;
-    return Date.now() - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs;
+    return this.isTrackedDispatchStillOutstanding();
   }
 
   isRunning(): boolean {
@@ -1561,10 +1588,7 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    this.lastBackgroundAgentDispatchAt = null;
-    this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
-    this.backgroundDispatchIsMonitor = false;
-    this.clearBackgroundWaitTimer();
+    this.resetBackgroundDispatchState();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}

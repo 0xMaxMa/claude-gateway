@@ -1422,6 +1422,66 @@ describe('SessionProcess', () => {
     nowSpy.mockRestore();
   });
 
+  it('BG16: a fresh dispatch clears an already-armed timer so it re-arms against the NEW deadline instead of firing on the stale one (manual review round)', async () => {
+    const sp = makeSp('chat:bg-stale-timer', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    jest.useFakeTimers();
+    try {
+      // t=0: dispatch a persistent Monitor and let the turn's own idle handling
+      // arm retainBackgroundWorkingState()'s timer for the 24h deadline.
+      sp.setProcessing(true);
+      lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+      sp.setProcessing(false);
+      expect(sp.retainBackgroundWorkingState()).toBe(true);
+
+      // t=1h: a fresh Monitor dispatch arrives mid-way through the old window —
+      // the real deadline is now 25h (1h + 24h), not the original 24h.
+      jest.advanceTimersByTime(60 * 60 * 1000);
+      sp.setProcessing(true);
+      lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+      sp.setProcessing(false);
+      expect(sp.retainBackgroundWorkingState()).toBe(true);
+
+      // Advance to the OLD (stale) deadline: 24h from t=0 is 23h from here.
+      // A timer left armed against the stale deadline would fire now and wipe
+      // out the fresh dispatch's tracking a full hour early.
+      jest.advanceTimersByTime(23 * 60 * 60 * 1000);
+
+      expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('BG17: a later, SHORTER Monitor dispatch does not shrink a still-outstanding, longer-lived Monitor already being tracked (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-no-shrink', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+    // Tracked deadline: T0 + 24h.
+
+    // 2h later, an unrelated one-shot Monitor with a much shorter declared
+    // timeout dispatches — a naive "any new Monitor overwrites" rule would
+    // collapse the deadline down to roughly T0+2h16min.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 60 * 1000);
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 60_000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // Past what the short monitor alone would protect, but still well inside
+    // the ORIGINAL persistent Monitor's 24h window.
+    nowSpy.mockReturnValue(T0 + 10 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------
