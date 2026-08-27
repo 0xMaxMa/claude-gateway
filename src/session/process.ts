@@ -39,15 +39,59 @@ const CHANNEL_REPLY_TOOLS = new Set([
 // right after dispatching one of these is legitimately idle *from the CLI's
 // perspective* while real work is still in flight elsewhere. See
 // BACKGROUND_AGENT_GRACE_MS and hasLikelyOutstandingBackgroundWork() below.
-const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow']);
+// Monitor fits the same contract (returns a task id immediately, delivers
+// each match as a later notification) — without it here, a session whose
+// only outstanding work is a Monitor task gets no retention grace: its
+// Telegram typing indicator (retainBackgroundWorkingState() is Telegram-only)
+// is torn down, AND restartOrDefer()/startIdleCleaner() (both channel-wide,
+// not Telegram-specific) see it as plain-idle and may SIGKILL or evict it —
+// while the monitor is still genuinely running (#413).
+const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow', 'Monitor']);
 // How long a session is treated as "may still have outstanding background
 // work" after dispatching one of BACKGROUND_DISPATCH_TOOLS, once its own turn
 // has ended. Generous enough to cover a multi-agent review of a large diff
 // (the incident that motivated this — a config-driven restart SIGHUP'd a
 // session mid-review, killing 3 in-flight review sub-agents with it, see
 // issue referenced in restartOrDefer below); bounded so a dispatch that never
-// reports back (crashed, errored) can't block a config rollout forever.
+// reports back (crashed, errored) can't block a config rollout forever. This
+// is the default for Agent/Workflow, and for a Monitor dispatch with no
+// longer-lived declared bound — see computeBackgroundGraceMs below for the
+// Monitor-specific cases (#415).
 const BACKGROUND_AGENT_GRACE_MS = 15 * 60 * 1000;
+// Ceiling on the grace window for a Monitor declared to run far longer than
+// BACKGROUND_AGENT_GRACE_MS (a `timeout_ms` beyond it, or `persistent: true`
+// — "session-length watches... runs until TaskStop or session ends"). Without
+// this, such a Monitor loses SIGKILL/eviction protection well before it
+// finishes (#415) — but an UNBOUNDED grace would defeat the crash-safety
+// property BACKGROUND_AGENT_GRACE_MS exists for (a dispatch whose Monitor
+// process died without ever reporting back must still eventually stop
+// blocking a restart/eviction). 24h comfortably covers any real operational
+// use of `persistent: true` within one session's lifetime while still being
+// a bound, not "forever".
+const BACKGROUND_MONITOR_MAX_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long a single BACKGROUND_DISPATCH_TOOLS dispatch should be treated as
+ * "may still be outstanding" — see BACKGROUND_AGENT_GRACE_MS /
+ * BACKGROUND_MONITOR_MAX_GRACE_MS above. Agent/Workflow (and a Monitor with
+ * no declared bound beyond the default) get the standard grace window; a
+ * Monitor that declares a longer `timeout_ms` or `persistent: true` gets a
+ * window sized to actually cover it, capped at BACKGROUND_MONITOR_MAX_GRACE_MS.
+ */
+function computeBackgroundGraceMs(toolName: string, input: unknown): number {
+  if (toolName !== 'Monitor') return BACKGROUND_AGENT_GRACE_MS;
+  const monitorInput = input as { persistent?: unknown; timeout_ms?: unknown } | undefined;
+  if (monitorInput?.persistent === true) return BACKGROUND_MONITOR_MAX_GRACE_MS;
+  const declaredTimeout =
+    typeof monitorInput?.timeout_ms === 'number' && monitorInput.timeout_ms > 0
+      ? monitorInput.timeout_ms
+      : 0;
+  // A little headroom past the monitor's own timeout so a notification that
+  // arrives right at expiry isn't racing the retention window's own expiry.
+  // declaredTimeout is always >= 0, so declaredTimeout + BACKGROUND_AGENT_GRACE_MS
+  // is always >= BACKGROUND_AGENT_GRACE_MS — no separate floor needed.
+  return Math.min(BACKGROUND_MONITOR_MAX_GRACE_MS, declaredTimeout + BACKGROUND_AGENT_GRACE_MS);
+}
 
 // Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
 // assistant text at all — used both to patch the in-memory prompt fed to the next
@@ -126,6 +170,15 @@ export class SessionProcess extends EventEmitter {
   // this field exists for no longer applies. Read via
   // hasLikelyOutstandingBackgroundWork().
   private lastBackgroundAgentDispatchAt: number | null = null;
+  // Grace window for the dispatch recorded in lastBackgroundAgentDispatchAt —
+  // see computeBackgroundGraceMs(). Meaningless while that field is null.
+  private backgroundGraceMs: number = BACKGROUND_AGENT_GRACE_MS;
+  // True when the tracked dispatch includes a Monitor (vs. Agent/Workflow only).
+  // A Monitor represents an independent background watcher that keeps running
+  // alongside ordinary conversation — unlike Agent/Workflow, an unrelated new
+  // turn starting does NOT mean it resolved or was superseded, so
+  // setProcessing(true) must not clear its grace window early (#415 review).
+  private backgroundDispatchIsMonitor = false;
   private backgroundWaitTimer: ReturnType<typeof setTimeout> | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
@@ -883,12 +936,57 @@ export class SessionProcess extends EventEmitter {
             // so restartOrDefer can tell "genuinely idle" apart from "idle because
             // it just fired off async work and is waiting on a task-notification".
             // Only the final (non-partial) message carries a fully materialised
-            // tool_use block, same as the reply-mirror check above.
+            // tool_use block, same as the reply-mirror check above. A single
+            // message can dispatch more than one background tool at once (e.g. a
+            // sub-agent Task alongside a persistent Monitor) — take the MAX grace
+            // across all of them, not just the first match, so a longer-lived
+            // dispatch later in the array can't be shadowed by a shorter one
+            // earlier in it (#415 review). The same shadowing risk exists ACROSS
+            // messages and turns too: a still-outstanding Monitor must never be
+            // demoted by a LATER Agent/Workflow dispatch, even when that later
+            // dispatch's raw expiry timestamp is numerically greater — a plain
+            // Agent/Workflow's grace is fixed at BACKGROUND_AGENT_GRACE_MS, the
+            // same floor a default (no timeout_ms/persistent) Monitor gets, so a
+            // subsequent Agent/Workflow dispatched even moments later always has
+            // a later raw expiry than that Monitor despite offering none of its
+            // turn-survival protection (setProcessing(true) resets non-Monitor
+            // tracking on the very next unrelated turn). Comparing only raw
+            // expiry let that demotion through silently, reintroducing #413
+            // through the code meant to guard it (found in manual review, round
+            // 6). Only another Monitor dispatch — never Agent/Workflow — may
+            // overwrite a still-outstanding Monitor, and only when its own
+            // expiry is at least as protective (BG17's no-shrink guarantee).
             if (!isPartial && !this.queryMode) {
+              let dispatchedGraceMs: number | null = null;
+              let dispatchedIsMonitor = false;
               for (const block of obj.message.content) {
-                if (block.type === 'tool_use' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
-                  this.lastBackgroundAgentDispatchAt = Date.now();
-                  break;
+                if (block.type === 'tool_use' && typeof block.name === 'string' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
+                  const graceMs = computeBackgroundGraceMs(block.name, block.input);
+                  dispatchedGraceMs = dispatchedGraceMs === null ? graceMs : Math.max(dispatchedGraceMs, graceMs);
+                  if (block.name === 'Monitor') dispatchedIsMonitor = true;
+                }
+              }
+              if (dispatchedGraceMs !== null) {
+                const now = Date.now();
+                const existingIsProtectiveMonitor =
+                  this.backgroundDispatchIsMonitor && this.isTrackedDispatchStillOutstanding();
+                const newExpiry = now + dispatchedGraceMs;
+                const existingExpiry = existingIsProtectiveMonitor
+                  ? this.lastBackgroundAgentDispatchAt! + this.backgroundGraceMs
+                  : -Infinity;
+                const canOverwrite =
+                  !existingIsProtectiveMonitor || (dispatchedIsMonitor && newExpiry >= existingExpiry);
+                if (canOverwrite) {
+                  this.lastBackgroundAgentDispatchAt = now;
+                  this.backgroundGraceMs = dispatchedGraceMs;
+                  this.backgroundDispatchIsMonitor = dispatchedIsMonitor;
+                  // The tracked deadline just changed — any timer already armed
+                  // by retainBackgroundWorkingState() against the OLD deadline is
+                  // now stale and must not be left to fire on the old schedule
+                  // (it would wipe this fresh dispatch out early). Clearing here
+                  // forces the next retainBackgroundWorkingState() call to re-arm
+                  // against the new deadline (manual review round).
+                  this.clearBackgroundWaitTimer();
                 }
               }
             }
@@ -1067,8 +1165,7 @@ export class SessionProcess extends EventEmitter {
       if (ptyStreamSocketPath) ptyStreamRegistry.close(ptyStreamSocketPath);
       this.process = null;
       this._exited = true;
-      this.lastBackgroundAgentDispatchAt = null;
-      this.clearBackgroundWaitTimer();
+      this.resetBackgroundDispatchState();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
       // stopped or restarted mid-turn (without a final result/session_idle).
@@ -1308,10 +1405,40 @@ export class SessionProcess extends EventEmitter {
     }
   }
 
+  // The single predicate for "is the currently tracked background dispatch
+  // still within its own grace window" — shared by hasLikelyOutstandingBackgroundWork()
+  // (the read path restartOrDefer/startIdleCleaner/retainBackgroundWorkingState
+  // all trust) and the dispatch-overwrite decision below, so the two can never
+  // silently disagree (manual review round).
+  private isTrackedDispatchStillOutstanding(): boolean {
+    return (
+      this.lastBackgroundAgentDispatchAt !== null &&
+      Date.now() - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs
+    );
+  }
+
+  // Clears the three fields that together describe "is there a background
+  // dispatch we should still treat as outstanding" back to their defaults, and
+  // the timer armed against them. Centralised (rather than repeated at each
+  // lifecycle site) so a future field added to this trio can't be forgotten at
+  // one of them (manual review round — this is exactly the kind of scattered
+  // reset that let an earlier version of this file's stale-timer bug slip
+  // through unnoticed).
+  private resetBackgroundDispatchState(): void {
+    this.lastBackgroundAgentDispatchAt = null;
+    this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+    this.backgroundDispatchIsMonitor = false;
+    this.clearBackgroundWaitTimer();
+  }
+
   /**
    * Extend Telegram's working state only while a parent session is waiting for
-   * background Agent/Workflow work. A bounded expiry releases the state if the
-   * child task never sends its completion notification.
+   * background Agent/Workflow/Monitor work. A bounded expiry (BACKGROUND_AGENT_GRACE_MS,
+   * fixed from the dispatch timestamp — not renewed by later activity) releases
+   * the state if the dispatch never sends its completion notification within
+   * that window. A Monitor started with a longer `timeout_ms` or `persistent:
+   * true` can legitimately outlive this window; see the note above
+   * BACKGROUND_AGENT_GRACE_MS.
    */
   retainBackgroundWorkingState(): boolean {
     if (this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
@@ -1329,10 +1456,10 @@ export class SessionProcess extends EventEmitter {
 
     if (this.backgroundWaitTimer === null) {
       const elapsed = Date.now() - this.lastBackgroundAgentDispatchAt!;
-      const remaining = Math.max(0, BACKGROUND_AGENT_GRACE_MS - elapsed);
+      const remaining = Math.max(0, this.backgroundGraceMs - elapsed);
       this.backgroundWaitTimer = setTimeout(() => {
         this.backgroundWaitTimer = null;
-        this.lastBackgroundAgentDispatchAt = null;
+        this.resetBackgroundDispatchState();
         if (!this._processing) {
           try { fs.rmSync(processingPath, { force: true }); } catch {}
           this.emit('backgroundWorkExpired');
@@ -1347,12 +1474,21 @@ export class SessionProcess extends EventEmitter {
     if (this._processing !== active) {
       this._processing = active;
       if (active) {
-        // A fresh turn is starting — either the notification this dispatch was
-        // waiting on just woke it (resolved), or unrelated new work superseded
-        // it (moot either way). isProcessing now covers this session correctly
-        // on its own, so the idle-window concern this field exists for is over.
-        this.lastBackgroundAgentDispatchAt = null;
-        this.clearBackgroundWaitTimer();
+        // A fresh turn is starting. For an Agent/Workflow-only dispatch: either
+        // the notification it was waiting on just woke this turn, or unrelated
+        // new work superseded it (moot either way) — isProcessing now covers
+        // this session correctly on its own, so clear it.
+        // A Monitor dispatch is different: it represents an independent
+        // background watcher that keeps running alongside ordinary
+        // conversation, not a one-shot "waiting for this exact notification"
+        // — an unrelated new turn starting is NOT evidence it resolved, so its
+        // grace window must survive this turn and keep expiring on its own
+        // schedule (#415 review; without this, an unrelated chat message
+        // arriving during a persistent Monitor's run silently strips its
+        // SIGKILL/eviction protection early).
+        if (!this.backgroundDispatchIsMonitor) {
+          this.resetBackgroundDispatchState();
+        }
       }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
@@ -1442,15 +1578,15 @@ export class SessionProcess extends EventEmitter {
   /**
    * True when this session's own turn has ended (not `isProcessing`) but it
    * recently dispatched a BACKGROUND_DISPATCH_TOOLS tool_use — i.e. it looks
-   * idle from the outside while a sub-agent it launched may still be doing
-   * real work. `restartOrDefer` treats this the same as `isProcessing` so a
+   * idle from the outside while that dispatch may still be doing real work.
+   * `restartOrDefer` treats this the same as `isProcessing` so a
    * config-driven restart never SIGKILLs a session mid-dispatch, regardless of
-   * which restart tier triggered it.
+   * which restart tier triggered it. The grace window itself is per-dispatch —
+   * see computeBackgroundGraceMs().
    */
   hasLikelyOutstandingBackgroundWork(): boolean {
     if (this._processing) return false;
-    if (this.lastBackgroundAgentDispatchAt === null) return false;
-    return Date.now() - this.lastBackgroundAgentDispatchAt < BACKGROUND_AGENT_GRACE_MS;
+    return this.isTrackedDispatchStillOutstanding();
   }
 
   isRunning(): boolean {
@@ -1462,8 +1598,7 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    this.lastBackgroundAgentDispatchAt = null;
-    this.clearBackgroundWaitTimer();
+    this.resetBackgroundDispatchState();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}

@@ -1100,12 +1100,12 @@ describe('SessionProcess', () => {
   // triggered an immediate restart of their idle-but-waiting parent).
   // --------------------------------------------------------------------------
 
-  function agentDispatchLine(toolName: string): string {
+  function agentDispatchLine(toolName: string, input: Record<string, unknown> = {}): string {
     return JSON.stringify({
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'tool_use', id: 'toolu_bg_1', name: toolName, input: {} }],
+        content: [{ type: 'tool_use', id: 'toolu_bg_1', name: toolName, input }],
       },
       stop_reason: 'tool_use',
     });
@@ -1135,6 +1135,16 @@ describe('SessionProcess', () => {
     sp.setProcessing(true);
     lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Workflow') + '\n'));
     sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+  });
+
+  it('BG3b: true after a Monitor dispatch too — Monitor returns a task id immediately and notifies later, same contract as Agent/Workflow (#413)', async () => {
+    const sp = makeSp('chat:bg-monitor', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
+    sp.setProcessing(false); // turn ends right after — the observed #413 incident shape
 
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
   });
@@ -1191,6 +1201,317 @@ describe('SessionProcess', () => {
 
     nowSpy.mockReturnValue(T0 + 16 * 60 * 1000); // +16 min, past the 15-min grace window
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG7b: a Monitor dispatch expires after BACKGROUND_AGENT_GRACE_MS too — the safety valve is not Agent/Workflow-specific (#413)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-ttl', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockReturnValue(T0 + 16 * 60 * 1000); // +16 min, past the 15-min grace window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG8: a Monitor with a declared timeout_ms beyond 15 min stays retained past the flat window (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-timeout', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 30 * 60 * 1000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // Past the old flat 15-min window, but well inside a 30-min declared timeout.
+    nowSpy.mockReturnValue(T0 + 20 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // Past timeout_ms plus its buffer (30min + 15min headroom).
+    nowSpy.mockReturnValue(T0 + 46 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG9: a persistent:true Monitor stays retained far past 15 min but is still bounded, not forever (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-persistent', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+
+    // 2 hours in — still well inside the 24h ceiling.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // Past the 24h ceiling — the crash-safety backstop still applies even to persistent monitors.
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG10: a declared timeout_ms far beyond the 24h ceiling is still capped, not honored verbatim (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-huge-timeout', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 72 * 60 * 60 * 1000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // 20h in: past the old flat 15-min window (proves scaling happened at all —
+    // this alone would be false without the fix) and still inside the 24h cap.
+    nowSpy.mockReturnValue(T0 + 20 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // 25h in: past the 24h ceiling — proves the 72h timeout_ms was NOT honored
+    // verbatim (an uncapped scale would still read true here).
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG11: when one message dispatches two background tools, the LONGER grace wins regardless of array order (#415 review)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    // Agent (15-min grace) listed BEFORE a persistent Monitor (24h grace) in the
+    // same assistant message — the shorter-lived tool must not shadow the longer one.
+    const multiDispatchLine = JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_bg_agent', name: 'Agent', input: {} },
+          { type: 'tool_use', id: 'toolu_bg_monitor', name: 'Monitor', input: { persistent: true } },
+        ],
+      },
+      stop_reason: 'tool_use',
+    });
+
+    const sp = makeSp('chat:bg-multi-dispatch', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(multiDispatchLine + '\n'));
+    sp.setProcessing(false);
+
+    // Past the Agent-only 15-min window — must still be retained because of the
+    // persistent Monitor also dispatched in the same message.
+    nowSpy.mockReturnValue(T0 + 60 * 60 * 1000); // +1h
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG12: a persistent Monitor grace survives an unrelated new turn starting and ending — unlike Agent/Workflow (#415 review)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-survives-turn', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // An hour later, an unrelated inbound message starts and ends a fresh turn
+    // that dispatches nothing background-related — must NOT clobber the still
+    // very-much-alive persistent Monitor's grace.
+    nowSpy.mockReturnValue(T0 + 60 * 60 * 1000);
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // But it is still bounded — past the 24h ceiling it finally releases.
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG13: an Agent-only dispatch is still cleared by an unrelated new turn — BG6 behavior unchanged for the non-Monitor case (#415 review)', async () => {
+    const sp = makeSp('chat:bg-agent-still-clears', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // A fresh, unrelated turn starts and ends with no new dispatch.
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
+  it('BG14: a still-outstanding persistent Monitor from an EARLIER message in the turn is not shadowed by a later, unrelated Agent dispatch in the SAME turn (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-cross-message', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+
+    // First message in the turn: dispatch a persistent Monitor.
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+
+    // A little later, still the SAME turn (isProcessing never went false in
+    // between): an unrelated Agent tool_use in a LATER message must not
+    // overwrite the still-outstanding persistent Monitor's tracking.
+    nowSpy.mockReturnValue(T0 + 5 * 60 * 1000); // +5 min
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+
+    sp.setProcessing(false);
+
+    // Past what a bare Agent dispatch (15 min from T0+5min) would have given —
+    // must still be retained because of the persistent Monitor dispatched first.
+    nowSpy.mockReturnValue(T0 + 3 * 60 * 60 * 1000); // +3h from T0
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG15: a NEW Monitor dispatch in a later message still refreshes tracking normally, even over an existing outstanding one (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-cross-message-refresh', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 20 * 60 * 1000 }) + '\n'));
+
+    // A second Monitor dispatch later in the same turn refreshes the tracked
+    // timestamp — the dispatch-detection code always accepts a NEW Monitor.
+    nowSpy.mockReturnValue(T0 + 10 * 60 * 1000);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 20 * 60 * 1000 }) + '\n'));
+
+    sp.setProcessing(false);
+
+    // Grace counts from the SECOND dispatch (T0+10min), not the first.
+    nowSpy.mockReturnValue(T0 + 40 * 60 * 1000); // 30 min after the second dispatch — still within its 35-min window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockReturnValue(T0 + 50 * 60 * 1000); // 40 min after the second dispatch — past its window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG16: a fresh dispatch clears an already-armed timer so it re-arms against the NEW deadline instead of firing on the stale one (manual review round)', async () => {
+    const sp = makeSp('chat:bg-stale-timer', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    jest.useFakeTimers();
+    try {
+      // t=0: dispatch a persistent Monitor and let the turn's own idle handling
+      // arm retainBackgroundWorkingState()'s timer for the 24h deadline.
+      sp.setProcessing(true);
+      lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+      sp.setProcessing(false);
+      expect(sp.retainBackgroundWorkingState()).toBe(true);
+
+      // t=1h: a fresh Monitor dispatch arrives mid-way through the old window —
+      // the real deadline is now 25h (1h + 24h), not the original 24h.
+      jest.advanceTimersByTime(60 * 60 * 1000);
+      sp.setProcessing(true);
+      lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+      sp.setProcessing(false);
+      expect(sp.retainBackgroundWorkingState()).toBe(true);
+
+      // Advance to the OLD (stale) deadline: 24h from t=0 is 23h from here.
+      // A timer left armed against the stale deadline would fire now and wipe
+      // out the fresh dispatch's tracking a full hour early.
+      jest.advanceTimersByTime(23 * 60 * 60 * 1000);
+
+      expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('BG17: a later, SHORTER Monitor dispatch does not shrink a still-outstanding, longer-lived Monitor already being tracked (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-no-shrink', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+    // Tracked deadline: T0 + 24h.
+
+    // 2h later, an unrelated one-shot Monitor with a much shorter declared
+    // timeout dispatches — a naive "any new Monitor overwrites" rule would
+    // collapse the deadline down to roughly T0+2h16min.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 60 * 1000);
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 60_000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // Past what the short monitor alone would protect, but still well inside
+    // the ORIGINAL persistent Monitor's 24h window.
+    nowSpy.mockReturnValue(T0 + 10 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG18: a later Agent/Workflow dispatch must never demote a still-outstanding default-grace Monitor, even when its raw expiry is numerically later (gateway-code-review round 6)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-no-demote', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    // Default Monitor: no timeout_ms/persistent, so its grace is the same flat
+    // BACKGROUND_AGENT_GRACE_MS floor as Agent/Workflow — the exact condition
+    // under which a later Agent/Workflow's raw expiry can outrun it.
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
+
+    // 2 min later, an unrelated Agent dispatch's fresh 15-min window has a
+    // numerically LATER raw expiry than the Monitor's (T0+17min vs T0+15min),
+    // but must not overwrite it — an Agent/Workflow dispatch offers none of a
+    // Monitor's turn-survival protection.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 1000);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+
+    // An unrelated new turn starting must not clear the Monitor's tracking —
+    // it would if the Agent dispatch above had silently taken over.
+    nowSpy.mockReturnValue(T0 + 3 * 60 * 1000);
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+
+    // Still well within the ORIGINAL Monitor's own 15-min window.
+    nowSpy.mockReturnValue(T0 + 5 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
 
     nowSpy.mockRestore();
   });
