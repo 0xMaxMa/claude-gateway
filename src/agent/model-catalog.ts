@@ -73,24 +73,36 @@ export function resetModelCatalogCache(): void {
 // Parsed `env` block of the Claude Code CLI config. The CLI applies that block
 // internally rather than to the OS environment, so a value set only there is
 // invisible to `process.env` and has to be read from the file.
+//
+// This gateway is a long-lived daemon (spawned once, runs for days), while
+// settings.json is edited live by whoever is testing a different
+// ANTHROPIC_BASE_URL/token — a one-time read here used to mean the daemon
+// silently kept using whatever the file said at its own startup, forever,
+// with no way to notice the file had changed short of a full process
+// restart. Give this the same TTL treatment `fetchModelCatalog` already
+// gives the catalog response itself, so an edit is picked up within a
+// minute instead of never.
 let settingsEnvCache: Record<string, unknown> | null | undefined;
+let settingsEnvFetchedAt = 0;
 
-function settingsEnv(key: string): string {
-  if (settingsEnvCache === undefined) {
+function settingsEnv(key: string, now: number = Date.now()): string {
+  if (settingsEnvCache === undefined || now - settingsEnvFetchedAt >= CATALOG_TTL_MS) {
     try {
       const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
       settingsEnvCache = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))?.env ?? null;
     } catch {
       settingsEnvCache = null;
     }
+    settingsEnvFetchedAt = now;
   }
   const v = settingsEnvCache?.[key];
   return typeof v === 'string' ? v : '';
 }
 
-/** Tests only — the settings file is read once per process otherwise. */
+/** Tests only — the settings file is otherwise re-read at most once per {@link CATALOG_TTL_MS}. */
 export function resetSettingsEnvCache(): void {
   settingsEnvCache = undefined;
+  settingsEnvFetchedAt = 0;
 }
 
 /**
@@ -99,20 +111,20 @@ export function resetSettingsEnvCache(): void {
  * the same `ANTHROPIC_BASE_URL` the session process already uses. Empty means
  * "not configured", which is the signal to stay on the static list.
  */
-export function catalogBaseUrl(): string {
+export function catalogBaseUrl(now: number = Date.now()): string {
   const raw =
     process.env.MODELS_BASE_URL ||
     process.env.ANTHROPIC_BASE_URL ||
-    settingsEnv('ANTHROPIC_BASE_URL');
+    settingsEnv('ANTHROPIC_BASE_URL', now);
   return raw.replace(/\/+$/, '');
 }
 
-function catalogAuthToken(): string {
+function catalogAuthToken(now: number): string {
   return (
     process.env.MODELS_API_KEY ||
     process.env.ANTHROPIC_AUTH_TOKEN ||
-    settingsEnv('ANTHROPIC_AUTH_TOKEN') ||
-    settingsEnv('CLAUDE_CODE_OAUTH_TOKEN')
+    settingsEnv('ANTHROPIC_AUTH_TOKEN', now) ||
+    settingsEnv('CLAUDE_CODE_OAUTH_TOKEN', now)
   );
 }
 
@@ -247,7 +259,7 @@ export async function fetchModelCatalog(
   fallback: ModelConfig[],
   now: number = Date.now(),
 ): Promise<ModelConfig[] | null> {
-  const base = catalogBaseUrl();
+  const base = catalogBaseUrl(now);
   const key = `${base} ${JSON.stringify(fallback)}`;
   if (cache && cache.key === key && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
   if (inFlight && inFlightKey === key) return inFlight;
@@ -274,7 +286,7 @@ export async function fetchModelCatalog(
   request = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const token = catalogAuthToken();
+      const token = catalogAuthToken(now);
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${base}/v1/models`, {
         method: 'GET',

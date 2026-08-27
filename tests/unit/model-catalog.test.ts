@@ -9,6 +9,9 @@
  * degrades to "use the static list" rather than throwing at a picker).
  */
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
   parseModelCatalog,
   fetchModelCatalog,
@@ -317,6 +320,45 @@ describe('model catalog — fetch policy', () => {
     const refreshed = await fetchModelCatalog(STATIC, Date.now() + 61_000);
 
     expect(refreshed!.map((m) => m.id)).toEqual(['claude-opus-5', 'claude-opus-5[1m]', 'new']);
+  });
+
+  it('re-reads settings.json for the auth token once the settings TTL has passed', async () => {
+    // A long-lived gateway daemon must not pin whatever ~/.claude/settings.json
+    // said at its own startup forever — someone editing that file (e.g.
+    // switching ANTHROPIC_BASE_URL/token to point at a different deployment)
+    // must be picked up without a full process restart.
+    //
+    // resetModelCatalogCache() between calls forces a real fetch each time
+    // (standing in for separate, unrelated catalog fetches later in the
+    // process's life) without touching resetSettingsEnvCache — the settings
+    // cache must expire on its own, the same way it would in the daemon.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'model-catalog-settings-'));
+    process.env.CLAUDE_CONFIG_DIR = dir;
+    const settingsPath = path.join(dir, 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'old-token' } }));
+    process.env.ANTHROPIC_BASE_URL = 'https://proxy.example.com';
+    fetchMock.mockResolvedValue(ok({ data: [{ id: 'live' }] }));
+
+    const t0 = Date.now();
+    await fetchModelCatalog(STATIC, t0);
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer old-token');
+
+    // Edit the file mid-run, without calling resetSettingsEnvCache — the real
+    // failure mode was exactly this: the file changes but the running process
+    // never notices.
+    fs.writeFileSync(settingsPath, JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } }));
+
+    // Still within the settings TTL: the stale token is reused, not the new one.
+    resetModelCatalogCache();
+    await fetchModelCatalog(STATIC, t0 + 30_000);
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer old-token');
+
+    // Past the TTL: the file is re-read and the new token is used.
+    resetModelCatalogCache();
+    await fetchModelCatalog(STATIC, t0 + 61_000);
+    expect(fetchMock.mock.calls[2][1].headers.Authorization).toBe('Bearer new-token');
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('shares one request between concurrent callers', async () => {
