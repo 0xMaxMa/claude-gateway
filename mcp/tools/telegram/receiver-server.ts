@@ -1238,7 +1238,7 @@ bot.command('models', async ctx => {
       const prefix = m.id === currentModel ? '\u2705 ' : ''
       keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
     }
-    if (liveModels.length) keyboard.text('More models', 'models:more:0').row()
+    if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
     keyboard.text('Dismiss', 'models:dismiss')
 
     await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
@@ -1531,13 +1531,22 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     try {
-      const res = await fetch(CALLBACK_URL_BASE + '/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_models' }),
-      })
-      if (!res.ok) throw new Error('model request failed')
-      const data = await res.json() as { liveModels?: unknown; models?: unknown }
+      const [modelRes, modelsRes] = await Promise.all([
+        fetch(CALLBACK_URL_BASE + '/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.callbackQuery.message?.chat.id) }),
+        }),
+        fetch(CALLBACK_URL_BASE + '/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'get_models' }),
+        }),
+      ])
+      if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
+      const modelData = await modelRes.json() as { model?: string }
+      const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
+      const data = await modelsRes.json() as { liveModels?: unknown; models?: unknown }
       const liveModels = Array.isArray(data.liveModels)
         ? validModelRows(data.liveModels)
         : validModelRows(data.models)
@@ -1549,7 +1558,7 @@ bot.on('callback_query:data', async ctx => {
       for (const [index, m] of liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).entries()) {
         const modelCallback = safeModelId(m.id)
         if (!modelCallback) continue
-        keyboard.text(m.id, `model:${modelCallback}`)
+        keyboard.text(`${m.id === currentModel ? '✅ ' : ''}${m.id}`, `model:${modelCallback}`)
         if (index % 2 === 1) keyboard.row()
       }
       if (liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).length % 2 === 1) keyboard.row()
@@ -1593,7 +1602,7 @@ bot.on('callback_query:data', async ctx => {
         if (!id) continue
         keyboard.text(`${m.id === (modelData.model ?? '') ? '✅ ' : ''}${m.label}`, `model:${id}`).row()
       }
-      if (liveModels.length) keyboard.text('More models', 'models:more:0').row()
+      if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
       keyboard.text('Dismiss', 'models:dismiss')
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(`Current model: ${modelData.model ?? ''}\nSelect a model:`, { reply_markup: keyboard })
