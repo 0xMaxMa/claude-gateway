@@ -1198,6 +1198,62 @@ bot.command('model', async ctx => {
   }
 })
 
+/** Fetches current model + configured/live model lists. Shared by /models, models:back and models:more so all three agree on fallback behavior. */
+async function fetchModelMenuData(chatId: string): Promise<{
+  currentModel: string
+  configuredModels: Array<{ id: string; label: string }>
+  liveModels: Array<{ id: string; label: string }>
+} | null> {
+  if (!CALLBACK_URL_BASE) return null
+  const [modelRes, modelsRes] = await Promise.all([
+    fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_model', chat_id: chatId }),
+    }),
+    fetch(CALLBACK_URL_BASE + '/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'get_models' }),
+    }),
+  ])
+  if (!modelRes.ok || !modelsRes.ok) throw new Error('model request failed')
+  const modelData = (await modelRes.json()) as { model?: string }
+  const modelsData = (await modelsRes.json()) as {
+    models?: unknown
+    configuredModels?: unknown
+    liveModels?: unknown
+  }
+  const currentModel = typeof modelData.model === 'string' ? modelData.model : ''
+  const availableRaw = validModelRows(modelsData.models)
+  const availableModels = availableRaw.length ? availableRaw : validModelRows(AVAILABLE_MODELS)
+  const configuredModels = Array.isArray(modelsData.configuredModels)
+    ? validModelRows(modelsData.configuredModels)
+    : availableModels
+  const liveModels = Array.isArray(modelsData.liveModels)
+    ? validModelRows(modelsData.liveModels)
+    : availableModels.filter(m => !configuredModels.some(c => c.id === m.id))
+  return { currentModel, configuredModels, liveModels }
+}
+
+/** Builds the root /models keyboard: one row per configured model, plus "More models..." when live-only models exist. */
+function buildModelsRootKeyboard(
+  currentModel: string,
+  configuredModels: Array<{ id: string; label: string }>,
+  liveModels: Array<{ id: string; label: string }>,
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+  for (const m of configuredModels) {
+    const id = safeModelId(m.id)
+    if (!id) continue
+    const prefix = m.id === currentModel ? '\u2705 ' : ''
+    keyboard.text(`${prefix}${m.label}`, `model:${id}`).row()
+  }
+  if (liveModels.length) keyboard.text('More models...', 'models:more:0').row()
+  keyboard.text('Dismiss', 'models:dismiss')
+  return keyboard
+}
+
 // /models — show model selection keyboard (receiver mode only)
 bot.command('models', async ctx => {
   if (ctx.chat?.type !== 'private') return
@@ -1206,31 +1262,10 @@ bot.command('models', async ctx => {
   if (!CALLBACK_URL_BASE) return
 
   try {
-    const [modelRes, modelsRes] = await Promise.all([
-      fetch(CALLBACK_URL_BASE + '/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_model', chat_id: String(ctx.chat.id) }),
-      }),
-      fetch(CALLBACK_URL_BASE + '/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'get_models' }),
-      }),
-    ])
-    const modelData = (await modelRes.json()) as { model?: string }
-    const modelsData = (await modelsRes.json()) as { models?: { id: string; label: string }[] }
-    const currentModel = modelData.model ?? ''
-    const availableModels = modelsData.models ?? AVAILABLE_MODELS
-
-    const keyboard = new InlineKeyboard()
-    for (const m of availableModels) {
-      const prefix = m.id === currentModel ? '\u2705 ' : ''
-      keyboard.text(`${prefix}${m.label}`, `model:${m.id}`).row()
-    }
-    keyboard.text('Dismiss', 'models:dismiss')
-
-    await ctx.reply(`Current model: ${currentModel}\nSelect a model:`, {
+    const menu = await fetchModelMenuData(String(ctx.chat.id))
+    if (!menu) return
+    const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
+    await ctx.reply(`Current model: ${menu.currentModel}\nSelect a model:`, {
       reply_markup: keyboard,
     })
   } catch (err) {
@@ -1403,6 +1438,26 @@ function isCallbackAuthorized(ctx: Context): boolean {
   return access.allowFrom.includes(String(ctx.from?.id ?? ''))
 }
 
+/** Telegram callback_data is capped at 64 UTF-8 bytes; reject untrusted ids safely. */
+function safeModelId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const id = value.trim()
+  return id && Buffer.byteLength(`model:${id}`, 'utf8') <= 64 ? id : null
+}
+
+function validModelRows(value: unknown): Array<{ id: string; label: string }> {
+  if (!Array.isArray(value)) return []
+  const rows: Array<{ id: string; label: string }> = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue
+    const row = item as { id?: unknown; model_id?: unknown; label?: unknown; display_name?: unknown; name?: unknown }
+    const id = safeModelId(row.id) ?? safeModelId(row.model_id)
+    const labelValue = [row.label, row.display_name, row.name].find(v => typeof v === 'string' && v.trim())
+    if (id && typeof labelValue === 'string') rows.push({ id, label: labelValue.trim() })
+  }
+  return rows
+}
+
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -1486,6 +1541,72 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
     await ctx.deleteMessage().catch(() => {})
+    return
+  }
+
+  const moreMatch = /^models:more:(\d+)$/.exec(data)
+  if (moreMatch) {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    try {
+      const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+      const menu = await fetchModelMenuData(chatId)
+      if (!menu) {
+        await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+        return
+      }
+      const { currentModel, liveModels } = menu
+      const page = Number(moreMatch[1])
+      const pageSize = 16
+      const totalPages = Math.max(1, Math.ceil(liveModels.length / pageSize))
+      const safePage = Math.min(page, totalPages - 1)
+      const keyboard = new InlineKeyboard()
+      for (const [index, m] of liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).entries()) {
+        const modelCallback = safeModelId(m.id)
+        if (!modelCallback) continue
+        keyboard.text(`${m.id === currentModel ? '\u2705 ' : ''}${m.id}`, `model:${modelCallback}`)
+        if (index % 2 === 1) keyboard.row()
+      }
+      if (liveModels.slice(safePage * pageSize, (safePage + 1) * pageSize).length % 2 === 1) keyboard.row()
+      keyboard.text('«', safePage === 0 ? 'models:back' : `models:more:${safePage - 1}`)
+      if (safePage < totalPages - 1) keyboard.text('»', `models:more:${safePage + 1}`)
+      keyboard.row().text('Dismiss', 'models:dismiss')
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(`More models (live) — page ${safePage + 1}/${totalPages}:`, { reply_markup: keyboard })
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
+    return
+  }
+
+  if (data === 'models:back') {
+    if (!isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!CALLBACK_URL_BASE) {
+      await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+      return
+    }
+    try {
+      const chatId = String(ctx.callbackQuery.message?.chat.id ?? ctx.from.id)
+      const menu = await fetchModelMenuData(chatId)
+      if (!menu) {
+        await ctx.answerCallbackQuery({ text: 'Not available.' }).catch(() => {})
+        return
+      }
+      const keyboard = buildModelsRootKeyboard(menu.currentModel, menu.configuredModels, menu.liveModels)
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(`Current model: ${menu.currentModel}\nSelect a model:`, { reply_markup: keyboard })
+    } catch {
+      await ctx.answerCallbackQuery({ text: 'Request failed' }).catch(() => {})
+    }
     return
   }
 

@@ -333,9 +333,9 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
 
     const text = forwardText();
     expect(text).toContain('Some BYOK Model');
-    // The static entries are gone: the catalog replaces the list, it does not
-    // append to it — otherwise a model removed upstream never disappears.
-    expect(text).not.toContain('Sonnet 4.6');
+    expect(text).toContain('Configured models');
+    expect(text).toContain('More models (live)');
+    expect(text).toContain('Sonnet 4.6');
   }, 15000);
 
   it('selects and persists a model that exists only in the live catalog', async () => {
@@ -422,7 +422,11 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
 
     const models = await getModelsOverHttp(port);
 
-    expect(models).toEqual([{ id: 'byok/some-model', label: 'Some BYOK Model' }]);
+    expect(models).toEqual([
+      { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+      { id: 'claude-opus-5', label: 'Opus 5' },
+      { id: 'byok/some-model', label: 'Some BYOK Model' },
+    ]);
   }, 15000);
 
   it('get_models answers with the static list when the catalog is unreachable', async () => {

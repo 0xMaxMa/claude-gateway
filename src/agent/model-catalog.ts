@@ -53,43 +53,56 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 interface CatalogCache {
   models: ModelConfig[];
   fetchedAt: number;
+  key: string;
 }
 
 let cache: CatalogCache | null = null;
 /** In-flight fetch, so N concurrent callers make one request, not N. */
 let inFlight: Promise<ModelConfig[] | null> | null = null;
+let inFlightKey: string | null = null;
 let warnedInsecureUrl = false;
 
 /** Reset module state. Tests only — each case needs a clean cache. */
 export function resetModelCatalogCache(): void {
   cache = null;
   inFlight = null;
+  inFlightKey = null;
   warnedInsecureUrl = false;
 }
-
-// ── configuration ───────────────────────────────────────────────────────────
 
 // Parsed `env` block of the Claude Code CLI config. The CLI applies that block
 // internally rather than to the OS environment, so a value set only there is
 // invisible to `process.env` and has to be read from the file.
+//
+// This gateway is a long-lived daemon (spawned once, runs for days), while
+// settings.json is edited live by whoever is testing a different
+// ANTHROPIC_BASE_URL/token — a one-time read here used to mean the daemon
+// silently kept using whatever the file said at its own startup, forever,
+// with no way to notice the file had changed short of a full process
+// restart. Give this the same TTL treatment `fetchModelCatalog` already
+// gives the catalog response itself, so an edit is picked up within a
+// minute instead of never.
 let settingsEnvCache: Record<string, unknown> | null | undefined;
+let settingsEnvFetchedAt = 0;
 
-function settingsEnv(key: string): string {
-  if (settingsEnvCache === undefined) {
+function settingsEnv(key: string, now: number = Date.now()): string {
+  if (settingsEnvCache === undefined || now - settingsEnvFetchedAt >= CATALOG_TTL_MS) {
     try {
       const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
       settingsEnvCache = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))?.env ?? null;
     } catch {
       settingsEnvCache = null;
     }
+    settingsEnvFetchedAt = now;
   }
   const v = settingsEnvCache?.[key];
   return typeof v === 'string' ? v : '';
 }
 
-/** Tests only — the settings file is read once per process otherwise. */
+/** Tests only — the settings file is otherwise re-read at most once per {@link CATALOG_TTL_MS}. */
 export function resetSettingsEnvCache(): void {
   settingsEnvCache = undefined;
+  settingsEnvFetchedAt = 0;
 }
 
 /**
@@ -98,20 +111,20 @@ export function resetSettingsEnvCache(): void {
  * the same `ANTHROPIC_BASE_URL` the session process already uses. Empty means
  * "not configured", which is the signal to stay on the static list.
  */
-export function catalogBaseUrl(): string {
+export function catalogBaseUrl(now: number = Date.now()): string {
   const raw =
     process.env.MODELS_BASE_URL ||
     process.env.ANTHROPIC_BASE_URL ||
-    settingsEnv('ANTHROPIC_BASE_URL');
+    settingsEnv('ANTHROPIC_BASE_URL', now);
   return raw.replace(/\/+$/, '');
 }
 
-function catalogAuthToken(): string {
+function catalogAuthToken(now: number): string {
   return (
     process.env.MODELS_API_KEY ||
     process.env.ANTHROPIC_AUTH_TOKEN ||
-    settingsEnv('ANTHROPIC_AUTH_TOKEN') ||
-    settingsEnv('CLAUDE_CODE_OAUTH_TOKEN')
+    settingsEnv('ANTHROPIC_AUTH_TOKEN', now) ||
+    settingsEnv('CLAUDE_CODE_OAUTH_TOKEN', now)
   );
 }
 
@@ -165,19 +178,33 @@ export function baseUrlIsSecure(raw: string): boolean {
  * live model that lost those fields would silently report against 200k.
  */
 export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): ModelConfig[] | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const rows = (body as { data?: unknown; models?: unknown }).data
-    ?? (body as { models?: unknown }).models;
+  const rows = Array.isArray(body)
+    ? body
+    : (typeof body === 'object' && body !== null
+      ? ((body as { data?: unknown; models?: unknown }).data
+        ?? (body as { models?: unknown }).models)
+      : null);
   if (!Array.isArray(rows)) return null;
 
-  const known = new Map(fallback.map((m) => [m.id, m]));
   const seen = new Set<string>();
+  // Config is authoritative: retain every curated entry, including local [1m]
+  // variants, before adding upstream-only rows. Preserve first duplicate/order.
   const models: ModelConfig[] = [];
+  for (const m of fallback) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    models.push(m);
+  }
+  let usableCount = 0;
   for (const row of rows) {
     if (typeof row !== 'object' || row === null) continue;
-    const r = row as { id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; kind?: unknown; type?: unknown };
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id || seen.has(id)) continue;
+    const r = row as { id?: unknown; model_id?: unknown; display_name?: unknown; label?: unknown; name?: unknown; context_window?: unknown; contextWindow?: unknown; alias?: unknown; multiplier?: unknown; token_multiplier?: unknown; kind?: unknown; type?: unknown };
+    // Prefer a non-empty trimmed `id`; older proxies use `model_id` instead.
+    // Do not let a blank/whitespace `id` mask a usable fallback field.
+    const primaryId = typeof r.id === 'string' ? r.id.trim() : '';
+    const fallbackId = typeof r.model_id === 'string' ? r.model_id.trim() : '';
+    const id = primaryId || fallbackId;
+    if (!id) continue;
     // A proxy that fronts image generation alongside chat may serve one
     // catalog for both — the image tool asks for its half with
     // `/v1/models?kind=image`. An image model in the chat picker is selectable
@@ -188,29 +215,34 @@ export function parseModelCatalog(body: unknown, fallback: ModelConfig[]): Model
     // sent because this repo has no way to know the proxy's chat kind value,
     // and guessing one risks an empty catalog on every deployment.
     const kind = [r.kind, r.type].find((v) => typeof v === 'string' && v.trim());
-    if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.toLowerCase())) continue;
+    if (typeof kind === 'string' && NON_CHAT_KINDS.has(kind.trim().toLowerCase())) continue;
+    usableCount++;
+    if (seen.has(id)) continue;
     seen.add(id);
 
-    const staticEntry = known.get(id);
-    const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim())
-      ?? staticEntry?.label ?? id;
-    const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && v > 0);
-    const multiplier = typeof r.multiplier === 'number' ? r.multiplier : staticEntry?.multiplier;
+    const label = [r.display_name, r.label, r.name].find((v) => typeof v === 'string' && v.trim()) ?? id;
+    const ctx = [r.context_window, r.contextWindow].find((v) => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    const multiplierValue = typeof r.multiplier === 'number' && Number.isFinite(r.multiplier)
+      ? r.multiplier
+      : r.token_multiplier;
+    const multiplier = typeof multiplierValue === 'number' && Number.isFinite(multiplierValue) && multiplierValue > 0
+      ? multiplierValue
+      : undefined;
 
     models.push({
       id,
       label: String(label),
       // A live-only model has no curated alias. Falling back to the id keeps
       // `/model <alias>` working for it rather than leaving the field empty.
-      alias: (typeof r.alias === 'string' && r.alias.trim()) || staticEntry?.alias || id,
-      contextWindow: (ctx as number | undefined) ?? staticEntry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      alias: (typeof r.alias === 'string' && r.alias.trim()) || id,
+      contextWindow: (ctx as number | undefined) ?? DEFAULT_CONTEXT_WINDOW,
       ...(multiplier === undefined ? {} : { multiplier }),
     });
   }
   // An empty catalog is treated as a failed fetch, not as "this deployment has
   // no models": an empty picker is strictly worse than a stale one, and an
   // upstream returning [] is far more likely to be broken than correct.
-  return models.length > 0 ? models : null;
+  return usableCount > 0 ? models : null;
 }
 
 // ── fetch ───────────────────────────────────────────────────────────────────
@@ -227,14 +259,15 @@ export async function fetchModelCatalog(
   fallback: ModelConfig[],
   now: number = Date.now(),
 ): Promise<ModelConfig[] | null> {
-  if (cache && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
-  if (inFlight) return inFlight;
+  const base = catalogBaseUrl(now);
+  const key = `${base} ${JSON.stringify(fallback)}`;
+  if (cache && cache.key === key && now - cache.fetchedAt < CATALOG_TTL_MS) return cache.models;
+  if (inFlight && inFlightKey === key) return inFlight;
 
   // A catalog that is merely stale is still better than the static list, but
   // only while a fetch is actually failing — a successful one below replaces it.
-  const stale = cache && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
+  const stale = cache && cache.key === key && now - cache.fetchedAt < CATALOG_STALE_MS ? cache.models : null;
 
-  const base = catalogBaseUrl();
   if (!base) return null; // standalone deployment — static list is the catalog
 
   if (!baseUrlIsSecure(base)) {
@@ -248,10 +281,12 @@ export async function fetchModelCatalog(
     return null;
   }
 
-  inFlight = (async (): Promise<ModelConfig[] | null> => {
+  inFlightKey = key;
+  let request!: Promise<ModelConfig[] | null>;
+  request = (async (): Promise<ModelConfig[] | null> => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const token = catalogAuthToken();
+      const token = catalogAuthToken(now);
       if (token) headers['Authorization'] = `Bearer ${token}`;
       const res = await fetch(`${base}/v1/models`, {
         method: 'GET',
@@ -263,13 +298,17 @@ export async function fetchModelCatalog(
       // Only a usable catalog is cached, and the cache stamp uses the same
       // clock the TTL check above read. Caching a failure would pin the
       // fallback for a full TTL after one blip.
-      if (parsed) cache = { models: parsed, fetchedAt: now };
+      if (parsed) cache = { models: parsed, fetchedAt: now, key };
       return parsed ?? stale;
     } catch {
       return stale; // unreachable, timed out, or unparseable
     } finally {
-      inFlight = null;
+      if (inFlight === request) {
+        inFlight = null;
+        inFlightKey = null;
+      }
     }
   })();
-  return inFlight;
+  inFlight = request;
+  return request;
 }
