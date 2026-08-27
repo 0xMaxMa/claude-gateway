@@ -1324,6 +1324,48 @@ describe('SessionProcess', () => {
     nowSpy.mockRestore();
   });
 
+  it('BG12: a persistent Monitor grace survives an unrelated new turn starting and ending — unlike Agent/Workflow (#415 review)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-survives-turn', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // An hour later, an unrelated inbound message starts and ends a fresh turn
+    // that dispatches nothing background-related — must NOT clobber the still
+    // very-much-alive persistent Monitor's grace.
+    nowSpy.mockReturnValue(T0 + 60 * 60 * 1000);
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // But it is still bounded — past the 24h ceiling it finally releases.
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG13: an Agent-only dispatch is still cleared by an unrelated new turn — BG6 behavior unchanged for the non-Monitor case (#415 review)', async () => {
+    const sp = makeSp('chat:bg-agent-still-clears', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // A fresh, unrelated turn starts and ends with no new dispatch.
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------

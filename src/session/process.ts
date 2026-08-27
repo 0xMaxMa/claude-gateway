@@ -173,6 +173,12 @@ export class SessionProcess extends EventEmitter {
   // Grace window for the dispatch recorded in lastBackgroundAgentDispatchAt —
   // see computeBackgroundGraceMs(). Meaningless while that field is null.
   private backgroundGraceMs: number = BACKGROUND_AGENT_GRACE_MS;
+  // True when the tracked dispatch includes a Monitor (vs. Agent/Workflow only).
+  // A Monitor represents an independent background watcher that keeps running
+  // alongside ordinary conversation — unlike Agent/Workflow, an unrelated new
+  // turn starting does NOT mean it resolved or was superseded, so
+  // setProcessing(true) must not clear its grace window early (#415 review).
+  private backgroundDispatchIsMonitor = false;
   private backgroundWaitTimer: ReturnType<typeof setTimeout> | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
@@ -938,15 +944,18 @@ export class SessionProcess extends EventEmitter {
             // earlier in it (#415 review).
             if (!isPartial && !this.queryMode) {
               let dispatchedGraceMs: number | null = null;
+              let dispatchedIsMonitor = false;
               for (const block of obj.message.content) {
                 if (block.type === 'tool_use' && typeof block.name === 'string' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
                   const graceMs = computeBackgroundGraceMs(block.name, block.input);
                   dispatchedGraceMs = dispatchedGraceMs === null ? graceMs : Math.max(dispatchedGraceMs, graceMs);
+                  if (block.name === 'Monitor') dispatchedIsMonitor = true;
                 }
               }
               if (dispatchedGraceMs !== null) {
                 this.lastBackgroundAgentDispatchAt = Date.now();
                 this.backgroundGraceMs = dispatchedGraceMs;
+                this.backgroundDispatchIsMonitor = dispatchedIsMonitor;
               }
             }
 
@@ -1126,6 +1135,7 @@ export class SessionProcess extends EventEmitter {
       this._exited = true;
       this.lastBackgroundAgentDispatchAt = null;
       this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+      this.backgroundDispatchIsMonitor = false;
       this.clearBackgroundWaitTimer();
       // Notify listeners that the underlying subprocess died. The runner relies
       // on this to tear down per-chat typing/processing state when a session is
@@ -1396,6 +1406,7 @@ export class SessionProcess extends EventEmitter {
         this.backgroundWaitTimer = null;
         this.lastBackgroundAgentDispatchAt = null;
         this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+        this.backgroundDispatchIsMonitor = false;
         if (!this._processing) {
           try { fs.rmSync(processingPath, { force: true }); } catch {}
           this.emit('backgroundWorkExpired');
@@ -1410,13 +1421,23 @@ export class SessionProcess extends EventEmitter {
     if (this._processing !== active) {
       this._processing = active;
       if (active) {
-        // A fresh turn is starting — either the notification this dispatch was
-        // waiting on just woke it (resolved), or unrelated new work superseded
-        // it (moot either way). isProcessing now covers this session correctly
-        // on its own, so the idle-window concern this field exists for is over.
-        this.lastBackgroundAgentDispatchAt = null;
-        this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
-        this.clearBackgroundWaitTimer();
+        // A fresh turn is starting. For an Agent/Workflow-only dispatch: either
+        // the notification it was waiting on just woke this turn, or unrelated
+        // new work superseded it (moot either way) — isProcessing now covers
+        // this session correctly on its own, so clear it.
+        // A Monitor dispatch is different: it represents an independent
+        // background watcher that keeps running alongside ordinary
+        // conversation, not a one-shot "waiting for this exact notification"
+        // — an unrelated new turn starting is NOT evidence it resolved, so its
+        // grace window must survive this turn and keep expiring on its own
+        // schedule (#415 review; without this, an unrelated chat message
+        // arriving during a persistent Monitor's run silently strips its
+        // SIGKILL/eviction protection early).
+        if (!this.backgroundDispatchIsMonitor) {
+          this.lastBackgroundAgentDispatchAt = null;
+          this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+          this.clearBackgroundWaitTimer();
+        }
       }
       this.emit('processingChange', active);
       if (this.source === 'telegram') {
@@ -1529,6 +1550,7 @@ export class SessionProcess extends EventEmitter {
     this.stopping = true;
     this.lastBackgroundAgentDispatchAt = null;
     this.backgroundGraceMs = BACKGROUND_AGENT_GRACE_MS;
+    this.backgroundDispatchIsMonitor = false;
     this.clearBackgroundWaitTimer();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
