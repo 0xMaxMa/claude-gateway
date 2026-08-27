@@ -1100,12 +1100,12 @@ describe('SessionProcess', () => {
   // triggered an immediate restart of their idle-but-waiting parent).
   // --------------------------------------------------------------------------
 
-  function agentDispatchLine(toolName: string): string {
+  function agentDispatchLine(toolName: string, input: Record<string, unknown> = {}): string {
     return JSON.stringify({
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'tool_use', id: 'toolu_bg_1', name: toolName, input: {} }],
+        content: [{ type: 'tool_use', id: 'toolu_bg_1', name: toolName, input }],
       },
       stop_reason: 'tool_use',
     });
@@ -1218,6 +1218,74 @@ describe('SessionProcess', () => {
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
 
     nowSpy.mockReturnValue(T0 + 16 * 60 * 1000); // +16 min, past the 15-min grace window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG8: a Monitor with a declared timeout_ms beyond 15 min stays retained past the flat window (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-timeout', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 30 * 60 * 1000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // Past the old flat 15-min window, but well inside a 30-min declared timeout.
+    nowSpy.mockReturnValue(T0 + 20 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // Past timeout_ms plus its buffer (30min + 15min headroom).
+    nowSpy.mockReturnValue(T0 + 46 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG9: a persistent:true Monitor stays retained far past 15 min but is still bounded, not forever (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-persistent', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+    sp.setProcessing(false);
+
+    // 2 hours in — still well inside the 24h ceiling.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // Past the 24h ceiling — the crash-safety backstop still applies even to persistent monitors.
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG10: a declared timeout_ms far beyond the 24h ceiling is still capped, not honored verbatim (#415)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-huge-timeout', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 72 * 60 * 60 * 1000 }) + '\n'));
+    sp.setProcessing(false);
+
+    // 20h in: past the old flat 15-min window (proves scaling happened at all —
+    // this alone would be false without the fix) and still inside the 24h cap.
+    nowSpy.mockReturnValue(T0 + 20 * 60 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    // 25h in: past the 24h ceiling — proves the 72h timeout_ms was NOT honored
+    // verbatim (an uncapped scale would still read true here).
+    nowSpy.mockReturnValue(T0 + 25 * 60 * 60 * 1000);
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
 
     nowSpy.mockRestore();

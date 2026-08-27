@@ -53,15 +53,46 @@ const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow', 'Monitor']);
 // (the incident that motivated this — a config-driven restart SIGHUP'd a
 // session mid-review, killing 3 in-flight review sub-agents with it, see
 // issue referenced in restartOrDefer below); bounded so a dispatch that never
-// reports back (crashed, errored) can't block a config rollout forever.
-// KNOWN LIMITATION (tracked in the #413 follow-up issue): this window is
-// fixed from the dispatch timestamp and never renewed, so it was sized for
-// Agent/Workflow's typically-bounded sub-agent reviews. A Monitor started
-// with `persistent: true` or a `timeout_ms` beyond this window can outlive
-// its own retention grace and lose SIGKILL/eviction protection while still
-// genuinely running — this PR only fixes the immediate post-dispatch
-// teardown (#413's actual incident), not that longer-running case.
+// reports back (crashed, errored) can't block a config rollout forever. This
+// is the default for Agent/Workflow, and for a Monitor dispatch with no
+// longer-lived declared bound — see computeBackgroundGraceMs below for the
+// Monitor-specific cases (#415).
 const BACKGROUND_AGENT_GRACE_MS = 15 * 60 * 1000;
+// Ceiling on the grace window for a Monitor declared to run far longer than
+// BACKGROUND_AGENT_GRACE_MS (a `timeout_ms` beyond it, or `persistent: true`
+// — "session-length watches... runs until TaskStop or session ends"). Without
+// this, such a Monitor loses SIGKILL/eviction protection well before it
+// finishes (#415) — but an UNBOUNDED grace would defeat the crash-safety
+// property BACKGROUND_AGENT_GRACE_MS exists for (a dispatch whose Monitor
+// process died without ever reporting back must still eventually stop
+// blocking a restart/eviction). 24h comfortably covers any real operational
+// use of `persistent: true` within one session's lifetime while still being
+// a bound, not "forever".
+const BACKGROUND_MONITOR_MAX_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long a single BACKGROUND_DISPATCH_TOOLS dispatch should be treated as
+ * "may still be outstanding" — see BACKGROUND_AGENT_GRACE_MS /
+ * BACKGROUND_MONITOR_MAX_GRACE_MS above. Agent/Workflow (and a Monitor with
+ * no declared bound beyond the default) get the standard grace window; a
+ * Monitor that declares a longer `timeout_ms` or `persistent: true` gets a
+ * window sized to actually cover it, capped at BACKGROUND_MONITOR_MAX_GRACE_MS.
+ */
+function computeBackgroundGraceMs(toolName: string, input: unknown): number {
+  if (toolName !== 'Monitor') return BACKGROUND_AGENT_GRACE_MS;
+  const monitorInput = input as { persistent?: unknown; timeout_ms?: unknown } | undefined;
+  if (monitorInput?.persistent === true) return BACKGROUND_MONITOR_MAX_GRACE_MS;
+  const declaredTimeout =
+    typeof monitorInput?.timeout_ms === 'number' && monitorInput.timeout_ms > 0
+      ? monitorInput.timeout_ms
+      : 0;
+  // A little headroom past the monitor's own timeout so a notification that
+  // arrives right at expiry isn't racing the retention window's own expiry.
+  return Math.min(
+    BACKGROUND_MONITOR_MAX_GRACE_MS,
+    Math.max(BACKGROUND_AGENT_GRACE_MS, declaredTimeout + BACKGROUND_AGENT_GRACE_MS),
+  );
+}
 
 // Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
 // assistant text at all — used both to patch the in-memory prompt fed to the next
@@ -140,6 +171,9 @@ export class SessionProcess extends EventEmitter {
   // this field exists for no longer applies. Read via
   // hasLikelyOutstandingBackgroundWork().
   private lastBackgroundAgentDispatchAt: number | null = null;
+  // Grace window for the dispatch recorded in lastBackgroundAgentDispatchAt —
+  // see computeBackgroundGraceMs(). Meaningless while that field is null.
+  private backgroundGraceMs: number = BACKGROUND_AGENT_GRACE_MS;
   private backgroundWaitTimer: ReturnType<typeof setTimeout> | null = null;
   readonly spawnedAt = Date.now();
   /** Backend used to run the subprocess. Set during start(); 'headless' until then. */
@@ -900,8 +934,9 @@ export class SessionProcess extends EventEmitter {
             // tool_use block, same as the reply-mirror check above.
             if (!isPartial && !this.queryMode) {
               for (const block of obj.message.content) {
-                if (block.type === 'tool_use' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
+                if (block.type === 'tool_use' && typeof block.name === 'string' && BACKGROUND_DISPATCH_TOOLS.has(block.name)) {
                   this.lastBackgroundAgentDispatchAt = Date.now();
+                  this.backgroundGraceMs = computeBackgroundGraceMs(block.name, block.input);
                   break;
                 }
               }
@@ -1347,7 +1382,7 @@ export class SessionProcess extends EventEmitter {
 
     if (this.backgroundWaitTimer === null) {
       const elapsed = Date.now() - this.lastBackgroundAgentDispatchAt!;
-      const remaining = Math.max(0, BACKGROUND_AGENT_GRACE_MS - elapsed);
+      const remaining = Math.max(0, this.backgroundGraceMs - elapsed);
       this.backgroundWaitTimer = setTimeout(() => {
         this.backgroundWaitTimer = null;
         this.lastBackgroundAgentDispatchAt = null;
@@ -1460,15 +1495,16 @@ export class SessionProcess extends EventEmitter {
   /**
    * True when this session's own turn has ended (not `isProcessing`) but it
    * recently dispatched a BACKGROUND_DISPATCH_TOOLS tool_use — i.e. it looks
-   * idle from the outside while a sub-agent it launched may still be doing
-   * real work. `restartOrDefer` treats this the same as `isProcessing` so a
+   * idle from the outside while that dispatch may still be doing real work.
+   * `restartOrDefer` treats this the same as `isProcessing` so a
    * config-driven restart never SIGKILLs a session mid-dispatch, regardless of
-   * which restart tier triggered it.
+   * which restart tier triggered it. The grace window itself is per-dispatch —
+   * see computeBackgroundGraceMs().
    */
   hasLikelyOutstandingBackgroundWork(): boolean {
     if (this._processing) return false;
     if (this.lastBackgroundAgentDispatchAt === null) return false;
-    return Date.now() - this.lastBackgroundAgentDispatchAt < BACKGROUND_AGENT_GRACE_MS;
+    return Date.now() - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs;
   }
 
   isRunning(): boolean {
