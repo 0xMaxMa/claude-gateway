@@ -39,7 +39,12 @@ const CHANNEL_REPLY_TOOLS = new Set([
 // right after dispatching one of these is legitimately idle *from the CLI's
 // perspective* while real work is still in flight elsewhere. See
 // BACKGROUND_AGENT_GRACE_MS and hasLikelyOutstandingBackgroundWork() below.
-const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow']);
+// Monitor fits the same contract (returns a task id immediately, delivers
+// each match as a later notification) — without it here, a session whose
+// only outstanding work is a Monitor task gets no retention grace and its
+// typing indicator is torn down while the monitor is still genuinely
+// running (#413).
+const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow', 'Monitor']);
 // How long a session is treated as "may still have outstanding background
 // work" after dispatching one of BACKGROUND_DISPATCH_TOOLS, once its own turn
 // has ended. Generous enough to cover a multi-agent review of a large diff

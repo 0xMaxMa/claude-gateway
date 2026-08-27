@@ -1139,6 +1139,16 @@ describe('SessionProcess', () => {
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
   });
 
+  it('BG3b: true after a Monitor dispatch too — Monitor returns a task id immediately and notifies later, same contract as Agent/Workflow (#413)', async () => {
+    const sp = makeSp('chat:bg-monitor', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
+    sp.setProcessing(false); // turn ends right after — the observed #413 incident shape
+
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+  });
+
   it('BG4: an ordinary tool_use (e.g. Bash) never arms it — no false positive', async () => {
     const sp = makeSp('chat:bg-bash', 'telegram', agentConfig, gatewayConfig, sessionStore);
     await sp.start();
@@ -1186,6 +1196,24 @@ describe('SessionProcess', () => {
     await sp.start();
     sp.setProcessing(true);
     lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockReturnValue(T0 + 16 * 60 * 1000); // +16 min, past the 15-min grace window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG7b: a Monitor dispatch expires after BACKGROUND_AGENT_GRACE_MS too — the safety valve is not Agent/Workflow-specific (#413)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-ttl', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
     sp.setProcessing(false);
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
 
