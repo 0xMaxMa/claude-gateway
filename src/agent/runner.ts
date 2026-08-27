@@ -2524,9 +2524,9 @@ export class AgentRunner extends EventEmitter {
         //     bystander (mirrors the image-size-threshold path).
         //   - hasLikelyOutstandingBackgroundWork(): regardless of which tier
         //     called restartOrDefer — even today's aggressive default — a
-        //     session that dispatched a background Agent/Workflow tool_use and
-        //     then ended its OWN turn looks idle here, but a sub-agent it
-        //     launched may still be doing real work. SIGKILLing it now would
+        //     session that dispatched a background Agent/Workflow/Monitor
+        //     tool_use and then ended its OWN turn looks idle here, but that
+        //     dispatch may still be doing real work. SIGKILLing it now would
         //     silently destroy that in-flight work with no notification or
         //     recovery (the incident this guards against: a CLAUDE.md-triggered
         //     restart killed a session mid-way through 3 dispatched code-review
@@ -2730,8 +2730,9 @@ export class AgentRunner extends EventEmitter {
   private startIdleCleaner(): void {
     this.idleCleanerTimer = setInterval(async () => {
       for (const [id, proc] of this.sessions) {
-        // A parent that just dispatched Agent/Workflow work is CLI-idle but its
-        // sub-agent may still need this session to receive the task notification.
+        // A parent that just dispatched Agent/Workflow/Monitor work is CLI-idle
+        // but that dispatch may still need this session to receive its
+        // eventual task notification.
         if (proc.hasLikelyOutstandingBackgroundWork()) continue;
         if (proc.isIdle(this.idleTimeoutMs)) {
           this.logger.info('Stopping idle session', { sessionId: id });

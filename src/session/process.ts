@@ -54,6 +54,13 @@ const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow', 'Monitor']);
 // session mid-review, killing 3 in-flight review sub-agents with it, see
 // issue referenced in restartOrDefer below); bounded so a dispatch that never
 // reports back (crashed, errored) can't block a config rollout forever.
+// KNOWN LIMITATION (tracked in the #413 follow-up issue): this window is
+// fixed from the dispatch timestamp and never renewed, so it was sized for
+// Agent/Workflow's typically-bounded sub-agent reviews. A Monitor started
+// with `persistent: true` or a `timeout_ms` beyond this window can outlive
+// its own retention grace and lose SIGKILL/eviction protection while still
+// genuinely running — this PR only fixes the immediate post-dispatch
+// teardown (#413's actual incident), not that longer-running case.
 const BACKGROUND_AGENT_GRACE_MS = 15 * 60 * 1000;
 
 // Shared wording for a turn that ended (gracefully or via a mid-turn exit) with no
@@ -1317,8 +1324,12 @@ export class SessionProcess extends EventEmitter {
 
   /**
    * Extend Telegram's working state only while a parent session is waiting for
-   * background Agent/Workflow work. A bounded expiry releases the state if the
-   * child task never sends its completion notification.
+   * background Agent/Workflow/Monitor work. A bounded expiry (BACKGROUND_AGENT_GRACE_MS,
+   * fixed from the dispatch timestamp — not renewed by later activity) releases
+   * the state if the dispatch never sends its completion notification within
+   * that window. A Monitor started with a longer `timeout_ms` or `persistent:
+   * true` can legitimately outlive this window; see the note above
+   * BACKGROUND_AGENT_GRACE_MS.
    */
   retainBackgroundWorkingState(): boolean {
     if (this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
