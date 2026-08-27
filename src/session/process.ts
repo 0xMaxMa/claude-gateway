@@ -942,12 +942,20 @@ export class SessionProcess extends EventEmitter {
             // across all of them, not just the first match, so a longer-lived
             // dispatch later in the array can't be shadowed by a shorter one
             // earlier in it (#415 review). The same shadowing risk exists ACROSS
-            // messages and turns too: a still-outstanding Monitor with a longer
-            // remaining protection window must never be overwritten by a LATER,
-            // less-protective dispatch — whether that later one is Agent/Workflow
-            // or even another, shorter-lived Monitor — so the decision compares
-            // the two dispatches' actual expiry times rather than just "is the
-            // new one Monitor" (manual review round).
+            // messages and turns too: a still-outstanding Monitor must never be
+            // demoted by a LATER Agent/Workflow dispatch, even when that later
+            // dispatch's raw expiry timestamp is numerically greater — a plain
+            // Agent/Workflow's grace is fixed at BACKGROUND_AGENT_GRACE_MS, the
+            // same floor a default (no timeout_ms/persistent) Monitor gets, so a
+            // subsequent Agent/Workflow dispatched even moments later always has
+            // a later raw expiry than that Monitor despite offering none of its
+            // turn-survival protection (setProcessing(true) resets non-Monitor
+            // tracking on the very next unrelated turn). Comparing only raw
+            // expiry let that demotion through silently, reintroducing #413
+            // through the code meant to guard it (found in manual review, round
+            // 6). Only another Monitor dispatch — never Agent/Workflow — may
+            // overwrite a still-outstanding Monitor, and only when its own
+            // expiry is at least as protective (BG17's no-shrink guarantee).
             if (!isPartial && !this.queryMode) {
               let dispatchedGraceMs: number | null = null;
               let dispatchedIsMonitor = false;
@@ -966,7 +974,9 @@ export class SessionProcess extends EventEmitter {
                 const existingExpiry = existingIsProtectiveMonitor
                   ? this.lastBackgroundAgentDispatchAt! + this.backgroundGraceMs
                   : -Infinity;
-                if (!existingIsProtectiveMonitor || newExpiry >= existingExpiry) {
+                const canOverwrite =
+                  !existingIsProtectiveMonitor || (dispatchedIsMonitor && newExpiry >= existingExpiry);
+                if (canOverwrite) {
                   this.lastBackgroundAgentDispatchAt = now;
                   this.backgroundGraceMs = dispatchedGraceMs;
                   this.backgroundDispatchIsMonitor = dispatchedIsMonitor;

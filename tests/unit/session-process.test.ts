@@ -1482,6 +1482,40 @@ describe('SessionProcess', () => {
     nowSpy.mockRestore();
   });
 
+  it('BG18: a later Agent/Workflow dispatch must never demote a still-outstanding default-grace Monitor, even when its raw expiry is numerically later (gateway-code-review round 6)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-monitor-no-demote', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+    // Default Monitor: no timeout_ms/persistent, so its grace is the same flat
+    // BACKGROUND_AGENT_GRACE_MS floor as Agent/Workflow — the exact condition
+    // under which a later Agent/Workflow's raw expiry can outrun it.
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor') + '\n'));
+
+    // 2 min later, an unrelated Agent dispatch's fresh 15-min window has a
+    // numerically LATER raw expiry than the Monitor's (T0+17min vs T0+15min),
+    // but must not overwrite it — an Agent/Workflow dispatch offers none of a
+    // Monitor's turn-survival protection.
+    nowSpy.mockReturnValue(T0 + 2 * 60 * 1000);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+    sp.setProcessing(false);
+
+    // An unrelated new turn starting must not clear the Monitor's tracking —
+    // it would if the Agent dispatch above had silently taken over.
+    nowSpy.mockReturnValue(T0 + 3 * 60 * 1000);
+    sp.setProcessing(true);
+    sp.setProcessing(false);
+
+    // Still well within the ORIGINAL Monitor's own 15-min window.
+    nowSpy.mockReturnValue(T0 + 5 * 60 * 1000);
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------
