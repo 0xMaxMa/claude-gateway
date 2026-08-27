@@ -41,9 +41,11 @@ const CHANNEL_REPLY_TOOLS = new Set([
 // BACKGROUND_AGENT_GRACE_MS and hasLikelyOutstandingBackgroundWork() below.
 // Monitor fits the same contract (returns a task id immediately, delivers
 // each match as a later notification) — without it here, a session whose
-// only outstanding work is a Monitor task gets no retention grace and its
-// typing indicator is torn down while the monitor is still genuinely
-// running (#413).
+// only outstanding work is a Monitor task gets no retention grace: its
+// Telegram typing indicator (retainBackgroundWorkingState() is Telegram-only)
+// is torn down, AND restartOrDefer()/startIdleCleaner() (both channel-wide,
+// not Telegram-specific) see it as plain-idle and may SIGKILL or evict it —
+// while the monitor is still genuinely running (#413).
 const BACKGROUND_DISPATCH_TOOLS = new Set(['Agent', 'Workflow', 'Monitor']);
 // How long a session is treated as "may still have outstanding background
 // work" after dispatching one of BACKGROUND_DISPATCH_TOOLS, once its own turn
