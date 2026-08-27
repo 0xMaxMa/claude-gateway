@@ -941,7 +941,13 @@ export class SessionProcess extends EventEmitter {
             // sub-agent Task alongside a persistent Monitor) — take the MAX grace
             // across all of them, not just the first match, so a longer-lived
             // dispatch later in the array can't be shadowed by a shorter one
-            // earlier in it (#415 review).
+            // earlier in it (#415 review). The same shadowing risk exists ACROSS
+            // messages within one turn too: a persistent Monitor dispatched
+            // earlier in the turn must not be forgotten just because a later
+            // message in the SAME turn dispatches an unrelated, shorter-lived
+            // Agent/Workflow before the turn ends — so a still-outstanding
+            // Monitor-class dispatch is preserved rather than overwritten by a
+            // later non-Monitor one (manual review round).
             if (!isPartial && !this.queryMode) {
               let dispatchedGraceMs: number | null = null;
               let dispatchedIsMonitor = false;
@@ -953,9 +959,16 @@ export class SessionProcess extends EventEmitter {
                 }
               }
               if (dispatchedGraceMs !== null) {
-                this.lastBackgroundAgentDispatchAt = Date.now();
-                this.backgroundGraceMs = dispatchedGraceMs;
-                this.backgroundDispatchIsMonitor = dispatchedIsMonitor;
+                const now = Date.now();
+                const existingMonitorStillOutstanding =
+                  this.backgroundDispatchIsMonitor &&
+                  this.lastBackgroundAgentDispatchAt !== null &&
+                  now - this.lastBackgroundAgentDispatchAt < this.backgroundGraceMs;
+                if (!existingMonitorStillOutstanding || dispatchedIsMonitor) {
+                  this.lastBackgroundAgentDispatchAt = now;
+                  this.backgroundGraceMs = dispatchedGraceMs;
+                  this.backgroundDispatchIsMonitor = dispatchedIsMonitor;
+                }
               }
             }
 

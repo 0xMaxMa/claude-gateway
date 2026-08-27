@@ -1366,6 +1366,62 @@ describe('SessionProcess', () => {
     expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
   });
 
+  it('BG14: a still-outstanding persistent Monitor from an EARLIER message in the turn is not shadowed by a later, unrelated Agent dispatch in the SAME turn (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-cross-message', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+
+    // First message in the turn: dispatch a persistent Monitor.
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { persistent: true }) + '\n'));
+
+    // A little later, still the SAME turn (isProcessing never went false in
+    // between): an unrelated Agent tool_use in a LATER message must not
+    // overwrite the still-outstanding persistent Monitor's tracking.
+    nowSpy.mockReturnValue(T0 + 5 * 60 * 1000); // +5 min
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Agent') + '\n'));
+
+    sp.setProcessing(false);
+
+    // Past what a bare Agent dispatch (15 min from T0+5min) would have given —
+    // must still be retained because of the persistent Monitor dispatched first.
+    nowSpy.mockReturnValue(T0 + 3 * 60 * 60 * 1000); // +3h from T0
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockRestore();
+  });
+
+  it('BG15: a NEW Monitor dispatch in a later message still refreshes tracking normally, even over an existing outstanding one (manual review round)', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const T0 = 3_000_000_000;
+    nowSpy.mockReturnValue(T0);
+
+    const sp = makeSp('chat:bg-cross-message-refresh', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    sp.setProcessing(true);
+
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 20 * 60 * 1000 }) + '\n'));
+
+    // A second Monitor dispatch later in the same turn refreshes the tracked
+    // timestamp — the dispatch-detection code always accepts a NEW Monitor.
+    nowSpy.mockReturnValue(T0 + 10 * 60 * 1000);
+    lastProcess!.stdout!.emit('data', Buffer.from(agentDispatchLine('Monitor', { timeout_ms: 20 * 60 * 1000 }) + '\n'));
+
+    sp.setProcessing(false);
+
+    // Grace counts from the SECOND dispatch (T0+10min), not the first.
+    nowSpy.mockReturnValue(T0 + 40 * 60 * 1000); // 30 min after the second dispatch — still within its 35-min window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(true);
+
+    nowSpy.mockReturnValue(T0 + 50 * 60 * 1000); // 40 min after the second dispatch — past its window
+    expect(sp.hasLikelyOutstandingBackgroundWork()).toBe(false);
+
+    nowSpy.mockRestore();
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-17: --include-partial-messages flag is in spawn args
   // --------------------------------------------------------------------------
