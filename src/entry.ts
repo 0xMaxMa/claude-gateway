@@ -28,7 +28,9 @@ import { classifyInvocation, isDirectSystemdChild } from './cli/command-names';
 
 const invocation = classifyInvocation(process.argv.slice(2), process.env, {
   hasTty: process.stdin.isTTY === true,
-  parentIsSystemd: isDirectSystemdChild(),
+  // Only `isSupervised()` -> the INVOCATION_ID branch reads this; skip the
+  // /proc read entirely otherwise (the common bare-terminal and boot cases).
+  parentIsSystemd: process.env.INVOCATION_ID ? isDirectSystemdChild() : undefined,
 });
 
 if (invocation === 'boot' || invocation === 'legacy-boot') {

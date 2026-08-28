@@ -58,6 +58,21 @@ describe('supervisor detection', () => {
     expect(classifyInvocation([], { INVOCATION_ID: 'abc' })).toBe('cli');
   });
 
+  /**
+   * `pm2 startup systemd` runs the PM2 daemon itself under systemd, so a
+   * genuinely PM2-managed process can carry `INVOCATION_ID` — inherited from
+   * that systemd-started daemon — alongside its own `pm_id`, while its
+   * immediate parent is PM2, not systemd (`parentIsSystemd` correctly false).
+   * Checking `INVOCATION_ID` before `pm_id` would reject this on the
+   * unproven `INVOCATION_ID` alone, without ever reaching the `pm_id`
+   * evidence that should have settled it — regression for exactly that.
+   */
+  it('trusts pm_id even when an inherited, unproven INVOCATION_ID is also present', () => {
+    expect(isSupervised({ INVOCATION_ID: 'abc', pm_id: '0' })).toBe(true);
+    expect(isSupervised({ INVOCATION_ID: 'abc', pm_id: '0' }, { parentIsSystemd: false })).toBe(true);
+    expect(classifyInvocation([], { INVOCATION_ID: 'abc', pm_id: '0' })).toBe('legacy-boot');
+  });
+
   /** `PM2_HOME` is configuration, not identity: an operator can export it from
    *  a shell profile, where it says nothing about how this process started. */
   it('does not treat PM2_HOME alone as a service launch when a terminal is attached', () => {
@@ -77,11 +92,19 @@ describe('supervisor detection', () => {
  * works and just feed it the boolean. These pin the function itself.
  */
 describe('isDirectSystemdChild', () => {
-  it('trusts pid 1 unconditionally — always systemd on a system-level unit', () => {
+  /**
+   * pid 1 has no special-cased shortcut — it's read like any other pid. On
+   * this (systemd-based) test host, /proc/1/comm genuinely is "systemd", so
+   * this also happens to prove the ppid===1 case, without trusting pid 1
+   * unconditionally the way an earlier version of this function did (fixed
+   * in review: a container's pid 1 is often tini/dumb-init/s6, not systemd,
+   * and that version would have misidentified it as a systemd parent).
+   */
+  it('reads comm even for pid 1, rather than trusting the pid alone', () => {
     expect(isDirectSystemdChild(1)).toBe(true);
   });
 
-  it('rejects a parent that is not systemd and not pid 1', () => {
+  it('rejects a parent that is not systemd', () => {
     // This test process's own pid is guaranteed to exist and not be systemd.
     expect(isDirectSystemdChild(process.pid)).toBe(false);
   });

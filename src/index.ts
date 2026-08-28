@@ -1080,7 +1080,9 @@ process.on('uncaughtException', (err) => {
 // The CLI runner remains lazy-loaded and is never imported on the server path.
 const invocation = classifyInvocation(process.argv.slice(2), process.env, {
   hasTty: process.stdin.isTTY === true,
-  parentIsSystemd: isDirectSystemdChild(),
+  // Only `isSupervised()` -> the INVOCATION_ID branch reads this; skip the
+  // /proc read entirely otherwise (the common bare-terminal and boot cases).
+  parentIsSystemd: process.env.INVOCATION_ID ? isDirectSystemdChild() : undefined,
 });
 if (invocation === 'legacy-boot') {
   process.stderr.write(
