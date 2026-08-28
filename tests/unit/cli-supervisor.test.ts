@@ -1,4 +1,11 @@
-import { isSupervised, claimSupervisorEnv, classifyInvocation, CHILD_MARKER, SUPERVISOR_MARKER } from '../../src/cli/command-names';
+import {
+  isSupervised,
+  claimSupervisorEnv,
+  classifyInvocation,
+  isDirectSystemdChild,
+  CHILD_MARKER,
+  SUPERVISOR_MARKER,
+} from '../../src/cli/command-names';
 
 /**
  * The supervisor markers are inherited by every descendant, and the gateway
@@ -8,27 +15,47 @@ import { isSupervised, claimSupervisorEnv, classifyInvocation, CHILD_MARKER, SUP
  */
 describe('supervisor detection', () => {
   it('treats a child of the gateway as a CLI invocation, whatever else it inherited', () => {
-    expect(isSupervised({ INVOCATION_ID: 'abc', [CHILD_MARKER]: '1' })).toBe(false);
+    expect(isSupervised({ INVOCATION_ID: 'abc', [CHILD_MARKER]: '1' }, { parentIsSystemd: true })).toBe(false);
     expect(isSupervised({ PM2_HOME: '/pm2', [CHILD_MARKER]: '1' })).toBe(false);
     expect(isSupervised({ pm_id: '0', [CHILD_MARKER]: '1' })).toBe(false);
   });
 
   it('recognises a service main process', () => {
-    expect(isSupervised({ INVOCATION_ID: 'abc' })).toBe(true);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { parentIsSystemd: true })).toBe(true);
     expect(isSupervised({ pm_id: '0' })).toBe(true);
     expect(isSupervised({ PM2_HOME: '/pm2' })).toBe(true);
   });
 
   /**
-   * `INVOCATION_ID` and `pm_id` are minted per invocation by the supervisor and
-   * cannot come from a shell profile, so a terminal does not overrule them — a
-   * legacy unit with `StandardInput=tty` must still boot rather than printing
-   * help at its service manager.
+   * `INVOCATION_ID` is minted per invocation by systemd and cannot come from a
+   * shell profile, so once `parentIsSystemd` proves it belongs to *this*
+   * process, a terminal does not overrule it — a legacy unit with
+   * `StandardInput=tty` must still boot rather than printing help at its
+   * service manager.
    */
   it('still boots a supervised launch that happens to have a terminal', () => {
-    expect(isSupervised({ INVOCATION_ID: 'abc' }, { hasTty: true })).toBe(true);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { hasTty: true, parentIsSystemd: true })).toBe(true);
     expect(isSupervised({ pm_id: '0' }, { hasTty: true })).toBe(true);
-    expect(classifyInvocation([], { INVOCATION_ID: 'abc' }, { hasTty: true })).toBe('legacy-boot');
+    expect(classifyInvocation([], { INVOCATION_ID: 'abc' }, { hasTty: true, parentIsSystemd: true })).toBe(
+      'legacy-boot',
+    );
+  });
+
+  /**
+   * `INVOCATION_ID` is inherited by every descendant of a systemd unit's main
+   * process — not just the one systemd forked. A shell reached through an
+   * unrelated systemd-managed process (a web-terminal service, say) carries
+   * the same env var, but this process's immediate parent is that shell, not
+   * systemd. Regression for the false-positive this let through before
+   * `parentIsSystemd` existed: bare `claude-gateway`, typed by a human in such
+   * a shell, tried to boot a second gateway on top of the one already running.
+   */
+  it('does not trust an inherited INVOCATION_ID whose parent is not systemd', () => {
+    expect(isSupervised({ INVOCATION_ID: 'abc' })).toBe(false);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { parentIsSystemd: false })).toBe(false);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { hasTty: true, parentIsSystemd: false })).toBe(false);
+    expect(classifyInvocation([], { INVOCATION_ID: 'abc' }, { parentIsSystemd: false })).toBe('cli');
+    expect(classifyInvocation([], { INVOCATION_ID: 'abc' })).toBe('cli');
   });
 
   /** `PM2_HOME` is configuration, not identity: an operator can export it from
@@ -41,6 +68,26 @@ describe('supervisor detection', () => {
   it('leaves an unmarked interactive invocation alone', () => {
     expect(isSupervised({})).toBe(false);
     expect(isSupervised({}, { hasTty: true })).toBe(false);
+  });
+});
+
+/**
+ * `isDirectSystemdChild` is what actually computes `parentIsSystemd` in
+ * production (see src/entry.ts, src/index.ts) — the specs above assume it
+ * works and just feed it the boolean. These pin the function itself.
+ */
+describe('isDirectSystemdChild', () => {
+  it('trusts pid 1 unconditionally — always systemd on a system-level unit', () => {
+    expect(isDirectSystemdChild(1)).toBe(true);
+  });
+
+  it('rejects a parent that is not systemd and not pid 1', () => {
+    // This test process's own pid is guaranteed to exist and not be systemd.
+    expect(isDirectSystemdChild(process.pid)).toBe(false);
+  });
+
+  it('rejects a pid that does not exist at all, without throwing', () => {
+    expect(isDirectSystemdChild(999999999)).toBe(false);
   });
 });
 

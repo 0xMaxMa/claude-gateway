@@ -209,46 +209,55 @@ describe('binary dispatch — help colouring', () => {
   }, TIMEOUT_MS);
 });
 
-describe('binary dispatch — legacy supervised units still boot', () => {
-  it('warns and enters the server path when a supervisor passes no command', async () => {
+describe('binary dispatch — inherited INVOCATION_ID from a non-systemd parent is not trusted', () => {
+  /**
+   * Regression for the bug this fixes: `INVOCATION_ID` is inherited by every
+   * descendant of *any* systemd unit's main process, not just the one systemd
+   * directly forked. A shell reached through an unrelated systemd-managed
+   * process (a web-terminal service, say) carries the same env var while its
+   * actual parent is that shell, not systemd. Before the `parentIsSystemd`
+   * check landed, this was enough to spoof a legacy-boot and start a second
+   * gateway on top of one already running.
+   *
+   * Spawned directly from this test process — a normal parent, definitely not
+   * systemd — so `isDirectSystemdChild()` reads a real, non-1 ppid and returns
+   * `false`. Must resolve to `cli` (help), never boot.
+   *
+   * Genuine `ppid === 1` legacy-boot (an actual pre-1.8 systemd unit) can't be
+   * fabricated portably from an integration test; it's covered by the pure
+   * `isDirectSystemdChild`/`isSupervised`/`classifyInvocation` unit tests in
+   * tests/unit/cli-supervisor.test.ts and tests/unit/cli-args.test.ts.
+   */
+  it('an inherited INVOCATION_ID without a systemd parent prints help and exits, never boots', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-legacy-boot-'));
-    const child = spawn(process.execPath, [ENTRY], {
-      env: {
+    try {
+      // Built by hand rather than terminalEnv(), which unconditionally deletes
+      // INVOCATION_ID — exactly the variable this test needs to keep. Still
+      // clears CLAUDE_GATEWAY_CHILD: this suite may itself be running inside a
+      // gateway-spawned shell (an agent's own session), which would otherwise
+      // short-circuit isSupervised() to false for an unrelated reason and let
+      // this test pass without ever exercising the fix.
+      const env: NodeJS.ProcessEnv = {
         ...process.env,
-        // Inherited when the suite runs inside a gateway-spawned shell, where it
-        // makes classifyInvocation() answer 'cli' — this launch would then never
-        // reach the legacy path and the test failed for a reason that had nothing
-        // to do with the code under test.
-        CLAUDE_GATEWAY_CHILD: '',
-        HOME: home,
-        // Marks the launch as systemd-supervised, which is exactly the pre-1.8
-        // unit shape (`ExecStart=/usr/local/bin/claude-gateway`, no command).
+        NO_COLOR: '1',
+        // Same shape as a shell reached through an unrelated systemd unit:
+        // the marker is present, but this process's real parent is the test
+        // runner, not systemd.
         INVOCATION_ID: 'test-invocation',
+        HOME: home,
         GATEWAY_CONFIG: path.join(home, 'config.json'),
         PORT: '0',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+      };
+      delete env.CLAUDE_GATEWAY_CHILD;
+      delete env.PM2_HOME;
+      delete env.pm_id;
+      delete env.FORCE_COLOR;
 
-    try {
-      const sawWarning = await new Promise<boolean>((resolve) => {
-        let stderr = '';
-        const timer = setTimeout(() => resolve(false), 10_000);
-        child.stderr.on('data', (d) => {
-          stderr += d.toString();
-          if (stderr.includes('DEPRECATED')) {
-            clearTimeout(timer);
-            resolve(true);
-          }
-        });
-        child.on('close', () => {
-          clearTimeout(timer);
-          resolve(stderr.includes('DEPRECATED'));
-        });
-      });
-      expect(sawWarning).toBe(true);
+      const { code, stdout, stderr } = await run([], env);
+      expect(code).toBe(0);
+      expect(stdout).toContain('claude-gateway');
+      expect(stderr).not.toContain('DEPRECATED');
     } finally {
-      child.kill('SIGKILL');
       fs.rmSync(home, { recursive: true, force: true });
     }
   }, TIMEOUT_MS);

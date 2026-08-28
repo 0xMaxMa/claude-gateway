@@ -24,10 +24,11 @@ import { loadGatewayDotenv } from './load-dotenv';
 // the CLI resolves the gateway's address from the same $GATEWAY_BIND.
 loadGatewayDotenv();
 
-import { classifyInvocation } from './cli/command-names';
+import { classifyInvocation, isDirectSystemdChild } from './cli/command-names';
 
 const invocation = classifyInvocation(process.argv.slice(2), process.env, {
   hasTty: process.stdin.isTTY === true,
+  parentIsSystemd: isDirectSystemdChild(),
 });
 
 if (invocation === 'boot' || invocation === 'legacy-boot') {

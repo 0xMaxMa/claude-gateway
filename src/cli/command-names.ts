@@ -7,6 +7,8 @@
  * — a bare `claude-gateway`, `--help`, a typo — goes to the CLI, so discovery
  * can never leave a stray server listening on the port.
  */
+import * as fs from 'fs';
+
 /** How src/index.ts should handle an invocation. */
 export type Invocation =
   /** `gateway start [...]` — boot the server in the foreground. */
@@ -45,6 +47,43 @@ export interface InvocationEnv {
 export interface InvocationSignals {
   /** True when a terminal is attached to stdin. */
   hasTty?: boolean;
+  /**
+   * True when this process's immediate parent is systemd itself, per
+   * `isDirectSystemdChild()`. Undefined/false means "not proven" — callers
+   * that don't check ancestry (most unit tests) get the safe default.
+   */
+  parentIsSystemd?: boolean;
+}
+
+/**
+ * True when this process's immediate parent is systemd itself — not merely a
+ * descendant of some process that systemd happens to manage.
+ *
+ * `INVOCATION_ID` is inherited by every descendant of a systemd unit's main
+ * process, including a shell that unit opens. A unit whose only job is to host
+ * a terminal (a web-terminal service, say) taints every command a human types
+ * into it with an `INVOCATION_ID` that was never meant to identify *that*
+ * command. This check is what lets `isSupervised()` tell "systemd forked me
+ * directly" from "I'm several processes deep inside something systemd manages".
+ *
+ * `ppid === 1` covers system-level units (systemd is always pid 1) and most
+ * containers. A `systemd --user` unit's parent is the per-user manager
+ * instead, at an unpredictable pid, so it's identified by its `comm` name —
+ * the same reasoning `orphan-receivers.ts` uses for the mirror-image
+ * "reparented to init" check.
+ *
+ * Linux-only (systemd itself is Linux-only) and fails closed: any error, or
+ * any other platform, returns `false`. A false negative costs a legacy unit a
+ * help screen instead of booting; a false positive risks a second server on
+ * the gateway's port, which is the worse failure.
+ */
+export function isDirectSystemdChild(ppid: number = process.ppid): boolean {
+  if (ppid === 1) return true;
+  try {
+    return fs.readFileSync(`/proc/${ppid}/comm`, 'utf8').trim() === 'systemd';
+  } catch {
+    return false;
+  }
 }
 
 /** True only for the explicit foreground-server invocation. */
@@ -69,18 +108,28 @@ export function isGatewayStartInvocation(argv: readonly string[]): boolean {
  * The remaining variables are not equal evidence, so they are not weighed
  * equally:
  *
- * - `INVOCATION_ID` and `pm_id` are *identity*: the supervisor mints them per
- *   invocation, and they cannot be set by a shell profile. They are trusted on
- *   their own — including when a terminal is attached, so a legacy unit with
+ * - `INVOCATION_ID` is *identity minted by systemd*, but only for the exact
+ *   process it forked — every descendant of that process inherits the same
+ *   value, including a shell some *other*, unrelated unit opens (a
+ *   web-terminal service, say). So it is trusted only alongside
+ *   `signals.parentIsSystemd`, which proves this process — not some ancestor
+ *   several levels up — is the one systemd actually launched. Once proven, a
+ *   terminal being attached doesn't overrule it, so a legacy unit with
  *   `StandardInput=tty` still boots rather than printing help at its service
  *   manager.
+ * - `pm_id` is trusted unconditionally, same as before this file's
+ *   `parentIsSystemd` check was added — PM2-managed processes aren't
+ *   generally used to host an interactive terminal the way a systemd unit can
+ *   (see `isDirectSystemdChild`), so the same inheritance risk hasn't been
+ *   observed for it. That is an asymmetry, not a proof it can't happen.
  * - `PM2_HOME` is *configuration* — where PM2 keeps its data. An operator can
  *   reasonably export it from a shell profile, where it says nothing about how
  *   this process was launched. It counts only when no terminal is attached.
  */
 export function isSupervised(env: InvocationEnv, signals: InvocationSignals = {}): boolean {
   if (env[CHILD_MARKER]) return false;
-  if (env.INVOCATION_ID || env.pm_id !== undefined) return true;
+  if (env.INVOCATION_ID) return signals.parentIsSystemd === true;
+  if (env.pm_id !== undefined) return true;
   return !!env.PM2_HOME && !signals.hasTty;
 }
 
