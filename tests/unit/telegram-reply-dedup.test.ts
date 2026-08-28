@@ -15,13 +15,17 @@ import { TelegramModule } from '../../mcp/tools/telegram/module';
 import { normalizeTelegramLineBreaks, resolveTelegramReplyFormat } from '../../mcp/tools/telegram/pure';
 
 let tmp: string;
+let savedStateDir: string | undefined;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tgdedup-'));
+  savedStateDir = process.env.TELEGRAM_STATE_DIR;
 });
 
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
+  if (savedStateDir !== undefined) process.env.TELEGRAM_STATE_DIR = savedStateDir;
+  else delete process.env.TELEGRAM_STATE_DIR;
 });
 
 function freshModule(stateDir: string): { mod: any; sendMessage: jest.Mock } {
