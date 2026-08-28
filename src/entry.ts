@@ -24,14 +24,9 @@ import { loadGatewayDotenv } from './load-dotenv';
 // the CLI resolves the gateway's address from the same $GATEWAY_BIND.
 loadGatewayDotenv();
 
-import { classifyInvocation, isDirectSystemdChild } from './cli/command-names';
+import { classifyInvocation, resolveInvocationSignals } from './cli/command-names';
 
-const invocation = classifyInvocation(process.argv.slice(2), process.env, {
-  hasTty: process.stdin.isTTY === true,
-  // Only `isSupervised()` -> the INVOCATION_ID branch reads this; skip the
-  // /proc read entirely otherwise (the common bare-terminal and boot cases).
-  parentIsSystemd: process.env.INVOCATION_ID ? isDirectSystemdChild() : undefined,
-});
+const invocation = classifyInvocation(process.argv.slice(2), process.env, resolveInvocationSignals());
 
 if (invocation === 'boot' || invocation === 'legacy-boot') {
   // Importing the server module runs its own dispatch, which re-classifies this

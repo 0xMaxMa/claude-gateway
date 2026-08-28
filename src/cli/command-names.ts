@@ -82,10 +82,19 @@ export interface InvocationSignals {
  * any other platform, returns `false`. A false negative costs a legacy unit a
  * help screen instead of booting; a false positive risks a second server on
  * the gateway's port, which is the worse failure.
+ *
+ * `readComm` is injectable for tests — real pid 1 is only genuinely systemd on
+ * a systemd-based host, so a test asserting against the live `/proc/1/comm`
+ * would pass or fail depending on where it happened to run (a Docker
+ * devcontainer's pid 1 is commonly tini or dumb-init). Injecting a fake reader
+ * proves the no-special-case behavior deterministically instead.
  */
-export function isDirectSystemdChild(ppid: number = process.ppid): boolean {
+export function isDirectSystemdChild(
+  ppid: number = process.ppid,
+  readComm: (pid: number) => string = (pid) => fs.readFileSync(`/proc/${pid}/comm`, 'utf8'),
+): boolean {
   try {
-    return fs.readFileSync(`/proc/${ppid}/comm`, 'utf8').trim() === 'systemd';
+    return readComm(ppid).trim() === 'systemd';
   } catch {
     return false;
   }
@@ -201,4 +210,21 @@ export function classifyInvocation(
   const asksForHelp = argv.some((token) => HELP_OR_VERSION_FLAGS.has(token));
   if (!hasCommandToken(argv) && !asksForHelp && isSupervised(env, signals)) return 'legacy-boot';
   return 'cli';
+}
+
+/**
+ * Builds the `InvocationSignals` for the current process from real OS/env
+ * state. Shared by src/entry.ts and src/index.ts — both call
+ * `classifyInvocation()` independently (src/index.ts must keep dispatching on
+ * its own for service units written before the entry-point split), so without
+ * this the same `hasTty`/`parentIsSystemd` construction would live twice and
+ * could drift out of sync between the two call sites.
+ */
+export function resolveInvocationSignals(env: NodeJS.ProcessEnv = process.env): InvocationSignals {
+  return {
+    hasTty: process.stdin.isTTY === true,
+    // Only isSupervised()'s INVOCATION_ID branch reads this; skip the /proc
+    // read entirely otherwise (the common bare-terminal and boot cases).
+    parentIsSystemd: env.INVOCATION_ID ? isDirectSystemdChild() : undefined,
+  };
 }

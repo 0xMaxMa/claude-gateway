@@ -3,6 +3,7 @@ import {
   claimSupervisorEnv,
   classifyInvocation,
   isDirectSystemdChild,
+  resolveInvocationSignals,
   CHILD_MARKER,
   SUPERVISOR_MARKER,
 } from '../../src/cli/command-names';
@@ -88,29 +89,63 @@ describe('supervisor detection', () => {
 
 /**
  * `isDirectSystemdChild` is what actually computes `parentIsSystemd` in
- * production (see src/entry.ts, src/index.ts) — the specs above assume it
- * works and just feed it the boolean. These pin the function itself.
+ * production (see `resolveInvocationSignals` in src/cli/command-names.ts) —
+ * the specs above assume it works and just feed it the boolean. These pin
+ * the function itself, with an injected `readComm` rather than the live
+ * `/proc/1/comm`: real pid 1 is only genuinely systemd on a systemd-based
+ * host, so asserting against the live file would pass or fail depending on
+ * where the suite happens to run (a Docker devcontainer's pid 1 is commonly
+ * tini or dumb-init, not systemd).
  */
 describe('isDirectSystemdChild', () => {
-  /**
-   * pid 1 has no special-cased shortcut — it's read like any other pid. On
-   * this (systemd-based) test host, /proc/1/comm genuinely is "systemd", so
-   * this also happens to prove the ppid===1 case, without trusting pid 1
-   * unconditionally the way an earlier version of this function did (fixed
-   * in review: a container's pid 1 is often tini/dumb-init/s6, not systemd,
-   * and that version would have misidentified it as a systemd parent).
-   */
-  it('reads comm even for pid 1, rather than trusting the pid alone', () => {
-    expect(isDirectSystemdChild(1)).toBe(true);
+  it('has no special-cased shortcut for pid 1 — a non-systemd pid 1 is rejected', () => {
+    // Regression: an earlier version of this function trusted `ppid === 1`
+    // unconditionally, without checking comm — exactly the false-positive
+    // class this PR fixes, reopened inside a container whose pid 1 is
+    // tini/dumb-init/s6 rather than systemd.
+    expect(isDirectSystemdChild(1, () => 'tini')).toBe(false);
   });
 
-  it('rejects a parent that is not systemd', () => {
-    // This test process's own pid is guaranteed to exist and not be systemd.
-    expect(isDirectSystemdChild(process.pid)).toBe(false);
+  it('accepts pid 1 when its comm really is systemd', () => {
+    expect(isDirectSystemdChild(1, () => 'systemd')).toBe(true);
   });
 
-  it('rejects a pid that does not exist at all, without throwing', () => {
-    expect(isDirectSystemdChild(999999999)).toBe(false);
+  it('rejects a parent whose comm is not systemd', () => {
+    expect(isDirectSystemdChild(4242, () => 'bash')).toBe(false);
+  });
+
+  it('accepts a systemd --user manager at an arbitrary, non-1 pid', () => {
+    expect(isDirectSystemdChild(4242, () => 'systemd')).toBe(true);
+  });
+
+  it('rejects a pid whose comm cannot be read, without throwing', () => {
+    expect(
+      isDirectSystemdChild(999999999, () => {
+        throw new Error('ENOENT');
+      }),
+    ).toBe(false);
+  });
+
+  it('defaults to the real /proc read and process.ppid when not overridden', () => {
+    // No assertion on the outcome (host-dependent) — just that it runs
+    // against the live process without an injected reader and never throws.
+    expect(() => isDirectSystemdChild()).not.toThrow();
+  });
+});
+
+/**
+ * Shared by src/entry.ts and src/index.ts (see the comment on the export) so
+ * the hasTty/parentIsSystemd construction can't drift between the two
+ * `classifyInvocation()` call sites the way it briefly did in review.
+ */
+describe('resolveInvocationSignals', () => {
+  it('skips the parentIsSystemd check entirely when INVOCATION_ID is absent', () => {
+    expect(resolveInvocationSignals({})).toEqual({ hasTty: expect.any(Boolean), parentIsSystemd: undefined });
+  });
+
+  it('computes parentIsSystemd when INVOCATION_ID is present', () => {
+    const signals = resolveInvocationSignals({ INVOCATION_ID: 'abc' });
+    expect(typeof signals.parentIsSystemd).toBe('boolean');
   });
 });
 
