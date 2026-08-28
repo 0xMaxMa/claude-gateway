@@ -793,7 +793,7 @@ describe('T20-T23: Failure notifications for command-type jobs + Telegram chunki
     fetchMock.mockRestore();
   });
 
-  it('T20: type=command failure → Telegram receives a short failure notice', async () => {
+  it('T20: type=command failure → Telegram receives a generic failure notice (no error text echoed)', async () => {
     const { manager, agentId } = makeManager({ botToken: 'TOKEN123' });
     await manager.start();
 
@@ -815,12 +815,12 @@ describe('T20-T23: Failure notifications for command-type jobs + Telegram chunki
     expect(telegramCall).toBeDefined();
     const body = JSON.parse(telegramCall![1].body);
     expect(body.chat_id).toBe('12345');
-    expect(body.text).toContain("cron 'command-fail' failed:");
+    expect(body.text).toBe("cron 'command-fail' failed — see run history for details");
 
     manager.stop();
   });
 
-  it('T21: type=command failure → Discord receives a short failure notice too', async () => {
+  it('T21: type=command failure → Discord receives the same generic notice too', async () => {
     const { manager, agentId } = makeManager({ discordBotToken: 'DISC123' });
     await manager.start();
 
@@ -841,7 +841,48 @@ describe('T20-T23: Failure notifications for command-type jobs + Telegram chunki
     );
     expect(discordCall).toBeDefined();
     const body = JSON.parse(discordCall![1].body);
-    expect(body.content).toContain("cron 'command-fail-discord' failed:");
+    expect(body.content).toBe("cron 'command-fail-discord' failed — see run history for details");
+
+    manager.stop();
+  });
+
+  it('T20b: type=command failure never echoes the raw exec error — a secret embedded in the failing command is NOT forwarded to Telegram/Discord', async () => {
+    // Node's child_process.exec rejection embeds the full command line verbatim
+    // ("Command failed: <cmd>\n<stderr>") — a user-authored command commonly
+    // embeds secrets (e.g. an Authorization header). This proves the fix: the
+    // chat notification must be generic regardless of what the command or its
+    // output contained.
+    const { manager, agentId } = makeManager({ botToken: 'TOKEN123', discordBotToken: 'DISC123' });
+    await manager.start();
+
+    const secret = 'sk-super-secret-token-do-not-leak';
+    const job = await manager.create({
+      agentId,
+      name: 'command-fail-secret',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: `echo "using ${secret}" 1>&2; exit 1`,
+      telegram: '12345',
+      discord: 'CHANNEL_123',
+    });
+
+    const log = await manager.run(job.id);
+    // The secret DOES land in the run log / lastError for local operator inspection...
+    expect(log.error).toContain(secret);
+
+    // ...but must never appear in what gets sent to chat.
+    const telegramCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    const telegramBody = JSON.parse(telegramCall![1].body);
+    const discordBody = JSON.parse(discordCall![1].body);
+    expect(telegramBody.text).not.toContain(secret);
+    expect(discordBody.content).not.toContain(secret);
+    expect(telegramBody.text).toBe("cron 'command-fail-secret' failed — see run history for details");
 
     manager.stop();
   });

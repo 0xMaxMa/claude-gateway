@@ -477,13 +477,22 @@ export class CronManager extends EventEmitter {
     // Agent-type jobs deliver the full response on success and a short failure
     // notice on failure. Command-type jobs stay silent on success (unchanged —
     // command output is not a "response" meant for chat) but still surface a
-    // short failure notice using the SAME telegram/discord fields, so a failing
+    // notice on failure using the SAME telegram/discord fields, so a failing
     // command job is no longer silent everywhere except the log.
     if (job.type === 'agent') {
       const text = status === 'ok' ? runLog.output : this.formatFailureNotice(job.name, error);
       await this.deliverToConfiguredChannels(job, text);
     } else if (status === 'error') {
-      await this.deliverToConfiguredChannels(job, this.formatFailureNotice(job.name, error));
+      // Command-type errors must NEVER echo the raw error text: runCommand()'s
+      // rejection embeds Node's exec message verbatim ("Command failed: <full
+      // command line>\n<stderr>") — and the command is a user-authored shell
+      // string that commonly embeds secrets (e.g. `curl -H "Authorization:
+      // Bearer $TOKEN"`). Unlike an agent-type error (an internal framework
+      // message), forwarding it to chat would leak the secret to whoever reads
+      // that Telegram chat/Discord channel. The full detail still lands in the
+      // run log (job.state.lastError / Run History) for the operator to inspect
+      // locally — only the chat notification is generic.
+      await this.deliverToConfiguredChannels(job, `cron '${job.name}' failed — see run history for details`);
     }
 
     this.emit('job:executed', job, runLog);
