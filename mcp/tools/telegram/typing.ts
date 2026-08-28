@@ -313,7 +313,7 @@ export function parseForwardQueue(raw: string): ForwardEntry[] {
  * satisfies dedup, so a marker from a version predating this format degrades
  * to "deliver" rather than risking a silent drop.
  */
-function parseRepliedTurnId(raw: string): string | null {
+export function parseRepliedTurnId(raw: string): string | null {
   try {
     const parsed = JSON.parse(raw.trim()) as { turnId?: unknown }
     if (parsed && typeof parsed === 'object' && typeof parsed.turnId === 'string') {
