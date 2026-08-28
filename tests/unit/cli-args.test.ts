@@ -66,13 +66,13 @@ describe('cli args parseCliArgs', () => {
  */
 describe('cli command-names isSupervised', () => {
   it('accepts a service main process: markers, no child stamp, no terminal', () => {
-    expect(isSupervised({ INVOCATION_ID: 'abc' })).toBe(true);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { parentIsSystemd: true })).toBe(true);
     expect(isSupervised({ pm_id: '0' })).toBe(true);
     expect(isSupervised({ PM2_HOME: '/home/u/.pm2' })).toBe(true);
   });
 
   it('rejects a descendant of a running gateway', () => {
-    expect(isSupervised({ INVOCATION_ID: 'abc', [CHILD_MARKER]: '1' })).toBe(false);
+    expect(isSupervised({ INVOCATION_ID: 'abc', [CHILD_MARKER]: '1' }, { parentIsSystemd: true })).toBe(false);
     expect(isSupervised({ pm_id: '0', [CHILD_MARKER]: '1' })).toBe(false);
   });
 
@@ -82,6 +82,14 @@ describe('cli command-names isSupervised', () => {
 
   it('is false without any marker', () => {
     expect(isSupervised({})).toBe(false);
+  });
+
+  // See tests/unit/cli-supervisor.test.ts for the parentIsSystemd regression
+  // coverage — INVOCATION_ID inherited from an unrelated systemd unit (e.g. a
+  // web-terminal service) must not be trusted just because it's present.
+  it('does not trust INVOCATION_ID without proof this process is systemd’s direct child', () => {
+    expect(isSupervised({ INVOCATION_ID: 'abc' })).toBe(false);
+    expect(isSupervised({ INVOCATION_ID: 'abc' }, { parentIsSystemd: false })).toBe(false);
   });
 });
 
@@ -112,9 +120,9 @@ describe('cli command-names claimSupervisorEnv', () => {
   // whatever it inherited.
   it('leaves an environment in which a bare invocation goes to the CLI', () => {
     const env: NodeJS.ProcessEnv = { INVOCATION_ID: 'abc' };
-    expect(classifyInvocation([], env)).toBe('legacy-boot');
+    expect(classifyInvocation([], env, { parentIsSystemd: true })).toBe('legacy-boot');
     claimSupervisorEnv(env);
-    expect(classifyInvocation([], env)).toBe('cli');
+    expect(classifyInvocation([], env, { parentIsSystemd: true })).toBe('cli');
   });
 
   it('records nothing when no supervisor started us', () => {
@@ -160,9 +168,18 @@ describe('cli command-names classifyInvocation', () => {
   });
 
   it('keeps pre-1.8 supervised units booting when they pass no command', () => {
-    expect(classifyInvocation([], systemd)).toBe('legacy-boot');
+    const systemdParent = { parentIsSystemd: true };
+    expect(classifyInvocation([], systemd, systemdParent)).toBe('legacy-boot');
     expect(classifyInvocation([], pm2)).toBe('legacy-boot');
-    expect(classifyInvocation(['--config', '/etc/cg.json'], systemd)).toBe('legacy-boot');
+    expect(classifyInvocation(['--config', '/etc/cg.json'], systemd, systemdParent)).toBe('legacy-boot');
+  });
+
+  // Regression: INVOCATION_ID alone used to be enough — inherited from an
+  // unrelated systemd unit (e.g. a web-terminal service) that merely happens
+  // to be an ancestor, it isn't proof systemd forked *this* process.
+  it('does not legacy-boot on an inherited INVOCATION_ID whose parent is not systemd', () => {
+    expect(classifyInvocation([], systemd)).toBe('cli');
+    expect(classifyInvocation([], systemd, { parentIsSystemd: false })).toBe('cli');
   });
 
   it('does not treat a supervised --help/--version as a boot request', () => {

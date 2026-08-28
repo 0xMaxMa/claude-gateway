@@ -7,6 +7,8 @@
  * — a bare `claude-gateway`, `--help`, a typo — goes to the CLI, so discovery
  * can never leave a stray server listening on the port.
  */
+import * as fs from 'fs';
+
 /** How src/index.ts should handle an invocation. */
 export type Invocation =
   /** `gateway start [...]` — boot the server in the foreground. */
@@ -45,6 +47,57 @@ export interface InvocationEnv {
 export interface InvocationSignals {
   /** True when a terminal is attached to stdin. */
   hasTty?: boolean;
+  /**
+   * True when this process's immediate parent is systemd itself, per
+   * `isDirectSystemdChild()`. Undefined/false means "not proven" — callers
+   * that don't check ancestry (most unit tests) get the safe default.
+   */
+  parentIsSystemd?: boolean;
+}
+
+/**
+ * True when this process's immediate parent is systemd itself — not merely a
+ * descendant of some process that systemd happens to manage.
+ *
+ * `INVOCATION_ID` is inherited by every descendant of a systemd unit's main
+ * process, including a shell that unit opens. A unit whose only job is to host
+ * a terminal (a web-terminal service, say) taints every command a human types
+ * into it with an `INVOCATION_ID` that was never meant to identify *that*
+ * command. This check is what lets `isSupervised()` tell "systemd forked me
+ * directly" from "I'm several processes deep inside something systemd manages".
+ *
+ * Identified by `comm` name rather than pid, deliberately including `ppid === 1`:
+ * on a systemd-based Linux host pid 1 *is* systemd, so its `comm` reads
+ * "systemd" like any other systemd process — but pid 1 is not always systemd.
+ * A container run with `--init` (tini, dumb-init, s6) or a non-systemd host
+ * makes pid 1 something else entirely, and `orphan-receivers.ts` documents the
+ * identical ambiguity for its own ppid-based check without resolving it (that
+ * function only proves "the parent is gone", so an unverified pid 1 costs it
+ * nothing; this one hands out `legacy-boot`, so it can't afford to guess).
+ * `systemd --user`'s per-user manager is a different, unpredictable pid, but
+ * its `comm` is "systemd" too — the same read covers both without a special
+ * case for either.
+ *
+ * Linux-only (systemd itself is Linux-only) and fails closed: any error, or
+ * any other platform, returns `false`. A false negative costs a legacy unit a
+ * help screen instead of booting; a false positive risks a second server on
+ * the gateway's port, which is the worse failure.
+ *
+ * `readComm` is injectable for tests — real pid 1 is only genuinely systemd on
+ * a systemd-based host, so a test asserting against the live `/proc/1/comm`
+ * would pass or fail depending on where it happened to run (a Docker
+ * devcontainer's pid 1 is commonly tini or dumb-init). Injecting a fake reader
+ * proves the no-special-case behavior deterministically instead.
+ */
+export function isDirectSystemdChild(
+  ppid: number = process.ppid,
+  readComm: (pid: number) => string = (pid) => fs.readFileSync(`/proc/${pid}/comm`, 'utf8'),
+): boolean {
+  try {
+    return readComm(ppid).trim() === 'systemd';
+  } catch {
+    return false;
+  }
 }
 
 /** True only for the explicit foreground-server invocation. */
@@ -69,9 +122,25 @@ export function isGatewayStartInvocation(argv: readonly string[]): boolean {
  * The remaining variables are not equal evidence, so they are not weighed
  * equally:
  *
- * - `INVOCATION_ID` and `pm_id` are *identity*: the supervisor mints them per
- *   invocation, and they cannot be set by a shell profile. They are trusted on
- *   their own — including when a terminal is attached, so a legacy unit with
+ * - `pm_id` is trusted unconditionally — checked *before* `INVOCATION_ID`, not
+ *   just alongside it, because `pm2 startup systemd` runs the PM2 daemon
+ *   itself under systemd: a PM2-managed gateway then genuinely has both
+ *   markers, `INVOCATION_ID` inherited from that systemd-started daemon and
+ *   `pm_id` set directly by PM2. Its immediate parent is PM2, not systemd, so
+ *   `parentIsSystemd` is correctly `false` — checking `INVOCATION_ID` first
+ *   would reject a real pre-1.8 PM2 unit on that basis alone, never reaching
+ *   the `pm_id` evidence that should have settled it. PM2-managed processes
+ *   aren't generally used to host an interactive terminal the way a systemd
+ *   unit can (see `isDirectSystemdChild`), so the same inheritance-based
+ *   spoofing risk fixed for `INVOCATION_ID` hasn't been observed for `pm_id`
+ *   itself — an asymmetry, not a proof it can't happen.
+ * - `INVOCATION_ID` is *identity minted by systemd*, but only for the exact
+ *   process it forked — every descendant of that process inherits the same
+ *   value, including a shell some *other*, unrelated unit opens (a
+ *   web-terminal service, say). So it is trusted only alongside
+ *   `signals.parentIsSystemd`, which proves this process — not some ancestor
+ *   several levels up — is the one systemd actually launched. Once proven, a
+ *   terminal being attached doesn't overrule it, so a legacy unit with
  *   `StandardInput=tty` still boots rather than printing help at its service
  *   manager.
  * - `PM2_HOME` is *configuration* — where PM2 keeps its data. An operator can
@@ -80,7 +149,8 @@ export function isGatewayStartInvocation(argv: readonly string[]): boolean {
  */
 export function isSupervised(env: InvocationEnv, signals: InvocationSignals = {}): boolean {
   if (env[CHILD_MARKER]) return false;
-  if (env.INVOCATION_ID || env.pm_id !== undefined) return true;
+  if (env.pm_id !== undefined) return true;
+  if (env.INVOCATION_ID) return signals.parentIsSystemd === true;
   return !!env.PM2_HOME && !signals.hasTty;
 }
 
@@ -140,4 +210,21 @@ export function classifyInvocation(
   const asksForHelp = argv.some((token) => HELP_OR_VERSION_FLAGS.has(token));
   if (!hasCommandToken(argv) && !asksForHelp && isSupervised(env, signals)) return 'legacy-boot';
   return 'cli';
+}
+
+/**
+ * Builds the `InvocationSignals` for the current process from real OS/env
+ * state. Shared by src/entry.ts and src/index.ts — both call
+ * `classifyInvocation()` independently (src/index.ts must keep dispatching on
+ * its own for service units written before the entry-point split), so without
+ * this the same `hasTty`/`parentIsSystemd` construction would live twice and
+ * could drift out of sync between the two call sites.
+ */
+export function resolveInvocationSignals(env: NodeJS.ProcessEnv = process.env): InvocationSignals {
+  return {
+    hasTty: process.stdin.isTTY === true,
+    // Only isSupervised()'s INVOCATION_ID branch reads this; skip the /proc
+    // read entirely otherwise (the common bare-terminal and boot cases).
+    parentIsSystemd: env.INVOCATION_ID ? isDirectSystemdChild() : undefined,
+  };
 }
