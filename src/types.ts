@@ -551,8 +551,8 @@ export interface CronJob {
   type?: CronJobType;               // default: 'command'
   command?: string;                 // shell command (type=command)
   prompt?: string;                  // agent prompt (type=agent)
-  telegram?: string;                // chat_id to deliver agent response (type=agent, required)
-  discord?: string;                 // discord channel/user id to deliver agent response (type=agent)
+  telegram?: string;                // chat_id to deliver response (agent-type) or failure notices (any type)
+  discord?: string;                 // discord channel/user id to deliver response (agent-type) or failure notices (any type)
   timeoutMs?: number;               // execution timeout ms (default 120000)
   // Lifecycle
   deleteAfterRun?: boolean;         // auto-delete after first successful run

@@ -56,8 +56,8 @@ export class CronModule implements ToolModule {
             type: { type: 'string', enum: ['command', 'agent'], description: 'Job type' },
             command: { type: 'string', description: 'Shell command (type=command)' },
             prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
-            telegram: { type: 'string', description: 'Telegram chat_id for response' },
-            discord: { type: 'string', description: 'Discord channel_id for agent response delivery' },
+            telegram: { type: 'string', description: 'Telegram chat_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
+            discord: { type: 'string', description: 'Discord channel_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
             timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
             scheduleKind: {
               type: 'string',
@@ -101,8 +101,8 @@ export class CronModule implements ToolModule {
             type: { type: 'string', enum: ['command', 'agent'], description: 'Job type' },
             command: { type: 'string', description: 'Shell command (type=command)' },
             prompt: { type: 'string', description: 'Agent prompt (type=agent)' },
-            telegram: { type: 'string', description: 'Telegram chat_id for response' },
-            discord: { type: 'string', description: 'Discord channel_id for agent response delivery' },
+            telegram: { type: 'string', description: 'Telegram chat_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
+            discord: { type: 'string', description: 'Discord channel_id for delivery — full response on success (type=agent), or a short failure notice on error (any type)' },
             timeout_ms: { type: 'number', description: 'Timeout in milliseconds' },
             scheduleKind: {
               type: 'string',

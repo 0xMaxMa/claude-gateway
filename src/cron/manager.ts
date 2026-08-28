@@ -33,13 +33,18 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 const DISCORD_MAX_MESSAGE_LENGTH = 2000;
+const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
+const FAILURE_NOTICE_ERROR_LENGTH = 300;
 
 interface StoreFormat {
   version: 1;
   jobs: CronJob[];
 }
 
-function chunkDiscordText(text: string, limit: number): string[] {
+// Generic word/line-boundary chunker for outbound notification text — used
+// by both sendTelegram() and sendDiscord() so long output doesn't get
+// silently rejected by either API's per-message length cap.
+function chunkPlainText(text: string, limit: number): string[] {
   if (text.length <= limit) return text.length === 0 ? [] : [text];
   const chunks: string[] = [];
   let rest = text;
@@ -468,18 +473,17 @@ export class CronManager extends EventEmitter {
       this.appendRunLog(job.id, runLog),
     ]);
 
-    // Deliver agent response to configured channels (independently; one failure must not block the other)
-    if (status === 'ok' && job.type === 'agent') {
-      const deliveries: Promise<void>[] = [];
-      if (job.telegram) {
-        deliveries.push(this.sendTelegram(job.agentId, job.telegram, runLog.output));
-      }
-      if (job.discord) {
-        deliveries.push(this.sendDiscord(job.agentId, job.discord, runLog.output));
-      }
-      if (deliveries.length > 0) {
-        await Promise.allSettled(deliveries);
-      }
+    // Deliver to configured channels (independently; one failure must not block the other).
+    // Agent-type jobs deliver the full response on success and a short failure
+    // notice on failure. Command-type jobs stay silent on success (unchanged —
+    // command output is not a "response" meant for chat) but still surface a
+    // short failure notice using the SAME telegram/discord fields, so a failing
+    // command job is no longer silent everywhere except the log.
+    if (job.type === 'agent') {
+      const text = status === 'ok' ? runLog.output : this.formatFailureNotice(job.name, error);
+      await this.deliverToConfiguredChannels(job, text);
+    } else if (status === 'error') {
+      await this.deliverToConfiguredChannels(job, this.formatFailureNotice(job.name, error));
     }
 
     this.emit('job:executed', job, runLog);
@@ -522,6 +526,24 @@ export class CronManager extends EventEmitter {
     return text;
   }
 
+  private async deliverToConfiguredChannels(job: CronJob, text: string): Promise<void> {
+    const deliveries: Promise<void>[] = [];
+    if (job.telegram) {
+      deliveries.push(this.sendTelegram(job.agentId, job.telegram, text));
+    }
+    if (job.discord) {
+      deliveries.push(this.sendDiscord(job.agentId, job.discord, text));
+    }
+    if (deliveries.length > 0) {
+      await Promise.allSettled(deliveries);
+    }
+  }
+
+  private formatFailureNotice(jobName: string, error: string | null): string {
+    const short = (error ?? 'unknown error').slice(0, FAILURE_NOTICE_ERROR_LENGTH);
+    return `cron '${jobName}' failed: ${short}`;
+  }
+
   private async sendTelegram(agentId: string, chatId: string, text: string): Promise<void> {
     const agentConfig = this.agentConfigs.get(agentId);
     const botToken = agentConfig?.telegram?.botToken;
@@ -531,20 +553,26 @@ export class CronManager extends EventEmitter {
       return;
     }
 
-    try {
-      const url = `${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`;
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!resp.ok) {
-        const body = await resp.text();
-        this.logger.warn(`Telegram notify failed: ${resp.status} ${body}`, { chatId });
+    const url = `${TELEGRAM_API_BASE}/bot${botToken}/sendMessage`;
+    const chunks = chunkPlainText(text, TELEGRAM_MAX_MESSAGE_LENGTH);
+
+    for (const chunk of chunks) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: chunk }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          this.logger.warn(`Telegram notify failed: ${resp.status} ${body}`, { chatId });
+          return;
+        }
+      } catch (err) {
+        this.logger.warn(`Telegram notify error: ${(err as Error).message}`, { chatId });
+        return;
       }
-    } catch (err) {
-      this.logger.warn(`Telegram notify error: ${(err as Error).message}`, { chatId });
     }
   }
 
@@ -558,7 +586,7 @@ export class CronManager extends EventEmitter {
     }
 
     const url = `${DISCORD_API_BASE}/channels/${channelId}/messages`;
-    const chunks = chunkDiscordText(text, DISCORD_MAX_MESSAGE_LENGTH);
+    const chunks = chunkPlainText(text, DISCORD_MAX_MESSAGE_LENGTH);
 
     for (const content of chunks) {
       try {

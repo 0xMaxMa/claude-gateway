@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { migrateAccess, defaultAccess } from './pure';
-import { chunkText, htmlToPlain } from './typing';
+import { chunkText, htmlToPlain, parseRepliedTurnId } from './typing';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
 import type {
   ChannelModule,
@@ -105,6 +105,10 @@ export class TelegramModule implements ChannelModule {
               type: 'string',
               enum: ['text', 'html'],
               description: "Rendering mode. 'html' accepts pre-rendered Telegram HTML. Raw Markdown is detected and converted automatically. Default: auto-detect Markdown or send plain text.",
+            },
+            allow_multiple: {
+              type: 'boolean',
+              description: 'Set true to send a second reply within the same turn (e.g. an image followed by a separate text message). Default false — a second call in the same turn is blocked to prevent re-announcing the same result.',
             },
           },
           required: ['chat_id', 'text'],
@@ -301,6 +305,7 @@ export class TelegramModule implements ChannelModule {
     const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined;
     const files = (args.files as string[] | undefined) ?? [];
     const explicitFormat = args.format as string | undefined;
+    const allowMultiple = args.allow_multiple === true;
     const InputFile = this._InputFile;
 
     // Single source of truth for reply format detection (shared with receiver-server).
@@ -309,6 +314,27 @@ export class TelegramModule implements ChannelModule {
     const { sendText, parseMode } = this._resolveTelegramReplyFormat!(text, explicitFormat);
 
     this.assertAllowedChat(chat_id);
+
+    // Turn-scoped reply gate: block a second telegram_reply call in the same
+    // turn (the model re-announcing the same result) before hitting the
+    // Telegram API at all, unless the caller opts in via allow_multiple.
+    // Reuses the same turnId (the live typing-signal timestamp) and .replied
+    // marker already written below — a null turnId on either side never
+    // matches, favoring an extra delivery over a silently dropped one, same
+    // as isEntryAlreadyReplied() in typing.ts.
+    let turnId: string | null = null;
+    try {
+      turnId = fs.readFileSync(path.join(this.typingDir, chat_id), 'utf8').trim() || null;
+    } catch {}
+    if (!allowMultiple && turnId !== null) {
+      let repliedTurnId: string | null = null;
+      try {
+        repliedTurnId = parseRepliedTurnId(fs.readFileSync(path.join(this.typingDir, `${chat_id}.replied`), 'utf8'));
+      } catch {}
+      if (repliedTurnId === turnId) {
+        throw new Error('telegram_reply already sent a message this turn — pass allow_multiple: true to send another (e.g. an image followed by separate text) instead of re-announcing the same result');
+      }
+    }
 
     for (const f of files) {
       this.assertSendable(f);
@@ -367,13 +393,10 @@ export class TelegramModule implements ChannelModule {
     // this turn's id — the receiver (typing.ts) only treats a queued
     // auto-forward as "already replied" when its own turnId matches this one,
     // so a marker left over from an earlier turn can never suppress a later
-    // turn's forward (see typing.ts's isEntryAlreadyReplied()).
+    // turn's forward (see typing.ts's isEntryAlreadyReplied()). Reuses the
+    // turnId read at the top of this method (the gate check above).
     try {
       fs.mkdirSync(this.typingDir, { recursive: true });
-      let turnId: string | null = null;
-      try {
-        turnId = fs.readFileSync(path.join(this.typingDir, chat_id), 'utf8').trim() || null;
-      } catch {}
       fs.writeFileSync(path.join(this.typingDir, `${chat_id}.replied`), JSON.stringify({ text: sendText, turnId }));
     } catch {}
 

@@ -476,7 +476,7 @@ describe('T11-T13: Telegram delivery', () => {
     manager.stop();
   });
 
-  it('T12: type=agent error → Telegram not called', async () => {
+  it('T12: type=agent error → Telegram receives a short failure notice (not silence, not the raw output)', async () => {
     const runner = {
       sendApiMessage: jest.fn().mockRejectedValue(new Error('agent failed')),
     };
@@ -498,7 +498,10 @@ describe('T11-T13: Telegram delivery', () => {
     const telegramCall = fetchMock.mock.calls.find((c) =>
       typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
     );
-    expect(telegramCall).toBeUndefined();
+    expect(telegramCall).toBeDefined();
+    const body = JSON.parse(telegramCall![1].body);
+    expect(body.chat_id).toBe('12345');
+    expect(body.text).toBe("cron 'agent-error' failed: agent failed");
 
     manager.stop();
   });
@@ -589,7 +592,7 @@ describe('T14-T19: Discord delivery', () => {
     manager.stop();
   });
 
-  it('T15: runner throws → Discord fetch not called', async () => {
+  it('T15: runner throws → Discord receives a short failure notice (not silence)', async () => {
     const runner = {
       sendApiMessage: jest.fn().mockRejectedValue(new Error('agent failed')),
     };
@@ -611,7 +614,9 @@ describe('T14-T19: Discord delivery', () => {
     const discordCall = fetchMock.mock.calls.find((c) =>
       typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
     );
-    expect(discordCall).toBeUndefined();
+    expect(discordCall).toBeDefined();
+    const body = JSON.parse(discordCall![1].body);
+    expect(body.content).toBe("cron 'discord-runner-fail' failed: agent failed");
 
     manager.stop();
   });
@@ -771,7 +776,137 @@ describe('T14-T19: Discord delivery', () => {
   });
 });
 
-// ─── Fix 1 regression tests ──────────────────────────────────────────────────
+// ─── T20-T23: Failure-visibility fix (command-type notify-on-fail + Telegram chunking) ──
+
+describe('T20-T23: Failure notifications for command-type jobs + Telegram chunking', () => {
+  let fetchMock: jest.SpyInstance;
+
+  beforeEach(() => {
+    fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+    } as Response);
+  });
+
+  afterEach(() => {
+    fetchMock.mockRestore();
+  });
+
+  it('T20: type=command failure → Telegram receives a short failure notice', async () => {
+    const { manager, agentId } = makeManager({ botToken: 'TOKEN123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'command-fail',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: 'exit 1',
+      telegram: '12345',
+    });
+
+    await manager.run(job.id);
+
+    const telegramCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    expect(telegramCall).toBeDefined();
+    const body = JSON.parse(telegramCall![1].body);
+    expect(body.chat_id).toBe('12345');
+    expect(body.text).toContain("cron 'command-fail' failed:");
+
+    manager.stop();
+  });
+
+  it('T21: type=command failure → Discord receives a short failure notice too', async () => {
+    const { manager, agentId } = makeManager({ discordBotToken: 'DISC123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'command-fail-discord',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: 'exit 1',
+      discord: 'CHANNEL_123',
+    });
+
+    await manager.run(job.id);
+
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(discordCall).toBeDefined();
+    const body = JSON.parse(discordCall![1].body);
+    expect(body.content).toContain("cron 'command-fail-discord' failed:");
+
+    manager.stop();
+  });
+
+  it('T22: type=command SUCCESS → stays silent (unchanged design — command output is not a chat response)', async () => {
+    const { manager, agentId } = makeManager({ botToken: 'TOKEN123', discordBotToken: 'DISC123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'command-ok',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'command',
+      command: 'echo hi',
+      telegram: '12345',
+      discord: 'CHANNEL_123',
+    });
+
+    const log = await manager.run(job.id);
+    expect(log.status).toBe('ok');
+
+    const telegramCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    const discordCall = fetchMock.mock.calls.find((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('discord.com/api'),
+    );
+    expect(telegramCall).toBeUndefined();
+    expect(discordCall).toBeUndefined();
+
+    manager.stop();
+  });
+
+  it('T23: output longer than 4096 chars → chunked into multiple Telegram messages', async () => {
+    const longText = 'a'.repeat(4500);
+    const runner = makeRunner(longText);
+    const { manager, agentId } = makeManager({ runner, botToken: 'TOKEN123' });
+    await manager.start();
+
+    const job = await manager.create({
+      agentId,
+      name: 'telegram-chunked',
+      scheduleKind: 'cron',
+      schedule: '* * * * *',
+      type: 'agent',
+      prompt: 'hi',
+      telegram: '12345',
+    });
+
+    await manager.run(job.id);
+
+    const telegramCalls = fetchMock.mock.calls.filter((c) =>
+      typeof c[0] === 'string' && (c[0] as string).includes('/sendMessage'),
+    );
+    // output truncated to 5000 chars in runLog, then split into <=4096-char chunks
+    expect(telegramCalls.length).toBeGreaterThanOrEqual(2);
+    for (const call of telegramCalls) {
+      const body = JSON.parse(call[1].body);
+      expect(body.text.length).toBeLessThanOrEqual(4096);
+    }
+
+    manager.stop();
+  });
+});
 
 describe('Fix 1: at-job does not re-fire when lastRunAt is already set', () => {
   function writeStore(storePath: string, job: Record<string, unknown>) {

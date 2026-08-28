@@ -234,13 +234,19 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
   });
 
   it('T10: claude-gateway updated — plain process warning', async () => {
-    // Remove systemd/pm2 env vars to simulate plain process
+    // Remove systemd/pm2 env vars to simulate plain process. CLAUDE_GATEWAY_SUPERVISOR
+    // must be cleared too — packages.ts:165 treats it as authoritative over the raw
+    // markers (claimSupervisorEnv() sets it at boot), so a real supervised deployment's
+    // inherited value would otherwise force the "managed" branch regardless of the
+    // INVOCATION_ID/PM2_HOME/pm_id clearing below.
     const savedInvocationId = process.env.INVOCATION_ID;
     const savedPm2Home = process.env.PM2_HOME;
     const savedPmId = process.env.pm_id;
+    const savedSupervisor = process.env.CLAUDE_GATEWAY_SUPERVISOR;
     delete process.env.INVOCATION_ID;
     delete process.env.PM2_HOME;
     delete process.env.pm_id;
+    delete process.env.CLAUDE_GATEWAY_SUPERVISOR;
 
     let callCount = 0;
     mockExecSync.mockImplementation((cmd: unknown) => {
@@ -273,6 +279,7 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
     if (savedInvocationId !== undefined) process.env.INVOCATION_ID = savedInvocationId;
     if (savedPm2Home !== undefined) process.env.PM2_HOME = savedPm2Home;
     if (savedPmId !== undefined) process.env.pm_id = savedPmId;
+    if (savedSupervisor !== undefined) process.env.CLAUDE_GATEWAY_SUPERVISOR = savedSupervisor;
 
     // process.kill(pid, 'SIGTERM') should be scheduled
     jest.runAllTimers();
