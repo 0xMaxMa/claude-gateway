@@ -77,15 +77,26 @@ describe('resolve', () => {
     const { resolveEnabledConnectors, listConnectorStatus } =
       require('../../src/connectors/resolve');
 
-    // disabled → omitted
-    expect(resolveEnabledConnectors({ connectors: {} })).toEqual({});
+    // Enablement is opt-out (default enabled) — microsoft-365 needs no secret
+    // so it resolves by default regardless of config; explicitly opt it out
+    // in these assertions to keep this test focused on github.
+    const noMs365 = { connectors: { 'microsoft-365': { enabled: false as const } } };
+
+    // no config, not connected → omitted
+    expect(resolveEnabledConnectors(noMs365)).toEqual({});
 
     // enabled but not connected → omitted
-    expect(resolveEnabledConnectors({ connectors: { github: { enabled: true } } })).toEqual({});
+    expect(
+      resolveEnabledConnectors({
+        connectors: { github: { enabled: true }, 'microsoft-365': { enabled: false } },
+      }),
+    ).toEqual({});
 
     // enabled + connected → entry present
     setSecret('GITHUB_TOKEN', 'ghp_xyz');
-    const resolved = resolveEnabledConnectors({ connectors: { github: { enabled: true } } });
+    const resolved = resolveEnabledConnectors({
+      connectors: { github: { enabled: true }, 'microsoft-365': { enabled: false } },
+    });
     expect(resolved.github).toEqual({
       type: 'http',
       url: 'https://api.githubcopilot.com/mcp/',
@@ -100,6 +111,112 @@ describe('resolve', () => {
     expect(status.setup.tokenUrl).toMatch(/^https:\/\/github\.com\/settings\/tokens\/new/);
     expect(typeof status.setup.label).toBe('string');
     expect(status.setup.label.length).toBeGreaterThan(0);
+  });
+
+  // POC (manual-token) Google connectors: each keeps its own secret slot even
+  // though the community servers they wrap both read GOOGLE_ACCESS_TOKEN — so
+  // connecting Gmail must not flip Drive's `connected` too.
+  it('gmail + google-drive: independent secret slots, each resolves its own stdio entry', () => {
+    const { setSecret } = require('../../src/connectors/token-env');
+    const { resolveEnabledConnectors, listConnectorStatus } =
+      require('../../src/connectors/resolve');
+
+    const enabled = {
+      connectors: {
+        gmail: { enabled: true },
+        'google-drive': { enabled: true },
+        // Opt-out: microsoft-365 needs no secret, so opt-in default resolves
+        // it regardless — excluded here to keep this test focused on Google.
+        'microsoft-365': { enabled: false as const },
+      },
+    };
+    expect(resolveEnabledConnectors(enabled)).toEqual({});
+
+    setSecret('GMAIL_ACCESS_TOKEN', 'ya29.gmail');
+    const gmailOnly = resolveEnabledConnectors(enabled);
+    expect(gmailOnly.gmail).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'gmail-mcp'],
+      env: { GOOGLE_ACCESS_TOKEN: 'ya29.gmail' },
+    });
+    expect(gmailOnly['google-drive']).toBeUndefined();
+
+    const statusAfterGmail = listConnectorStatus();
+    expect(statusAfterGmail.find((c: { id: string }) => c.id === 'gmail')).toMatchObject({
+      connected: true,
+    });
+    expect(statusAfterGmail.find((c: { id: string }) => c.id === 'google-drive')).toMatchObject({
+      connected: false,
+    });
+
+    setSecret('GDRIVE_ACCESS_TOKEN', 'ya29.drive');
+    const both = resolveEnabledConnectors(enabled);
+    expect(both['google-drive']).toEqual({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'google-drive-mcp'],
+      env: { GOOGLE_ACCESS_TOKEN: 'ya29.drive' },
+    });
+  });
+
+  it('custom connector: opt-out default enablement; partially-connected → omitted; fully-connected → substituted', () => {
+    const { setSecret } = require('../../src/connectors/token-env');
+    const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+
+    const customConnectors = {
+      calendar: {
+        label: 'Calendar',
+        config: {
+          type: 'streamable-http',
+          url: 'https://server.smithery.ai/calendar/mcp',
+          headers: { Authorization: 'Bearer {smithery_api_key}', 'X-Extra': '{unset_var}' },
+        },
+        secretNames: ['smithery_api_key', 'unset_var'],
+      },
+    };
+    // microsoft-365 opted out throughout — see the "opt-out" comment above.
+    const noMs365 = { 'microsoft-365': { enabled: false as const } };
+    const agentConfig = { connectors: { calendar: { enabled: true }, ...noMs365 } };
+
+    // No config at all (not even mentioning `calendar`) → still resolves once
+    // secrets exist, because enablement defaults to on (opt-out model).
+    setSecret('CUSTOM__calendar__smithery_api_key', 'sk-abc');
+    setSecret('CUSTOM__calendar__unset_var', 'val');
+    expect(resolveEnabledConnectors({ connectors: noMs365 }, customConnectors)).toEqual({
+      calendar: {
+        type: 'streamable-http',
+        url: 'https://server.smithery.ai/calendar/mcp',
+        headers: { Authorization: 'Bearer sk-abc', 'X-Extra': 'val' },
+      },
+    });
+
+    // Explicitly disabled for this agent → omitted even though fully connected.
+    expect(
+      resolveEnabledConnectors(
+        { connectors: { calendar: { enabled: false }, ...noMs365 } },
+        customConnectors,
+      ),
+    ).toEqual({});
+
+    // Reset secrets to re-test the partial-connection path from a clean slate.
+    const { deleteSecret } = require('../../src/connectors/token-env');
+    deleteSecret('CUSTOM__calendar__smithery_api_key');
+    deleteSecret('CUSTOM__calendar__unset_var');
+
+    // Enabled but only one of two required secrets present → still omitted.
+    setSecret('CUSTOM__calendar__smithery_api_key', 'sk-abc');
+    expect(resolveEnabledConnectors(agentConfig, customConnectors)).toEqual({});
+
+    // Both secrets present → substituted into the raw config.
+    setSecret('CUSTOM__calendar__unset_var', 'val');
+    expect(resolveEnabledConnectors(agentConfig, customConnectors)).toEqual({
+      calendar: {
+        type: 'streamable-http',
+        url: 'https://server.smithery.ai/calendar/mcp',
+        headers: { Authorization: 'Bearer sk-abc', 'X-Extra': 'val' },
+      },
+    });
   });
 });
 
@@ -150,6 +267,7 @@ describe('connectors-router', () => {
     expect(github).toMatchObject({ id: 'github', label: 'GitHub', connected: false });
     expect(github.setup.tokenUrl).toMatch(/^https:\/\/github\.com\/settings\/tokens\/new/);
     expect(github.setup.label).toBeTruthy();
+    expect(github.repoUrl).toBe('https://github.com/github/github-mcp-server');
   });
 
   it('rejects missing / invalid key', async () => {

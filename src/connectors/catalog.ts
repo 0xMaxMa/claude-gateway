@@ -19,6 +19,7 @@ export const CONNECTOR_CATALOG: ConnectorSpec[] = [
     description: 'Repos, issues, and pull requests via the official GitHub MCP server.',
     transport: 'http',
     auth: { kind: 'secret', secretEnv: 'GITHUB_TOKEN' },
+    repoUrl: 'https://github.com/github/github-mcp-server',
     setup: {
       // GitHub's classic-PAT page accepts scopes + description query params
       // (fine-grained tokens do not); the GitHub MCP server works with a classic PAT.
@@ -41,6 +42,82 @@ export const CONNECTOR_CATALOG: ConnectorSpec[] = [
     //            'ghcr.io/github/github-mcp-server'],
     //     env: { GITHUB_PERSONAL_ACCESS_TOKEN: secret ?? '' },
     //   }),
+  },
+  // ── Google connectors — real OAuth (authorization_code + refresh), but the
+  // whole client_secret-touching flow lives in getpod-ai's services/api, NOT
+  // here — this gateway only ever receives a short-lived access_token via
+  // POST /v1/connectors/:id/oauth/receive (connectors-router.ts). Reason: this
+  // gateway runs inside the user's own VM, reachable by that user's own
+  // shell/SSH — a client_secret shared across every user can't live here
+  // safely. See types.ts's 'oauth' auth kind doc comment.
+  //
+  // Both community servers below (io.github.domdomegg/{gmail,google-drive,
+  // google-cal}-mcp on the MCP registry) read the SAME env var name
+  // (GOOGLE_ACCESS_TOKEN) in their process, but each catalog entry stores its
+  // OWN secret under a distinct key (GMAIL_ACCESS_TOKEN / GDRIVE_ACCESS_TOKEN /
+  // GCAL_ACCESS_TOKEN) so connecting one doesn't silently mark the others
+  // "connected" too.
+  {
+    id: 'gmail',
+    label: 'Gmail',
+    description: 'Read, search, and send email via Gmail.',
+    transport: 'stdio',
+    auth: { kind: 'oauth', secretEnv: 'GMAIL_ACCESS_TOKEN' },
+    repoUrl: 'https://github.com/domdomegg/gmail-mcp',
+    build: (secret) => ({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'gmail-mcp'],
+      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
+    }),
+  },
+  {
+    id: 'google-drive',
+    label: 'Google Drive',
+    description: 'List, search, and manage files in Google Drive.',
+    transport: 'stdio',
+    auth: { kind: 'oauth', secretEnv: 'GDRIVE_ACCESS_TOKEN' },
+    repoUrl: 'https://github.com/domdomegg/google-drive-mcp',
+    build: (secret) => ({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'google-drive-mcp'],
+      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
+    }),
+  },
+  {
+    id: 'google-calendar',
+    label: 'Google Calendar',
+    description: 'List, create, and manage calendar events.',
+    transport: 'stdio',
+    auth: { kind: 'oauth', secretEnv: 'GCAL_ACCESS_TOKEN' },
+    repoUrl: 'https://github.com/domdomegg/google-cal-mcp',
+    build: (secret) => ({
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', 'google-cal-mcp'],
+      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
+    }),
+  },
+  // Microsoft 365 (Outlook/OneDrive/Teams) — the one registry entry
+  // (com.proscendia/microsoft-365) is a remote streamable-http server with NO
+  // static header/token: it does its own Microsoft OAuth at connect-time
+  // (server-side, once the MCP client opens the connection), so there is
+  // nothing for us to store — auth.kind 'none'. UNVERIFIED whether Claude
+  // Code's MCP client actually completes that handshake; enabling this for an
+  // agent is the live test.
+  {
+    id: 'microsoft-365',
+    label: 'Microsoft 365',
+    description: 'Outlook, OneDrive, and Teams via the user\'s own Microsoft account.',
+    transport: 'http',
+    auth: { kind: 'none' },
+    // No GitHub repo published by the vendor — link to their site instead.
+    repoUrl: 'https://proscendia.com',
+    build: () => ({
+      type: 'http',
+      url: 'https://microsoft-mcp.proscendia.com/mcp',
+    }),
   },
 ];
 

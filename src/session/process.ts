@@ -628,7 +628,10 @@ export class SessionProcess extends EventEmitter {
     // Connectors: catalog entries enabled for THIS agent AND connected (secret present
     // in mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
     // without a daemon restart. Secrets land only in this 0600 mcp-config.json.
-    const connectorServers = resolveEnabledConnectors(this.agentConfig);
+    const connectorServers = resolveEnabledConnectors(
+      this.agentConfig,
+      this.gatewayConfig.gateway.customConnectors,
+    );
     for (const [name, server] of Object.entries(connectorServers)) {
       if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
     }
