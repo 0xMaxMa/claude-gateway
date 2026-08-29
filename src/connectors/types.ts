@@ -14,7 +14,7 @@ export type ConnectorTransport = 'http' | 'stdio';
 
 export type ConnectorAuth =
   | { kind: 'none' }
-  | { kind: 'secret'; secretEnv: string } // iteration 1 — paste a token (e.g. GitHub PAT)
+  | { kind: 'secret'; secretEnv: string } // paste a token (e.g. GitHub PAT)
   | {
       kind: 'oauth_device';
       secretEnv: string;
@@ -24,14 +24,17 @@ export type ConnectorAuth =
       tokenUrl: string;
     }
   | {
+      // Managed externally by services/api (getpod-ai), NOT by this gateway —
+      // the gateway never sees a client_secret or a refresh_token, only ever
+      // receives a short-lived access_token via POST
+      // /v1/connectors/:id/oauth/receive (connectors-router.ts). Reason: this
+      // gateway runs inside the user's own VM (SSH + agent shell access), so
+      // a client_secret shared across every user could never live here
+      // safely. The web panel shows a "Connect" link to services/api's own
+      // OAuth start endpoint instead of the paste-a-token modal `secretEnv`
+      // kinds use.
       kind: 'oauth';
-      secretEnv: string; // env name holding the (refreshed) access token
-      clientId: string;
-      clientSecret: string;
-      scopes: string[];
-      authUrl: string;
-      tokenUrl: string;
-      redirectPath: string;
+      secretEnv: string;
     };
 
 /**
@@ -59,6 +62,13 @@ export interface ConnectorSpec {
   /** Optional guided token-generation help for the web panel. */
   setup?: ConnectorSetup;
   /**
+   * Link to the underlying MCP server's repo/docs/vendor page — shown as a
+   * small external link in the web panel so a user can see what they're
+   * actually running before connecting (most of today's catalog is a
+   * community package, not an Anthropic/vendor-official one).
+   */
+  repoUrl?: string;
+  /**
    * Build the mcpServers entry for this connector. `secret` is the resolved token
    * (null for auth.kind === 'none' or when not yet connected).
    */
@@ -74,9 +84,37 @@ export interface ConnectorStatus {
   connected: boolean;
   /** Optional guided token-generation help for the web panel. */
   setup?: ConnectorSetup;
+  /**
+   * 'built-in' = code-reviewed CONNECTOR_CATALOG entry (the security boundary —
+   * only vetted servers). 'custom' = user-pasted raw mcpServers JSON, admin-trusted
+   * but NOT code-reviewed — see connectors/custom.ts.
+   */
+  source: 'built-in' | 'custom';
+  /** repoUrl (built-in) or sourceUrl (custom) — see their doc comments. */
+  repoUrl?: string;
 }
 
 /** Returns the env-var name a spec's secret is stored under, or null for kind 'none'. */
 export function secretEnvOf(spec: ConnectorSpec): string | null {
   return spec.auth.kind === 'none' ? null : spec.auth.secretEnv;
+}
+
+/**
+ * A user-pasted connector: raw mcpServers-entry JSON (from the MCP registry, a
+ * docs page, wherever) with `{placeholderName}` tokens standing in for secrets.
+ * Stored in config.json's gateway.customConnectors, keyed by a slugified id.
+ * Unlike ConnectorSpec, there's no build() — resolve.ts does a generic
+ * find-and-replace of `{name}` against the connector's own namespaced secrets
+ * (see connectors/custom.ts: customSecretKey, substitutePlaceholders).
+ */
+export interface CustomConnectorEntry {
+  label: string;
+  description?: string;
+  /** Raw config as pasted, e.g. {"command":"npx","args":["gmail-mcp"]} or
+   *  {"type":"streamable-http","url":"...","headers":{"Authorization":"Bearer {api_key}"}}. */
+  config: Record<string, unknown>;
+  /** Placeholder names found in `config` at add-time, e.g. ['api_key']. */
+  secretNames: string[];
+  /** Where the user says this config came from — their own reference, unverified. */
+  sourceUrl?: string;
 }

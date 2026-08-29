@@ -732,6 +732,7 @@ export class GatewayRouter {
       const connectorsRouter = createConnectorsRouter(
         this.gatewayConfig.gateway.api.keys,
         this.configPath,
+        this.agents,
       );
       this.app.use('/api', connectorsRouter);
     }

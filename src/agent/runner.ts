@@ -42,6 +42,7 @@ import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
+import { resolveEnabledConnectors } from '../connectors/resolve';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -2714,6 +2715,27 @@ export class AgentRunner extends EventEmitter {
     }
     this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred, skipped });
     return { immediate, deferred, skipped };
+  }
+
+  /**
+   * Called after a connector's secret changes (most commonly: the background
+   * OAuth refresher in index.ts rotated an access token). A no-op when this
+   * agent doesn't actually resolve that connector — restarting a long-lived
+   * session that never uses the connector would be pure disruption. Otherwise
+   * reuses restartOrDefer's lossless defer-idle path: the stdio MCP subprocess
+   * only reads its env once at spawn (see session/process.ts's writeMcpConfig
+   * comment), so a session with the connector enabled genuinely needs a
+   * respawn to pick up the new token — there's no way to hot-patch a running
+   * child process's env.
+   */
+  async restartSessionsUsingConnector(connectorId: string): Promise<{ restarted: boolean }> {
+    const resolved = resolveEnabledConnectors(
+      this.agentConfig,
+      this.gatewayConfig?.gateway?.customConnectors,
+    );
+    if (!(connectorId in resolved)) return { restarted: false };
+    await this.restartOrDefer({ skipBusy: false, deferIdle: true });
+    return { restarted: true };
   }
 
   /**

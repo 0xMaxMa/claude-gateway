@@ -391,12 +391,26 @@ describe('SessionProcess', () => {
       expect(readMcpConfig().github).toBeUndefined();
     });
 
-    it('not enabled → github entry omitted even with token', async () => {
+    it('explicitly disabled → github entry omitted even with token', async () => {
+      // Enablement is opt-out (default on) — an empty `connectors: {}` no
+      // longer means "nothing enabled"; it must be explicitly {enabled: false}.
       fs.writeFileSync(TOKEN_ENV, 'GITHUB_TOKEN=ghp_inject\n', { mode: 0o600 });
-      agentConfig.connectors = {};
+      agentConfig.connectors = { github: { enabled: false } };
       const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await sp.start();
       expect(readMcpConfig().github).toBeUndefined();
+    });
+
+    it('opt-out default: empty connectors config still injects a connected connector', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'GITHUB_TOKEN=ghp_default\n', { mode: 0o600 });
+      agentConfig.connectors = {};
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toEqual({
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_default' },
+      });
     });
   });
 
@@ -1054,6 +1068,10 @@ describe('SessionProcess', () => {
     try {
       // No settings.json, no .claude.json
       mockHomeDir = fakeHome;
+      // Enablement is opt-out (default on) — microsoft-365 needs no secret, so
+      // it would otherwise appear here regardless of this test's intent (a
+      // baseline session with no connectors configured).
+      agentConfig.connectors = { 'microsoft-365': { enabled: false } };
 
       const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await expect(sp.start()).resolves.not.toThrow();

@@ -1,3 +1,6 @@
+export type { CustomConnectorEntry } from './connectors/types';
+import type { CustomConnectorEntry } from './connectors/types';
+
 export interface SessionConfig {
   idleTimeoutMinutes?: number; // default 30
   maxConcurrent?: number; // default 20
@@ -459,6 +462,12 @@ export interface GatewayConfig {
      * connectors connect/disconnect routes. The secret VALUE never lives here.
      */
     connectors?: Record<string, { secretEnv: string }>;
+    /**
+     * User-pasted (not code-reviewed) connectors — second tier alongside the
+     * built-in CONNECTOR_CATALOG. Keyed by slugified id. See
+     * connectors/types.ts's CustomConnectorEntry doc for the security tradeoff.
+     */
+    customConnectors?: Record<string, CustomConnectorEntry>;
   };
   agents: AgentConfig[];
 }
