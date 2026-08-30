@@ -52,9 +52,10 @@ describe('connectors-router — oauth-kind connectors', () => {
     return cfgPath;
   }
 
-  it('GET /v1/connectors reports gmail/google-drive/google-calendar as authKind "oauth"', async () => {
+  it('GET /v1/connectors reports github/gmail/google-drive/google-calendar as authKind "oauth"', async () => {
     const res = await request(makeApp(tmpConfig())).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     const byId = Object.fromEntries(res.body.connectors.map((c: { id: string; authKind: string }) => [c.id, c.authKind]));
+    expect(byId.github).toBe('oauth');
     expect(byId.gmail).toBe('oauth');
     expect(byId['google-drive']).toBe('oauth');
     expect(byId['google-calendar']).toBe('oauth');
@@ -77,8 +78,10 @@ describe('connectors-router — oauth-kind connectors', () => {
   });
 
   it('oauth/receive rejects a non-oauth connector', async () => {
+    // microsoft-365 is auth kind 'none' — github is 'oauth' now too, so it's
+    // no longer a valid non-oauth example here.
     const res = await request(makeApp(tmpConfig()))
-      .post('/api/v1/connectors/github/oauth/receive')
+      .post('/api/v1/connectors/microsoft-365/oauth/receive')
       .set('X-Api-Key', adminKey)
       .send({ access_token: 'at-1' });
     expect(res.status).toBe(400);

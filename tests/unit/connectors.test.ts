@@ -103,14 +103,11 @@ describe('resolve', () => {
       headers: { Authorization: 'Bearer ghp_xyz' },
     });
 
-    // connected reflected in status
+    // connected reflected in status — github is now a real OAuth connector
+    // (services/api-driven, no paste-token setup help to surface).
     const status = listConnectorStatus().find((c: { id: string }) => c.id === 'github');
-    expect(status).toMatchObject({ id: 'github', authKind: 'secret', connected: true });
-
-    // guided token-generation help is surfaced for the web panel
-    expect(status.setup.tokenUrl).toMatch(/^https:\/\/github\.com\/settings\/tokens\/new/);
-    expect(typeof status.setup.label).toBe('string');
-    expect(status.setup.label.length).toBeGreaterThan(0);
+    expect(status).toMatchObject({ id: 'github', authKind: 'oauth', connected: true });
+    expect(status.setup).toBeUndefined();
   });
 
   // POC (manual-token) Google connectors: each keeps its own secret slot even
@@ -264,9 +261,13 @@ describe('connectors-router', () => {
     const res = await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(res.status).toBe(200);
     const github = res.body.connectors.find((c: { id: string }) => c.id === 'github');
-    expect(github).toMatchObject({ id: 'github', label: 'GitHub', connected: false });
-    expect(github.setup.tokenUrl).toMatch(/^https:\/\/github\.com\/settings\/tokens\/new/);
-    expect(github.setup.label).toBeTruthy();
+    expect(github).toMatchObject({
+      id: 'github',
+      label: 'GitHub',
+      authKind: 'oauth',
+      connected: false,
+    });
+    expect(github.setup).toBeUndefined();
     expect(github.repoUrl).toBe('https://github.com/github/github-mcp-server');
   });
 
@@ -283,22 +284,26 @@ describe('connectors-router', () => {
     expect(res.status).toBe(403);
   });
 
-  it('connect stores secret + writes config.json; delete clears both', async () => {
+  // github is oauth-kind now (services/api pushes the token via /oauth/receive,
+  // same as gmail/drive/calendar — see tests/unit/oauth-connectors.test.ts for
+  // that route's dedicated coverage). This test keeps the router-level
+  // connect→status→delete round trip exercised end-to-end from this suite.
+  it('oauth/receive stores the access token + writes config.json; delete clears both', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
     const cfgPath = path.join(dir, 'config.json');
     fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
     const app = makeApp(cfgPath);
     const { getSecret } = require('../../src/connectors/token-env');
 
-    // empty token rejected
-    const bad = await request(app).post('/api/v1/connectors/github/connect').set('X-Api-Key', adminKey).send({ token: '  ' });
+    // empty access_token rejected
+    const bad = await request(app).post('/api/v1/connectors/github/oauth/receive').set('X-Api-Key', adminKey).send({ access_token: '  ' });
     expect(bad.status).toBe(400);
 
-    // connect
-    const ok = await request(app).post('/api/v1/connectors/github/connect').set('X-Api-Key', adminKey).send({ token: 'ghp_secret' });
+    // receive
+    const ok = await request(app).post('/api/v1/connectors/github/oauth/receive').set('X-Api-Key', adminKey).send({ access_token: 'ghu_pushed' });
     expect(ok.status).toBe(200);
     expect(ok.body).toEqual({ id: 'github', connected: true });
-    expect(getSecret('GITHUB_TOKEN')).toBe('ghp_secret');
+    expect(getSecret('GITHUB_TOKEN')).toBe('ghu_pushed');
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
     expect(written.gateway.connectors).toEqual({ github: { secretEnv: 'GITHUB_TOKEN' } });
 

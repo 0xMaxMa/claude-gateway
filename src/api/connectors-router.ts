@@ -159,7 +159,7 @@ export function createConnectorsRouter(
 
     if (spec.auth.kind === 'oauth') {
       res.status(400).json({
-        error: `'${spec.id}' is connected via getpod-ai (Google OAuth), not a pasted token`,
+        error: `'${spec.id}' is connected via getpod-ai (OAuth), not a pasted token`,
       });
       return;
     }
