@@ -18,16 +18,14 @@ export const CONNECTOR_CATALOG: ConnectorSpec[] = [
     label: 'GitHub',
     description: 'Repos, issues, and pull requests via the official GitHub MCP server.',
     transport: 'http',
-    auth: { kind: 'secret', secretEnv: 'GITHUB_TOKEN' },
+    // Real OAuth (authorization_code, no refresh — GitHub OAuth App user
+    // tokens don't expire unless the org opts into expiring tokens, which
+    // getpod's App doesn't) — same push-only shape as the Google connectors
+    // below: the client_secret lives in getpod-ai's services/api only, this
+    // gateway only ever receives the short-lived-in-name-only access_token
+    // via POST /v1/connectors/:id/oauth/receive. See types.ts's 'oauth' doc.
+    auth: { kind: 'oauth', secretEnv: 'GITHUB_TOKEN' },
     repoUrl: 'https://github.com/github/github-mcp-server',
-    setup: {
-      // GitHub's classic-PAT page accepts scopes + description query params
-      // (fine-grained tokens do not); the GitHub MCP server works with a classic PAT.
-      tokenUrl:
-        'https://github.com/settings/tokens/new?scopes=repo,read:org&description=GetPod%20connector',
-      label: 'Create a GitHub token',
-      hint: 'Opens GitHub with repo + read:org scopes pre-filled. Generate it, then paste it here.',
-    },
     build: (secret) => ({
       type: 'http',
       url: 'https://api.githubcopilot.com/mcp/',
