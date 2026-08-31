@@ -1601,6 +1601,14 @@ export class AgentRunner extends EventEmitter {
       // so the result's plain-text auto-forward is skipped (no duplicate message).
       let menuSentThisTurn = false;
       let menuPromptTextThisTurn = '';
+      // Text of the most recent assistant message this turn. Used only as a
+      // fallback when the turn's `result` is an empty string — some backends
+      // (OpenRouter) stream the answer as assistant text and then close the turn
+      // with `result: ""`, which would otherwise leave the history DB with no row
+      // for the reply. Replaced, never appended: assistant messages arrive as
+      // cumulative snapshots, so the last one is the complete text (same
+      // semantics as `result`).
+      let lastAssistantTextThisTurn = '';
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
       const replyToolName =
@@ -1624,8 +1632,13 @@ export class AgentRunner extends EventEmitter {
 
           // Track reply tool calls and persist assistant messages to history
           if (obj['type'] === 'assistant') {
-            const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
+            const msg = obj['message'] as { content?: Array<{ type: string; name?: string; text?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
+              const textThisMessage = msg!.content
+                .filter((b) => b.type === 'text' && typeof b.text === 'string')
+                .map((b) => b.text as string)
+                .join('');
+              if (textThisMessage.trim()) lastAssistantTextThisTurn = textThisMessage;
               for (const block of msg!.content) {
                 // Skill-learning: count every tool_use this turn (deduped by block
                 // id inside the manager, since cumulative assistant snapshots re-emit
@@ -1860,8 +1873,18 @@ export class AgentRunner extends EventEmitter {
                 forwardableText = '';
               }
             }
-            if (!isSocketError && !isRequestTooLarge && forwardableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
-              const text = forwardableText;
+            // A backend that closes the turn with `result: ""` after streaming the
+            // answer as assistant text (OpenRouter) leaves nothing to store here.
+            // SessionProcess still appends that text to the session JSON, so the
+            // history DB would be the only layer missing the reply — and the
+            // cross-channel producer used to hide that by writing a second copy of
+            // every reply (see sendMessageToSession's done()). Persist the fallback
+            // instead. Forwarding deliberately keeps using forwardableText alone:
+            // an empty `result` also arrives between pty-shell sub-turns, and
+            // posting the intermediate narration to the channel would be a new
+            // message, not a recovered one.
+            const persistableText = forwardableText || lastAssistantTextThisTurn.trim();
+            if (!isSocketError && !isRequestTooLarge && persistableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
               this.historyDb.insertMessage({
@@ -1869,31 +1892,33 @@ export class AgentRunner extends EventEmitter {
                 sessionId: actualSessionId,
                 source: channelSrcForResult as HistorySource,
                 role: 'assistant',
-                content: text,
+                content: persistableText,
                 ts: Date.now(),
               });
-              // Forward to channel. LINE has no .forward consumer — the gateway
-              // delivers via LineReplyManager (free reply, or cache + postback
-              // button when slow) instead of writeAutoForward.
-              const channelText = normalizeTelegramLineBreaks(text)
-              if (channelSrcForResult === 'line' && this.lineReply) {
-                void this.lineReply.onAnswer(mapKey, channelText)
-              } else if (
-                channelSrcForResult !== 'discord' &&
-                channelSrcForResult !== 'slack' &&
-                (hasMarkdown(channelText) || containsTelegramHtml(channelText))
-              ) {
-                // Telegram HTML entities — Slack has its own mrkdwn format and
-                // would display these tags literally, so Slack skips this and
-                // falls through to the plain-text branch below.
-                this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
-              } else {
-                this.writeAutoForward(mapKey, channelText);
+              if (forwardableText) {
+                // Forward to channel. LINE has no .forward consumer — the gateway
+                // delivers via LineReplyManager (free reply, or cache + postback
+                // button when slow) instead of writeAutoForward.
+                const channelText = normalizeTelegramLineBreaks(forwardableText)
+                if (channelSrcForResult === 'line' && this.lineReply) {
+                  void this.lineReply.onAnswer(mapKey, channelText)
+                } else if (
+                  channelSrcForResult !== 'discord' &&
+                  channelSrcForResult !== 'slack' &&
+                  (hasMarkdown(channelText) || containsTelegramHtml(channelText))
+                ) {
+                  // Telegram HTML entities — Slack has its own mrkdwn format and
+                  // would display these tags literally, so Slack skips this and
+                  // falls through to the plain-text branch below.
+                  this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
+                } else {
+                  this.writeAutoForward(mapKey, channelText);
+                }
+                // Assistant output reached the channel — mark the turn delivered so
+                // a later recovery does not resend a message that was answered (C1).
+                const lt = this.lastTurn.get(mapKey);
+                if (lt) lt.delivered = true;
               }
-              // Assistant output reached the channel — mark the turn delivered so
-              // a later recovery does not resend a message that was answered (C1).
-              const lt = this.lastTurn.get(mapKey);
-              if (lt) lt.delivered = true;
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
@@ -1901,6 +1926,7 @@ export class AgentRunner extends EventEmitter {
             pendingLineImageMedia.clear();
             menuSentThisTurn = false;
             menuPromptTextThisTurn = '';
+            lastAssistantTextThisTurn = '';
             // In pty-shell mode, a `result` fires after every Claude API sub-turn
             // (there can be many per user message, separated by tool-call gaps of
             // arbitrary length). Starting the typing-done timer here would stop
@@ -4201,22 +4227,22 @@ export class AgentRunner extends EventEmitter {
       if (settled) return;
       settled = true;
       cleanup();
-      if (result.trim()) {
-        const uiAssistantTs = Date.now();
-        this.sessionStore.appendTelegramMessage(this.agentConfig.id, rawChatId, sessionId, {
-          role: 'assistant',
-          content: result.trim(),
-          ts: uiAssistantTs,
-        }, channel).catch(() => {});
-        this.historyDb.insertMessage({
-          chatId: `${channel}-${rawChatId}`,
-          sessionId,
-          source: channel as HistorySource,
-          role: 'assistant',
-          content: result.trim(),
-          ts: uiAssistantTs,
-        });
-      }
+      // Deliberately does NOT persist the reply. This turn targets a *channel*
+      // session, and channel sessions already have two writers that are bound to
+      // the session rather than to this turn:
+      //   • history DB  — the long-lived proc.on('output') handler installed in
+      //     spawnSession, which writes either the reply-tool text or the result
+      //     text (and deliberately suppresses socket errors, request_too_large
+      //     and corrupted-thinking output).
+      //   • session JSON — SessionProcess's own parser, which appends for every
+      //     `source !== 'api'` session.
+      // Writing here as well produced two rows per cross-channel turn, and after
+      // a reply-tool turn the second row held the model's trailing `result`
+      // narration — text the user never received on the channel. The API path
+      // (sendApiMessage*) still persists its own reply: there neither writer
+      // exists, because `source === 'api'` disables SessionProcess's append and
+      // API sessions get no channel output handler.
+      //
       // No-op once the soft timeout has answered: TurnStream.complete() keeps
       // its first terminal frame.
       this.turnStreams.complete(turn, resultEvent(result.trim(), []));
@@ -4288,12 +4314,10 @@ export class AgentRunner extends EventEmitter {
       // turn and means the opposite — see the code vocabulary on StreamEvent's
       // `error`.
       //
-      // Detaching this turn's listener here does NOT cost the late answer: it is
-      // this producer's *duplicate* write. The session's own long-lived output
-      // handler already inserts a plain-text result into the history DB (see the
-      // forwardableText branch in getOrSpawnSession) and SessionProcess appends
-      // it to the session JSON, neither of which is bound to this turn. Staying
-      // subscribed would write a second row, not rescue a lost one.
+      // Detaching this turn's listener here costs nothing: this producer no
+      // longer persists anything (see done()). The session's own long-lived
+      // output handler and SessionProcess own both storage layers and are not
+      // bound to this turn, so the late answer still lands in history.
       fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
     }, opts.timeoutMs);
 
