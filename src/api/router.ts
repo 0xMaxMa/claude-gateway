@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
+import { callbackSink, type ApiStreamCallbacks } from '../agent/turn-stream';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
@@ -64,6 +65,65 @@ export function isValidSessionId(v: unknown): v is string {
 // sibling routers (image share) apply the identical guard as the /api routes.
 export function isValidAgentId(v: unknown): v is string {
   return typeof v === 'string' && AGENT_ID_RE.test(v);
+}
+
+/**
+ * The one place a turn's stream events become SSE frames (#421).
+ *
+ * All three streaming producers — POST /messages, the cross-channel
+ * chat-session POST, and POST /greeting — plus the re-attach GET below go
+ * through this, so the buffering/replay path has exactly one implementation
+ * instead of the three hand-rolled copies it replaced.
+ *
+ * `seq` is the event's per-turn sequence number; a client feeds the last one it
+ * saw back as `after_seq` to resume. It is absent only for events emitted
+ * outside a turn (built-in commands answered locally), where there is nothing
+ * to resume onto.
+ */
+function createSseCallbacks(
+  res: Response,
+  meta: { requestId: string; sessionId: string; startTime: number },
+): ApiStreamCallbacks {
+  return {
+    onChunk: (event, seq) => {
+      try { res.write(`data: ${JSON.stringify({ ...event, seq })}\n\n`); } catch { /* client gone */ }
+    },
+    onDone: (fullText, attachments, seq) => {
+      try {
+        const frame: Record<string, unknown> = {
+          type: 'result',
+          text: fullText,
+          seq,
+          request_id: meta.requestId,
+          session_id: meta.sessionId,
+          duration_ms: Date.now() - meta.startTime,
+        };
+        if (attachments?.length) frame['attachments'] = attachments;
+        res.write(`data: ${JSON.stringify(frame)}\n\n`);
+        res.write('data: [DONE]\n\n');
+      } catch { /* client gone */ }
+      // Always close: a throw mid-frame must not leave the response half-open,
+      // which would hang a client that is waiting for [DONE].
+      finally { try { res.end(); } catch { /* client gone */ } }
+    },
+    onError: (err, seq) => {
+      try {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, seq, request_id: meta.requestId, session_id: meta.sessionId })}\n\n`);
+      } catch { /* client gone */ }
+      finally { try { res.end(); } catch { /* client gone */ } }
+    },
+  };
+}
+
+function openSseStream(res: Response): void {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+  res.socket?.setNoDelay(true);
 }
 
 function maskToken(token: string): string {
@@ -424,42 +484,13 @@ export function createApiRouter(
       // SSE streaming mode
       let onClientDisconnect: (() => void) | undefined;
       try {
-        const sseCallbacks = {
-          onChunk: (event: import('../types').StreamEvent) => {
-            try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
-          },
-          onDone: (fullText: string, attachments: import('../types').ApiAttachment[]) => {
-            try {
-              const resultEvent: Record<string, unknown> = { type: 'result', text: fullText, request_id: requestId, session_id: sessionId, duration_ms: Date.now() - startTime };
-              if (attachments.length) resultEvent['attachments'] = attachments;
-              res.write(`data: ${JSON.stringify(resultEvent)}\n\n`);
-              res.write('data: [DONE]\n\n');
-              res.end();
-            } catch { /* client gone */ }
-          },
-          onError: (err: Error) => {
-            try {
-              res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
-              res.end();
-            } catch { /* client gone */ }
-          },
-        };
-        const openSseStream = () => {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-          });
-          res.flushHeaders();
-        };
+        const sseCallbacks = createSseCallbacks(res, { requestId, sessionId, startTime });
 
         // Built-in command — emit its response through the same SSE callbacks as a
         // normal reply. Commands bypass the 409 preflight (they must work mid-session,
         // e.g. /stop) and never reach Claude.
         if (isBuiltinCommand) {
-          openSseStream();
-          res.socket?.setNoDelay(true);
+          openSseStream(res);
           try {
             const { responseText } = await runner.executeApiCommand(
               sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage, model: modelStr },
@@ -478,8 +509,7 @@ export function createApiRouter(
           return;
         }
 
-        openSseStream();
-        res.socket?.setNoDelay(true);
+        openSseStream(res);
 
         const agentCfg = agentConfigs.get(agentId)!;
         const allowTools = agentCfg.allow_tools ?? !!apiKey.allow_tools;
@@ -488,10 +518,12 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, requestId },
         );
 
-        // Client disconnect — marks SSE writes as no-op; stream continues server-side until result is saved to DB
+        // Client disconnect — detaches this connection's sink. The turn keeps
+        // running and keeps buffering, so the client can resume it on a new
+        // connection via GET …/sessions/:sessionId/stream?after_seq= (#421).
         res.on('close', onClientDisconnect);
       } catch (err: unknown) {
         const code = (err as { code?: string }).code;
@@ -2572,34 +2604,12 @@ export function createApiRouter(
     const senderName = typeof body.senderName === 'string' ? body.senderName : undefined;
 
     let cleanup: (() => void) | undefined;
+    const requestId = randomUUID();
+    const startTime = Date.now();
     try {
-      const sseCallbacks = {
-        onChunk: (event: import('../types').StreamEvent) => {
-          try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
-        },
-        onDone: (fullText: string) => {
-          try {
-            res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, session_id: sessionId })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
-          } catch { /* client gone */ }
-        },
-        onError: (err: Error) => {
-          try {
-            res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
-            res.end();
-          } catch { /* client gone */ }
-        },
-      };
+      const sseCallbacks = createSseCallbacks(res, { requestId, sessionId, startTime });
 
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      res.flushHeaders();
-      res.socket?.setNoDelay(true);
+      openSseStream(res);
 
       cleanup = await runner.sendMessageToSession(
         rawChatId,
@@ -2608,7 +2618,7 @@ export function createApiRouter(
         content.trim(),
         senderName,
         sseCallbacks,
-        { timeoutMs: DEFAULT_TIMEOUT_MS },
+        { timeoutMs: DEFAULT_TIMEOUT_MS, requestId },
       );
       res.on('close', cleanup);
     } catch (err: unknown) {
@@ -3213,6 +3223,76 @@ export function createApiRouter(
     }
   });
 
+  /**
+   * GET /api/v1/agents/:agentId/sessions/:sessionId/stream?after_seq=N&request_id=…
+   *
+   * Re-attach to a session's current turn (#421). Replays every buffered event
+   * after `after_seq` — omit it to replay the turn from its first event — then
+   * keeps streaming live events on the same connection, terminating with the
+   * same `result` + `[DONE]` frames the original connection would have got.
+   *
+   * Attaching is never a conflict: `409` still means "you tried to start a
+   * second turn", never "you tried to resume the first one". A turn that is
+   * gone (never existed, or past its replay grace window) answers `410`, which
+   * tells the client to read history instead.
+   *
+   * Unlike the sibling session routes this needs no `chat_id`: the turn buffer
+   * is keyed by session id, and a client resuming after a reload may well have
+   * nothing but the session id left.
+   */
+  router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, (req: Request, res: Response) => {
+    const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    if (!isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+      return;
+    }
+
+    const rawAfterSeq = req.query['after_seq'];
+    const afterSeq = rawAfterSeq === undefined || rawAfterSeq === '' ? 0 : Number(rawAfterSeq);
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+      res.status(400).json({ error: 'after_seq must be a non-negative integer' });
+      return;
+    }
+    const requestId = typeof req.query['request_id'] === 'string' ? req.query['request_id'] : undefined;
+
+    // The SSE headers must not go out until the attach is known to succeed —
+    // otherwise a 410 would arrive as a half-open text/event-stream. attach()
+    // replays synchronously, so the first replayed event opens the stream and
+    // an attach that fails never writes at all.
+    let opened = false;
+    const ensureOpen = () => { if (!opened) { opened = true; openSseStream(res); } };
+    const callbacks = createSseCallbacks(res, { requestId: requestId ?? sessionId, sessionId, startTime: Date.now() });
+    const inner = callbackSink({
+      onChunk: (event, seq) => { ensureOpen(); callbacks.onChunk(event, seq); },
+      onDone: (text, attachments, seq) => { ensureOpen(); callbacks.onDone(text, attachments, seq); },
+      onError: (err, seq) => { ensureOpen(); callbacks.onError(err, seq); },
+    });
+
+    const attached = runner.attachTurnStream(sessionId, inner, { afterSeq, requestId });
+    if (!attached.ok) {
+      const body = {
+        gone: { code: 'TURN_GONE', error: 'No resumable turn for this session' },
+        mismatch: { code: 'TURN_MISMATCH', error: 'That request_id is not the session\'s current turn' },
+        truncated: { code: 'TURN_TRUNCATED', error: 'Buffered events at that cursor have been evicted' },
+      }[attached.reason];
+      res.status(410).json({ ...body, hint: 'Read the session history instead.' });
+      return;
+    }
+
+    // A turn still in flight with the client already at the head replays
+    // nothing, so open the stream explicitly rather than leaving the client
+    // waiting on headers until the next live event.
+    ensureOpen();
+    res.on('close', attached.detach);
+  });
+
   // POST /api/v1/agents/:agentId/greeting — stream a proactive welcome from GREETING.md into an existing session
   router.post('/v1/agents/:agentId/greeting', auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
@@ -3270,42 +3350,20 @@ export function createApiRouter(
     }
 
     let onClientDisconnect: (() => void) | undefined;
+    const requestId = randomUUID();
+    const startTime = Date.now();
     try {
-      const sseCallbacks = {
-        onChunk: (event: import('../types').StreamEvent) => {
-          try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* client gone */ }
-        },
-        onDone: (fullText: string) => {
-          try {
-            res.write(`data: ${JSON.stringify({ type: 'result', text: fullText, session_id: sessionId })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
-          } catch { /* client gone */ }
-        },
-        onError: (err: Error) => {
-          try {
-            res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
-            res.end();
-          } catch { /* client gone */ }
-        },
-      } satisfies Parameters<typeof runner.sendApiMessageStream>[3];
+      const sseCallbacks = createSseCallbacks(res, { requestId, sessionId, startTime });
 
       // Preflight conflict check already done above; throw-based check catches races after headers
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      res.flushHeaders();
-      res.socket?.setNoDelay(true);
+      openSseStream(res);
 
       onClientDisconnect = await runner.sendApiMessageStream(
         sessionId,
         chatId,
         content,
         sseCallbacks,
-        { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true },
+        { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true, requestId },
       );
 
       res.on('close', onClientDisconnect);

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -18,6 +19,13 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 import { isBuiltinCommand } from './builtin-commands';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
+import {
+  TurnStreamRegistry,
+  callbackSink,
+  resultEvent,
+  type ApiStreamCallbacks,
+  type TurnSink,
+} from './turn-stream';
 import { runRecovery, toRecoveryOutcome, type RecoveryEffects, type RecoveryRequest } from './recovery-executor';
 import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
@@ -212,6 +220,12 @@ export class AgentRunner extends EventEmitter {
 
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
+
+  // Per-session buffer of the current turn's stream events, so a disconnected or
+  // timed-out client can re-attach and pick the turn back up (#421). Distinct
+  // from pendingApiSessions: that clears the moment the turn settles, this one
+  // survives it for the replay grace window.
+  private readonly turnStreams = new TurnStreamRegistry();
 
   // Serialises concurrent getOrSpawnSession calls for the same key to prevent double-spawn
   private readonly sessionSpawnLocks = new Map<string, Promise<SessionProcess>>();
@@ -2910,6 +2924,8 @@ export class AgentRunner extends EventEmitter {
       clearTimeout(buf.timer);
     }
     this.channelCoalesce.clear();
+    // Drops every turn record and its replay-grace timer (#421).
+    this.turnStreams.clear();
     // Receiver teardown now resolves only once the child has exited, so it must
     // be awaited or shutdown() can exit the gateway out from under a receiver
     // that is still shutting down (issue #405). Run it concurrently with session
@@ -3283,18 +3299,16 @@ export class AgentRunner extends EventEmitter {
    * Send a message to an API session and stream back events via callbacks.
    *
    * Returns a disconnect handler for the caller to wire to the SSE close event.
-   * On client disconnect the stream continues server-side until the result is saved to DB.
+   * It detaches this caller's sink; the turn keeps running, keeps buffering, and
+   * stays re-attachable via attachTurnStream() until the replay grace window
+   * expires (#421).
    */
   async sendApiMessageStream(
     sessionId: string,
     chatId: string,
     message: string,
-    callbacks: {
-      onChunk: (event: StreamEvent) => void;
-      onDone: (fullText: string, attachments: ApiAttachment[]) => void;
-      onError: (err: Error) => void;
-    },
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams },
+    callbacks: ApiStreamCallbacks,
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; requestId?: string },
   ): Promise<() => void> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -3357,16 +3371,12 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
-    let clientGone = false;
-    // onError must fire at most once per turn. The soft timeout notifies the
-    // client directly (below) WITHOUT setting `settled`, so the later hard-cap
-    // fail() would otherwise call onError a second time.
-    let errorNotified = false;
-    const notifyError = (err: Error) => {
-      if (errorNotified) return;
-      errorNotified = true;
-      callbacks.onError(err);
-    };
+    // The turn's event buffer. Every emission below records into it whether or
+    // not anyone is listening; the sink decides only what reaches a socket, so a
+    // disconnect no longer costs the client the rest of the turn (#421).
+    const turn = this.turnStreams.start(sessionId, opts.requestId ?? randomUUID());
+    const initialSink = callbackSink(callbacks);
+    turn.attach(initialSink, 0);
     // Track partial message text for delta computation (--include-partial-messages)
     let lastPartialText = '';
     // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
@@ -3412,7 +3422,7 @@ export class AgentRunner extends EventEmitter {
           ts: streamAssistantTs,
         });
       }
-      callbacks.onDone(finalText, attachments);
+      this.turnStreams.complete(sessionId, resultEvent(finalText, attachments));
     };
 
     const fail = (err: Error) => {
@@ -3424,7 +3434,7 @@ export class AgentRunner extends EventEmitter {
       // state as "still thinking" and spins forever), and drain the attachment
       // buffer so nothing leaks into the next turn.
       this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
-      notifyError(err);
+      this.turnStreams.complete(sessionId, { type: 'error', message: err.message }, err);
     };
 
     // The subprocess died without ever emitting a final `result` line (crash,
@@ -3456,9 +3466,12 @@ export class AgentRunner extends EventEmitter {
       this.pendingApiSessions.delete(sessionId);
     };
 
-    // Called when the SSE client disconnects. Marks clientGone so SSE writes
-    // fail silently, but keeps onOutput listening so the result is still saved to DB.
-    const onClientDisconnect = () => { clientGone = true; };
+    // Called when the SSE client disconnects. Detaches that connection's sink —
+    // the producer below keeps recording, so a re-attach can still deliver
+    // everything that arrived while nobody was listening (#421). Passing the
+    // sink means a stale close from a superseded connection cannot silence the
+    // one that replaced it.
+    const onClientDisconnect = () => { turn.detach(initialSink); };
 
     const onOutput = (line: string) => {
       try {
@@ -3474,13 +3487,13 @@ export class AgentRunner extends EventEmitter {
               if (block.type === 'text' && block.text) fullText += block.text;
               // PTY mode (headless=false) emits tool_use blocks inside assistant messages
               if (block.type === 'tool_use' && block.name && block.id) {
-                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+                turn.emit({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
               }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
+              turn.emit({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
@@ -3491,16 +3504,16 @@ export class AgentRunner extends EventEmitter {
           const text = (obj['text'] as string) ?? '';
           if (text) {
             buffer.push(text);
-            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+            turn.emit({ type: 'text_delta', text });
           }
         }
 
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, (event) => turn.emit(event), (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+          turn.emit({ type: 'text_delta', text });
         });
 
         // Text from delta field (other formats)
@@ -3508,16 +3521,13 @@ export class AgentRunner extends EventEmitter {
           const deltaText = (obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined;
           if (deltaText) {
             buffer.push(deltaText);
-            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: deltaText });
+            turn.emit({ type: 'text_delta', text: deltaText });
           }
         }
 
         // Thinking
         if (obj['type'] === 'thinking') {
-          if (!clientGone) callbacks.onChunk({
-            type: 'thinking',
-            text: (obj['text'] as string) ?? '',
-          });
+          turn.emit({ type: 'thinking', text: (obj['text'] as string) ?? '' });
         }
 
         // Result = end of turn
@@ -3538,21 +3548,24 @@ export class AgentRunner extends EventEmitter {
       }
     };
 
-    // Soft timeout (#75): tell the SSE client now, but KEEP the output listener
-    // attached — exactly like onClientDisconnect — so a turn that finishes a few
-    // seconds past the budget still lands in history with its attachments
+    // Soft timeout (#75, reworked in #421): tell the client the budget elapsed,
+    // but say so with a NON-terminal `timeout` event rather than an `error`. The
+    // turn is not cancelled — the output listener stays attached so a turn that
+    // finishes a few seconds late still lands in history with its attachments
     // (observed: 304s image turn vs 300s budget → image generated, reply lost,
-    // spinner stuck). The hard cap bounds a genuinely hung turn.
+    // spinner stuck) — and the buffer keeps recording, so whether the client
+    // stays on this connection or reconnects to …/stream, it still gets the
+    // reply. Reporting a still-running turn as `error` was the bug: history
+    // gained a message no live client could ever see. The hard cap below bounds
+    // a genuinely hung turn and IS a real error.
     let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
     const globalTimer = setTimeout(() => {
-      clientGone = true;
-      try {
-        notifyError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
-      } catch { /* client already gone */ }
+      turn.emit({ type: 'timeout', message: 'Agent response timeout', resumable: true });
       // The session stays in-flight (pendingApiSessions) until the hard cap so a
       // retry on the SAME session_id gets a 409 CONFLICT rather than interleaving
       // with the subprocess that is still processing this turn. This lock is
-      // intentionally held for the whole soft→hard window (see API.md §409).
+      // intentionally held for the whole soft→hard window (see API.md §409) —
+      // resuming the turn goes through …/stream, which is never a conflict.
       hardCapTimer = setTimeout(() => {
         session.setProcessing(false);
         fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
@@ -3614,6 +3627,36 @@ export class AgentRunner extends EventEmitter {
    */
   hasActiveApiSession(sessionId: string): boolean {
     return this.pendingApiSessions.has(sessionId);
+  }
+
+  /**
+   * Attach a sink to a session's current turn stream (#421) — the server half of
+   * "resume a turn on a new connection".
+   *
+   * Replays every buffered event after `afterSeq` and then, if the turn is still
+   * running, installs `sink` as the live one. Both happen in one synchronous
+   * block inside TurnStream.attach, so nothing can slip through the seam.
+   *
+   * Returns a `detach` handler on success, or a reason the attach could not be
+   * honoured:
+   *  - `gone`      — no record: the turn never existed, or its replay grace
+   *                  window has expired. The client should read history instead.
+   *  - `mismatch`  — a record exists but for a different request_id, i.e. the
+   *                  turn the client asked for is already over.
+   *  - `truncated` — the cursor sits inside a region the bounded buffer has
+   *                  already evicted, so a gapless replay is impossible.
+   */
+  attachTurnStream(
+    sessionId: string,
+    sink: TurnSink,
+    opts: { afterSeq?: number; requestId?: string } = {},
+  ): { ok: true; requestId: string; detach: () => void } | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' } {
+    const turn = this.turnStreams.get(sessionId);
+    if (!turn) return { ok: false, reason: 'gone' };
+    if (opts.requestId && opts.requestId !== turn.requestId) return { ok: false, reason: 'mismatch' };
+    const failure = turn.attach(sink, opts.afterSeq ?? 0);
+    if (failure) return { ok: false, reason: failure };
+    return { ok: true, requestId: turn.requestId, detach: () => turn.detach(sink) };
   }
 
   /**
@@ -4068,12 +4111,8 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     message: string,
     senderName: string | undefined,
-    callbacks: {
-      onChunk: (event: StreamEvent) => void;
-      onDone: (fullText: string) => void;
-      onError: (err: Error) => void;
-    },
-    opts: { timeoutMs: number },
+    callbacks: ApiStreamCallbacks,
+    opts: { timeoutMs: number; requestId?: string },
   ): Promise<() => void> {
     // Ensure the session process uses the correct channel source
     this.channelSourceMap.set(rawChatId, channel);
@@ -4101,8 +4140,13 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
-    let clientGone = false;
     let lastPartialText = '';
+    // Same resumable buffer as the API path (#421) — one mechanism, not a
+    // per-producer copy. Channel sessions have their own id space, so sharing
+    // the registry with API turns cannot collide.
+    const turn = this.turnStreams.start(sessionId, opts.requestId ?? randomUUID());
+    const initialSink = callbackSink(callbacks);
+    turn.attach(initialSink, 0);
     const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
     const done = (result: string) => {
@@ -4125,14 +4169,14 @@ export class AgentRunner extends EventEmitter {
           ts: uiAssistantTs,
         });
       }
-      callbacks.onDone(result.trim());
+      this.turnStreams.complete(sessionId, resultEvent(result.trim(), []));
     };
 
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      callbacks.onError(err);
+      this.turnStreams.complete(sessionId, { type: 'error', message: err.message }, err);
     };
 
     let globalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4142,7 +4186,7 @@ export class AgentRunner extends EventEmitter {
       session.off('output', onOutput);
     };
 
-    const onClientDisconnect = () => { clientGone = true; };
+    const onClientDisconnect = () => { turn.detach(initialSink); };
 
     const onOutput = (line: string) => {
       try {
@@ -4155,27 +4199,27 @@ export class AgentRunner extends EventEmitter {
               if (block.type === 'text' && block.text) fullText += block.text;
               // PTY mode (headless=false) emits tool_use blocks inside assistant messages
               if (block.type === 'tool_use' && block.name && block.id) {
-                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+                turn.emit({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
               }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
+              turn.emit({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
         }
         if (obj['type'] === 'text') {
           const text = (obj['text'] as string) ?? '';
-          if (text) { buffer.push(text); if (!clientGone) callbacks.onChunk({ type: 'text_delta', text }); }
+          if (text) { buffer.push(text); turn.emit({ type: 'text_delta', text }); }
         }
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, (event) => turn.emit(event), (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+          turn.emit({ type: 'text_delta', text });
         });
         if (obj['type'] === 'result') {
           session.setProcessing(false);

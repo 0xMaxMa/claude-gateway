@@ -88,6 +88,7 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 | `GET` | `/api/v1/agents/:agentId/sessions` | Key | List API sessions for a `chat_id` |
 | `POST` | `/api/v1/agents/:agentId/sessions` | Key | Create a new API session (auto-names from prompt) |
 | `GET` | `/api/v1/agents/:agentId/sessions/:sessionId/info` | Key | Get session info (name, message count, context %) |
+| `GET` | `/api/v1/agents/:agentId/sessions/:sessionId/stream` | Key | Re-attach to the session's in-flight turn (SSE, resumable from a `seq` cursor) |
 | `PATCH` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Rename a session |
 | `DELETE` | `/api/v1/agents/:agentId/sessions/:sessionId` | Key | Delete a session |
 | `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/clear` | Key | Clear session history |
@@ -1318,13 +1319,14 @@ curl -X POST \
 | 403 | Invalid key or key has no access to that agent |
 | 404 | Agent ID not found |
 | 409 | Session is busy processing another request |
-| 504 | Agent did not respond within timeout (default 60s) |
+| 504 | Agent did not respond within timeout (default 60s) — **sync mode only** |
 | 500 | Internal error |
 
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
 > - Error 409 = session is currently processing a request — wait and retry
-> - After a soft timeout (504), the same `session_id` keeps returning `409` until the hard cap (a further 10 min) — the subprocess is still finishing that turn, so a retry would interleave. Use a new `session_id` to start immediately.
+> - After a soft timeout, the same `session_id` keeps returning `409` until the hard cap (a further 10 min) — the subprocess is still finishing that turn, so a retry would interleave. Use a new `session_id` to start immediately, or stay with this one and read the turn out via [`GET …/sessions/:sessionId/stream`](#resuming-an-interrupted-stream), which is never a conflict.
+> - The soft timeout only ends the *request* in sync mode (`504`). In streaming mode it is a non-terminal [`timeout` event](#streaming-api-sse) — the turn is still running and the stream stays open.
 
 ---
 
@@ -1491,15 +1493,19 @@ curl -N -X POST \
 **Response:**
 
 ```
-data: {"type":"text_delta","text":"Let me"}
-data: {"type":"text_delta","text":" explain..."}
-data: {"type":"tool_use","name":"Read","id":"toolu_abc123"}
-data: {"type":"text_delta","text":"Here's the explanation..."}
-data: {"type":"result","text":"Here's the full explanation...","request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
+data: {"type":"text_delta","text":"Let me","seq":1}
+data: {"type":"text_delta","text":" explain...","seq":2}
+data: {"type":"tool_use","name":"Read","id":"toolu_abc123","seq":3}
+data: {"type":"text_delta","text":"Here's the explanation...","seq":4}
+data: {"type":"result","text":"Here's the full explanation...","seq":5,"request_id":"550e8400-...","session_id":"abc-123","duration_ms":4200}
 data: [DONE]
 
 > When images are captured during the turn, the `result` event also includes `"attachments": [{"type":"image","url":"..."}]`.
 ```
+
+> `seq` is the event's position in the turn, counting from 1. Remember the last
+> one you processed — it is the cursor for
+> [resuming an interrupted stream](#resuming-an-interrupted-stream).
 
 ### Requests with tool use
 
@@ -1525,15 +1531,70 @@ Regardless of `allow_tools`, the agent will not create or update workspace ident
 
 **Event types:**
 
-| Type | Fields | Description |
-|------|--------|-------------|
-| `text_delta` | `text` | Incremental text chunk |
-| `tool_use` | `name`, `id` | Tool invocation (e.g. Read, Grep, Bash) |
-| `thinking` | `text` | Agent reasoning (if available) |
-| `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | Final aggregated result; `attachments` present only when images were captured |
-| `error` | `message` | Error event |
+Every event carries a `seq` (the turn-scoped sequence number) in addition to the fields below.
 
-The stream ends with `data: [DONE]`.
+| Type | Fields | Terminal | Description |
+|------|--------|----------|-------------|
+| `text_delta` | `text` | no | Incremental text chunk |
+| `tool_use` | `name`, `id` | no | Tool invocation (e.g. Read, Grep, Bash) |
+| `thinking` | `text` | no | Agent reasoning (if available) |
+| `timeout` | `message`, `resumable: true` | **no** | The soft response budget elapsed, but the turn is still running — see below |
+| `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | yes | Final aggregated result; `attachments` present only when images were captured |
+| `error` | `message` | yes | The turn failed |
+
+The stream ends with `data: [DONE]` after `result`.
+
+**`timeout` is not a failure.** It means the turn passed `timeout_ms` without
+finishing; the connection stays open and the turn keeps streaming, because the
+subprocess is still working and its reply will still be persisted to history.
+Render it as "still working", not as an error. Only `error` is a failure — that
+includes the hard cap (a further 10 minutes), at which point the turn really is
+abandoned.
+
+### Resuming an interrupted stream
+
+A streamed turn is no longer bound to the request that started it. If the
+connection drops — a browser reload, a flaky mobile network, a proxy idle
+timeout — the turn keeps running server-side and its events keep being buffered,
+so a new connection can pick it up where the old one left off.
+
+#### GET /api/v1/agents/:agentId/sessions/:sessionId/stream
+
+Re-attach to the session's current turn. Replays every buffered event after the
+cursor, then keeps streaming live events on the same connection, terminating
+with the same `result` + `[DONE]` frames the original connection would have got.
+
+| Query param | Description |
+|-------------|-------------|
+| `after_seq` | Resume after this sequence number. Omit (or `0`) to replay the turn from its first event. |
+| `request_id` | Optional guard: fail rather than attach if this is not the session's current turn. |
+
+```bash
+# The stream died after seq 12 — pick the same turn back up.
+curl -N -H "X-Api-Key: my-secret-key" \
+  "http://localhost:10850/api/v1/agents/alfred/sessions/abc-123/stream?after_seq=12"
+```
+
+Read access is enough — resuming a turn reads it, it does not start one.
+
+**Resuming is never a conflict.** `409` still means "you tried to start a second
+turn on a busy session"; it is never the answer to a resume. When a turn cannot
+be resumed the endpoint answers `410 Gone` with a `code` saying why, and the
+client should read the session's history instead:
+
+| `code` | Meaning |
+|--------|---------|
+| `TURN_GONE` | No turn for that session — it never ran, or it finished more than 2 minutes ago |
+| `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for |
+| `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) |
+
+A completed turn stays replayable for **2 minutes** after its terminal frame,
+which is what makes a reload immediately after the answer arrives still work.
+The buffer is bounded per turn — 2,000 events or ~4 MB, whichever comes first —
+and once the oldest events are evicted, a cursor pointing into the evicted
+region gets `TURN_TRUNCATED` rather than a replay with a silent hole in it. A
+turn producing more output than that is not resumable from the start; its recent
+tail still is.
 
 ---
 

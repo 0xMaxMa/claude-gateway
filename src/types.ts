@@ -516,6 +516,11 @@ export type StreamEvent =
   | { type: 'tool_use'; name: string; id: string; input?: Record<string, unknown> }
   | { type: 'thinking'; text: string }
   | { type: 'result'; text: string; attachments?: ApiAttachment[] }
+  // The soft response budget elapsed, but the turn is still running (#421).
+  // Non-terminal on purpose: the stream stays open and the turn stays resumable
+  // via GET …/sessions/:sessionId/stream. `error` remains reserved for genuine
+  // failures, including the hard-cap expiry.
+  | { type: 'timeout'; message: string; resumable: true }
   | { type: 'error'; message: string };
 
 export interface Logger {

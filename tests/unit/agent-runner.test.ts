@@ -1412,28 +1412,33 @@ describe('AgentRunner — sendApiMessageStream', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   }, 15000);
 
-  // T13: timeout calls onError
-  it('T13: timeout calls onError after timeout', async () => {
+  // T13: the soft timeout is a non-terminal `timeout` event, not an error (#421).
+  // It used to call onError, which told the client the request had failed while
+  // the turn was still running — and frequently still about to answer.
+  it('T13: soft timeout emits a non-terminal timeout event, not onError', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    const errorPromise = new Promise<Error>((resolve) => {
+    const onError = jest.fn();
+    const timedOut = new Promise<StreamEvent>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t13',
         'test-chat',
         'timeout test',
         {
-          onChunk: () => {},
+          onChunk: (event) => { if (event.type === 'timeout') resolve(event); },
           onDone: () => {},
-          onError: (err) => resolve(err),
+          onError,
         },
         { timeoutMs: 200 }, // short timeout
       );
     });
 
-    const err = await errorPromise;
-    expect(err.message).toMatch(/timeout/i);
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    const event = await timedOut;
+    expect(event).toEqual({ type: 'timeout', message: expect.stringMatching(/timeout/i), resumable: true });
+    expect(onError).not.toHaveBeenCalled();
+    // The turn is still in flight — the hard cap, not the soft one, ends it.
+    expect(runner.hasActiveApiSession('stream-t13')).toBe(true);
   }, 15000);
 
   // T14: onClientDisconnect keeps stream alive; session freed only after result
@@ -1489,15 +1494,17 @@ describe('AgentRunner — sendApiMessageStream', () => {
     ).resolves.toBeDefined();
   }, 15000);
 
-  // T14b: response is persisted to history DB after client disconnect
+  // T14b: response is persisted to history DB after client disconnect.
+  // Since #421 the abandoned connection's callbacks go quiet on disconnect —
+  // its socket is dead, and the turn's output is delivered to whoever
+  // re-attaches instead. Persistence, which is what this test is really about,
+  // is unaffected.
   it('T14b: response persisted to history DB after client disconnect', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
     let onClientDisconnect: (() => void) | undefined;
-    let doneText = '';
-    let doneFiredResolve!: () => void;
-    const doneFired = new Promise<void>((res) => { doneFiredResolve = res; });
+    const onDone = jest.fn();
 
     runner.sendApiMessageStream(
       'stream-t14b',
@@ -1505,7 +1512,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
       'persist after disconnect',
       {
         onChunk: () => {},
-        onDone: (text) => { doneText = text; doneFiredResolve(); },
+        onDone,
         onError: () => {},
       },
       { timeoutMs: 10000 },
@@ -1521,12 +1528,21 @@ describe('AgentRunner — sendApiMessageStream', () => {
     // Simulate Claude completing the response after disconnect
     const session = getSessions(runner).get('stream-t14b')!;
     session.emit('output', JSON.stringify({ type: 'result', result: 'Persisted response' }));
+    await new Promise(r => setTimeout(r, 100));
 
-    // onDone must still fire even though client disconnected
-    await doneFired;
-    expect(doneText).toBe('Persisted response');
+    // Nothing is written to the socket the client already closed…
+    expect(onDone).not.toHaveBeenCalled();
 
-    // History DB must contain the assistant message
+    // …but the result is still there for a client that re-attaches…
+    const replayed: Array<{ text: string }> = [];
+    const attached = runner.attachTurnStream('stream-t14b', {
+      write: () => {},
+      finish: (e) => { if (e.event.type === 'result') replayed.push({ text: e.event.text }); },
+    });
+    expect(attached.ok).toBe(true);
+    expect(replayed).toEqual([{ text: 'Persisted response' }]);
+
+    // …and history DB must contain the assistant message
     const page = runner.getHistoryDb().getMessages('api-test-chat');
     const msgs = page.messages as Array<{ role: string; content: string }>;
     const assistantMsg = msgs.find(m => m.role === 'assistant');
@@ -2226,20 +2242,23 @@ describe('AgentRunner — timeout keeps listening (#75)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    const errorPromise = new Promise<Error>((resolve) => {
+    const softTimeout = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'late-1',
         'late-chat',
         'slow turn',
-        { onChunk: () => {}, onDone: () => {}, onError: (err) => resolve(err) },
+        {
+          onChunk: (event) => { if (event.type === 'timeout') resolve(); },
+          onDone: () => {},
+          onError: () => {},
+        },
         { timeoutMs: 200 },
       );
     });
     await waitForSession(runner, 'late-1');
 
-    // Soft timeout fires and the client is told…
-    const err = await errorPromise;
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    // Soft timeout fires and the client is told the turn is running long (#421)…
+    await softTimeout;
 
     // …but the turn is still listening: register an attachment and finish late.
     const mediaDir = path.join(runner.getAgentsBaseDir(), 'alfred', 'media', 'api-late-1');
