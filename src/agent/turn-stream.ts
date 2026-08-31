@@ -181,6 +181,11 @@ export class TurnStreamRegistry {
    * Begin a new turn, replacing (and un-scheduling) any previous record for the
    * session so a fresh turn never inherits the last one's buffer — the same
    * reason `pendingApiAttachments` is cleared at the top of every turn.
+   *
+   * This also ends the previous turn's replay grace window early: a session
+   * holds at most one turn, so a client resuming turn N after turn N+1 has
+   * started gets TURN_GONE rather than a replay. Documented in API.md under
+   * "Resuming an interrupted stream"; history is the fallback.
    */
   start(sessionId: string, requestId: string): TurnStream {
     this.release(sessionId);
@@ -228,7 +233,8 @@ export class TurnStreamRegistry {
   }
 }
 
-/** Cheap stand-in for the serialised size — exact bytes aren't worth the hot-path cost. */function approxSize(event: StreamEvent): number {
+/** Cheap stand-in for the serialised size — exact bytes aren't worth the hot-path cost. */
+function approxSize(event: StreamEvent): number {
   switch (event.type) {
     case 'text_delta':
     case 'thinking':

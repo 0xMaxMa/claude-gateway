@@ -244,6 +244,32 @@ describe('TurnStreamRegistry', () => {
     registry.clear();
   });
 
+  it('starting a new turn ends the previous turn\'s grace window immediately', async () => {
+    // The grace window promises a completed turn stays replayable for 2 minutes,
+    // but a session holds at most one turn — so a client resuming turn N after
+    // turn N+1 has started gets TURN_GONE, not a replay. Documented in API.md;
+    // pinned here so the doc can't quietly drift from the behaviour.
+    const registry = new TurnStreamRegistry(30);
+    const first = registry.start('sess-1', 'req-1');
+    first.emit(delta('answer to turn 1'));
+    registry.complete(first, resultEvent('answer to turn 1', []));
+
+    // Within the grace window the completed turn is still resumable…
+    expect(registry.get('sess-1')).toBe(first);
+
+    // …until a second turn starts on the same session, well inside that window.
+    const second = registry.start('sess-1', 'req-2');
+    expect(registry.get('sess-1')).toBe(second);
+
+    // And `start()` must have CANCELLED the completed turn's release timer, not
+    // just overwritten the map entry: that timer is keyed by session id, so if
+    // it survived it would fire mid-flight and evict `second` — a live turn —
+    // leaving its client resuming into TURN_GONE at the old turn's deadline.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(registry.get('sess-1')).toBe(second);
+    registry.clear();
+  });
+
   it('a superseded turn finishing late terminates ITSELF, never the turn that replaced it', async () => {
     // Two producers can hold the same session id — an API turn and a channel
     // turn are separate namespaces that share this map. A late finisher must

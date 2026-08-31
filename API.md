@@ -1531,6 +1531,21 @@ Regardless of `allow_tools`, the agent will not create or update workspace ident
 
 **Event types:**
 
+> **⚠️ Breaking in 1.9.0 — the soft timeout is no longer terminal.**
+> Through 1.8.2 a turn that passed `timeout_ms` emitted a terminal
+> `{"type":"error","message":"Agent response timeout"}` and the stream ended
+> there. From 1.9.0 it emits a **non-terminal** `timeout` event
+> and the connection stays open until the turn finishes or the hard cap (a
+> further 10 minutes) fires.
+>
+> A pre-1.9.0 client that ignores unknown event types will not fail at
+> `timeout_ms` any more — it will sit on an open connection for up to 10 extra
+> minutes waiting for a terminal frame. **Handle `timeout` explicitly**: render
+> it as "still working", and if you need the old cut-off, close the connection
+> yourself when you receive it (the turn keeps running server-side and its reply
+> is still persisted to history; you can read it back via
+> [`GET …/stream`](#resuming-an-interrupted-stream) or from the session history).
+
 Every event carries a `seq` (the turn-scoped sequence number) in addition to the fields below.
 
 | Type | Fields | Terminal | Description |
@@ -1598,12 +1613,22 @@ client should read the session's history instead:
 
 | `code` | Meaning |
 |--------|---------|
-| `TURN_GONE` | No turn for that session — it never ran, or it finished more than 2 minutes ago |
+| `TURN_GONE` | No turn for that session — it never ran, it finished more than 2 minutes ago, or a newer turn has since started on this session |
 | `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for |
 | `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) |
 
 A completed turn stays replayable for **2 minutes** after its terminal frame,
 which is what makes a reload immediately after the answer arrives still work.
+
+**Starting a new turn ends the previous one's grace window immediately.** A
+session holds at most one turn: the moment a new turn starts, the completed one
+is dropped, even if less than 2 minutes have passed. So if two clients share a
+`session_id` — a phone reloading to resume turn *N* while a laptop has already
+posted turn *N+1* — the reload gets `TURN_GONE` rather than the replay the grace
+window otherwise promises. Read the session's history for that turn's result;
+the reply was persisted regardless. Give each client its own `session_id` if you
+need their turns to be independently resumable.
+
 The buffer is bounded per turn — 2,000 events or ~4 MB, whichever comes first —
 and once the oldest events are evicted, a cursor pointing into the evicted
 region gets `TURN_TRUNCATED` rather than a replay with a silent hole in it. A
