@@ -29,8 +29,12 @@ class MockStreamRunner extends EventEmitter {
   terminal: SeqEvent | null = null;
   detachCalled = false;
   captured: { sessionId: string; afterSeq?: number; requestId?: string } | null = null;
+  /** What turnStreamStartedAt should answer — the age the result frame reports. */
+  startedAt: number | undefined = undefined;
 
   hasActiveApiSession(): boolean { return false; }
+
+  turnStreamStartedAt(): number | undefined { return this.startedAt; }
 
   attachTurnStream(
     sessionId: string,
@@ -97,7 +101,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     runner.terminal = seq(4, { type: 'result', text: 'before after' });
 
     const res = await supertest.default(buildApp(runner))
-      .get(url('?after_seq=1'))
+      .get(url('?after_seq=1&request_id=req-1'))
       .set('X-Api-Key', 'sk-read-only');
 
     expect(res.status).toBe(200);
@@ -215,7 +219,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     runner.attachResult = { ok: false, reason };
 
     const res = await supertest.default(buildApp(runner))
-      .get(url('?after_seq=1'))
+      .get(url('?after_seq=1&request_id=req-1'))
       .set('X-Api-Key', 'sk-read-only');
 
     expect(res.status).toBe(410);
@@ -231,7 +235,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     runner.attachResult = { ok: false, reason: 'ahead' };
 
     const res = await supertest.default(buildApp(runner))
-      .get(url('?after_seq=50'))
+      .get(url('?after_seq=50&request_id=req-1'))
       .set('X-Api-Key', 'sk-read-only');
 
     expect(res.status).toBe(410);
@@ -246,11 +250,53 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
   it('rejects a bad after_seq before touching the runner', async () => {
     for (const bad of ['-1', 'abc', '1.5']) {
       const res = await supertest.default(buildApp(runner))
-        .get(url(`?after_seq=${bad}`))
+        .get(url(`?after_seq=${bad}&request_id=req-1`))
         .set('X-Api-Key', 'sk-read-only');
       expect(res.status).toBe(400);
     }
     expect(runner.captured).toBeNull();
+  });
+
+  it('rejects a non-zero after_seq that does not name its turn, before touching the runner', async () => {
+    // Seq numbers restart at 1 every turn, so a bare cursor cannot say WHICH
+    // turn's seq 12 the client saw. If the session has moved on, that cursor
+    // lands inside the newer turn — attach() sees a perfectly ordinary
+    // mid-stream resume and replays a turn the client never watched, with
+    // everything before seq 12 missing. Only request_id separates the two.
+    // (A terminal frame is armed so that a regression here fails on the status
+    // rather than hanging on a stream that never closes.)
+    runner.terminal = seq(13, { type: 'result', text: 'someone else\'s turn' });
+    const res = await supertest.default(buildApp(runner))
+      .get(url('?after_seq=12'))
+      .set('X-Api-Key', 'sk-read-only');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('request_id');
+    expect(res.body.hint).toContain('after_seq');
+    expect(runner.captured).toBeNull();
+
+    // after_seq=0 (and omitting it) still needs nothing: replaying whichever
+    // turn is current from its first event is unambiguous either way.
+    runner.terminal = seq(1, { type: 'result', text: 'ok' });
+    expect(
+      (await supertest.default(buildApp(runner)).get(url('?after_seq=0')).set('X-Api-Key', 'sk-read-only')).status,
+    ).toBe(200);
+  });
+
+  it('reports duration_ms for the turn, not for the reconnect', async () => {
+    // A client that resumes 5 seconds before a long turn ends must not be told
+    // the turn took 5 seconds. The replayed frame stands in for the one the
+    // original connection would have received, so it is timed from the turn's
+    // own start.
+    runner.startedAt = Date.now() - 30_000;
+    runner.terminal = seq(4, { type: 'result', text: 'done' });
+
+    const res = await supertest.default(buildApp(runner))
+      .get(url('?after_seq=3&request_id=req-1'))
+      .set('X-Api-Key', 'sk-read-only');
+
+    const result = parseSse(res.text).find((e) => e['type'] === 'result')!;
+    expect(result['duration_ms'] as number).toBeGreaterThanOrEqual(30_000);
   });
 
   it('enforces auth, agent access and session-id validity', async () => {

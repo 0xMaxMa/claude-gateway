@@ -315,9 +315,10 @@ describe('TurnStreamRegistry', () => {
 
   it('starting a new turn ends the previous turn\'s grace window immediately', async () => {
     // The grace window promises a completed turn stays replayable for 2 minutes,
-    // but a session holds at most one turn — so a client resuming turn N after
-    // turn N+1 has started gets TURN_GONE, not a replay. Documented in API.md;
-    // pinned here so the doc can't quietly drift from the behaviour.
+    // but a session holds at most one turn — so nothing of turn N survives once
+    // turn N+1 starts, and a client that names turn N gets TURN_MISMATCH rather
+    // than a replay. Documented in API.md; pinned here so the doc can't quietly
+    // drift from the behaviour.
     const registry = new TurnStreamRegistry(30);
     const first = registry.start('sess-1', 'req-1');
     first.emit(delta('answer to turn 1'));

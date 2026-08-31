@@ -3294,13 +3294,34 @@ export function createApiRouter(
     }
     const requestId = typeof req.query['request_id'] === 'string' ? req.query['request_id'] : undefined;
 
+    // A cursor is only meaningful relative to the turn that produced it, and
+    // seq numbering restarts at 1 for every turn. attach() rejects a cursor that
+    // runs *past* the current turn's last event (CURSOR_AHEAD), but a stale
+    // cursor from turn N lands harmlessly *inside* turn N+1 whenever N+1 has
+    // already emitted that many events — and then replays N+1's tail as if the
+    // client had been watching it all along, with the whole earlier part of that
+    // turn silently missing. Only `request_id` distinguishes the two, so
+    // resuming mid-turn requires it. `after_seq=0` still does not: replaying
+    // whichever turn is current from its first event is well defined either way.
+    if (afterSeq > 0 && !requestId) {
+      res.status(400).json({
+        error: 'request_id is required when after_seq > 0',
+        hint: 'Retry without after_seq to replay the current turn from its first event.',
+      });
+      return;
+    }
+
     // The SSE headers must not go out until the attach is known to succeed —
     // otherwise a 410 would arrive as a half-open text/event-stream. attach()
     // replays synchronously, so the first replayed event opens the stream and
     // an attach that fails never writes at all.
     let opened = false;
     const ensureOpen = () => { if (!opened) { opened = true; openSseStream(res); } };
-    const callbacks = createSseCallbacks(res, { requestId, sessionId, startTime: Date.now() });
+    // `duration_ms` on the replayed terminal frame means the age of the *turn*,
+    // which is what the original connection would have reported. Timing from the
+    // reconnect instead would make a turn resumed near its end look instant.
+    const startTime = runner.turnStreamStartedAt(sessionId) ?? Date.now();
+    const callbacks = createSseCallbacks(res, { requestId, sessionId, startTime });
     const inner = callbackSink({
       onChunk: (event, seq) => { ensureOpen(); callbacks.onChunk(event, seq); },
       onDone: (text, attachments, seq) => { ensureOpen(); callbacks.onDone(text, attachments, seq); },

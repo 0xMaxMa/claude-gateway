@@ -1879,11 +1879,19 @@ export class AgentRunner extends EventEmitter {
             // history DB would be the only layer missing the reply — and the
             // cross-channel producer used to hide that by writing a second copy of
             // every reply (see sendMessageToSession's done()). Persist the fallback
-            // instead. Forwarding deliberately keeps using forwardableText alone:
-            // an empty `result` also arrives between pty-shell sub-turns, and
-            // posting the intermediate narration to the channel would be a new
-            // message, not a recovered one.
-            const persistableText = forwardableText || lastAssistantTextThisTurn.trim();
+            // instead, but only for the shape it was written for: an *empty* result
+            // ending a whole turn on the headless backend.
+            //   • A menu turn is excluded because `forwardableText` above may have
+            //     been blanked on purpose — falling back there would resurrect the
+            //     option list the strip removed and duplicate the prompt row
+            //     already inserted when the menu was rendered.
+            //   • pty-shell is excluded because its `result` fires per sub-turn, so
+            //     every tool-call boundary with an empty result would add a phantom
+            //     row of that sub-turn's narration.
+            // Forwarding deliberately keeps using forwardableText alone: recovering
+            // a missing history row is not a reason to post a new channel message.
+            const canFallBack = !menuSentThisTurn && proc.backend !== 'pty-shell';
+            const persistableText = forwardableText || (canFallBack ? lastAssistantTextThisTurn.trim() : '');
             if (!isSocketError && !isRequestTooLarge && persistableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
@@ -3718,6 +3726,16 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Wall-clock start of the session's current API turn, or undefined when there
+   * is no resumable record. The resume endpoint reports `duration_ms` against
+   * this rather than against the reconnect, so a replayed terminal frame carries
+   * the turn's age — the same number the original connection would have sent.
+   */
+  turnStreamStartedAt(sessionId: string): number | undefined {
+    return this.turnStreams.get(turnStreamKey('api', sessionId))?.startedAt;
+  }
+
+  /**
    * Register file paths as attachments for the current API session turn.
    * Called by the api_reply MCP tool via the attachments endpoint.
    * Files must be absolute paths within the agent's media directory.
@@ -4176,7 +4194,10 @@ export class AgentRunner extends EventEmitter {
   /**
    * Send a message into an existing channel session (cross-channel continuation from UI).
    * The session process receives full history context from the session JSON (Layer 1).
-   * The reply is streamed back via SSE callbacks and persisted to history DB.
+   * The reply is streamed back via SSE callbacks; persistence is *not* this
+   * method's job. A channel session already has two session-bound writers — the
+   * long-lived output handler installed in spawnSession, and SessionProcess's own
+   * parser — and writing here as well produced a second row per turn. See done().
    */
   async sendMessageToSession(
     rawChatId: string,

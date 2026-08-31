@@ -5013,6 +5013,7 @@ describe('AgentRunner — sendMessageToSession writes one assistant row per laye
     chatId: string,
     sessionId: string,
     stdoutLines: string[],
+    mutateSession?: (proc: { backend: string }) => void,
   ): Promise<{
     dbRows: Array<{ role: string; content: string }>;
     jsonRows: Array<{ role: string; content: string }>;
@@ -5037,6 +5038,12 @@ describe('AgentRunner — sendMessageToSession writes one assistant row per laye
       );
     });
     await new Promise(r => setTimeout(r, 250));
+
+    if (mutateSession) {
+      const proc = (runner as unknown as { sessions: Map<string, { backend: string }> }).sessions.get(chatId);
+      if (!proc) throw new Error('session not spawned');
+      mutateSession(proc);
+    }
 
     // Feed raw stdout rather than emitting 'output' directly: SessionProcess's
     // own parser is the session-JSON writer under test, and emitting on the
@@ -5110,5 +5117,52 @@ describe('AgentRunner — sendMessageToSession writes one assistant row per laye
     // The fallback is persistence-only: an empty `result` also arrives between
     // pty-shell sub-turns, so it must not post an extra message to the channel.
     expect(forwarded).toEqual([]);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-04: the empty-result fallback must not fire on a menu turn.
+  // `forwardableText` is blanked there on purpose (the wrapper appends the menu
+  // text to the result, and the prompt row was already inserted when the menu
+  // was rendered) — falling back would resurrect the option list as a second row.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-04: a menu turn does not fall back to the assistant text', async () => {
+    const { chatId, sessionId } = uniqueIds('menu');
+    const { dbRows } = await driveCrossChannelTurn(chatId, sessionId, [
+      JSON.stringify({
+        type: 'assistant',
+        stop_reason: 'end_turn',
+        message: { content: [{ type: 'text', text: 'Pick one\n1. Alpha\n2. Beta' }] },
+      }),
+      JSON.stringify({ type: 'system', subtype: 'menu_prompt', prompt: 'Pick one', options: [{ label: 'Alpha' }, { label: 'Beta' }] }),
+      JSON.stringify({ type: 'result', result: 'Pick one' }),
+    ]);
+
+    // Exactly the prompt row written by the menu_prompt handler — no echo of the
+    // assistant text that produced it.
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'Pick one' }]);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-05: on pty-shell `result` fires per sub-turn, so an empty result
+  // is a tool-call boundary rather than the end of the answer. The fallback must
+  // stay off there or every boundary adds a phantom row of interim narration.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-05: pty-shell sub-turn boundaries do not create phantom rows', async () => {
+    const { chatId, sessionId } = uniqueIds('pty');
+    const { dbRows } = await driveCrossChannelTurn(
+      chatId,
+      sessionId,
+      [
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'let me check the file' }] } }),
+        JSON.stringify({ type: 'result', result: '' }),
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'now running the tests' }] } }),
+        JSON.stringify({ type: 'result', result: '' }),
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'all green' }] } }),
+        JSON.stringify({ type: 'result', result: 'all green' }),
+      ],
+      (proc) => { proc.backend = 'pty-shell'; },
+    );
+
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'all green' }]);
   }, 15000);
 });

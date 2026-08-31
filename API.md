@@ -1627,15 +1627,23 @@ with the same `result` + `[DONE]` frames the original connection would have got.
 | Query param | Description |
 |-------------|-------------|
 | `after_seq` | Resume after this sequence number. Omit (or `0`) to replay the turn from its first event. |
-| `request_id` | Optional guard: fail rather than attach if this is not the session's current turn. |
+| `request_id` | The turn you mean to resume — the `request_id` its frames carry. **Required whenever `after_seq > 0`**; optional (and unused) when replaying from the start. |
 
 ```bash
 # The stream died after seq 12 — pick the same turn back up.
 curl -N -H "X-Api-Key: my-secret-key" \
-  "http://localhost:10850/api/v1/agents/alfred/sessions/abc-123/stream?after_seq=12"
+  "http://localhost:10850/api/v1/agents/alfred/sessions/abc-123/stream?after_seq=12&request_id=req-abc"
 ```
 
 Read access is enough — resuming a turn reads it, it does not start one.
+
+**A cursor without a `request_id` is not a resume.** Sequence numbers restart at
+1 for every turn, so `after_seq=12` alone does not say *which* turn's twelfth
+event you saw. If the session has moved on to a later turn, that cursor lands
+inside it and would replay a stream you were never watching, with everything
+before seq 12 silently missing. The endpoint answers `400` instead: send the
+`request_id` from the frames you received, or drop `after_seq` and replay the
+current turn from its first event.
 
 **Resuming is never a conflict.** `409` still means "you tried to start a second
 turn on a busy session"; it is never the answer to a resume. When a turn cannot
@@ -1643,31 +1651,31 @@ be resumed the endpoint answers `410 Gone` with a `code` saying why:
 
 | `code` | Meaning | What to do |
 |--------|---------|------------|
-| `TURN_GONE` | No turn for that session — it never ran, it finished more than 2 minutes ago, or a newer turn has since started on this session | Read the session's history |
-| `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for | Read the session's history |
+| `TURN_GONE` | No turn for that session — it never ran, or it finished more than 2 minutes ago | Read the session's history |
+| `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for — yours is over | Read the session's history |
 | `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) | Read the session's history |
-| `CURSOR_AHEAD` | `after_seq` is past the turn's last event — the cursor is left over from an earlier turn | Retry **without** `after_seq` |
+| `CURSOR_AHEAD` | `after_seq` is past the turn's last event | Retry **without** `after_seq` |
 
 Each response carries a `hint` field with the same advice.
 
-**`CURSOR_AHEAD` is the one you can recover from without history.** Sequence
-numbers restart at 1 for every turn, so a cursor kept across turns is not merely
-useless — it is ahead of everything the new turn has produced. Re-attaching with
-it matches no event, and the turn is still live, so the safe answer is to replay
-from the start: drop `after_seq` and call again. (Sending `request_id` alongside
-`after_seq` catches the same mistake earlier, as `TURN_MISMATCH`.)
+**`CURSOR_AHEAD` is the one you can recover from without history.** It means the
+named turn is live but has not reached your cursor — re-attaching would match no
+event — so the safe answer is to replay from the start: drop `after_seq` and call
+again.
 
 A completed turn stays replayable for **2 minutes** after its terminal frame,
-which is what makes a reload immediately after the answer arrives still work.
+which is what makes a reload immediately after the answer arrives still work. The
+replayed `result` frame reports `duration_ms` for the turn itself, not for the
+time since you reconnected.
 
 **Starting a new turn ends the previous one's grace window immediately.** A
 session holds at most one turn: the moment a new turn starts, the completed one
 is dropped, even if less than 2 minutes have passed. So if two clients share a
 `session_id` — a phone reloading to resume turn *N* while a laptop has already
-posted turn *N+1* — the reload gets `TURN_GONE` rather than the replay the grace
-window otherwise promises. Read the session's history for that turn's result;
-the reply was persisted regardless. Give each client its own session — one
-[`POST /sessions`](#post-apiv1agentsagentidsessions) each — if you need their
+posted turn *N+1* — the reload gets `TURN_MISMATCH` rather than the replay the
+grace window otherwise promises. Read the session's history for that turn's
+result; the reply was persisted regardless. Give each client its own session —
+one [`POST /sessions`](#post-apiv1agentsagentidsessions) each — if you need their
 turns to be independently resumable.
 
 The buffer is bounded per turn — 2,000 events or ~4 MB, whichever comes first —

@@ -135,8 +135,13 @@ export class TurnStream {
    * produced. Seq numbering restarts at 1 for every turn, so a client that
    * reloads and replays a cursor held over from an earlier turn would otherwise
    * attach successfully, match no event, and still be handed the terminal frame
-   * — the final answer with every delta silently missing. Rejecting is the only
-   * way the client learns its cursor belongs to a turn that is gone.
+   * — the final answer with every delta silently missing.
+   *
+   * This catches a stale cursor only when the new turn is *shorter* than the old
+   * one; a cursor from turn N sits inside turn N+1 the moment N+1 has emitted
+   * that many events, and no seq comparison can tell that apart from a genuine
+   * resume. Identity is what separates them, which is why the resume endpoint
+   * requires `request_id` whenever `after_seq > 0`.
    */
   attach(sink: TurnSink, afterSeq: number): AttachFailure | null {
     if (afterSeq > this.lastSeq) return 'ahead';
@@ -219,9 +224,13 @@ export class TurnStreamRegistry {
    * `pendingApiAttachments` is cleared at the top of every turn.
    *
    * This also ends the previous turn's replay grace window early: a session
-   * holds at most one turn, so a client resuming turn N after turn N+1 has
-   * started gets TURN_GONE rather than a replay. Documented in API.md under
-   * "Resuming an interrupted stream"; history is the fallback.
+   * holds at most one turn, so nothing of turn N survives once turn N+1 starts.
+   * A client that resumes turn N by name (`request_id`) therefore gets
+   * TURN_MISMATCH — not a replay of N, and not a replay of N+1 either. A client
+   * that resumes by cursor alone cannot be told apart from one legitimately
+   * following N+1, which is why the resume endpoint requires the request id
+   * alongside a non-zero cursor. Documented in API.md under "Resuming an
+   * interrupted stream"; history is the fallback.
    */
   start(key: string, requestId: string): TurnStream {
     this.release(key);
