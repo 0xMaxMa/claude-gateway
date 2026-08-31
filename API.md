@@ -1531,20 +1531,21 @@ Regardless of `allow_tools`, the agent will not create or update workspace ident
 
 **Event types:**
 
-> **⚠️ Breaking in 1.9.0 — the soft timeout is no longer terminal.**
-> Through 1.8.2 a turn that passed `timeout_ms` emitted a terminal
+> **⚠️ Breaking change — the soft timeout is no longer terminal.**
+> Up to and including 1.8.2, a turn that passed `timeout_ms` emitted a terminal
 > `{"type":"error","message":"Agent response timeout"}` and the stream ended
-> there. From 1.9.0 it emits a **non-terminal** `timeout` event
-> and the connection stays open until the turn finishes or the hard cap (a
-> further 10 minutes) fires.
+> there. It now emits a **non-terminal** `timeout` event instead, and the
+> connection stays open until the turn finishes or the hard cap (a further 10
+> minutes) fires.
 >
-> A pre-1.9.0 client that ignores unknown event types will not fail at
-> `timeout_ms` any more — it will sit on an open connection for up to 10 extra
-> minutes waiting for a terminal frame. **Handle `timeout` explicitly**: render
-> it as "still working", and if you need the old cut-off, close the connection
-> yourself when you receive it (the turn keeps running server-side and its reply
-> is still persisted to history; you can read it back via
-> [`GET …/stream`](#resuming-an-interrupted-stream) or from the session history).
+> A client written against 1.8.2 or earlier that ignores unknown event types
+> will not fail at `timeout_ms` any more — it will sit on an open connection for
+> up to 10 extra minutes waiting for a terminal frame. **Handle `timeout`
+> explicitly**: render it as "still working", and if you need the old cut-off,
+> close the connection yourself when you receive it (the turn keeps running
+> server-side and its reply is still persisted to history; you can read it back
+> via [`GET …/stream`](#resuming-an-interrupted-stream) or from the session
+> history).
 
 Every event carries a `seq` (the turn-scoped sequence number) in addition to the fields below.
 
