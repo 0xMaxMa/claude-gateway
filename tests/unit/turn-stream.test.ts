@@ -200,8 +200,6 @@ describe('TurnStream', () => {
     const turn = new TurnStream('sess-1', 'req-1');
     for (let i = 0; i < TURN_BUFFER_MAX_EVENTS * 2; i++) turn.emit(delta(`e${i}`));
 
-    expect(turn.isTruncated).toBe(true);
-
     // The tail is still replayable...
     const tail = recordingSink();
     expect(turn.attach(tail.sink, turn.lastSeq - 10)).toBeNull();

@@ -1509,9 +1509,11 @@ data: [DONE]
 > When images are captured during the turn, the `result` event also includes `"attachments": [{"type":"image","url":"..."}]`.
 ```
 
-> `seq` is the event's position in the turn, counting from 1. Remember the last
-> one you processed — it is the cursor for
-> [resuming an interrupted stream](#resuming-an-interrupted-stream).
+> `seq` is the event's position **within this turn**, counting from 1 — it
+> restarts at 1 on the next turn, so it is a cursor only in combination with the
+> turn's `request_id`. Remember both: they are what
+> [resuming an interrupted stream](#resuming-an-interrupted-stream) takes.
+> (`data: [DONE]` is a stream terminator, not an event, and carries neither.)
 
 ### Requests with tool use
 
@@ -1553,7 +1555,9 @@ Regardless of `allow_tools`, the agent will not create or update workspace ident
 > via [`GET …/stream`](#resuming-an-interrupted-stream) or from the session
 > history).
 
-Every event carries a `seq` (the turn-scoped sequence number) in addition to the fields below.
+Every event in the table below carries a `seq` — the turn-scoped sequence number
+described above — in addition to its own fields. The `data: [DONE]` line that
+closes the stream is a terminator, not an event, and has no fields at all.
 
 | Type | Fields | Terminal | Description |
 |------|--------|----------|-------------|
@@ -1565,6 +1569,13 @@ Every event carries a `seq` (the turn-scoped sequence number) in addition to the
 | `error` | `message`, `code?` | yes | The turn failed |
 
 The stream ends with `data: [DONE]` after `result`.
+
+**Idle streams send a keepalive.** While a turn is working without producing
+events — a long tool call, a slow model — the connection emits an SSE comment
+line (`: keepalive`) every 15 seconds so a reverse proxy does not close it as
+idle. Comment lines are discarded by every conforming SSE parser, carry no
+`seq`, and never reach your event handler; if you parse the stream by hand,
+ignore any line that starts with `:`.
 
 **`timeout` is not a failure.** It means the turn passed `timeout_ms` without
 finishing; the connection stays open and the turn keeps streaming, because the

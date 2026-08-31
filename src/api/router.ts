@@ -128,7 +128,18 @@ function createSseCallbacks(
   };
 }
 
-function openSseStream(res: Response): void {
+/**
+ * How often an idle SSE stream emits a comment frame. Well under the 60s
+ * `proxy_read_timeout` nginx and Caddy default to.
+ */
+const SSE_KEEPALIVE_MS = 15_000;
+
+/**
+ * Write SSE headers and start the idle keepalive. Exported for tests: the
+ * keepalive is time-based and only observable on a stream deliberately held
+ * open, which is exactly what an end-to-end HTTP test cannot do.
+ */
+export function openSseStream(res: Response): void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -137,6 +148,23 @@ function openSseStream(res: Response): void {
   });
   res.flushHeaders();
   res.socket?.setNoDelay(true);
+
+  // A turn can go minutes without producing an event — a long Bash call, a slow
+  // model — and a reverse proxy reads that silence as a dead connection and
+  // closes it. #421 makes that recoverable, not free: the client still has to
+  // notice and re-attach. A comment frame (`:` prefix) is discarded by every
+  // SSE parser per spec, so this keeps the socket warm without reaching the
+  // client's event handler or consuming a `seq`.
+  let keepalive: ReturnType<typeof setInterval> | undefined;
+  const stop = () => { if (keepalive !== undefined) { clearInterval(keepalive); keepalive = undefined; } };
+  keepalive = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch { stop(); }
+  }, SSE_KEEPALIVE_MS);
+  // unref so a forgotten stream cannot by itself hold the process (or a test
+  // runner) open; the listeners below are the real cleanup.
+  keepalive.unref?.();
+  res.on('close', stop);
+  res.on('finish', stop);
 }
 
 function maskToken(token: string): string {

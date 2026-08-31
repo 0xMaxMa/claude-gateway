@@ -287,6 +287,80 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
     expect(rows[0]!.content).toContain('Session process exited unexpectedly');
   });
 
+  /**
+   * The hard cap on the SYNC path. Every test above drives sendApiMessageStream;
+   * sendApiMessage has its own copy of the soft→hard escalation, and nothing
+   * covered it — so a regression there (interrupting after clearing the
+   * processing flag, or never interrupting at all) would leave a hung
+   * subprocess and a stuck pendingApiSessions entry with the suite still green.
+   */
+  async function startHangingSyncTurn(id: string): Promise<{ caught: Promise<Error> }> {
+    // Returned wrapped in an object: an async function AWAITS a bare promise it
+    // returns, and this one cannot settle until the test advances the clock.
+    const caught = runner
+      .sendApiMessage(id, chatId, 'a question that hangs', { timeoutMs: SOFT_TIMEOUT_MS })
+      .then(() => new Error('expected the sync turn to reject'), (e: Error) => e);
+
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    expect(lastProcess).not.toBeNull();
+    return { caught };
+  }
+
+  it('AC-2/AC-4 (sync path): the soft timeout unblocks the caller, the hard cap stops the turn', async () => {
+    const syncSession = 'sess-sync-hardcap-1';
+    const { caught } = await startHangingSyncTurn(syncSession);
+
+    // Soft timeout: the caller is freed with TIMEOUT_SOFT, but the turn is
+    // untouched — nothing killed, the session still pending.
+    jest.advanceTimersByTime(SOFT_TIMEOUT_MS + 50);
+    await drain();
+    expect((await caught as Error & { code?: string }).code).toBe('TIMEOUT_SOFT');
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+    expect(runner.hasActiveApiSession(syncSession)).toBe(true);
+    expect(assistantRows(syncSession)).toHaveLength(0);
+
+    // Hard cap: SIGINT, and exactly one terminal row so history never ends on a
+    // dangling user message.
+    jest.advanceTimersByTime(HARD_CAP_EXTRA_MS + 50);
+    await drain();
+
+    expect(lastProcess!.kill.mock.calls.map((c) => c[0])).toContain('SIGINT');
+    expect(runner.hasActiveApiSession(syncSession)).toBe(false);
+    const rows = assistantRows(syncSession);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toContain('Agent response timed out.');
+  });
+
+  it('the sync path never reaches the hard cap with text in hand — the quiet timer answers first', async () => {
+    // Why the sync hard-cap row above carries no partial text, unlike the
+    // streaming one: on this path any text arms a 2s quiet timer that resolves
+    // the turn, and text is the only thing that fills the buffer. So a
+    // non-empty buffer and a hard cap are mutually exclusive here. Pinned
+    // because `fail(..., buffer.join(''))` at the cap reads as though partial
+    // text were expected there. (A production timeout budget is minutes, well
+    // clear of the 2s quiet window — hence the realistic timeoutMs.)
+    const syncSession = 'sess-sync-quiet-1';
+    const resolved = runner
+      .sendApiMessage(syncSession, chatId, 'a question that answers', { timeoutMs: 60_000 })
+      .then((r) => r.text);
+
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    emitLine({ type: 'text', text: 'a complete answer with no result line' });
+    await drain();
+
+    jest.advanceTimersByTime(2_000 + 50);
+    await drain();
+
+    expect(await resolved).toBe('a complete answer with no result line');
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+  });
+
   it('AC-4: the terminal error carries code TIMEOUT, not just a message', async () => {
     const callbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
     await startHangingTurn(callbacks);

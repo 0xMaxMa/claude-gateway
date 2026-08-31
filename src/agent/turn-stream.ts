@@ -69,11 +69,14 @@ export type AttachFailure = 'truncated' | 'ahead';
  */
 export class TurnStream {
   readonly startedAt = Date.now();
-  completedAt: number | null = null;
 
   private readonly events: BufferedEvent[] = [];
   private nextSeq = 1;
-  /** seq of the oldest event ever evicted — anything at or below this is unreplayable. */
+  /**
+   * seq of the NEWEST event evicted so far — eviction walks the head forward, so
+   * this advances with each drop. Anything at or below it is unreplayable, which
+   * is exactly the comparison attach() makes.
+   */
   private evictedThroughSeq = 0;
   private bytes = 0;
   private terminalEvent: SeqEvent | null = null;
@@ -91,11 +94,6 @@ export class TurnStream {
 
   get lastSeq(): number {
     return this.nextSeq - 1;
-  }
-
-  /** True once the head of the buffer has been evicted (a from-scratch replay is no longer possible). */
-  get isTruncated(): boolean {
-    return this.evictedThroughSeq > 0;
   }
 
   /** Record a non-terminal event and, if a sink is attached, write it out. */
@@ -116,7 +114,6 @@ export class TurnStream {
     if (this.terminalEvent) return;
     const e: SeqEvent = { seq: this.nextSeq++, event, ...(error ? { error } : {}) };
     this.terminalEvent = e;
-    this.completedAt = Date.now();
     const sink = this.sink;
     this.sink = null;
     sink?.finish(e);

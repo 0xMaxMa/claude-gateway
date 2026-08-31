@@ -11,7 +11,7 @@
 import express from 'express';
 import * as supertest from 'supertest';
 import { EventEmitter } from 'events';
-import { createApiRouter } from '../../src/api/router';
+import { createApiRouter, openSseStream } from '../../src/api/router';
 import { AgentConfig, ApiKey, StreamEvent } from '../../src/types';
 import type { SeqEvent, TurnSink } from '../../src/agent/turn-stream';
 
@@ -297,6 +297,40 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
 
     const result = parseSse(res.text).find((e) => e['type'] === 'result')!;
     expect(result['duration_ms'] as number).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it('keeps an idle stream alive with SSE comment frames, and stops them when it closes', async () => {
+    // A turn can be silent for minutes (a long Bash call), which a reverse proxy
+    // reads as a dead connection. The keepalive is a comment frame: every SSE
+    // parser drops it, so it must not appear as an event or consume a seq.
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+    try {
+      const writes: string[] = [];
+      const res = {
+        writeHead: jest.fn(),
+        flushHeaders: jest.fn(),
+        socket: { setNoDelay: jest.fn() },
+        write: (c: string) => { writes.push(c); return true; },
+        on: jest.fn(),
+      };
+      const listeners = new Map<string, () => void>();
+      res.on.mockImplementation((ev: string, fn: () => void) => { listeners.set(ev, fn); return res; });
+
+      openSseStream(res as unknown as import('express').Response);
+
+      jest.advanceTimersByTime(46_000);
+      expect(writes).toEqual([': keepalive\n\n', ': keepalive\n\n', ': keepalive\n\n']);
+      // Comment frames only — nothing a client would parse as an event.
+      expect(parseSse(writes.join(''))).toEqual([]);
+
+      // Once the response closes the timer must go, or every dropped connection
+      // leaks an interval that writes to a dead socket forever.
+      listeners.get('close')!();
+      jest.advanceTimersByTime(60_000);
+      expect(writes).toHaveLength(3);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('enforces auth, agent access and session-id validity', async () => {
