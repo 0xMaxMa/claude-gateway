@@ -521,7 +521,12 @@ export type StreamEvent =
   // via GET …/sessions/:sessionId/stream. `error` remains reserved for genuine
   // failures, including the hard-cap expiry.
   | { type: 'timeout'; message: string; resumable: true }
-  | { type: 'error'; message: string };
+  // `code` carries the originating Error's `code` (e.g. 'TIMEOUT' for the hard
+  // cap, 'PROCESS_EXITED' for a crash). Without it the only way to tell the
+  // hard cap from a crash or a 5xx was to match `message` — and the two
+  // timeouts differ by a tense and a full stop ('Agent response timeout' vs
+  // 'Agent response timed out.'). Optional: not every failure carries one.
+  | { type: 'error'; message: string; code?: string };
 
 export interface Logger {
   info(message: string, data?: Record<string, unknown>): void;

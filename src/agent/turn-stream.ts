@@ -248,9 +248,33 @@ export function resultEvent(text: string, attachments: ApiAttachment[]): StreamE
   return attachments.length ? { type: 'result', text, attachments } : { type: 'result', text };
 }
 
+/** Terminal frame for a turn that failed, carrying the Error's `code` when it has one. */
+export function errorEvent(err: Error): StreamEvent {
+  const code = errorCode(err);
+  return code ? { type: 'error', message: err.message, code } : { type: 'error', message: err.message };
+}
+
+/** The `code` property producers attach to their Errors, when it is a string. */
+export function errorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
 /** Best-effort message for a terminal frame that is not a `result`. */
 function terminalMessage(event: StreamEvent): string {
   return 'message' in event ? event.message : `Turn ended (${event.type})`;
+}
+
+/**
+ * Rebuild an Error for a terminal frame whose original Error is not available —
+ * a replayed `error` frame reaches a sink as data, not as the live throw. The
+ * frame's `code` is copied back onto it so a resumed client learns the same
+ * thing the original connection did.
+ */
+function terminalError(event: StreamEvent): Error {
+  const err = new Error(terminalMessage(event));
+  if (event.type === 'error' && event.code) Object.assign(err, { code: event.code });
+  return err;
 }
 
 /**
@@ -280,7 +304,7 @@ export function callbackSink(callbacks: ApiStreamCallbacks): TurnSink {
           // `error` — and anything else that ever ends up terminal. A sink that
           // is handed a terminal frame it does not recognise must still be told
           // the turn is over, or an SSE response stays open forever.
-          callbacks.onError(e.error ?? new Error(terminalMessage(e.event)), e.seq);
+          callbacks.onError(e.error ?? terminalError(e.event), e.seq);
         }
       } catch { /* sink gone */ }
     },

@@ -11,6 +11,7 @@ import {
   TurnStreamRegistry,
   TURN_BUFFER_MAX_EVENTS,
   callbackSink,
+  errorEvent,
   resultEvent,
   type SeqEvent,
 } from '../../src/agent/turn-stream';
@@ -168,6 +169,30 @@ describe('TurnStream', () => {
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toBe(err);
+  });
+
+  it('errorEvent puts the Error\'s code on the frame, and omits the field when there is none', () => {
+    expect(errorEvent(Object.assign(new Error('timed out'), { code: 'TIMEOUT' })))
+      .toEqual({ type: 'error', message: 'timed out', code: 'TIMEOUT' });
+    expect(errorEvent(new Error('plain'))).toEqual({ type: 'error', message: 'plain' });
+    // A non-string `code` (libuv errno objects use numbers) is not a protocol code.
+    expect(errorEvent(Object.assign(new Error('numeric'), { code: 7 })))
+      .toEqual({ type: 'error', message: 'numeric' });
+  });
+
+  it('a REPLAYED error frame still hands its code to the sink — the live Error is long gone', () => {
+    // The turn completed while nobody was attached; the reconnecting client
+    // gets the frame from the buffer, not the throw. Rebuilding a bare Error
+    // there would silently downgrade 'the turn was hard-capped' to 'something
+    // failed', which is the string-matching the code field exists to end.
+    const turn = new TurnStream('sess-1', 'req-1');
+    turn.complete({ type: 'error', message: 'Agent response timed out.', code: 'TIMEOUT' });
+
+    const onError = jest.fn();
+    turn.attach(callbackSink({ onChunk: jest.fn(), onDone: jest.fn(), onError }), 0);
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toMatchObject({ message: 'Agent response timed out.', code: 'TIMEOUT' });
   });
 
   it('is bounded: a turn with heavy output evicts its oldest events instead of growing forever', () => {

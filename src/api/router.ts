@@ -6,7 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
-import { callbackSink, type ApiStreamCallbacks } from '../agent/turn-stream';
+import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-stream';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
@@ -114,7 +114,11 @@ function createSseCallbacks(
     },
     onError: (err, seq) => {
       try {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, seq, ...ids() })}\n\n`);
+        // `code` lets a client separate the hard cap (TIMEOUT — the turn was
+        // interrupted, do not wait for it) from a crash (PROCESS_EXITED) or a
+        // transport failure, instead of string-matching `message`.
+        const code = errorCode(err);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, ...(code ? { code } : {}), seq, ...ids() })}\n\n`);
       } catch { /* client gone */ }
       finally { try { res.end(); } catch { /* client gone */ } }
     },

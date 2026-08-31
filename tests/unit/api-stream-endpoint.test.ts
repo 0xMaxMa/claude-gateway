@@ -173,8 +173,40 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(events[events.length - 1]).toMatchObject({ type: 'result' });
   });
 
-  // ── Refused attaches: JSON 410, never a half-open event-stream ────────────
+  it('puts the error `code` on the wire so a client can tell the hard cap from a crash', async () => {
+    // Both timeouts used to reach the client as bare messages differing only by
+    // a tense and a full stop ('Agent response timeout' vs 'Agent response
+    // timed out.'), so distinguishing 'the turn is still alive, resume it' from
+    // 'the turn was interrupted, stop waiting' meant string-matching.
+    runner.terminal = {
+      seq: 5,
+      event: { type: 'error', message: 'Agent response timed out.', code: 'TIMEOUT' },
+      error: Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }),
+    };
 
+    const events = parseSse(
+      (await supertest.default(buildApp(runner)).get(url()).set('X-Api-Key', 'sk-read-only')).text,
+    );
+    expect(events[events.length - 1]).toMatchObject({
+      type: 'error',
+      message: 'Agent response timed out.',
+      code: 'TIMEOUT',
+      seq: 5,
+    });
+  });
+
+  it('omits `code` entirely for an error that has none, rather than sending a null', async () => {
+    runner.terminal = { seq: 2, event: { type: 'error', message: 'boom' }, error: new Error('boom') };
+
+    const events = parseSse(
+      (await supertest.default(buildApp(runner)).get(url()).set('X-Api-Key', 'sk-read-only')).text,
+    );
+    const last = events[events.length - 1]!;
+    expect(last).toMatchObject({ type: 'error', message: 'boom' });
+    expect(last).not.toHaveProperty('code');
+  });
+
+  // ── Refused attaches: JSON 410, never a half-open event-stream ────────────
   it.each([
     ['gone', 'TURN_GONE'],
     ['mismatch', 'TURN_MISMATCH'],

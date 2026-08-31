@@ -1540,7 +1540,7 @@ Every event carries a `seq` (the turn-scoped sequence number) in addition to the
 | `thinking` | `text` | no | Agent reasoning (if available) |
 | `timeout` | `message`, `resumable: true` | **no** | The soft response budget elapsed, but the turn is still running — see below |
 | `result` | `text`, `request_id`, `session_id`, `duration_ms`, `attachments?` | yes | Final aggregated result; `attachments` present only when images were captured |
-| `error` | `message` | yes | The turn failed |
+| `error` | `message`, `code?` | yes | The turn failed |
 
 The stream ends with `data: [DONE]` after `result`.
 
@@ -1550,6 +1550,20 @@ subprocess is still working and its reply will still be persisted to history.
 Render it as "still working", not as an error. Only `error` is a failure — that
 includes the hard cap (a further 10 minutes), at which point the turn really is
 abandoned.
+
+**Branch on `code`, not on `message`.** An `error` event carries the originating
+failure's code when it has one — `TIMEOUT` for the hard cap, `PROCESS_EXITED`
+for a subprocess crash. The field is omitted when there is no code, so treat it
+as optional. It is present on replayed frames too, so a client that resumed
+through [`GET …/stream`](#resuming-an-interrupted-stream) learns exactly what
+the original connection would have.
+
+**What the hard cap does.** At the cap the turn is *interrupted*, not merely
+abandoned: the subprocess is sent `SIGINT` so it stops working and stops
+consuming tokens. History gets exactly one assistant row for that turn — any
+text the turn had already streamed, followed by `⚠️ Agent response timed out.`
+A hard-capped turn never produces a later reply, so it can never leave both a
+failure row and a reply row behind.
 
 ### Resuming an interrupted stream
 
@@ -1728,7 +1742,7 @@ introducing yourself and what you can help with.
 **Notes:**
 - `GREETING.md` is **deleted before streaming begins**. Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning `GREETING.md` enables a new greeting on the next call.
 - The SSE stream format matches `POST /messages` with `stream: true` — use the same client-side handler.
-- If the agent errors mid-stream, an `{"type":"error","message":"..."}` SSE event is sent and the stream closes.
+- If the agent errors mid-stream, an `{"type":"error","message":"...","code":"..."}` SSE event is sent and the stream closes (`code` omitted when the failure carries none).
 
 ---
 

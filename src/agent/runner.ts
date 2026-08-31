@@ -22,6 +22,7 @@ import { SafeModeManager } from './safe-mode';
 import {
   TurnStreamRegistry,
   callbackSink,
+  errorEvent,
   resultEvent,
   type ApiStreamCallbacks,
   type TurnSink,
@@ -3178,13 +3179,13 @@ export class AgentRunner extends EventEmitter {
         resolve({ text: finalText, attachments });
       };
 
-      const fail = (err: Error) => {
+      const fail = (err: Error, partialText?: string) => {
         if (settled) return;
         settled = true;
         // Terminal close for a turn that produced no result (#75): record it so
         // history does not end on a dangling user message, and drain the
         // attachment buffer so nothing leaks into the next turn.
-        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
+        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage, partialText);
         cleanup();
         reject(err); // no-op when the soft timeout already rejected
       };
@@ -3280,8 +3281,12 @@ export class AgentRunner extends EventEmitter {
       const globalTimer = setTimeout(() => {
         reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
         hardCapTimer = setTimeout(() => {
+          // Interrupt before clearing the processing flag — interrupt() no-ops
+          // once `_processing` is false. See the streaming path for why the cap
+          // stops the turn instead of only detaching from it.
+          session.interrupt();
           session.setProcessing(false);
-          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }), buffer.join(''));
         }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
       }, opts.timeoutMs);
 
@@ -3425,7 +3430,7 @@ export class AgentRunner extends EventEmitter {
       this.turnStreams.complete(turn, resultEvent(finalText, attachments));
     };
 
-    const fail = (err: Error) => {
+    const fail = (err: Error, partialText?: string) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -3433,8 +3438,8 @@ export class AgentRunner extends EventEmitter {
       // history does not end on a dangling user message (the web reads that
       // state as "still thinking" and spins forever), and drain the attachment
       // buffer so nothing leaks into the next turn.
-      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
-      this.turnStreams.complete(turn, { type: 'error', message: err.message }, err);
+      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage, partialText);
+      this.turnStreams.complete(turn, errorEvent(err), err);
     };
 
     // The subprocess died without ever emitting a final `result` line (crash,
@@ -3567,8 +3572,21 @@ export class AgentRunner extends EventEmitter {
       // intentionally held for the whole soft→hard window (see API.md §409) —
       // resuming the turn goes through …/stream, which is never a conflict.
       hardCapTimer = setTimeout(() => {
+        // Genuinely end the turn rather than just unsubscribing from it. The old
+        // cleanup() only did `session.off('output')`, so past the cap the
+        // subprocess kept running and kept burning tokens while its eventual
+        // `result` line was parsed by nobody — the worst of both worlds, and the
+        // reason the `⚠️` row this writes could contradict a turn that was still
+        // alive. After the interrupt the row is simply true.
+        //
+        // ORDER MATTERS: interrupt() gates on `_processing` and no-ops once it
+        // is false, so it must come BEFORE setProcessing(false).
+        session.interrupt();
         session.setProcessing(false);
-        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+        // Whatever the turn did stream before the cap is real work the client
+        // may already have rendered; persist it alongside the notice instead of
+        // replacing it, exactly as the /stop path does.
+        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }), buffer.join(''));
       }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
     }, opts.timeoutMs);
 
@@ -3680,12 +3698,18 @@ export class AgentRunner extends EventEmitter {
    * assistant row so history never ends on a dangling user message.
    * System-initiated turns (skipUserMessage) have nothing dangling to close —
    * only the buffer is drained.
+   *
+   * `partialText` is whatever the turn already streamed before it died. It is
+   * prepended rather than discarded, so the single row this writes carries both
+   * the work the client saw and the notice — never a failure row that erases a
+   * half-finished reply, and never a failure row *plus* a separate reply row
+   * (the callers' `settled` guard makes done() and fail() mutually exclusive).
    */
-  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean): void {
+  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean, partialText?: string): void {
     const attachments = this.popApiAttachments(sessionId);
     if (skipUserMessage) return;
     const failTs = Date.now();
-    const content = `\u26a0\ufe0f ${err.message}`;
+    const content = [partialText?.trim(), `\u26a0\ufe0f ${err.message}`].filter(Boolean).join('\n\n');
     this.sessionStore
       .appendMessage(this.agentConfig.id, sessionId, { role: 'assistant', content, ts: failTs })
       .catch(() => {});
@@ -4176,7 +4200,7 @@ export class AgentRunner extends EventEmitter {
       if (settled) return;
       settled = true;
       cleanup();
-      this.turnStreams.complete(turn, { type: 'error', message: err.message }, err);
+      this.turnStreams.complete(turn, errorEvent(err), err);
     };
 
     let globalTimer: ReturnType<typeof setTimeout> | undefined;
