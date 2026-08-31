@@ -479,8 +479,24 @@ export function createApiRouter(
     // by the upstream provider, not the local config list.
     const modelStr = typeof requestModel === 'string' ? requestModel.trim() : undefined;
     const requestId = randomUUID();
-    const sessionId = (session_id as string | undefined) ?? randomUUID();
     const chatIdStr = (chat_id as string).trim();
+    // A client-supplied session_id resumes an existing session and nothing else.
+    // It used to be minted on the spot when unknown, so a typo quietly forked a
+    // second session named "Session N" instead of continuing the intended one —
+    // and since API.md has always documented this field as "resume an existing
+    // session", the silent create was never the contract anyone was promised.
+    //
+    // The lookup is scoped to this chat's index (api-{chatId}), so it doubles as
+    // the scope check: a session belonging to another chat is simply not found.
+    if (session_id !== undefined && !(await runner.apiSessionExists(chatIdStr, session_id as string))) {
+      res.status(404).json({
+        code: 'SESSION_NOT_FOUND',
+        error: `No session '${session_id as string}' in chat '${chatIdStr}'`,
+        hint: 'Create it with POST /v1/agents/:agentId/sessions, or omit session_id to start a new one.',
+      });
+      return;
+    }
+    const sessionId = (session_id as string | undefined) ?? randomUUID();
     const startTime = Date.now();
     const timeoutMs =
       typeof timeout_ms === 'number' && timeout_ms > 0 && timeout_ms <= 600_000
@@ -3341,10 +3357,30 @@ export function createApiRouter(
       res.status(400).json({ error: 'session_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
       return;
     }
-    // chat_id is optional — provide the same value used when creating the session via POST /sessions
-    // so the greeting message lands in the correct historyDb bucket (api-{chatId}).
-    // If omitted, sessionId is used as the bucket key, which creates a secondary index entry.
-    const chatId = typeof body.chat_id === 'string' && body.chat_id.trim() ? body.chat_id.trim() : sessionId;
+    // chat_id is required: it names the historyDb bucket (api-{chatId}) the greeting
+    // lands in. It used to fall back to sessionId, which quietly filed the greeting
+    // under a bucket of its own — a second index the real chat never reads, so the
+    // greeting vanished from history while still consuming the session.
+    const chatId = typeof body.chat_id === 'string' ? body.chat_id.trim() : '';
+    if (!chatId) {
+      res.status(400).json({ error: 'chat_id is required and must be a non-empty string' });
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(chatId)) {
+      res.status(400).json({ error: 'chat_id must be 1-64 alphanumeric characters, hyphens, or underscores' });
+      return;
+    }
+    // Same rule as POST /messages: session_id names an existing session, it does not
+    // mint one. Greeting has no "omit to start fresh" branch at all — the session is
+    // always pre-created by POST /sessions — so an unknown id is unambiguously wrong.
+    if (!(await runner.apiSessionExists(chatId, sessionId))) {
+      res.status(404).json({
+        code: 'SESSION_NOT_FOUND',
+        error: `No session '${sessionId}' in chat '${chatId}'`,
+        hint: 'Create it with POST /v1/agents/:agentId/sessions first.',
+      });
+      return;
+    }
 
     if (runner.hasActiveApiSession(sessionId)) {
       res.status(409).json({ error: 'Session already has a pending request' });

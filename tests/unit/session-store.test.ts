@@ -581,6 +581,35 @@ describe('session-store', () => {
   });
 
   // -------------------------------------------------------------------------
+  // U-API-10..13: apiSessionExists — the gate on a client-supplied session_id
+  // -------------------------------------------------------------------------
+  it('U-API-10: apiSessionExists finds a session ensureApiSession registered', async () => {
+    await store.ensureApiSession('agent-x', apiChatId, apiSessionId);
+    expect(await store.apiSessionExists('agent-x', apiChatId, apiSessionId)).toBe(true);
+  });
+
+  it('U-API-11: apiSessionExists is false for an id nobody registered', async () => {
+    await store.ensureApiSession('agent-x', apiChatId, apiSessionId);
+    expect(await store.apiSessionExists('agent-x', apiChatId, 'never-created')).toBe(false);
+  });
+
+  it('U-API-12: apiSessionExists is scoped to the chat — another chat cannot see it', async () => {
+    await store.ensureApiSession('agent-x', 'chat-a', apiSessionId);
+    expect(await store.apiSessionExists('agent-x', 'chat-a', apiSessionId)).toBe(true);
+    expect(await store.apiSessionExists('agent-x', 'chat-b', apiSessionId)).toBe(false);
+    // Nor across agents, since the index lives under the agent's own directory.
+    expect(await store.apiSessionExists('agent-y', 'chat-a', apiSessionId)).toBe(false);
+  });
+
+  it('U-API-13: apiSessionExists writes nothing — a miss leaves no index behind', async () => {
+    expect(await store.apiSessionExists('agent-x', 'untouched-chat', 'nope')).toBe(false);
+    // listSessions would have materialised an index (and a seeded "Session 1") here.
+    // A pure check must not, or probing an unknown chat quietly creates one.
+    expect(fs.existsSync(path.join(tmpDir, 'agent-x', 'sessions', 'api-untouched-chat'))).toBe(false);
+    expect(await store.loadIndex('agent-x', 'untouched-chat', 'api')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // U-SEC-01: path-traversal session ids are rejected (defense-in-depth)
   // -------------------------------------------------------------------------
   it('U-SEC-01: appendMessage rejects a session id that escapes the agent dir', async () => {

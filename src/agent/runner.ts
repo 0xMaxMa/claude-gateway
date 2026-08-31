@@ -4052,6 +4052,15 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
+  /**
+   * Does `sessionId` already exist under `chatId`? The API layer calls this before
+   * honouring a client-supplied `session_id`, so an unknown id is rejected instead
+   * of silently becoming a brand-new session. Read-only — it never registers.
+   */
+  async apiSessionExists(chatId: string, sessionId: string): Promise<boolean> {
+    return this.sessionStore.apiSessionExists(this.agentConfig.id, chatId, sessionId);
+  }
+
   async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
     const sessionName = name ?? (prompt
       ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)

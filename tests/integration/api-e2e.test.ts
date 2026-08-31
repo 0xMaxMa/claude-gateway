@@ -26,8 +26,7 @@ const API_KEY_ALFRED = 'sk-test-alfred-only-key';
 const API_KEY_ADMIN = 'sk-test-admin-key';
 const API_KEY_WRONG = 'sk-test-wrong-key';
 
-function createTempWorkspace(prefix = 'api-e2e-ws-'): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function writeWorkspaceFiles(dir: string): string {
   const files: Record<string, string> = {
     'AGENTS.md': '# Agent\nYou are a test assistant.',
     'SOUL.md': '# Soul\nBe helpful.',
@@ -39,6 +38,23 @@ function createTempWorkspace(prefix = 'api-e2e-ws-'): string {
     fs.writeFileSync(path.join(dir, name), content, 'utf-8');
   }
   return dir;
+}
+
+function createTempWorkspace(prefix = 'api-e2e-ws-'): string {
+  return writeWorkspaceFiles(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
+/**
+ * A workspace nested as <agentsBaseDir>/<agentId>/workspace.
+ *
+ * AgentRunner derives agentsBaseDir as workspace/../.., so a flat temp dir
+ * resolves it to `/` and every SessionStore write fails with EACCES. Anything
+ * that touches the session index needs this shape.
+ */
+function createStructuredWorkspace(prefix: string, agentId = 'alfred'): string {
+  const ws = path.join(createTempDir(prefix), agentId, 'workspace');
+  fs.mkdirSync(ws, { recursive: true });
+  return writeWorkspaceFiles(ws);
 }
 
 function createTempDir(prefix = 'api-e2e-'): string {
@@ -320,9 +336,9 @@ describe('Agent HTTP API integration (planning-05)', () => {
     await runner.stop();
   });
 
-  // ─── I-API-09: session_id echoed back ─────────────────────────────────────
-  it('I-API-09: Provided session_id is echoed in response', async () => {
-    const ws = createTempWorkspace('api-09-');
+  // ─── I-API-09: session_id resumes a session that exists ───────────────────
+  it('I-API-09: A session_id from POST /sessions is accepted and echoed back', async () => {
+    const ws = createStructuredWorkspace('api-09-');
     const logDir = createTempDir('api-09-log-');
     const cfg = makeAgentConfig('alfred', ws);
     const gatewayCfg = makeGatewayConfig(logDir);
@@ -336,7 +352,13 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
     await router.start(0);
 
-    const sessionId = 'my-custom-session-001';
+    const created = await supertest(router.getApp())
+      .post('/api/v1/agents/alfred/sessions')
+      .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
+      .send({ chat_id: 'test-chat', name: 'fixture' });
+    expect(created.status).toBe(201);
+    const sessionId = created.body.sessionId as string;
+
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
@@ -344,6 +366,81 @@ describe('Agent HTTP API integration (planning-05)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.session_id).toBe(sessionId);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-API-09b: an unknown session_id is rejected, never minted ────────────
+  it('I-API-09b: Unknown session_id returns 404 and creates no session', async () => {
+    const ws = createStructuredWorkspace('api-09b-');
+    const logDir = createTempDir('api-09b-log-');
+    const cfg = makeAgentConfig('alfred', ws);
+    const gatewayCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gatewayCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+
+    const agents = new Map([['alfred', runner]]);
+    const configs = new Map([['alfred', cfg]]);
+    const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
+    await router.start(0);
+
+    const res = await supertest(router.getApp())
+      .post('/api/v1/agents/alfred/messages')
+      .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
+      .send({ message: 'Hi', chat_id: 'test-chat', session_id: 'my-custom-session-001' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('SESSION_NOT_FOUND');
+
+    // The old behaviour minted it on the spot, so a typo silently forked a second
+    // conversation. Nothing may have been registered under that id.
+    const listed = await supertest(router.getApp())
+      .get('/api/v1/agents/alfred/sessions?chat_id=test-chat')
+      .set('Authorization', `Bearer ${API_KEY_ALFRED}`);
+    expect(listed.status).toBe(200);
+    expect(
+      (listed.body.sessions as Array<{ id: string }>).some((s) => s.id === 'my-custom-session-001'),
+    ).toBe(false);
+
+    await router.stop();
+    await runner.stop();
+  });
+
+  // ─── I-API-09c: session_id is scoped to the chat that owns it ──────────────
+  it('I-API-09c: A session created in one chat is not addressable from another', async () => {
+    const ws = createStructuredWorkspace('api-09c-');
+    const logDir = createTempDir('api-09c-log-');
+    const cfg = makeAgentConfig('alfred', ws);
+    const gatewayCfg = makeGatewayConfig(logDir);
+
+    const runner = new AgentRunner(cfg, gatewayCfg);
+    await runner.start();
+    await waitFor(() => runner.isRunning());
+
+    const agents = new Map([['alfred', runner]]);
+    const configs = new Map([['alfred', cfg]]);
+    const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
+    await router.start(0);
+
+    const created = await supertest(router.getApp())
+      .post('/api/v1/agents/alfred/sessions')
+      .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
+      .send({ chat_id: 'chat-a' });
+    expect(created.status).toBe(201);
+    const sessionId = created.body.sessionId as string;
+
+    // Same key, same agent, real session id — but the wrong chat. The existence
+    // check reads chat-b's index, so this is simply not found.
+    const res = await supertest(router.getApp())
+      .post('/api/v1/agents/alfred/messages')
+      .set('Authorization', `Bearer ${API_KEY_ALFRED}`)
+      .send({ message: 'Hi', chat_id: 'chat-b', session_id: sessionId });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('SESSION_NOT_FOUND');
 
     await router.stop();
     await runner.stop();
@@ -443,7 +540,13 @@ describe('Agent HTTP API integration (planning-05)', () => {
     const router = new GatewayRouter(agents, configs, undefined, gatewayCfg);
     await router.start(0);
 
-    const sessionId = 'persist-test-session';
+    const created = await supertest(router.getApp())
+      .post('/api/v1/agents/alfred/sessions')
+      .set('Authorization', `Bearer ${API_KEY_ADMIN}`)
+      .send({ chat_id: 'test-chat', name: 'persist-test-session' });
+    expect(created.status).toBe(201);
+    const sessionId = created.body.sessionId as string;
+
     const res = await supertest(router.getApp())
       .post('/api/v1/agents/alfred/messages')
       .set('Authorization', `Bearer ${API_KEY_ADMIN}`)

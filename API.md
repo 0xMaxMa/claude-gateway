@@ -1234,6 +1234,12 @@ guild snowflake.
 Send a message to an agent. Returns a JSON response or SSE stream.
 
 > **Breaking change (PR #69):** `chat_id` is now required. Messages are stored under `sessions/api-{chat_id}/` on disk.
+>
+> **Breaking change:** `session_id` now *resumes* a session and nothing else. An id
+> the gateway has never issued returns `404 SESSION_NOT_FOUND` instead of quietly
+> becoming a brand-new session under that name. Clients that minted their own ids
+> must either call [`POST /sessions`](#post-apiv1agentsagentidsessions) first and
+> use the id it returns, or omit `session_id` and adopt the one in the response.
 
 **Request body:**
 
@@ -1241,7 +1247,7 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 |-------|----------|-------------|
 | `message` | Yes | Message text (max 10,000 chars), or a slash command (e.g. `/session`, `/clear`) |
 | `chat_id` | Yes | Caller identity — used to namespace sessions (e.g. `"myapp"`, `"user-123"`) |
-| `session_id` | No | Resume an existing session; omit to start a new one |
+| `session_id` | No | Resume an existing session under this `chat_id`; omit to start a new one. Must already exist — an unknown id is `404`, never a new session |
 | `stream` | No | `true` to enable SSE streaming (default `false`) |
 | `timeout_ms` | No | Override the default response timeout in milliseconds (default 60000) |
 | `media_files` | No | Array of `mediaPath` strings returned by the Media Upload endpoint |
@@ -1317,7 +1323,7 @@ curl -X POST \
 | 400 | Empty or too-long message, or missing `chat_id` |
 | 401 | Missing API key |
 | 403 | Invalid key or key has no access to that agent |
-| 404 | Agent ID not found |
+| 404 | Agent ID not found, or `session_id` names no session in this `chat_id` (`code: "SESSION_NOT_FOUND"`) |
 | 409 | Session is busy processing another request |
 | 504 | Agent did not respond within timeout (default 60s) — **sync mode only** |
 | 500 | Internal error |
@@ -1325,7 +1331,7 @@ curl -X POST \
 > - `session_id` is optional — omit for a stateless one-shot call
 > - Sessions idle-timeout after `idleTimeoutMinutes` (default 30 min); history is restored automatically on next message
 > - Error 409 = session is currently processing a request — wait and retry
-> - After a soft timeout, the same `session_id` keeps returning `409` until the hard cap (a further 10 min) — the subprocess is still finishing that turn, so a retry would interleave. Use a new `session_id` to start immediately, or stay with this one and read the turn out via [`GET …/sessions/:sessionId/stream`](#resuming-an-interrupted-stream), which is never a conflict.
+> - After a soft timeout, the same `session_id` keeps returning `409` until the hard cap (a further 10 min) — the subprocess is still finishing that turn, so a retry would interleave. Omit `session_id` to start a fresh session immediately, or stay with this one and read the turn out via [`GET …/sessions/:sessionId/stream`](#resuming-an-interrupted-stream), which is never a conflict.
 > - The soft timeout only ends the *request* in sync mode (`504`). In streaming mode it is a non-terminal [`timeout` event](#streaming-api-sse) — the turn is still running and the stream stays open.
 
 ---
@@ -1660,8 +1666,9 @@ is dropped, even if less than 2 minutes have passed. So if two clients share a
 `session_id` — a phone reloading to resume turn *N* while a laptop has already
 posted turn *N+1* — the reload gets `TURN_GONE` rather than the replay the grace
 window otherwise promises. Read the session's history for that turn's result;
-the reply was persisted regardless. Give each client its own `session_id` if you
-need their turns to be independently resumable.
+the reply was persisted regardless. Give each client its own session — one
+[`POST /sessions`](#post-apiv1agentsagentidsessions) each — if you need their
+turns to be independently resumable.
 
 The buffer is bounded per turn — 2,000 events or ~4 MB, whichever comes first —
 and once the oldest events are evicted, a cursor pointing into the evicted
@@ -1759,20 +1766,25 @@ Returns `204 No Content` if `GREETING.md` does not exist or is empty.
 **Two-step flow:**
 
 1. Create the session first: `POST /api/v1/agents/:agentId/sessions` → redirect the user to the chat UI with the returned `session_id`.
-2. Once in the chat UI, trigger the greeting: `POST /api/v1/agents/:agentId/greeting` with `session_id` → stream the assistant's opening message as SSE with typing animation visible to the user.
+2. Once in the chat UI, trigger the greeting: `POST /api/v1/agents/:agentId/greeting` with that `session_id` and the same `chat_id` → stream the assistant's opening message as SSE with typing animation visible to the user.
 
 **Request:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `session_id` | Yes | ID of an existing session to deliver the greeting into |
-| `chat_id` | No | Same `chat_id` used when the session was created; ensures the greeting message is stored in the correct history bucket. Defaults to `session_id` when omitted (creates a secondary index entry) |
+| `session_id` | Yes | ID of an existing session to deliver the greeting into. Must already exist under `chat_id` — an unknown id is `404`, never a new session |
+| `chat_id` | Yes | Same `chat_id` used when the session was created; names the history bucket (`api-{chat_id}`) the greeting is stored in |
+
+> **Breaking change:** `chat_id` is now required. It used to default to `session_id`,
+> which filed the greeting under `api-{session_id}` — an index the real chat never
+> reads, so the opening message vanished from history while still consuming the
+> one-shot `GREETING.md`. Pass the same `chat_id` you created the session with.
 
 ```bash
 curl -N -X POST \
   -H "X-Api-Key: my-write-key" \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "7f3a1c2d-89ab-4def-b012-345678901234"}' \
+  -d '{"session_id": "7f3a1c2d-89ab-4def-b012-345678901234", "chat_id": "myapp"}' \
   http://localhost:10850/api/v1/agents/getpod/greeting
 ```
 
@@ -1800,6 +1812,7 @@ introducing yourself and what you can help with.
 
 **Notes:**
 - `GREETING.md` is **deleted before streaming begins**. Subsequent calls return 204 immediately, making the endpoint idempotent. Re-provisioning `GREETING.md` enables a new greeting on the next call.
+- A `session_id` that names no session under `chat_id` returns `404` with `code: "SESSION_NOT_FOUND"`. The check runs *before* the unlink, so a rejected call leaves `GREETING.md` intact for the real session.
 - The SSE stream format matches `POST /messages` with `stream: true` — use the same client-side handler.
 - If the agent errors mid-stream, an `{"type":"error","message":"...","code":"..."}` SSE event is sent and the stream closes (`code` omitted when the failure carries none).
 
@@ -1832,6 +1845,10 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ### POST /api/v1/agents/:agentId/sessions
 
 Create a new API session. Optionally auto-generates a session name by summarising a prompt.
+
+The gateway mints the id; there is no way to choose one. Along with omitting
+`session_id` on [`POST /messages`](#post-apiv1agentsagentidmessages), this is
+the only way a session comes into existence.
 
 **Request body:**
 
