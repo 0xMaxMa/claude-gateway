@@ -84,9 +84,11 @@ function createSseCallbacks(
   res: Response,
   meta: { requestId?: string; sessionId: string; startTime: number },
 ): ApiStreamCallbacks {
-  // `request_id` correlates a frame with the POST that started the turn. A
-  // resuming client that did not name one has no correlation to make, so the
-  // field is omitted rather than filled with a stand-in.
+  // `request_id` correlates a frame with the POST that started the turn. The
+  // resume endpoint fills it in from the turn record when the reconnecting
+  // client could not name one, so every frame that belongs to a turn carries it;
+  // the field is omitted only when there is genuinely no turn id to report
+  // (events emitted outside a turn), never filled with a stand-in.
   const ids = () => ({
     ...(meta.requestId ? { request_id: meta.requestId } : {}),
     session_id: meta.sessionId,
@@ -140,6 +142,12 @@ const SSE_KEEPALIVE_MS = 15_000;
  * open, which is exactly what an end-to-end HTTP test cannot do.
  */
 export function openSseStream(res: Response): void {
+  // Every caller reaches here after at least one `await` (a session-exists
+  // check, reading GREETING.md), so the client may already be gone — and then
+  // 'close' has fired before the listeners below exist and nothing would ever
+  // clear the interval. Bail before writing to a socket that is not there.
+  if (res.writableEnded || res.destroyed) return;
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -158,6 +166,13 @@ export function openSseStream(res: Response): void {
   let keepalive: ReturnType<typeof setInterval> | undefined;
   const stop = () => { if (keepalive !== undefined) { clearInterval(keepalive); keepalive = undefined; } };
   keepalive = setInterval(() => {
+    // A tick can land in the window between `res.end()` and 'finish' — arbitrarily
+    // wide when the reader is slow, since the body has to drain first. Writing
+    // there is a write-after-end, which http does NOT throw synchronously: it
+    // emits 'error' on the response a tick later, so `try/catch` never sees it
+    // and an unhandled one takes the whole gateway down through the
+    // uncaughtException handler in index.ts. Check the state instead.
+    if (res.writableEnded || res.destroyed) { stop(); return; }
     try { res.write(': keepalive\n\n'); } catch { stop(); }
   }, SSE_KEEPALIVE_MS);
   // unref so a forgotten stream cannot by itself hold the process (or a test
@@ -165,6 +180,11 @@ export function openSseStream(res: Response): void {
   keepalive.unref?.();
   res.on('close', stop);
   res.on('finish', stop);
+  // Last line of defence for the same class of failure: any asynchronous write
+  // error on this response — from the keepalive above or from a frame written by
+  // createSseCallbacks — is a dead client, not a reason to exit(1). An 'error'
+  // listener is what keeps the emit from becoming an uncaught exception.
+  res.on('error', stop);
 }
 
 function maskToken(token: string): string {
@@ -3345,11 +3365,22 @@ export function createApiRouter(
     // an attach that fails never writes at all.
     let opened = false;
     const ensureOpen = () => { if (!opened) { opened = true; openSseStream(res); } };
-    // `duration_ms` on the replayed terminal frame means the age of the *turn*,
-    // which is what the original connection would have reported. Timing from the
-    // reconnect instead would make a turn resumed near its end look instant.
-    const startTime = runner.turnStreamStartedAt(sessionId) ?? Date.now();
-    const callbacks = createSseCallbacks(res, { requestId, sessionId, startTime });
+    // Both halves of the frame metadata come from the turn itself, and must be
+    // read before attach() — attach replays synchronously into the sink built
+    // from them.
+    //   • `duration_ms` on a replayed terminal frame means the age of the *turn*,
+    //     which is what the original connection would have reported. Timing from
+    //     the reconnect would make a turn resumed near its end look instant.
+    //   • `request_id` is echoed from the turn when the client did not name one.
+    //     A client that reloaded has no token, and the endpoint demands one for
+    //     any later `after_seq > 0` — so omitting it here would strand that
+    //     client on replay-from-zero forever.
+    const turn = runner.turnStreamInfo(sessionId);
+    const callbacks = createSseCallbacks(res, {
+      requestId: requestId ?? turn?.requestId,
+      sessionId,
+      startTime: turn?.startedAt ?? Date.now(),
+    });
     const inner = callbackSink({
       onChunk: (event, seq) => { ensureOpen(); callbacks.onChunk(event, seq); },
       onDone: (text, attachments, seq) => { ensureOpen(); callbacks.onDone(text, attachments, seq); },
@@ -3362,7 +3393,15 @@ export function createApiRouter(
       const body = {
         gone: { code: 'TURN_GONE', error: 'No resumable turn for this session', hint: 'Read the session history instead.' },
         mismatch: { code: 'TURN_MISMATCH', error: 'That request_id is not the session\'s current turn', hint: 'Read the session history instead.' },
-        truncated: { code: 'TURN_TRUNCATED', error: 'Buffered events at that cursor have been evicted', hint: 'Read the session history instead.' },
+        // Recoverable without history, like CURSOR_AHEAD: only the cursor is
+        // unusable. Dropping it replays whatever the bounded buffer still holds
+        // — the first frame's `seq` says how much came before it — and ends with
+        // the terminal `result`, which carries the turn's full text.
+        truncated: {
+          code: 'TURN_TRUNCATED',
+          error: 'Buffered events at that cursor have been evicted',
+          hint: 'Retry without after_seq to replay this turn from the oldest event still buffered.',
+        },
         // Recoverable without history, unlike its three siblings: the turn is
         // live, only the cursor is stale. Say so, or a client follows the
         // generic hint and abandons a stream it could still have joined.

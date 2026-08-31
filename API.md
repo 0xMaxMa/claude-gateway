@@ -1638,7 +1638,7 @@ with the same `result` + `[DONE]` frames the original connection would have got.
 | Query param | Description |
 |-------------|-------------|
 | `after_seq` | Resume after this sequence number. Omit (or `0`) to replay the turn from its first event. |
-| `request_id` | The turn you mean to resume — the `request_id` its frames carry. **Required whenever `after_seq > 0`**; optional (and unused) when replaying from the start. |
+| `request_id` | The turn you mean to resume — the `request_id` its frames carry. **Required whenever `after_seq > 0`**; optional when replaying from the start, and the frames you get back report the turn's own `request_id` either way. |
 
 ```bash
 # The stream died after seq 12 — pick the same turn back up.
@@ -1656,6 +1656,10 @@ before seq 12 silently missing. The endpoint answers `400` instead: send the
 `request_id` from the frames you received, or drop `after_seq` and replay the
 current turn from its first event.
 
+**A client that reloaded has no `request_id`, and that is fine.** Drop
+`after_seq`, and the frames you get back carry the turn's own `request_id` —
+which is what you feed to the next resume, cursor and all.
+
 **Resuming is never a conflict.** `409` still means "you tried to start a second
 turn on a busy session"; it is never the answer to a resume. When a turn cannot
 be resumed the endpoint answers `410 Gone` with a `code` saying why:
@@ -1664,15 +1668,15 @@ be resumed the endpoint answers `410 Gone` with a `code` saying why:
 |--------|---------|------------|
 | `TURN_GONE` | No turn for that session — it never ran, or it finished more than 2 minutes ago | Read the session's history |
 | `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for — yours is over | Read the session's history |
-| `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) | Read the session's history |
+| `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) — only a non-zero `after_seq` can get this | Retry **without** `after_seq` |
 | `CURSOR_AHEAD` | `after_seq` is past the turn's last event | Retry **without** `after_seq` |
 
 Each response carries a `hint` field with the same advice.
 
-**`CURSOR_AHEAD` is the one you can recover from without history.** It means the
-named turn is live but has not reached your cursor — re-attaching would match no
-event — so the safe answer is to replay from the start: drop `after_seq` and call
-again.
+**`CURSOR_AHEAD` and `TURN_TRUNCATED` are the two you can recover from without
+history.** Both mean the turn is live and only your *cursor* is unusable — past
+the turn's last event, or pointing into events the buffer has already dropped.
+The answer to either is the same: drop `after_seq` and call again.
 
 A completed turn stays replayable for **2 minutes** after its terminal frame,
 which is what makes a reload immediately after the answer arrives still work. The
@@ -1690,10 +1694,12 @@ one [`POST /sessions`](#post-apiv1agentsagentidsessions) each — if you need th
 turns to be independently resumable.
 
 The buffer is bounded per turn — 2,000 events or ~4 MB, whichever comes first —
-and once the oldest events are evicted, a cursor pointing into the evicted
-region gets `TURN_TRUNCATED` rather than a replay with a silent hole in it. A
-turn producing more output than that is not resumable from the start; its recent
-tail still is.
+and once the oldest events are evicted, a cursor pointing into the evicted region
+gets `TURN_TRUNCATED` rather than a replay with a silent hole in it. Replaying
+from the start (no `after_seq`) is never refused, though: you get the oldest
+event still buffered onwards, and the first frame's `seq` tells you how much of
+the turn came before it. Nothing is actually lost — the terminal `result` carries
+the turn's full text regardless of how much of the delta stream survived.
 
 ---
 

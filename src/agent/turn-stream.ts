@@ -124,9 +124,17 @@ export class TurnStream {
    * Deliberately synchronous end to end: an event produced during an `await`
    * here would land in the buffer but miss the sink (gap) or arrive twice (dup).
    *
-   * Returns `'truncated'` — installing nothing — when `afterSeq` sits inside a
-   * region the buffer has already evicted, since the seamless replay the caller
-   * asked for cannot be honoured.
+   * Returns `'truncated'` — installing nothing — when `afterSeq` names an event
+   * the buffer has already evicted: the caller asked to continue seamlessly from
+   * a point that no longer exists, and that promise cannot be honoured.
+   *
+   * `afterSeq === 0` is exempt. It claims to have seen nothing, so there is no
+   * seam to break, and refusing it is what turned the headline case — a reload
+   * during a long turn — into a dead end: history holds no assistant row while
+   * the turn is still running, so the client was sent somewhere with nothing in
+   * it. It gets whatever the buffer still holds instead; the first replayed
+   * frame's `seq` is > 1 exactly when older events were dropped, and the terminal
+   * `result` carries the turn's full text regardless.
    *
    * Returns `'ahead'` when `afterSeq` runs past the last event this turn has
    * produced. Seq numbering restarts at 1 for every turn, so a client that
@@ -142,7 +150,7 @@ export class TurnStream {
    */
   attach(sink: TurnSink, afterSeq: number): AttachFailure | null {
     if (afterSeq > this.lastSeq) return 'ahead';
-    if (afterSeq < this.evictedThroughSeq) return 'truncated';
+    if (afterSeq > 0 && afterSeq < this.evictedThroughSeq) return 'truncated';
 
     // Retire whoever held the slot before the replay, so the displaced socket
     // closes instead of waiting forever for a terminal frame it will not get.
@@ -255,6 +263,21 @@ export class TurnStreamRegistry {
     const timer = setTimeout(() => this.release(turn.key), this.graceMs);
     timer.unref?.();
     this.releaseTimers.set(turn.key, timer);
+  }
+
+  /**
+   * Terminal frame + immediate release, for a producer whose turns nothing can
+   * re-attach to: the cross-channel live view files under its channel namespace,
+   * and the resume endpoint only ever looks under `api`. Holding that buffer for
+   * the grace window would retain up to the full per-turn cap (2,000 events /
+   * ~4 MB) for two minutes with no code path able to replay a byte of it.
+   *
+   * Same superseded-turn guard as complete(): a late finisher releases its OWN
+   * record, never the one that replaced it.
+   */
+  completeAndRelease(turn: TurnStream, event: StreamEvent, error?: Error): void {
+    turn.complete(event, error);
+    if (this.turns.get(turn.key) === turn) this.release(turn.key);
   }
 
   /** Drop the record and its grace timer. */

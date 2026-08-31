@@ -29,12 +29,12 @@ class MockStreamRunner extends EventEmitter {
   terminal: SeqEvent | null = null;
   detachCalled = false;
   captured: { sessionId: string; afterSeq?: number; requestId?: string } | null = null;
-  /** What turnStreamStartedAt should answer — the age the result frame reports. */
-  startedAt: number | undefined = undefined;
+  /** What turnStreamInfo should answer — the identity and age the frames report. */
+  turnInfo: { requestId: string; startedAt: number } | undefined = undefined;
 
   hasActiveApiSession(): boolean { return false; }
 
-  turnStreamStartedAt(): number | undefined { return this.startedAt; }
+  turnStreamInfo(): { requestId: string; startedAt: number } | undefined { return this.turnInfo; }
 
   attachTurnStream(
     sessionId: string,
@@ -130,7 +130,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(runner.captured).toMatchObject({ afterSeq: 0, requestId: undefined });
   });
 
-  it('echoes request_id when the client named one, and omits the field entirely when it did not', async () => {
+  it('echoes the client\'s request_id, and reports the turn\'s own when the client had none', async () => {
     runner.terminal = seq(1, { type: 'result', text: 'ok' });
 
     const named = parseSse(
@@ -140,13 +140,23 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     )[0]!;
     expect(named['request_id']).toBe('req-abc');
 
-    // No correlation to make — better an absent field than the session id
-    // masquerading as a request id.
+    // A client that reloaded has no token, and the endpoint refuses any
+    // `after_seq > 0` without one — so a resume that omitted it must LEARN the
+    // turn's request_id here, or it can never resume from a cursor again.
+    runner.turnInfo = { requestId: 'req-live', startedAt: Date.now() };
     const anonymous = parseSse(
       (await supertest.default(buildApp(runner)).get(url()).set('X-Api-Key', 'sk-read-only')).text,
     )[0]!;
-    expect(anonymous).not.toHaveProperty('request_id');
+    expect(anonymous['request_id']).toBe('req-live');
     expect(anonymous['session_id']).toBe(SESSION);
+
+    // With no turn record to name, the field is absent — better than the session
+    // id masquerading as a request id.
+    runner.turnInfo = undefined;
+    const unknown = parseSse(
+      (await supertest.default(buildApp(runner)).get(url()).set('X-Api-Key', 'sk-read-only')).text,
+    )[0]!;
+    expect(unknown).not.toHaveProperty('request_id');
   });
 
   it('forwards a result\'s attachments so a resumed turn does not lose its images', async () => {
@@ -214,7 +224,6 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
   it.each([
     ['gone', 'TURN_GONE'],
     ['mismatch', 'TURN_MISMATCH'],
-    ['truncated', 'TURN_TRUNCATED'],
   ] as const)('answers 410 %s with a %s code and no SSE headers', async (reason, code) => {
     runner.attachResult = { ok: false, reason };
 
@@ -228,11 +237,15 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(res.body.hint).toContain('history');
   });
 
-  it('answers 410 CURSOR_AHEAD with a recover-here hint, not the history fallback', async () => {
-    // The other three refusals mean the turn is unreachable. This one means the
-    // turn is live and only the cursor is stale, so pointing the client at
-    // history would send it away from a stream it can still join.
-    runner.attachResult = { ok: false, reason: 'ahead' };
+  it.each([
+    ['truncated', 'TURN_TRUNCATED'],
+    ['ahead', 'CURSOR_AHEAD'],
+  ] as const)('answers 410 %s (%s) with a recover-here hint, not the history fallback', async (reason, code) => {
+    // Both mean the turn is live and only the *cursor* is unusable — one points
+    // into evicted events, the other past the last one. Dropping `after_seq`
+    // recovers either, so pointing the client at history would send it away from
+    // a stream it can still join (and, mid-turn, at a history with no row yet).
+    runner.attachResult = { ok: false, reason };
 
     const res = await supertest.default(buildApp(runner))
       .get(url('?after_seq=50&request_id=req-1'))
@@ -240,7 +253,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
 
     expect(res.status).toBe(410);
     expect(res.headers['content-type']).toContain('application/json');
-    expect(res.body).toMatchObject({ code: 'CURSOR_AHEAD' });
+    expect(res.body).toMatchObject({ code });
     expect(res.body.hint).toContain('after_seq');
     expect(res.body.hint).not.toContain('history');
   });
@@ -288,7 +301,7 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     // the turn took 5 seconds. The replayed frame stands in for the one the
     // original connection would have received, so it is timed from the turn's
     // own start.
-    runner.startedAt = Date.now() - 30_000;
+    runner.turnInfo = { requestId: 'req-1', startedAt: Date.now() - 30_000 };
     runner.terminal = seq(4, { type: 'result', text: 'done' });
 
     const res = await supertest.default(buildApp(runner))
@@ -299,24 +312,34 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(result['duration_ms'] as number).toBeGreaterThanOrEqual(30_000);
   });
 
-  it('keeps an idle stream alive with SSE comment frames, and stops them when it closes', async () => {
+  // ── Keepalive ─────────────────────────────────────────────────────────────
+  // The keepalive is time-based and fires on a response nobody is reading, which
+  // no end-to-end HTTP test can hold still, so these drive openSseStream directly
+  // against a stub response whose lifecycle flags they control.
+  function resStub() {
+    const writes: string[] = [];
+    const listeners = new Map<string, () => void>();
+    const res = {
+      writableEnded: false,
+      destroyed: false,
+      writeHead: jest.fn(),
+      flushHeaders: jest.fn(),
+      socket: { setNoDelay: jest.fn() },
+      write: (c: string) => { writes.push(c); return true; },
+      on: jest.fn(),
+    };
+    res.on.mockImplementation((ev: string, fn: () => void) => { listeners.set(ev, fn); return res; });
+    return { res, writes, listeners, response: res as unknown as import('express').Response };
+  }
+
+  it('keeps an idle stream alive with SSE comment frames, and stops them when it closes', () => {
     // A turn can be silent for minutes (a long Bash call), which a reverse proxy
     // reads as a dead connection. The keepalive is a comment frame: every SSE
     // parser drops it, so it must not appear as an event or consume a seq.
     jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
     try {
-      const writes: string[] = [];
-      const res = {
-        writeHead: jest.fn(),
-        flushHeaders: jest.fn(),
-        socket: { setNoDelay: jest.fn() },
-        write: (c: string) => { writes.push(c); return true; },
-        on: jest.fn(),
-      };
-      const listeners = new Map<string, () => void>();
-      res.on.mockImplementation((ev: string, fn: () => void) => { listeners.set(ev, fn); return res; });
-
-      openSseStream(res as unknown as import('express').Response);
+      const { writes, listeners, response } = resStub();
+      openSseStream(response);
 
       jest.advanceTimersByTime(46_000);
       expect(writes).toEqual([': keepalive\n\n', ': keepalive\n\n', ': keepalive\n\n']);
@@ -328,6 +351,52 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
       listeners.get('close')!();
       jest.advanceTimersByTime(60_000);
       expect(writes).toHaveLength(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('never writes into the window between res.end() and \'finish\' — that write kills the process', () => {
+    // http does NOT throw write-after-end synchronously: it emits 'error' on the
+    // response a tick later, so the try/catch around the write cannot see it and
+    // index.ts's uncaughtException handler turns it into exit(1). The window is
+    // as wide as the reader is slow — the body has to drain before 'finish' —
+    // so one stalled SSE client could take the gateway down. Checked, not caught.
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+    try {
+      const { res, writes, listeners, response } = resStub();
+      openSseStream(response);
+      jest.advanceTimersByTime(16_000);
+      expect(writes).toHaveLength(1);
+
+      res.writableEnded = true; // end() called, 'finish'/'close' not fired yet
+      jest.advanceTimersByTime(60_000);
+      expect(writes).toHaveLength(1);
+
+      // Belt and braces for the same class of failure: an 'error' listener means
+      // an asynchronous write error on this response — from here or from a frame
+      // written by createSseCallbacks — is a dead client, never an uncaught throw.
+      expect(listeners.has('error')).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('opens nothing when the client is already gone', () => {
+    // Every caller reaches openSseStream after an await (a session lookup,
+    // reading GREETING.md). If the client aborted during it, 'close' has already
+    // fired, so a listener registered now never runs and the interval would
+    // outlive the request writing to a destroyed socket.
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+    try {
+      const { res, writes, listeners, response } = resStub();
+      res.destroyed = true;
+      openSseStream(response);
+
+      expect(res.writeHead).not.toHaveBeenCalled();
+      expect(listeners.size).toBe(0);
+      jest.advanceTimersByTime(60_000);
+      expect(writes).toHaveLength(0);
     } finally {
       jest.useRealTimers();
     }

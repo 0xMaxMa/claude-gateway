@@ -208,8 +208,26 @@ describe('TurnStream', () => {
     // ...but a cursor inside the evicted region is refused rather than served
     // with a silent hole, so the client can fall back to history.
     const stale = recordingSink();
-    expect(turn.attach(stale.sink, 0)).toBe('truncated');
+    expect(turn.attach(stale.sink, 1)).toBe('truncated');
     expect(stale.writes).toHaveLength(0);
+  });
+
+  it('serves the retained tail to a cursor-less re-attach, even on a turn past the buffer cap', () => {
+    // after_seq=0 claims to have seen nothing, so there is no seam to break and
+    // nothing to serve "with a hole" — it is the reload-mid-turn case the whole
+    // feature exists for. Refusing it sent that client to history, which holds
+    // no assistant row while the turn is still running: a dead end.
+    const turn = new TurnStream('sess-1', 'req-1');
+    for (let i = 0; i < TURN_BUFFER_MAX_EVENTS * 2; i++) turn.emit(delta(`e${i}`));
+
+    const fresh = recordingSink();
+    expect(turn.attach(fresh.sink, 0)).toBeNull();
+    expect(fresh.writes.length).toBeGreaterThan(0);
+    // The dropped events are not hidden: the first frame's seq says how much of
+    // the turn came before it, and the terminal result carries the full text.
+    expect(fresh.writes[0]!.seq).toBeGreaterThan(1);
+    turn.complete(resultEvent('the whole answer', []));
+    expect(fresh.finished?.event).toMatchObject({ text: 'the whole answer' });
   });
 
   it('refuses a cursor past the turn\'s last event instead of serving the answer with no deltas', () => {
@@ -360,6 +378,42 @@ describe('TurnStreamRegistry', () => {
     // …and the stale completion must not have scheduled a release for `current`.
     await new Promise((r) => setTimeout(r, 60));
     expect(registry.get('sess-1')).toBe(current);
+    registry.clear();
+  });
+
+  it('completeAndRelease drops the record at once — no grace window for a turn nothing can resume', () => {
+    // The cross-channel live view files under its channel namespace and the
+    // resume endpoint only looks under `api`, so its buffer is unreachable the
+    // moment the turn ends. Keeping it for two minutes would retain up to the
+    // full per-turn cap for nobody.
+    const registry = new TurnStreamRegistry(60_000);
+    const turn = registry.start(turnStreamKey('telegram', 'sess-1'), 'req-1');
+    turn.emit(delta('live view'));
+
+    const watcher = recordingSink();
+    turn.attach(watcher.sink, 0);
+    registry.completeAndRelease(turn, resultEvent('done', []));
+
+    // The attached client still gets its terminal frame — releasing the record
+    // is about the buffer, not about cutting the live connection short.
+    expect(watcher.finished?.event).toMatchObject({ type: 'result', text: 'done' });
+    expect(registry.get(turnStreamKey('telegram', 'sess-1'))).toBeUndefined();
+    registry.clear();
+  });
+
+  it('completeAndRelease from a superseded turn cannot evict the turn that replaced it', () => {
+    // Same hazard complete() guards against: a late finisher must release its
+    // OWN record. Without the guard the newer, live turn would be dropped and
+    // its client would resume into TURN_GONE.
+    const registry = new TurnStreamRegistry(60_000);
+    const stale = registry.start(turnStreamKey('telegram', 'sess-1'), 'req-1');
+    const current = registry.start(turnStreamKey('telegram', 'sess-1'), 'req-2');
+
+    registry.completeAndRelease(stale, resultEvent('stale', []));
+
+    expect(stale.isComplete).toBe(true);
+    expect(current.isComplete).toBe(false);
+    expect(registry.get(turnStreamKey('telegram', 'sess-1'))).toBe(current);
     registry.clear();
   });
 

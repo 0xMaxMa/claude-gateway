@@ -3706,8 +3706,10 @@ export class AgentRunner extends EventEmitter {
    *                  window has expired. The client should read history instead.
    *  - `mismatch`  — a record exists but for a different request_id, i.e. the
    *                  turn the client asked for is already over.
-   *  - `truncated` — the cursor sits inside a region the bounded buffer has
-   *                  already evicted, so a gapless replay is impossible.
+   *  - `truncated` — a non-zero cursor sits inside a region the bounded buffer
+   *                  has already evicted, so a gapless replay is impossible. A
+   *                  cursor-less attach is never truncated: it has no seam to
+   *                  keep, and takes whatever tail is still buffered.
    *
    * Looks only under the `api` namespace: this is the API resume endpoint, and a
    * channel turn on the same session id is a different turn (see turnStreamKey).
@@ -3726,13 +3728,18 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Wall-clock start of the session's current API turn, or undefined when there
-   * is no resumable record. The resume endpoint reports `duration_ms` against
-   * this rather than against the reconnect, so a replayed terminal frame carries
-   * the turn's age — the same number the original connection would have sent.
+   * Identity and wall-clock start of the session's current API turn, or undefined
+   * when there is no resumable record.
+   *
+   * The resume endpoint needs both *before* it attaches, because attach() replays
+   * synchronously into a sink built from them: `startedAt` so a replayed terminal
+   * frame reports `duration_ms` for the turn rather than for the reconnect, and
+   * `requestId` so a client that reconnected without one still learns the token it
+   * needs to resume again from a cursor.
    */
-  turnStreamStartedAt(sessionId: string): number | undefined {
-    return this.turnStreams.get(turnStreamKey('api', sessionId))?.startedAt;
+  turnStreamInfo(sessionId: string): { requestId: string; startedAt: number } | undefined {
+    const turn = this.turnStreams.get(turnStreamKey('api', sessionId));
+    return turn ? { requestId: turn.requestId, startedAt: turn.startedAt } : undefined;
   }
 
   /**
@@ -4235,10 +4242,12 @@ export class AgentRunner extends EventEmitter {
     const buffer: string[] = [];
     let settled = false;
     let lastPartialText = '';
-    // Same resumable buffer as the API path (#421) — one mechanism, not a
+    // Same event plumbing as the API path (#421) — one mechanism, not a
     // per-producer copy. The key is namespaced per producer (turnStreamKey), so
     // a channel turn and an API turn on one session id cannot displace each
-    // other's record.
+    // other's record. Re-attaching is *not* part of the deal here: the resume
+    // endpoint looks under `api` only, so this record exists to drive the live
+    // sink and is released the moment the turn ends (see done()/fail()).
     const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), opts.requestId ?? randomUUID());
     const initialSink = callbackSink(callbacks);
     turn.attach(initialSink, 0);
@@ -4266,14 +4275,20 @@ export class AgentRunner extends EventEmitter {
       //
       // No-op once the soft timeout has answered: TurnStream.complete() keeps
       // its first terminal frame.
-      this.turnStreams.complete(turn, resultEvent(result.trim(), []));
+      //
+      // Released rather than kept for the replay grace window: this turn is filed
+      // under the channel namespace and attachTurnStream() only looks under `api`,
+      // so nothing can re-attach to it. See API.md — the live view is documented
+      // as non-resumable, and holding its buffer for two minutes would cost
+      // memory no client can spend.
+      this.turnStreams.completeAndRelease(turn, resultEvent(result.trim(), []));
     };
 
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      this.turnStreams.complete(turn, errorEvent(err), err);
+      this.turnStreams.completeAndRelease(turn, errorEvent(err), err);
     };
 
     let globalTimer: ReturnType<typeof setTimeout> | undefined;
