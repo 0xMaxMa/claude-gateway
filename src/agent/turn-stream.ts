@@ -51,7 +51,7 @@ export interface TurnSink {
   displaced?(): void;
 }
 
-export type AttachFailure = 'truncated';
+export type AttachFailure = 'truncated' | 'ahead';
 
 /**
  * One in-flight (or recently completed) turn: its ordered event buffer, its
@@ -119,8 +119,16 @@ export class TurnStream {
    * Returns `'truncated'` — installing nothing — when `afterSeq` sits inside a
    * region the buffer has already evicted, since the seamless replay the caller
    * asked for cannot be honoured.
+   *
+   * Returns `'ahead'` when `afterSeq` runs past the last event this turn has
+   * produced. Seq numbering restarts at 1 for every turn, so a client that
+   * reloads and replays a cursor held over from an earlier turn would otherwise
+   * attach successfully, match no event, and still be handed the terminal frame
+   * — the final answer with every delta silently missing. Rejecting is the only
+   * way the client learns its cursor belongs to a turn that is gone.
    */
   attach(sink: TurnSink, afterSeq: number): AttachFailure | null {
+    if (afterSeq > this.lastSeq) return 'ahead';
     if (afterSeq < this.evictedThroughSeq) return 'truncated';
 
     // Retire whoever held the slot before the replay, so the displaced socket

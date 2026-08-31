@@ -586,7 +586,10 @@ export function createApiRouter(
         res.json(syncResult);
       } catch (err: unknown) {
         const code = (err as { code?: string }).code;
-        if (code === 'TIMEOUT') {
+        if (code === 'TIMEOUT' || code === 'TIMEOUT_SOFT') {
+          // Both are 504 on this endpoint: the caller waited as long as it
+          // agreed to and got nothing. They differ only in what happens to the
+          // turn afterwards, which a synchronous caller cannot observe.
           res.status(504).json({ error: 'Agent response timeout' });
         } else if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
@@ -3292,11 +3295,19 @@ export function createApiRouter(
     const attached = runner.attachTurnStream(sessionId, inner, { afterSeq, requestId });
     if (!attached.ok) {
       const body = {
-        gone: { code: 'TURN_GONE', error: 'No resumable turn for this session' },
-        mismatch: { code: 'TURN_MISMATCH', error: 'That request_id is not the session\'s current turn' },
-        truncated: { code: 'TURN_TRUNCATED', error: 'Buffered events at that cursor have been evicted' },
+        gone: { code: 'TURN_GONE', error: 'No resumable turn for this session', hint: 'Read the session history instead.' },
+        mismatch: { code: 'TURN_MISMATCH', error: 'That request_id is not the session\'s current turn', hint: 'Read the session history instead.' },
+        truncated: { code: 'TURN_TRUNCATED', error: 'Buffered events at that cursor have been evicted', hint: 'Read the session history instead.' },
+        // Recoverable without history, unlike its three siblings: the turn is
+        // live, only the cursor is stale. Say so, or a client follows the
+        // generic hint and abandons a stream it could still have joined.
+        ahead: {
+          code: 'CURSOR_AHEAD',
+          error: 'after_seq is past this turn\'s last event — the cursor belongs to an earlier turn',
+          hint: 'Retry without after_seq to replay this turn from its first event.',
+        },
       }[attached.reason];
-      res.status(410).json({ ...body, hint: 'Read the session history instead.' });
+      res.status(410).json(body);
       return;
     }
 

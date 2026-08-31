@@ -1568,11 +1568,35 @@ includes the hard cap (a further 10 minutes), at which point the turn really is
 abandoned.
 
 **Branch on `code`, not on `message`.** An `error` event carries the originating
-failure's code when it has one — `TIMEOUT` for the hard cap, `PROCESS_EXITED`
-for a subprocess crash. The field is omitted when there is no code, so treat it
-as optional. It is present on replayed frames too, so a client that resumed
-through [`GET …/stream`](#resuming-an-interrupted-stream) learns exactly what
-the original connection would have.
+failure's code when it has one. The field is omitted when there is no code, so
+treat it as optional. It is present on replayed frames too, so a client that
+resumed through [`GET …/stream`](#resuming-an-interrupted-stream) learns exactly
+what the original connection would have.
+
+| `code` | Meaning | Is the turn still running? |
+|--------|---------|----------------------------|
+| `TIMEOUT` | The hard cap fired; the turn was interrupted with `SIGINT` | **No** — it is dead |
+| `TIMEOUT_SOFT` | The caller's `timeout_ms` elapsed on an endpoint that cannot keep streaming the turn | **Yes** — its reply will land in history |
+| `PROCESS_EXITED` | The subprocess crashed mid-turn | No |
+
+`TIMEOUT` and `TIMEOUT_SOFT` are deliberately distinct: the two describe
+opposite situations and their messages differ only by a tense and a full stop
+(`Agent response timed out.` vs `Agent response timeout`), which is exactly the
+kind of string-matching this field exists to replace.
+
+**Which endpoints emit which timeout:**
+
+| Endpoint | At `timeout_ms` | Hard cap | Resumable |
+|----------|-----------------|----------|-----------|
+| `POST …/messages` with `stream: true` | non-terminal `timeout` event, connection stays open | yes, +10 min → `error` / `TIMEOUT` | yes, via `GET …/stream` |
+| `POST …/messages` (synchronous) | `504` response | yes, +10 min (server-side only) | no |
+| Cross-channel live view (`POST …/chats/:chatId/sessions/:sessionId/messages`) | terminal `error` / `TIMEOUT_SOFT` | **none** | no |
+
+The cross-channel live view keeps the pre-#421 behaviour on purpose: it has no
+resume endpoint to reconnect through, so holding the connection open would buy
+nothing. Its turn is *abandoned*, never interrupted — the agent keeps working
+and the reply appears in the session history. Poll history, or start a fresh
+turn.
 
 **What the hard cap does.** At the cap the turn is *interrupted*, not merely
 abandoned: the subprocess is sent `SIGINT` so it stops working and stops
@@ -1609,14 +1633,23 @@ Read access is enough — resuming a turn reads it, it does not start one.
 
 **Resuming is never a conflict.** `409` still means "you tried to start a second
 turn on a busy session"; it is never the answer to a resume. When a turn cannot
-be resumed the endpoint answers `410 Gone` with a `code` saying why, and the
-client should read the session's history instead:
+be resumed the endpoint answers `410 Gone` with a `code` saying why:
 
-| `code` | Meaning |
-|--------|---------|
-| `TURN_GONE` | No turn for that session — it never ran, it finished more than 2 minutes ago, or a newer turn has since started on this session |
-| `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for |
-| `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) |
+| `code` | Meaning | What to do |
+|--------|---------|------------|
+| `TURN_GONE` | No turn for that session — it never ran, it finished more than 2 minutes ago, or a newer turn has since started on this session | Read the session's history |
+| `TURN_MISMATCH` | The session has a turn, but not the `request_id` you asked for | Read the session's history |
+| `TURN_TRUNCATED` | That cursor's events have been evicted (see the buffer limits below) | Read the session's history |
+| `CURSOR_AHEAD` | `after_seq` is past the turn's last event — the cursor is left over from an earlier turn | Retry **without** `after_seq` |
+
+Each response carries a `hint` field with the same advice.
+
+**`CURSOR_AHEAD` is the one you can recover from without history.** Sequence
+numbers restart at 1 for every turn, so a cursor kept across turns is not merely
+useless — it is ahead of everything the new turn has produced. Re-attaching with
+it matches no event, and the turn is still live, so the safe answer is to replay
+from the start: drop `after_seq` and call again. (Sending `request_id` alongside
+`after_seq` catches the same mistake earlier, as `TURN_MISMATCH`.)
 
 A completed turn stays replayable for **2 minutes** after its terminal frame,
 which is what makes a reload immediately after the answer arrives still work.
@@ -2934,6 +2967,16 @@ data: [DONE]
 | 400 | `content` is missing or too long |
 | 403 | Key has no access to agent |
 | 404 | Agent not found |
+
+**Timeouts differ from the main messages endpoint.** This stream has a fixed
+60-second budget, and passing it is **terminal** here: the connection closes
+with `{"type":"error","message":"Agent response timeout","code":"TIMEOUT_SOFT"}`.
+There is no `timeout` event, no hard cap, and no resume endpoint for this path —
+the turn is abandoned, not interrupted, so the agent keeps working and its reply
+still lands in the session history. Read it back from
+[`GET …/chats/:chatId/sessions`](#get-apiv1agentsagentidchatschatidsessions) or
+start a fresh turn. See [Streaming API (SSE)](#streaming-api-sse) for how
+`TIMEOUT_SOFT` differs from `TIMEOUT`.
 
 ---
 

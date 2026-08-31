@@ -17,7 +17,7 @@ import type { SeqEvent, TurnSink } from '../../src/agent/turn-stream';
 
 type AttachResult =
   | { ok: true; requestId: string; detach: () => void }
-  | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' };
+  | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' | 'ahead' };
 
 class MockStreamRunner extends EventEmitter {
   get workspacePath(): string { return '/tmp/test-agent'; }
@@ -222,6 +222,23 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(res.headers['content-type']).toContain('application/json');
     expect(res.body).toMatchObject({ code });
     expect(res.body.hint).toContain('history');
+  });
+
+  it('answers 410 CURSOR_AHEAD with a recover-here hint, not the history fallback', async () => {
+    // The other three refusals mean the turn is unreachable. This one means the
+    // turn is live and only the cursor is stale, so pointing the client at
+    // history would send it away from a stream it can still join.
+    runner.attachResult = { ok: false, reason: 'ahead' };
+
+    const res = await supertest.default(buildApp(runner))
+      .get(url('?after_seq=50'))
+      .set('X-Api-Key', 'sk-read-only');
+
+    expect(res.status).toBe(410);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.body).toMatchObject({ code: 'CURSOR_AHEAD' });
+    expect(res.body.hint).toContain('after_seq');
+    expect(res.body.hint).not.toContain('history');
   });
 
   // ── Guards ────────────────────────────────────────────────────────────────

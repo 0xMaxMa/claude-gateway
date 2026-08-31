@@ -277,4 +277,36 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
     // And the Error handed to an in-process sink carries it too.
     expect((terminal as unknown as SeqEvent).error).toMatchObject({ code: 'TIMEOUT' });
   });
+
+  /**
+   * The cross-channel live view (sendMessageToSession) has no hard cap and no
+   * resume endpoint, so its soft timeout stays terminal: it gives up on a turn
+   * that is still running. That is the opposite of what the API hard cap means,
+   * and before this both carried `code: 'TIMEOUT'` — so the discriminator #421
+   * added to replace message-matching could not tell "still running, we stopped
+   * listening" from "interrupted, definitely dead".
+   */
+  it('AC-4: the cross-channel soft timeout is TIMEOUT_SOFT, distinct from the hard cap\'s TIMEOUT', async () => {
+    const softCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+    const started = runner.sendMessageToSession(
+      'web-chat-1', 'telegram', 'sess-crosschannel-1', 'a question that hangs', 'tester',
+      softCallbacks, { timeoutMs: SOFT_TIMEOUT_MS, requestId: 'req-crosschannel' },
+    );
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    await started;
+
+    jest.advanceTimersByTime(SOFT_TIMEOUT_MS + 50);
+    await drain();
+
+    expect(softCallbacks.onError).toHaveBeenCalledTimes(1);
+    const softErr = softCallbacks.onError.mock.calls[0]![0] as Error & { code?: string };
+    expect(softErr.code).toBe('TIMEOUT_SOFT');
+
+    // The subprocess is untouched — this path abandons the turn, it does not
+    // stop it. That difference is exactly what the two codes now express.
+    expect(lastProcess!.kill).not.toHaveBeenCalled();
+  });
 });

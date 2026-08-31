@@ -3279,7 +3279,10 @@ export class AgentRunner extends EventEmitter {
       // bounds a genuinely hung turn.
       let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
       const globalTimer = setTimeout(() => {
-        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        // TIMEOUT_SOFT: the caller's budget elapsed, the turn has not. The hard
+        // cap below rejects nobody — the promise is already settled — but it
+        // does stop the turn, so only IT gets the terminal TIMEOUT.
+        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
         hardCapTimer = setTimeout(() => {
           // Interrupt before clearing the processing flag — interrupt() no-ops
           // once `_processing` is false. See the streaming path for why the cap
@@ -3668,7 +3671,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     sink: TurnSink,
     opts: { afterSeq?: number; requestId?: string } = {},
-  ): { ok: true; requestId: string; detach: () => void } | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' } {
+  ): { ok: true; requestId: string; detach: () => void } | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' | 'ahead' } {
     const turn = this.turnStreams.get(sessionId);
     if (!turn) return { ok: false, reason: 'gone' };
     if (opts.requestId && opts.requestId !== turn.requestId) return { ok: false, reason: 'mismatch' };
@@ -4256,7 +4259,11 @@ export class AgentRunner extends EventEmitter {
 
     globalTimer = setTimeout(() => {
       session.setProcessing(false);
-      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      // TIMEOUT_SOFT, not TIMEOUT: this path has no hard cap and no resume
+      // endpoint, so the turn keeps running with nobody listening and its result
+      // lands in history alone. The API hard cap interrupts the turn and means
+      // the opposite — see the code vocabulary on StreamEvent's `error`.
+      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
     }, opts.timeoutMs);
 
     session.on('output', onOutput);

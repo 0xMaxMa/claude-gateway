@@ -521,11 +521,22 @@ export type StreamEvent =
   // via GET …/sessions/:sessionId/stream. `error` remains reserved for genuine
   // failures, including the hard-cap expiry.
   | { type: 'timeout'; message: string; resumable: true }
-  // `code` carries the originating Error's `code` (e.g. 'TIMEOUT' for the hard
-  // cap, 'PROCESS_EXITED' for a crash). Without it the only way to tell the
-  // hard cap from a crash or a 5xx was to match `message` — and the two
-  // timeouts differ by a tense and a full stop ('Agent response timeout' vs
-  // 'Agent response timed out.'). Optional: not every failure carries one.
+  // `code` carries the originating Error's `code`. Without it the only way to
+  // tell one failure from another was to match `message` — and the two timeouts
+  // differ by a tense and a full stop ('Agent response timeout' vs 'Agent
+  // response timed out.'). Optional: not every failure carries one.
+  //
+  // Timeout vocabulary — the distinction is whether the TURN is over, not
+  // whether the caller gave up:
+  //   'TIMEOUT'        the hard cap fired; the turn was interrupted and is dead.
+  //   'TIMEOUT_SOFT'   the caller's budget elapsed; the turn is STILL RUNNING and
+  //                    its result will land in history. Emitted by the paths that
+  //                    cannot keep streaming it — the cross-channel live view
+  //                    (no hard cap, no resume endpoint) and the synchronous API.
+  //   'PROCESS_EXITED' the subprocess crashed mid-turn.
+  // The streaming API path emits no soft-timeout error at all: there the budget
+  // elapsing is the non-terminal `timeout` event above, because the turn stays
+  // reachable through GET …/sessions/:sessionId/stream.
   | { type: 'error'; message: string; code?: string };
 
 export interface Logger {

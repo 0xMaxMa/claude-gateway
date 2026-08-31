@@ -212,6 +212,53 @@ describe('TurnStream', () => {
     expect(turn.attach(stale.sink, 0)).toBe('truncated');
     expect(stale.writes).toHaveLength(0);
   });
+
+  it('refuses a cursor past the turn\'s last event instead of serving the answer with no deltas', () => {
+    // Seq restarts at 1 every turn, so a cursor held over from an earlier turn
+    // is not merely useless — it is *ahead*. Without an upper bound the attach
+    // succeeds, the `e.seq > afterSeq` replay loop matches nothing, and the
+    // client is still handed the terminal frame: the final answer with every
+    // delta silently missing.
+    const turn = new TurnStream('sess-1', 'req-2');
+    turn.emit(delta('one'));
+    turn.emit(delta('two'));
+    expect(turn.lastSeq).toBe(2);
+
+    const stale = recordingSink();
+    expect(turn.attach(stale.sink, 50)).toBe('ahead');
+    expect(stale.writes).toHaveLength(0);
+
+    // Nothing was installed, so the turn keeps running for whoever is really
+    // attached rather than streaming on into a rejected sink.
+    turn.emit(delta('three'));
+    expect(stale.writes).toHaveLength(0);
+    turn.complete(resultEvent('one two three', []));
+    expect(stale.finished).toBeNull();
+  });
+
+  it('accepts a cursor sitting exactly at the head — caught up is not ahead', () => {
+    const turn = new TurnStream('sess-1', 'req-3');
+    turn.emit(delta('one'));
+
+    const caughtUp = recordingSink();
+    expect(turn.attach(caughtUp.sink, turn.lastSeq)).toBeNull();
+    expect(caughtUp.writes).toHaveLength(0); // nothing missed, nothing replayed
+
+    turn.emit(delta('two'));
+    expect(caughtUp.writes.map((e) => e.event)).toEqual([delta('two')]); // and it is live
+  });
+
+  it('accepts after_seq=0 on a turn that has produced nothing yet', () => {
+    // lastSeq is 0 before the first emit; a fresh client must not be told its
+    // cursor is ahead of a turn that simply has not started producing.
+    const turn = new TurnStream('sess-1', 'req-4');
+    const fresh = recordingSink();
+
+    expect(turn.attach(fresh.sink, 0)).toBeNull();
+
+    turn.emit(delta('first'));
+    expect(fresh.writes.map((e) => e.seq)).toEqual([1]);
+  });
 });
 
 describe('TurnStreamRegistry', () => {

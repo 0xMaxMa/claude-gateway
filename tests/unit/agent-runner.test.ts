@@ -2292,7 +2292,10 @@ describe('AgentRunner — timeout keeps listening (#75)', () => {
     await waitForSession(runner, 'late-sync');
     const err = await rejected;
     expect(err).not.toBeNull();
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    // TIMEOUT_SOFT, not TIMEOUT: the caller's budget elapsed but the turn is
+    // still running — which is precisely what the rest of this test asserts.
+    // The hard cap, which does end the turn, keeps the bare TIMEOUT.
+    expect((err as Error & { code: string }).code).toBe('TIMEOUT_SOFT');
 
     const session = getSessions(runner).get('late-sync')!;
     session.emit('output', JSON.stringify({ type: 'result', result: 'sync late' }));
