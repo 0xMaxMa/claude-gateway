@@ -1654,7 +1654,11 @@ export class AgentRunner extends EventEmitter {
                   }
                 }
                 if (block.type === 'tool_use' && block.name === replyToolName) {
-                  const replyBlockId = (block as Record<string, unknown>)['id'] as string ?? null;
+                  // The block comes off the CLI's stdout — validate the id rather
+                  // than casting, so a malformed one degrades to the flag check
+                  // instead of poisoning the Set with a non-string key.
+                  const rawBlockId = (block as Record<string, unknown>)['id'];
+                  const replyBlockId = typeof rawBlockId === 'string' && rawBlockId ? rawBlockId : null;
                   // Skip a re-emitted snapshot of a block already handled. Blocks
                   // with no id fall back to the old flag check, which is the best
                   // dedup available without an id.
