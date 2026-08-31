@@ -3522,14 +3522,16 @@ describe('AgentRunner — Discord-aware auto-forward format (US-005)', () => {
     expect(session).toBeDefined();
 
     const writeForwardSpy = jest.spyOn(
-      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string, forceDeliver?: boolean) => void },
       'writeAutoForward',
     );
 
     session!.emit('output', JSON.stringify({ type: 'result', result: '**bold** and `code`' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(writeForwardSpy).toHaveBeenCalledWith('ch:disc01', '**bold** and `code`');
+    // No reply call failed this turn, so the forward is NOT force-delivered
+    // (#422) — it keeps the turn id the receiver dedups against.
+    expect(writeForwardSpy).toHaveBeenCalledWith('ch:disc01', '**bold** and `code`', 'text', false);
   }, 15000);
 
   // US5-02: Telegram result text with markdown is converted to HTML
@@ -3547,7 +3549,7 @@ describe('AgentRunner — Discord-aware auto-forward format (US-005)', () => {
     expect(session).toBeDefined();
 
     const writeForwardSpy = jest.spyOn(
-      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string, forceDeliver?: boolean) => void },
       'writeAutoForward',
     );
 
@@ -3558,6 +3560,7 @@ describe('AgentRunner — Discord-aware auto-forward format (US-005)', () => {
       'ch:tg01',
       expect.stringContaining('<b>'),
       'html',
+      false,
     );
   }, 15000);
 
@@ -3576,14 +3579,14 @@ describe('AgentRunner — Discord-aware auto-forward format (US-005)', () => {
     expect(session).toBeDefined();
 
     const writeForwardSpy = jest.spyOn(
-      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void },
+      runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string, forceDeliver?: boolean) => void },
       'writeAutoForward',
     );
 
     session!.emit('output', JSON.stringify({ type: 'result', result: 'plain text no markdown' }));
     await new Promise(r => setTimeout(r, 100));
 
-    expect(writeForwardSpy).toHaveBeenCalledWith('ch:tg02', 'plain text no markdown');
+    expect(writeForwardSpy).toHaveBeenCalledWith('ch:tg02', 'plain text no markdown', 'text', false);
   }, 15000);
 
   // US5-04: per-chat image counters are independent across chatIds
@@ -4953,5 +4956,199 @@ describe('AgentRunner — gateway turn queue, coalesce, and /stop', () => {
           .some((w: string) => w.includes('<channel') && w.includes('second')),
     );
     expect(liveGotSecond).toBe(true);
+  }, 15000);
+});
+
+// ── Silent drop: the turn's SECOND reply call is rejected (Issue #422) ────────
+// A long turn that posts an interim progress update and then a final report gets
+// its final `telegram_reply` rejected by the turn-scoped guard in
+// mcp/tools/telegram/module.ts ("already sent a message this turn"). Two runner
+// bugs then swallowed the final text entirely:
+//   1. the reply tool_use handler was gated on `!replyCalled`, so
+//      `replyToolUseId` froze on the turn's FIRST call — the failing SECOND
+//      call's tool_result never matched, `replyCalled` stayed true, and the
+//      result-forwarding fallback (`!replyCalled`) never fired;
+//   2. even once it does fire, the `.forward` entry carries the live turn id,
+//      which equals the one in the `.replied` marker the earlier successful
+//      reply left — so the receiver's `isEntryAlreadyReplied()` would drop it.
+// The fix dedups reply tool_use blocks by block id and force-delivers the
+// fallback forward (null turnId) when a reply call failed this turn.
+describe('AgentRunner — reply failure after an earlier reply in the same turn (#422)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-422-'));
+    const workspace = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    agentConfig = makeAgentConfig(workspace);
+    fs.mkdirSync(workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  function typingDir(): string {
+    return path.join(agentConfig.workspace, '.telegram-state', 'typing');
+  }
+
+  const replyToolUse = (toolUseId: string, text: string) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: toolUseId,
+          name: 'mcp__gateway__telegram_reply',
+          input: { chat_id: 'x', text },
+        }],
+      },
+    });
+
+  const replyResult = (toolUseId: string, isError: boolean) =>
+    JSON.stringify({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: isError }],
+      },
+    });
+
+  const turnResult = (text: string) =>
+    JSON.stringify({ type: 'result', is_error: false, result: text });
+
+  /**
+   * Start a session and plant the live typing-signal file the receiver writes
+   * for an in-flight turn — that file IS the turn id both `.replied` and
+   * `.forward` markers are stamped with.
+   */
+  async function startTurn(chatId: string, turnId: string): Promise<SessionProcess> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    await sendChannelPost(getCallbackPort(runner), chatId, 'run the long task');
+    await waitForSession(runner, chatId);
+    fs.mkdirSync(typingDir(), { recursive: true });
+    fs.writeFileSync(path.join(typingDir(), chatId), turnId);
+    return getSessions(runner).get(chatId)!;
+  }
+
+  /** The `.replied` marker the MCP reply tool writes (in its own process). */
+  function writeRepliedMarker(chatId: string, text: string, turnId: string): void {
+    fs.writeFileSync(
+      path.join(typingDir(), `${chatId}.replied`),
+      JSON.stringify({ text, turnId }),
+    );
+  }
+
+  function forwardEntries(chatId: string): Array<{ text: string; format: string; turnId: string | null }> | null {
+    const p = path.join(typingDir(), `${chatId}.forward`);
+    if (!fs.existsSync(p)) return null;
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  }
+
+  // The core regression. Pre-fix there is no `.forward` file at all.
+  it('delivers the final text when the turn\'s second reply call is rejected', async () => {
+    const chatId = 'chat:422-core';
+    const turnId = '1755000000000';
+    const session = await startTurn(chatId, turnId);
+
+    // Interim progress update — succeeds, and leaves a `.replied` marker
+    // stamped with this turn's id (what the guard later trips on).
+    session.emit('output', replyToolUse('toolu_first', 'working on it, this will take a while'));
+    session.emit('output', replyResult('toolu_first', false));
+    writeRepliedMarker(chatId, 'working on it, this will take a while', turnId);
+
+    // Final report — the turn-scoped guard rejects it.
+    session.emit('output', replyToolUse('toolu_second', 'all done, everything is deployed'));
+    session.emit('output', replyResult('toolu_second', true));
+
+    session.emit('output', turnResult('all done, everything is deployed'));
+    await new Promise(r => setTimeout(r, 100));
+
+    const entries = forwardEntries(chatId);
+    expect(entries).not.toBeNull();
+    expect(entries!.map(e => e.text).join('\n')).toContain('all done, everything is deployed');
+    // Null turn id is what keeps the receiver from deduping this entry against
+    // the interim reply's `.replied` marker — `isEntryAlreadyReplied()` never
+    // matches a null on either side.
+    expect(entries![0]!.turnId).toBeNull();
+    expect(entries![0]!.turnId).not.toBe(turnId);
+  }, 15000);
+
+  // Guard against over-correcting: a turn with no reply failure must still stamp
+  // the real turn id, or the receiver loses its dedup against a `.replied` marker.
+  it('keeps the real turn id on a fallback forward when no reply call failed', async () => {
+    const chatId = 'chat:422-normal';
+    const turnId = '1755000000001';
+    const session = await startTurn(chatId, turnId);
+
+    session.emit('output', turnResult('here is the plain answer'));
+    await new Promise(r => setTimeout(r, 100));
+
+    const entries = forwardEntries(chatId);
+    expect(entries).not.toBeNull();
+    expect(entries![0]!.turnId).toBe(turnId);
+  }, 15000);
+
+  // The socket-drop notice deliberately bypasses the `replyCalled` gate. Without
+  // force-delivery an earlier reply's `.replied` marker would dedup it away and
+  // defeat that bypass — the user would never learn the connection dropped.
+  it('force-delivers the socket-drop notice past an earlier reply in the same turn', async () => {
+    const chatId = 'chat:422-socket';
+    const turnId = '1755000000002';
+    const session = await startTurn(chatId, turnId);
+
+    session.emit('output', replyToolUse('toolu_ok', 'starting now'));
+    session.emit('output', replyResult('toolu_ok', false));
+    writeRepliedMarker(chatId, 'starting now', turnId);
+
+    session.emit('output', turnResult('API Error: The socket connection was closed unexpectedly'));
+    await new Promise(r => setTimeout(r, 100));
+
+    const entries = forwardEntries(chatId);
+    expect(entries).not.toBeNull();
+    const notice = entries!.find(e => e.text.includes('Connection to Anthropic API dropped'));
+    expect(notice).toBeDefined();
+    expect(notice!.turnId).toBeNull();
+  }, 15000);
+
+  // Reply tool_use blocks are now deduped by block id rather than by the
+  // `replyCalled` flag, so a re-emitted cumulative snapshot must not double-post.
+  it('writes one history row when the same reply tool_use block is re-emitted', async () => {
+    const chatId = 'chat:422-snapshot';
+    const session = await startTurn(chatId, '1755000000003');
+
+    session.emit('output', replyToolUse('toolu_dup', 'the one and only answer'));
+    session.emit('output', replyToolUse('toolu_dup', 'the one and only answer')); // snapshot repeat
+    await new Promise(r => setTimeout(r, 50));
+
+    const rows = (runner.getHistoryDb().getMessages(`telegram-${chatId}`).messages as Array<{ role: string; content: string }>)
+      .filter(m => m.role === 'assistant' && m.content === 'the one and only answer');
+    expect(rows).toHaveLength(1);
+  }, 15000);
+
+  // Two distinct reply calls that both succeed must each land in history — the
+  // id-based dedup must not collapse them the way the old flag check did.
+  it('writes both history rows when a turn makes two distinct successful reply calls', async () => {
+    const chatId = 'chat:422-two-ok';
+    const session = await startTurn(chatId, '1755000000004');
+
+    session.emit('output', replyToolUse('toolu_a', 'interim update'));
+    session.emit('output', replyResult('toolu_a', false));
+    session.emit('output', replyToolUse('toolu_b', 'final report'));
+    session.emit('output', replyResult('toolu_b', false));
+    await new Promise(r => setTimeout(r, 50));
+
+    const contents = (runner.getHistoryDb().getMessages(`telegram-${chatId}`).messages as Array<{ role: string; content: string }>)
+      .filter(m => m.role === 'assistant')
+      .map(m => m.content);
+    expect(contents).toContain('interim update');
+    expect(contents).toContain('final report');
   }, 15000);
 });
