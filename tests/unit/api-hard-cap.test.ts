@@ -87,6 +87,7 @@ import type { TurnSink, SeqEvent } from '../../src/agent/turn-stream';
 
 /** Mirrors API_TIMEOUT_HARD_CAP_EXTRA_MS in src/agent/runner.ts. */
 const HARD_CAP_EXTRA_MS = 600_000;
+
 const SOFT_TIMEOUT_MS = 1_000;
 
 function makeAgentConfig(workspace: string): AgentConfig {
@@ -140,10 +141,10 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
   });
 
   /**
-   * Start a turn, stream `partial` out of it, then let the soft timeout pass.
-   * Leaves the turn parked in the soft→hard grace window.
+   * Start a turn and, if `partial` is given, stream that text out of it. The
+   * turn is left in flight — no timeout has fired yet.
    */
-  async function startHangingTurn(callbacks: {
+  async function startTurn(callbacks: {
     onChunk: jest.Mock; onDone: jest.Mock; onError: jest.Mock;
   }, partial?: string): Promise<void> {
     const started = runner.sendApiMessageStream(
@@ -163,9 +164,25 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
       emitLine({ type: 'text', text: partial });
       await drain();
     }
+  }
 
+  /**
+   * Start a turn, stream `partial` out of it, then let the soft timeout pass.
+   * Leaves the turn parked in the soft→hard grace window.
+   */
+  async function startHangingTurn(callbacks: {
+    onChunk: jest.Mock; onDone: jest.Mock; onError: jest.Mock;
+  }, partial?: string): Promise<void> {
+    await startTurn(callbacks, partial);
     jest.advanceTimersByTime(SOFT_TIMEOUT_MS + 50);
     await drain();
+  }
+
+  /** Assistant rows persisted for `id`, in insertion order. */
+  function assistantRows(id: string): Array<{ role: string; content: string; sessionId: string }> {
+    return insertMessage.mock.calls
+      .map((c) => c[0] as { role: string; content: string; sessionId: string })
+      .filter((m) => m.role === 'assistant' && m.sessionId === id);
   }
 
   it('AC-2: the hard cap SIGINTs the subprocess — a live turn is never silently abandoned', async () => {
@@ -218,14 +235,56 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
     jest.advanceTimersByTime(HARD_CAP_EXTRA_MS + 50);
     await drain();
 
-    const assistantRows = insertMessage.mock.calls
-      .map((c) => c[0] as { role: string; content: string; sessionId: string })
-      .filter((m) => m.role === 'assistant' && m.sessionId === sessionId);
+    const rows = assistantRows(sessionId);
 
     // Exactly one terminal row — never a failure row *and* a reply row.
-    expect(assistantRows).toHaveLength(1);
-    expect(assistantRows[0]!.content).toContain('Here is the first half of the answer');
-    expect(assistantRows[0]!.content).toContain('Agent response timed out.');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toContain('Here is the first half of the answer');
+    expect(rows[0]!.content).toContain('Agent response timed out.');
+  });
+
+  /**
+   * The crash path is the case partialText exists for — the client watched the
+   * deltas arrive and no `result` line is ever coming — yet it was the one path
+   * that called fail() without it, so the row that replaced the half-written
+   * reply erased it. Same defect shape as the hard cap above, different trigger.
+   */
+  it('a mid-turn crash keeps the text the client already saw (streaming path)', async () => {
+    const callbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+    await startTurn(callbacks, 'Half of an answer the client already rendered');
+
+    lastProcess!.emit('exit', null, 'SIGKILL');
+    await drain();
+
+    const rows = assistantRows(sessionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toContain('Half of an answer the client already rendered');
+    expect(rows[0]!.content).toContain('Session process exited unexpectedly');
+  });
+
+  it('a mid-turn crash keeps the text already streamed (sync path)', async () => {
+    const syncSession = 'sess-sync-crash-1';
+    const settled = runner
+      .sendApiMessage(syncSession, chatId, 'a question that crashes', { timeoutMs: 60_000 })
+      .catch((e: Error) => e);
+
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    expect(lastProcess).not.toBeNull();
+
+    // Under the 2s quiet timer, so the turn is still open when the crash lands.
+    emitLine({ type: 'text', text: 'Half of an answer' });
+    await drain();
+    lastProcess!.emit('exit', null, 'SIGKILL');
+    await drain();
+
+    expect((await settled as Error & { code?: string }).code).toBe('PROCESS_EXITED');
+    const rows = assistantRows(syncSession);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toContain('Half of an answer');
+    expect(rows[0]!.content).toContain('Session process exited unexpectedly');
   });
 
   it('AC-4: the terminal error carries code TIMEOUT, not just a message', async () => {
@@ -280,10 +339,12 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
 
   /**
    * The cross-channel live view (sendMessageToSession) has no hard cap and no
-   * resume endpoint, so its soft timeout stays terminal: it gives up on a turn
-   * that is still running. That is the opposite of what the API hard cap means,
-   * and before this both carried `code: 'TIMEOUT'` — so the discriminator #421
-   * added to replace message-matching could not tell "still running, we stopped
+   * resume endpoint, so its soft timeout is terminal *for the caller*: it stops
+   * waiting on a turn that is still running (whose answer still reaches history
+   * by another route — see the suite below). That is the opposite of what the
+   * API hard cap means, and
+   * before this both carried `code: 'TIMEOUT'` — so the discriminator #421 added
+   * to replace message-matching could not tell "still running, we stopped
    * listening" from "interrupted, definitely dead".
    */
   it('AC-4: the cross-channel soft timeout is TIMEOUT_SOFT, distinct from the hard cap\'s TIMEOUT', async () => {
@@ -308,5 +369,123 @@ describe('AgentRunner — the API hard cap ends the turn instead of abandoning i
     // The subprocess is untouched — this path abandons the turn, it does not
     // stop it. That difference is exactly what the two codes now express.
     expect(lastProcess!.kill).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * What the cross-channel soft timeout does and does not cost (#421).
+ *
+ * TIMEOUT_SOFT tells the client the turn is still running and its result still
+ * lands in history — and the timeout then runs cleanup(), detaching this turn's
+ * output listener, which is the only route to done(). That reads like the answer
+ * is lost, but it is not: the reply reaches history through writers that are not
+ * bound to the turn at all — the session's own long-lived output handler inserts
+ * the plain-text result into the history DB, and SessionProcess appends it to the
+ * session JSON. done()'s own writes are a *duplicate* of those, so keeping the
+ * listener alive past the timeout would add a second row rather than rescue a
+ * lost one. Pinned here because the promise in API.md rests on it.
+ */
+describe('AgentRunner — a cross-channel turn answers late without the caller', () => {
+  let tmpDir: string;
+  let runner: AgentRunner;
+  const rawChatId = 'web-chat-1';
+  const channel = 'telegram' as const;
+  const channelSession = 'sess-crosschannel-late';
+
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+    insertMessage.mockClear();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-latechannel-test-'));
+    const workspaceDir = path.join(tmpDir, 'agents', 'alfred', 'workspace');
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    runner = new AgentRunner(makeAgentConfig(workspaceDir), makeGatewayConfig());
+    lastProcess = null;
+  });
+
+  afterEach(async () => {
+    jest.useRealTimers();
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function startChannelTurn(
+    callbacks: { onChunk: jest.Mock; onDone: jest.Mock; onError: jest.Mock },
+    requestId: string,
+    sessionId: string = channelSession,
+  ): Promise<void> {
+    const started = runner.sendMessageToSession(
+      rawChatId, channel, sessionId, 'a question that hangs', 'tester',
+      callbacks, { timeoutMs: SOFT_TIMEOUT_MS, requestId },
+    );
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    await started;
+    expect(lastProcess).not.toBeNull();
+  }
+
+  function assistantContents(sessionId: string): string[] {
+    return insertMessage.mock.calls
+      .map((c) => c[0] as { role: string; content: string; sessionId: string })
+      .filter((m) => m.role === 'assistant' && m.sessionId === sessionId)
+      .map((m) => m.content);
+  }
+
+  it('a result that lands after the soft timeout still reaches history', async () => {
+    const callbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+    await startChannelTurn(callbacks, 'req-late-1');
+
+    jest.advanceTimersByTime(SOFT_TIMEOUT_MS + 50);
+    await drain();
+    // The caller has been answered and told the turn is still running…
+    expect(callbacks.onError).toHaveBeenCalledTimes(1);
+    expect(callbacks.onError.mock.calls[0]![0]).toMatchObject({ code: 'TIMEOUT_SOFT' });
+    expect(assistantContents(channelSession)).toEqual([]);
+
+    // …and the turn then finishes. The turn's own listener is gone, so this row
+    // is written by the session handler alone — which is why exactly one lands
+    // here, where a punctual turn (both writers live) still writes two.
+    emitLine({ type: 'result', result: 'the answer, a moment late' });
+    await drain();
+
+    expect(assistantContents(channelSession)).toEqual(['the answer, a moment late']);
+    // The caller was already answered; the late result must not re-terminate it.
+    expect(callbacks.onDone).not.toHaveBeenCalled();
+    expect(callbacks.onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('an API turn and a channel turn on one session id no longer displace each other', async () => {
+    // Both producers share one registry. Keyed by the bare session id, whichever
+    // started second released the other's record — and with it the resume
+    // endpoint's only way back to a live API turn.
+    const apiCallbacks = { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() };
+    const startedApi = runner.sendApiMessageStream(
+      'api-chat-1', 'api-chat-1', 'an api question', apiCallbacks,
+      { timeoutMs: 60_000, requestId: 'req-api-side' },
+    );
+    for (let i = 0; i < 20 && !lastProcess; i++) {
+      jest.advanceTimersByTime(10);
+      await drain(3);
+    }
+    await startedApi;
+    emitLine({ type: 'text', text: 'from the api turn' });
+    await drain();
+
+    // Same session id, other producer.
+    await startChannelTurn(
+      { onChunk: jest.fn(), onDone: jest.fn(), onError: jest.fn() },
+      'req-channel-side',
+      'api-chat-1',
+    );
+
+    const replayed: StreamEvent[] = [];
+    const attached = runner.attachTurnStream('api-chat-1', {
+      write: (e) => { replayed.push(e.event); },
+      finish: () => {},
+    }, { afterSeq: 0, requestId: 'req-api-side' });
+
+    expect(attached.ok).toBe(true);
+    expect(replayed).toContainEqual({ type: 'text_delta', text: 'from the api turn' });
   });
 });

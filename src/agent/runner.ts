@@ -24,6 +24,7 @@ import {
   callbackSink,
   errorEvent,
   resultEvent,
+  turnStreamKey,
   type ApiStreamCallbacks,
   type TurnSink,
 } from './turn-stream';
@@ -3208,7 +3209,10 @@ export class AgentRunner extends EventEmitter {
           done(buffer.join(''), true);
           return;
         }
-        fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+        // Whatever streamed before the crash is real work the caller may already
+        // have read; persist it alongside the notice rather than replacing it,
+        // exactly as the hard cap below does.
+        fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
       };
 
       const cleanup = () => {
@@ -3382,7 +3386,7 @@ export class AgentRunner extends EventEmitter {
     // The turn's event buffer. Every emission below records into it whether or
     // not anyone is listening; the sink decides only what reaches a socket, so a
     // disconnect no longer costs the client the rest of the turn (#421).
-    const turn = this.turnStreams.start(sessionId, opts.requestId ?? randomUUID());
+    const turn = this.turnStreams.start(turnStreamKey('api', sessionId), opts.requestId ?? randomUUID());
     const initialSink = callbackSink(callbacks);
     turn.attach(initialSink, 0);
     // Track partial message text for delta computation (--include-partial-messages)
@@ -3463,7 +3467,11 @@ export class AgentRunner extends EventEmitter {
         done(buffer.join(''), true);
         return;
       }
-      fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+      // Whatever streamed before the crash is real work the client may already
+      // have rendered; persist it alongside the notice rather than replacing it,
+      // exactly as the hard cap below does. A crash is the case partialText was
+      // added for — the client saw the deltas and no `result` will ever land.
+      fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
     };
 
     const cleanup = () => {
@@ -3666,13 +3674,16 @@ export class AgentRunner extends EventEmitter {
    *                  turn the client asked for is already over.
    *  - `truncated` — the cursor sits inside a region the bounded buffer has
    *                  already evicted, so a gapless replay is impossible.
+   *
+   * Looks only under the `api` namespace: this is the API resume endpoint, and a
+   * channel turn on the same session id is a different turn (see turnStreamKey).
    */
   attachTurnStream(
     sessionId: string,
     sink: TurnSink,
     opts: { afterSeq?: number; requestId?: string } = {},
   ): { ok: true; requestId: string; detach: () => void } | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' | 'ahead' } {
-    const turn = this.turnStreams.get(sessionId);
+    const turn = this.turnStreams.get(turnStreamKey('api', sessionId));
     if (!turn) return { ok: false, reason: 'gone' };
     if (opts.requestId && opts.requestId !== turn.requestId) return { ok: false, reason: 'mismatch' };
     const failure = turn.attach(sink, opts.afterSeq ?? 0);
@@ -4178,9 +4189,10 @@ export class AgentRunner extends EventEmitter {
     let settled = false;
     let lastPartialText = '';
     // Same resumable buffer as the API path (#421) — one mechanism, not a
-    // per-producer copy. Channel sessions have their own id space, so sharing
-    // the registry with API turns cannot collide.
-    const turn = this.turnStreams.start(sessionId, opts.requestId ?? randomUUID());
+    // per-producer copy. The key is namespaced per producer (turnStreamKey), so
+    // a channel turn and an API turn on one session id cannot displace each
+    // other's record.
+    const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), opts.requestId ?? randomUUID());
     const initialSink = callbackSink(callbacks);
     turn.attach(initialSink, 0);
     const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
@@ -4205,6 +4217,8 @@ export class AgentRunner extends EventEmitter {
           ts: uiAssistantTs,
         });
       }
+      // No-op once the soft timeout has answered: TurnStream.complete() keeps
+      // its first terminal frame.
       this.turnStreams.complete(turn, resultEvent(result.trim(), []));
     };
 
@@ -4269,9 +4283,17 @@ export class AgentRunner extends EventEmitter {
     globalTimer = setTimeout(() => {
       session.setProcessing(false);
       // TIMEOUT_SOFT, not TIMEOUT: this path has no hard cap and no resume
-      // endpoint, so the turn keeps running with nobody listening and its result
-      // lands in history alone. The API hard cap interrupts the turn and means
-      // the opposite — see the code vocabulary on StreamEvent's `error`.
+      // endpoint, so the turn keeps running with nobody listening on the wire
+      // and its result lands in history alone. The API hard cap interrupts the
+      // turn and means the opposite — see the code vocabulary on StreamEvent's
+      // `error`.
+      //
+      // Detaching this turn's listener here does NOT cost the late answer: it is
+      // this producer's *duplicate* write. The session's own long-lived output
+      // handler already inserts a plain-text result into the history DB (see the
+      // forwardableText branch in getOrSpawnSession) and SessionProcess appends
+      // it to the session JSON, neither of which is bound to this turn. Staying
+      // subscribed would write a second row, not rescue a lost one.
       fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
     }, opts.timeoutMs);
 

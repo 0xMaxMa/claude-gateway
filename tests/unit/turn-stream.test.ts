@@ -13,6 +13,7 @@ import {
   callbackSink,
   errorEvent,
   resultEvent,
+  turnStreamKey,
   type SeqEvent,
 } from '../../src/agent/turn-stream';
 import { StreamEvent } from '../../src/types';
@@ -259,6 +260,27 @@ describe('TurnStream', () => {
     turn.emit(delta('first'));
     expect(fresh.writes.map((e) => e.seq)).toEqual([1]);
   });
+
+  it('measures a tool_use event once, not again when it is evicted', () => {
+    // approxSize() advertises itself as too cheap to cache, then serialises the
+    // tool input — so charging it a second time on eviction stringified every
+    // tool call twice, the big Write/Edit payloads included. The size is now
+    // carried on the buffered entry.
+    const turn = new TurnStream('api:sess-1', 'req-5');
+    const input = { file_path: '/tmp/x.ts', content: 'y'.repeat(4096) };
+    const spy = jest.spyOn(JSON, 'stringify');
+    try {
+      turn.emit({ type: 'tool_use', name: 'Write', id: 'tool-1', input });
+      // Push it past the cap so the entry is evicted, which is where the second
+      // measurement used to happen.
+      for (let i = 0; i <= TURN_BUFFER_MAX_EVENTS; i++) turn.emit(delta('.'));
+
+      const onThisInput = spy.mock.calls.filter((c) => c[0] === input);
+      expect(onThisInput).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('TurnStreamRegistry', () => {
@@ -318,10 +340,10 @@ describe('TurnStreamRegistry', () => {
   });
 
   it('a superseded turn finishing late terminates ITSELF, never the turn that replaced it', async () => {
-    // Two producers can hold the same session id — an API turn and a channel
-    // turn are separate namespaces that share this map. A late finisher must
-    // not deliver its result to the newer turn's client, nor schedule that
-    // turn's release out from under it.
+    // Turn N and turn N+1 on one session share a key, so the record for N is
+    // replaced the moment N+1 starts. A late finisher must not deliver its
+    // result to the newer turn's client, nor schedule that turn's release out
+    // from under it.
     const registry = new TurnStreamRegistry(30);
     const stale = registry.start('sess-1', 'req-1');
     const current = registry.start('sess-1', 'req-2');
@@ -352,5 +374,28 @@ describe('TurnStreamRegistry', () => {
     // The release timer must not resurrect or throw after clear().
     await new Promise((r) => setTimeout(r, 60));
     expect(registry.get('sess-1')).toBeUndefined();
+  });
+
+  it('namespaced keys keep an API turn and a channel turn on one session id apart', () => {
+    // One registry serves both producers. Keyed by the bare session id, the
+    // second producer to start would release the first one's record — the
+    // collision two comments in the source used to contradict each other about.
+    const registry = new TurnStreamRegistry(60_000);
+    const api = registry.start(turnStreamKey('api', 'sess-1'), 'req-api');
+    api.emit(delta('from the api turn'));
+    const watcher = recordingSink();
+    api.attach(watcher.sink, api.lastSeq);
+
+    const channel = registry.start(turnStreamKey('telegram', 'sess-1'), 'req-telegram');
+
+    expect(registry.get(turnStreamKey('api', 'sess-1'))).toBe(api);
+    expect(registry.get(turnStreamKey('telegram', 'sess-1'))).toBe(channel);
+
+    // …and terminating the channel turn leaves the API turn's client waiting on
+    // its own turn, not handed someone else's terminal frame.
+    registry.complete(channel, resultEvent('channel answer', []));
+    expect(api.isComplete).toBe(false);
+    expect(watcher.finished).toBeNull();
+    registry.clear();
   });
 });

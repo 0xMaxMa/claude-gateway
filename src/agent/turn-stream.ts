@@ -37,6 +37,16 @@ export interface SeqEvent {
   error?: Error;
 }
 
+/**
+ * A retained event, carrying the size it contributed to the turn's byte budget.
+ * Measured once on the way in: approxSize() stringifies tool input, so charging
+ * it again on eviction meant every tool call was serialised twice, in a helper
+ * whose whole premise is that it is too cheap to bother caching.
+ */
+interface BufferedEvent extends SeqEvent {
+  bytes: number;
+}
+
 /** Whatever is currently writing a turn's events out (an SSE response, a test spy). */
 export interface TurnSink {
   /** A non-terminal event. */
@@ -61,7 +71,7 @@ export class TurnStream {
   readonly startedAt = Date.now();
   completedAt: number | null = null;
 
-  private readonly events: SeqEvent[] = [];
+  private readonly events: BufferedEvent[] = [];
   private nextSeq = 1;
   /** seq of the oldest event ever evicted — anything at or below this is unreplayable. */
   private evictedThroughSeq = 0;
@@ -70,7 +80,8 @@ export class TurnStream {
   private sink: TurnSink | null = null;
 
   constructor(
-    readonly sessionId: string,
+    /** The registry key this turn is filed under — see turnStreamKey(). */
+    readonly key: string,
     readonly requestId: string,
   ) {}
 
@@ -90,9 +101,9 @@ export class TurnStream {
   /** Record a non-terminal event and, if a sink is attached, write it out. */
   emit(event: StreamEvent): void {
     if (this.terminalEvent) return; // nothing may follow the terminal frame
-    const e: SeqEvent = { seq: this.nextSeq++, event };
+    const e: BufferedEvent = { seq: this.nextSeq++, event, bytes: approxSize(event) };
     this.events.push(e);
-    this.bytes += approxSize(event);
+    this.bytes += e.bytes;
     this.evictIfOverCap();
     this.sink?.write(e);
   }
@@ -167,16 +178,33 @@ export class TurnStream {
       (this.events.length > TURN_BUFFER_MAX_EVENTS - batch || this.bytes > TURN_BUFFER_MAX_BYTES)
     ) {
       const dropped = this.events.shift()!;
-      this.bytes -= approxSize(dropped.event);
+      this.bytes -= dropped.bytes;
       this.evictedThroughSeq = dropped.seq;
     }
   }
 }
 
 /**
+ * Registry key for a turn. Every producer namespaces its session ids, because
+ * one registry serves them all: the API path files under `api`, a channel turn
+ * under its channel name. Without the prefix the two id spaces shared one
+ * keyspace and a collision would let one producer's turn evict or terminate the
+ * other's — a claim the old comments here asserted could not happen while
+ * complete()'s guard below existed precisely because it could.
+ *
+ * The chat id is deliberately NOT part of the key: an API session id is minted
+ * by the gateway inside a single `api-{chatId}` index and cannot be presented
+ * for another chat (see apiSessionExists), so the namespace prefix already makes
+ * every key unique.
+ */
+export function turnStreamKey(namespace: string, sessionId: string): string {
+  return `${namespace}:${sessionId}`;
+}
+
+/**
  * Per-session registry of turn streams, with the completed-turn grace window.
  *
- * Keyed by session id; each record carries its request id, so a client that
+ * Keyed by turnStreamKey(); each record carries its request id, so a client that
  * re-attaches can assert it is resuming the turn it thinks it is.
  */
 export class TurnStreamRegistry {
@@ -187,51 +215,50 @@ export class TurnStreamRegistry {
 
   /**
    * Begin a new turn, replacing (and un-scheduling) any previous record for the
-   * session so a fresh turn never inherits the last one's buffer — the same
-   * reason `pendingApiAttachments` is cleared at the top of every turn.
+   * key so a fresh turn never inherits the last one's buffer — the same reason
+   * `pendingApiAttachments` is cleared at the top of every turn.
    *
    * This also ends the previous turn's replay grace window early: a session
    * holds at most one turn, so a client resuming turn N after turn N+1 has
    * started gets TURN_GONE rather than a replay. Documented in API.md under
    * "Resuming an interrupted stream"; history is the fallback.
    */
-  start(sessionId: string, requestId: string): TurnStream {
-    this.release(sessionId);
-    const turn = new TurnStream(sessionId, requestId);
-    this.turns.set(sessionId, turn);
+  start(key: string, requestId: string): TurnStream {
+    this.release(key);
+    const turn = new TurnStream(key, requestId);
+    this.turns.set(key, turn);
     return turn;
   }
 
-  get(sessionId: string): TurnStream | undefined {
-    return this.turns.get(sessionId);
+  get(key: string): TurnStream | undefined {
+    return this.turns.get(key);
   }
 
   /**
    * Record the terminal frame and keep the turn replayable for the grace window.
    *
-   * Takes the TurnStream itself, not a session id: two producers can hold the
-   * same session id (an API turn and a channel turn are separate namespaces
-   * that happen to share this map), and a superseded producer finishing late
-   * must terminate its OWN record, never the one that replaced it.
+   * Takes the TurnStream itself, not a key: a turn superseded by the next one on
+   * the same session finishes late often enough, and it must terminate its OWN
+   * record, never the one that replaced it.
    */
   complete(turn: TurnStream, event: StreamEvent, error?: Error): void {
     turn.complete(event, error);
     // Only the current record earns a grace timer; a superseded one is already
     // unreachable and would otherwise schedule a release for its successor.
-    if (this.turns.get(turn.sessionId) !== turn) return;
-    const timer = setTimeout(() => this.release(turn.sessionId), this.graceMs);
+    if (this.turns.get(turn.key) !== turn) return;
+    const timer = setTimeout(() => this.release(turn.key), this.graceMs);
     timer.unref?.();
-    this.releaseTimers.set(turn.sessionId, timer);
+    this.releaseTimers.set(turn.key, timer);
   }
 
   /** Drop the record and its grace timer. */
-  release(sessionId: string): void {
-    const timer = this.releaseTimers.get(sessionId);
+  release(key: string): void {
+    const timer = this.releaseTimers.get(key);
     if (timer) {
       clearTimeout(timer);
-      this.releaseTimers.delete(sessionId);
+      this.releaseTimers.delete(key);
     }
-    this.turns.delete(sessionId);
+    this.turns.delete(key);
   }
 
   clear(): void {
