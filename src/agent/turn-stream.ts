@@ -43,6 +43,12 @@ export interface TurnSink {
   write(e: SeqEvent): void;
   /** The terminal `result` / `error` frame. The sink should close after this. */
   finish(e: SeqEvent): void;
+  /**
+   * Another connection took over this turn. Optional: sinks that own a socket
+   * should close it, otherwise the displaced connection hangs open with no
+   * terminal frame ever coming — it is no longer the one being written to.
+   */
+  displaced?(): void;
 }
 
 export type AttachFailure = 'truncated';
@@ -117,6 +123,14 @@ export class TurnStream {
   attach(sink: TurnSink, afterSeq: number): AttachFailure | null {
     if (afterSeq < this.evictedThroughSeq) return 'truncated';
 
+    // Retire whoever held the slot before the replay, so the displaced socket
+    // closes instead of waiting forever for a terminal frame it will not get.
+    const previous = this.sink;
+    if (previous && previous !== sink) {
+      this.sink = null;
+      try { previous.displaced?.(); } catch { /* already gone */ }
+    }
+
     for (const e of this.events) {
       if (e.seq > afterSeq) sink.write(e);
     }
@@ -179,14 +193,22 @@ export class TurnStreamRegistry {
     return this.turns.get(sessionId);
   }
 
-  /** Record the terminal frame and keep the turn replayable for the grace window. */
-  complete(sessionId: string, event: StreamEvent, error?: Error): void {
-    const turn = this.turns.get(sessionId);
-    if (!turn) return;
+  /**
+   * Record the terminal frame and keep the turn replayable for the grace window.
+   *
+   * Takes the TurnStream itself, not a session id: two producers can hold the
+   * same session id (an API turn and a channel turn are separate namespaces
+   * that happen to share this map), and a superseded producer finishing late
+   * must terminate its OWN record, never the one that replaced it.
+   */
+  complete(turn: TurnStream, event: StreamEvent, error?: Error): void {
     turn.complete(event, error);
-    const timer = setTimeout(() => this.release(sessionId), this.graceMs);
+    // Only the current record earns a grace timer; a superseded one is already
+    // unreachable and would otherwise schedule a release for its successor.
+    if (this.turns.get(turn.sessionId) !== turn) return;
+    const timer = setTimeout(() => this.release(turn.sessionId), this.graceMs);
     timer.unref?.();
-    this.releaseTimers.set(sessionId, timer);
+    this.releaseTimers.set(turn.sessionId, timer);
   }
 
   /** Drop the record and its grace timer. */
@@ -206,8 +228,7 @@ export class TurnStreamRegistry {
   }
 }
 
-/** Cheap stand-in for the serialised size — exact bytes aren't worth the hot-path cost. */
-function approxSize(event: StreamEvent): number {
+/** Cheap stand-in for the serialised size — exact bytes aren't worth the hot-path cost. */function approxSize(event: StreamEvent): number {
   switch (event.type) {
     case 'text_delta':
     case 'thinking':
@@ -227,6 +248,11 @@ export function resultEvent(text: string, attachments: ApiAttachment[]): StreamE
   return attachments.length ? { type: 'result', text, attachments } : { type: 'result', text };
 }
 
+/** Best-effort message for a terminal frame that is not a `result`. */
+function terminalMessage(event: StreamEvent): string {
+  return 'message' in event ? event.message : `Turn ended (${event.type})`;
+}
+
 /**
  * The callback shape every streaming producer in AgentRunner emits into. `seq`
  * is the event's per-turn sequence number — the cursor a client passes back to
@@ -236,6 +262,8 @@ export interface ApiStreamCallbacks {
   onChunk: (event: StreamEvent, seq?: number) => void;
   onDone: (fullText: string, attachments: ApiAttachment[], seq?: number) => void;
   onError: (err: Error, seq?: number) => void;
+  /** Another connection resumed this turn; this one is no longer being written to. */
+  onDisplaced?: () => void;
 }
 
 /** Adapt a callback trio into a sink a TurnStream can drive. */
@@ -248,10 +276,16 @@ export function callbackSink(callbacks: ApiStreamCallbacks): TurnSink {
       try {
         if (e.event.type === 'result') {
           callbacks.onDone(e.event.text, e.event.attachments ?? [], e.seq);
-        } else if (e.event.type === 'error') {
-          callbacks.onError(e.error ?? new Error(e.event.message), e.seq);
+        } else {
+          // `error` — and anything else that ever ends up terminal. A sink that
+          // is handed a terminal frame it does not recognise must still be told
+          // the turn is over, or an SSE response stays open forever.
+          callbacks.onError(e.error ?? new Error(terminalMessage(e.event)), e.seq);
         }
       } catch { /* sink gone */ }
+    },
+    displaced: () => {
+      try { callbacks.onDisplaced?.(); } catch { /* sink gone */ }
     },
   };
 }

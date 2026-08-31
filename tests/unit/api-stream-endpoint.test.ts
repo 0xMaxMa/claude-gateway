@@ -126,6 +126,25 @@ describe('GET /api/v1/agents/:agentId/sessions/:sessionId/stream (#421)', () => 
     expect(runner.captured).toMatchObject({ afterSeq: 0, requestId: undefined });
   });
 
+  it('echoes request_id when the client named one, and omits the field entirely when it did not', async () => {
+    runner.terminal = seq(1, { type: 'result', text: 'ok' });
+
+    const named = parseSse(
+      (await supertest.default(buildApp(runner))
+        .get(url('?request_id=req-abc'))
+        .set('X-Api-Key', 'sk-read-only')).text,
+    )[0]!;
+    expect(named['request_id']).toBe('req-abc');
+
+    // No correlation to make — better an absent field than the session id
+    // masquerading as a request id.
+    const anonymous = parseSse(
+      (await supertest.default(buildApp(runner)).get(url()).set('X-Api-Key', 'sk-read-only')).text,
+    )[0]!;
+    expect(anonymous).not.toHaveProperty('request_id');
+    expect(anonymous['session_id']).toBe(SESSION);
+  });
+
   it('forwards a result\'s attachments so a resumed turn does not lose its images', async () => {
     runner.terminal = seq(2, {
       type: 'result',

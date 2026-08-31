@@ -16,13 +16,15 @@ import {
 } from '../../src/agent/turn-stream';
 import { StreamEvent } from '../../src/types';
 
-function recordingSink(): { writes: SeqEvent[]; finished: SeqEvent | null; sink: { write(e: SeqEvent): void; finish(e: SeqEvent): void } } {
+function recordingSink(): { writes: SeqEvent[]; finished: SeqEvent | null; displacedCount: number; sink: { write(e: SeqEvent): void; finish(e: SeqEvent): void; displaced(): void } } {
   const rec = {
     writes: [] as SeqEvent[],
     finished: null as SeqEvent | null,
+    displacedCount: 0,
     sink: {
       write(e: SeqEvent) { rec.writes.push(e); },
       finish(e: SeqEvent) { rec.finished = e; },
+      displaced() { rec.displacedCount++; },
     },
   };
   return rec;
@@ -118,6 +120,30 @@ describe('TurnStream', () => {
     expect(b.writes.map((e) => e.seq)).toEqual([1]);
   });
 
+  it('tells a displaced connection it has been taken over, so its socket does not hang', () => {
+    const turn = new TurnStream('sess-1', 'req-1');
+    const a = recordingSink();
+    const b = recordingSink();
+    turn.attach(a.sink, 0);
+
+    turn.attach(b.sink, 0); // a second connection resumes the same turn
+
+    expect(a.displacedCount).toBe(1);
+    expect(b.displacedCount).toBe(0);
+    // The displaced sink is genuinely out of the loop, not merely notified.
+    turn.emit(delta('live'));
+    expect(a.writes).toHaveLength(0);
+    expect(b.writes).toHaveLength(1);
+  });
+
+  it('re-attaching the SAME sink is not a displacement', () => {
+    const turn = new TurnStream('sess-1', 'req-1');
+    const a = recordingSink();
+    turn.attach(a.sink, 0);
+    turn.attach(a.sink, 0);
+    expect(a.displacedCount).toBe(0);
+  });
+
   it('nothing may follow the terminal frame, and complete() is idempotent', () => {
     const turn = new TurnStream('sess-1', 'req-1');
     const a = recordingSink();
@@ -168,7 +194,7 @@ describe('TurnStreamRegistry', () => {
     const registry = new TurnStreamRegistry(30);
     const turn = registry.start('sess-1', 'req-1');
     turn.emit(delta('hi'));
-    registry.complete('sess-1', resultEvent('hi', []));
+    registry.complete(turn, resultEvent('hi', []));
 
     expect(registry.get('sess-1')).toBe(turn);
     await new Promise((r) => setTimeout(r, 60));
@@ -179,7 +205,7 @@ describe('TurnStreamRegistry', () => {
     const registry = new TurnStreamRegistry(60_000);
     const first = registry.start('sess-1', 'req-1');
     first.emit(delta('old turn'));
-    registry.complete('sess-1', resultEvent('old turn', []));
+    registry.complete(first, resultEvent('old turn', []));
 
     const second = registry.start('sess-1', 'req-2');
     expect(second).not.toBe(first);
@@ -193,10 +219,35 @@ describe('TurnStreamRegistry', () => {
     registry.clear();
   });
 
+  it('a superseded turn finishing late terminates ITSELF, never the turn that replaced it', async () => {
+    // Two producers can hold the same session id — an API turn and a channel
+    // turn are separate namespaces that share this map. A late finisher must
+    // not deliver its result to the newer turn's client, nor schedule that
+    // turn's release out from under it.
+    const registry = new TurnStreamRegistry(30);
+    const stale = registry.start('sess-1', 'req-1');
+    const current = registry.start('sess-1', 'req-2');
+
+    const watcher = recordingSink();
+    current.attach(watcher.sink, 0);
+
+    registry.complete(stale, resultEvent('stale result', []));
+
+    expect(stale.isComplete).toBe(true);
+    expect(current.isComplete).toBe(false);
+    expect(watcher.finished).toBeNull();
+    expect(registry.get('sess-1')).toBe(current);
+
+    // …and the stale completion must not have scheduled a release for `current`.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(registry.get('sess-1')).toBe(current);
+    registry.clear();
+  });
+
   it('clear() drops every record and its pending grace timer', async () => {
     const registry = new TurnStreamRegistry(30);
-    registry.start('sess-1', 'req-1');
-    registry.complete('sess-1', resultEvent('x', []));
+    const turn = registry.start('sess-1', 'req-1');
+    registry.complete(turn, resultEvent('x', []));
     registry.clear();
 
     expect(registry.get('sess-1')).toBeUndefined();

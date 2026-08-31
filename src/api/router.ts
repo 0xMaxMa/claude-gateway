@@ -82,8 +82,15 @@ export function isValidAgentId(v: unknown): v is string {
  */
 function createSseCallbacks(
   res: Response,
-  meta: { requestId: string; sessionId: string; startTime: number },
+  meta: { requestId?: string; sessionId: string; startTime: number },
 ): ApiStreamCallbacks {
+  // `request_id` correlates a frame with the POST that started the turn. A
+  // resuming client that did not name one has no correlation to make, so the
+  // field is omitted rather than filled with a stand-in.
+  const ids = () => ({
+    ...(meta.requestId ? { request_id: meta.requestId } : {}),
+    session_id: meta.sessionId,
+  });
   return {
     onChunk: (event, seq) => {
       try { res.write(`data: ${JSON.stringify({ ...event, seq })}\n\n`); } catch { /* client gone */ }
@@ -94,8 +101,7 @@ function createSseCallbacks(
           type: 'result',
           text: fullText,
           seq,
-          request_id: meta.requestId,
-          session_id: meta.sessionId,
+          ...ids(),
           duration_ms: Date.now() - meta.startTime,
         };
         if (attachments?.length) frame['attachments'] = attachments;
@@ -108,10 +114,13 @@ function createSseCallbacks(
     },
     onError: (err, seq) => {
       try {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, seq, request_id: meta.requestId, session_id: meta.sessionId })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: err.message, seq, ...ids() })}\n\n`);
       } catch { /* client gone */ }
       finally { try { res.end(); } catch { /* client gone */ } }
     },
+    // Another connection resumed this turn — hand the stream over and close
+    // this socket rather than leaving it hanging for a frame that will never come.
+    onDisplaced: () => { try { res.end(); } catch { /* already gone */ } },
   };
 }
 
@@ -3268,11 +3277,12 @@ export function createApiRouter(
     // an attach that fails never writes at all.
     let opened = false;
     const ensureOpen = () => { if (!opened) { opened = true; openSseStream(res); } };
-    const callbacks = createSseCallbacks(res, { requestId: requestId ?? sessionId, sessionId, startTime: Date.now() });
+    const callbacks = createSseCallbacks(res, { requestId, sessionId, startTime: Date.now() });
     const inner = callbackSink({
       onChunk: (event, seq) => { ensureOpen(); callbacks.onChunk(event, seq); },
       onDone: (text, attachments, seq) => { ensureOpen(); callbacks.onDone(text, attachments, seq); },
       onError: (err, seq) => { ensureOpen(); callbacks.onError(err, seq); },
+      onDisplaced: callbacks.onDisplaced,
     });
 
     const attached = runner.attachTurnStream(sessionId, inner, { afterSeq, requestId });

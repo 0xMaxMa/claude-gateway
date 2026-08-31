@@ -3422,7 +3422,7 @@ export class AgentRunner extends EventEmitter {
           ts: streamAssistantTs,
         });
       }
-      this.turnStreams.complete(sessionId, resultEvent(finalText, attachments));
+      this.turnStreams.complete(turn, resultEvent(finalText, attachments));
     };
 
     const fail = (err: Error) => {
@@ -3434,7 +3434,7 @@ export class AgentRunner extends EventEmitter {
       // state as "still thinking" and spins forever), and drain the attachment
       // buffer so nothing leaks into the next turn.
       this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
-      this.turnStreams.complete(sessionId, { type: 'error', message: err.message }, err);
+      this.turnStreams.complete(turn, { type: 'error', message: err.message }, err);
     };
 
     // The subprocess died without ever emitting a final `result` line (crash,
@@ -4169,14 +4169,14 @@ export class AgentRunner extends EventEmitter {
           ts: uiAssistantTs,
         });
       }
-      this.turnStreams.complete(sessionId, resultEvent(result.trim(), []));
+      this.turnStreams.complete(turn, resultEvent(result.trim(), []));
     };
 
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      this.turnStreams.complete(sessionId, { type: 'error', message: err.message }, err);
+      this.turnStreams.complete(turn, { type: 'error', message: err.message }, err);
     };
 
     let globalTimer: ReturnType<typeof setTimeout> | undefined;
