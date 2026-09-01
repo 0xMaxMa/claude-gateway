@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as http from 'http';
 import * as net from 'net';
+import * as os from 'os';
 import * as path from 'path';
 import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
 import { createLogger } from '../logger';
@@ -1055,6 +1056,31 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Delete a channel's throwaway staging copy of an inbound attachment, once
+   * MediaStore holds the permanent one.
+   *
+   * Opt-in via `meta.media_ephemeral === '1'` — only a channel that created the
+   * file under the system temp dir sets it, and only for a path it built itself.
+   * Meta arrives over the local /channel intake, so the flag alone is not
+   * authority to unlink: the path is resolved (symlinks included) and must sit
+   * INSIDE the real temp dir, which bounds a forged flag to deleting something
+   * already in a world-writable scratch directory. Every failure is swallowed —
+   * a leftover temp file is a wart, and a throw here would abort recording the
+   * turn that was already delivered.
+   */
+  private static discardEphemeralStaging(stagedPath: string): void {
+    try {
+      const tmpRoot = fs.realpathSync(os.tmpdir());
+      const real = fs.realpathSync(stagedPath);
+      const rel = path.relative(tmpRoot, real);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return;
+      fs.rmSync(real, { force: true });
+    } catch {
+      // Already gone, unreadable, or outside the temp dir — leave it alone.
+    }
+  }
+
+  /**
    * Inject one coalesced turn into the session immediately. The caller must have
    * already marked the chat active in `turnActive`. Records each buffered message
    * individually in history, then writes the merged turn to the subprocess.
@@ -1084,6 +1110,7 @@ export class AgentRunner extends EventEmitter {
           // Persist to permanent history DB (separate from session context)
           const mediaFiles: string[] = [];
           if (meta['image_path']) {
+            const stagedPath = meta['image_path'];
             try {
               const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['image_path']);
               mediaFiles.push(rel);
@@ -1094,6 +1121,10 @@ export class AgentRunner extends EventEmitter {
               // Mutating meta['image_path'] here (same object as entry.meta) makes the
               // channel XML and image-size tracker below both use the readable path.
               meta['image_path'] = MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, rel);
+              // The staging copy has served its purpose — drop it (see
+              // discardEphemeralStaging). Only after a SUCCESSFUL copy: the catch
+              // below keeps the original path as the agent's only route to the bytes.
+              if (meta['media_ephemeral'] === '1') AgentRunner.discardEphemeralStaging(stagedPath);
             } catch {
               // Non-fatal — leave the original path so host agents still read it
             }
@@ -1156,7 +1187,15 @@ export class AgentRunner extends EventEmitter {
           blocks.push(channelXml);
 
           const imagePath = entry.meta?.['image_path'];
-          if (imagePath) {
+          // Non-image attachments (LINE files) ride the same image_path channel so
+          // the runner stages them into MediaStore, but they must NOT count toward
+          // the image-size restart budget below: that budget exists because images
+          // are pulled into context as pixels, whereas a document the agent may
+          // never open would push the chat into a summary+restart it never needed.
+          // media_type is set by the LINE router alone; everything else (Telegram,
+          // Slack, web upload) omits it and keeps counting as an image.
+          const isImageMedia = (entry.meta?.['media_type'] ?? 'image') === 'image';
+          if (imagePath && isImageMedia) {
             const queue = this.pendingImagePaths.get(chatId) ?? [];
             queue.push(imagePath);
             this.pendingImagePaths.set(chatId, queue);

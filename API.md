@@ -1394,10 +1394,20 @@ curl -X POST http://localhost:10850/webhooks/line/<agentId> \
   -d "$BODY"
 ```
 
-Text and image messages from allowed 1:1/group/room sources are normalized and forwarded
-to the agent's `/channel` intake (the same path Telegram uses). The request is
-acknowledged (`200 {"ok":true}`) **before** event processing, so LINE never sees a slow
-response.
+Text, image, and file messages from allowed 1:1/group/room sources are normalized and
+forwarded to the agent's `/channel` intake (the same path Telegram uses). Image and file
+bytes are fetched via the LINE blob API and handed to the agent as `meta.image_path`; a
+file also carries `meta.attachment_kind: "document"` and `meta.attachment_name` (the
+sanitized sender-supplied name). LINE sends no MIME type for a file, so the stored
+extension is derived from that name and constrained to a short alphanumeric run —
+anything unusable, or any type a browser would render as active content (the HTML and
+XML families, script and style), is stored as `.bin`. When the bytes cannot be fetched —
+over the 20 MB media cap, an empty upload, or a failed transfer — the turn is still
+forwarded, with no `meta.image_path` and a `content` that states the file is not
+available and why, so the agent never mistakes a lost attachment for one it has yet to
+open. Sticker, video, audio, and location messages are ignored. The
+request is acknowledged (`200 {"ok":true}`) **before** event processing, so LINE never
+sees a slow response.
 
 **Error responses:**
 
