@@ -24,7 +24,7 @@ import { classifyPhantomDraft, unsubmittedDraft as discountPhantom } from './dra
 import { shouldAdoptOrphanWake } from './orphan-wake';
 import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
-import { decideBypassDialogAction, BypassDialogState, BYPASS_MAX_MOVES } from './bypass-dialog';
+import { decideBypassDialogAction, BypassDialogState, BYPASS_MAX_KEYS } from './bypass-dialog';
 import { buildSubmitDiag } from './submit-diag';
 
 const POLL_MS = 200;
@@ -187,11 +187,11 @@ class Driver {
   // re-sent every poll while the error overlay lingers. Reset when a new turn begins.
   private requestTooLargeHandled = false;
   private lastDialogActionAt = 0;
-  // Keystroke budget for the bypass-permissions dialog, spent by the arrow
-  // keys that walk the caret onto the accept row on Claude Code builds whose
-  // dialog has no row numbers (see bypass-dialog.ts). Reset once the dialog
-  // leaves the screen.
-  private bypassDialog: BypassDialogState = { moves: 0 };
+  // Keystroke budget for the bypass-permissions dialog, spent by every key we
+  // send at it — the arrows that walk the caret onto the accept row on builds
+  // whose dialog has no row numbers, and the key that accepts (see
+  // bypass-dialog.ts). Reset once the dialog leaves the screen.
+  private bypassDialog: BypassDialogState = { keys: 0 };
   // In-flight behavioral probe round, advanced synchronously by tick() at a
   // single chokepoint — the same tick-driven pattern as menuCancel and
   // interrupting (review round 2, finding 6; replaced a detached async
@@ -1028,7 +1028,7 @@ class Driver {
     if (!dialog) {
       // Dialog gone (accepted, or never really there) — the next one starts
       // with a fresh keystroke budget.
-      this.bypassDialog.moves = 0;
+      this.bypassDialog.keys = 0;
       return;
     }
     this.lastDialogActionAt = now;
@@ -1040,26 +1040,24 @@ class Driver {
       // renders the dialog (numbered rows vs not — see bypass-dialog.ts), so
       // it is decided from the screen, one key per cooldown round.
       const action = decideBypassDialogAction(this.screen.dialogText(), this.bypassDialog);
-      switch (action.kind) {
-        case 'digit':
-          logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
-          this.host.writeRaw(action.key);
-          break;
-        case 'move':
-          this.bypassDialog.moves++;
-          logWarn(`Bypass Permissions dialog: moving caret to the accept row (${this.bypassDialog.moves}/${BYPASS_MAX_MOVES})`);
-          this.host.writeRaw(action.key);
-          break;
-        case 'confirm':
-          logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
-          this.host.writeRaw(action.key);
-          break;
-        case 'wait':
-          // Deliberately no keystroke: an un-accepted dialog is visible and
-          // recoverable, a mis-aimed Enter picks "No, exit" and is not.
-          logWarn(`Bypass Permissions dialog left alone — ${action.reason}`);
-          break;
+      if (action.kind === 'wait') {
+        // Deliberately no keystroke: an un-accepted dialog is visible and
+        // recoverable, a mis-aimed Enter picks "No, exit" and is not.
+        logWarn(`Bypass Permissions dialog left alone — ${action.reason}`);
+        return;
       }
+      // Every key sent draws down the same per-dialog budget, so a dialog that
+      // ignores us stops attracting keystrokes instead of collecting them.
+      this.bypassDialog.keys++;
+      const spent = `${this.bypassDialog.keys}/${BYPASS_MAX_KEYS}`;
+      if (action.kind === 'move') {
+        logWarn(`Bypass Permissions dialog: moving caret to the accept row (${spent})`);
+      } else {
+        logWarn(
+          `accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions) (${spent})`,
+        );
+      }
+      this.host.writeRaw(action.key);
     }
   }
 

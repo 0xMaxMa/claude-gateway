@@ -23,7 +23,9 @@ import {
   BYPASS_KEY_DOWN,
   BYPASS_KEY_UP,
   BYPASS_KEY_ENTER,
-  BYPASS_MAX_MOVES,
+  BYPASS_MAX_KEYS,
+  BYPASS_ACCEPT_LABEL,
+  BYPASS_DECLINE_LABEL,
 } from '../../src/shell/bypass-dialog';
 import { shouldAdoptOrphanWake, OrphanWakeObs } from '../../src/shell/orphan-wake';
 import * as os from 'os';
@@ -908,12 +910,12 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
   /** The same build after one Down: caret has moved onto the accept row. */
   const CURRENT_ROWS_AFTER_DOWN = ['    No, exit', '  ❯ Yes, I accept'];
 
-  const decide = async (rows: string[], moves = 0) => {
+  const decide = async (rows: string[], keys = 0) => {
     const screen = await renderScreen(dialog(rows));
     // Sanity: every fixture is a screen the detector actually fires on, so the
     // decision is only ever asked about dialogs that reached this code path.
     expect(screen.detectDialog()).toBe('bypass-permissions');
-    return decideBypassDialogAction(screen.dialogText(), { moves });
+    return decideBypassDialogAction(screen.dialogText(), { keys });
   };
 
   it('types the digit on the numbered rendering (<= 2.1.247 behavior, unchanged)', async () => {
@@ -961,12 +963,33 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     expect(action.kind).toBe('wait');
   });
 
-  it('stops moving once the keystroke budget is spent, rather than guessing Enter', async () => {
-    const action = await decide(CURRENT_ROWS, BYPASS_MAX_MOVES);
+  it('stops sending keys once the budget is spent, rather than guessing Enter', async () => {
+    const action = await decide(CURRENT_ROWS, BYPASS_MAX_KEYS);
     expect(action.kind).toBe('wait');
     // One below the cap still moves — the budget bounds key traffic, it does
     // not disable the fix.
-    expect(await decide(CURRENT_ROWS, BYPASS_MAX_MOVES - 1)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
+    expect(await decide(CURRENT_ROWS, BYPASS_MAX_KEYS - 1)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
+  });
+
+  it('bounds the digit path too — an unresponsive numbered dialog is #431 all over again', async () => {
+    // Keys sent at a dialog that ignores them are not discarded, they queue and
+    // land in the prompt later, so the digit gets the same budget as the arrows.
+    expect((await decide(LEGACY_ROWS, BYPASS_MAX_KEYS)).kind).toBe('wait');
+    expect(await decide(LEGACY_ROWS, BYPASS_MAX_KEYS - 1)).toEqual({ kind: 'digit', key: '2' });
+  });
+
+  it('bounds repeated Enter at a dialog that will not dismiss', async () => {
+    expect((await decide(CURRENT_ROWS_AFTER_DOWN, BYPASS_MAX_KEYS)).kind).toBe('wait');
+  });
+
+  it('keeps the accept label in sync with the detection marker in screen.ts', async () => {
+    // The label is duplicated (this module stays dependency-free), so drift
+    // would mean detectDialog() fires on a dialog whose rows we cannot parse.
+    expect(TUI_BYPASS_PERMS).toContain(BYPASS_ACCEPT_LABEL);
+    expect(await decide([`  ❯ ${BYPASS_DECLINE_LABEL}`, `    ${BYPASS_ACCEPT_LABEL}`])).toEqual({
+      kind: 'move',
+      key: BYPASS_KEY_DOWN,
+    });
   });
 
   it('ignores prose that merely quotes the labels mid-sentence', async () => {
@@ -982,7 +1005,7 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     // not a live modal, and must not attract a keystroke.
     const screen = await renderScreen([...dialog(CURRENT_ROWS_AFTER_DOWN), ...FILLER(44), '❯ ']);
     expect(screen.detectDialog()).toBeNull();
-    expect(decideBypassDialogAction(screen.dialogText(), { moves: 0 }).kind).toBe('wait');
+    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0 }).kind).toBe('wait');
   });
 });
 

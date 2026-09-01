@@ -32,9 +32,15 @@
  * Driver.maybeHandleDialog() in claude-pty-shell.ts for where it is wired in.
  */
 
-/** The dialog's two option labels — also the TUI_BYPASS_PERMS detection markers. */
-const ACCEPT_LABEL = 'Yes, I accept';
-const DECLINE_LABEL = 'No, exit';
+/**
+ * The dialog's two option labels. BYPASS_ACCEPT_LABEL is the same string
+ * screen.ts lists in TUI_BYPASS_PERMS as a detection marker; it is repeated
+ * here rather than imported to keep this module dependency-free, and a unit
+ * test asserts the two never drift apart (screen.ts: "all matchers live here
+ * so a UI change requires touching exactly one file").
+ */
+export const BYPASS_ACCEPT_LABEL = 'Yes, I accept';
+export const BYPASS_DECLINE_LABEL = 'No, exit';
 
 /** Arrow keystrokes used to walk the caret onto the accept row. */
 export const BYPASS_KEY_DOWN = '\x1b[B';
@@ -43,12 +49,14 @@ export const BYPASS_KEY_UP = '\x1b[A';
 export const BYPASS_KEY_ENTER = '\r';
 
 /**
- * Cap on arrow keystrokes per dialog. The dialog has two rows, so one move is
- * always enough; the budget exists purely so a dialog that renders but never
- * responds cannot draw unbounded key traffic. Exhausting it falls back to
- * 'wait' — the fail-safe visible dialog, not a guessed Enter.
+ * Cap on keystrokes sent per dialog — arrow moves plus the accepting key
+ * itself. The dialog needs at most two (one move, one Enter), so the budget
+ * exists purely so a dialog that renders but never responds cannot draw
+ * unbounded key traffic: those keys are not discarded by an unresponsive TUI,
+ * they queue, and land in the prompt once it finally opens. Exhausting the
+ * budget falls back to 'wait' — the fail-safe visible dialog.
  */
-export const BYPASS_MAX_MOVES = 4;
+export const BYPASS_MAX_KEYS = 4;
 
 export type BypassDialogAction =
   /** Numbered rendering: type this digit, which selects and confirms in one key. */
@@ -62,8 +70,8 @@ export type BypassDialogAction =
 
 /** Per-dialog bookkeeping. Reset once the dialog leaves the screen. */
 export interface BypassDialogState {
-  /** Arrow keystrokes sent for the current dialog. */
-  moves: number;
+  /** Keystrokes already sent for the current dialog. */
+  keys: number;
 }
 
 /** One option row of the dialog as it appears on screen. */
@@ -93,8 +101,8 @@ function rowPattern(label: string): RegExp {
   return new RegExp(`^[\\s│]*(❯)?\\s*(?:(\\d+)\\.)?\\s*${label}[\\s│]*$`);
 }
 
-const ACCEPT_ROW_RE = rowPattern(ACCEPT_LABEL);
-const DECLINE_ROW_RE = rowPattern(DECLINE_LABEL);
+const ACCEPT_ROW_RE = rowPattern(BYPASS_ACCEPT_LABEL);
+const DECLINE_ROW_RE = rowPattern(BYPASS_DECLINE_LABEL);
 
 /**
  * Find the option row nearest the bottom of the region. A live modal is the
@@ -119,12 +127,21 @@ function findRow(lines: string[], re: RegExp): OptionRow | null {
  * blind key sequence: every keystroke is justified by what is on screen at
  * the moment it is sent.
  *
- * `state.moves` is only read/advanced by the caller for 'move' actions.
+ * `state.keys` is only read here; the caller advances it for every action that
+ * actually sends a key.
  */
 export function decideBypassDialogAction(
   dialogText: string,
   state: BypassDialogState,
 ): BypassDialogAction {
+  // Budget applies to every keystroke, not just the arrows: a dialog still on
+  // screen after this many keys is not responding to us, and the fix for #431
+  // is precisely that repeating a key at a dialog that ignores it is worse
+  // than doing nothing.
+  if (state.keys >= BYPASS_MAX_KEYS) {
+    return { kind: 'wait', reason: `keystroke budget exhausted after ${state.keys} keys` };
+  }
+
   const lines = dialogText.split('\n');
   const accept = findRow(lines, ACCEPT_ROW_RE);
   if (!accept) return { kind: 'wait', reason: 'accept row not parseable on screen' };
@@ -151,9 +168,6 @@ export function decideBypassDialogAction(
   // understand. Guessing either way risks confirming "No, exit".
   if (!decline?.caret || accept.caret) {
     return { kind: 'wait', reason: 'no unambiguous caret on the dialog rows' };
-  }
-  if (state.moves >= BYPASS_MAX_MOVES) {
-    return { kind: 'wait', reason: `move budget exhausted after ${state.moves} keystrokes` };
   }
   return {
     kind: 'move',
