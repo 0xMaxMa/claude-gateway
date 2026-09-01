@@ -6,6 +6,7 @@ import {
   ConfigValidationError,
   DuplicateAgentIdError,
   MissingEnvVarError,
+  SkippedAgent,
 } from '../../src/config/loader';
 
 const FIXTURES = path.join(__dirname, '../fixtures/configs');
@@ -305,5 +306,86 @@ describe('config-loader', () => {
       if (prevAdmin === undefined) delete process.env.ADMIN_API_KEY;
       else process.env.ADMIN_API_KEY = prevAdmin;
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // U-CL-09: onSkippedAgent reports every drop site
+  //
+  // Skipping an agent is deliberately non-fatal, which is exactly what made it
+  // invisible before #427 — the only signal was a console.warn that never
+  // reaches logs/gateway.log. These pin the callback contract for all three
+  // sites so a drop can never go back to being silent.
+  // -------------------------------------------------------------------------
+  describe('U-CL-09: onSkippedAgent callback', () => {
+    const healthyAgent = {
+      id: 'alfred',
+      description: '',
+      workspace: '/tmp',
+      env: '/tmp/.env',
+      telegram: { botToken: 'alfred-plain-token' },
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+    };
+
+    function writeConfig(name: string, agents: unknown[]): string {
+      const configPath = path.join(tmpDir, name);
+      fs.writeFileSync(configPath, JSON.stringify({
+        gateway: { logDir: '/tmp/logs', port: 8080 },
+        agents,
+      }));
+      return configPath;
+    }
+
+    it('U-CL-09a: reports a malformed (non-object) config entry', () => {
+      const configPath = writeConfig('malformed.json', ['not-an-object', healthyAgent]);
+      const skipped: SkippedAgent[] = [];
+
+      const config = loadConfig(configPath, { onSkippedAgent: (s) => skipped.push(s) });
+
+      expect(config.agents.map(a => a.id)).toEqual(['alfred']);
+      expect(skipped).toEqual([
+        { id: 'index 0', reason: 'Config entry must be an object' },
+      ]);
+    });
+
+    it('U-CL-09b: reports an agent that fails validation', () => {
+      const configPath = writeConfig('invalid.json', [
+        { ...healthyAgent, id: 'broken', telegram: {} },
+        healthyAgent,
+      ]);
+      const skipped: SkippedAgent[] = [];
+
+      const config = loadConfig(configPath, { onSkippedAgent: (s) => skipped.push(s) });
+
+      expect(config.agents.map(a => a.id)).toEqual(['alfred']);
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0].id).toBe('broken');
+      expect(skipped[0].reason).toContain('missing "telegram.botToken"');
+      // No ${VAR} was involved, so there is nothing to name.
+      expect(skipped[0].missingVar).toBeUndefined();
+    });
+
+    it('U-CL-09c: reports the unresolved variable name for a missing env var', () => {
+      const configPath = writeConfig('missing-var.json', [
+        { ...healthyAgent, id: 'nowhere', telegram: { botToken: '${NOWHERE_BOT_TOKEN}' } },
+        healthyAgent,
+      ]);
+      const skipped: SkippedAgent[] = [];
+
+      const config = loadConfig(configPath, { onSkippedAgent: (s) => skipped.push(s) });
+
+      expect(config.agents.map(a => a.id)).toEqual(['alfred']);
+      expect(skipped).toEqual([
+        {
+          id: 'nowhere',
+          reason: 'Missing environment variable: NOWHERE_BOT_TOKEN',
+          missingVar: 'NOWHERE_BOT_TOKEN',
+        },
+      ]);
+    });
+
+    it('U-CL-09d: omits the callback safely when no options are passed', () => {
+      const configPath = writeConfig('no-options.json', ['not-an-object', healthyAgent]);
+      expect(() => loadConfig(configPath)).not.toThrow();
+    });
   });
 });

@@ -12,7 +12,7 @@ import { loadGatewayDotenv } from './load-dotenv';
 // which does the same before dispatching to the CLI.
 loadGatewayDotenv();
 
-import { loadConfig } from './config/loader';
+import { loadConfig, logSkippedAgents, SkippedAgent } from './config/loader';
 import { agentsDirForConfig, loadAgentEnvFiles } from './config/agent-env';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
@@ -580,7 +580,14 @@ async function main(): Promise<void> {
   }
 
   console.log(`[gateway] Loading config from ${CONFIG_PATH}`);
-  const config: GatewayConfig = loadConfig(CONFIG_PATH);
+  // Skips are collected rather than logged inline: the structured logger needs
+  // config.gateway.logDir, so it cannot exist until this call returns. They are
+  // replayed through globalLogger below so a dropped agent is diagnosable from
+  // logs/gateway.log at startup too, not only on reload (#427).
+  const startupSkips: SkippedAgent[] = [];
+  const config: GatewayConfig = loadConfig(CONFIG_PATH, {
+    onSkippedAgent: (s) => startupSkips.push(s),
+  });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
   // ── Context isolation check ──────────────────────────────────────────────
@@ -595,6 +602,7 @@ async function main(): Promise<void> {
   const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
   const personalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+  logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
   const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
   const logDir = expandTilde(config.gateway.logDir);
 

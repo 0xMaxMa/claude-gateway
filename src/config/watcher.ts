@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { loadConfig, SkippedAgent } from './loader';
+import { loadConfig, logSkippedAgents, SkippedAgent } from './loader';
 import { agentsDirForConfig, loadAgentEnvFiles } from './agent-env';
 import { AgentConfig, GatewayConfig, Logger } from '../types';
 import { createWatcher, WatchHandle } from '../watch/factory';
@@ -101,13 +101,7 @@ export class ConfigWatcher extends EventEmitter {
 
     // Report drops before the no-change bail-out below: a silently dropped
     // agent produces exactly zero diff, so this is the only trace it leaves.
-    for (const s of skipped) {
-      this.logger.warn('Agent skipped during config reload', {
-        id: s.id,
-        reason: s.reason,
-        ...(s.missingVar ? { missingVar: s.missingVar } : {}),
-      });
-    }
+    logSkippedAgents(this.logger, skipped, 'Agent skipped during config reload');
 
     const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
 
