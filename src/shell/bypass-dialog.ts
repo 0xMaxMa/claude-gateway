@@ -149,8 +149,9 @@ export function decideBypassDialogAction(
   // Numbered rendering (<= 2.1.247): the digit selects and confirms in one
   // keystroke — the pre-#431 behavior, preserved. The index comes from the
   // accept row itself, so a reordered dialog cannot make us type the digit
-  // that means "No, exit". Only a single-character index is typable as one
-  // keystroke; a wider index falls through to the arrow path below.
+  // that means "No, exit". A wider index is not one keystroke, and how such a
+  // dialog responds to arrows has never been observed, so it stops here rather
+  // than guessing its way toward Enter.
   if (accept.digit !== null) {
     if (accept.digit >= 1 && accept.digit <= 9) {
       return { kind: 'digit', key: String(accept.digit) };

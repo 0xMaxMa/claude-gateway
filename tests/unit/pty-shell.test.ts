@@ -932,6 +932,11 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     expect(action).toEqual({ kind: 'digit', key: '1' });
   });
 
+  it('does nothing for a multi-digit index — that is not one keystroke', async () => {
+    const action = await decide(['  ❯ 10. No, exit', '    11. Yes, I accept']);
+    expect(action.kind).toBe('wait');
+  });
+
   it('moves the caret toward the accept row on the un-numbered rendering (>= 2.1.248)', async () => {
     // Proven live on 2.1.251: '2' leaves the caret untouched, Down moves it.
     expect(await decide(CURRENT_ROWS)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
