@@ -4701,6 +4701,94 @@ describe('AgentRunner — channel coalescing (US-IMG-COALESCE)', () => {
     // … and NOT the raw host staging path the container cannot read.
     expect(turn).not.toContain(`image_path="${rawStaging}"`);
   }, 15000);
+
+  // A channel that downloads an attachment to a throwaway file (LINE stages into
+  // os.tmpdir()) marks it meta.media_ephemeral='1'. Once MediaStore holds the
+  // permanent copy, the staging file is dead weight — nothing sweeps the temp dir,
+  // so every inbound attachment used to stay there for the life of the host.
+  async function postMedia(
+    port: number,
+    chatId: string,
+    mediaPath: string,
+    extraMeta: Record<string, string> = {},
+  ): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: '(file: doc.pdf)',
+        meta: {
+          chat_id: chatId, message_id: '1', user: 'testuser',
+          ts: new Date().toISOString(), image_path: mediaPath, ...extraMeta,
+        },
+      }),
+    });
+  }
+
+  it('deletes an ephemeral staging file once MediaStore has the permanent copy', async () => {
+    const staging = path.join(tmpDir, 'line-file-abc-123.pdf');
+    fs.writeFileSync(staging, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postMedia(port, 'chat:eph-1', staging, { media_ephemeral: '1' });
+    await new Promise(r => setTimeout(r, 450));
+
+    // The agent still has the bytes — via the MediaStore copy it was handed …
+    const turn = turnWritesOf().find(w => w.includes('image_path='));
+    expect(turn).toContain(`${path.sep}media${path.sep}telegram-chat:eph-1${path.sep}`);
+    // … and the staging copy is gone.
+    expect(fs.existsSync(staging)).toBe(false);
+  }, 15000);
+
+  it('leaves a staging file alone when the channel did not mark it ephemeral', async () => {
+    // Telegram/Discord stage under <workspace>/.*-state and own those files
+    // themselves; the runner must not start deleting them.
+    const staging = path.join(tmpDir, 'tg-staged.jpg');
+    fs.writeFileSync(staging, Buffer.alloc(64));
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await postMedia(port, 'chat:eph-2', staging);
+    await new Promise(r => setTimeout(r, 450));
+
+    expect(turnWritesOf().find(w => w.includes('image_path='))).toBeDefined();
+    expect(fs.existsSync(staging)).toBe(true);
+  }, 15000);
+
+  it('refuses to delete outside the temp dir even when the flag says ephemeral', () => {
+    // meta reaches the runner over the local /channel intake, so the flag alone
+    // must never be authority to unlink an arbitrary path.
+    //
+    // The victim file has to live OUTSIDE os.tmpdir() for the test to mean
+    // anything, and os.tmpdir() ignores a mocked process.env (it reads the real
+    // environment), so this stages under the project dir instead of /tmp.
+    const outsideDir = fs.mkdtempSync(path.join(process.cwd(), '.gw-outside-'));
+    const outside = path.join(outsideDir, 'precious.pdf');
+    fs.writeFileSync(outside, 'keep me');
+
+    const discard = (AgentRunner as unknown as { discardEphemeralStaging(p: string): void })
+      .discardEphemeralStaging;
+    try {
+      // Precondition: fail loudly rather than pass vacuously if cwd ever moves
+      // under the temp dir.
+      expect(path.relative(os.tmpdir(), outside).startsWith('..')).toBe(true);
+      discard(outside);
+      expect(fs.existsSync(outside)).toBe(true);
+
+      // …while a file genuinely inside the temp dir is removed.
+      const staged = path.join(tmpDir, 'line-file-x.pdf');
+      fs.writeFileSync(staged, 'bytes');
+      discard(staged);
+      expect(fs.existsSync(staged)).toBe(false);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── line_image transcript history: gate on tool_result success ────────────────

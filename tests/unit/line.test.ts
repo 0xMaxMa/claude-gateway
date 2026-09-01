@@ -19,7 +19,7 @@ import {
   splitForLine,
   LINE_SAFE_BUBBLE_CHARS,
 } from '../../src/agent/line-pure';
-import { normalizeLineEvent, safeFileExt, safeAttachmentName } from '../../src/api/line-webhook-router';
+import { normalizeLineEvent, safeFileExt, safeAttachmentName, markMediaUnavailable } from '../../src/api/line-webhook-router';
 import { LineModule } from '../../mcp/tools/line/module';
 
 describe('chunkText()', () => {
@@ -315,11 +315,77 @@ describe('safeFileExt()', () => {
     }
   });
 
+  test('the XML family degrades too, not just the extensions spelled "xml"', () => {
+    // The first cut of the denylist was hand-picked and denied `xml`/`xsl` while
+    // letting `xsd` and `rng` through — which `mime@1.6.0` (the table res.sendFile
+    // consults) resolves to the very same `application/xml`. A browser parses those
+    // as XML and honours an <?xml-stylesheet?> PI, i.e. XSLT into scripted HTML on
+    // the gateway's origin, with nosniff powerless because the type is genuine.
+    for (const name of ['schema.xsd', 'grammar.rng', 'doc.dtd', 'g.rdf', 'feed.atom',
+                        'feed.rss', 'places.kml', 'svc.wsdl', 'ui.xul', 'e.mathml']) {
+      expect(safeFileExt(name)).toBe('bin');
+    }
+  });
+
+  test('an unlisted extension in the html/xml families is still caught by the suffix guard', () => {
+    // Belt-and-braces for a types.json entry that does not exist yet.
+    for (const name of ['x.dhtml', 'x.zzhtm', 'x.myxml']) {
+      expect(safeFileExt(name)).toBe('bin');
+    }
+  });
+
   test('every result is safe to interpolate into a path segment', () => {
     const hostile = ['../x.sh', 'a.<script>', 'a.\u0000pdf', 'a. pdf', 'a.p:df', 'a.p\\df'];
     for (const name of hostile) {
       expect(safeFileExt(name)).toMatch(/^[a-z0-9]{1,8}$/);
     }
+  });
+});
+
+describe('markMediaUnavailable()', () => {
+  // A download that fails must not leave the turn looking like a staged file:
+  // before this, the agent saw `(file: report.pdf)` + attachment_kind but no
+  // image_path, which is exactly what a not-yet-opened attachment looks like.
+  const fileEvent = (fileName: string) => ({
+    type: 'message' as const,
+    mode: 'active' as const,
+    timestamp: 1,
+    source: { type: 'user' as const, userId: 'U123' },
+    replyToken: 'rt-1',
+    message: { type: 'file' as const, id: 'f1', fileName, fileSize: 10 },
+  } as never);
+
+  test('says the file is not available, and why, where the model will read it', () => {
+    const norm = normalizeLineEvent(fileEvent('report.pdf'))!;
+    markMediaUnavailable(norm, 'file', 'larger than the 20 MB limit');
+    expect(norm.content).toBe('(file: report.pdf — not available: larger than the 20 MB limit)');
+    expect(norm.content).not.toBe('(file: report.pdf)');
+    expect(norm.meta.image_path).toBeUndefined();
+    // The name is still context worth keeping — only the promise of a readable
+    // file is withdrawn.
+    expect(norm.meta.attachment_name).toBe('report.pdf');
+  });
+
+  test('drops any image_path already attached', () => {
+    const norm = normalizeLineEvent(fileEvent('a.pdf'))!;
+    norm.meta.image_path = '/tmp/line-file-x.pdf';
+    markMediaUnavailable(norm, 'file', 'the download failed');
+    expect(norm.meta.image_path).toBeUndefined();
+  });
+
+  test('a nameless file and an image both get a readable label', () => {
+    const noName = normalizeLineEvent(fileEvent('   '))!;
+    markMediaUnavailable(noName, 'file', 'the download failed');
+    expect(noName.content).toBe('(file — not available: the download failed)');
+
+    const img = normalizeLineEvent({
+      type: 'message', mode: 'active', timestamp: 1,
+      source: { type: 'user', userId: 'U123' },
+      message: { type: 'image', id: 'i1' },
+    } as never)!;
+    markMediaUnavailable(img, 'image', 'the download failed');
+    // Empty content + no image_path would have the runner label this "(photo)".
+    expect(img.content).toBe('(image — not available: the download failed)');
   });
 });
 

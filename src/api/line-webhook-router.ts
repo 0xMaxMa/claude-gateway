@@ -111,11 +111,47 @@ function persistPublicBase(
  * necessity (an allowlist would degrade every legitimate but unlisted document
  * type), so it is the second line: `X-Content-Type-Options: nosniff` on that
  * endpoint is the first.
+ *
+ * NOT hand-picked — that is how the first cut of this list ended up denying `xml`
+ * and `xsl` while letting `xsd` and `rng` through, which `mime` resolves to the
+ * very same `application/xml`. The list below is DERIVED from the table
+ * `res.sendFile` actually consults (`mime@1.6.0`'s `types.json`, reached via
+ * express → send), taking every extension whose type is:
+ *
+ *   - HTML            — `text/html`, `application/xhtml+xml`
+ *   - XML-parsed      — `text/xml`, `application/xml`, `application/xml-dtd`, and
+ *                       anything with a `+xml` suffix, which Blink's
+ *                       `IsXMLMIMEType` renders through the XML parser and so
+ *                       honours an `<?xml-stylesheet?>` PI (XSLT → scripted HTML)
+ *   - script / style  — any `javascript` / `ecmascript` subtype, and `text/css`
+ *
+ * plus the server-side extensions (`php`, `jsp`, `asp*`, `hta`) that predate the
+ * derivation. Regenerate after an express/send major bump — the suffix guard in
+ * `isBrowserActiveExt` covers new `*htm`/`*html`/`*xml` spellings until then.
  */
 const BROWSER_ACTIVE_EXTS = new Set([
-  'htm', 'html', 'xhtml', 'xht', 'shtml', 'shtm', 'xml', 'xsl', 'xslt',
-  'svg', 'svgz', 'js', 'mjs', 'cjs', 'css', 'jsp', 'php', 'asp', 'aspx', 'hta',
+  'asp', 'aspx', 'atom', 'atomcat', 'atomsvc', 'ccxml', 'cdxml', 'cjs', 'css', 'dae',
+  'davmount', 'dbk', 'dd2', 'dtb', 'dtd', 'ecma', 'emma', 'es3', 'et3', 'gml', 'gpx',
+  'grxml', 'hal', 'hta', 'htm', 'html', 'ink', 'inkml', 'irp', 'js', 'jsp', 'kml',
+  'lasxml', 'lbe', 'link66', 'lostxml', 'mads', 'mathml', 'meta4', 'metalink', 'mets',
+  'mjs', 'mods', 'mpd', 'mpkg', 'mrcx', 'mscml', 'musicxml', 'mxml', 'ncx', 'omdoc', 'opf',
+  'osfpvg', 'php', 'pls', 'pskcxml', 'rdf', 'res', 'rif', 'rl', 'rld', 'rng', 'rs', 'rsd',
+  'rss', 'sbml', 'sdkd', 'sdkm', 'shf', 'shtm', 'shtml', 'smi', 'smil', 'sru', 'srx',
+  'ssdl', 'ssml', 'svg', 'svgz', 'tei', 'teicorpus', 'tfi', 'uoml', 'uvt', 'uvvt', 'vxml',
+  'wadl', 'wbs', 'wsdl', 'wspolicy', 'x3d', 'x3dz', 'xaml', 'xdf', 'xdm', 'xdp', 'xdssc',
+  'xenc', 'xer', 'xht', 'xhtml', 'xhvml', 'xlf', 'xml', 'xop', 'xpl', 'xsd', 'xsl', 'xslt',
+  'xsm', 'xspf', 'xul', 'xvm', 'xvml', 'yin', 'zaz', 'zmm',
 ]);
+
+/**
+ * True when serving a file under this extension could execute script on the
+ * gateway's origin. The trailing-family test is deliberate belt-and-braces: a
+ * future `types.json` entry like `dhtml` or `foo.xml` variant lands in the same
+ * two dangerous families, and this catches it without a code change.
+ */
+function isBrowserActiveExt(ext: string): boolean {
+  return BROWSER_ACTIVE_EXTS.has(ext) || /(?:htm|html|xml)$/.test(ext);
+}
 
 /**
  * Extension for an inbound LINE **file**, derived from the sender-supplied name.
@@ -137,7 +173,7 @@ export function safeFileExt(fileName: string | undefined | null): string {
   if (dot <= 0 || dot === raw.length - 1) return 'bin';
   const ext = raw.slice(dot + 1).toLowerCase();
   if (!/^[a-z0-9]{1,8}$/.test(ext)) return 'bin';
-  return BROWSER_ACTIVE_EXTS.has(ext) ? 'bin' : ext;
+  return isBrowserActiveExt(ext) ? 'bin' : ext;
 }
 
 /**
@@ -176,13 +212,29 @@ function mediaTempPath(prefix: string, messageId: string): string {
 }
 
 /**
+ * Media rejected for size — a distinct type so the caller can tell the agent WHY
+ * the bytes are missing without echoing a raw error string into the prompt.
+ */
+class MediaTooLargeError extends Error {
+  constructor() {
+    super(`media exceeds ${MAX_MEDIA_BYTES} byte cap`);
+    this.name = 'MediaTooLargeError';
+  }
+}
+
+/**
  * Stream inbound media bytes into `dest`, enforcing MAX_MEDIA_BYTES, then rename
  * to the final extension. `resolveExt` is called once with the first chunk —
  * images sniff their type from the bytes, files take it from the sanitised name.
  *
  * Returns the final absolute path, or null when the stream carried no bytes.
- * Throws once the cap is exceeded, after destroying the stream and removing the
- * partial file (a caller that swallows the throw still forwards the turn).
+ *
+ * EVERY failure path — the cap, a mid-transfer socket error, a full disk — closes
+ * the write handle and removes the partial `.tmp` before rethrowing. Without that
+ * an interrupted transfer leaks a file descriptor for the lifetime of the process
+ * and leaves the partial file behind: nothing sweeps `os.tmpdir()`, and a caller
+ * that swallows the throw (handlePost does, to keep forwarding the turn) would
+ * never notice.
  */
 async function drainToFile(
   stream: AsyncIterable<Buffer | string>,
@@ -193,19 +245,33 @@ async function drainToFile(
   let total = 0;
   let ext = 'bin';
   let firstChunk = true;
-  for await (const chunk of stream) {
-    const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += b.length;
-    if (total > MAX_MEDIA_BYTES) {
-      (stream as { destroy?: () => void }).destroy?.();
-      fileStream.destroy();
-      fs.rmSync(dest, { force: true });
-      throw new Error(`media exceeds ${MAX_MEDIA_BYTES} byte cap`);
+  try {
+    for await (const chunk of stream) {
+      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += b.length;
+      if (total > MAX_MEDIA_BYTES) {
+        // Stop pulling bytes we are going to discard; the catch below closes the
+        // file handle and unlinks the partial write.
+        (stream as { destroy?: () => void }).destroy?.();
+        throw new MediaTooLargeError();
+      }
+      if (firstChunk) { ext = resolveExt(b); firstChunk = false; }
+      fileStream.write(b);
     }
-    if (firstChunk) { ext = resolveExt(b); firstChunk = false; }
-    fileStream.write(b);
+    await new Promise<void>((resolve, reject) => fileStream.end((err?: Error | null) => err ? reject(err) : resolve()));
+  } catch (err) {
+    // Wait for 'close' before unlinking. fs.createWriteStream opens its fd on the
+    // thread pool, so a failure this early can still have an open() in flight —
+    // removing the path first just lets that open recreate it, leaving an empty
+    // file behind (and the handle open until GC).
+    await new Promise<void>((resolve) => {
+      if (fileStream.closed) { resolve(); return; }
+      fileStream.once('close', () => resolve());
+      fileStream.destroy();
+    });
+    fs.rmSync(dest, { force: true });
+    throw err;
   }
-  await new Promise<void>((resolve, reject) => fileStream.end((err?: Error | null) => err ? reject(err) : resolve()));
   if (total === 0) { fs.rmSync(dest, { force: true }); return null; }
   const finalDest = dest.replace(/\.tmp$/, `.${ext}`);
   fs.renameSync(dest, finalDest);
@@ -247,7 +313,7 @@ async function downloadLineFile(
   declaredSize?: number,
 ): Promise<string | null> {
   if (Number.isFinite(declaredSize) && (declaredSize as number) > MAX_MEDIA_BYTES) {
-    throw new Error(`media exceeds ${MAX_MEDIA_BYTES} byte cap`);
+    throw new MediaTooLargeError();
   }
   const ext = safeFileExt(fileName);
   const stream = await blobClient.getMessageContent(messageId);
@@ -341,6 +407,32 @@ export function normalizeLineEvent(
 }
 
 export type NormalizedLinePostback = { chatId: string; replyToken: string; data: string };
+
+/**
+ * Rewrite a normalized media message whose bytes never arrived.
+ *
+ * Without this the turn still reaches the agent carrying `(file: report.pdf)` and
+ * `attachment_kind="document"` but NO `image_path`, which is indistinguishable
+ * from a staged file the agent simply has not opened yet — so the agent either
+ * stays silent or claims to have read something it never received. That is the
+ * silent-drop shape issue #429 was about, reappearing for the failure path.
+ *
+ * `reason` is a fixed phrase chosen by the caller, never a raw error string: the
+ * result lands in the `<channel>` element body, which `buildChannelXml` does not
+ * escape, so an SDK error message could otherwise forge tag structure. The
+ * attachment meta is left in place — the name is still useful context, and its
+ * `image_path` is (correctly) absent.
+ */
+export function markMediaUnavailable(
+  norm: NormalizedLineMessage,
+  mediaType: 'image' | 'file',
+  reason: string,
+): void {
+  delete norm.meta.image_path;
+  const name = norm.meta.attachment_name;
+  const label = mediaType === 'image' ? 'image' : name ? `file: ${name}` : 'file';
+  norm.content = `(${label} — not available: ${reason})`;
+}
 
 /** Parse a `/cli` approve/deny postback payload, or null when it's not ours. */
 export function parseCliPostback(data: string): { pairingId: string; deny: boolean } | null {
@@ -670,13 +762,30 @@ export function createLineWebhookHandler(
             const file = (event as webhook.MessageEvent).message as webhook.FileMessageContent;
             mediaPath = await downloadLineFile(blobClient, norm.meta.message_id, file.fileName, file.fileSize);
           }
-          if (mediaPath) norm.meta.image_path = mediaPath;
+          // A null path means the blob API answered with zero bytes. Both that and
+          // a throw leave the agent with no file, so both must say so — see
+          // markMediaUnavailable.
+          if (mediaPath) {
+            norm.meta.image_path = mediaPath;
+            // Staging copy under os.tmpdir(): the runner owns it from here and
+            // deletes it once MediaStore has its permanent copy. Nothing else
+            // sweeps the temp dir, so without this every inbound attachment —
+            // up to MediaStore.maxUploadBytes each — stays on disk forever.
+            norm.meta.media_ephemeral = '1';
+          } else markMediaUnavailable(norm, mediaType, 'the sender uploaded no content');
         } catch (err) {
           logger.warn('LINE webhook: media download failed', {
             mediaType,
             messageId: norm.meta.message_id,
             error: (err as Error).message,
           });
+          markMediaUnavailable(
+            norm,
+            mediaType,
+            err instanceof MediaTooLargeError
+              ? `larger than the ${Math.floor(MAX_MEDIA_BYTES / (1024 * 1024))} MB limit`
+              : 'the download failed',
+          );
         }
       }
 

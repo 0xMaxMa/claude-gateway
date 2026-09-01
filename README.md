@@ -1146,7 +1146,7 @@ sees a message. If those aren't met the bot looks online but stays silent.
 
 **LINE limits**
 - Inbound arrives via the Express **webhook**, not polling; the signature is verified over the **exact raw bytes**. Front it with the bun CORS proxy (see `/tunnel`) — never point cloudflared straight at the gateway, or chunked bodies break the signature and webhooks are dropped.
-- Handled inbound message types are **text, image, and file** (documents up to the 20 MB media cap). Sticker, video, audio, and location are ignored. LINE reports no MIME type for a file, so its extension is derived from the sender-supplied name and sanitized before use.
+- Handled inbound message types are **text, image, and file** (documents up to the 20 MB media cap). Sticker, video, audio, and location are ignored. LINE reports no MIME type for a file, so its extension is derived from the sender-supplied name and sanitized before use. A file the gateway cannot fetch (too large, empty, or a failed transfer) still reaches the agent — as a message that says the attachment is unavailable, rather than one that looks like a file waiting to be read.
 - Group/room `requireMention` uses LINE's **native mention** only (`mention.mentionees[].isSelf`). Typing the bot's name as plain text does **not** count, and `@All` does **not** count as a bot mention. LINE attaches mentions to **text messages only**, so an image or file posted in a group cannot satisfy the gate — send media in a DM, or set `requireMention: false` for that agent.
 - Delivery is **reply-token-first (free) → push fallback (metered)**. The single-use reply token lives only ~1 min; after that, replies consume the OA's monthly push quota.
 - Max **5 message objects** per reply/push request (the gateway auto-chunks to fit).
