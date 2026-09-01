@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { GatewayConfig } from '../types';
+import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
 
 export class ConfigValidationError extends Error {
@@ -17,9 +17,16 @@ export class DuplicateAgentIdError extends Error {
 }
 
 export class MissingEnvVarError extends Error {
+  /**
+   * The unresolved variable, exposed separately so callers can log it as a
+   * field instead of scraping it back out of `message`.
+   */
+  readonly varName: string;
+
   constructor(varName: string) {
     super(`Missing environment variable: ${varName}`);
     this.name = 'MissingEnvVarError';
+    this.varName = varName;
   }
 }
 
@@ -92,11 +99,66 @@ function validateAgent(agent: Record<string, unknown>, index: number): string | 
   return null;
 }
 
+/** An agent that was dropped from the loaded config rather than started. */
+export interface SkippedAgent {
+  /** The agent's id, or `index N` when the entry was too malformed to have one. */
+  id: string;
+  /** Human-readable cause, e.g. `Missing environment variable: ACME_BOT_TOKEN`. */
+  reason: string;
+  /** Set only when the agent was dropped because a `${VAR}` did not resolve. */
+  missingVar?: string;
+}
+
+export interface LoadConfigOptions {
+  /**
+   * Called once per dropped agent. Skipping is deliberately non-fatal (one bad
+   * agent must not take the gateway down), which historically made it invisible:
+   * the only signal was a `console.warn` that never reaches `logs/gateway.log`.
+   * Callers that have a structured logger should pass this so a dropped agent
+   * is diagnosable — see issue #427.
+   */
+  onSkippedAgent?: (skipped: SkippedAgent) => void;
+}
+
+/**
+ * Emit one `SkippedAgent` through a caller's structured logger.
+ *
+ * Shared by the startup load and every reload so both write the same fields
+ * under the same key — `grep "Agent skipped" logs/gateway.log` finds either.
+ */
+export function logSkippedAgents(
+  logger: Logger,
+  skipped: readonly SkippedAgent[],
+  message: string,
+): void {
+  for (const s of skipped) {
+    logger.warn(message, {
+      id: s.id,
+      reason: s.reason,
+      ...(s.missingVar ? { missingVar: s.missingVar } : {}),
+    });
+  }
+}
+
 /**
  * Load and validate config.json from the given path.
  * Interpolates ${VAR} env vars throughout the config.
  */
-export function loadConfig(configPath: string): GatewayConfig {
+export function loadConfig(configPath: string, options?: LoadConfigOptions): GatewayConfig {
+  const skippedAgents: string[] = [];
+
+  /**
+   * The single place an agent is dropped. Both the console warning and the
+   * structured-logger callback go through here on purpose: when they were two
+   * parallel statements per call site, a new skip site could easily carry one
+   * and not the other — reintroducing exactly the invisible drop of #427.
+   */
+  const skipAgent = (id: string, reason: string, missingVar?: string): void => {
+    console.warn(`[gateway] Skipping agent "${id}": ${reason}`);
+    skippedAgents.push(id);
+    options?.onSkippedAgent?.({ id, reason, ...(missingVar ? { missingVar } : {}) });
+  };
+
   let raw: string;
   try {
     raw = fs.readFileSync(configPath, 'utf-8');
@@ -127,19 +189,15 @@ export function loadConfig(configPath: string): GatewayConfig {
 
   // Validate each agent before interpolation — skip invalid agents with a warning
   const validAgents: Record<string, unknown>[] = [];
-  const skippedAgents: string[] = [];
   for (let i = 0; i < (config.agents as unknown[]).length; i++) {
     const agent = (config.agents as unknown[])[i];
     if (typeof agent !== 'object' || agent === null) {
-      console.warn(`[gateway] Skipping agent at index ${i}: must be an object`);
-      skippedAgents.push(`index ${i}`);
+      skipAgent(`index ${i}`, 'Config entry must be an object');
       continue;
     }
     const error = validateAgent(agent as Record<string, unknown>, i);
     if (error) {
-      const agentId = (agent as Record<string, unknown>).id || `index ${i}`;
-      console.warn(`[gateway] Skipping agent "${agentId}": ${error}`);
-      skippedAgents.push(String(agentId));
+      skipAgent(String((agent as Record<string, unknown>).id || `index ${i}`), error);
       continue;
     }
     validAgents.push(agent as Record<string, unknown>);
@@ -209,8 +267,7 @@ export function loadConfig(configPath: string): GatewayConfig {
       interpolatedAgents.push(interpolateObject(agent));
     } catch (err) {
       if (err instanceof MissingEnvVarError) {
-        console.warn(`[gateway] Skipping agent "${agent.id}": ${err.message}`);
-        skippedAgents.push(String(agent.id));
+        skipAgent(String(agent.id), err.message, err.varName);
         continue;
       }
       throw err;

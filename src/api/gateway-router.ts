@@ -9,6 +9,7 @@ import { Server } from 'http';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { AgentRunner } from '../agent/runner';
 import { AgentConfig, AgentStats, ApiKey, GatewayConfig, HeartbeatResult } from '../types';
+import { agentsDirForConfig } from '../config/agent-env';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { shouldRoutePtyInput, MAX_PTY_INPUT_BYTES } from '../shell/control-channel';
 import { getWatcherHealth } from '../watch/factory';
@@ -369,9 +370,7 @@ export class GatewayRouter {
    */
   /** Filesystem root holding per-agent workspaces: <config-dir>/agents (or ~/.claude-gateway/agents). */
   private agentsRoot(): string {
-    return this.configPath
-      ? path.join(path.dirname(this.configPath), 'agents')
-      : path.join(os.homedir(), '.claude-gateway', 'agents');
+    return agentsDirForConfig(this.configPath);
   }
 
   private requireDashOrApiKey(req: Request, res: Response): boolean {

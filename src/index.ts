@@ -12,7 +12,8 @@ import { loadGatewayDotenv } from './load-dotenv';
 // which does the same before dispatching to the CLI.
 loadGatewayDotenv();
 
-import { loadConfig } from './config/loader';
+import { loadConfig, logSkippedAgents, SkippedAgent } from './config/loader';
+import { agentsDirForConfig, loadAgentEnvFiles } from './config/agent-env';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
@@ -123,38 +124,6 @@ function validateWorkspaceFast(workspacePath: string): { ok: true } | { ok: fals
     return { ok: false, reason: 'workspace missing AGENTS.md' };
   }
   return { ok: true };
-}
-
-/**
- * Load .env from a single agent's env file into process.env.
- * Values already in process.env win (existing env vars take priority).
- */
-function loadAgentEnvFile(envFile: string): void {
-  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq < 1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim();
-    if (key && process.env[key] === undefined) {
-      process.env[key] = val;
-    }
-  }
-}
-
-/**
- * Load .env files from the gateway agents directory into process.env.
- * Each agent may have a .env at ~/.claude-gateway/agents/<id>/.env
- * containing bot tokens and other secrets. Values already in process.env win.
- */
-function loadAgentEnvFiles(gatewayAgentsDir: string): void {
-  if (!fs.existsSync(gatewayAgentsDir)) return;
-  for (const agentId of fs.readdirSync(gatewayAgentsDir)) {
-    const envFile = path.join(gatewayAgentsDir, agentId, '.env');
-    if (!fs.existsSync(envFile)) continue;
-    loadAgentEnvFile(envFile);
-  }
 }
 
 // ─── Context shared between startAgent calls ──────────────────────────────────
@@ -569,9 +538,10 @@ let isShuttingDown = false;
 let registeredShutdown: ((signal: string) => Promise<void>) | null = null;
 
 async function main(): Promise<void> {
-  // Load agent .env files before config interpolation so ${TOKEN} vars resolve
-  const gatewayAgentsDir = path.join(path.dirname(CONFIG_PATH), 'agents');
-  loadAgentEnvFiles(gatewayAgentsDir);
+  // Load agent .env files before config interpolation so ${TOKEN} vars resolve.
+  // ConfigWatcher repeats this before every reload, so agents that appear later
+  // resolve too — see src/config/agent-env.ts.
+  loadAgentEnvFiles(agentsDirForConfig(CONFIG_PATH));
 
   // ── First run: create config.json with a fresh admin key if none exists ───
   const templatePath = path.join(__dirname, '..', 'config.template.json');
@@ -610,8 +580,22 @@ async function main(): Promise<void> {
   }
 
   console.log(`[gateway] Loading config from ${CONFIG_PATH}`);
-  const config: GatewayConfig = loadConfig(CONFIG_PATH);
+  // Skips are collected rather than logged inline: the structured logger needs
+  // config.gateway.logDir, so it cannot exist until this call returns. They are
+  // replayed through globalLogger below so a dropped agent is diagnosable from
+  // logs/gateway.log at startup too, not only on reload (#427).
+  const startupSkips: SkippedAgent[] = [];
+  const config: GatewayConfig = loadConfig(CONFIG_PATH, {
+    onSkippedAgent: (s) => startupSkips.push(s),
+  });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
+
+  // Created as early as logDir allows, and before the isolation guard below:
+  // a config bad enough to drop an agent is exactly the config likely to fail
+  // validation too, and a guard throw must not swallow the reason an agent
+  // went missing.
+  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+  logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
 
   // ── Context isolation check ──────────────────────────────────────────────
   const guard = new ContextIsolationGuard();
@@ -624,7 +608,6 @@ async function main(): Promise<void> {
 
   const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
   const personalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
-  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
   const logDir = expandTilde(config.gateway.logDir);
 
@@ -747,7 +730,7 @@ async function main(): Promise<void> {
   const appsConfigPath = path.join(path.dirname(CONFIG_PATH), 'apps.json');
   const appsRegistry = new AppsRegistry(appsConfigPath);
   const registryClient = new RegistryClient();
-  const agentManager = new AgentManager(CONFIG_PATH, path.join(path.dirname(CONFIG_PATH), 'agents'));
+  const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
   const socketServer = new SocketServer();
 
   // Callbacks that bridge installer events to the router (filled in after router is created)
@@ -943,12 +926,9 @@ async function main(): Promise<void> {
   configWatcher.on('agent.added', async (newAgentConfig: AgentConfig) => {
     globalLogger.info('New agent detected in config, starting dynamically', { id: newAgentConfig.id });
 
-    // Load .env for new agent so token interpolation works before startAgent
-    const agentEnvFile = path.join(gatewayAgentsDir, newAgentConfig.id, '.env');
-    if (fs.existsSync(agentEnvFile)) {
-      loadAgentEnvFile(agentEnvFile);
-    }
-
+    // The agent's .env is already in process.env: ConfigWatcher.reload() folds
+    // agents/<id>/.env in before interpolating, which is the only reason this
+    // event can fire for a ${VAR}-token agent at all (#427).
     newAgentConfig.workspace = expandTilde(newAgentConfig.workspace);
     await startAgent(newAgentConfig, configWatcher.getConfig(), ctx);
     globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
@@ -957,12 +937,6 @@ async function main(): Promise<void> {
   configWatcher.on('channel.added', async (agentId: string, channel: string) => {
     const runner = ctx.agentRunners.get(agentId);
     if (!runner) return;
-
-    // Load fresh .env so new token is available before starting receiver
-    const agentEnvFile = path.join(gatewayAgentsDir, agentId, '.env');
-    if (fs.existsSync(agentEnvFile)) {
-      loadAgentEnvFile(agentEnvFile);
-    }
 
     // Reload the agent config so runner has the new token
     const freshConfig = configWatcher.getConfig();

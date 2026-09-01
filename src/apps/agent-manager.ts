@@ -5,6 +5,7 @@ import { execSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
+import { agentsDirForConfig } from '../config/agent-env';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,7 +24,9 @@ interface RawConfig {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG_PATH = path.join(os.homedir(), '.claude-gateway', 'config.json');
-const DEFAULT_AGENTS_DIR = path.join(os.homedir(), '.claude-gateway', 'agents');
+// Derived, not declared independently: the agents dir is always config.json's
+// sibling, and the two must not be able to drift apart.
+const DEFAULT_AGENTS_DIR = agentsDirForConfig(DEFAULT_CONFIG_PATH);
 
 // ─── AgentManager ────────────────────────────────────────────────────────────
 

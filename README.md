@@ -571,7 +571,9 @@ Each key has a `key` string (supports `${ENV_VAR}` interpolation), an optional `
 
 ### Bot tokens
 
-Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loaded at startup. Use `${AGENT_BOT_TOKEN}` syntax in config to reference them, or set them as shell environment variables.
+Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loaded at startup **and before every config reload** — so an agent added to `config.json` while the gateway is running starts without a restart, even though its token only exists in a brand-new `.env`. Use `${AGENT_BOT_TOKEN}` syntax in config to reference them, or set them as shell environment variables. Lines are `KEY=value`; `#` comments and blank lines are ignored, and surrounding quotes are stripped, the same as in `~/.claude-gateway/.env`.
+
+A variable you exported yourself always wins over the `.env` file and is never replaced by a reload. A token the gateway did read from a `.env` is refreshed when that file changes, so **rotating a token takes effect on the next config reload** rather than at the next restart. Note that only `config.json` is watched — editing a `.env` by hand applies on the following reload, while the MCP `agent_create` / `agent_update` tools write both files and so take effect immediately. If a `${VAR}` cannot be resolved from anywhere, that one agent is skipped — the rest of the gateway starts normally — and the skip is logged to `logs/gateway.log` with the name of the missing variable.
 
 ---
 

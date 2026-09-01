@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
-import { loadConfig } from './loader';
+import { loadConfig, logSkippedAgents, SkippedAgent } from './loader';
+import { agentsDirForConfig, loadAgentEnvFiles } from './agent-env';
 import { AgentConfig, GatewayConfig, Logger } from '../types';
 import { createWatcher, WatchHandle } from '../watch/factory';
 import { expandHome } from '../utils/paths';
@@ -43,6 +44,7 @@ export class ConfigWatcher extends EventEmitter {
 
   private watchHandle: WatchHandle | null = null;
   private currentConfig: GatewayConfig;
+  private readonly agentsDir: string;
 
   constructor(
     private readonly configPath: string,
@@ -51,6 +53,7 @@ export class ConfigWatcher extends EventEmitter {
   ) {
     super();
     this.currentConfig = structuredClone(initialConfig);
+    this.agentsDir = agentsDirForConfig(configPath);
   }
 
   start(): void {
@@ -73,9 +76,21 @@ export class ConfigWatcher extends EventEmitter {
   }
 
   reload(): void {
+    // Fold any per-agent .env files into process.env BEFORE interpolation.
+    // An agent added while the gateway is running (MCP `agent_create`) writes
+    // its token to a brand-new agents/<id>/.env and only a ${VAR} placeholder
+    // into config.json. Without this refresh that variable is absent from
+    // process.env, loadConfig() drops the agent, the diff below sees nothing,
+    // and `agent.added` — whose handler is what used to load the .env — never
+    // fires. Issue #427.
+    loadAgentEnvFiles(this.agentsDir);
+
     let newConfig: GatewayConfig;
+    const skipped: SkippedAgent[] = [];
     try {
-      newConfig = loadConfig(this.configPath);
+      newConfig = loadConfig(this.configPath, {
+        onSkippedAgent: (s) => skipped.push(s),
+      });
       newConfig.gateway.logDir = expandHome(newConfig.gateway.logDir);
     } catch (err) {
       this.logger.error('Config reload failed, keeping current config', {
@@ -83,6 +98,10 @@ export class ConfigWatcher extends EventEmitter {
       });
       return;
     }
+
+    // Report drops before the no-change bail-out below: a silently dropped
+    // agent produces exactly zero diff, so this is the only trace it leaves.
+    logSkippedAgents(this.logger, skipped, 'Agent skipped during config reload');
 
     const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
 

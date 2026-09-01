@@ -585,4 +585,187 @@ describe('config-watcher', () => {
     expect(agentConfig.heartbeat).toBeDefined();
     expect(agentConfig.heartbeat!.rateLimitMinutes).toBe(45);
   });
+
+  // ---------------------------------------------------------------------------
+  // U-CW-11: per-agent .env files are refreshed before every reload (issue #427)
+  //
+  // MCP `agent_create` writes the real bot token to a brand-new
+  // agents/<id>/.env and only a ${VAR} placeholder into config.json. A gateway
+  // that was already running has never seen that variable, so before the fix
+  // loadConfig() dropped the agent, the diff came back empty, and `agent.added`
+  // — whose handler is what used to load the .env — never fired.
+  // ---------------------------------------------------------------------------
+  describe('U-CW-11: agent .env refresh on reload', () => {
+    const OWNED_VARS = ['CARLOS_BOT_TOKEN', 'ALFRED_DISCORD_TOKEN', 'NOWHERE_BOT_TOKEN'];
+
+    beforeEach(() => {
+      for (const v of OWNED_VARS) delete process.env[v];
+    });
+
+    afterEach(() => {
+      for (const v of OWNED_VARS) delete process.env[v];
+    });
+
+    /** Write agents/<id>/.env under the temp gateway root (sibling of config.json). */
+    function writeAgentEnv(agentId: string, contents: string): void {
+      const dir = path.join(tmpDir, 'agents', agentId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.env'), contents);
+    }
+
+    /** A raw agent entry whose telegram token is the given ${VAR} placeholder. */
+    function rawAgentWithToken(id: string, tokenPlaceholder: string): Record<string, unknown> {
+      return {
+        id,
+        description: `${id} bot`,
+        workspace: `/tmp/${id}/workspace`,
+        env: `/tmp/${id}/.env`,
+        telegram: { botToken: tokenPlaceholder },
+        claude: { model: 'claude-opus-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+      };
+    }
+
+    it('U-CW-11a: emits agent.added for an agent whose token only exists in a new agents/<id>/.env', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      const addedSpy = jest.fn();
+      watcher.on('agent.added', addedSpy);
+
+      // What agent_create does: token to a fresh .env, placeholder to config.json.
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=carlos-secret-token\n');
+      const raw = rawConfig();
+      (raw.agents as unknown[]).push(rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}'));
+      writeConfigFile(configPath, raw);
+
+      expect(process.env.CARLOS_BOT_TOKEN).toBeUndefined();
+      watcher.reload();
+
+      expect(addedSpy).toHaveBeenCalledTimes(1);
+      const added: AgentConfig = addedSpy.mock.calls[0][0];
+      expect(added.id).toBe('carlos');
+      // The placeholder must be resolved, not passed through verbatim — the
+      // receiver would authenticate with the literal "${CARLOS_BOT_TOKEN}".
+      expect(added.telegram!.botToken).toBe('carlos-secret-token');
+
+      watcher.stop();
+    });
+
+    it('U-CW-11b: emits channel.added when an existing agent gains a channel whose token is in .env', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      const channelSpy = jest.fn();
+      watcher.on('channel.added', channelSpy);
+
+      // What agent_update/add_channel does.
+      writeAgentEnv('alfred', 'ALFRED_DISCORD_TOKEN=alfred-discord-secret\n');
+      const raw = rawConfig();
+      const alfred = (raw.agents as Record<string, unknown>[])[0];
+      alfred.discord = { botToken: '${ALFRED_DISCORD_TOKEN}' };
+      writeConfigFile(configPath, raw);
+
+      watcher.reload();
+
+      expect(channelSpy).toHaveBeenCalledWith('alfred', 'discord');
+      expect(watcher.getConfig().agents[0].discord!.botToken).toBe('alfred-discord-secret');
+
+      watcher.stop();
+    });
+
+    it('U-CW-11c: logs the skip and the missing variable when no .env resolves the placeholder', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      const addedSpy = jest.fn();
+      watcher.on('agent.added', addedSpy);
+
+      // Placeholder with no .env anywhere: the agent must still be skipped
+      // rather than crash the reload — but the skip has to be visible.
+      const raw = rawConfig();
+      (raw.agents as unknown[]).push(rawAgentWithToken('nowhere', '${NOWHERE_BOT_TOKEN}'));
+      writeConfigFile(configPath, raw);
+
+      expect(() => watcher.reload()).not.toThrow();
+
+      expect(addedSpy).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Agent skipped during config reload',
+        { id: 'nowhere', reason: 'Missing environment variable: NOWHERE_BOT_TOKEN', missingVar: 'NOWHERE_BOT_TOKEN' },
+      );
+      // The healthy agents are untouched by their neighbour's bad token.
+      expect(watcher.getConfig().agents.map(a => a.id)).toEqual(['alfred', 'baerbel']);
+
+      watcher.stop();
+    });
+
+    it('U-CW-11d: does not let a per-agent .env overwrite a variable already in process.env', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      const addedSpy = jest.fn();
+      watcher.on('agent.added', addedSpy);
+
+      // An operator-exported value must win over the file on disk, otherwise
+      // reload would silently swap out a token the operator set deliberately.
+      process.env.CARLOS_BOT_TOKEN = 'from-process-env';
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=from-dotenv\n');
+      const raw = rawConfig();
+      (raw.agents as unknown[]).push(rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}'));
+      writeConfigFile(configPath, raw);
+
+      watcher.reload();
+
+      expect(addedSpy).toHaveBeenCalledTimes(1);
+      expect((addedSpy.mock.calls[0][0] as AgentConfig).telegram!.botToken).toBe('from-process-env');
+      expect(process.env.CARLOS_BOT_TOKEN).toBe('from-process-env');
+
+      watcher.stop();
+    });
+
+    it('U-CW-11e: swaps the receiver over to a rotated token without a restart', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      // agent_create: token A in a fresh .env, placeholder in config.json.
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=token-a\n');
+      const withCarlos = rawConfig();
+      (withCarlos.agents as unknown[]).push(rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}'));
+      writeConfigFile(configPath, withCarlos);
+      watcher.reload();
+      expect(watcher.getConfig().agents.find(a => a.id === 'carlos')!.telegram!.botToken)
+        .toBe('token-a');
+
+      // Token A is revoked. agent_update remove_channel strips the .env line
+      // and drops the channel from config.json...
+      const withoutChannel = rawConfig();
+      const carlosRaw = rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}');
+      delete carlosRaw.telegram;
+      (withoutChannel.agents as unknown[]).push(carlosRaw);
+      writeAgentEnv('carlos', '');
+      writeConfigFile(configPath, withoutChannel);
+      watcher.reload();
+
+      // ...then add_channel writes token B and puts the same placeholder back.
+      const channelSpy = jest.fn();
+      watcher.on('channel.added', channelSpy);
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=token-b\n');
+      writeConfigFile(configPath, withCarlos);
+      watcher.reload();
+
+      // Before the ownership ledger this resolved to the revoked token-a: the
+      // reload reported success, the receiver started, and every poll 401'd.
+      expect(channelSpy).toHaveBeenCalledWith('carlos', 'telegram');
+      expect(watcher.getConfig().agents.find(a => a.id === 'carlos')!.telegram!.botToken)
+        .toBe('token-b');
+
+      watcher.stop();
+    });
+  });
 });
