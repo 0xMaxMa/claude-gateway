@@ -727,5 +727,45 @@ describe('config-watcher', () => {
 
       watcher.stop();
     });
+
+    it('U-CW-11e: swaps the receiver over to a rotated token without a restart', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      writeConfigFile(configPath, rawConfig());
+      const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+      // agent_create: token A in a fresh .env, placeholder in config.json.
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=token-a\n');
+      const withCarlos = rawConfig();
+      (withCarlos.agents as unknown[]).push(rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}'));
+      writeConfigFile(configPath, withCarlos);
+      watcher.reload();
+      expect(watcher.getConfig().agents.find(a => a.id === 'carlos')!.telegram!.botToken)
+        .toBe('token-a');
+
+      // Token A is revoked. agent_update remove_channel strips the .env line
+      // and drops the channel from config.json...
+      const withoutChannel = rawConfig();
+      const carlosRaw = rawAgentWithToken('carlos', '${CARLOS_BOT_TOKEN}');
+      delete carlosRaw.telegram;
+      (withoutChannel.agents as unknown[]).push(carlosRaw);
+      writeAgentEnv('carlos', '');
+      writeConfigFile(configPath, withoutChannel);
+      watcher.reload();
+
+      // ...then add_channel writes token B and puts the same placeholder back.
+      const channelSpy = jest.fn();
+      watcher.on('channel.added', channelSpy);
+      writeAgentEnv('carlos', 'CARLOS_BOT_TOKEN=token-b\n');
+      writeConfigFile(configPath, withCarlos);
+      watcher.reload();
+
+      // Before the ownership ledger this resolved to the revoked token-a: the
+      // reload reported success, the receiver started, and every poll 401'd.
+      expect(channelSpy).toHaveBeenCalledWith('carlos', 'telegram');
+      expect(watcher.getConfig().agents.find(a => a.id === 'carlos')!.telegram!.botToken)
+        .toBe('token-b');
+
+      watcher.stop();
+    });
   });
 });
