@@ -42,6 +42,10 @@ describe('agent-env', () => {
 
   it('U-AE-01: derives the agents dir as the sibling of config.json', () => {
     expect(agentsDirForConfig('/srv/gw/config.json')).toBe('/srv/gw/agents');
+    // No config path: the API routers and the apps agent manager fall back to
+    // the default install root rather than resolving against the cwd.
+    expect(agentsDirForConfig()).toBe(path.join(os.homedir(), '.claude-gateway', 'agents'));
+    expect(agentsDirForConfig('')).toBe(path.join(os.homedir(), '.claude-gateway', 'agents'));
   });
 
   it('U-AE-02: folds a new agent .env into process.env', () => {
@@ -116,5 +120,16 @@ describe('agent-env', () => {
 
     expect(() => loadAgentEnvFiles(agentsDir)).not.toThrow();
     expect(process.env.ACME_BOT_TOKEN).toBe('token-a');
+  });
+
+  it('U-AE-08: strips quotes around a token, as ~/.claude-gateway/.env does', () => {
+    // Quoting is ordinary .env style. Keeping the quotes would still resolve
+    // the ${VAR}, so loadConfig() reports no skip and the only symptom is the
+    // receiver 401-ing on a token that has `"` in it.
+    writeAgentEnv('acme', 'ACME_BOT_TOKEN="123:ABC-def"\n');
+
+    loadAgentEnvFiles(agentsDir);
+
+    expect(process.env.ACME_BOT_TOKEN).toBe('123:ABC-def');
   });
 });

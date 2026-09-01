@@ -1,5 +1,7 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { parseDotenv } from '../load-dotenv';
 
 /**
  * Per-agent `.env` loading.
@@ -23,12 +25,17 @@ import * as path from 'path';
  */
 
 /**
- * The gateway's agents directory for a given config path — the sibling
- * `agents/` of `config.json`, which is where per-agent workspaces and their
- * `.env` files live.
+ * The gateway's agents directory — the sibling `agents/` of `config.json`,
+ * which is where per-agent workspaces and their `.env` files live.
+ *
+ * Falls back to `~/.claude-gateway/agents` when there is no config path: the
+ * API routers serve requests whose `configPath` may be unset, and the apps
+ * agent manager has no config path at all.
  */
-export function agentsDirForConfig(configPath: string): string {
-  return path.join(path.dirname(configPath), 'agents');
+export function agentsDirForConfig(configPath?: string): string {
+  return configPath
+    ? path.join(path.dirname(configPath), 'agents')
+    : path.join(os.homedir(), '.claude-gateway', 'agents');
 }
 
 /**
@@ -56,29 +63,24 @@ const injected = new Map<string, { file: string; value: string }>();
  * first load: if anything else has since assigned to the variable, the ledger
  * no longer matches, ownership is dropped, and the file goes back to losing.
  * Re-loading an unchanged file remains a no-op.
+ *
+ * Line syntax is `parseDotenv`'s, shared with `~/.claude-gateway/.env`, so a
+ * quoted token means the same thing in both places.
  */
 function loadAgentEnvFile(envFile: string): void {
-  for (const line of fs.readFileSync(envFile, 'utf8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq < 1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    const val = trimmed.slice(eq + 1).trim();
-    if (!key) continue;
-
+  for (const { key, value } of parseDotenv(fs.readFileSync(envFile, 'utf8'))) {
     const current = process.env[key];
     if (current === undefined) {
-      process.env[key] = val;
-      injected.set(key, { file: envFile, value: val });
+      process.env[key] = value;
+      injected.set(key, { file: envFile, value });
       continue;
     }
 
     const owned = injected.get(key);
     if (owned && owned.file === envFile && owned.value === current) {
-      if (val !== current) {
-        process.env[key] = val;
-        injected.set(key, { file: envFile, value: val });
+      if (value !== current) {
+        process.env[key] = value;
+        injected.set(key, { file: envFile, value });
       }
     }
   }

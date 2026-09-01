@@ -730,7 +730,7 @@ async function main(): Promise<void> {
   const appsConfigPath = path.join(path.dirname(CONFIG_PATH), 'apps.json');
   const appsRegistry = new AppsRegistry(appsConfigPath);
   const registryClient = new RegistryClient();
-  const agentManager = new AgentManager(CONFIG_PATH, path.join(path.dirname(CONFIG_PATH), 'agents'));
+  const agentManager = new AgentManager(CONFIG_PATH, agentsDirForConfig(CONFIG_PATH));
   const socketServer = new SocketServer();
 
   // Callbacks that bridge installer events to the router (filled in after router is created)

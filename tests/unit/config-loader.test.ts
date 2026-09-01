@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import {
   loadConfig,
+  logSkippedAgents,
   ConfigValidationError,
   DuplicateAgentIdError,
   MissingEnvVarError,
@@ -386,6 +387,45 @@ describe('config-loader', () => {
     it('U-CL-09d: omits the callback safely when no options are passed', () => {
       const configPath = writeConfig('no-options.json', ['not-an-object', healthyAgent]);
       expect(() => loadConfig(configPath)).not.toThrow();
+    });
+
+    it('U-CL-09e: logSkippedAgents writes one warn per skip, with the variable name', () => {
+      // The startup path (src/index.ts) and the reload path (ConfigWatcher)
+      // both collect skips first and replay them through this helper once a
+      // logger exists — at startup because logDir is only known after the load
+      // it is reporting on. This pins the payload both of them emit.
+      const warn = jest.fn();
+      const logger = { info: jest.fn(), warn, error: jest.fn(), debug: jest.fn() };
+
+      logSkippedAgents(
+        logger as unknown as Parameters<typeof logSkippedAgents>[0],
+        [
+          { id: 'nowhere', reason: 'Missing environment variable: X_TOKEN', missingVar: 'X_TOKEN' },
+          { id: 'broken', reason: 'missing "telegram.botToken"' },
+        ],
+        'Agent skipped at startup',
+      );
+
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenNthCalledWith(1, 'Agent skipped at startup', {
+        id: 'nowhere',
+        reason: 'Missing environment variable: X_TOKEN',
+        missingVar: 'X_TOKEN',
+      });
+      // Nothing named a variable here, so the payload carries id + reason only.
+      expect(warn).toHaveBeenNthCalledWith(2, 'Agent skipped at startup', {
+        id: 'broken',
+        reason: 'missing "telegram.botToken"',
+      });
+    });
+
+    it('U-CL-09f: logSkippedAgents is a no-op when nothing was skipped', () => {
+      const warn = jest.fn();
+      const logger = { info: jest.fn(), warn, error: jest.fn(), debug: jest.fn() };
+
+      logSkippedAgents(logger as unknown as Parameters<typeof logSkippedAgents>[0], [], 'x');
+
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 });

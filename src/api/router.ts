@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
 import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-stream';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
+import { agentsDirForConfig } from '../config/agent-env';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
@@ -898,9 +899,7 @@ export function createApiRouter(
   // ──────────────────────────────────────────────────────────────
 
   function getAgentsBaseDir(): string {
-    return configPath
-      ? path.join(path.dirname(configPath), 'agents')
-      : path.join(os.homedir(), '.claude-gateway', 'agents');
+    return agentsDirForConfig(configPath);
   }
 
   function getTelegramStateDir(agentId: string): string {
