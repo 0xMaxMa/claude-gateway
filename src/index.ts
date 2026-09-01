@@ -590,6 +590,13 @@ async function main(): Promise<void> {
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
+  // Created as early as logDir allows, and before the isolation guard below:
+  // a config bad enough to drop an agent is exactly the config likely to fail
+  // validation too, and a guard throw must not swallow the reason an agent
+  // went missing.
+  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
+  logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
+
   // ── Context isolation check ──────────────────────────────────────────────
   const guard = new ContextIsolationGuard();
   guard.validate(config.agents);
@@ -601,8 +608,6 @@ async function main(): Promise<void> {
 
   const sharedSkillsDir = path.join(os.homedir(), '.claude-gateway', 'shared-skills');
   const personalSkillsDir = path.join(os.homedir(), '.claude', 'skills');
-  const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
-  logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
   const mcpToolsDir = path.resolve(__dirname, '..', 'mcp', 'tools');
   const logDir = expandTilde(config.gateway.logDir);
 

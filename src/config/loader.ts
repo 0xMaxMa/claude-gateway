@@ -158,6 +158,7 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     skippedAgents.push(id);
     options?.onSkippedAgent?.({ id, reason, ...(missingVar ? { missingVar } : {}) });
   };
+
   let raw: string;
   try {
     raw = fs.readFileSync(configPath, 'utf-8');
