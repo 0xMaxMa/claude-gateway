@@ -73,22 +73,33 @@ function makeGatewayConfig(logDir: string): GatewayConfig {
 }
 
 
-/** Send a message and wait for response, return session_id */
+/** A conversation the gateway has already opened: its chat and the session inside it. */
+interface Conversation {
+  /** Raw chat_id — the history endpoints want it prefixed, as `api-${chatId}`. */
+  chatId: string;
+  sessionId: string;
+}
+
+/**
+ * Send a message and return the conversation it landed in.
+ *
+ * `session_id` names an existing session and no longer mints one, so the opening
+ * message omits it and adopts whatever the gateway hands back; pass that result
+ * as `conv` to append to the same session instead of starting another.
+ */
 async function sendMessage(
   app: ReturnType<GatewayRouter['getApp']>,
   agentId: string,
   message: string,
-  sessionId?: string,
-): Promise<{ sessionId: string; response: string }> {
-  // Pre-generate a stable ID used as both chat_id and session_id so that
-  // chatId in the DB (api-{chat_id}) always equals api-{returned session_id}.
-  const sid = sessionId ?? randomUUID();
+  conv?: Conversation,
+): Promise<Conversation & { response: string }> {
+  const chatId = conv?.chatId ?? randomUUID();
   const res = await supertest(app)
     .post(`/api/v1/agents/${agentId}/messages`)
     .set('X-Api-Key', API_KEY_ADMIN)
-    .send({ message, chat_id: sid, session_id: sid });
+    .send({ message, chat_id: chatId, ...(conv ? { session_id: conv.sessionId } : {}) });
   if (res.status !== 200) throw new Error(`sendMessage failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return { sessionId: res.body.session_id as string, response: res.body.response as string };
+  return { chatId, sessionId: res.body.session_id as string, response: res.body.response as string };
 }
 
 // ─── suite ───────────────────────────────────────────────────────────────────
@@ -141,7 +152,7 @@ describe('Chat History API integration (planning-50)', () => {
     const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await router.start(0);
 
-    const { sessionId } = await sendMessage(router.getApp(), 'alfred', 'Hello history!');
+    const { chatId } = await sendMessage(router.getApp(), 'alfred', 'Hello history!');
 
     // Allow history write to settle
     await new Promise((r) => setTimeout(r, 200));
@@ -153,7 +164,7 @@ describe('Chat History API integration (planning-50)', () => {
     expect(res.status).toBe(200);
     expect(res.body.chats.length).toBeGreaterThanOrEqual(1);
 
-    const chat = res.body.chats.find((c: { chatId: string }) => c.chatId === `api-${sessionId}`);
+    const chat = res.body.chats.find((c: { chatId: string }) => c.chatId === `api-${chatId}`);
     expect(chat).toBeDefined();
     expect(chat.messageCount).toBeGreaterThanOrEqual(1);
     expect(typeof chat.lastActive).toBe('number');
@@ -176,10 +187,10 @@ describe('Chat History API integration (planning-50)', () => {
     const app = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await app.start(0);
 
-    const { sessionId } = await sendMessage(app.getApp(), 'alfred', 'Tell me a story');
+    const conv = await sendMessage(app.getApp(), 'alfred', 'Tell me a story');
     await new Promise((r) => setTimeout(r, 200));
 
-    const chatId = `api-${sessionId}`;
+    const chatId = `api-${conv.chatId}`;
     const res = await supertest(app.getApp())
       .get(`/api/v1/agents/alfred/chats/${chatId}/messages`)
       .set('X-Api-Key', API_KEY_ADMIN);
@@ -213,14 +224,14 @@ describe('Chat History API integration (planning-50)', () => {
     const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await router.start(0);
 
-    const sid = 'hist-04-session';
     // Send 3 messages in the same session — produces 6 rows (3 user + 3 assistant)
-    for (let i = 0; i < 3; i++) {
-      await sendMessage(router.getApp(), 'alfred', `message-${i}`, sid);
+    let conv = await sendMessage(router.getApp(), 'alfred', 'message-0');
+    for (let i = 1; i < 3; i++) {
+      conv = await sendMessage(router.getApp(), 'alfred', `message-${i}`, conv);
     }
     await new Promise((r) => setTimeout(r, 300));
 
-    const chatId = `api-${sid}`;
+    const chatId = `api-${conv.chatId}`;
 
     // Request only 2 at a time
     const page1 = await supertest(router.getApp())
@@ -264,12 +275,12 @@ describe('Chat History API integration (planning-50)', () => {
     const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await router.start(0);
 
-    const sid = 'hist-14-session';
-    for (let i = 0; i < 3; i++) {
-      await sendMessage(router.getApp(), 'alfred', `message-${i}`, sid);
+    let conv = await sendMessage(router.getApp(), 'alfred', 'message-0');
+    for (let i = 1; i < 3; i++) {
+      conv = await sendMessage(router.getApp(), 'alfred', `message-${i}`, conv);
     }
     await new Promise((r) => setTimeout(r, 300));
-    const chatId = `api-${sid}`;
+    const chatId = `api-${conv.chatId}`;
 
     // asc → strictly ascending ts (oldest first)
     const asc = await supertest(router.getApp())
@@ -325,12 +336,11 @@ describe('Chat History API integration (planning-50)', () => {
     const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await router.start(0);
 
-    const sid = 'hist-05-session';
-    await sendMessage(router.getApp(), 'alfred', 'quantum computing is fascinating', sid);
-    await sendMessage(router.getApp(), 'alfred', 'what is the weather today', sid);
+    const conv = await sendMessage(router.getApp(), 'alfred', 'quantum computing is fascinating');
+    await sendMessage(router.getApp(), 'alfred', 'what is the weather today', conv);
     await new Promise((r) => setTimeout(r, 300));
 
-    const chatId = `api-${sid}`;
+    const chatId = `api-${conv.chatId}`;
     const res = await supertest(router.getApp())
       .get(`/api/v1/agents/alfred/chats/${chatId}/messages/search?q=quantum`)
       .set('X-Api-Key', API_KEY_ADMIN);
@@ -559,9 +569,11 @@ describe('Chat History API integration (planning-50)', () => {
     const chatId = `api-${sid}`;
     const port = ((router as unknown as { server: http.Server }).server.address() as { port: number }).port;
 
-    // Stream request — disconnect right after first data arrives
+    // Stream request — disconnect right after first data arrives.
+    // session_id is omitted: it now only names an existing session, and this chat
+    // has none yet. The gateway mints one, still under api-{chat_id}.
     await new Promise<void>((resolve) => {
-      const reqBody = JSON.stringify({ message: 'disconnect test message', chat_id: sid, session_id: sid, stream: true });
+      const reqBody = JSON.stringify({ message: 'disconnect test message', chat_id: sid, stream: true });
       const req = http.request(
         {
           hostname: '127.0.0.1',
@@ -620,14 +632,13 @@ describe('Chat History API integration (planning-50)', () => {
     const router = new GatewayRouter(new Map([['alfred', runner]]), new Map([['alfred', cfg]]), undefined, gwCfg);
     await router.start(0);
 
-    const sid = 'hist-21-session';
-    await sendMessage(router.getApp(), 'alfred', 'first day message', sid);
+    const conv = await sendMessage(router.getApp(), 'alfred', 'first day message');
     await new Promise((r) => setTimeout(r, 200));
 
-    const chatId = `api-${sid}`;
+    const chatId = `api-${conv.chatId}`;
     const now = Date.now();
     const res = await supertest(router.getApp())
-      .get(`/api/v1/agents/alfred/chats/${chatId}/messages/active-days?from=${now - 86400000}&to=${now + 86400000}&tz_offset=420&session_id=${sid}`)
+      .get(`/api/v1/agents/alfred/chats/${chatId}/messages/active-days?from=${now - 86400000}&to=${now + 86400000}&tz_offset=420&session_id=${conv.sessionId}`)
       .set('X-Api-Key', API_KEY_ADMIN);
 
     expect(res.status).toBe(200);

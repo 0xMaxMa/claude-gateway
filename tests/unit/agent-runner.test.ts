@@ -1412,28 +1412,33 @@ describe('AgentRunner — sendApiMessageStream', () => {
     ).rejects.toMatchObject({ code: 'CONFLICT' });
   }, 15000);
 
-  // T13: timeout calls onError
-  it('T13: timeout calls onError after timeout', async () => {
+  // T13: the soft timeout is a non-terminal `timeout` event, not an error (#421).
+  // It used to call onError, which told the client the request had failed while
+  // the turn was still running — and frequently still about to answer.
+  it('T13: soft timeout emits a non-terminal timeout event, not onError', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    const errorPromise = new Promise<Error>((resolve) => {
+    const onError = jest.fn();
+    const timedOut = new Promise<StreamEvent>((resolve) => {
       runner.sendApiMessageStream(
         'stream-t13',
         'test-chat',
         'timeout test',
         {
-          onChunk: () => {},
+          onChunk: (event) => { if (event.type === 'timeout') resolve(event); },
           onDone: () => {},
-          onError: (err) => resolve(err),
+          onError,
         },
         { timeoutMs: 200 }, // short timeout
       );
     });
 
-    const err = await errorPromise;
-    expect(err.message).toMatch(/timeout/i);
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    const event = await timedOut;
+    expect(event).toEqual({ type: 'timeout', message: expect.stringMatching(/timeout/i), resumable: true });
+    expect(onError).not.toHaveBeenCalled();
+    // The turn is still in flight — the hard cap, not the soft one, ends it.
+    expect(runner.hasActiveApiSession('stream-t13')).toBe(true);
   }, 15000);
 
   // T14: onClientDisconnect keeps stream alive; session freed only after result
@@ -1489,15 +1494,17 @@ describe('AgentRunner — sendApiMessageStream', () => {
     ).resolves.toBeDefined();
   }, 15000);
 
-  // T14b: response is persisted to history DB after client disconnect
+  // T14b: response is persisted to history DB after client disconnect.
+  // Since #421 the abandoned connection's callbacks go quiet on disconnect —
+  // its socket is dead, and the turn's output is delivered to whoever
+  // re-attaches instead. Persistence, which is what this test is really about,
+  // is unaffected.
   it('T14b: response persisted to history DB after client disconnect', async () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
     let onClientDisconnect: (() => void) | undefined;
-    let doneText = '';
-    let doneFiredResolve!: () => void;
-    const doneFired = new Promise<void>((res) => { doneFiredResolve = res; });
+    const onDone = jest.fn();
 
     runner.sendApiMessageStream(
       'stream-t14b',
@@ -1505,7 +1512,7 @@ describe('AgentRunner — sendApiMessageStream', () => {
       'persist after disconnect',
       {
         onChunk: () => {},
-        onDone: (text) => { doneText = text; doneFiredResolve(); },
+        onDone,
         onError: () => {},
       },
       { timeoutMs: 10000 },
@@ -1521,12 +1528,21 @@ describe('AgentRunner — sendApiMessageStream', () => {
     // Simulate Claude completing the response after disconnect
     const session = getSessions(runner).get('stream-t14b')!;
     session.emit('output', JSON.stringify({ type: 'result', result: 'Persisted response' }));
+    await new Promise(r => setTimeout(r, 100));
 
-    // onDone must still fire even though client disconnected
-    await doneFired;
-    expect(doneText).toBe('Persisted response');
+    // Nothing is written to the socket the client already closed…
+    expect(onDone).not.toHaveBeenCalled();
 
-    // History DB must contain the assistant message
+    // …but the result is still there for a client that re-attaches…
+    const replayed: Array<{ text: string }> = [];
+    const attached = runner.attachTurnStream('stream-t14b', {
+      write: () => {},
+      finish: (e) => { if (e.event.type === 'result') replayed.push({ text: e.event.text }); },
+    });
+    expect(attached.ok).toBe(true);
+    expect(replayed).toEqual([{ text: 'Persisted response' }]);
+
+    // …and history DB must contain the assistant message
     const page = runner.getHistoryDb().getMessages('api-test-chat');
     const msgs = page.messages as Array<{ role: string; content: string }>;
     const assistantMsg = msgs.find(m => m.role === 'assistant');
@@ -2226,20 +2242,23 @@ describe('AgentRunner — timeout keeps listening (#75)', () => {
     runner = new AgentRunner(agentConfig, gatewayConfig);
     await runner.start();
 
-    const errorPromise = new Promise<Error>((resolve) => {
+    const softTimeout = new Promise<void>((resolve) => {
       runner.sendApiMessageStream(
         'late-1',
         'late-chat',
         'slow turn',
-        { onChunk: () => {}, onDone: () => {}, onError: (err) => resolve(err) },
+        {
+          onChunk: (event) => { if (event.type === 'timeout') resolve(); },
+          onDone: () => {},
+          onError: () => {},
+        },
         { timeoutMs: 200 },
       );
     });
     await waitForSession(runner, 'late-1');
 
-    // Soft timeout fires and the client is told…
-    const err = await errorPromise;
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    // Soft timeout fires and the client is told the turn is running long (#421)…
+    await softTimeout;
 
     // …but the turn is still listening: register an attachment and finish late.
     const mediaDir = path.join(runner.getAgentsBaseDir(), 'alfred', 'media', 'api-late-1');
@@ -2273,7 +2292,10 @@ describe('AgentRunner — timeout keeps listening (#75)', () => {
     await waitForSession(runner, 'late-sync');
     const err = await rejected;
     expect(err).not.toBeNull();
-    expect((err as Error & { code: string }).code).toBe('TIMEOUT');
+    // TIMEOUT_SOFT, not TIMEOUT: the caller's budget elapsed but the turn is
+    // still running — which is precisely what the rest of this test asserts.
+    // The hard cap, which does end the turn, keeps the bare TIMEOUT.
+    expect((err as Error & { code: string }).code).toBe('TIMEOUT_SOFT');
 
     const session = getSessions(runner).get('late-sync')!;
     session.emit('output', JSON.stringify({ type: 'result', result: 'sync late' }));
@@ -4958,6 +4980,196 @@ describe('AgentRunner — gateway turn queue, coalesce, and /stop', () => {
     expect(liveGotSecond).toBe(true);
   }, 15000);
 });
+
+// ── Cross-channel turn persistence (one writer per layer) ────────────────────
+
+describe('AgentRunner — sendMessageToSession writes one assistant row per layer', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-dup-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  // agentsBaseDir resolves to the parent of the workspace's parent, which is the
+  // shared os.tmpdir() — so history and session files outlive a single run. Keep
+  // the ids unique per run or the counts below accumulate across invocations.
+  function uniqueIds(tag: string): { chatId: string; sessionId: string } {
+    const chatId = `xchan-${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    return { chatId, sessionId: `sess-${chatId}` };
+  }
+
+  async function driveCrossChannelTurn(
+    chatId: string,
+    sessionId: string,
+    stdoutLines: string[],
+    mutateSession?: (proc: { backend: string }) => void,
+  ): Promise<{
+    dbRows: Array<{ role: string; content: string }>;
+    jsonRows: Array<{ role: string; content: string }>;
+    forwarded: string[];
+  }> {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const forwarded: string[] = [];
+    const runnerInternals = runner as unknown as { writeAutoForward: (chatId: string, text: string, format?: string) => void };
+    const originalForward = runnerInternals.writeAutoForward.bind(runner);
+    runnerInternals.writeAutoForward = (id: string, text: string, format?: string) => {
+      forwarded.push(text);
+      return originalForward(id, text, format as 'text' | 'html' | undefined);
+    };
+
+    const donePromise = new Promise<string>((resolve, reject) => {
+      runner.sendMessageToSession(
+        chatId, 'telegram', sessionId, 'hello', undefined,
+        { onChunk: () => {}, onDone: resolve, onError: reject },
+        { timeoutMs: 5000 },
+      );
+    });
+    await new Promise(r => setTimeout(r, 250));
+
+    if (mutateSession) {
+      const proc = (runner as unknown as { sessions: Map<string, { backend: string }> }).sessions.get(chatId);
+      if (!proc) throw new Error('session not spawned');
+      mutateSession(proc);
+    }
+
+    // Feed raw stdout rather than emitting 'output' directly: SessionProcess's
+    // own parser is the session-JSON writer under test, and emitting on the
+    // EventEmitter would bypass it.
+    const rawProc = allProcesses[allProcesses.length - 1];
+    for (const line of stdoutLines) rawProc.stdout!.emit('data', Buffer.from(line + '\n'));
+    await donePromise;
+    await new Promise(r => setTimeout(r, 250));
+
+    const page = runner.getHistoryDb().getMessages(`telegram-${chatId}`);
+    const jsonRows = await (runner as unknown as {
+      sessionStore: { loadTelegramSession: (a: string, c: string, s: string, ch: string) => Promise<Array<{ role: string; content: string }>> };
+    }).sessionStore.loadTelegramSession(agentConfig.id, chatId, sessionId, 'telegram');
+    return {
+      dbRows: page.messages.map((m) => ({ role: m.role, content: m.content })),
+      jsonRows: jsonRows.map((m) => ({ role: m.role, content: m.content })),
+      forwarded,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-01: plain-text answer (no reply tool) — one row per layer
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-01: a plain-text answer is persisted once, not twice', async () => {
+    const { chatId, sessionId } = uniqueIds('plain');
+    const { dbRows, jsonRows } = await driveCrossChannelTurn(chatId, sessionId, [
+      JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'the answer' }] } }),
+      JSON.stringify({ type: 'result', result: 'the answer' }),
+    ]);
+
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'the answer' }]);
+    expect(jsonRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'the answer' }]);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-02: reply-tool answer — the reply text is stored, the trailing
+  // `result` narration is not. This is the case the duplicate write corrupted:
+  // it stored a second row holding text the user never received.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-02: a reply-tool answer stores the reply text only, never the result narration', async () => {
+    const { chatId, sessionId } = uniqueIds('reply');
+    const { dbRows, jsonRows } = await driveCrossChannelTurn(chatId, sessionId, [
+      JSON.stringify({
+        type: 'assistant',
+        stop_reason: 'tool_use',
+        message: { content: [{ type: 'tool_use', id: 'tu_1', name: 'mcp__gateway__telegram_reply', input: { text: 'the answer' } }] },
+      }),
+      JSON.stringify({ type: 'result', result: 'I sent the reply.' }),
+    ]);
+
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'the answer' }]);
+    expect(jsonRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'the answer' }]);
+    expect(dbRows.map(r => r.content)).not.toContain('I sent the reply.');
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-03: `result: ""` with streamed text (OpenRouter shape) still
+  // reaches history — the long-lived handler falls back to the turn's last
+  // assistant text for persistence (not for forwarding), so removing the
+  // producer's write loses nothing.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-03: an empty result falls back to the streamed assistant text', async () => {
+    const { chatId, sessionId } = uniqueIds('empty');
+    const { dbRows, jsonRows, forwarded } = await driveCrossChannelTurn(chatId, sessionId, [
+      JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'streamed answer' }] } }),
+      JSON.stringify({ type: 'result', result: '' }),
+    ]);
+
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'streamed answer' }]);
+    expect(jsonRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'streamed answer' }]);
+    // The fallback is persistence-only: an empty `result` also arrives between
+    // pty-shell sub-turns, so it must not post an extra message to the channel.
+    expect(forwarded).toEqual([]);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-04: the empty-result fallback must not fire on a menu turn.
+  // `forwardableText` is blanked there on purpose (the wrapper appends the menu
+  // text to the result, and the prompt row was already inserted when the menu
+  // was rendered) — falling back would resurrect the option list as a second row.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-04: a menu turn does not fall back to the assistant text', async () => {
+    const { chatId, sessionId } = uniqueIds('menu');
+    const { dbRows } = await driveCrossChannelTurn(chatId, sessionId, [
+      JSON.stringify({
+        type: 'assistant',
+        stop_reason: 'end_turn',
+        message: { content: [{ type: 'text', text: 'Pick one\n1. Alpha\n2. Beta' }] },
+      }),
+      JSON.stringify({ type: 'system', subtype: 'menu_prompt', prompt: 'Pick one', options: [{ label: 'Alpha' }, { label: 'Beta' }] }),
+      JSON.stringify({ type: 'result', result: 'Pick one' }),
+    ]);
+
+    // Exactly the prompt row written by the menu_prompt handler — no echo of the
+    // assistant text that produced it.
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'Pick one' }]);
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // T-XCHAN-DUP-05: on pty-shell `result` fires per sub-turn, so an empty result
+  // is a tool-call boundary rather than the end of the answer. The fallback must
+  // stay off there or every boundary adds a phantom row of interim narration.
+  // --------------------------------------------------------------------------
+  it('T-XCHAN-DUP-05: pty-shell sub-turn boundaries do not create phantom rows', async () => {
+    const { chatId, sessionId } = uniqueIds('pty');
+    const { dbRows } = await driveCrossChannelTurn(
+      chatId,
+      sessionId,
+      [
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'let me check the file' }] } }),
+        JSON.stringify({ type: 'result', result: '' }),
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'now running the tests' }] } }),
+        JSON.stringify({ type: 'result', result: '' }),
+        JSON.stringify({ type: 'assistant', stop_reason: 'end_turn', message: { content: [{ type: 'text', text: 'all green' }] } }),
+        JSON.stringify({ type: 'result', result: 'all green' }),
+      ],
+      (proc) => { proc.backend = 'pty-shell'; },
+    );
+
+    expect(dbRows.filter(r => r.role === 'assistant')).toEqual([{ role: 'assistant', content: 'all green' }]);
+  }, 15000);
+});
+
 
 // ── Silent drop: the turn's SECOND reply call is rejected (Issue #422) ────────
 // A long turn that posts an interim progress update and then a final report gets

@@ -77,6 +77,16 @@ class MockAgentRunner extends EventEmitter {
     return this._activeApiSessions.has(sessionId);
   }
 
+  /** Whether a client-supplied session_id is treated as registered. Flip to test the 404. */
+  sessionExists = true;
+  /** Every (chatId, sessionId) the router asked about, in order. */
+  existsLookups: Array<{ chatId: string; sessionId: string }> = [];
+
+  async apiSessionExists(chatId: string, sessionId: string): Promise<boolean> {
+    this.existsLookups.push({ chatId, sessionId });
+    return this.sessionExists;
+  }
+
   markSessionActive(sessionId: string): void {
     this._activeApiSessions.add(sessionId);
   }
@@ -121,8 +131,12 @@ const apiKeys: ApiKey[] = [
   { key: 'sk-test-write', agents: [AGENT_ID], write: true },
 ];
 
-function buildApp(runnerImpl: (sessionId: string, chatId: string, msg: string) => Promise<{ text: string; attachments: import('../../src/types').ApiAttachment[] }>) {
+function buildApp(
+  runnerImpl: (sessionId: string, chatId: string, msg: string) => Promise<{ text: string; attachments: import('../../src/types').ApiAttachment[] }>,
+  configure?: (runner: MockAgentRunner) => void,
+) {
   const runner = new MockAgentRunner(runnerImpl);
+  configure?.(runner);
   const runners = new Map([[AGENT_ID, runner as unknown as import('../../src/agent/runner').AgentRunner]]);
   const configs = new Map([[AGENT_ID, agentConfig]]);
   const app = express();
@@ -170,7 +184,7 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
     expect(typeof res.body.duration_ms).toBe('number');
   });
 
-  it('echoes back provided session_id', async () => {
+  it('echoes back a session_id that already exists', async () => {
     const app = buildApp(async () => ({ text: 'ok', attachments: [] }));
     const res = await supertest.default(app)
       .post(POST_URL)
@@ -178,6 +192,50 @@ describe('POST /api/v1/agents/:agentId/messages', () => {
       .send({ message: 'ping', chat_id: 'test-chat', session_id: 'my-session-001' });
     expect(res.status).toBe(200);
     expect(res.body.session_id).toBe('my-session-001');
+  });
+
+  it('returns 404 for a session_id that does not exist, instead of minting it', async () => {
+    let reached = false;
+    const app = buildApp(
+      async () => { reached = true; return { text: 'ok', attachments: [] }; },
+      (runner) => { runner.sessionExists = false; },
+    );
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'ping', chat_id: 'test-chat', session_id: 'never-created' });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('SESSION_NOT_FOUND');
+    // The old behaviour ran the turn under a freshly-invented session. Nothing
+    // may reach the runner once the id is rejected.
+    expect(reached).toBe(false);
+  });
+
+  it('scopes the session_id existence check to the request chat_id', async () => {
+    let seen: Array<{ chatId: string; sessionId: string }> = [];
+    const app = buildApp(
+      async () => ({ text: 'ok', attachments: [] }),
+      (runner) => { seen = runner.existsLookups; },
+    );
+    await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'ping', chat_id: 'chat-a', session_id: 'sess-1' });
+    expect(seen).toEqual([{ chatId: 'chat-a', sessionId: 'sess-1' }]);
+  });
+
+  it('does not check existence when session_id is omitted — the gateway mints one', async () => {
+    let seen: Array<{ chatId: string; sessionId: string }> = [];
+    const app = buildApp(
+      async () => ({ text: 'ok', attachments: [] }),
+      (runner) => { seen = runner.existsLookups; },
+    );
+    const res = await supertest.default(app)
+      .post(POST_URL)
+      .set(AUTH)
+      .send({ message: 'ping', chat_id: 'test-chat' });
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([]);
   });
 
   it('generates a uuid session_id when not provided', async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -18,6 +19,15 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 import { isBuiltinCommand } from './builtin-commands';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
+import {
+  TurnStreamRegistry,
+  callbackSink,
+  errorEvent,
+  resultEvent,
+  turnStreamKey,
+  type ApiStreamCallbacks,
+  type TurnSink,
+} from './turn-stream';
 import { runRecovery, toRecoveryOutcome, type RecoveryEffects, type RecoveryRequest } from './recovery-executor';
 import { initialBudget, type BudgetState } from './recovery-policy';
 import { scrubText } from './incident';
@@ -212,6 +222,12 @@ export class AgentRunner extends EventEmitter {
 
   // Tracks session IDs with an in-flight API request (prevents concurrent turns)
   private readonly pendingApiSessions = new Set<string>();
+
+  // Per-session buffer of the current turn's stream events, so a disconnected or
+  // timed-out client can re-attach and pick the turn back up (#421). Distinct
+  // from pendingApiSessions: that clears the moment the turn settles, this one
+  // survives it for the replay grace window.
+  private readonly turnStreams = new TurnStreamRegistry();
 
   // Serialises concurrent getOrSpawnSession calls for the same key to prevent double-spawn
   private readonly sessionSpawnLocks = new Map<string, Promise<SessionProcess>>();
@@ -1596,6 +1612,14 @@ export class AgentRunner extends EventEmitter {
       // so the result's plain-text auto-forward is skipped (no duplicate message).
       let menuSentThisTurn = false;
       let menuPromptTextThisTurn = '';
+      // Text of the most recent assistant message this turn. Used only as a
+      // fallback when the turn's `result` is an empty string — some backends
+      // (OpenRouter) stream the answer as assistant text and then close the turn
+      // with `result: ""`, which would otherwise leave the history DB with no row
+      // for the reply. Replaced, never appended: assistant messages arrive as
+      // cumulative snapshots, so the last one is the complete text (same
+      // semantics as `result`).
+      let lastAssistantTextThisTurn = '';
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
       const replyToolName =
@@ -1619,8 +1643,13 @@ export class AgentRunner extends EventEmitter {
 
           // Track reply tool calls and persist assistant messages to history
           if (obj['type'] === 'assistant') {
-            const msg = obj['message'] as { content?: Array<{ type: string; name?: string; input?: Record<string, unknown> }> } | undefined;
+            const msg = obj['message'] as { content?: Array<{ type: string; name?: string; text?: string; input?: Record<string, unknown> }> } | undefined;
             if (Array.isArray(msg?.content)) {
+              const textThisMessage = msg!.content
+                .filter((b) => b.type === 'text' && typeof b.text === 'string')
+                .map((b) => b.text as string)
+                .join('');
+              if (textThisMessage.trim()) lastAssistantTextThisTurn = textThisMessage;
               for (const block of msg!.content) {
                 // Skill-learning: count every tool_use this turn (deduped by block
                 // id inside the manager, since cumulative assistant snapshots re-emit
@@ -1870,8 +1899,26 @@ export class AgentRunner extends EventEmitter {
                 forwardableText = '';
               }
             }
-            if (!isSocketError && !isRequestTooLarge && forwardableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
-              const text = forwardableText;
+            // A backend that closes the turn with `result: ""` after streaming the
+            // answer as assistant text (OpenRouter) leaves nothing to store here.
+            // SessionProcess still appends that text to the session JSON, so the
+            // history DB would be the only layer missing the reply — and the
+            // cross-channel producer used to hide that by writing a second copy of
+            // every reply (see sendMessageToSession's done()). Persist the fallback
+            // instead, but only for the shape it was written for: an *empty* result
+            // ending a whole turn on the headless backend.
+            //   • A menu turn is excluded because `forwardableText` above may have
+            //     been blanked on purpose — falling back there would resurrect the
+            //     option list the strip removed and duplicate the prompt row
+            //     already inserted when the menu was rendered.
+            //   • pty-shell is excluded because its `result` fires per sub-turn, so
+            //     every tool-call boundary with an empty result would add a phantom
+            //     row of that sub-turn's narration.
+            // Forwarding deliberately keeps using forwardableText alone: recovering
+            // a missing history row is not a reason to post a new channel message.
+            const canFallBack = !menuSentThisTurn && proc.backend !== 'pty-shell';
+            const persistableText = forwardableText || (canFallBack ? lastAssistantTextThisTurn.trim() : '');
+            if (!isSocketError && !isRequestTooLarge && persistableText && !proc.queryMode && !replyCalled && !isThinkingCorruption) {
               const channelSrcForResult = this.channelSourceMap.get(mapKey) ?? 'telegram';
               // Persist assistant reply to permanent history DB
               this.historyDb.insertMessage({
@@ -1879,31 +1926,33 @@ export class AgentRunner extends EventEmitter {
                 sessionId: actualSessionId,
                 source: channelSrcForResult as HistorySource,
                 role: 'assistant',
-                content: text,
+                content: persistableText,
                 ts: Date.now(),
               });
-              // Forward to channel. LINE has no .forward consumer — the gateway
-              // delivers via LineReplyManager (free reply, or cache + postback
-              // button when slow) instead of writeAutoForward.
-              const channelText = normalizeTelegramLineBreaks(text)
-              if (channelSrcForResult === 'line' && this.lineReply) {
-                void this.lineReply.onAnswer(mapKey, channelText)
-              } else if (
-                channelSrcForResult !== 'discord' &&
-                channelSrcForResult !== 'slack' &&
-                (hasMarkdown(channelText) || containsTelegramHtml(channelText))
-              ) {
-                // Telegram HTML entities — Slack has its own mrkdwn format and
-                // would display these tags literally, so Slack skips this and
-                // falls through to the plain-text branch below.
-                this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html', replySendFailed);
-              } else {
-                this.writeAutoForward(mapKey, channelText, 'text', replySendFailed);
+              if (forwardableText) {
+                // Forward to channel. LINE has no .forward consumer — the gateway
+                // delivers via LineReplyManager (free reply, or cache + postback
+                // button when slow) instead of writeAutoForward.
+                const channelText = normalizeTelegramLineBreaks(forwardableText)
+                if (channelSrcForResult === 'line' && this.lineReply) {
+                  void this.lineReply.onAnswer(mapKey, channelText)
+                } else if (
+                  channelSrcForResult !== 'discord' &&
+                  channelSrcForResult !== 'slack' &&
+                  (hasMarkdown(channelText) || containsTelegramHtml(channelText))
+                ) {
+                  // Telegram HTML entities — Slack has its own mrkdwn format and
+                  // would display these tags literally, so Slack skips this and
+                  // falls through to the plain-text branch below.
+                  this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html', replySendFailed);
+                } else {
+                  this.writeAutoForward(mapKey, channelText, 'text', replySendFailed);
+                }
+                // Assistant output reached the channel — mark the turn delivered so
+                // a later recovery does not resend a message that was answered (C1).
+                const lt = this.lastTurn.get(mapKey);
+                if (lt) lt.delivered = true;
               }
-              // Assistant output reached the channel — mark the turn delivered so
-              // a later recovery does not resend a message that was answered (C1).
-              const lt = this.lastTurn.get(mapKey);
-              if (lt) lt.delivered = true;
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
@@ -1913,6 +1962,7 @@ export class AgentRunner extends EventEmitter {
             pendingLineImageMedia.clear();
             menuSentThisTurn = false;
             menuPromptTextThisTurn = '';
+            lastAssistantTextThisTurn = '';
             // In pty-shell mode, a `result` fires after every Claude API sub-turn
             // (there can be many per user message, separated by tool-call gaps of
             // arbitrary length). Starting the typing-done timer here would stop
@@ -2943,6 +2993,8 @@ export class AgentRunner extends EventEmitter {
       clearTimeout(buf.timer);
     }
     this.channelCoalesce.clear();
+    // Drops every turn record and its replay-grace timer (#421).
+    this.turnStreams.clear();
     // Receiver teardown now resolves only once the child has exited, so it must
     // be awaited or shutdown() can exit the gateway out from under a receiver
     // that is still shutting down (issue #405). Run it concurrently with session
@@ -3195,13 +3247,13 @@ export class AgentRunner extends EventEmitter {
         resolve({ text: finalText, attachments });
       };
 
-      const fail = (err: Error) => {
+      const fail = (err: Error, partialText?: string) => {
         if (settled) return;
         settled = true;
         // Terminal close for a turn that produced no result (#75): record it so
         // history does not end on a dangling user message, and drain the
         // attachment buffer so nothing leaks into the next turn.
-        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
+        this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage, partialText);
         cleanup();
         reject(err); // no-op when the soft timeout already rejected
       };
@@ -3224,7 +3276,10 @@ export class AgentRunner extends EventEmitter {
           done(buffer.join(''), true);
           return;
         }
-        fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+        // Whatever streamed before the crash is real work the caller may already
+        // have read; persist it alongside the notice rather than replacing it,
+        // exactly as the hard cap below does.
+        fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
       };
 
       const cleanup = () => {
@@ -3295,10 +3350,17 @@ export class AgentRunner extends EventEmitter {
       // bounds a genuinely hung turn.
       let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
       const globalTimer = setTimeout(() => {
-        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+        // TIMEOUT_SOFT: the caller's budget elapsed, the turn has not. The hard
+        // cap below rejects nobody — the promise is already settled — but it
+        // does stop the turn, so only IT gets the terminal TIMEOUT.
+        reject(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
         hardCapTimer = setTimeout(() => {
+          // Interrupt before clearing the processing flag — interrupt() no-ops
+          // once `_processing` is false. See the streaming path for why the cap
+          // stops the turn instead of only detaching from it.
+          session.interrupt();
           session.setProcessing(false);
-          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+          fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }), buffer.join(''));
         }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
       }, opts.timeoutMs);
 
@@ -3316,18 +3378,16 @@ export class AgentRunner extends EventEmitter {
    * Send a message to an API session and stream back events via callbacks.
    *
    * Returns a disconnect handler for the caller to wire to the SSE close event.
-   * On client disconnect the stream continues server-side until the result is saved to DB.
+   * It detaches this caller's sink; the turn keeps running, keeps buffering, and
+   * stays re-attachable via attachTurnStream() until the replay grace window
+   * expires (#421).
    */
   async sendApiMessageStream(
     sessionId: string,
     chatId: string,
     message: string,
-    callbacks: {
-      onChunk: (event: StreamEvent) => void;
-      onDone: (fullText: string, attachments: ApiAttachment[]) => void;
-      onError: (err: Error) => void;
-    },
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams },
+    callbacks: ApiStreamCallbacks,
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; requestId?: string },
   ): Promise<() => void> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -3390,16 +3450,12 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
-    let clientGone = false;
-    // onError must fire at most once per turn. The soft timeout notifies the
-    // client directly (below) WITHOUT setting `settled`, so the later hard-cap
-    // fail() would otherwise call onError a second time.
-    let errorNotified = false;
-    const notifyError = (err: Error) => {
-      if (errorNotified) return;
-      errorNotified = true;
-      callbacks.onError(err);
-    };
+    // The turn's event buffer. Every emission below records into it whether or
+    // not anyone is listening; the sink decides only what reaches a socket, so a
+    // disconnect no longer costs the client the rest of the turn (#421).
+    const turn = this.turnStreams.start(turnStreamKey('api', sessionId), opts.requestId ?? randomUUID());
+    const initialSink = callbackSink(callbacks);
+    turn.attach(initialSink, 0);
     // Track partial message text for delta computation (--include-partial-messages)
     let lastPartialText = '';
     // Accumulate tool_use blocks from stream_event (content_block_start → delta → stop)
@@ -3445,10 +3501,10 @@ export class AgentRunner extends EventEmitter {
           ts: streamAssistantTs,
         });
       }
-      callbacks.onDone(finalText, attachments);
+      this.turnStreams.complete(turn, resultEvent(finalText, attachments));
     };
 
-    const fail = (err: Error) => {
+    const fail = (err: Error, partialText?: string) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -3456,8 +3512,8 @@ export class AgentRunner extends EventEmitter {
       // history does not end on a dangling user message (the web reads that
       // state as "still thinking" and spins forever), and drain the attachment
       // buffer so nothing leaks into the next turn.
-      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage);
-      notifyError(err);
+      this.persistFailedApiTurn(chatId, sessionId, err, opts.skipUserMessage, partialText);
+      this.turnStreams.complete(turn, errorEvent(err), err);
     };
 
     // The subprocess died without ever emitting a final `result` line (crash,
@@ -3478,7 +3534,11 @@ export class AgentRunner extends EventEmitter {
         done(buffer.join(''), true);
         return;
       }
-      fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }));
+      // Whatever streamed before the crash is real work the client may already
+      // have rendered; persist it alongside the notice rather than replacing it,
+      // exactly as the hard cap below does. A crash is the case partialText was
+      // added for — the client saw the deltas and no `result` will ever land.
+      fail(Object.assign(new Error('Session process exited unexpectedly before responding.'), { code: 'PROCESS_EXITED' }), buffer.join(''));
     };
 
     const cleanup = () => {
@@ -3489,9 +3549,12 @@ export class AgentRunner extends EventEmitter {
       this.pendingApiSessions.delete(sessionId);
     };
 
-    // Called when the SSE client disconnects. Marks clientGone so SSE writes
-    // fail silently, but keeps onOutput listening so the result is still saved to DB.
-    const onClientDisconnect = () => { clientGone = true; };
+    // Called when the SSE client disconnects. Detaches that connection's sink —
+    // the producer below keeps recording, so a re-attach can still deliver
+    // everything that arrived while nobody was listening (#421). Passing the
+    // sink means a stale close from a superseded connection cannot silence the
+    // one that replaced it.
+    const onClientDisconnect = () => { turn.detach(initialSink); };
 
     const onOutput = (line: string) => {
       try {
@@ -3507,13 +3570,13 @@ export class AgentRunner extends EventEmitter {
               if (block.type === 'text' && block.text) fullText += block.text;
               // PTY mode (headless=false) emits tool_use blocks inside assistant messages
               if (block.type === 'tool_use' && block.name && block.id) {
-                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+                turn.emit({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
               }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
+              turn.emit({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
@@ -3524,16 +3587,16 @@ export class AgentRunner extends EventEmitter {
           const text = (obj['text'] as string) ?? '';
           if (text) {
             buffer.push(text);
-            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+            turn.emit({ type: 'text_delta', text });
           }
         }
 
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, (event) => turn.emit(event), (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+          turn.emit({ type: 'text_delta', text });
         });
 
         // Text from delta field (other formats)
@@ -3541,16 +3604,13 @@ export class AgentRunner extends EventEmitter {
           const deltaText = (obj['delta'] as Record<string, unknown> | undefined)?.['text'] as string | undefined;
           if (deltaText) {
             buffer.push(deltaText);
-            if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: deltaText });
+            turn.emit({ type: 'text_delta', text: deltaText });
           }
         }
 
         // Thinking
         if (obj['type'] === 'thinking') {
-          if (!clientGone) callbacks.onChunk({
-            type: 'thinking',
-            text: (obj['text'] as string) ?? '',
-          });
+          turn.emit({ type: 'thinking', text: (obj['text'] as string) ?? '' });
         }
 
         // Result = end of turn
@@ -3571,24 +3631,40 @@ export class AgentRunner extends EventEmitter {
       }
     };
 
-    // Soft timeout (#75): tell the SSE client now, but KEEP the output listener
-    // attached — exactly like onClientDisconnect — so a turn that finishes a few
-    // seconds past the budget still lands in history with its attachments
+    // Soft timeout (#75, reworked in #421): tell the client the budget elapsed,
+    // but say so with a NON-terminal `timeout` event rather than an `error`. The
+    // turn is not cancelled — the output listener stays attached so a turn that
+    // finishes a few seconds late still lands in history with its attachments
     // (observed: 304s image turn vs 300s budget → image generated, reply lost,
-    // spinner stuck). The hard cap bounds a genuinely hung turn.
+    // spinner stuck) — and the buffer keeps recording, so whether the client
+    // stays on this connection or reconnects to …/stream, it still gets the
+    // reply. Reporting a still-running turn as `error` was the bug: history
+    // gained a message no live client could ever see. The hard cap below bounds
+    // a genuinely hung turn and IS a real error.
     let hardCapTimer: ReturnType<typeof setTimeout> | undefined;
     const globalTimer = setTimeout(() => {
-      clientGone = true;
-      try {
-        notifyError(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
-      } catch { /* client already gone */ }
+      turn.emit({ type: 'timeout', message: 'Agent response timeout', resumable: true });
       // The session stays in-flight (pendingApiSessions) until the hard cap so a
       // retry on the SAME session_id gets a 409 CONFLICT rather than interleaving
       // with the subprocess that is still processing this turn. This lock is
-      // intentionally held for the whole soft→hard window (see API.md §409).
+      // intentionally held for the whole soft→hard window (see API.md §409) —
+      // resuming the turn goes through …/stream, which is never a conflict.
       hardCapTimer = setTimeout(() => {
+        // Genuinely end the turn rather than just unsubscribing from it. The old
+        // cleanup() only did `session.off('output')`, so past the cap the
+        // subprocess kept running and kept burning tokens while its eventual
+        // `result` line was parsed by nobody — the worst of both worlds, and the
+        // reason the `⚠️` row this writes could contradict a turn that was still
+        // alive. After the interrupt the row is simply true.
+        //
+        // ORDER MATTERS: interrupt() gates on `_processing` and no-ops once it
+        // is false, so it must come BEFORE setProcessing(false).
+        session.interrupt();
         session.setProcessing(false);
-        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }));
+        // Whatever the turn did stream before the cap is real work the client
+        // may already have rendered; persist it alongside the notice instead of
+        // replacing it, exactly as the /stop path does.
+        fail(Object.assign(new Error('Agent response timed out.'), { code: 'TIMEOUT' }), buffer.join(''));
       }, API_TIMEOUT_HARD_CAP_EXTRA_MS);
     }, opts.timeoutMs);
 
@@ -3650,6 +3726,56 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * Attach a sink to a session's current turn stream (#421) — the server half of
+   * "resume a turn on a new connection".
+   *
+   * Replays every buffered event after `afterSeq` and then, if the turn is still
+   * running, installs `sink` as the live one. Both happen in one synchronous
+   * block inside TurnStream.attach, so nothing can slip through the seam.
+   *
+   * Returns a `detach` handler on success, or a reason the attach could not be
+   * honoured:
+   *  - `gone`      — no record: the turn never existed, or its replay grace
+   *                  window has expired. The client should read history instead.
+   *  - `mismatch`  — a record exists but for a different request_id, i.e. the
+   *                  turn the client asked for is already over.
+   *  - `truncated` — a non-zero cursor sits inside a region the bounded buffer
+   *                  has already evicted, so a gapless replay is impossible. A
+   *                  cursor-less attach is never truncated: it has no seam to
+   *                  keep, and takes whatever tail is still buffered.
+   *
+   * Looks only under the `api` namespace: this is the API resume endpoint, and a
+   * channel turn on the same session id is a different turn (see turnStreamKey).
+   */
+  attachTurnStream(
+    sessionId: string,
+    sink: TurnSink,
+    opts: { afterSeq?: number; requestId?: string } = {},
+  ): { ok: true; requestId: string; detach: () => void } | { ok: false; reason: 'gone' | 'mismatch' | 'truncated' | 'ahead' } {
+    const turn = this.turnStreams.get(turnStreamKey('api', sessionId));
+    if (!turn) return { ok: false, reason: 'gone' };
+    if (opts.requestId && opts.requestId !== turn.requestId) return { ok: false, reason: 'mismatch' };
+    const failure = turn.attach(sink, opts.afterSeq ?? 0);
+    if (failure) return { ok: false, reason: failure };
+    return { ok: true, requestId: turn.requestId, detach: () => turn.detach(sink) };
+  }
+
+  /**
+   * Identity and wall-clock start of the session's current API turn, or undefined
+   * when there is no resumable record.
+   *
+   * The resume endpoint needs both *before* it attaches, because attach() replays
+   * synchronously into a sink built from them: `startedAt` so a replayed terminal
+   * frame reports `duration_ms` for the turn rather than for the reconnect, and
+   * `requestId` so a client that reconnected without one still learns the token it
+   * needs to resume again from a cursor.
+   */
+  turnStreamInfo(sessionId: string): { requestId: string; startedAt: number } | undefined {
+    const turn = this.turnStreams.get(turnStreamKey('api', sessionId));
+    return turn ? { requestId: turn.requestId, startedAt: turn.startedAt } : undefined;
+  }
+
+  /**
    * Register file paths as attachments for the current API session turn.
    * Called by the api_reply MCP tool via the attachments endpoint.
    * Files must be absolute paths within the agent's media directory.
@@ -3670,12 +3796,18 @@ export class AgentRunner extends EventEmitter {
    * assistant row so history never ends on a dangling user message.
    * System-initiated turns (skipUserMessage) have nothing dangling to close —
    * only the buffer is drained.
+   *
+   * `partialText` is whatever the turn already streamed before it died. It is
+   * prepended rather than discarded, so the single row this writes carries both
+   * the work the client saw and the notice — never a failure row that erases a
+   * half-finished reply, and never a failure row *plus* a separate reply row
+   * (the callers' `settled` guard makes done() and fail() mutually exclusive).
    */
-  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean): void {
+  private persistFailedApiTurn(chatId: string, sessionId: string, err: Error, skipUserMessage?: boolean, partialText?: string): void {
     const attachments = this.popApiAttachments(sessionId);
     if (skipUserMessage) return;
     const failTs = Date.now();
-    const content = `\u26a0\ufe0f ${err.message}`;
+    const content = [partialText?.trim(), `\u26a0\ufe0f ${err.message}`].filter(Boolean).join('\n\n');
     this.sessionStore
       .appendMessage(this.agentConfig.id, sessionId, { role: 'assistant', content, ts: failTs })
       .catch(() => {});
@@ -4015,6 +4147,15 @@ export class AgentRunner extends EventEmitter {
     return this.sessionStore.listSessions(this.agentConfig.id, chatId, 'api');
   }
 
+  /**
+   * Does `sessionId` already exist under `chatId`? The API layer calls this before
+   * honouring a client-supplied `session_id`, so an unknown id is rejected instead
+   * of silently becoming a brand-new session. Read-only — it never registers.
+   */
+  async apiSessionExists(chatId: string, sessionId: string): Promise<boolean> {
+    return this.sessionStore.apiSessionExists(this.agentConfig.id, chatId, sessionId);
+  }
+
   async createApiSession(chatId: string, prompt?: string, name?: string): Promise<import('../types').SessionMeta> {
     const sessionName = name ?? (prompt
       ? (prompt.length > 60 ? `${prompt.slice(0, 60)}...` : prompt)
@@ -4093,7 +4234,10 @@ export class AgentRunner extends EventEmitter {
   /**
    * Send a message into an existing channel session (cross-channel continuation from UI).
    * The session process receives full history context from the session JSON (Layer 1).
-   * The reply is streamed back via SSE callbacks and persisted to history DB.
+   * The reply is streamed back via SSE callbacks; persistence is *not* this
+   * method's job. A channel session already has two session-bound writers — the
+   * long-lived output handler installed in spawnSession, and SessionProcess's own
+   * parser — and writing here as well produced a second row per turn. See done().
    */
   async sendMessageToSession(
     rawChatId: string,
@@ -4101,12 +4245,8 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     message: string,
     senderName: string | undefined,
-    callbacks: {
-      onChunk: (event: StreamEvent) => void;
-      onDone: (fullText: string) => void;
-      onError: (err: Error) => void;
-    },
-    opts: { timeoutMs: number },
+    callbacks: ApiStreamCallbacks,
+    opts: { timeoutMs: number; requestId?: string },
   ): Promise<() => void> {
     // Ensure the session process uses the correct channel source
     this.channelSourceMap.set(rawChatId, channel);
@@ -4134,38 +4274,54 @@ export class AgentRunner extends EventEmitter {
 
     const buffer: string[] = [];
     let settled = false;
-    let clientGone = false;
     let lastPartialText = '';
+    // Same event plumbing as the API path (#421) — one mechanism, not a
+    // per-producer copy. The key is namespaced per producer (turnStreamKey), so
+    // a channel turn and an API turn on one session id cannot displace each
+    // other's record. Re-attaching is *not* part of the deal here: the resume
+    // endpoint looks under `api` only, so this record exists to drive the live
+    // sink and is released the moment the turn ends (see done()/fail()).
+    const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), opts.requestId ?? randomUUID());
+    const initialSink = callbackSink(callbacks);
+    turn.attach(initialSink, 0);
     const toolBlocks = new Map<number, { id: string; name: string; chunks: string[] }>();
 
     const done = (result: string) => {
       if (settled) return;
       settled = true;
       cleanup();
-      if (result.trim()) {
-        const uiAssistantTs = Date.now();
-        this.sessionStore.appendTelegramMessage(this.agentConfig.id, rawChatId, sessionId, {
-          role: 'assistant',
-          content: result.trim(),
-          ts: uiAssistantTs,
-        }, channel).catch(() => {});
-        this.historyDb.insertMessage({
-          chatId: `${channel}-${rawChatId}`,
-          sessionId,
-          source: channel as HistorySource,
-          role: 'assistant',
-          content: result.trim(),
-          ts: uiAssistantTs,
-        });
-      }
-      callbacks.onDone(result.trim());
+      // Deliberately does NOT persist the reply. This turn targets a *channel*
+      // session, and channel sessions already have two writers that are bound to
+      // the session rather than to this turn:
+      //   • history DB  — the long-lived proc.on('output') handler installed in
+      //     spawnSession, which writes either the reply-tool text or the result
+      //     text (and deliberately suppresses socket errors, request_too_large
+      //     and corrupted-thinking output).
+      //   • session JSON — SessionProcess's own parser, which appends for every
+      //     `source !== 'api'` session.
+      // Writing here as well produced two rows per cross-channel turn, and after
+      // a reply-tool turn the second row held the model's trailing `result`
+      // narration — text the user never received on the channel. The API path
+      // (sendApiMessage*) still persists its own reply: there neither writer
+      // exists, because `source === 'api'` disables SessionProcess's append and
+      // API sessions get no channel output handler.
+      //
+      // No-op once the soft timeout has answered: TurnStream.complete() keeps
+      // its first terminal frame.
+      //
+      // Released rather than kept for the replay grace window: this turn is filed
+      // under the channel namespace and attachTurnStream() only looks under `api`,
+      // so nothing can re-attach to it. See API.md — the live view is documented
+      // as non-resumable, and holding its buffer for two minutes would cost
+      // memory no client can spend.
+      this.turnStreams.completeAndRelease(turn, resultEvent(result.trim(), []));
     };
 
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      callbacks.onError(err);
+      this.turnStreams.completeAndRelease(turn, errorEvent(err), err);
     };
 
     let globalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4175,7 +4331,7 @@ export class AgentRunner extends EventEmitter {
       session.off('output', onOutput);
     };
 
-    const onClientDisconnect = () => { clientGone = true; };
+    const onClientDisconnect = () => { turn.detach(initialSink); };
 
     const onOutput = (line: string) => {
       try {
@@ -4188,27 +4344,27 @@ export class AgentRunner extends EventEmitter {
               if (block.type === 'text' && block.text) fullText += block.text;
               // PTY mode (headless=false) emits tool_use blocks inside assistant messages
               if (block.type === 'tool_use' && block.name && block.id) {
-                if (!clientGone) callbacks.onChunk({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
+                turn.emit({ type: 'tool_use', name: block.name, id: block.id, input: block.input as Record<string, unknown> | undefined });
               }
             }
             if (fullText.length > lastPartialText.length) {
               const delta = fullText.slice(lastPartialText.length);
               buffer.push(delta);
-              if (!clientGone) callbacks.onChunk({ type: 'text_delta', text: delta });
+              turn.emit({ type: 'text_delta', text: delta });
             }
             lastPartialText = fullText;
           }
         }
         if (obj['type'] === 'text') {
           const text = (obj['text'] as string) ?? '';
-          if (text) { buffer.push(text); if (!clientGone) callbacks.onChunk({ type: 'text_delta', text }); }
+          if (text) { buffer.push(text); turn.emit({ type: 'text_delta', text }); }
         }
         // stream_event from --output-format stream-json (tool_use + text_delta)
-        this._applyStreamEvent(obj, toolBlocks, clientGone ? () => {} : callbacks.onChunk, (text) => {
+        this._applyStreamEvent(obj, toolBlocks, (event) => turn.emit(event), (text) => {
           buffer.push(text);
           // Update lastPartialText so the final 'assistant' message won't re-send the full text
           lastPartialText += text;
-          if (!clientGone) callbacks.onChunk({ type: 'text_delta', text });
+          turn.emit({ type: 'text_delta', text });
         });
         if (obj['type'] === 'result') {
           session.setProcessing(false);
@@ -4221,7 +4377,17 @@ export class AgentRunner extends EventEmitter {
 
     globalTimer = setTimeout(() => {
       session.setProcessing(false);
-      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT' }));
+      // TIMEOUT_SOFT, not TIMEOUT: this path has no hard cap and no resume
+      // endpoint, so the turn keeps running with nobody listening on the wire
+      // and its result lands in history alone. The API hard cap interrupts the
+      // turn and means the opposite — see the code vocabulary on StreamEvent's
+      // `error`.
+      //
+      // Detaching this turn's listener here costs nothing: this producer no
+      // longer persists anything (see done()). The session's own long-lived
+      // output handler and SessionProcess own both storage layers and are not
+      // bound to this turn, so the late answer still lands in history.
+      fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' }));
     }, opts.timeoutMs);
 
     session.on('output', onOutput);

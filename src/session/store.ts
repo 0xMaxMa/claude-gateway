@@ -582,6 +582,19 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Does this api-channel session already exist under this chat?
+   *
+   * Read-only on purpose. `listSessions` goes through `getOrCreateIndex`, which
+   * materialises an index (and migrates a legacy JSONL) as a side effect — fine
+   * when the caller is about to write, wrong for a check whose whole point is to
+   * reject an unknown id without leaving anything behind on disk.
+   */
+  async apiSessionExists(agentId: string, internalChatId: string, sessionId: string): Promise<boolean> {
+    const index = await this.loadIndex(agentId, internalChatId, 'api');
+    return index?.sessions.some((s) => s.id === sessionId) ?? false;
+  }
+
   async ensureApiSession(agentId: string, internalChatId: string, sessionId: string): Promise<void> {
     const queue = this.getTelegramQueue(agentId, internalChatId);
     await queue.add(async () => {

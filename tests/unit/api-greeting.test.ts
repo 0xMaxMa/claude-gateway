@@ -24,6 +24,15 @@ class MockGreetingRunner extends EventEmitter {
   cleanupCalled = false;
   capturedCallbacks: SseCallbacks | null = null;
   capturedChatId: string | null = null;
+  /** Whether the runner claims the requested session is registered. */
+  sessionExists = true;
+  /** Every (chatId, sessionId) the router asked about, in order. */
+  existsLookups: Array<{ chatId: string; sessionId: string }> = [];
+
+  async apiSessionExists(chatId: string, sessionId: string): Promise<boolean> {
+    this.existsLookups.push({ chatId, sessionId });
+    return this.sessionExists;
+  }
 
   constructor(workspacePath: string) {
     super();
@@ -134,7 +143,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(204);
     expect(runner.capturedCallbacks).toBeNull();
   });
@@ -145,7 +154,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(204);
     expect(runner.capturedCallbacks).toBeNull();
   });
@@ -182,7 +191,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(409);
     expect(runner.capturedCallbacks).toBeNull();
   });
@@ -194,7 +203,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-read-only')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(403);
     expect(res.body.error).toMatch(/write or admin/i);
   });
@@ -205,7 +214,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-admin')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
   });
@@ -217,7 +226,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post('/api/v1/agents/nonexistent/greeting')
       .set('X-Api-Key', 'sk-admin')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(404);
   });
 
@@ -235,7 +244,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     await fs.chmod(greetingPath, 0o644);
     expect(res.status).toBe(500);
     expect(runner.capturedCallbacks).toBeNull();
@@ -249,7 +258,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
     const events = parseSseEvents(res.text);
@@ -267,7 +276,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(res.status).toBe(200);
     const events = parseSseEvents(res.text);
     const errEvent = events.find(e => e['type'] === 'error');
@@ -283,7 +292,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     await waitForFileDeleted(greetingPath);
   });
 
@@ -294,13 +303,13 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const first = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(first.status).toBe(200);
     await waitForFileDeleted(greetingPath);
     const second = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     expect(second.status).toBe(204);
   });
 
@@ -316,7 +325,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     const res = await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     // Headers already flushed — status is 200, error comes via SSE
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
@@ -337,14 +346,58 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     expect(runner.capturedChatId).toBe('user-123');
   });
 
-  it('T-GREETING-CHATID-FALLBACK: sessionId used as chatId when chat_id is absent', async () => {
+  it('T-GREETING-400-NO-CHATID: missing chat_id returns 400 instead of bucketing under the session id', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/chat_id/i);
+    // The old fallback filed the greeting under api-{sessionId} — a bucket the real
+    // chat never reads. Nothing may reach the runner on this path any more.
+    expect(runner.capturedChatId).toBeNull();
+  });
+
+  it('T-GREETING-400-BAD-CHATID: chat_id outside the id charset returns 400', async () => {
+    await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'sess-abc', chat_id: '../../etc' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/chat_id/i);
+  });
+
+  // ── Unknown session ────────────────────────────────────────────────────────
+
+  it('T-GREETING-404-UNKNOWN-SESSION: an unregistered session_id returns 404, and GREETING.md survives', async () => {
+    const greetingPath = path.join(tmpDir, 'GREETING.md');
+    await fs.writeFile(greetingPath, 'Welcome!');
+    runner.sessionExists = false;
+    const app = buildApp(runner);
+    const res = await supertest.default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/greeting`)
+      .set('X-Api-Key', 'sk-write')
+      .send({ session_id: 'never-created', chat_id: 'user-123' });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('SESSION_NOT_FOUND');
+    expect(runner.capturedChatId).toBeNull();
+    // Greeting is one-shot — it unlinks the file before streaming. A rejected
+    // request must not burn it, or the real session loses its welcome forever.
+    await expect(fs.access(greetingPath)).resolves.toBeUndefined();
+  });
+
+  it('T-GREETING-404-SCOPED-BY-CHAT: the existence check is scoped to the request\'s chat_id', async () => {
     await fs.writeFile(path.join(tmpDir, 'GREETING.md'), 'Welcome!');
     const app = buildApp(runner);
     await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
-    expect(runner.capturedChatId).toBe('sess-abc');
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
+    expect(runner.existsLookups).toEqual([{ chatId: 'user-123', sessionId: 'sess-abc' }]);
   });
 
   // ── Disconnect cleanup ─────────────────────────────────────────────────────
@@ -355,7 +408,7 @@ describe('POST /api/v1/agents/:agentId/greeting', () => {
     await supertest.default(app)
       .post(`/api/v1/agents/${AGENT_ID}/greeting`)
       .set('X-Api-Key', 'sk-write')
-      .send({ session_id: 'sess-abc' });
+      .send({ session_id: 'sess-abc', chat_id: 'user-123' });
     // After res.end() the socket closes, firing 'close' which invokes the cleanup
     expect(runner.cleanupCalled).toBe(true);
   });
