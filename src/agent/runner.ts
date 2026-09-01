@@ -1156,7 +1156,15 @@ export class AgentRunner extends EventEmitter {
           blocks.push(channelXml);
 
           const imagePath = entry.meta?.['image_path'];
-          if (imagePath) {
+          // Non-image attachments (LINE files) ride the same image_path channel so
+          // the runner stages them into MediaStore, but they must NOT count toward
+          // the image-size restart budget below: that budget exists because images
+          // are pulled into context as pixels, whereas a document the agent may
+          // never open would push the chat into a summary+restart it never needed.
+          // media_type is set by the LINE router alone; everything else (Telegram,
+          // Slack, web upload) omits it and keeps counting as an image.
+          const isImageMedia = (entry.meta?.['media_type'] ?? 'image') === 'image';
+          if (imagePath && isImageMedia) {
             const queue = this.pendingImagePaths.get(chatId) ?? [];
             queue.push(imagePath);
             this.pendingImagePaths.set(chatId, queue);
