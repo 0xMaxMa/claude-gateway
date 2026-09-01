@@ -967,10 +967,34 @@ services:
       expect(attempted).toBe(1);
       expect(failures).toEqual([]); // pre-fix: killed mid-build, restore fails
 
-      const compose = asyncSpawn.seen.filter((c) => c.args.includes('build') || c.args.includes('up'));
-      expect(compose.map((c) => (c.args.includes('build') ? 'build' : 'up'))).toEqual(['build', 'up']);
+      const compose = asyncSpawn.seen.filter(
+        (c) => c.args.includes('pull') || c.args.includes('build') || c.args.includes('up'),
+      );
+      const step = (c: { args: string[] }): string =>
+        c.args.includes('pull') ? 'pull' : c.args.includes('build') ? 'build' : 'up';
+      expect(compose.map(step)).toEqual(['pull', 'build', 'up']);
       expect(compose[0].timeoutMs).toBe(1_800_000);
-      expect(compose[1].timeoutMs).toBe(180_000);
+      expect(compose[1].timeoutMs).toBe(1_800_000);
+      expect(compose[2].timeoutMs).toBe(180_000);
+    });
+
+    it('pulls under the build budget too, so an image-only app is not killed mid-fetch', async () => {
+      // `compose build` is a no-op for a project whose services are all
+      // `image:` — those have to be PULLED. Without this the fetch would fall
+      // to `up` under the 3-minute wait budget, which is the same cold-host
+      // failure #425 describes, just via the registry instead of the builder.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const asyncSpawn = coldHostAsyncSpawn(400_000);
+      await makeInstaller(successSpawn, asyncSpawn).restoreRunningApps();
+
+      const pull = asyncSpawn.seen.find((c) => c.args.includes('pull'));
+      expect(pull).toBeDefined();
+      expect(pull?.timeoutMs).toBe(1_800_000);
+      // Buildable services are the build step's job, not the pull's.
+      expect(pull?.args).toContain('--ignore-buildable');
     });
 
     it('skips the build entirely when the app image is already on the host', async () => {
@@ -990,6 +1014,7 @@ services:
       const { failures } = await installer2.restoreRunningApps();
       expect(failures).toEqual([]);
       expect(warm.seen.some((c) => c.args.includes('build'))).toBe(false);
+      expect(warm.seen.some((c) => c.args.includes('pull'))).toBe(false);
       expect(warm.seen.filter((c) => c.args.includes('up'))).toHaveLength(1);
     });
 
@@ -1076,6 +1101,46 @@ services:
       expect((await registry.get('my-app'))?.status).toBe('running');
       expect((await installer2.restoreRunningApps()).attempted).toBe(1);
     });
+
+    it('shields apps still queued behind the concurrency limit, not only the ones in flight', async () => {
+      // The pool runs 4 at a time. An app waiting its turn has no containers
+      // either, so if it is left unmarked a status read persists `stopped` —
+      // and once THAT is stored, the no-latch guard (which requires the stored
+      // status to still be `running`) can no longer save it. On a cold host the
+      // queue wait is minutes, so this window is wide open.
+      const names = ['app-a', 'app-b', 'app-c', 'app-d', 'app-e'];
+      for (let i = 0; i < names.length; i++) {
+        const inst = makeInstaller();
+        await waitForJob(inst, inst.install({ localPath: makeAppDir(srcDir, names[i], 5101 + i) }), 5000);
+      }
+
+      // Saturate the pool: the first 4 `up` calls park until we release them,
+      // leaving the 5th app queued and untouched.
+      let release!: () => void;
+      const parked = new Promise<void>((r) => { release = r; });
+      let upCalls = 0;
+      let installer2!: AppInstaller;
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('up')) {
+          upCalls++;
+          if (upCalls <= 4) await parked;
+        }
+        return { stdout: '', stderr: '', status: 0 }; // empty ps = no containers
+      });
+      installer2 = makeInstaller(successSpawn, asyncSpawn);
+
+      const restore = installer2.restoreRunningApps();
+      // Wait for the pool to fill before reading the queued app.
+      for (let i = 0; i < 200 && upCalls < 4; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(upCalls).toBe(4);
+
+      const queued = await installer2.reconcileStatus((await registry.get('app-e'))!);
+      release();
+      await restore;
+
+      expect(queued.status).toBe('running'); // pre-fix: 'stopped'
+      expect((await registry.get('app-e'))?.status).toBe('running');
+    }, 60000);
 
     it('clears the restore failure once the app is observed running', async () => {
       // Anti-over-correction: the marker must not pin an app to `error` forever.

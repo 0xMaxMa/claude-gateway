@@ -17,6 +17,7 @@ import {
 } from './compose-generator';
 import { AgentManager } from './agent-manager';
 import { msUntilNextHour } from '../history/cleanup';
+import { msOr } from '../utils/config-num';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -286,19 +287,6 @@ function isValidTimezone(tz: string | undefined): tz is string {
     return false;
   }
 }
-
-/**
- * Resolve a millisecond budget from config, falling back to the built-in default.
- * Config is untrusted input and this value reaches `setTimeout`, where `NaN`, `0`
- * and negatives all mean "no ceiling at all" — so anything non-numeric,
- * non-finite or non-positive must degrade to the default rather than silently
- * removing the timeout that bounds a hung `docker compose`.
- */
-function resolveTimeoutMs(value: unknown, fallbackMs: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : fallbackMs;
-}
 // Disallow '..' in owner/repo segments — prevents path traversal via edge-case git URL parsing.
 const GITHUB_URL_RE = /^https:\/\/github\.com\/(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*(\.git)?$/;
 
@@ -436,8 +424,8 @@ export class AppInstaller {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
     this.backupsDir = backupsDir ?? path.join(this.appsDir, APP_BACKUPS_DIRNAME);
     this.restoreConfig = {
-      buildTimeoutMs: resolveTimeoutMs(appRestoreConfig?.buildTimeoutMs, RESTORE_BUILD_TIMEOUT_MS),
-      waitTimeoutMs: resolveTimeoutMs(appRestoreConfig?.waitTimeoutMs, RESTORE_COMPOSE_TIMEOUT_MS),
+      buildTimeoutMs: msOr(appRestoreConfig?.buildTimeoutMs, RESTORE_BUILD_TIMEOUT_MS),
+      waitTimeoutMs: msOr(appRestoreConfig?.waitTimeoutMs, RESTORE_COMPOSE_TIMEOUT_MS),
     };
     this.appBackupConfig = {
       retention:
@@ -1412,7 +1400,9 @@ export class AppInstaller {
     // the reason from {@link getRestoreFailure} — while the stored `running`
     // intent survives for the next boot to retry.
     if (live === 'stopped' && entry.status === 'running' && this.restoreFailures.has(entry.name)) {
-      return { ...entry, status: 'error' };
+      // Matches the persisted path below: a corrected status carries a fresh
+      // timestamp whether or not the write happened.
+      return { ...entry, status: 'error', updatedAt: new Date().toISOString() };
     }
     try {
       await this.registry.updateStatus(entry.name, live);
@@ -1493,6 +1483,16 @@ export class AppInstaller {
     const running = apps.filter((e) => e.status === 'running');
     const failures: Array<{ app: string; error: string }> = [];
 
+    // Mark the WHOLE batch in flight before any worker starts, not per worker.
+    // The pool runs at most RESTORE_MAX_CONCURRENCY at a time, so marking inside
+    // the worker would leave every queued app unprotected for as long as the
+    // apps ahead of it take — minutes on a cold host. A status read landing in
+    // that window persists `running` → `stopped`, and once that is stored the
+    // no-latch guard in reconcileStatus() no longer applies (it requires the
+    // stored status to still be `running`), so a later failure would latch the
+    // app off for good — the exact outcome this path exists to prevent (#425).
+    for (const entry of running) this.restoringNames.add(entry.name);
+
     // Bounded-concurrency worker pool: workers pull from a shared cursor until
     // the list is drained, so at most RESTORE_MAX_CONCURRENCY compose-ups run at
     // once. push() is safe across workers — JS is single-threaded between awaits.
@@ -1500,7 +1500,6 @@ export class AppInstaller {
     const worker = async (): Promise<void> => {
       while (cursor < running.length) {
         const entry = running[cursor++];
-        this.restoringNames.add(entry.name);
         try {
           await this.composeUpAsync(entry.name, entry.installPath);
           this.restoreFailures.delete(entry.name);
@@ -1509,12 +1508,20 @@ export class AppInstaller {
           failures.push({ app: entry.name, error });
           this.restoreFailures.set(entry.name, { error, at: new Date().toISOString() });
         } finally {
+          // Released per app, not per batch, so an app that is already up stops
+          // being shielded the moment its own restore ends.
           this.restoringNames.delete(entry.name);
         }
       }
     };
     const poolSize = Math.min(RESTORE_MAX_CONCURRENCY, running.length);
-    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    try {
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    } finally {
+      // Safety net for anything the per-app finally could not reach: a leaked
+      // marker would freeze that app's status reporting for the whole process.
+      for (const entry of running) this.restoringNames.delete(entry.name);
+    }
 
     return { attempted: running.length, failures };
   }
@@ -3032,40 +3039,52 @@ export class AppInstaller {
    * is running (the very reason this restore exists), so there is nothing to
    * conflict with — and keeping it out avoids extra synchronous docker calls.
    *
-   * Runs `build` and `up` as two commands under two budgets, but only when the
-   * host actually has to build. `up` alone would build whatever is missing, and
-   * then the build shares the healthcheck-wait budget — on a host with no image
-   * cache (data dir restored onto a fresh machine, migrated host, pruned Docker)
-   * that budget expires mid-build, at which point the SIGKILL in {@link
-   * defaultAsyncSpawn} *cancels* the build and leaves no image and no container
-   * (issue #425).
+   * Runs the cold-start steps and `up` under two budgets, but only pays for the
+   * cold path when the host actually lacks the images. `up` alone would pull and
+   * build whatever is missing, and then that work shares the healthcheck-wait
+   * budget — on a host with no image cache (data dir restored onto a fresh
+   * machine, migrated host, pruned Docker) that budget expires mid-build, at
+   * which point the SIGKILL in {@link defaultAsyncSpawn} *cancels* the build and
+   * leaves no image and no container (issue #425).
    */
   private async composeUpAsync(appName: string, dir: string): Promise<void> {
-    // Only a cold host pays for a build. `up` builds solely what is missing,
+    // Only a cold host pays for pull/build. `up` fetches solely what is missing,
     // whereas `build` re-runs every time it is called — issuing it
     // unconditionally would re-execute every Dockerfile on every boot, and
     // `appHousekeeping` prunes build cache older than a week, so for an app
     // whose image was already there that is a from-scratch rebuild in front of
     // a start that needed none.
     if (await this.needsImageBuild(appName, dir)) {
-      // Best-effort pre-build under its own, much larger budget. Failures are
-      // swallowed so `up` stays the single authority on whether the app starts:
-      // it rebuilds what is missing and reports the real error with its logs.
-      try {
-        await this.runAsync(
-          ['docker', 'compose', '-p', appName, 'build'],
-          dir,
-          this.restoreConfig.buildTimeoutMs,
-        );
-      } catch {
-        /* fall through — `up` rebuilds and surfaces the actual failure */
-      }
+      // Pull first: services declared with `image:` only are never built, so on
+      // a cold host they have to be fetched — and `up` would otherwise fetch
+      // them under the short wait budget. `--ignore-buildable` skips the
+      // services that build, which the next step handles.
+      await this.tryColdStart(appName, dir, ['pull', '--ignore-buildable']);
+      await this.tryColdStart(appName, dir, ['build']);
     }
     await this.runAsync(
       ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'],
       dir,
       this.restoreConfig.waitTimeoutMs,
     );
+  }
+
+  /**
+   * Run one best-effort cold-start step (`pull` / `build`) under the build
+   * budget. Errors are swallowed on purpose so `up` stays the single authority
+   * on whether the app starts: it re-does whatever is still missing and reports
+   * the real failure together with the container logs.
+   */
+  private async tryColdStart(appName: string, dir: string, step: string[]): Promise<void> {
+    try {
+      await this.runAsync(
+        ['docker', 'compose', '-p', appName, ...step],
+        dir,
+        this.restoreConfig.buildTimeoutMs,
+      );
+    } catch {
+      /* fall through — `up` redoes it and surfaces the actual failure */
+    }
   }
 
   /**

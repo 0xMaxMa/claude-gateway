@@ -12,6 +12,7 @@ import * as path from 'path';
 import { resolveStalenessConfig, STALENESS_DEFAULTS } from '../dreaming/config';
 import { isValidTimezone } from '../skill-learning/config';
 import { expandHome } from '../../utils/paths';
+import { numOr } from '../../utils/config-num';
 import type {
   KnowledgeArchiveConfig,
   ResolvedKnowledgeArchiveCfg,
@@ -35,12 +36,6 @@ function pick<T>(agent: T | undefined, global: T | undefined, fallback: T): T {
   if (agent !== undefined) return agent;
   if (global !== undefined) return global;
   return fallback;
-}
-
-function numOr(value: number, fallback: number, min: number, max: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  if (value < min || value > max) return fallback;
-  return value;
 }
 
 export function resolveArchiveConfig(
