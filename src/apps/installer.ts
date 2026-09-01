@@ -260,6 +260,10 @@ const RESTORE_COMPOSE_TIMEOUT_MS = 180_000;
 // SIGKILLs the CLI, which *cancels* the build (see {@link defaultAsyncSpawn}),
 // so this must be generous: an expired budget means the app is never built.
 const RESTORE_BUILD_TIMEOUT_MS = 1_800_000;
+// Ceiling for the read-only probe that decides whether a build is needed at all.
+// Two local daemon queries, no network and no work — generous on purpose so a
+// momentarily busy dockerd does not make the restore skip a build it needs.
+const IMAGE_PROBE_TIMEOUT_MS = 30_000;
 // Max apps brought up concurrently during boot restore. Bounds the docker/CPU
 // spike when many apps are marked running, while still parallelising the common
 // case. Typical installs have 1-3 apps, so this rarely binds.
@@ -3028,33 +3032,85 @@ export class AppInstaller {
    * is running (the very reason this restore exists), so there is nothing to
    * conflict with — and keeping it out avoids extra synchronous docker calls.
    *
-   * Runs `build` and `up` as two commands under two budgets. `up` alone would
-   * build whatever is missing, but then the build shares the healthcheck-wait
-   * budget — and on a host with no image cache (data dir restored onto a fresh
-   * machine, migrated host, pruned Docker) that budget expires mid-build, at
-   * which point the SIGKILL in {@link defaultAsyncSpawn} *cancels* the build and
-   * leaves no image and no container (issue #425).
+   * Runs `build` and `up` as two commands under two budgets, but only when the
+   * host actually has to build. `up` alone would build whatever is missing, and
+   * then the build shares the healthcheck-wait budget — on a host with no image
+   * cache (data dir restored onto a fresh machine, migrated host, pruned Docker)
+   * that budget expires mid-build, at which point the SIGKILL in {@link
+   * defaultAsyncSpawn} *cancels* the build and leaves no image and no container
+   * (issue #425).
    */
   private async composeUpAsync(appName: string, dir: string): Promise<void> {
-    // Best-effort pre-build under its own, much larger budget. Failures are
-    // swallowed so `up` stays the single authority on whether the app starts:
-    // it rebuilds what is missing and reports the real error with its logs. A
-    // project whose services are all `image:` has nothing to build, so this
-    // exits 0 immediately and the warm-reboot path pays one fast CLI call.
-    try {
-      await this.runAsync(
-        ['docker', 'compose', '-p', appName, 'build'],
-        dir,
-        this.restoreConfig.buildTimeoutMs,
-      );
-    } catch {
-      /* fall through — `up` rebuilds and surfaces the actual failure */
+    // Only a cold host pays for a build. `up` builds solely what is missing,
+    // whereas `build` re-runs every time it is called — issuing it
+    // unconditionally would re-execute every Dockerfile on every boot, and
+    // `appHousekeeping` prunes build cache older than a week, so for an app
+    // whose image was already there that is a from-scratch rebuild in front of
+    // a start that needed none.
+    if (await this.needsImageBuild(appName, dir)) {
+      // Best-effort pre-build under its own, much larger budget. Failures are
+      // swallowed so `up` stays the single authority on whether the app starts:
+      // it rebuilds what is missing and reports the real error with its logs.
+      try {
+        await this.runAsync(
+          ['docker', 'compose', '-p', appName, 'build'],
+          dir,
+          this.restoreConfig.buildTimeoutMs,
+        );
+      } catch {
+        /* fall through — `up` rebuilds and surfaces the actual failure */
+      }
     }
     await this.runAsync(
       ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'],
       dir,
       this.restoreConfig.waitTimeoutMs,
     );
+  }
+
+  /**
+   * True when at least one image the compose project needs is absent from the
+   * local daemon — the cold-host case that must build before it can start.
+   *
+   * Every failure path here answers `false`. "No signal" must mean "skip the
+   * pre-build", which leaves {@link composeUpAsync} behaving exactly as it did
+   * before the build step existed — `up` still builds whatever is missing. The
+   * opposite default would rebuild apps that only needed starting, which is the
+   * cost this probe exists to avoid.
+   */
+  private async needsImageBuild(appName: string, dir: string): Promise<boolean> {
+    let images: string[];
+    try {
+      const { stdout } = await this.runAsync(
+        ['docker', 'compose', '-p', appName, 'config', '--images'],
+        dir,
+        IMAGE_PROBE_TIMEOUT_MS,
+      );
+      // Image names come from the app's own compose file, so they are untrusted
+      // here: one starting with '-' would be read as a flag by `image inspect`.
+      // They are passed as argv (never a shell string), so dropping those is
+      // the only guard needed.
+      images = stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith('-'));
+    } catch {
+      return false;
+    }
+    if (images.length === 0) return false;
+    try {
+      // `docker image inspect` exits non-zero when *any* argument is missing,
+      // so one call covers the whole project. `--format` keeps the output to
+      // one id per image instead of the full manifest JSON.
+      const res = await this.spawnAsync(
+        'docker',
+        ['image', 'inspect', '--format', '{{.Id}}', ...images],
+        { cwd: dir, timeoutMs: IMAGE_PROBE_TIMEOUT_MS },
+      );
+      return res.status !== 0;
+    } catch {
+      return false;
+    }
   }
 
   /** Async equivalent of {@link run}: throws on non-zero exit. */

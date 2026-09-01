@@ -926,11 +926,12 @@ services:
      * Async-spawn double with real cold-host timeout semantics: a command whose
      * work exceeds its OWN budget is killed (rejects, as defaultAsyncSpawn
      * does), and a killed build leaves nothing behind. `buildMs` is how long
-     * this host needs to build the app's image from source.
+     * this host needs to build the app's image from source; `imagePresent`
+     * models a warm host that already has the image.
      */
-    function coldHostAsyncSpawn(buildMs: number) {
+    function coldHostAsyncSpawn(buildMs: number, imagePresent = false) {
       const seen: Array<{ args: string[]; timeoutMs?: number }> = [];
-      let imageBuilt = false;
+      let imageBuilt = imagePresent;
       const fn = jest.fn(async (_cmd: string, args: string[], opts?: object) => {
         const budget = (opts as { timeoutMs?: number } | undefined)?.timeoutMs;
         seen.push({ args, timeoutMs: budget });
@@ -940,6 +941,9 @@ services:
           if (buildMs > ceiling) throw new Error(`Command timed out after ${ceiling}ms: docker compose`);
           imageBuilt = true;
         };
+        // Image probe: which images the project needs, and whether they exist.
+        if (args.includes('config')) return { stdout: 'my-app-web\n', stderr: '', status: 0 };
+        if (args.includes('inspect')) return { stdout: '', stderr: '', status: imageBuilt ? 0 : 1 };
         if (args.includes('build')) build();
         // `up` builds a missing image itself — under ITS budget, which is the
         // whole bug when no separate build step ran first.
@@ -967,6 +971,26 @@ services:
       expect(compose.map((c) => (c.args.includes('build') ? 'build' : 'up'))).toEqual(['build', 'up']);
       expect(compose[0].timeoutMs).toBe(1_800_000);
       expect(compose[1].timeoutMs).toBe(180_000);
+    });
+
+    it('skips the build entirely when the app image is already on the host', async () => {
+      // Anti-over-correction: `up` builds only what is missing, but `build`
+      // re-runs every time it is called. Issuing it unconditionally would
+      // re-execute every Dockerfile on every boot — and appHousekeeping prunes
+      // build cache after a week, so that rebuild would be from scratch.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      // A build this host cannot afford: 400s against the 180s wait budget. It
+      // never runs, because the image is already there.
+      const warm = coldHostAsyncSpawn(400_000, true);
+      const installer2 = makeInstaller(successSpawn, warm);
+
+      const { failures } = await installer2.restoreRunningApps();
+      expect(failures).toEqual([]);
+      expect(warm.seen.some((c) => c.args.includes('build'))).toBe(false);
+      expect(warm.seen.filter((c) => c.args.includes('up'))).toHaveLength(1);
     });
 
     it('still bounds the build: one that outlasts its own budget fails the restore', async () => {
