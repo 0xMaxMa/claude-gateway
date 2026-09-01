@@ -571,7 +571,9 @@ Each key has a `key` string (supports `${ENV_VAR}` interpolation), an optional `
 
 ### Bot tokens
 
-Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loaded at startup. Use `${AGENT_BOT_TOKEN}` syntax in config to reference them, or set them as shell environment variables.
+Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loaded at startup **and before every config reload** — so an agent added to `config.json` while the gateway is running starts without a restart, even though its token only exists in a brand-new `.env`. Use `${AGENT_BOT_TOKEN}` syntax in config to reference them, or set them as shell environment variables.
+
+A variable already present in the environment always wins over the `.env` file, so a token you exported yourself is never replaced by a reload. If a `${VAR}` cannot be resolved from anywhere, that one agent is skipped — the rest of the gateway starts normally — and the skip is logged to `logs/gateway.log` with the name of the missing variable.
 
 ---
 
