@@ -1587,6 +1587,17 @@ export class AgentRunner extends EventEmitter {
       // Auto-forward result text to channel if agent didn't call reply tool.
       let replyCalled = false;
       let replyToolUseId: string | null = null; // track id to detect failed tool calls
+      // Reply tool_use blocks re-appear across cumulative `assistant` snapshots
+      // exactly like line_image ones, so a repeat is skipped by block id rather
+      // than by `replyCalled`. Gating on the flag also froze `replyToolUseId` on
+      // the turn's FIRST reply call, so a LATER call's failure never matched the
+      // unblock below and the turn's final message was dropped silently (#422).
+      const seenReplyToolIds = new Set<string>();
+      // Set when a reply tool call failed this turn. The fallback forward must
+      // then reach the channel even though an EARLIER successful reply in the
+      // same turn already wrote a `.replied` marker carrying this turn's id —
+      // see writeAutoForward()'s forceDeliver argument.
+      let replySendFailed = false;
       // line_image tool_use blocks re-appear across cumulative `assistant` stream
       // snapshots (--include-partial-messages), so dedupe history inserts by the
       // block id — otherwise one sent image lands in the transcript N times and
@@ -1671,9 +1682,21 @@ export class AgentRunner extends EventEmitter {
                     });
                   }
                 }
-                if (block.type === 'tool_use' && block.name === replyToolName && !replyCalled) {
+                if (block.type === 'tool_use' && block.name === replyToolName) {
+                  // The block comes off the CLI's stdout — validate the id rather
+                  // than casting, so a malformed one degrades to the flag check
+                  // instead of poisoning the Set with a non-string key.
+                  const rawBlockId = (block as Record<string, unknown>)['id'];
+                  const replyBlockId = typeof rawBlockId === 'string' && rawBlockId ? rawBlockId : null;
+                  // Skip a re-emitted snapshot of a block already handled. Blocks
+                  // with no id fall back to the old flag check, which is the best
+                  // dedup available without an id.
+                  const alreadyHandled =
+                    replyBlockId !== null ? seenReplyToolIds.has(replyBlockId) : replyCalled;
+                  if (alreadyHandled) continue;
+                  if (replyBlockId !== null) seenReplyToolIds.add(replyBlockId);
                   replyCalled = true;
-                  replyToolUseId = (block as Record<string, unknown>)['id'] as string ?? null;
+                  replyToolUseId = replyBlockId;
                   // Persist the reply text to history so it appears in chat history API
                   const replyText = typeof block.input?.['text'] === 'string' ? block.input['text'].trim() : '';
                   // Capture any images the reply attached (reply tool's `files`)
@@ -1714,6 +1737,7 @@ export class AgentRunner extends EventEmitter {
                 if (block.type === 'tool_result' && block.tool_use_id === replyToolUseId && block.is_error) {
                   replyCalled = false;
                   replyToolUseId = null;
+                  replySendFailed = true;
                 }
               }
             }
@@ -1830,10 +1854,12 @@ export class AgentRunner extends EventEmitter {
             // Detect Anthropic API socket drop — Claude CLI emits this as is_error:false
             // with "API Error: The socket connection was closed unexpectedly". The error
             // bypasses the replyCalled gate so the user always gets notified, even when
-            // the agent already called the reply tool earlier in the same turn.
+            // the agent already called the reply tool earlier in the same turn — hence
+            // forceDeliver, or that earlier reply's `.replied` marker would dedup this
+            // notice away and defeat the bypass (#422).
             const isSocketError = !proc.queryMode && resultText.includes(ANTHROPIC_SOCKET_ERROR);
             if (isSocketError) {
-              this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.');
+              this.writeAutoForward(mapKey, '⚡ Connection to Anthropic API dropped. Please resend your message.', 'text', true);
             }
             // Bug B: headless (claude --print) reports a too-large request as a
             // synthetic `result` (is_error + "Request too large (max"), NOT as the
@@ -1918,9 +1944,9 @@ export class AgentRunner extends EventEmitter {
                   // Telegram HTML entities — Slack has its own mrkdwn format and
                   // would display these tags literally, so Slack skips this and
                   // falls through to the plain-text branch below.
-                  this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html');
+                  this.writeAutoForward(mapKey, toTelegramHtml(channelText), 'html', replySendFailed);
                 } else {
-                  this.writeAutoForward(mapKey, channelText);
+                  this.writeAutoForward(mapKey, channelText, 'text', replySendFailed);
                 }
                 // Assistant output reached the channel — mark the turn delivered so
                 // a later recovery does not resend a message that was answered (C1).
@@ -1930,6 +1956,8 @@ export class AgentRunner extends EventEmitter {
             }
             replyCalled = false; // reset for next turn
             replyToolUseId = null;
+            replySendFailed = false;
+            seenReplyToolIds.clear();
             seenLineImageIds.clear();
             pendingLineImageMedia.clear();
             menuSentThisTurn = false;
@@ -2711,7 +2739,7 @@ export class AgentRunner extends EventEmitter {
     this.pendingRestarts.add(chatId);
   }
 
-  private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text'): void {
+  private writeAutoForward(chatId: string, text: string, format: 'text' | 'html' = 'text', forceDeliver = false): void {
     // LINE has no .forward consumer — route through LineReplyManager's push path.
     if (this.channelFor(chatId) === 'line') {
       if (this.lineReply) void this.lineReply.onAnswer(chatId, text);
@@ -2746,6 +2774,11 @@ export class AgentRunner extends EventEmitter {
       // state) must both reach the user, not have the second clobber the
       // first. turnId is the live typing-signal timestamp — the receiver uses
       // it to scope the `.replied` dedup marker to the turn that wrote it.
+      // forceDeliver writes a null turnId instead: `isEntryAlreadyReplied()`
+      // never matches a null on either side, so the entry survives a `.replied`
+      // marker left by an EARLIER successful reply in this same turn. Used for
+      // text that is NOT the one that marker covers — a fallback forward after a
+      // reply call failed, and the socket-drop notice (#422).
       let entries: Array<{ text: string; format: string; turnId: string | null }> = [];
       try {
         const raw = fs.readFileSync(forwardPath, 'utf8').trim();
@@ -2762,7 +2795,7 @@ export class AgentRunner extends EventEmitter {
       } catch {
         // No existing file — fresh queue.
       }
-      entries.push({ text, format, turnId: this.readCurrentTurnId(chatId) });
+      entries.push({ text, format, turnId: forceDeliver ? null : this.readCurrentTurnId(chatId) });
       // Atomic write (tmp + rename): the receiver polls this directory on
       // every typing tick, so a non-atomic write could be read mid-flush.
       const tmpPath = `${forwardPath}.tmp`;
