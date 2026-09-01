@@ -152,7 +152,11 @@ describe('AppInstaller', () => {
     callbacks = makeCallbacks();
   });
 
-  function makeInstaller(spawnFn = successSpawn, asyncSpawnFn = successAsyncSpawn) {
+  function makeInstaller(
+    spawnFn = successSpawn,
+    asyncSpawnFn = successAsyncSpawn,
+    restoreConfig?: { buildTimeoutMs?: number; waitTimeoutMs?: number },
+  ) {
     return new AppInstaller(
       registry,
       new RegistryClient(),
@@ -161,6 +165,10 @@ describe('AppInstaller', () => {
       appsDir,
       undefined, // agentManager
       asyncSpawnFn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      undefined, // housekeepingConfig
+      undefined, // appBackupConfig
+      undefined, // backupsDir
+      restoreConfig,
     );
   }
 
@@ -906,6 +914,263 @@ services:
       expect(maxInFlight).toBeLessThanOrEqual(4); // never exceeded the cap
       expect(maxInFlight).toBeGreaterThan(1); // and it actually parallelised
     }, 60000);
+
+    // ── Cold-host restore (issue #425) ────────────────────────────────────
+    //
+    // On a host with no image cache the restore has to BUILD before it can
+    // wait. `up` alone would do that under the healthcheck-wait budget, and a
+    // timeout there SIGKILLs the compose CLI — which cancels the build, so no
+    // image and no container ever appear. The double below models exactly that.
+
+    /**
+     * Async-spawn double with real cold-host timeout semantics: a command whose
+     * work exceeds its OWN budget is killed (rejects, as defaultAsyncSpawn
+     * does), and a killed build leaves nothing behind. `buildMs` is how long
+     * this host needs to build the app's image from source; `imagePresent`
+     * models a warm host that already has the image.
+     */
+    function coldHostAsyncSpawn(buildMs: number, imagePresent = false) {
+      const seen: Array<{ args: string[]; timeoutMs?: number }> = [];
+      let imageBuilt = imagePresent;
+      const fn = jest.fn(async (_cmd: string, args: string[], opts?: object) => {
+        const budget = (opts as { timeoutMs?: number } | undefined)?.timeoutMs;
+        seen.push({ args, timeoutMs: budget });
+        const ceiling = budget ?? Number.POSITIVE_INFINITY;
+        const build = (): void => {
+          // The CLI owns the build session: killing it cancels the build.
+          if (buildMs > ceiling) throw new Error(`Command timed out after ${ceiling}ms: docker compose`);
+          imageBuilt = true;
+        };
+        // Image probe: which images the project needs, and whether they exist.
+        if (args.includes('config')) return { stdout: 'my-app-web\n', stderr: '', status: 0 };
+        if (args.includes('inspect')) return { stdout: '', stderr: '', status: imageBuilt ? 0 : 1 };
+        if (args.includes('build')) build();
+        // `up` builds a missing image itself — under ITS budget, which is the
+        // whole bug when no separate build step ran first.
+        else if (args.includes('up') && !imageBuilt) build();
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      return Object.assign(fn, { seen });
+    }
+
+    it('builds under its own budget before waiting, so a cold rebuild is not killed by the wait timeout', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      // 400s of build — far past the 180s healthcheck-wait budget, well inside
+      // the 30-minute build budget.
+      const asyncSpawn = coldHostAsyncSpawn(400_000);
+      const installer2 = makeInstaller(successSpawn, asyncSpawn);
+
+      const { attempted, failures } = await installer2.restoreRunningApps();
+      expect(attempted).toBe(1);
+      expect(failures).toEqual([]); // pre-fix: killed mid-build, restore fails
+
+      const compose = asyncSpawn.seen.filter(
+        (c) => c.args.includes('pull') || c.args.includes('build') || c.args.includes('up'),
+      );
+      const step = (c: { args: string[] }): string =>
+        c.args.includes('pull') ? 'pull' : c.args.includes('build') ? 'build' : 'up';
+      expect(compose.map(step)).toEqual(['pull', 'build', 'up']);
+      expect(compose[0].timeoutMs).toBe(1_800_000);
+      expect(compose[1].timeoutMs).toBe(1_800_000);
+      expect(compose[2].timeoutMs).toBe(180_000);
+    });
+
+    it('pulls under the build budget too, so an image-only app is not killed mid-fetch', async () => {
+      // `compose build` is a no-op for a project whose services are all
+      // `image:` — those have to be PULLED. Without this the fetch would fall
+      // to `up` under the 3-minute wait budget, which is the same cold-host
+      // failure #425 describes, just via the registry instead of the builder.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const asyncSpawn = coldHostAsyncSpawn(400_000);
+      await makeInstaller(successSpawn, asyncSpawn).restoreRunningApps();
+
+      const pull = asyncSpawn.seen.find((c) => c.args.includes('pull'));
+      expect(pull).toBeDefined();
+      expect(pull?.timeoutMs).toBe(1_800_000);
+      // Buildable services are the build step's job, not the pull's.
+      expect(pull?.args).toContain('--ignore-buildable');
+    });
+
+    it('skips the build entirely when the app image is already on the host', async () => {
+      // Anti-over-correction: `up` builds only what is missing, but `build`
+      // re-runs every time it is called. Issuing it unconditionally would
+      // re-execute every Dockerfile on every boot — and appHousekeeping prunes
+      // build cache after a week, so that rebuild would be from scratch.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      // A build this host cannot afford: 400s against the 180s wait budget. It
+      // never runs, because the image is already there.
+      const warm = coldHostAsyncSpawn(400_000, true);
+      const installer2 = makeInstaller(successSpawn, warm);
+
+      const { failures } = await installer2.restoreRunningApps();
+      expect(failures).toEqual([]);
+      expect(warm.seen.some((c) => c.args.includes('build'))).toBe(false);
+      expect(warm.seen.some((c) => c.args.includes('pull'))).toBe(false);
+      expect(warm.seen.filter((c) => c.args.includes('up'))).toHaveLength(1);
+    });
+
+    it('still bounds the build: one that outlasts its own budget fails the restore', async () => {
+      // Anti-over-correction: the fix must not remove the ceiling, only resize it.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const installer2 = makeInstaller(successSpawn, coldHostAsyncSpawn(2_000_000));
+
+      const { failures } = await installer2.restoreRunningApps();
+      expect(failures).toHaveLength(1);
+      expect(failures[0].app).toBe('my-app');
+    });
+
+    it('takes both budgets from config, ignoring values that would remove the ceiling', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const configured = coldHostAsyncSpawn(1_000);
+      await makeInstaller(successSpawn, configured, {
+        buildTimeoutMs: 900_000,
+        waitTimeoutMs: 60_000,
+      }).restoreRunningApps();
+      const withConfig = configured.seen.filter((c) => c.args.includes('build') || c.args.includes('up'));
+      expect(withConfig[0].timeoutMs).toBe(900_000);
+      expect(withConfig[1].timeoutMs).toBe(60_000);
+
+      // Config is untrusted: 0/negative/NaN all mean "no timeout" to setTimeout,
+      // so they must fall back to the defaults rather than unbound the command.
+      const bogus = coldHostAsyncSpawn(1_000);
+      await makeInstaller(successSpawn, bogus, {
+        buildTimeoutMs: 0,
+        waitTimeoutMs: -1,
+      }).restoreRunningApps();
+      const withBogus = bogus.seen.filter((c) => c.args.includes('build') || c.args.includes('up'));
+      expect(withBogus[0].timeoutMs).toBe(1_800_000);
+      expect(withBogus[1].timeoutMs).toBe(180_000);
+    });
+
+    it('does not let a status read latch the app to stopped while its restore is in flight', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      // A GET /apps landing mid-restore: `compose ps` reports no containers
+      // (they do not exist yet), which maps to `stopped` and would be persisted
+      // — permanently excluding the app from every future boot restore.
+      let midRestore: import('../../../src/apps/registry').AppEntry | undefined;
+      let installer2!: AppInstaller;
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('up')) {
+          midRestore = await installer2.reconcileStatus((await registry.get('my-app'))!);
+        }
+        return { stdout: '', stderr: '', status: 0 }; // empty ps = no containers
+      });
+      installer2 = makeInstaller(successSpawn, asyncSpawn);
+
+      await installer2.restoreRunningApps();
+
+      expect(midRestore?.status).toBe('running'); // pre-fix: 'stopped'
+      expect((await registry.get('my-app'))?.status).toBe('running');
+    });
+
+    it('records a failed restore and keeps the app eligible for the next boot', async () => {
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      const installer2 = makeInstaller(successSpawn, failingAsyncSpawn('up'));
+      await installer2.restoreRunningApps();
+
+      // Observable through the API, not just the boot log.
+      const failure = installer2.getRestoreFailure('my-app');
+      expect(failure?.error).toMatch(/mocked error: up/);
+      expect(failure?.at).toEqual(expect.any(String));
+
+      // Reported honestly as `error` (not a deliberate `stopped`)…
+      const reconciled = await installer2.reconcileStatus((await registry.get('my-app'))!);
+      expect(reconciled.status).toBe('error');
+      // …while the stored `running` intent survives, so the next pass retries it.
+      expect((await registry.get('my-app'))?.status).toBe('running');
+      expect((await installer2.restoreRunningApps()).attempted).toBe(1);
+    });
+
+    it('shields apps still queued behind the concurrency limit, not only the ones in flight', async () => {
+      // The pool runs 4 at a time. An app waiting its turn has no containers
+      // either, so if it is left unmarked a status read persists `stopped` —
+      // and once THAT is stored, the no-latch guard (which requires the stored
+      // status to still be `running`) can no longer save it. On a cold host the
+      // queue wait is minutes, so this window is wide open.
+      const names = ['app-a', 'app-b', 'app-c', 'app-d', 'app-e'];
+      for (let i = 0; i < names.length; i++) {
+        const inst = makeInstaller();
+        await waitForJob(inst, inst.install({ localPath: makeAppDir(srcDir, names[i], 5101 + i) }), 5000);
+      }
+
+      // Saturate the pool: the first 4 `up` calls park until we release them,
+      // leaving the 5th app queued and untouched.
+      let release!: () => void;
+      const parked = new Promise<void>((r) => { release = r; });
+      let upCalls = 0;
+      let installer2!: AppInstaller;
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('up')) {
+          upCalls++;
+          if (upCalls <= 4) await parked;
+        }
+        return { stdout: '', stderr: '', status: 0 }; // empty ps = no containers
+      });
+      installer2 = makeInstaller(successSpawn, asyncSpawn);
+
+      const restore = installer2.restoreRunningApps();
+      // Wait for the pool to fill before reading the queued app.
+      for (let i = 0; i < 200 && upCalls < 4; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(upCalls).toBe(4);
+
+      const queued = await installer2.reconcileStatus((await registry.get('app-e'))!);
+      release();
+      await restore;
+
+      expect(queued.status).toBe('running'); // pre-fix: 'stopped'
+      expect((await registry.get('app-e'))?.status).toBe('running');
+    }, 60000);
+
+    it('clears the restore failure once the app is observed running', async () => {
+      // Anti-over-correction: the marker must not pin an app to `error` forever.
+      const appDir = makeAppDir(srcDir, 'my-app');
+      const installer = makeInstaller();
+      await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+
+      // dockerd got there in the end (or an operator started it): `ps` flips
+      // from "no containers" to a live one.
+      let containersLive = false;
+      const spawnDouble = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('ps')) {
+          return {
+            stdout: containersLive ? JSON.stringify({ State: 'running', ExitCode: 0 }) : '',
+            stderr: '',
+            status: 0,
+          };
+        }
+        if (args.includes('up')) return { stdout: '', stderr: 'mocked error: up', status: 1 };
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer2 = makeInstaller(successSpawn, spawnDouble);
+
+      await installer2.restoreRunningApps();
+      expect(installer2.getRestoreFailure('my-app')).toBeDefined();
+
+      containersLive = true;
+      expect((await installer2.reconcileStatus((await registry.get('my-app'))!)).status).toBe('running');
+      expect(installer2.getRestoreFailure('my-app')).toBeUndefined();
+    });
   });
 
   // ─── GitHub URL install — validation ─────────────────────────────────────

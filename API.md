@@ -178,6 +178,8 @@ Sessions are stored at `sessions/api-{chat_id}/` — symmetric with `telegram-{i
 
 Backup retention (`gateway.appBackup`): backups are pruned by the **union** of a count cap and an age cap — a backup is removed when it exceeds `retention` (keep N newest per app, default **3**, `0` = unbounded) **or** is older than `maxAgeDays` (default **30**, `0` = disabled). Pruning runs after each successful backup and once per day via a scheduler at `cleanupHour` (0-23, default `0`) in `cleanupTimezone` (IANA, default `"UTC"`).
 
+Boot restore (`gateway.appRestore`): at startup every app stored as `running` is brought back up in the background. When an image the app needs is missing from the local daemon, the restore first runs `docker compose pull --ignore-buildable` and `docker compose build`, each under `buildTimeoutMs` (default **1800000**, 30 min); it then runs `docker compose up -d --wait` under `waitTimeoutMs` (default **180000**, 3 min). The two budgets are separate because a timeout SIGKILLs the compose CLI, and while that only abandons the *healthcheck wait* once images exist, it **cancels an in-progress build** — so a cold host with no image cache must not have its rebuild bounded by the short wait budget. When the images are already present both cold-start steps are skipped entirely, so a warm reboot is unaffected. Any non-numeric, non-finite or non-positive value falls back to the default. See `restoreError` under `GET /api/v1/apps`.
+
 ### Cron API
 
 | Method | Path | Auth | Description |
@@ -3188,6 +3190,15 @@ curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps | jq
 **`status` values:** `running` | `stopped` | `error` | `building`
 
 > **Live status:** `GET /api/v1/apps` and `GET /api/v1/apps/:name` reconcile the stored status against the live Docker runtime (`docker compose ps`) on read, so a container that crashed, was OOM-killed, was stopped from outside the gateway, or is stuck in a crash-restart loop reports `stopped`/`error` rather than a stale `running`. A `running` container (or one doing a clean/transient restart) → `running`; a container stuck `restarting` after a non-zero exit (crash-loop), an exit with a non-signal non-zero code, or a `dead` container → `error`; no containers, a clean exit, or a container force-killed by an explicit stop (exit 137/SIGKILL or 143/SIGTERM) → `stopped`. If Docker cannot be queried (daemon down, compose file missing) the last stored status is returned unchanged, and an app mid-install (`building`) is not reconciled.
+
+> **Boot restore:** an app whose containers the boot-time restore is still bringing up is **not** reconciled either — its stored status is returned as-is, so a read landing mid-restore cannot see the not-yet-created containers and write `stopped` underneath it. If that restore **failed**, the app reports `error` together with two extra fields, and the stored `running` intent is deliberately left alone so the next boot retries it:
+>
+> | Field | Description |
+> |-------|-------------|
+> | `restoreError` | Why this process's boot restore of the app failed (compose error or timeout) |
+> | `restoreFailedAt` | ISO timestamp of that failure |
+>
+> Both are absent unless a restore failed, and are in-memory only — they describe the current gateway process. They clear as soon as the app is observed `running`, or on an explicit start/stop.
 
 **`source` values:** `registry` | `custom` | `local`
 

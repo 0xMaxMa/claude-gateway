@@ -8,6 +8,7 @@
  */
 
 import { isValidTimezone } from '../skill-learning/config';
+import { numOr } from '../../utils/config-num';
 import type { DreamingConfig, ResolvedDreamingCfg, ResolvedStalenessCfg, StalenessConfig } from './types';
 
 /** Built-in staleness-GC defaults (planning-66). */
@@ -46,17 +47,11 @@ function pick<T>(agent: T | undefined, global: T | undefined, fallback: T): T {
 }
 
 /**
- * Sanitize a resolved numeric config value: fall back to the default on
- * anything non-finite (string/null/NaN/Infinity from untyped JSON config) or
- * out of [min, max]. Critical for `dreamHour`, which feeds the scheduler delay —
- * a NaN there would make `setTimeout` fire immediately and the async reviewer
- * fan out in a tight reschedule loop.
+ * Numeric config sanitation lives in {@link numOr} (`src/utils/config-num.ts`).
+ * Critical for `dreamHour`, which feeds the scheduler delay — a NaN there would
+ * make `setTimeout` fire immediately and the async reviewer fan out in a tight
+ * reschedule loop.
  */
-function numOr(value: number, fallback: number, min: number, max: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  if (value < min || value > max) return fallback;
-  return value;
-}
 
 /**
  * Resolve the staleness-GC sub-config (planning-66). Booleans fall back to the

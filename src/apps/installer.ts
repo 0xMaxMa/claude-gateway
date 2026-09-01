@@ -17,6 +17,7 @@ import {
 } from './compose-generator';
 import { AgentManager } from './agent-manager';
 import { msUntilNextHour } from '../history/cleanup';
+import { msOr } from '../utils/config-num';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -146,6 +147,28 @@ export interface AppHousekeepingConfig {
   danglingImagePrune?: boolean;
 }
 
+/**
+ * Boot-restore budgets (issue #425). Mirrors `GatewayConfig['gateway']['appRestore']`;
+ * all fields optional so an absent config resolves to {@link RESTORE_BUILD_TIMEOUT_MS}
+ * / {@link RESTORE_COMPOSE_TIMEOUT_MS}. Split because the two phases have very
+ * different shapes: the healthcheck wait should stay short, while a cold build
+ * legitimately takes minutes and is *cancelled* if its budget expires.
+ */
+export interface AppRestoreConfig {
+  /** Ceiling for the restore's `docker compose build`. Default 1_800_000 (30 min). */
+  buildTimeoutMs?: number;
+  /** Ceiling for the restore's `docker compose up -d --wait`. Default 180_000 (3 min). */
+  waitTimeoutMs?: number;
+}
+
+/** Why an app's boot-time restore failed, and when. See {@link AppInstaller.getRestoreFailure}. */
+export interface RestoreFailure {
+  /** The underlying error message (compose output tail, or the timeout). */
+  error: string;
+  /** ISO timestamp of the failure. */
+  at: string;
+}
+
 /** Read-only reclaim report (issue #302). Volumes are reported, never deleted. */
 export interface HousekeepingReport {
   /** Human-readable reclaimable build cache from `docker system df` (e.g. "1.457GB"); '' if unknown. */
@@ -225,9 +248,23 @@ const BACKUP_HELPER_IMAGE = 'alpine';
 const BIND_MOVE_TIMEOUT_MS = 120_000;
 // Per-app ceiling for the boot-time `compose up --wait` during restore. Runs in
 // the background (non-blocking), so this only bounds how long a hung container
-// keeps its child process alive — not the gateway's responsiveness. Shorter than
-// the install path's 600s because restore images are already built (no pull/build).
+// keeps its child process alive — not the gateway's responsiveness. Deliberately
+// short: it bounds the *healthcheck wait* only. The build that may precede it on
+// a cold host gets its own, far larger budget below — sizing this one to cover a
+// from-source build would also make every hung container hold on for that long.
 const RESTORE_COMPOSE_TIMEOUT_MS = 180_000;
+// Per-app ceiling for the boot-time `compose build` that precedes the wait.
+// Applies when the host has no image cache for the app (data dir restored onto a
+// fresh machine, migrated host, pruned Docker state), where the restore has to
+// cover base-image pulls, a dependency install and an application build — for up
+// to RESTORE_MAX_CONCURRENCY apps competing for the same CPU. A timeout here
+// SIGKILLs the CLI, which *cancels* the build (see {@link defaultAsyncSpawn}),
+// so this must be generous: an expired budget means the app is never built.
+const RESTORE_BUILD_TIMEOUT_MS = 1_800_000;
+// Ceiling for the read-only probe that decides whether a build is needed at all.
+// Two local daemon queries, no network and no work — generous on purpose so a
+// momentarily busy dockerd does not make the restore skip a build it needs.
+const IMAGE_PROBE_TIMEOUT_MS = 30_000;
 // Max apps brought up concurrently during boot restore. Bounds the docker/CPU
 // spike when many apps are marked running, while still parallelising the common
 // case. Typical installs have 1-3 apps, so this rarely binds.
@@ -357,6 +394,19 @@ export class AppInstaller {
   private readonly appBackupConfig: Required<AppBackupConfig>;
   /** Tracks app names currently being installed to prevent concurrent installs of the same name. */
   private readonly installingNames = new Set<string>();
+  /**
+   * App names whose boot-time restore is in flight. Mirrors {@link installingNames}
+   * for {@link restoreRunningApps}: while a restore owns an app, its containers do
+   * not exist yet, so status reads must not reconcile it (issue #425).
+   */
+  private readonly restoringNames = new Set<string>();
+  /**
+   * App name → why this boot's restore of it failed. In-memory on purpose: it
+   * describes the *current* process's restore attempt, so a gateway restart
+   * (which retries the restore) correctly starts from a clean slate.
+   */
+  private readonly restoreFailures = new Map<string, RestoreFailure>();
+  private readonly restoreConfig: Required<AppRestoreConfig>;
 
   constructor(
     private readonly registry: AppsRegistry,
@@ -369,9 +419,14 @@ export class AppInstaller {
     private readonly housekeepingConfig: AppHousekeepingConfig = {},
     appBackupConfig?: AppBackupConfig,
     backupsDir?: string,
+    appRestoreConfig?: AppRestoreConfig,
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
     this.backupsDir = backupsDir ?? path.join(this.appsDir, APP_BACKUPS_DIRNAME);
+    this.restoreConfig = {
+      buildTimeoutMs: msOr(appRestoreConfig?.buildTimeoutMs, RESTORE_BUILD_TIMEOUT_MS),
+      waitTimeoutMs: msOr(appRestoreConfig?.waitTimeoutMs, RESTORE_COMPOSE_TIMEOUT_MS),
+    };
     this.appBackupConfig = {
       retention:
         appBackupConfig?.retention !== undefined && appBackupConfig.retention >= 0
@@ -649,6 +704,9 @@ export class AppInstaller {
     }
 
     await this.registry.remove(appName);
+    // The app is gone — drop its restore marker so a later install of the same
+    // name does not inherit a failure that belonged to the previous one.
+    this.restoreFailures.delete(appName);
   }
 
   // ─── Backup / Restore ───────────────────────────────────────────────────────
@@ -1298,6 +1356,11 @@ export class AppInstaller {
         this.composeUp(appName, entry.installPath);
         await this.registry.updateStatus(appName, 'running');
       }
+      // An explicit operator action supersedes this boot's restore attempt: a
+      // stop is a deliberate `stopped`, a start replaced the failed one. Only
+      // cleared on success — if the action threw, the app is still in the state
+      // the failed restore left it in and stays eligible for the next retry.
+      this.restoreFailures.delete(appName);
     } finally {
       this.installingNames.delete(appName);
     }
@@ -1319,11 +1382,28 @@ export class AppInstaller {
    *
    * When the live status differs from the stored one it is persisted back to
    * `apps.json` before returning, so subsequent reads and the boot-time restore
-   * see the truth.
+   * see the truth. The one exception is an app whose boot restore failed: see
+   * {@link restoreRunningApps} for why that must not be written down.
    */
   async reconcileStatus(entry: AppEntry): Promise<AppEntry> {
     const live = await this.queryRuntimeStatus(entry);
+    // Up and serving — whatever went wrong at boot has since been resolved
+    // (dockerd finished, an operator started it), so drop the stale marker.
+    if (live === 'running') this.restoreFailures.delete(entry.name);
     if (live === entry.status) return entry;
+    // A failed boot restore must NOT rewrite `running` → `stopped`.
+    // restoreRunningApps() only considers entries stored as `running`, so
+    // persisting `stopped` here is exactly what excludes the app from every
+    // future boot restore — one slow cold build would latch it off for good
+    // (issue #425). Report `error` instead: honest (it is not serving), and
+    // distinguishable from a deliberate stop — GET /api/v1/apps pairs it with
+    // the reason from {@link getRestoreFailure} — while the stored `running`
+    // intent survives for the next boot to retry.
+    if (live === 'stopped' && entry.status === 'running' && this.restoreFailures.has(entry.name)) {
+      // Matches the persisted path below: a corrected status carries a fresh
+      // timestamp whether or not the write happened.
+      return { ...entry, status: 'error', updatedAt: new Date().toISOString() };
+    }
     try {
       await this.registry.updateStatus(entry.name, live);
     } catch {
@@ -1352,6 +1432,11 @@ export class AppInstaller {
   private async queryRuntimeStatus(entry: AppEntry): Promise<AppEntry['status']> {
     // An install in flight owns the status — don't race it.
     if (entry.status === 'building') return entry.status;
+    // So does a boot-time restore: its `compose build`/`up` has not created the
+    // containers yet, so a read landing mid-restore sees an empty list, maps it
+    // to `stopped`, and reconcileStatus() persists that underneath the restore.
+    // On a cold host the window is minutes, not seconds (issue #425).
+    if (this.restoringNames.has(entry.name)) return entry.status;
     let stdout: string;
     try {
       const res = await this.spawnAsync(
@@ -1386,11 +1471,27 @@ export class AppInstaller {
    * Best-effort and non-fatal — a failure for one app is collected and the rest
    * still proceed, so one broken app cannot block the others or gateway startup.
    * Returns the apps that failed to start (and the count attempted, for logging).
+   *
+   * Each app is marked in-flight for the duration ({@link restoringNames}) so a
+   * concurrent status read cannot persist `stopped` underneath it, and a failure
+   * is recorded ({@link getRestoreFailure}) so it is visible through the apps API
+   * rather than only in the log, and so reconcileStatus() keeps the app eligible
+   * for the next boot's restore instead of latching it off (issue #425).
    */
   async restoreRunningApps(): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
     const apps = await this.registry.list();
     const running = apps.filter((e) => e.status === 'running');
     const failures: Array<{ app: string; error: string }> = [];
+
+    // Mark the WHOLE batch in flight before any worker starts, not per worker.
+    // The pool runs at most RESTORE_MAX_CONCURRENCY at a time, so marking inside
+    // the worker would leave every queued app unprotected for as long as the
+    // apps ahead of it take — minutes on a cold host. A status read landing in
+    // that window persists `running` → `stopped`, and once that is stored the
+    // no-latch guard in reconcileStatus() no longer applies (it requires the
+    // stored status to still be `running`), so a later failure would latch the
+    // app off for good — the exact outcome this path exists to prevent (#425).
+    for (const entry of running) this.restoringNames.add(entry.name);
 
     // Bounded-concurrency worker pool: workers pull from a shared cursor until
     // the list is drained, so at most RESTORE_MAX_CONCURRENCY compose-ups run at
@@ -1401,15 +1502,38 @@ export class AppInstaller {
         const entry = running[cursor++];
         try {
           await this.composeUpAsync(entry.name, entry.installPath);
+          this.restoreFailures.delete(entry.name);
         } catch (err) {
-          failures.push({ app: entry.name, error: (err as Error).message });
+          const error = (err as Error).message;
+          failures.push({ app: entry.name, error });
+          this.restoreFailures.set(entry.name, { error, at: new Date().toISOString() });
+        } finally {
+          // Released per app, not per batch, so an app that is already up stops
+          // being shielded the moment its own restore ends.
+          this.restoringNames.delete(entry.name);
         }
       }
     };
     const poolSize = Math.min(RESTORE_MAX_CONCURRENCY, running.length);
-    await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    try {
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    } finally {
+      // Safety net for anything the per-app finally could not reach: a leaked
+      // marker would freeze that app's status reporting for the whole process.
+      for (const entry of running) this.restoringNames.delete(entry.name);
+    }
 
     return { attempted: running.length, failures };
+  }
+
+  /**
+   * Why this boot's restore of `appName` failed, or `undefined` when the last
+   * restore succeeded (or never ran). Lets `GET /api/v1/apps` tell an app the
+   * gateway tried and failed to start apart from one an operator stopped —
+   * previously the difference existed only in the boot log.
+   */
+  getRestoreFailure(appName: string): RestoreFailure | undefined {
+    return this.restoreFailures.get(appName);
   }
 
   // ─── Internal install pipeline ────────────────────────────────────────────
@@ -2914,13 +3038,98 @@ export class AppInstaller {
    * dev-time port clashes during install/update, but after a host reboot nothing
    * is running (the very reason this restore exists), so there is nothing to
    * conflict with — and keeping it out avoids extra synchronous docker calls.
+   *
+   * Runs the cold-start steps and `up` under two budgets, but only pays for the
+   * cold path when the host actually lacks the images. `up` alone would pull and
+   * build whatever is missing, and then that work shares the healthcheck-wait
+   * budget — on a host with no image cache (data dir restored onto a fresh
+   * machine, migrated host, pruned Docker) that budget expires mid-build, at
+   * which point the SIGKILL in {@link defaultAsyncSpawn} *cancels* the build and
+   * leaves no image and no container (issue #425).
    */
   private async composeUpAsync(appName: string, dir: string): Promise<void> {
+    // Only a cold host pays for pull/build. `up` fetches solely what is missing,
+    // whereas `build` re-runs every time it is called — issuing it
+    // unconditionally would re-execute every Dockerfile on every boot, and
+    // `appHousekeeping` prunes build cache older than a week, so for an app
+    // whose image was already there that is a from-scratch rebuild in front of
+    // a start that needed none.
+    if (await this.needsImageBuild(appName, dir)) {
+      // Pull first: services declared with `image:` only are never built, so on
+      // a cold host they have to be fetched — and `up` would otherwise fetch
+      // them under the short wait budget. `--ignore-buildable` skips the
+      // services that build, which the next step handles.
+      await this.tryColdStart(appName, dir, ['pull', '--ignore-buildable']);
+      await this.tryColdStart(appName, dir, ['build']);
+    }
     await this.runAsync(
       ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'],
       dir,
-      RESTORE_COMPOSE_TIMEOUT_MS,
+      this.restoreConfig.waitTimeoutMs,
     );
+  }
+
+  /**
+   * Run one best-effort cold-start step (`pull` / `build`) under the build
+   * budget. Errors are swallowed on purpose so `up` stays the single authority
+   * on whether the app starts: it re-does whatever is still missing and reports
+   * the real failure together with the container logs.
+   */
+  private async tryColdStart(appName: string, dir: string, step: string[]): Promise<void> {
+    try {
+      await this.runAsync(
+        ['docker', 'compose', '-p', appName, ...step],
+        dir,
+        this.restoreConfig.buildTimeoutMs,
+      );
+    } catch {
+      /* fall through — `up` redoes it and surfaces the actual failure */
+    }
+  }
+
+  /**
+   * True when at least one image the compose project needs is absent from the
+   * local daemon — the cold-host case that must build before it can start.
+   *
+   * Every failure path here answers `false`. "No signal" must mean "skip the
+   * pre-build", which leaves {@link composeUpAsync} behaving exactly as it did
+   * before the build step existed — `up` still builds whatever is missing. The
+   * opposite default would rebuild apps that only needed starting, which is the
+   * cost this probe exists to avoid.
+   */
+  private async needsImageBuild(appName: string, dir: string): Promise<boolean> {
+    let images: string[];
+    try {
+      const { stdout } = await this.runAsync(
+        ['docker', 'compose', '-p', appName, 'config', '--images'],
+        dir,
+        IMAGE_PROBE_TIMEOUT_MS,
+      );
+      // Image names come from the app's own compose file, so they are untrusted
+      // here: one starting with '-' would be read as a flag by `image inspect`.
+      // They are passed as argv (never a shell string), so dropping those is
+      // the only guard needed.
+      images = stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith('-'));
+    } catch {
+      return false;
+    }
+    if (images.length === 0) return false;
+    try {
+      // `docker image inspect` exits non-zero when *any* argument is missing,
+      // so one call covers the whole project. `--format` keeps the output to
+      // one id per image instead of the full manifest JSON.
+      const res = await this.spawnAsync(
+        'docker',
+        ['image', 'inspect', '--format', '{{.Id}}', ...images],
+        { cwd: dir, timeoutMs: IMAGE_PROBE_TIMEOUT_MS },
+      );
+      return res.status !== 0;
+    } catch {
+      return false;
+    }
   }
 
   /** Async equivalent of {@link run}: throws on non-zero exit. */
@@ -3489,11 +3698,16 @@ function defaultSpawn(
  * to a failure). On timeout the child is SIGKILLed and the promise rejects.
  *
  * NOTE on timeout semantics for `docker compose up --wait`: SIGKILL kills the
- * `docker compose` CLI process we spawned, NOT the containers. dockerd keeps
- * bringing them up in the background, so a timeout means "we stopped waiting on
- * the healthcheck", not "the start was cancelled" — the app may well come up
- * healthy moments later. That's acceptable for restore: we only abandon the
- * blocking wait, the container lifecycle is owned by dockerd regardless.
+ * `docker compose` CLI process we spawned, NOT the containers. **Once the images
+ * exist**, dockerd keeps bringing them up in the background, so a timeout means
+ * "we stopped waiting on the healthcheck", not "the start was cancelled" — the
+ * app may well come up healthy moments later.
+ *
+ * That does NOT hold while an image is still being built. A build session is
+ * driven by the client, so killing the CLI cancels it: the timeout leaves no
+ * image and no container, and nothing arrives later. This is why the restore
+ * builds under its own, far larger budget before it waits — see
+ * {@link AppInstaller.composeUpAsync} and issue #425.
  */
 function defaultAsyncSpawn(
   cmd: string,
@@ -3517,7 +3731,8 @@ function defaultAsyncSpawn(
     const timer = opts?.timeoutMs
       ? setTimeout(() => {
           if (settled) return;
-          // SIGKILL the compose CLI; dockerd keeps starting the containers.
+          // SIGKILL the compose CLI. Containers already handed to dockerd keep
+          // starting; a build in progress does not survive. See the note above.
           child.kill('SIGKILL');
           fail(new Error(`Command timed out after ${opts.timeoutMs}ms: ${cmd} ${args[0] ?? ''}`));
         }, opts.timeoutMs)
