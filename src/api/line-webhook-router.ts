@@ -101,16 +101,34 @@ function persistPublicBase(
 }
 
 /**
+ * Extensions a browser would treat as ACTIVE content. A staged file is reachable
+ * over the authenticated media endpoint (`GET /api/agents/:id/media/*`, which
+ * hands the extension to `res.sendFile` and so to Express's Content-Type lookup),
+ * so a sender-named `x.html` or `x.svg` opened from the UI would execute script on
+ * the gateway's own origin. Naming them `bin` costs nothing — the bytes still reach
+ * the agent unchanged, and that endpoint content-sniffs a `.bin` against image/PDF
+ * magic only, falling back to application/octet-stream. This is a denylist by
+ * necessity (an allowlist would degrade every legitimate but unlisted document
+ * type), so it is the second line: `X-Content-Type-Options: nosniff` on that
+ * endpoint is the first.
+ */
+const BROWSER_ACTIVE_EXTS = new Set([
+  'htm', 'html', 'xhtml', 'xht', 'shtml', 'shtm', 'xml', 'xsl', 'xslt',
+  'svg', 'svgz', 'js', 'mjs', 'cjs', 'css', 'jsp', 'php', 'asp', 'aspx', 'hta',
+]);
+
+/**
  * Extension for an inbound LINE **file**, derived from the sender-supplied name.
  *
  * LINE reports NO MIME type on `file` message events (an image's type can be
  * sniffed from its bytes; a document's cannot), so the name is the only signal —
  * and it is untrusted webhook input. Treat it as hostile: take the last
  * dot-segment, lowercase it, and accept it only when it is a short alphanumeric
- * run. Anything else — traversal segments, path separators, percent-escapes,
- * spaces, an over-long suffix, no suffix at all — degrades to `bin` rather than
- * reaching the filesystem. A multi-part suffix collapses to its last part
- * ("archive.tar.gz" → "gz"), which is enough for the agent to recognise the file.
+ * run that a browser will not execute. Anything else — traversal segments, path
+ * separators, percent-escapes, spaces, an over-long suffix, no suffix at all, or
+ * an active-content type — degrades to `bin` rather than reaching the filesystem.
+ * A multi-part suffix collapses to its last part ("archive.tar.gz" → "gz"), which
+ * is enough for the agent to recognise the file.
  */
 export function safeFileExt(fileName: string | undefined | null): string {
   const raw = typeof fileName === 'string' ? fileName : '';
@@ -118,7 +136,8 @@ export function safeFileExt(fileName: string | undefined | null): string {
   // dot <= 0 covers both "no suffix" and a leading-dot name (".env" has no ext).
   if (dot <= 0 || dot === raw.length - 1) return 'bin';
   const ext = raw.slice(dot + 1).toLowerCase();
-  return /^[a-z0-9]{1,8}$/.test(ext) ? ext : 'bin';
+  if (!/^[a-z0-9]{1,8}$/.test(ext)) return 'bin';
+  return BROWSER_ACTIVE_EXTS.has(ext) ? 'bin' : ext;
 }
 
 /**
@@ -303,7 +322,11 @@ export function normalizeLineEvent(
   if (msg.type === 'file') {
     const file = msg as webhook.FileMessageContent;
     meta.media_type = 'file';
-    meta.attachment_kind = 'file';
+    // `attachment_kind` is a cross-channel vocabulary the model reads off the
+    // <channel> tag, not a LINE-specific label — Telegram already emits
+    // 'document' for a generic file (mcp/tools/telegram/receiver-server.ts), so
+    // match it rather than teaching the agent a second word for the same thing.
+    meta.attachment_kind = 'document';
     const name = safeAttachmentName(file.fileName);
     if (name) meta.attachment_name = name;
     // A LINE file message carries no caption. Without a placeholder `content`
@@ -637,13 +660,16 @@ export function createLineWebhookHandler(
       const mediaType = norm.meta.media_type;
       if ((mediaType === 'image' || mediaType === 'file') && blobClient && norm.meta.message_id) {
         try {
-          // The extension comes from the RAW event name (safeFileExt sanitises it
-          // itself) — meta.attachment_name is the display label and has already
-          // had characters stripped, which could corrupt the suffix.
-          const file = (event as webhook.MessageEvent).message as webhook.FileMessageContent;
-          const mediaPath = mediaType === 'image'
-            ? await downloadLineImage(blobClient, norm.meta.message_id)
-            : await downloadLineFile(blobClient, norm.meta.message_id, file.fileName, file.fileSize);
+          let mediaPath: string | null;
+          if (mediaType === 'image') {
+            mediaPath = await downloadLineImage(blobClient, norm.meta.message_id);
+          } else {
+            // The extension comes from the RAW event name (safeFileExt sanitises
+            // it itself) — meta.attachment_name is the display label and has
+            // already had characters stripped, which could corrupt the suffix.
+            const file = (event as webhook.MessageEvent).message as webhook.FileMessageContent;
+            mediaPath = await downloadLineFile(blobClient, norm.meta.message_id, file.fileName, file.fileSize);
+          }
           if (mediaPath) norm.meta.image_path = mediaPath;
         } catch (err) {
           logger.warn('LINE webhook: media download failed', {

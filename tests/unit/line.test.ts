@@ -171,7 +171,8 @@ describe('normalizeLineEvent()', () => {
     );
     expect(norm).not.toBeNull();
     expect(norm!.meta.media_type).toBe('file');
-    expect(norm!.meta.attachment_kind).toBe('file');
+    // matches Telegram's vocabulary for a generic attachment
+    expect(norm!.meta.attachment_kind).toBe('document');
     expect(norm!.meta.attachment_name).toBe('report.pdf');
     expect(norm!.meta.message_id).toBe('f1');
     expect(norm!.meta.chat_id).toBe('U123');
@@ -297,6 +298,21 @@ describe('safeFileExt()', () => {
 
   test('a leading-dot name has no extension', () => {
     expect(safeFileExt('.env')).toBe('bin');
+  });
+
+  test('browser-active types degrade to bin so the media endpoint cannot serve them inline', () => {
+    // A staged file is reachable over GET /api/agents/:id/media/*, which derives
+    // Content-Type from the extension — an .html or .svg named by the sender would
+    // otherwise execute on the gateway's own origin when opened from the UI.
+    for (const name of ['x.html', 'x.HTM', 'x.svg', 'x.xhtml', 'x.js', 'x.mjs', 'x.css', 'x.xml', 'x.php', 'x.hta']) {
+      expect(safeFileExt(name)).toBe('bin');
+    }
+  });
+
+  test('ordinary document types are still preserved', () => {
+    for (const [name, ext] of [['a.pdf', 'pdf'], ['a.docx', 'docx'], ['a.zip', 'zip'], ['a.csv', 'csv'], ['a.txt', 'txt']]) {
+      expect(safeFileExt(name)).toBe(ext);
+    }
   });
 
   test('every result is safe to interpolate into a path segment', () => {
