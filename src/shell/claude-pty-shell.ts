@@ -24,6 +24,7 @@ import { classifyPhantomDraft, unsubmittedDraft as discountPhantom } from './dra
 import { shouldAdoptOrphanWake } from './orphan-wake';
 import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
+import { decideBypassDialogAction, BypassDialogState, BYPASS_MAX_MOVES } from './bypass-dialog';
 import { buildSubmitDiag } from './submit-diag';
 
 const POLL_MS = 200;
@@ -186,6 +187,11 @@ class Driver {
   // re-sent every poll while the error overlay lingers. Reset when a new turn begins.
   private requestTooLargeHandled = false;
   private lastDialogActionAt = 0;
+  // Keystroke budget for the bypass-permissions dialog, spent by the arrow
+  // keys that walk the caret onto the accept row on Claude Code builds whose
+  // dialog has no row numbers (see bypass-dialog.ts). Reset once the dialog
+  // leaves the screen.
+  private bypassDialog: BypassDialogState = { moves: 0 };
   // In-flight behavioral probe round, advanced synchronously by tick() at a
   // single chokepoint — the same tick-driven pattern as menuCancel and
   // interrupting (review round 2, finding 6; replaced a detached async
@@ -1019,14 +1025,41 @@ class Driver {
     if (now - this.lastDialogActionAt < DIALOG_ACTION_COOLDOWN_MS) return;
     if (this.screen.quietMs() < 500) return;
     const dialog = this.screen.detectDialog();
-    if (!dialog) return;
+    if (!dialog) {
+      // Dialog gone (accepted, or never really there) — the next one starts
+      // with a fresh keystroke budget.
+      this.bypassDialog.moves = 0;
+      return;
+    }
     this.lastDialogActionAt = now;
 
     if (dialog === 'bypass-permissions') {
       // --dangerously-skip-permissions is built into the wrapper, so the
       // confirmation dialog is always accepted on the operator's behalf.
-      logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
-      this.host.writeRaw('2');
+      // WHICH keystroke does that depends on how the running Claude Code
+      // renders the dialog (numbered rows vs not — see bypass-dialog.ts), so
+      // it is decided from the screen, one key per cooldown round.
+      const action = decideBypassDialogAction(this.screen.dialogText(), this.bypassDialog);
+      switch (action.kind) {
+        case 'digit':
+          logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
+          this.host.writeRaw(action.key);
+          break;
+        case 'move':
+          this.bypassDialog.moves++;
+          logWarn(`Bypass Permissions dialog: moving caret to the accept row (${this.bypassDialog.moves}/${BYPASS_MAX_MOVES})`);
+          this.host.writeRaw(action.key);
+          break;
+        case 'confirm':
+          logWarn('accepting Bypass Permissions dialog (per built-in --dangerously-skip-permissions)');
+          this.host.writeRaw(action.key);
+          break;
+        case 'wait':
+          // Deliberately no keystroke: an un-accepted dialog is visible and
+          // recoverable, a mis-aimed Enter picks "No, exit" and is not.
+          logWarn(`Bypass Permissions dialog left alone — ${action.reason}`);
+          break;
+      }
     }
   }
 

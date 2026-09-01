@@ -1,0 +1,162 @@
+/**
+ * Decision logic for accepting Claude Code's "Bypass Permissions mode" dialog.
+ *
+ * The wrapper always injects --dangerously-skip-permissions, so the resulting
+ * confirmation modal is accepted on the operator's behalf. How to accept it
+ * depends on the Claude Code build, because the dialog's rendering changed:
+ *
+ *   Claude Code <= 2.1.247          Claude Code >= 2.1.248
+ *     ❯ 1. No, exit                   ❯ No, exit
+ *       2. Yes, I accept                Yes, I accept
+ *
+ * The old shape is a numbered select — typing the digit picks *and* confirms
+ * the row in one keystroke. The new shape has no indexes, so a digit selects
+ * nothing at all: the dialog stays up, gets re-detected every
+ * DIALOG_ACTION_COOLDOWN_MS, and the session wedges until the watchdog kills
+ * it (issue #431). Both shapes start with the caret on "No, exit".
+ *
+ * Both renderings are still in the wild, so this decides per screen rather
+ * than per version — there is no version string to read from inside the PTY
+ * anyway, and the screen is the thing that actually has to be driven.
+ *
+ * SAFETY: choosing "No, exit" terminates Claude Code, which is not
+ * recoverable, while leaving the dialog up merely means an operator sees it.
+ * So Enter is only ever sent once the caret is *observed* on the accept row,
+ * the digit is read off the accept row instead of hard-coded (a future
+ * reordering must not send us to "No, exit"), and anything unparseable or
+ * ambiguous produces no keystroke at all.
+ *
+ * This module is the pure decision — kept free of node-pty / screen imports so
+ * it is cheap to unit-test in isolation, same pattern as menu-probe.ts's
+ * decideProbeAttempt and menu-cancel.ts's decideMenuCancel. See
+ * Driver.maybeHandleDialog() in claude-pty-shell.ts for where it is wired in.
+ */
+
+/** The dialog's two option labels — also the TUI_BYPASS_PERMS detection markers. */
+const ACCEPT_LABEL = 'Yes, I accept';
+const DECLINE_LABEL = 'No, exit';
+
+/** Arrow keystrokes used to walk the caret onto the accept row. */
+export const BYPASS_KEY_DOWN = '\x1b[B';
+export const BYPASS_KEY_UP = '\x1b[A';
+/** Confirms the highlighted row ("Enter to confirm" per the dialog's own footer). */
+export const BYPASS_KEY_ENTER = '\r';
+
+/**
+ * Cap on arrow keystrokes per dialog. The dialog has two rows, so one move is
+ * always enough; the budget exists purely so a dialog that renders but never
+ * responds cannot draw unbounded key traffic. Exhausting it falls back to
+ * 'wait' — the fail-safe visible dialog, not a guessed Enter.
+ */
+export const BYPASS_MAX_MOVES = 4;
+
+export type BypassDialogAction =
+  /** Numbered rendering: type this digit, which selects and confirms in one key. */
+  | { kind: 'digit'; key: string }
+  /** Un-numbered rendering: caret is elsewhere, walk it toward the accept row. */
+  | { kind: 'move'; key: string }
+  /** Caret is on the accept row — safe to confirm. */
+  | { kind: 'confirm'; key: string }
+  /** Nothing safe to do this round; `reason` is for the log. */
+  | { kind: 'wait'; reason: string };
+
+/** Per-dialog bookkeeping. Reset once the dialog leaves the screen. */
+export interface BypassDialogState {
+  /** Arrow keystrokes sent for the current dialog. */
+  moves: number;
+}
+
+/** One option row of the dialog as it appears on screen. */
+interface OptionRow {
+  /** Line index within the scanned region — decides Down vs Up. */
+  line: number;
+  /** The ❯ caret is on this row. */
+  caret: boolean;
+  /** The row's `N.` index in the numbered rendering, or null when un-numbered. */
+  digit: number | null;
+}
+
+/**
+ * Match an option row: optional box border, optional ❯ caret, optional `N.`
+ * index, then the label and nothing else.
+ *
+ * Anchored at both ends on purpose. The dialog's own warning prose mentions
+ * accepting responsibility and Bypass Permissions mode, and a chat reply can
+ * quote the labels outright; requiring the label to be the *whole* row keeps
+ * those from being mistaken for a selectable option.
+ *
+ * The caret is U+276F only — never the ASCII '>' that TUI_MENU_OPTION_RE
+ * tolerates for row content — because the real TUI never renders '>' as a
+ * caret while prose (markdown blockquotes) renders it constantly.
+ */
+function rowPattern(label: string): RegExp {
+  return new RegExp(`^[\\s│]*(❯)?\\s*(?:(\\d+)\\.)?\\s*${label}[\\s│]*$`);
+}
+
+const ACCEPT_ROW_RE = rowPattern(ACCEPT_LABEL);
+const DECLINE_ROW_RE = rowPattern(DECLINE_LABEL);
+
+/**
+ * Find the option row nearest the bottom of the region. A live modal is the
+ * bottom-most thing on screen, so scanning upward from the end means quoted
+ * scrollback above it can never be the row we act on.
+ */
+function findRow(lines: string[], re: RegExp): OptionRow | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = re.exec(lines[i]);
+    if (m) return { line: i, caret: m[1] === '❯', digit: m[2] ? Number(m[2]) : null };
+  }
+  return null;
+}
+
+/**
+ * Decide the single keystroke to send at a bypass-permissions dialog, given
+ * the screen region the dialog was detected in.
+ *
+ * Callers send at most one key per call and re-read the screen before the
+ * next one (the DIALOG_ACTION_COOLDOWN_MS re-entry in maybeHandleDialog()),
+ * so multi-step acceptance is a screen-driven state machine rather than a
+ * blind key sequence: every keystroke is justified by what is on screen at
+ * the moment it is sent.
+ *
+ * `state.moves` is only read/advanced by the caller for 'move' actions.
+ */
+export function decideBypassDialogAction(
+  dialogText: string,
+  state: BypassDialogState,
+): BypassDialogAction {
+  const lines = dialogText.split('\n');
+  const accept = findRow(lines, ACCEPT_ROW_RE);
+  if (!accept) return { kind: 'wait', reason: 'accept row not parseable on screen' };
+
+  // Numbered rendering (<= 2.1.247): the digit selects and confirms in one
+  // keystroke — the pre-#431 behavior, preserved. The index comes from the
+  // accept row itself, so a reordered dialog cannot make us type the digit
+  // that means "No, exit". Only a single-character index is typable as one
+  // keystroke; a wider index falls through to the arrow path below.
+  if (accept.digit !== null) {
+    if (accept.digit >= 1 && accept.digit <= 9) {
+      return { kind: 'digit', key: String(accept.digit) };
+    }
+    return { kind: 'wait', reason: `accept row index ${accept.digit} is not a single keystroke` };
+  }
+
+  // Un-numbered rendering (>= 2.1.248): navigate, then confirm.
+  const decline = findRow(lines, DECLINE_ROW_RE);
+  if (accept.caret && !decline?.caret) return { kind: 'confirm', key: BYPASS_KEY_ENTER };
+
+  // Not on the accept row. Only move when the caret is unambiguously on the
+  // decline row: a screen with no caret at all is still rendering (or is not
+  // the live dialog), and one with a caret on both rows is not a shape we
+  // understand. Guessing either way risks confirming "No, exit".
+  if (!decline?.caret || accept.caret) {
+    return { kind: 'wait', reason: 'no unambiguous caret on the dialog rows' };
+  }
+  if (state.moves >= BYPASS_MAX_MOVES) {
+    return { kind: 'wait', reason: `move budget exhausted after ${state.moves} keystrokes` };
+  }
+  return {
+    kind: 'move',
+    key: accept.line > decline.line ? BYPASS_KEY_DOWN : BYPASS_KEY_UP,
+  };
+}

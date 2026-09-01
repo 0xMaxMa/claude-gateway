@@ -348,6 +348,8 @@ Controls the Claude subprocess backend for all non-app agents.
 
 `--dangerously-skip-permissions` is always injected by the gateway automatically — there is no per-agent config field for it.
 
+In PTY mode that flag makes Claude Code open a "Bypass Permissions mode" confirmation dialog at startup, which the wrapper accepts on your behalf. How it is accepted depends on the Claude Code build: releases up to **2.1.247** render numbered options (`1. No, exit` / `2. Yes, I accept`) and are accepted with the digit, while **2.1.248 and newer** drop the numbers, so the wrapper walks the caret onto the accept row and only then presses Enter. If a future release changes the dialog beyond what the wrapper recognises, it deliberately sends **no** keystroke and leaves the dialog on screen rather than risk selecting "No, exit" (which would exit Claude Code) — set `PTY_SHELL_SKIP_DIALOG_DISMISS=1` to turn the auto-accept off entirely.
+
 ```json
 {
   "gateway": {
