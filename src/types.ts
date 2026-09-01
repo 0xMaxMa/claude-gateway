@@ -275,6 +275,21 @@ export interface GatewayConfig {
       autoBackupBeforeUpdate?: boolean;    // default true
     };
     /**
+     * Boot-time app-restore budgets (issue #425). `restoreRunningApps()` brings
+     * every app stored as `running` back up after a gateway/host restart. On a
+     * warm reboot the images already exist and the wait is short; on a cold host
+     * (data dir restored elsewhere, migrated machine, pruned Docker) the app has
+     * to be rebuilt from source first — and a build killed by an expired budget
+     * is *cancelled*, not merely un-awaited. Hence two budgets: raise
+     * `buildTimeoutMs` for slow hosts or heavy images.
+     */
+    appRestore?: {
+      /** Ceiling for the restore's `docker compose build`, ms. Default 1800000 (30 min). */
+      buildTimeoutMs?: number;
+      /** Ceiling for the restore's `docker compose up -d --wait`, ms. Default 180000 (3 min). */
+      waitTimeoutMs?: number;
+    };
+    /**
      * Skill self-improvement (skill-learning). A closed Do → Learn → Improve
      * loop: after a qualifying session goes idle, a print-only reviewer distils
      * how the task was solved into a reusable workspace SKILL.md (provenance

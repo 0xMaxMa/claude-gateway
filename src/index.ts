@@ -796,6 +796,8 @@ async function main(): Promise<void> {
     undefined,
     config.gateway.appHousekeeping,
     config.gateway?.appBackup,
+    undefined,
+    config.gateway?.appRestore,
   );
 
   // Reclaim update scratch dirs a previous crash left beside an install path.

@@ -1,12 +1,27 @@
 import { Router, Request, Response } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
-import { AppsRegistry } from '../apps/registry';
+import { AppsRegistry, AppEntry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
 import { assertValidHostPort } from '../apps/compose-generator';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
+
+/**
+ * Attach this boot's restore failure to an app entry, when one is recorded, so
+ * an app the gateway tried and failed to start is distinguishable from one an
+ * operator deliberately stopped (issue #425). Absent on every healthy app, so
+ * the response shape is unchanged for existing consumers.
+ */
+function withRestoreFailure(
+  installer: AppInstaller,
+  entry: AppEntry,
+): AppEntry & { restoreError?: string; restoreFailedAt?: string } {
+  const failure = installer.getRestoreFailure(entry.name);
+  if (!failure) return entry;
+  return { ...entry, restoreError: failure.error, restoreFailedAt: failure.at };
+}
 
 /**
  * Parse a request-body `ports` field into a validated host-port override map.
@@ -99,7 +114,7 @@ export function createAppsRouter(
       // Reconcile each stored status against the live Docker runtime so a
       // container that crashed/was killed externally no longer reports running.
       const reconciled = await installer.reconcileStatuses(apps);
-      res.json({ apps: reconciled });
+      res.json({ apps: reconciled.map((e) => withRestoreFailure(installer, e)) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -206,7 +221,7 @@ export function createAppsRouter(
       }
       // Reconcile the stored status against the live Docker runtime before return.
       const reconciled = await installer.reconcileStatus(entry);
-      res.json(reconciled);
+      res.json(withRestoreFailure(installer, reconciled));
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

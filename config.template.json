@@ -68,6 +68,10 @@
       "buildCacheMaxAgeHours": 168,
       "danglingImagePrune": true
     },
+    "appRestore": {
+      "buildTimeoutMs": 1800000,
+      "waitTimeoutMs": 180000
+    },
     "skillLearning": {
       "enabled": true,
       "mode": "auto",
