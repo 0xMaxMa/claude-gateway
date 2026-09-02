@@ -306,7 +306,15 @@ async function followFile(
         /* transient (rotation race, permissions) — the next poll retries */
       }
     }, pollMs);
-    if (typeof timer.unref === 'function') timer.unref();
+    // Deliberately NOT unref'ed. Elsewhere in this repo an interval is unref'ed
+    // so a background timer cannot hold a process open at shutdown, but every
+    // one of those runs inside the gateway server, which its HTTP listener
+    // keeps alive regardless. This one runs in the CLI, where the interval is
+    // the only ref'ed handle there is: `process.once('SIGINT')` does not hold
+    // the loop open, so unref'ing here drained the loop and exited 0 the moment
+    // the tail had been written — `--follow` printed the tail and returned
+    // instead of following (#439). Nothing leaks: `stop()` clears the interval
+    // on both the abort and the SIGINT path.
     const stop = (): void => {
       clearInterval(timer);
       resolve();
