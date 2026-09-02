@@ -188,9 +188,30 @@ export interface ModelConfig {
   multiplier?: number;
 }
 
+/**
+ * Log verbosity, rotation and retention (issue #435). Every field is optional
+ * and falls back to `LOGS_DEFAULTS` in src/logger.ts, so a config with no
+ * `gateway.logs` block keeps working.
+ *
+ * Named to match the history-retention settings above (`retentionDays`, with
+ * 0 = keep forever) rather than inventing a second vocabulary for the same idea.
+ */
+export interface LogsConfig {
+  /** Minimum level written to file and stdout. Default "info" — see LOGS_DEFAULTS. */
+  level?: 'debug' | 'info' | 'warn' | 'error';
+  /** Rotate a log once an append would carry it past this size. Default 16 MiB. */
+  maxFileBytes?: number;
+  /** Rotated generations kept per stream (`<name>.log.1` …). 0 = keep none. Default 3. */
+  maxFiles?: number;
+  /** Delete logs older than this at boot and daily. 0 = keep forever. Default 14. */
+  retentionDays?: number;
+}
+
 export interface GatewayConfig {
   gateway: {
     logDir: string;
+    /** Log verbosity, rotation and retention. Absent = LOGS_DEFAULTS. */
+    logs?: LogsConfig;
     timezone: string;
     /**
      * Network interface the HTTP/WebSocket server binds to. Defaults to

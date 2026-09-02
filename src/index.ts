@@ -31,9 +31,9 @@ import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
 import { ContextIsolationGuard } from './agent/context-isolation';
-import { createLogger } from './logger';
+import { createLogger, configureLogging, loggingConfig, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
-import { AgentConfig, GatewayConfig } from './types';
+import { AgentConfig, GatewayConfig, LogsConfig } from './types';
 import { AppsRegistry } from './apps/registry';
 import { sweepOrphanedReceivers } from './utils/orphan-receivers';
 import { registerShutdownSignals } from './shutdown-signals';
@@ -590,6 +590,11 @@ async function main(): Promise<void> {
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
+  // Must precede the first createLogger() call: the level gate and the rotation
+  // thresholds are process-wide policy, and a logger created before the policy
+  // is installed would run the whole boot on defaults.
+  configureLogging(config.gateway.logs);
+
   // Created as early as logDir allows, and before the isolation guard below:
   // a config bad enough to drop an agent is exactly the config likely to fail
   // validation too, and a guard throw must not swallow the reason an agent
@@ -799,6 +804,19 @@ async function main(): Promise<void> {
   // keeps the process alive.
   appInstaller.startBackupCleanup();
 
+  // Log retention (issue #435): sweeps once now and daily thereafter. Session
+  // logs are the reason this is age-based — each session writes its own file
+  // and never returns to it, so the per-stream generation cap cannot reach them.
+  startLogRetentionSweep(logDir, (removed) => {
+    globalLogger.info('Swept expired log files', {
+      count: removed.length,
+      // Read live rather than closing over the boot-time policy: `gateway.logs`
+      // is hot-reloadable, so a captured value would report the threshold that
+      // was in force at boot while the sweep used the current one.
+      retentionDays: loggingConfig().retentionDays,
+    });
+  });
+
   // Start gateway router
   const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
   await router.start(PORT);
@@ -893,6 +911,16 @@ async function main(): Promise<void> {
         if (change.field === 'gateway.headless') {
           // Applies to sessions spawned after the change; running sessions keep their backend.
           config.gateway.headless = change.newValue as boolean | undefined;
+        }
+        if (change.field === 'gateway.logs') {
+          // Re-installing the policy is enough: every logger reads it per call,
+          // and the retention sweep reads `retentionDays` on each run.
+          config.gateway.logs = change.newValue as LogsConfig | undefined;
+          const applied = configureLogging(config.gateway.logs);
+          // warn, not info: raising the level to `warn` would swallow an `info`
+          // confirmation under the very policy just installed, leaving the
+          // operator with no evidence the edit took.
+          globalLogger.warn('Logging policy reloaded', { ...applied });
         }
         continue;
       }

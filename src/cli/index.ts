@@ -14,15 +14,26 @@ import { runAgents } from './commands/agents';
 import { runChannels } from './commands/channels';
 
 /** Flags that are always boolean regardless of command — never consume the next
- *  token as a value (see parseCliArgs). */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print']);
+ *  token as a value (see parseCliArgs). `follow` is here rather than in the
+ *  gateway command because the verb is a positional: `gateway --follow logs`
+ *  would otherwise parse `logs` as the flag's value and leave no command at all.
+ *  No generated resource command declares a `--follow` value flag. */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command
  *  builds its query/body from `cmd.flags` alone, so an unrecognised flag would
- *  otherwise be parsed, ignored, and reported as success. */
+ *  otherwise be parsed, ignored, and reported as success.
+ *
+ *  Not simply `GLOBAL_BOOLEAN_FLAGS` spread in: the two sets answer different
+ *  questions. `follow` has to parse as a boolean everywhere so the gateway verb
+ *  survives, but it means nothing to a resource command, and accepting it there
+ *  would quietly re-open the hole this check exists to close. */
 const GLOBAL_FLAG_NAMES: ReadonlySet<string> = new Set([
-  ...GLOBAL_BOOLEAN_FLAGS,
+  'help',
+  'json',
+  'yes',
+  'print',
   'url',
   'key',
   'config',
@@ -281,7 +292,7 @@ export const NAME_W = 36;
 export const NOUN_NAME_W = 48;
 
 export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
-  ['gateway status|restart|stop', 'Manage the gateway process (manager-aware)'],
+  ['gateway status|restart|stop|logs', 'Manage the gateway process (manager-aware)'],
   ['service install|status|uninstall', 'Run the gateway as a systemd-user or PM2 service'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
   ['claude version|update [check]', 'Inspect / update the Claude Code binary'],

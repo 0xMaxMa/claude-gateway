@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { expandHome, loadCliConfig } from '../http-client';
+import { explicitConfigWarning, listSessionLogs, resolveLogDir } from '../logs-dir';
 import { redactLine } from '../redact';
 import { writeCommandHelp } from '../output';
 
@@ -39,51 +39,6 @@ export function selectDiagnosticLines(content: string, maxLines = MAX_DIAG_LINES
     }
   }
   return picked.length > maxLines ? picked.slice(picked.length - maxLines) : picked;
-}
-
-/** The config file stores `logDir` exactly as written, and the shipped template
- *  writes `~/.claude-gateway/logs`. The server expands that itself on boot, so
- *  the literal tilde survives on disk and only bites a reader that forgets to
- *  expand it — `readdirSync('~/...')` throws ENOENT and looks like "no logs". */
-function resolveLogDir(flags: Record<string, string | boolean>): string {
-  if (typeof flags.logDir === 'string') return expandHome(flags.logDir);
-  const cfg = loadCliConfig(typeof flags.config === 'string' ? flags.config : undefined);
-  if (cfg.logDir) return expandHome(cfg.logDir);
-  return path.join(os.homedir(), '.claude-gateway', 'logs');
-}
-
-/**
- * Session logs in `dir`, or the reason the directory could not be read.
- *
- * The read used to be wrapped in a bare `catch { return [] }`, which reported
- * every failure as "no session logs found". That is how the unexpanded `~`
- * stayed invisible: an ENOENT on a path that was never resolved looked exactly
- * like an empty directory, and a permission problem still would. The caller
- * needs the errno to say anything useful, so it is returned rather than eaten.
- */
-function listSessionLogs(dir: string): { logs: Array<{ file: string; mtimeMs: number }>; error?: string } {
-  let names: string[];
-  try {
-    names = fs.readdirSync(dir);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === 'ENOENT') return { logs: [], error: `${dir} does not exist` };
-    if (e.code === 'ENOTDIR') return { logs: [], error: `${dir} is not a directory` };
-    return { logs: [], error: `${dir} could not be read (${e.code ?? e.message})` };
-  }
-  const logs = names
-    .filter((n) => n.endsWith('.log') && /session/i.test(n))
-    .map((n) => {
-      const file = path.join(dir, n);
-      let mtimeMs = 0;
-      try {
-        mtimeMs = fs.statSync(file).mtimeMs;
-      } catch {
-        /* ignore */
-      }
-      return { file, mtimeMs };
-    });
-  return { logs };
 }
 
 function claudeCodeVersion(): string {
@@ -127,6 +82,11 @@ export async function runDebugBundle(flags: Record<string, string | boolean>): P
     return 0;
   }
   const logDir = resolveLogDir(flags);
+  // A `--config` that could not be read leaves this pointing at the default
+  // directory, which would otherwise be reported as though it were the one
+  // asked for.
+  const configWarning = explicitConfigWarning(flags);
+  if (configWarning) process.stderr.write(`${configWarning}\n`);
   const sessionFilter = typeof flags.session === 'string' ? flags.session : undefined;
 
   const found = listSessionLogs(logDir);

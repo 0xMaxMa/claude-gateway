@@ -5,15 +5,21 @@ import { probeHealth } from '../health';
 import { detectManager, defaultPidfilePath, pidLooksLikeGateway } from '../manager';
 import { printJson } from '../output';
 import { writeCommandHelp } from '../output';
+import { runGatewayLogs } from './logs';
 
 /**
- * `gateway start|status|restart|stop` — whole-process lifecycle.
+ * `gateway start|status|restart|stop|logs` — whole-process lifecycle.
  *
  * `start` is handled by the boot entry point (src/index.ts), which recognises
  * it before the CLI is ever imported; it is listed here only so the usage text
  * and an unknown-verb error stay honest. Restart/stop must be performed by
  * whatever manager owns the process (it has to stop the very process serving
  * HTTP), so detection resolves the manager and the action is delegated to it.
+ *
+ * `logs` is the odd one out: it touches no process at all, reading the log
+ * files directly so it still answers when the gateway is wedged or dead. It
+ * lives here because the logs are the gateway's, and an operator looking for
+ * them looks under the noun they already know.
  */
 export async function runGatewayLifecycle(
   positionals: string[],
@@ -27,8 +33,11 @@ export async function runGatewayLifecycle(
       flags.help === true,
       'gateway',
       'manage the gateway process on this host',
-      'claude-gateway gateway <start|status|restart|stop>',
-      ['  start is the only command that boots a server; the rest are manager-aware.'],
+      'claude-gateway gateway <start|status|restart|stop|logs>',
+      [
+        '  start is the only command that boots a server; status/restart/stop are manager-aware.',
+        '  logs reads the log files directly and works even when the gateway is dead.',
+      ],
     );
     return flags.help === true ? 0 : 1;
   }
@@ -45,8 +54,10 @@ export async function runGatewayLifecycle(
       return gatewayAction('restart');
     case 'stop':
       return gatewayAction('stop');
+    case 'logs':
+      return runGatewayLogs(flags);
     default:
-      process.stderr.write(`Unknown: gateway ${verb} (expected start|status|restart|stop)\n`);
+      process.stderr.write(`Unknown: gateway ${verb} (expected start|status|restart|stop|logs)\n`);
       return 1;
   }
 }
