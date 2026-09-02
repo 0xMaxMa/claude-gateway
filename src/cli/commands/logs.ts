@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { explicitConfigWarning, listLogStreamIds, resolveLogDir } from '../logs-dir';
-import { writeCommandHelp } from '../output';
+import { flushStream, writeCommandHelp } from '../output';
 
 /**
  * `gateway logs` — read the gateway's own logs without knowing where they live.
@@ -239,25 +239,41 @@ export async function runGatewayLogs(
 
   process.stdout.on('error', onSinkError);
   try {
-    let startPos: number;
+    let tail: { lines: string[]; endPos: number } | undefined;
     try {
       // Resume from where the tail stopped, not from a fresh stat: the gateway is
       // a different process and may have appended in between.
-      const tail = tailFrom(file, parsed.lines);
-      for (const line of tail.lines) emit(line);
-      startPos = tail.endPos;
+      tail = tailFrom(file, parsed.lines);
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       process.stderr.write(`Cannot read ${file} (${e.code ?? e.message})\n`);
-      return 1;
     }
 
-    if (flags.follow === true) await followFile(file, startPos, emit, opts, sink);
+    let exitCode = 1;
+    if (tail) {
+      for (const line of tail.lines) emit(line);
+      if (flags.follow === true) await followFile(file, tail.endPos, emit, opts, sink);
+      exitCode = 0;
+    }
+
+    // Wait for the writes before judging them. A stdout failure is reported
+    // asynchronously, so returning as soon as the last `emit` call returns
+    // decides the exit code before the failure that decides it has arrived —
+    // `gateway logs > <full disk>` exited 0 with an empty stderr, and only the
+    // follow path escaped it, because following happens to keep the process
+    // there long enough for the error to land.
+    //
+    // The same wait is what makes the command self-contained: the `finally`
+    // below detaches the only 'error' listener stdout has, and detaching it
+    // while a write is still in flight leaves that error to the process. That
+    // it did not crash was luck — src/entry.ts calls `exitAfterFlush` on the
+    // next tick, and its own drain re-attached one just in time.
+    await flushStream(process.stdout);
     if (sink.failure) {
       process.stderr.write(`Cannot write output (${sink.failure.code ?? sink.failure.message})\n`);
       return 1;
     }
-    return 0;
+    return exitCode;
   } finally {
     process.stdout.off('error', onSinkError);
   }

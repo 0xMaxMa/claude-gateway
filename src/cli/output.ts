@@ -23,6 +23,58 @@ export function printJson(data: unknown, flags: Record<string, string | boolean>
 }
 
 /**
+ * Resolve once everything already written to `s` has reached the OS — or has
+ * failed and been reported.
+ *
+ * Two separate things outlive the `write()` call that started them, and a
+ * caller that waits for either has to wait for both:
+ *
+ *  - **Buffering.** Into a pipe, `write()` returns as soon as the chunk is
+ *    queued. An empty write's callback runs after every chunk ahead of it has
+ *    flushed — or with the failure that stopped it — which is what makes this
+ *    both a drain and a report.
+ *  - **Reporting.** A failed write is reported *after* the call that made it
+ *    returns, so a stream with nothing left buffered can still owe its caller an
+ *    error. That is not merely untidy: the caller decides an exit code on it,
+ *    and a caller that detaches its own `'error'` listener before the event
+ *    lands leaves it unhandled, which ends the process.
+ *
+ * Awaiting this is enough for the second case without any extra delay here.
+ * Measured on this platform (EPIPE on a closed pipe, ENOSPC on a full device,
+ * both file and socket stdout): the failure is queued for delivery during the
+ * write itself, and the tick queue that carries it runs ahead of the microtask
+ * that resumes the `await`. So by the time a caller has this promise's value it
+ * has already seen the error.
+ *
+ * The empty write is skipped when nothing is buffered, and that is not an
+ * economy. A stream that has already failed fails the extra write too, and that
+ * second failure is reported after this promise has settled and the listeners —
+ * the caller's and the one below — are gone: `gateway logs --follow | head -5`
+ * ended in an uncaught `write EPIPE` with the drain removed. Nothing can be in
+ * flight on a stream with an empty buffer anyway. `destroyed`/`writableEnded`
+ * is guarded for a different reason: writing to a finished stream emits
+ * ERR_STREAM_WRITE_AFTER_END, an error the caller never had coming.
+ */
+export function flushStream(s: NodeJS.WriteStream): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const settle = (): void => {
+      s.off('error', settle);
+      resolve();
+    };
+    if (s.writableLength === 0 || s.destroyed || s.writableEnded) {
+      settle();
+      return;
+    }
+    // Backstop: a failure that never reached the write callback would otherwise
+    // leave this pending forever, and `runGatewayLogs` has no deadline of its
+    // own. No test distinguishes it — every failure measured here does reach the
+    // callback — so it is insurance against a hang, not a fixed defect.
+    s.once('error', settle);
+    s.write('', settle);
+  });
+}
+
+/**
  * Wait for stdout/stderr to reach the OS, then exit with `code`.
  *
  * When stdout is a pipe Node's writes are asynchronous, so `process.exit()`
@@ -38,23 +90,16 @@ export function printJson(data: unknown, flags: Record<string, string | boolean>
  */
 export async function exitAfterFlush(code: number, timeoutMs = 2000): Promise<never> {
   process.exitCode = code;
-  const drain = (s: NodeJS.WriteStream): Promise<void> =>
-    new Promise<void>((resolve) => {
-      if (s.writableLength === 0 || s.destroyed || s.writableEnded) {
-        resolve();
-        return;
-      }
-      // An empty write's callback runs after every pending chunk has flushed.
-      s.write('', () => resolve());
-      s.once('error', () => resolve());
-    });
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, timeoutMs);
     timer.unref?.();
   });
   try {
-    await Promise.race([Promise.all([drain(process.stdout), drain(process.stderr)]), deadline]);
+    await Promise.race([
+      Promise.all([flushStream(process.stdout), flushStream(process.stderr)]),
+      deadline,
+    ]);
   } finally {
     if (timer) clearTimeout(timer);
   }

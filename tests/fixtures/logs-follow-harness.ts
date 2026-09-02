@@ -15,15 +15,30 @@
  * `process.exitCode` — because stdout here is a pipe, and draining it before
  * exiting is precisely the production behaviour these tests are asserting on.
  * A harness that exited differently would be testing a CLI that does not ship.
+ *
+ * `LOGS_HARNESS_EXIT=bare` drops that final drain. It exists for one assertion:
+ * that the command settles its own stdout rather than relying on whatever the
+ * caller happens to do next. `exitAfterFlush` re-attaches an `'error'` listener
+ * of its own a tick later, so for a while a write still in flight when
+ * `runGatewayLogs` returned was caught by that listener purely by timing — the
+ * bare mode is the same CLI with that safety net removed.
  */
 import { runCli } from '../../src/cli/index';
 import { exitAfterFlush } from '../../src/cli/output';
 
+const bare = process.env.LOGS_HARNESS_EXIT === 'bare';
+
+async function finish(code: number): Promise<void> {
+  if (bare) {
+    process.exitCode = code;
+    return;
+  }
+  await exitAfterFlush(code);
+}
+
 runCli(process.argv.slice(2))
-  .then(async (code) => {
-    await exitAfterFlush(code);
-  })
+  .then(finish)
   .catch(async (err: unknown) => {
     process.stderr.write(`${(err as Error)?.stack ?? String(err)}\n`);
-    await exitAfterFlush(1);
+    await finish(1);
   });

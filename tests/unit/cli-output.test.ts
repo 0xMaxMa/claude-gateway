@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -84,6 +84,94 @@ describe('cli output exitAfterFlush', () => {
     );
     expect(res.status).toBe(3);
     expect(res.bytes).toBe(6);
+  });
+});
+
+/**
+ * A stream reports a failed write *after* the call that made it returns, so
+ * "have my writes landed?" and "did any of them fail?" are the same question.
+ * `gateway logs` decides its exit code on the answer, and detaches its stdout
+ * 'error' listener once it has one — settling early would both hide the failure
+ * and leave the event to the process as an uncaught exception.
+ *
+ * Out-of-process again: a real failing stdout is the only thing that exercises
+ * this, and `/dev/full` is that failure without needing to fill a disk.
+ */
+describe('cli output flushStream', () => {
+  const OUTPUT = JSON.stringify(path.resolve('src/cli/output.ts'));
+  const hasDevFull = process.platform === 'linux' && fs.existsSync('/dev/full');
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-flushstream-'));
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  /** Runs `body` with stdout pointed at `/dev/full`; returns its stderr and code. */
+  function onFullDisk(body: string): { stderr: string; status: number | null } {
+    const script = path.join(dir, 'run.js');
+    fs.writeFileSync(script, body);
+    const full = fs.openSync('/dev/full', 'w');
+    try {
+      const res = spawnSync(process.execPath, ['-r', 'ts-node/register', script], {
+        stdio: ['ignore', full, 'pipe'],
+        encoding: 'utf8',
+        env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true' },
+      });
+      return { stderr: res.stderr ?? '', status: res.status };
+    } finally {
+      fs.closeSync(full);
+    }
+  }
+
+  (hasDevFull ? it : it.skip)('settles only after a failed write has been reported', () => {
+    const res = onFullDisk(`
+      const { flushStream } = require(${OUTPUT});
+      const seen = [];
+      process.stdout.on('error', (e) => seen.push('error:' + e.code));
+      process.stdout.write('some output\\n');
+      flushStream(process.stdout).then(() => {
+        seen.push('settled');
+        process.stderr.write(JSON.stringify(seen) + '\\n');
+      });
+    `);
+    // Not merely "contains error": the order is the whole point.
+    expect(res.stderr.trim()).toBe('["error:ENOSPC","settled"]');
+  });
+
+  (hasDevFull ? it : it.skip)('leaves nothing for the caller to catch after it settles', () => {
+    const res = onFullDisk(`
+      const { flushStream } = require(${OUTPUT});
+      const onError = () => {};
+      process.stdout.on('error', onError);
+      process.stdout.write('some output\\n');
+      flushStream(process.stdout).then(() => {
+        // What a command does once it has its answer: stdout is nobody's
+        // responsibility again. Any write still owed an error now ends the
+        // process — including one this flush made itself.
+        process.stdout.off('error', onError);
+        setTimeout(() => process.exit(0), 50);
+      });
+    `);
+    expect(res.stderr).toBe('');
+    expect(res.status).toBe(0);
+  });
+
+  it('waits for buffered bytes to reach a pipe', () => {
+    const script = path.join(dir, 'drain.js');
+    const size = 5 * 1024 * 1024;
+    fs.writeFileSync(
+      script,
+      `const { flushStream } = require(${OUTPUT});
+       process.stdout.write('x'.repeat(${size}) + '\\n');
+       flushStream(process.stdout).then(() => process.exit(0));`,
+    );
+    const res = spawnSync(process.execPath, ['-r', 'ts-node/register', script], {
+      maxBuffer: size * 2,
+      env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true' },
+    });
+    expect(res.stdout.length).toBe(size + 1);
+    expect(res.status).toBe(0);
   });
 });
 

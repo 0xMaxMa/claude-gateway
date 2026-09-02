@@ -199,4 +199,74 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
       expect(exitCode).toBe(1);
     },
   );
+
+  // The same failure without `--follow`. It used to exit 0 with an empty
+  // stderr: stdout reports a failed write after the call that made it returns,
+  // so a command that returned as soon as the last line was handed over settled
+  // its exit code before the failure arrived. Only the follow path escaped it,
+  // and only because following keeps the process there long enough. A script
+  // doing `gateway logs > snapshot.log` on a full disk got a truncated file and
+  // a success code — the "answered when it should have spoken up" failure this
+  // command exists to avoid.
+  (hasDevFull ? it : it.skip)(
+    'I-LOGS-439e: a plain read that cannot write its output fails loudly too',
+    async () => {
+      const file = path.join(dir, 'gateway.log');
+      fs.writeFileSync(file, record('first line') + record('second line'));
+
+      let stderr = '';
+      let exitCode: number | null = null;
+      const full = fs.openSync('/dev/full', 'w');
+      try {
+        child = spawn(process.execPath, ['-r', TS_NODE, HARNESS, 'gateway', 'logs', '--logDir', dir], {
+          stdio: ['ignore', full, 'pipe'],
+          env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true' },
+        });
+      } finally {
+        fs.closeSync(full);
+      }
+      child.stderr!.on('data', (d: Buffer) => { stderr += d.toString(); });
+      child.on('exit', (code) => { exitCode = code; });
+
+      await waitUntil(() => `the plain read to exit (stderr: ${stderr})`, () => exitCode !== null);
+
+      expect(stderr).toContain('Cannot write output (ENOSPC)');
+      expect(exitCode).toBe(1);
+    },
+  );
+
+  // Whoever calls `runGatewayLogs` should not have to finish its writes for it.
+  // The command detaches the only 'error' listener stdout has when it returns,
+  // so a write still in flight at that moment is left to the process — an
+  // uncaught exception, stack trace and all. Nothing crashed only because
+  // src/entry.ts calls `exitAfterFlush` on the next tick and its drain happened
+  // to attach a listener in time; the bare harness removes that coincidence.
+  (hasDevFull ? it : it.skip)(
+    'I-LOGS-439f: reports the failure by itself, without the caller draining stdout',
+    async () => {
+      const file = path.join(dir, 'gateway.log');
+      fs.writeFileSync(file, record('first line'));
+
+      let stderr = '';
+      let exitCode: number | null = null;
+      const full = fs.openSync('/dev/full', 'w');
+      try {
+        child = spawn(process.execPath, ['-r', TS_NODE, HARNESS, 'gateway', 'logs', '--logDir', dir], {
+          stdio: ['ignore', full, 'pipe'],
+          env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true', LOGS_HARNESS_EXIT: 'bare' },
+        });
+      } finally {
+        fs.closeSync(full);
+      }
+      child.stderr!.on('data', (d: Buffer) => { stderr += d.toString(); });
+      child.on('exit', (code) => { exitCode = code; });
+
+      await waitUntil(() => `the bare-exit read to finish (stderr: ${stderr})`, () => exitCode !== null);
+
+      // The reported failure, and only that — no stack trace behind it.
+      expect(stderr).toContain('Cannot write output (ENOSPC)');
+      expect(stderr).not.toMatch(/at .*\(/);
+      expect(exitCode).toBe(1);
+    },
+  );
 });
