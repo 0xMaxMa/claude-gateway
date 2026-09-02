@@ -49,29 +49,80 @@ export const BYPASS_KEY_UP = '\x1b[A';
 export const BYPASS_KEY_ENTER = '\r';
 
 /**
- * Cap on keystrokes sent per dialog — arrow moves plus the accepting key
- * itself. The dialog needs at most two (one move, one Enter), so the budget
- * exists purely so a dialog that renders but never responds cannot draw
- * unbounded key traffic: those keys are not discarded by an unresponsive TUI,
- * they queue, and land in the prompt once it finally opens. Exhausting the
- * budget falls back to 'wait' — the fail-safe visible dialog.
+ * Ceiling on keystrokes sent per dialog — arrow moves plus the accepting key
+ * itself. A healthy dialog needs at most two (one move, one Enter); the
+ * ceiling exists so a dialog that renders but never responds cannot draw
+ * *unbounded* key traffic, because those keys are not discarded by an
+ * unresponsive TUI — they queue and land in the prompt once it opens.
+ *
+ * Sized to the startup window rather than to the happy path. maybeHandleDialog()
+ * only runs while the shell is not ready, so the caller can make at most
+ * STARTUP_TIMEOUT_MS / DIALOG_ACTION_COOLDOWN_MS = 120000/2000 = 60 attempts
+ * before the startup timeout ends the process anyway; a test pins that
+ * arithmetic against the driver's own constants. A tighter ceiling would go
+ * silent partway through that window, so a dialog that merely swallowed its
+ * first keystrokes (still rendering, key handler not yet attached) would never
+ * be retried and would die at the startup timeout into a respawn loop — the
+ * exact #431 symptom. Overspending is cheap by comparison: an unresponsive TUI
+ * only ever collects arrows and digits here (Enter is sent solely after the
+ * caret is *observed* to have moved, which an unresponsive TUI never does), so
+ * the worst case is junk characters in an input draft the driver already
+ * clears, never a submitted line.
+ *
+ * Exhausting the ceiling falls back to 'wait' — the fail-safe visible dialog.
  */
-export const BYPASS_MAX_KEYS = 4;
+export const BYPASS_MAX_KEYS = 60;
+
+/**
+ * Consecutive rounds with no dialog on screen before the keystroke ceiling is
+ * considered spent on a dialog that is gone.
+ *
+ * Not 1: detection needs both TUI_BYPASS_PERMS markers inside the same bottom
+ * region (screen.ts DIALOG_REGION_ROWS), so a repaint that shifts the box by a
+ * row drops the header out of that window for a single read. Resetting on one
+ * miss would zero the counter mid-dialog — precisely the case the ceiling
+ * exists for. Requiring sustained absence costs the next dialog one extra
+ * cooldown round at most.
+ */
+export const BYPASS_RESET_AFTER_MISSES = 2;
 
 export type BypassDialogAction =
   /** Numbered rendering: type this digit, which selects and confirms in one key. */
   | { kind: 'digit'; key: string }
-  /** Un-numbered rendering: caret is elsewhere, walk it toward the accept row. */
+  /**
+   * Un-numbered rendering: the caret is on the decline row, so step it onto
+   * the accept row. Exactly one step — see decideBypassDialogAction(); a caret
+   * anywhere other than the decline row is ambiguous and yields 'wait'.
+   */
   | { kind: 'move'; key: string }
   /** Caret is on the accept row — safe to confirm. */
   | { kind: 'confirm'; key: string }
   /** Nothing safe to do this round; `reason` is for the log. */
   | { kind: 'wait'; reason: string };
 
-/** Per-dialog bookkeeping. Reset once the dialog leaves the screen. */
+/** Per-dialog bookkeeping. Reset once the dialog has left the screen. */
 export interface BypassDialogState {
   /** Keystrokes already sent for the current dialog. */
   keys: number;
+  /** Consecutive rounds the dialog was not detected — see noteDialogAbsent(). */
+  misses: number;
+}
+
+/**
+ * Record a round in which no dialog was detected, clearing the keystroke count
+ * once the dialog has been absent for BYPASS_RESET_AFTER_MISSES consecutive
+ * rounds so the next dialog starts with a full allowance. Tolerating a single
+ * miss keeps a one-round detection flicker (a repaint shifting the header out
+ * of the detection window) from silently refilling the allowance mid-dialog.
+ */
+export function noteDialogAbsent(state: BypassDialogState): void {
+  state.misses++;
+  if (state.misses >= BYPASS_RESET_AFTER_MISSES) state.keys = 0;
+}
+
+/** Record a round in which the dialog *was* detected, restarting the miss run. */
+export function noteDialogPresent(state: BypassDialogState): void {
+  state.misses = 0;
 }
 
 /** One option row of the dialog as it appears on screen. */
@@ -96,9 +147,22 @@ interface OptionRow {
  * The caret is U+276F only — never the ASCII '>' that TUI_MENU_OPTION_RE
  * tolerates for row content — because the real TUI never renders '>' as a
  * caret while prose (markdown blockquotes) renders it constantly.
+ *
+ * The label is escaped before interpolation. These patterns are built at module
+ * load, and the labels above are meant to be edited when the TUI changes: an
+ * unescaped label containing '(' would throw SyntaxError at import time and take
+ * every PTY session down with it, and a '.' would silently become a wildcard
+ * that widens what counts as a selectable row.
  */
-function rowPattern(label: string): RegExp {
-  return new RegExp(`^[\\s│]*(❯)?\\s*(?:(\\d+)\\.)?\\s*${label}[\\s│]*$`);
+function escapeForRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Exported only so a unit test can prove the escaping above. */
+export function rowPattern(label: string): RegExp {
+  return new RegExp(
+    `^[\\s│]*(❯)?\\s*(?:(\\d+)\\.)?\\s*${escapeForRegExp(label)}[\\s│]*$`,
+  );
 }
 
 const ACCEPT_ROW_RE = rowPattern(BYPASS_ACCEPT_LABEL);
@@ -147,11 +211,11 @@ export function decideBypassDialogAction(
   if (!accept) return { kind: 'wait', reason: 'accept row not parseable on screen' };
 
   // Numbered rendering (<= 2.1.247): the digit selects and confirms in one
-  // keystroke — the pre-#431 behavior, preserved. The index comes from the
-  // accept row itself, so a reordered dialog cannot make us type the digit
-  // that means "No, exit". A wider index is not one keystroke, and how such a
-  // dialog responds to arrows has never been observed, so it stops here rather
-  // than guessing its way toward Enter.
+  // keystroke, the same key the pre-#431 code sent — but read off the accept
+  // row rather than hard-coded, so a reordered dialog cannot make us type the
+  // digit that means "No, exit". A wider index is not one keystroke, and how
+  // such a dialog responds to arrows has never been observed, so it stops here
+  // rather than guessing its way toward Enter.
   if (accept.digit !== null) {
     if (accept.digit >= 1 && accept.digit <= 9) {
       return { kind: 'digit', key: String(accept.digit) };
@@ -167,6 +231,12 @@ export function decideBypassDialogAction(
   // decline row: a screen with no caret at all is still rendering (or is not
   // the live dialog), and one with a caret on both rows is not a shape we
   // understand. Guessing either way risks confirming "No, exit".
+  //
+  // So this is a single step between two known rows, not a search: on a dialog
+  // whose caret sits on some third row, every round yields 'wait' and the
+  // operator sees the dialog. Both observed renderings have exactly these two
+  // options, and stepping blindly toward a row we cannot see the caret on is
+  // how Enter ends up on "No, exit".
   if (!decline?.caret || accept.caret) {
     return { kind: 'wait', reason: 'no unambiguous caret on the dialog rows' };
   }

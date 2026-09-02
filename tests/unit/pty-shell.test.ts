@@ -20,10 +20,14 @@ import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
 import {
   decideBypassDialogAction,
+  noteDialogAbsent,
+  noteDialogPresent,
+  rowPattern,
   BYPASS_KEY_DOWN,
   BYPASS_KEY_UP,
   BYPASS_KEY_ENTER,
   BYPASS_MAX_KEYS,
+  BYPASS_RESET_AFTER_MISSES,
   BYPASS_ACCEPT_LABEL,
   BYPASS_DECLINE_LABEL,
 } from '../../src/shell/bypass-dialog';
@@ -915,7 +919,7 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     // Sanity: every fixture is a screen the detector actually fires on, so the
     // decision is only ever asked about dialogs that reached this code path.
     expect(screen.detectDialog()).toBe('bypass-permissions');
-    return decideBypassDialogAction(screen.dialogText(), { keys });
+    return decideBypassDialogAction(screen.dialogText(), { keys, misses: 0 });
   };
 
   it('types the digit on the numbered rendering (<= 2.1.247 behavior, unchanged)', async () => {
@@ -976,6 +980,67 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     expect(await decide(CURRENT_ROWS, BYPASS_MAX_KEYS - 1)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
   });
 
+  it('keeps retrying for the whole startup window, not a fraction of it', () => {
+    // The pre-#431 code retried every DIALOG_ACTION_COOLDOWN_MS until the
+    // startup timeout. A ceiling below that many rounds would go silent while
+    // the shell is still starting, so a dialog that merely swallowed its first
+    // keystrokes would never be retried and would die at the startup timeout
+    // into a respawn loop — the very symptom #431 is about.
+    //
+    // claude-pty-shell.ts self-starts a Driver at import, so the two constants
+    // are read back out of its source instead of imported.
+    const src = fs.readFileSync(
+      path.join(__dirname, '../../src/shell/claude-pty-shell.ts'),
+      'utf8',
+    );
+    const numberOf = (name: string): number => {
+      const m = new RegExp(`const ${name} = ([\\d_]+);`).exec(src);
+      if (!m) throw new Error(`${name} not found in claude-pty-shell.ts — update this test`);
+      return Number(m[1].replace(/_/g, ''));
+    };
+    const rounds = numberOf('STARTUP_TIMEOUT_MS') / numberOf('DIALOG_ACTION_COOLDOWN_MS');
+    expect(rounds).toBeGreaterThan(0);
+    expect(BYPASS_MAX_KEYS).toBeGreaterThanOrEqual(rounds);
+  });
+
+  it('does not refill the budget on a single missed detection', () => {
+    // detectDialog() needs both markers inside the same bottom region, so a
+    // repaint that shifts the box by one row hides a dialog that is still up.
+    // Refilling there would defeat the ceiling exactly when it is needed.
+    const state = { keys: 5, misses: 0 };
+    noteDialogAbsent(state);
+    expect(state.keys).toBe(5);
+  });
+
+  it('refills the budget once the dialog has been gone for several rounds', () => {
+    const state = { keys: 5, misses: 0 };
+    for (let i = 0; i < BYPASS_RESET_AFTER_MISSES; i++) noteDialogAbsent(state);
+    expect(state.keys).toBe(0);
+  });
+
+  it('restarts the miss run whenever the dialog is seen again', () => {
+    // A flicker (seen, missed, seen, missed, …) must never accumulate its way
+    // to a refill while the dialog is still on screen.
+    const state = { keys: 5, misses: 0 };
+    for (let i = 0; i < 10; i++) {
+      noteDialogAbsent(state);
+      noteDialogPresent(state);
+    }
+    expect(state.keys).toBe(5);
+  });
+
+  it('matches the option labels literally, so a label edit cannot widen the pattern', () => {
+    // rowPattern() interpolates the label into a RegExp built at module load,
+    // and the labels are meant to be edited when the TUI changes. Unescaped,
+    // '.' would silently become a wildcard...
+    expect(rowPattern('a.c').test('  abc')).toBe(false);
+    expect(rowPattern('a.c').test('  a.c')).toBe(true);
+    // ...and an unbalanced group would throw at import time, taking down every
+    // PTY session rather than one dialog.
+    expect(() => rowPattern('Yes (really)')).not.toThrow();
+    expect(rowPattern('Yes (really)').test('  ❯ Yes (really)')).toBe(true);
+  });
+
   it('bounds the digit path too — an unresponsive numbered dialog is #431 all over again', async () => {
     // Keys sent at a dialog that ignores them are not discarded, they queue and
     // land in the prompt later, so the digit gets the same budget as the arrows.
@@ -1010,7 +1075,7 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     // not a live modal, and must not attract a keystroke.
     const screen = await renderScreen([...dialog(CURRENT_ROWS_AFTER_DOWN), ...FILLER(44), '❯ ']);
     expect(screen.detectDialog()).toBeNull();
-    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0 }).kind).toBe('wait');
+    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0, misses: 0 }).kind).toBe('wait');
   });
 });
 

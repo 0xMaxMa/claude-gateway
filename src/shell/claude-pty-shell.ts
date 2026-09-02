@@ -24,7 +24,13 @@ import { classifyPhantomDraft, unsubmittedDraft as discountPhantom } from './dra
 import { shouldAdoptOrphanWake } from './orphan-wake';
 import { parseControlCommand, keystrokesFor, KEY_ENTER, isAcceptablePtyInput, MAX_PTY_INPUT_BYTES } from './control-channel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_KEY_DOWN, PROBE_KEY_UP, PROBE_SETTLE_MS } from './menu-probe';
-import { decideBypassDialogAction, BypassDialogState, BYPASS_MAX_KEYS } from './bypass-dialog';
+import {
+  decideBypassDialogAction,
+  noteDialogAbsent,
+  noteDialogPresent,
+  BypassDialogState,
+  BYPASS_MAX_KEYS,
+} from './bypass-dialog';
 import { buildSubmitDiag } from './submit-diag';
 
 const POLL_MS = 200;
@@ -52,6 +58,12 @@ const MAX_ENTER_RETRIES = 2;
 const INPUT_CLEAR_MAX_KEYS = 8;
 const INPUT_CLEAR_SETTLE_MS = 60;
 const FALLBACK_IDLE_QUIET_MS = 2000;
+// Together with STARTUP_TIMEOUT_MS below this bounds how many dialog rounds can
+// ever happen: maybeHandleDialog() runs only while the shell is not ready, so at
+// most STARTUP_TIMEOUT_MS / DIALOG_ACTION_COOLDOWN_MS attempts. BYPASS_MAX_KEYS is
+// sized against that, and a unit test reads both numbers back out of this file to
+// keep the two from drifting apart (this module self-starts a Driver on import, so
+// a test cannot import them).
 const DIALOG_ACTION_COOLDOWN_MS = 2000;
 // An interactive select menu must be stable (no PTY output) this long before we
 // bridge it to chat — avoids racing a menu that's still rendering.
@@ -191,7 +203,7 @@ class Driver {
   // send at it — the arrows that walk the caret onto the accept row on builds
   // whose dialog has no row numbers, and the key that accepts (see
   // bypass-dialog.ts). Reset once the dialog leaves the screen.
-  private bypassDialog: BypassDialogState = { keys: 0 };
+  private bypassDialog: BypassDialogState = { keys: 0, misses: 0 };
   // In-flight behavioral probe round, advanced synchronously by tick() at a
   // single chokepoint — the same tick-driven pattern as menuCancel and
   // interrupting (review round 2, finding 6; replaced a detached async
@@ -1026,11 +1038,15 @@ class Driver {
     if (this.screen.quietMs() < 500) return;
     const dialog = this.screen.detectDialog();
     if (!dialog) {
-      // Dialog gone (accepted, or never really there) — the next one starts
-      // with a fresh keystroke budget.
-      this.bypassDialog.keys = 0;
+      // No dialog this round. The keystroke allowance is only refilled once it
+      // has been absent for several consecutive rounds: detectDialog() needs
+      // both markers inside the same bottom region, so a repaint that shifts
+      // the box by a row can hide it for a single read while it is still very
+      // much up, and refilling there would defeat the allowance entirely.
+      noteDialogAbsent(this.bypassDialog);
       return;
     }
+    noteDialogPresent(this.bypassDialog);
     this.lastDialogActionAt = now;
 
     if (dialog === 'bypass-permissions') {
