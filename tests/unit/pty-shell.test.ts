@@ -20,6 +20,7 @@ import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
 import {
   decideBypassDialogAction,
+  isBypassDialogOnScreen,
   noteDialogAbsent,
   noteDialogPresent,
   rowPattern,
@@ -30,6 +31,7 @@ import {
   BYPASS_RESET_AFTER_MISSES,
   BYPASS_ACCEPT_LABEL,
   BYPASS_DECLINE_LABEL,
+  BYPASS_CONFIRM_FOOTER,
 } from '../../src/shell/bypass-dialog';
 import { shouldAdoptOrphanWake, OrphanWakeObs } from '../../src/shell/orphan-wake';
 import * as os from 'os';
@@ -851,26 +853,95 @@ describe('TranscriptTailer onToolUse (main-chain tool_use, with name)', () => {
   });
 });
 
-describe('ScreenModel detectDialog (region-restricted)', () => {
-  it('detects the bypass dialog when it renders at the bottom (real modal)', async () => {
-    const screen = await renderScreen([
-      ...FILLER(44),
-      '  Bypass Permissions mode',
-      '  Yes, I accept',
-    ]);
+// Verbatim captures of the real dialog, taken by driving
+// `claude --dangerously-skip-permissions` through node-pty + @xterm/headless
+// and reading the screen with no keys pressed. The ONLY difference between the
+// row variants is the option rows: Claude Code <= 2.1.247 numbers them,
+// >= 2.1.248 does not (bisected to that exact release — issue #431). Both start
+// with the caret on "No, exit".
+const DIALOG_BODY = [
+  '  WARNING: Claude Code running in Bypass Permissions mode',
+  '',
+  '  In Bypass Permissions mode, Claude Code will not ask for your approval before running',
+  '  potentially dangerous commands.',
+  '  This mode should only be used in a sandboxed container/VM that has restricted internet access',
+  '  and can easily be restored if damaged.',
+  '',
+  '  By proceeding, you accept all responsibility for actions taken while running in Bypass',
+  '  Permissions mode.',
+  '',
+  '  https://code.claude.com/docs/en/security',
+  '',
+];
+const DIALOG_FOOTER = ['', '  Enter to confirm · Esc to cancel'];
+// The modal with scrollback above it and nothing below — the shape a session
+// that had already produced output shows. 34 + 12 + 2 + 2 = exactly 50 rows.
+const dialog = (rows: string[]) => [...FILLER(34), ...DIALOG_BODY, ...rows, ...DIALOG_FOOTER];
+
+/** Claude Code <= 2.1.247 — numbered rows, caret on decline. */
+const LEGACY_ROWS = ['  ❯ 1. No, exit', '    2. Yes, I accept'];
+/** Claude Code >= 2.1.248 — no row numbers, caret on decline. */
+const CURRENT_ROWS = ['  ❯ No, exit', '    Yes, I accept'];
+/** The same build after one Down: caret has moved onto the accept row. */
+const CURRENT_ROWS_AFTER_DOWN = ['    No, exit', '  ❯ Yes, I accept'];
+
+/**
+ * Issue #436, verbatim: the 50-row screen a session was killed on after its
+ * 120 s startup timeout, recovered from the driver's own timeout dump. This is
+ * what the dialog looks like on a CLEAN boot — it renders at the TOP, because
+ * there is no conversation yet to push it down, and rows 16-50 are blank.
+ *
+ * The old detector scanned the bottom 20 rows (31-50) and so matched nothing at
+ * all here: no keystroke was sent, the startup timeout fired, the session
+ * respawned into the same dialog.
+ */
+const TOP_OF_SCREEN_CAPTURE = [
+  '',
+  '─'.repeat(185),
+  '  WARNING: Claude Code running in Bypass Permissions mode',
+  '',
+  '  In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.',
+  '  This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.',
+  '',
+  '  By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.',
+  '',
+  '  https://code.claude.com/docs/en/security',
+  '',
+  '  ❯ No, exit',
+  '    Yes, I accept',
+  '',
+  '  Enter to confirm · Esc to cancel',
+  ...Array.from({ length: 35 }, () => ''),
+];
+
+describe('ScreenModel detectDialog (structural, not positional)', () => {
+  it('detects the dialog at the TOP of an otherwise blank screen (issue #436 regression)', async () => {
+    // Fails on the pre-fix code: both markers sit at rows 3-13, the detector
+    // scanned rows 31-50, and every one of those rows is blank.
+    const screen = await renderScreen(TOP_OF_SCREEN_CAPTURE);
     expect(screen.detectDialog()).toBe('bypass-permissions');
   });
 
-  it('ignores the markers when they sit in the upper scrollback (quoted prose)', async () => {
-    // An agent explaining the dialog, or re-injected history: markers are near the
-    // top, above the bottom region detectDialog scans → no auto-accept keystroke.
+  it('still detects the dialog when scrollback has pushed it to the bottom', async () => {
+    const screen = await renderScreen(dialog(CURRENT_ROWS));
+    expect(screen.detectDialog()).toBe('bypass-permissions');
+  });
+
+  it('detects the numbered rendering in both positions too (<= 2.1.247)', async () => {
+    expect((await renderScreen(dialog(LEGACY_ROWS))).detectDialog()).toBe('bypass-permissions');
+    const top = [...DIALOG_BODY, ...LEGACY_ROWS, ...DIALOG_FOOTER];
+    expect((await renderScreen(top)).detectDialog()).toBe('bypass-permissions');
+  });
+
+  it('ignores prose that merely quotes the markers', async () => {
     const screen = await renderScreen([
       'Assistant: ตอน "Bypass Permissions mode" โผล่ มันจะให้กด "Yes, I accept"',
       ...FILLER(44),
       '❯ ',
     ]);
     expect(screen.detectDialog()).toBeNull();
-    // Sanity: the markers ARE on screen — only the region guard excludes them.
+    // Sanity: the markers ARE on screen — the structural test is what excludes
+    // them, and it no longer depends on WHERE on the screen they landed.
     expect(screen.text()).toContain('Bypass Permissions mode');
     expect(screen.text()).toContain('Yes, I accept');
   });
@@ -879,41 +950,47 @@ describe('ScreenModel detectDialog (region-restricted)', () => {
     const screen = await renderScreen([...FILLER(45), '  Bypass Permissions mode']);
     expect(screen.detectDialog()).toBeNull();
   });
+
+  it('ignores a dialog that has scrolled up with live content below it', async () => {
+    // The property that replaced the bottom-region window: a live modal OWNS
+    // the screen. Anything rendered below its footer — conversation lines, an
+    // idle input caret — means what is on screen is a record of a dialog, not
+    // one we can drive.
+    const screen = await renderScreen([...dialog(CURRENT_ROWS_AFTER_DOWN), ...FILLER(44), '❯ ']);
+    expect(screen.detectDialog()).toBeNull();
+  });
+
+  it('ignores the dialog while no row is highlighted (frame still rendering)', async () => {
+    const screen = await renderScreen(dialog(['    No, exit', '    Yes, I accept']));
+    expect(screen.detectDialog()).toBeNull();
+  });
+
+  it('ignores a shape with a caret on both rows', async () => {
+    const screen = await renderScreen(dialog(['  ❯ No, exit', '  ❯ Yes, I accept']));
+    expect(screen.detectDialog()).toBeNull();
+  });
+
+  it('requires the confirm footer below the option rows', async () => {
+    // Without its own affordance the rows are just two lines of text. The
+    // footer is also what the accepting Enter relies on, so detection and the
+    // action stay gated on the same evidence.
+    const screen = await renderScreen([...FILLER(34), ...DIALOG_BODY, ...CURRENT_ROWS, '', '']);
+    expect(screen.detectDialog()).toBeNull();
+  });
+
+  it('ignores a footer that renders above the option rows', async () => {
+    const screen = await renderScreen([...FILLER(34), ...DIALOG_BODY, ...DIALOG_FOOTER, ...CURRENT_ROWS]);
+    expect(screen.detectDialog()).toBeNull();
+  });
+
+  it('is a pure function of the screen text (same verdict, no ScreenModel)', async () => {
+    const screen = await renderScreen(TOP_OF_SCREEN_CAPTURE);
+    expect(isBypassDialogOnScreen(screen.text())).toBe(true);
+    expect(isBypassDialogOnScreen(screen.text().replace(BYPASS_CONFIRM_FOOTER, 'Enter to  confirm'))).toBe(false);
+  });
 });
 
 describe('decideBypassDialogAction (accepting the bypass dialog across Claude Code versions)', () => {
-  // Both fixtures are verbatim captures of the real dialog, taken by driving
-  // `claude --dangerously-skip-permissions` through node-pty + @xterm/headless
-  // and reading the screen with no keys pressed. The ONLY difference between
-  // them is the option rows: Claude Code <= 2.1.247 numbers them, >= 2.1.248
-  // does not (bisected to that exact release — issue #431). Both start with
-  // the caret on "No, exit".
-  const DIALOG_BODY = [
-    '  WARNING: Claude Code running in Bypass Permissions mode',
-    '',
-    '  In Bypass Permissions mode, Claude Code will not ask for your approval before running',
-    '  potentially dangerous commands.',
-    '  This mode should only be used in a sandboxed container/VM that has restricted internet access',
-    '  and can easily be restored if damaged.',
-    '',
-    '  By proceeding, you accept all responsibility for actions taken while running in Bypass',
-    '  Permissions mode.',
-    '',
-    '  https://code.claude.com/docs/en/security',
-    '',
-  ];
-  const DIALOG_FOOTER = ['', '  Enter to confirm · Esc to cancel'];
-  // FILLER pushes the modal down into the bottom-region window detectDialog()
-  // scans, the way a real session's scrollback does.
-  const dialog = (rows: string[]) => [...FILLER(34), ...DIALOG_BODY, ...rows, ...DIALOG_FOOTER];
-
-  /** Claude Code <= 2.1.247 — numbered rows, caret on decline. */
-  const LEGACY_ROWS = ['  ❯ 1. No, exit', '    2. Yes, I accept'];
-  /** Claude Code >= 2.1.248 — no row numbers, caret on decline. */
-  const CURRENT_ROWS = ['  ❯ No, exit', '    Yes, I accept'];
-  /** The same build after one Down: caret has moved onto the accept row. */
-  const CURRENT_ROWS_AFTER_DOWN = ['    No, exit', '  ❯ Yes, I accept'];
-
   const decide = async (rows: string[], keys = 0) => {
     const screen = await renderScreen(dialog(rows));
     // Sanity: every fixture is a screen the detector actually fires on, so the
@@ -921,6 +998,15 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     expect(screen.detectDialog()).toBe('bypass-permissions');
     return decideBypassDialogAction(screen.dialogText(), { keys, misses: 0 });
   };
+
+  /** For screens the detector rejects: assert that, then ask the action layer
+   *  directly — it must refuse independently, so the two cannot drift apart. */
+  const decideUndetected = async (lines: string[], keys = 0) => {
+    const screen = await renderScreen(lines);
+    expect(screen.detectDialog()).toBeNull();
+    return decideBypassDialogAction(screen.dialogText(), { keys, misses: 0 });
+  };
+
 
   it('types the digit on the numbered rendering (<= 2.1.247 behavior, unchanged)', async () => {
     // Proven live on 2.1.247: the digit alone selects AND confirms — Claude
@@ -963,12 +1049,12 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
   });
 
   it('does nothing when no row is highlighted (still rendering / not the live dialog)', async () => {
-    const action = await decide(['    No, exit', '    Yes, I accept']);
+    const action = await decideUndetected(dialog(['    No, exit', '    Yes, I accept']));
     expect(action.kind).toBe('wait');
   });
 
   it('does nothing when both rows carry a caret (shape we do not understand)', async () => {
-    const action = await decide(['  ❯ No, exit', '  ❯ Yes, I accept']);
+    const action = await decideUndetected(dialog(['  ❯ No, exit', '  ❯ Yes, I accept']));
     expect(action.kind).toBe('wait');
   });
 
@@ -1004,9 +1090,10 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
   });
 
   it('does not refill the budget on a single missed detection', () => {
-    // detectDialog() needs both markers inside the same bottom region, so a
-    // repaint that shifts the box by one row hides a dialog that is still up.
-    // Refilling there would defeat the ceiling exactly when it is needed.
+    // Detection is structural, so a mid-repaint frame — rows drawn, footer not
+    // yet, or the caret momentarily on neither row — reads as absent for one
+    // round while the dialog is still up. Refilling there would defeat the
+    // ceiling exactly when it is needed.
     const state = { keys: 5, misses: 0 };
     noteDialogAbsent(state);
     expect(state.keys).toBe(5);
@@ -1063,16 +1150,17 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
   });
 
   it('ignores prose that merely quotes the labels mid-sentence', async () => {
-    const action = await decide([
+    const action = await decideUndetected(dialog([
       '  ❯ No, exit',
       '  You will be asked to pick Yes, I accept before the session starts.',
-    ]);
+    ]));
     expect(action.kind).toBe('wait');
   });
 
-  it('acts only on the region the detector fired for (quoted dialog in scrollback)', async () => {
-    // Same guard detectDialog() has: rows sitting in the upper scrollback are
-    // not a live modal, and must not attract a keystroke.
+  it('acts only on what the detector fired for (quoted dialog in scrollback)', async () => {
+    // Same rule detectDialog() applies, enforced independently here: a modal
+    // with conversation and an idle caret rendered below it is a record of a
+    // dialog, not one we can drive — and must not attract a keystroke.
     const screen = await renderScreen([...dialog(CURRENT_ROWS_AFTER_DOWN), ...FILLER(44), '❯ ']);
     expect(screen.detectDialog()).toBeNull();
     expect(decideBypassDialogAction(screen.dialogText(), { keys: 0, misses: 0 }).kind).toBe('wait');

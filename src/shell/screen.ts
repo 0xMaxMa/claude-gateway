@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/headless';
+import { isBypassDialogOnScreen } from './bypass-dialog';
 
 export type DialogKind = 'bypass-permissions';
 
@@ -43,14 +44,22 @@ export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
 /**
- * Rows from the bottom of the screen that detectDialog() scans. A modal dialog is
- * anchored to the bottom; this window comfortably covers a tall dialog box while
- * excluding the upper ~60% of the buffer where conversation/scrollback lives.
+ * The bypass dialog's confirm footer. It lives in bypass-dialog.ts, next to the
+ * option-row patterns it is matched together with, and is re-exported here so
+ * this file remains the index of every TUI matcher.
+ */
+export { BYPASS_CONFIRM_FOOTER as TUI_BYPASS_CONFIRM_FOOTER } from './bypass-dialog';
+
+/**
+ * Rows from the bottom of the screen scanned for a bottom-anchored overlay.
  *
- * Conservative on purpose: if a future dialog renders taller than this and the
- * markers fall outside the window, the only effect is the auto-accept doesn't
- * fire — the operator simply sees the dialog (fail-safe), it never mis-accepts.
- * Bump this if Claude Code's dialog grows.
+ * Used by parseInteractivePrompt() for the tool-permission prompt, which really
+ * does render at the bottom, below the conversation. It is NOT used for the
+ * bypass-permissions dialog: that one appears at boot, before there is any
+ * conversation to push it down, so it renders at the TOP of an otherwise blank
+ * screen and fell outside this window entirely (issue #436). See
+ * isBypassDialogOnScreen() in bypass-dialog.ts for the structural test that
+ * replaced the positional one there.
  */
 const DIALOG_REGION_ROWS = 20;
 
@@ -483,22 +492,30 @@ export class ScreenModel {
    * dialog's follow-up action (see decideBypassDialogAction in bypass-dialog.ts)
    * reads the same rows the detection was made from — acting on a wider view
    * could send keystrokes because of text that never triggered the detector.
+   *
+   * That region is now the whole screen: the bypass dialog is not bottom-anchored
+   * (issue #436), so it is told apart from text that merely quotes it by its
+   * structure rather than by where it sits. Since the region no longer excludes
+   * anything, the "act only on what was detected" guarantee is enforced inside
+   * decideBypassDialogAction(), which applies the same structural test.
    */
   dialogText(): string {
-    return this.bottomText(DIALOG_REGION_ROWS);
+    return this.text();
   }
 
   detectDialog(): DialogKind | null {
-    // Scan only the bottom region: a real modal dialog renders there, while a
-    // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the
-    // scrollback above and must not trigger the auto-accept keystroke. The dialog
-    // has no transcript signal, so this region guard (plus requiring BOTH markers)
-    // is the available defense.
+    // Cheap substring gate first — both markers anywhere on screen — then the
+    // structural test that actually decides. The markers alone are not evidence
+    // of a live modal: this dialog's own warning prose repeats "Bypass
+    // Permissions mode", and a chat reply or re-injected history can carry both
+    // strings verbatim. isBypassDialogOnScreen() requires the two option rows to
+    // be whole rows with exactly one caret, the confirm footer below them, and
+    // nothing but blank rows below that — a live modal owns the screen, quoted
+    // text never does.
     const text = this.dialogText();
-    if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
-      return 'bypass-permissions';
-    }
-    return null;
+    if (!TUI_BYPASS_PERMS.every((s) => text.includes(s))) return null;
+    if (!isBypassDialogOnScreen(text)) return null;
+    return 'bypass-permissions';
   }
 
   /**
