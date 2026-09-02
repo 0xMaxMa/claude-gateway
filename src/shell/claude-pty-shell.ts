@@ -1049,15 +1049,20 @@ class Driver {
       noteDialogAbsent(this.bypassDialog);
       // A detector that returns null without a word is how #436 stayed hidden:
       // the symptom (a 120 s startup timeout) is three layers away from the
-      // cause (detection that never fired), with no breadcrumb in between. When
-      // the markers ARE on screen but the structure does not validate, say so —
-      // once per run, since the common case is an agent's own reply quoting the
-      // dialog, which is precisely what must not attract a keystroke.
-      if (this.screen.text().includes(TUI_BYPASS_PERMS[0])) {
+      // cause (detection that never fired), with no breadcrumb in between.
+      //
+      // Gated on the SAME substring test detectDialog() uses, not on one marker:
+      // "Bypass Permissions mode" alone appears in this repo's own README and in
+      // any reply discussing the dialog, so warning on it would be noise. Both
+      // markers present means we cleared the cheap gate and it was the structural
+      // test that refused — the case actually worth a line. Warned once per run
+      // of such rounds; the common cause is a reply quoting the dialog, which is
+      // precisely what must not attract a keystroke.
+      if (TUI_BYPASS_PERMS.every((s) => this.screen.dialogText().includes(s))) {
         if (!this.bypassMarkerWarned) {
           this.bypassMarkerWarned = true;
           logWarn(
-            'Bypass Permissions marker on screen but no live dialog validated — not acting ' +
+            'Bypass Permissions markers on screen but no live dialog validated — not acting ' +
               '(quoted text, or a dialog shape this build does not recognise)',
           );
         }

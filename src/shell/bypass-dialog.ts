@@ -57,6 +57,29 @@ export const BYPASS_DECLINE_LABEL = 'No, exit';
  */
 export const BYPASS_CONFIRM_FOOTER = 'Enter to confirm';
 
+/**
+ * The dialog's heading — the same string screen.ts lists first in
+ * TUI_BYPASS_PERMS, repeated here for the dependency-free reason above, with a
+ * unit test asserting the two never drift apart.
+ *
+ * Required by {@link isBypassDialogOnScreen} so that predicate is the COMPLETE
+ * rule rather than half of one split across two files. See the note there.
+ */
+export const BYPASS_HEADING = 'Bypass Permissions mode';
+
+/**
+ * How far apart the dialog's own rows may sit before they stop being one block.
+ *
+ * The real capture has the two options on adjacent rows and the footer two rows
+ * below them (one blank row between). These bounds allow a little repaint slack
+ * while still requiring the elements to be visually together: without them the
+ * "structure" was only an ordering, so an option row, a second option row 15
+ * lines further down and any sentence containing "Enter to confirm" below that
+ * satisfied it — on a screen of ordinary conversation (review round 2, M3).
+ */
+export const BYPASS_MAX_ROW_GAP = 2;
+export const BYPASS_MAX_FOOTER_GAP = 3;
+
 /** Arrow keystrokes used to walk the caret onto the accept row. */
 export const BYPASS_KEY_DOWN = '\x1b[B';
 export const BYPASS_KEY_UP = '\x1b[A';
@@ -127,8 +150,8 @@ export interface BypassDialogState {
  * Record a round in which no dialog was detected, clearing the keystroke count
  * once the dialog has been absent for BYPASS_RESET_AFTER_MISSES consecutive
  * rounds so the next dialog starts with a full allowance. Tolerating a single
- * miss keeps a one-round detection flicker (a repaint shifting the header out
- * of the detection window) from silently refilling the allowance mid-dialog.
+ * miss keeps a one-round detection flicker (a repaint catching the dialog
+ * half-drawn) from silently refilling the allowance mid-dialog.
  */
 export function noteDialogAbsent(state: BypassDialogState): void {
   state.misses++;
@@ -142,7 +165,7 @@ export function noteDialogPresent(state: BypassDialogState): void {
 
 /** One option row of the dialog as it appears on screen. */
 interface OptionRow {
-  /** Line index within the scanned region — decides Down vs Up. */
+  /** Line index within the screen text — decides Down vs Up. */
   line: number;
   /** The ❯ caret is on this row. */
   caret: boolean;
@@ -184,7 +207,7 @@ const ACCEPT_ROW_RE = rowPattern(BYPASS_ACCEPT_LABEL);
 const DECLINE_ROW_RE = rowPattern(BYPASS_DECLINE_LABEL);
 
 /**
- * Find the option row nearest the bottom of the region. A live modal is the
+ * Find the option row nearest the bottom of the screen. A live modal is the
  * bottom-most thing on screen, so scanning upward from the end means quoted
  * scrollback above it can never be the row we act on.
  */
@@ -214,27 +237,52 @@ function findRow(lines: string[], re: RegExp): OptionRow | null {
  * hazard: an agent explaining this dialog, or re-injected conversation history,
  * puts the same characters on the same screen, and a mis-aimed Enter can land on
  * "No, exit" and kill Claude Code unrecoverably. So the proxy is replaced with
- * the thing it was proxying for — four structural properties, all position-
+ * the thing it was proxying for — structural properties, all position-
  * independent, all read off a verbatim capture of the real dialog:
  *
- *   1. Both option labels occupy a WHOLE row (findRow's anchored patterns), so
+ *   1. The dialog's heading is somewhere on screen. Cheap substring reject.
+ *   2. Both option labels occupy a WHOLE row (findRow's anchored patterns), so
  *      prose that mentions them mid-sentence never qualifies.
- *   2. Exactly ONE of those two rows carries the ❯ caret. Zero means the frame
+ *   3. Exactly ONE of those two rows carries the ❯ caret. Zero means the frame
  *      is still rendering (or is not a live select); two is a shape we do not
  *      understand.
- *   3. The dialog's own confirm footer renders BELOW the option rows.
- *   4. Nothing but blank rows renders below that footer.
+ *   4. The rows and the footer form one BLOCK — the options within
+ *      BYPASS_MAX_ROW_GAP rows of each other, the footer within
+ *      BYPASS_MAX_FOOTER_GAP below them. Without this the three elements only
+ *      had to appear in order, so an option row, an unrelated option row 15
+ *      lines later and a sentence containing "Enter to confirm" further down
+ *      still qualified (review round 2, finding M3).
+ *   5. The dialog's own confirm footer renders BELOW the option rows.
+ *   6. Nothing but blank rows renders below that footer.
  *
- * (4) is the load-bearing one, and it is what the old bottom-region test was
+ * (6) is the load-bearing one, and it is what the old bottom-region test was
  * actually encoding: a live modal owns the screen. Quoted text never can — the
  * input box, its border and the status bar always render underneath it — so
- * scrollback, a pasted dialog, and re-injected history all fail (4) no matter
+ * scrollback, a pasted dialog, and re-injected history all fail (6) no matter
  * where on the screen they land.
+ *
+ * (6) is deliberately ZERO-tolerance: not even a box border may follow the
+ * footer. A future Claude Code that draws this dialog inside a box, or paints a
+ * status line beneath it, would therefore stop being detected. That is the
+ * intended direction of the trade — a miss is fail-safe (the operator sees the
+ * dialog, and maybeHandleDialog() now logs a warning naming this exact case),
+ * whereas relaxing (6) to tolerate border rows would admit a quoted dialog
+ * sitting above an EMPTY input box, whose rows are themselves nothing but
+ * border characters. Given "No, exit" is unrecoverable and a visible dialog is
+ * not, a miss beats a false accept (review round 2, finding M2 — accepted as
+ * accurate, resolved this way rather than by relaxing the rule).
  *
  * Fail-safe in the same direction as before: anything unrecognised reads as "no
  * dialog", which means no keystroke and an operator who simply sees the dialog.
  */
 export function isBypassDialogOnScreen(screenText: string): boolean {
+  // The heading gate lives HERE rather than in ScreenModel.detectDialog() so
+  // that this predicate is the whole rule. When detectDialog() held it, the
+  // action layer re-applied only the structural half, and a screen carrying a
+  // perfect dialog shape without the heading produced a live Enter if
+  // decideBypassDialogAction() was ever called from anywhere else — the exact
+  // drift the two-layer design claimed to prevent (review round 2, finding H1).
+  if (!screenText.includes(BYPASS_HEADING)) return false;
   const lines = screenText.split('\n');
   const accept = findRow(lines, ACCEPT_ROW_RE);
   const decline = findRow(lines, DECLINE_ROW_RE);
@@ -242,17 +290,19 @@ export function isBypassDialogOnScreen(screenText: string): boolean {
   // Exactly one caret: equal flags mean either none (still rendering) or both
   // (unrecognised shape). Same rule decideBypassDialogAction() acts on.
   if (accept.caret === decline.caret) return false;
+  if (Math.abs(accept.line - decline.line) > BYPASS_MAX_ROW_GAP) return false;
   const lastOptionRow = Math.max(accept.line, decline.line);
   const footer = lines.findIndex(
     (l, i) => i > lastOptionRow && l.includes(BYPASS_CONFIRM_FOOTER),
   );
   if (footer === -1) return false;
+  if (footer - lastOptionRow > BYPASS_MAX_FOOTER_GAP) return false;
   return lines.slice(footer + 1).every((l) => l.trim() === '');
 }
 
 /**
  * Decide the single keystroke to send at a bypass-permissions dialog, given
- * the screen region the dialog was detected in.
+ * the screen text the dialog was detected on.
  *
  * Callers send at most one key per call and re-read the screen before the
  * next one (the DIALOG_ACTION_COOLDOWN_MS re-entry in maybeHandleDialog()),

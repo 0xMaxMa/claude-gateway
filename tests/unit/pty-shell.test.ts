@@ -32,6 +32,7 @@ import {
   BYPASS_ACCEPT_LABEL,
   BYPASS_DECLINE_LABEL,
   BYPASS_CONFIRM_FOOTER,
+  BYPASS_HEADING,
 } from '../../src/shell/bypass-dialog';
 import { shouldAdoptOrphanWake, OrphanWakeObs } from '../../src/shell/orphan-wake';
 import * as os from 'os';
@@ -164,6 +165,40 @@ describe('neutralizeTuiTriggers (history detox)', () => {
 
   it('handles empty input', () => {
     expect(neutralizeTuiTriggers('')).toBe('');
+  });
+
+  // Review round 2, finding M4. The bypass detector currently rejects re-injected
+  // history because Claude Code paints the input box below it, failing the
+  // "nothing below the footer" rule — but that is a fact about how Claude Code
+  // renders, not an invariant we own, and the 32MB loop above is exactly the bug
+  // that proved a footer-requirement guard insufficient against a verbatim copy.
+  // Breaking the footer makes the bypass detector unreachable from re-injected
+  // text by construction.
+  it('breaks the bypass dialog footer so re-injected history cannot fake a dialog', async () => {
+    const quoted = [
+      'Assistant: the dialog that wedged the session looked like this:',
+      '  WARNING: Claude Code running in Bypass Permissions mode',
+      '  ❯ No, exit',
+      '    Yes, I accept',
+      '',
+      '  Enter to confirm · Esc to cancel',
+    ].join('\n');
+
+    // Verbatim, this text is a detectable dialog when it owns the screen.
+    const verbatimScreen = await renderScreen([
+      ...quoted.split('\n'),
+      ...Array.from({ length: 44 }, () => ''),
+    ]);
+    expect(verbatimScreen.detectDialog()).toBe('bypass-permissions');
+
+    // After the detox it can never be, however it lands on screen.
+    const detoxed = neutralizeTuiTriggers(quoted);
+    expect(detoxed).not.toContain(BYPASS_CONFIRM_FOOTER);
+    const detoxedScreen = await renderScreen([
+      ...detoxed.split('\n'),
+      ...Array.from({ length: 44 }, () => ''),
+    ]);
+    expect(detoxedScreen.detectDialog()).toBeNull();
   });
 });
 
@@ -988,6 +1023,76 @@ describe('ScreenModel detectDialog (structural, not positional)', () => {
     expect(isBypassDialogOnScreen(screen.text())).toBe(true);
     expect(isBypassDialogOnScreen(screen.text().replace(BYPASS_CONFIRM_FOOTER, 'Enter to  confirm'))).toBe(false);
   });
+
+  // Review round 2, finding H1. The heading check used to live in detectDialog()
+  // rather than in the predicate, so decideBypassDialogAction() — which re-applies
+  // the predicate to refuse acting on a non-dialog — enforced only half the rule.
+  // A screen with a perfect dialog SHAPE but no heading therefore produced a live
+  // Enter at the action layer while the detector said null. The rule is one
+  // predicate now, and this pins both layers to it.
+  it('requires the heading, so the detect and act layers cannot drift (H1)', async () => {
+    const shapeWithoutHeading = [
+      'Assistant: after you press Down the screen looks like:',
+      '',
+      ...CURRENT_ROWS_AFTER_DOWN,
+      ...DIALOG_FOOTER,
+      ...Array.from({ length: 44 }, () => ''),
+    ];
+    const screen = await renderScreen(shapeWithoutHeading);
+    expect(screen.text()).not.toContain('Bypass Permissions mode');
+    expect(isBypassDialogOnScreen(screen.text())).toBe(false);
+    expect(screen.detectDialog()).toBeNull();
+    // The layer that actually emits keystrokes must refuse too — this is the
+    // assertion that would have caught the drift.
+    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0, misses: 0 })).toEqual({
+      kind: 'wait',
+      reason: 'no live bypass dialog on screen',
+    });
+  });
+
+  // Review round 2, finding M3. Before the gap bounds, the "structure" was only
+  // an ordering: the elements never had to belong to the same visual block, so
+  // three lines scattered down a screen of ordinary conversation qualified — and
+  // yielded a real `confirm`.
+  it('requires the rows and footer to be one block, not merely in order (M3)', async () => {
+    const scattered = [
+      'WARNING: Claude Code running in Bypass Permissions mode',
+      ...Array.from({ length: 5 }, () => 'noise'),
+      '    No, exit',
+      ...Array.from({ length: 15 }, () => 'unrelated conversation text'),
+      '  ❯ Yes, I accept',
+      ...Array.from({ length: 10 }, () => 'more unrelated text'),
+      '  press Enter to confirm your subscription',
+      ...Array.from({ length: 17 }, () => ''),
+    ];
+    const screen = await renderScreen(scattered);
+    expect(isBypassDialogOnScreen(screen.text())).toBe(false);
+    expect(screen.detectDialog()).toBeNull();
+    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0, misses: 0 })).toEqual({
+      kind: 'wait',
+      reason: 'no live bypass dialog on screen',
+    });
+  });
+
+  // Review round 2, finding M2 — accepted as accurate, resolved by DOCUMENTING
+  // the trade rather than relaxing the rule. A boxed dialog is not detected, and
+  // that is deliberate: a miss is fail-safe (visible dialog + the new warning),
+  // whereas tolerating border rows below the footer would admit a quoted dialog
+  // sitting above an empty input box, whose rows are pure border characters.
+  // This test exists so the behaviour is a decision on record, not an accident.
+  it('fails CLOSED on a boxed rendering (deliberate — see M2)', async () => {
+    const boxed = [
+      '  ╭────────────────────────────────────────╮',
+      '  │ WARNING: Bypass Permissions mode       │',
+      '  │ ❯ No, exit                             │',
+      '  │   Yes, I accept                        │',
+      '  │ Enter to confirm · Esc to cancel       │',
+      '  ╰────────────────────────────────────────╯',
+      ...Array.from({ length: 44 }, () => ''),
+    ];
+    const screen = await renderScreen(boxed);
+    expect(screen.detectDialog()).toBeNull();
+  });
 });
 
 describe('decideBypassDialogAction (accepting the bypass dialog across Claude Code versions)', () => {
@@ -1143,6 +1248,10 @@ describe('decideBypassDialogAction (accepting the bypass dialog across Claude Co
     // The label is duplicated (this module stays dependency-free), so drift
     // would mean detectDialog() fires on a dialog whose rows we cannot parse.
     expect(TUI_BYPASS_PERMS).toContain(BYPASS_ACCEPT_LABEL);
+    // Same for the heading, which isBypassDialogOnScreen() now gates on: if it
+    // drifted from screen.ts's marker list the predicate would reject every real
+    // dialog, silently restoring the #436 wedge.
+    expect(TUI_BYPASS_PERMS).toContain(BYPASS_HEADING);
     expect(await decide([`  ❯ ${BYPASS_DECLINE_LABEL}`, `    ${BYPASS_ACCEPT_LABEL}`])).toEqual({
       kind: 'move',
       key: BYPASS_KEY_DOWN,

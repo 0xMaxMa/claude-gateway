@@ -1,5 +1,5 @@
 import { Terminal } from '@xterm/headless';
-import { isBypassDialogOnScreen } from './bypass-dialog';
+import { isBypassDialogOnScreen, BYPASS_CONFIRM_FOOTER } from './bypass-dialog';
 
 export type DialogKind = 'bypass-permissions';
 
@@ -43,12 +43,14 @@ export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
-/**
- * The bypass dialog's confirm footer. It lives in bypass-dialog.ts, next to the
- * option-row patterns it is matched together with, and is re-exported here so
- * this file remains the index of every TUI matcher.
+/*
+ * NOTE: the bypass dialog's remaining matchers — the option-row patterns and the
+ * "Enter to confirm" footer — live in bypass-dialog.ts, next to the decision
+ * that consumes them, so that module stays dependency-free and unit-testable
+ * on its own. They are deliberately NOT re-exported here: an alias nobody
+ * imports is dead code, and this pointer keeps the "one file to touch when the
+ * UI changes" intent without it.
  */
-export { BYPASS_CONFIRM_FOOTER as TUI_BYPASS_CONFIRM_FOOTER } from './bypass-dialog';
 
 /**
  * Rows from the bottom of the screen scanned for a bottom-anchored overlay.
@@ -110,12 +112,22 @@ export const TUI_SYNTHETIC_MODEL = '<synthetic>';
  * and never collapses runs of spaces, so the broken fragment stays broken after a
  * round-trip through the screen buffer. Only the re-injected copy is altered;
  * live detection of a genuine overlay is untouched.
+ *
+ * The bypass dialog's confirm footer is defanged the same way and for the same
+ * reason. isBypassDialogOnScreen() rejects re-injected history today because the
+ * input box and status bar paint below it, failing the "nothing below the footer"
+ * rule — but that is a fact about how Claude Code happens to render, not an
+ * invariant we control, and the 32MB loop above is precisely the bug that proved
+ * a footer-requirement guard is not enough against a verbatim captured copy.
+ * Breaking the footer costs nothing and makes the bypass detector unreachable
+ * from re-injected text by construction (review round 2, finding M4).
  */
 export function neutralizeTuiTriggers(text: string): string {
   if (!text) return text;
   return text
     .split(TUI_REQUEST_TOO_LARGE).join('Request too large ( max')
-    .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back');
+    .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back')
+    .split(BYPASS_CONFIRM_FOOTER).join('Enter to  confirm');
 }
 
 /** A numbered option row, with an optional leading ❯/> highlight marker. */
@@ -406,21 +418,6 @@ export class ScreenModel {
     return this.rowsText(0, this.term.rows);
   }
 
-  /**
-   * The bottom `rows` lines of the visible screen. Active modal UI — permission
-   * dialogs, error overlays, the input box — renders anchored to the bottom,
-   * whereas conversation/scrollback flows in the upper area. Matching a marker
-   * against this region instead of the full buffer keeps a reply (or re-injected
-   * history) that merely quotes a marker from tripping a detector, since that
-   * text sits above the active zone. Reduces false positives sharply but is not
-   * absolute (text can briefly be the bottom-most line), so prefer an
-   * authoritative transcript signal where one exists.
-   */
-  bottomText(rows: number): string {
-    const start = Math.max(0, this.term.rows - rows);
-    return this.rowsText(start, this.term.rows);
-  }
-
   private rowsText(startRow: number, endRow: number): string {
     const buf = this.term.buffer.active;
     const lines: string[] = [];
@@ -504,18 +501,13 @@ export class ScreenModel {
   }
 
   detectDialog(): DialogKind | null {
-    // Cheap substring gate first — both markers anywhere on screen — then the
-    // structural test that actually decides. The markers alone are not evidence
-    // of a live modal: this dialog's own warning prose repeats "Bypass
-    // Permissions mode", and a chat reply or re-injected history can carry both
-    // strings verbatim. isBypassDialogOnScreen() requires the two option rows to
-    // be whole rows with exactly one caret, the confirm footer below them, and
-    // nothing but blank rows below that — a live modal owns the screen, quoted
-    // text never does.
-    const text = this.dialogText();
-    if (!TUI_BYPASS_PERMS.every((s) => text.includes(s))) return null;
-    if (!isBypassDialogOnScreen(text)) return null;
-    return 'bypass-permissions';
+    // The whole rule lives in isBypassDialogOnScreen(), including the heading
+    // substring check that used to sit here. Keeping half the rule at this layer
+    // was a real drift hazard: decideBypassDialogAction() re-applies the
+    // predicate to refuse acting on a screen that is not a live dialog, and a
+    // half-rule meant the ACTION layer — the one that emits keystrokes — was the
+    // weaker of the two (review round 2, finding H1).
+    return isBypassDialogOnScreen(this.dialogText()) ? 'bypass-permissions' : null;
   }
 
   /**
