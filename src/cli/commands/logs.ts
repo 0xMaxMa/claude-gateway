@@ -67,12 +67,20 @@ export function formatLogLine(line: string): string {
 }
 
 /**
- * The last `count` lines of `file`, oldest first.
+ * The last `count` lines of `file`, oldest first, with the offset they were
+ * read to.
  *
  * Reads backwards in chunks so the cost is bounded by what is asked for rather
  * than by the size of the file.
+ *
+ * `endPos` is what `--follow` must resume from. Following from a *later*
+ * `statSync` would skip whatever the gateway appended in between: those bytes
+ * are past the tail's read and before the follower's start, so nothing would
+ * ever print them. Nothing can interleave here within this process — the read
+ * is synchronous — but the writer is a different process, which is the whole
+ * reason the command exists.
  */
-export function tailLines(file: string, count: number): string[] {
+export function tailFrom(file: string, count: number): { lines: string[]; endPos: number } {
   const fd = fs.openSync(file, 'r');
   try {
     const size = fs.fstatSync(fd).size;
@@ -92,13 +100,21 @@ export function tailLines(file: string, count: number): string[] {
     }
     const lines = text.split('\n');
     // A leading fragment from a chunk boundary is not a whole line. It only
-    // exists when the scan stopped short of the start of the file.
+    // exists when the scan stopped short of the start of the file. Dropping it
+    // is safe even when the boundary happens to land exactly on a newline: the
+    // loop only stops with more than `count` lines in hand, so the one dropped
+    // is always older than the newest `count`.
     if (pos > 0 && lines.length > 0) lines.shift();
     while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-    return lines.length > count ? lines.slice(lines.length - count) : lines;
+    return { lines: lines.length > count ? lines.slice(lines.length - count) : lines, endPos: size };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+/** The last `count` lines of `file`, oldest first. */
+export function tailLines(file: string, count: number): string[] {
+  return tailFrom(file, count).lines;
 }
 
 function countNewlines(s: string): number {
@@ -197,8 +213,11 @@ export async function runGatewayLogs(
 
   let startPos: number;
   try {
-    for (const line of tailLines(file, parsed.lines)) emit(line);
-    startPos = fs.statSync(file).size;
+    // Resume from where the tail stopped, not from a fresh stat: the gateway is
+    // a different process and may have appended in between.
+    const tail = tailFrom(file, parsed.lines);
+    for (const line of tail.lines) emit(line);
+    startPos = tail.endPos;
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     process.stderr.write(`Cannot read ${file} (${e.code ?? e.message})\n`);

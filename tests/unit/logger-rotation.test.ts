@@ -282,6 +282,31 @@ describe('logger level gate, rotation and retention (#435)', () => {
     expect(sweepOldLogs(path.join(dir, 'nope'), 14)).toEqual([]);
   });
 
+  it('U-LOG-21: the daily sweep is scheduled even when retention starts disabled', () => {
+    // `retentionDays` is read on each run, so a policy reloaded later takes
+    // effect at the next sweep — but only if a timer exists to reach it. One
+    // that was never started because retention happened to be 0 at boot could
+    // not, and retention would stay off until a restart.
+    configureLogging({ retentionDays: 0 });
+    const timers = jest.spyOn(global, 'setInterval');
+    const stop = startLogRetentionSweep(dir);
+    expect(timers).toHaveBeenCalledTimes(1);
+
+    // Turn retention on the way a config reload would, then let the timer fire.
+    const old = path.join(dir, 'stale.log');
+    fs.writeFileSync(old, 'x');
+    const longAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    fs.utimesSync(old, longAgo / 1000, longAgo / 1000);
+    configureLogging({ retentionDays: 14 });
+
+    const tick = timers.mock.calls[0][0] as () => void;
+    tick();
+
+    expect(fs.existsSync(old)).toBe(false);
+    stop();
+    timers.mockRestore();
+  });
+
   // ── U-LOG-18: defaults ────────────────────────────────────────────────────
 
   it('U-LOG-18: a config with no gateway.logs block runs on defaults', () => {

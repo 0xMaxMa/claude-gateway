@@ -305,6 +305,10 @@ only the level bounds what is *written*.
 Retention is age-based because each session writes its own `<agent>:session:<uuid>.log` and never
 returns to it — `maxFiles` prunes generations of one stream, so it can never reach them.
 
+This block is **hot-reloaded**: edit it in `config.json` and it applies on the next config reload,
+no restart. That matters because turning the level up is something you do while chasing a live
+problem, and a restart would kill the sessions you are trying to observe.
+
 ### `session`
 
 | Field | Default | Description |

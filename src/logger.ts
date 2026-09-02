@@ -81,6 +81,13 @@ function nonNegativeOrDefault(value: number | undefined, fallback: number): numb
  * would each see only their own share of the file and rotate late. Seeded from
  * `statSync` once per file, then maintained by arithmetic so the common path
  * costs no syscall.
+ *
+ * One entry per log file, and session logs create a new file each. The
+ * retention sweep deletes its entry along with the file, which bounds the map
+ * for any configuration that keeps retention on; with `retentionDays: 0` it
+ * grows with the session count, at roughly a path string per session. That is
+ * small enough not to be worth a second eviction mechanism whose only job would
+ * be to duplicate the sweep.
  */
 const fileSizes = new Map<string, number>();
 
@@ -293,6 +300,12 @@ export function sweepOldLogs(logDir: string, retentionDays: number, now = Date.n
  * Modelled on `AppInstaller.startBackupCleanup()`: the timer is unref'd so it
  * never keeps the process alive, and a failing sweep is swallowed rather than
  * escalated — retention is housekeeping, not a reason to take the gateway down.
+ *
+ * The timer is created unconditionally, including when retention is currently
+ * off. `retentionDays` is read on each run rather than captured, so a policy
+ * reloaded from `gateway.logs` takes effect at the next sweep — and a timer
+ * that was never started because retention happened to be 0 at boot could not
+ * do that. A disabled sweep costs one no-op call a day.
  */
 export function startLogRetentionSweep(
   logDir: string,
@@ -307,7 +320,6 @@ export function startLogRetentionSweep(
     }
   };
   run();
-  if (!(active.retentionDays > 0)) return () => {};
   const timer = setInterval(run, 24 * 60 * 60 * 1000);
   if (typeof timer.unref === 'function') timer.unref();
   return () => clearInterval(timer);

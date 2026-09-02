@@ -17,6 +17,10 @@ const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
 // Gateway-level (non-agent) fields that can be hot-reloaded; agentId will be '' in ConfigChange
 const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
   'gateway.headless',
+  // Logging policy is process-wide module state, so re-installing it is just a
+  // call — and turning the level up to chase a live problem is precisely when a
+  // restart is unaffordable, since it kills the sessions being investigated.
+  'gateway.logs',
 ];
 
 export interface ConfigChange {
@@ -224,6 +228,7 @@ export class ConfigWatcher extends EventEmitter {
     const gatewayFieldPairs: Array<{ field: string; oldVal: unknown; newVal: unknown }> = [
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
+      { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },
     ];
     for (const { field, oldVal, newVal } of gatewayFieldPairs) {
       if (!deepEqual(oldVal, newVal)) {

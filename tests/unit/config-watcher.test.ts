@@ -111,12 +111,14 @@ describe('config-watcher', () => {
     alfredExtraFlags?: string[];
     alfredDangerouslySkip?: boolean;
     publicUrl?: string;
+    logs?: Record<string, unknown>;
   }): Record<string, unknown> {
     return {
       gateway: {
         logDir: '/tmp/claude-gateway-test-logs',
         timezone: 'Asia/Bangkok',
         ...(overrides?.publicUrl ? { publicUrl: overrides.publicUrl } : {}),
+        ...(overrides?.logs ? { logs: overrides.logs } : {}),
       },
       agents: [
         {
@@ -178,6 +180,60 @@ describe('config-watcher', () => {
       newValue: 'claude-sonnet-4-6',
       hotReloadable: true,
     });
+
+    watcher.stop();
+  });
+
+  // ---------------------------------------------------------------------------
+  // U-CW-12: gateway.logs is diffed and hot-reloadable (#435)
+  // ---------------------------------------------------------------------------
+  it('U-CW-12: emits gateway.logs as a hot-reloadable gateway-level change', () => {
+    // Without this the block would be a silent no-op: a field the watcher does
+    // not diff produces no change at all, so an operator editing `level` sees
+    // nothing happen and gets no hint that a restart is needed either.
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig({ logs: { level: 'info' } }));
+
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    writeConfigFile(configPath, rawConfig({ logs: { level: 'debug', maxFiles: 5 } }));
+    watcher.reload();
+
+    expect(changeSpy).toHaveBeenCalledTimes(1);
+    const changes: ConfigChange[] = changeSpy.mock.calls[0][0];
+    const logsChange = changes.find((c) => c.field === 'gateway.logs');
+    expect(logsChange).toMatchObject({
+      agentId: '',
+      field: 'gateway.logs',
+      oldValue: { level: 'info' },
+      newValue: { level: 'debug', maxFiles: 5 },
+      // Turning the level up to chase a live problem is exactly when a restart
+      // is unaffordable — it kills the sessions being investigated.
+      hotReloadable: true,
+    });
+
+    watcher.stop();
+  });
+
+  // ---------------------------------------------------------------------------
+  // U-CW-13: an unchanged gateway.logs block is not reported as a change
+  // ---------------------------------------------------------------------------
+  it('U-CW-13: an identical gateway.logs block produces no change', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig({ logs: { level: 'warn', maxFiles: 2 } }));
+
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    // Same values, rewritten — deepEqual must see through the new object.
+    writeConfigFile(configPath, rawConfig({ logs: { level: 'warn', maxFiles: 2 } }));
+    watcher.reload();
+
+    const changes: ConfigChange[] = changeSpy.mock.calls[0]?.[0] ?? [];
+    expect(changes.find((c) => c.field === 'gateway.logs')).toBeUndefined();
 
     watcher.stop();
   });

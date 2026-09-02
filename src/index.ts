@@ -33,7 +33,7 @@ import { GatewayRouter } from './api/gateway-router';
 import { ContextIsolationGuard } from './agent/context-isolation';
 import { createLogger, configureLogging, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
-import { AgentConfig, GatewayConfig } from './types';
+import { AgentConfig, GatewayConfig, LogsConfig } from './types';
 import { AppsRegistry } from './apps/registry';
 import { sweepOrphanedReceivers } from './utils/orphan-receivers';
 import { registerShutdownSignals } from './shutdown-signals';
@@ -908,6 +908,16 @@ async function main(): Promise<void> {
         if (change.field === 'gateway.headless') {
           // Applies to sessions spawned after the change; running sessions keep their backend.
           config.gateway.headless = change.newValue as boolean | undefined;
+        }
+        if (change.field === 'gateway.logs') {
+          // Re-installing the policy is enough: every logger reads it per call,
+          // and the retention sweep reads `retentionDays` on each run.
+          config.gateway.logs = change.newValue as LogsConfig | undefined;
+          const applied = configureLogging(config.gateway.logs);
+          // warn, not info: raising the level to `warn` would swallow an `info`
+          // confirmation under the very policy just installed, leaving the
+          // operator with no evidence the edit took.
+          globalLogger.warn('Logging policy reloaded', { ...applied });
         }
         continue;
       }

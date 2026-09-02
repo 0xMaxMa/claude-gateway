@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { formatLogLine, runGatewayLogs, tailLines } from '../../src/cli/commands/logs';
+import { formatLogLine, runGatewayLogs, tailFrom, tailLines } from '../../src/cli/commands/logs';
 import { runGatewayLifecycle } from '../../src/cli/commands/gateway';
 import type { CliConfigView } from '../../src/cli/http-client';
 
@@ -249,6 +249,36 @@ describe('cli gateway logs', () => {
   it('U-LOGS-18: asking for more lines than the file holds returns the whole file', () => {
     const file = write('small.log', ['a', 'b']);
     expect(tailLines(file, 500)).toEqual(['a', 'b']);
+  });
+
+  it('U-LOGS-20: the tail is exact at every chunk-boundary alignment', () => {
+    // 64-byte lines divide the 64 KB read chunk exactly, so a boundary lands on
+    // a line boundary — the case where dropping the leading fragment could take
+    // a whole line with it. Swept across counts either side of 1024 and 2048.
+    const lines = Array.from({ length: 4096 }, (_, i) => String(i).padStart(63, '0'));
+    const file = write('aligned.log', lines);
+
+    for (const n of [1, 2, 1000, 1023, 1024, 1025, 2047, 2048, 2049]) {
+      expect(tailLines(file, n)).toEqual(lines.slice(-n));
+    }
+  });
+
+  it('U-LOGS-21: the follow offset is where the tail stopped, not where the file is now', () => {
+    // `--follow` resumes from this offset. Taking a fresh size instead would
+    // skip whatever the gateway appended between the two calls: past the tail's
+    // read, before the follower's start, printed by neither. The writer is a
+    // different process, so that window is real even though nothing can
+    // interleave within this one.
+    const file = write('gateway.log', [entry('info', 'a'), entry('info', 'b')]);
+    const sizeAtRead = fs.statSync(file).size;
+
+    const { lines, endPos } = tailFrom(file, 10);
+    fs.appendFileSync(file, entry('info', 'raced') + '\n');
+
+    expect(lines).toHaveLength(2);
+    expect(endPos).toBe(sizeAtRead);
+    // Everything past endPos is exactly what the follower must go on to stream.
+    expect(fs.readFileSync(file, 'utf-8').slice(endPos)).toBe(entry('info', 'raced') + '\n');
   });
 
   it('U-LOGS-19: an empty log file is not an error', async () => {
