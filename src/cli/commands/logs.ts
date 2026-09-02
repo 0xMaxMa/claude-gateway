@@ -211,8 +211,21 @@ export async function runGatewayLogs(
   }
 
   const asJson = flags.json === true;
+  // A downstream reader that closes early — `gateway logs --follow | head -5`,
+  // a pager quit with `q` — ends the follow normally. It is not an error, and
+  // it must not be treated as one: the EPIPE otherwise reaches the CLI's top
+  // level, which prints `Error: write EPIPE` after the output the operator
+  // asked for and exits 1.
+  //
+  // `broken` is set by the follow loop's stdout 'error' handler and only read
+  // here. Writing into a pipe nobody reads never throws — it always surfaces as
+  // an asynchronous 'error' event — so this is not a fast path, it is the guard
+  // for the final flush: `followFile` drains once more and emits any
+  // unterminated line *after* removing that handler, and a write on the dead
+  // stream then would be an unhandled 'error' with nothing left to catch it.
+  const sink = { broken: false };
   const emit = (line: string): void => {
-    if (line === '') return;
+    if (line === '' || sink.broken) return;
     process.stdout.write(`${asJson ? line : formatLogLine(line)}\n`);
   };
 
@@ -230,7 +243,18 @@ export async function runGatewayLogs(
   }
 
   if (flags.follow !== true) return 0;
-  return await followFile(file, startPos, emit, opts);
+  return await followFile(file, startPos, emit, opts, sink);
+}
+
+/**
+ * Whether an error means "nobody is reading this any more".
+ *
+ * EPIPE is the reader closing its end; ERR_STREAM_DESTROYED is the same
+ * situation observed one layer up, after Node has already torn the stream down.
+ */
+function isPipeClosed(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
 }
 
 /**
@@ -247,6 +271,7 @@ async function followFile(
   fromPos: number,
   emit: (line: string) => void,
   opts: LogsRunOptions,
+  sink: { broken: boolean },
 ): Promise<number> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   let pos = fromPos;
@@ -317,8 +342,21 @@ async function followFile(
     // on both the abort and the SIGINT path.
     const stop = (): void => {
       clearInterval(timer);
+      process.stdout.off('error', onSinkError);
+      if (opts.signal) opts.signal.removeEventListener('abort', stop);
+      else process.off('SIGINT', stop);
       resolve();
     };
+    // The reader going away is how a follow normally ends, and it is only ever
+    // observable here: a failed pipe write does not throw, it arrives as an
+    // 'error' on stdout. Without this listener that error is unhandled and
+    // takes the process down with a stack trace instead of ending the follow.
+    function onSinkError(err: unknown): void {
+      if (!isPipeClosed(err)) return;
+      sink.broken = true;
+      stop();
+    }
+    process.stdout.on('error', onSinkError);
     if (opts.signal) {
       if (opts.signal.aborted) return stop();
       opts.signal.addEventListener('abort', stop, { once: true });

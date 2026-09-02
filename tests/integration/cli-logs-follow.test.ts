@@ -116,4 +116,47 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
     expect(exitCode).toBe(0);
     expect(stdout).toContain('only line');
   });
+
+  it('I-LOGS-439c: a reader that closes early ends the follow quietly instead of erroring', async () => {
+    const file = path.join(dir, 'gateway.log');
+    fs.writeFileSync(file, record('first line'));
+
+    let stdout = '';
+    let stderr = '';
+    let exitCode: number | null = null;
+
+    child = spawn(process.execPath, ['-r', TS_NODE, HARNESS, 'gateway', 'logs', '--follow', '--logDir', dir], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true' },
+    });
+    child.stdout!.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr!.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.on('exit', (code) => { exitCode = code; });
+
+    await waitUntil(`the tail to be printed (stderr: ${stderr})`, () => stdout.includes('first line'));
+
+    // `gateway logs --follow | head -5`: the reader has what it wanted and goes
+    // away. Destroying our end of the pipe is what the shell does to the CLI.
+    child.stdout!.destroy();
+
+    // Keep writing, so a follower that ignored the closed pipe would keep
+    // trying to write into it rather than sitting idle. Each append ends
+    // mid-line on purpose: the file then never ends in a newline, so there is
+    // always a held-back fragment for the final flush to emit *after* the
+    // follow has torn down its stdout error handler — the one write that has
+    // nothing left to catch it.
+    const writer = setInterval(() => {
+      try { fs.appendFileSync(file, `${record('nobody is reading this')}{"unterminated":`); } catch { /* dir gone */ }
+    }, 20);
+    try {
+      await waitUntil('the follow to end once its reader is gone', () => exitCode !== null);
+    } finally {
+      clearInterval(writer);
+    }
+
+    // The operator asked for output and got it; a broken pipe afterwards is the
+    // end of the pipeline, not a failure to report.
+    expect(stderr).not.toMatch(/EPIPE|Error:/);
+    expect(exitCode).toBe(0);
+  });
 });
