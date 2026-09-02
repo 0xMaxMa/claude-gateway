@@ -478,13 +478,23 @@ export class ScreenModel {
     return draft;
   }
 
+  /**
+   * The exact screen region {@link detectDialog} matches against. Exposed so a
+   * dialog's follow-up action (see decideBypassDialogAction in bypass-dialog.ts)
+   * reads the same rows the detection was made from — acting on a wider view
+   * could send keystrokes because of text that never triggered the detector.
+   */
+  dialogText(): string {
+    return this.bottomText(DIALOG_REGION_ROWS);
+  }
+
   detectDialog(): DialogKind | null {
     // Scan only the bottom region: a real modal dialog renders there, while a
     // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the
     // scrollback above and must not trigger the auto-accept keystroke. The dialog
     // has no transcript signal, so this region guard (plus requiring BOTH markers)
     // is the available defense.
-    const text = this.bottomText(DIALOG_REGION_ROWS);
+    const text = this.dialogText();
     if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
       return 'bypass-permissions';
     }

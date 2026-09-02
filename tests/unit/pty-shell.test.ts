@@ -18,6 +18,19 @@ import { Writable } from 'stream';
 import { preTrustWorkspace, checkAuthStatus } from '../../src/shell/trust';
 import { decideMenuCancel, MenuCancelState } from '../../src/shell/menu-cancel';
 import { decideProbeAttempt, confirmProbeReaction, ProbeState, PROBE_MAX_ROUNDS, PROBE_RETRY_COOLDOWN_MS } from '../../src/shell/menu-probe';
+import {
+  decideBypassDialogAction,
+  noteDialogAbsent,
+  noteDialogPresent,
+  rowPattern,
+  BYPASS_KEY_DOWN,
+  BYPASS_KEY_UP,
+  BYPASS_KEY_ENTER,
+  BYPASS_MAX_KEYS,
+  BYPASS_RESET_AFTER_MISSES,
+  BYPASS_ACCEPT_LABEL,
+  BYPASS_DECLINE_LABEL,
+} from '../../src/shell/bypass-dialog';
 import { shouldAdoptOrphanWake, OrphanWakeObs } from '../../src/shell/orphan-wake';
 import * as os from 'os';
 import * as fs from 'fs';
@@ -865,6 +878,204 @@ describe('ScreenModel detectDialog (region-restricted)', () => {
   it('requires BOTH markers (one alone never triggers)', async () => {
     const screen = await renderScreen([...FILLER(45), '  Bypass Permissions mode']);
     expect(screen.detectDialog()).toBeNull();
+  });
+});
+
+describe('decideBypassDialogAction (accepting the bypass dialog across Claude Code versions)', () => {
+  // Both fixtures are verbatim captures of the real dialog, taken by driving
+  // `claude --dangerously-skip-permissions` through node-pty + @xterm/headless
+  // and reading the screen with no keys pressed. The ONLY difference between
+  // them is the option rows: Claude Code <= 2.1.247 numbers them, >= 2.1.248
+  // does not (bisected to that exact release — issue #431). Both start with
+  // the caret on "No, exit".
+  const DIALOG_BODY = [
+    '  WARNING: Claude Code running in Bypass Permissions mode',
+    '',
+    '  In Bypass Permissions mode, Claude Code will not ask for your approval before running',
+    '  potentially dangerous commands.',
+    '  This mode should only be used in a sandboxed container/VM that has restricted internet access',
+    '  and can easily be restored if damaged.',
+    '',
+    '  By proceeding, you accept all responsibility for actions taken while running in Bypass',
+    '  Permissions mode.',
+    '',
+    '  https://code.claude.com/docs/en/security',
+    '',
+  ];
+  const DIALOG_FOOTER = ['', '  Enter to confirm · Esc to cancel'];
+  // FILLER pushes the modal down into the bottom-region window detectDialog()
+  // scans, the way a real session's scrollback does.
+  const dialog = (rows: string[]) => [...FILLER(34), ...DIALOG_BODY, ...rows, ...DIALOG_FOOTER];
+
+  /** Claude Code <= 2.1.247 — numbered rows, caret on decline. */
+  const LEGACY_ROWS = ['  ❯ 1. No, exit', '    2. Yes, I accept'];
+  /** Claude Code >= 2.1.248 — no row numbers, caret on decline. */
+  const CURRENT_ROWS = ['  ❯ No, exit', '    Yes, I accept'];
+  /** The same build after one Down: caret has moved onto the accept row. */
+  const CURRENT_ROWS_AFTER_DOWN = ['    No, exit', '  ❯ Yes, I accept'];
+
+  const decide = async (rows: string[], keys = 0) => {
+    const screen = await renderScreen(dialog(rows));
+    // Sanity: every fixture is a screen the detector actually fires on, so the
+    // decision is only ever asked about dialogs that reached this code path.
+    expect(screen.detectDialog()).toBe('bypass-permissions');
+    return decideBypassDialogAction(screen.dialogText(), { keys, misses: 0 });
+  };
+
+  it('types the digit on the numbered rendering (<= 2.1.247 behavior, unchanged)', async () => {
+    // Proven live on 2.1.247: the digit alone selects AND confirms — Claude
+    // Code dismissed the dialog and persisted skipDangerousModePermissionPrompt.
+    expect(await decide(LEGACY_ROWS)).toEqual({ kind: 'digit', key: '2' });
+  });
+
+  it('reads the digit off the accept row instead of hard-coding it', async () => {
+    // Same numbered shape with the options ordered the other way. The pre-#431
+    // code sent a hard-coded '2', which here means "No, exit" — i.e. it would
+    // have killed the session rather than accepted.
+    const action = await decide(['  ❯ 1. Yes, I accept', '    2. No, exit']);
+    expect(action).toEqual({ kind: 'digit', key: '1' });
+  });
+
+  it('does nothing for a multi-digit index — that is not one keystroke', async () => {
+    const action = await decide(['  ❯ 10. No, exit', '    11. Yes, I accept']);
+    expect(action.kind).toBe('wait');
+  });
+
+  it('moves the caret toward the accept row on the un-numbered rendering (>= 2.1.248)', async () => {
+    // Proven live on 2.1.251: '2' leaves the caret untouched, Down moves it.
+    expect(await decide(CURRENT_ROWS)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
+  });
+
+  it('confirms only once the caret is observed on the accept row', async () => {
+    expect(await decide(CURRENT_ROWS_AFTER_DOWN)).toEqual({ kind: 'confirm', key: BYPASS_KEY_ENTER });
+  });
+
+  it('moves up when the accept row is listed above the caret', async () => {
+    const action = await decide(['    Yes, I accept', '  ❯ No, exit']);
+    expect(action).toEqual({ kind: 'move', key: BYPASS_KEY_UP });
+  });
+
+  it('NEVER confirms while the caret is on "No, exit" (that keystroke exits Claude Code)', async () => {
+    for (const rows of [CURRENT_ROWS, ['    Yes, I accept', '  ❯ No, exit']]) {
+      const action = await decide(rows);
+      expect(action.kind).not.toBe('confirm');
+    }
+  });
+
+  it('does nothing when no row is highlighted (still rendering / not the live dialog)', async () => {
+    const action = await decide(['    No, exit', '    Yes, I accept']);
+    expect(action.kind).toBe('wait');
+  });
+
+  it('does nothing when both rows carry a caret (shape we do not understand)', async () => {
+    const action = await decide(['  ❯ No, exit', '  ❯ Yes, I accept']);
+    expect(action.kind).toBe('wait');
+  });
+
+  it('stops sending keys once the budget is spent, rather than guessing Enter', async () => {
+    const action = await decide(CURRENT_ROWS, BYPASS_MAX_KEYS);
+    expect(action.kind).toBe('wait');
+    // One below the cap still moves — the budget bounds key traffic, it does
+    // not disable the fix.
+    expect(await decide(CURRENT_ROWS, BYPASS_MAX_KEYS - 1)).toEqual({ kind: 'move', key: BYPASS_KEY_DOWN });
+  });
+
+  it('keeps retrying for the whole startup window, not a fraction of it', () => {
+    // The pre-#431 code retried every DIALOG_ACTION_COOLDOWN_MS until the
+    // startup timeout. A ceiling below that many rounds would go silent while
+    // the shell is still starting, so a dialog that merely swallowed its first
+    // keystrokes would never be retried and would die at the startup timeout
+    // into a respawn loop — the very symptom #431 is about.
+    //
+    // claude-pty-shell.ts self-starts a Driver at import, so the two constants
+    // are read back out of its source instead of imported.
+    const src = fs.readFileSync(
+      path.join(__dirname, '../../src/shell/claude-pty-shell.ts'),
+      'utf8',
+    );
+    const numberOf = (name: string): number => {
+      const m = new RegExp(`const ${name} = ([\\d_]+);`).exec(src);
+      if (!m) throw new Error(`${name} not found in claude-pty-shell.ts — update this test`);
+      return Number(m[1].replace(/_/g, ''));
+    };
+    const rounds = numberOf('STARTUP_TIMEOUT_MS') / numberOf('DIALOG_ACTION_COOLDOWN_MS');
+    expect(rounds).toBeGreaterThan(0);
+    expect(BYPASS_MAX_KEYS).toBeGreaterThanOrEqual(rounds);
+  });
+
+  it('does not refill the budget on a single missed detection', () => {
+    // detectDialog() needs both markers inside the same bottom region, so a
+    // repaint that shifts the box by one row hides a dialog that is still up.
+    // Refilling there would defeat the ceiling exactly when it is needed.
+    const state = { keys: 5, misses: 0 };
+    noteDialogAbsent(state);
+    expect(state.keys).toBe(5);
+  });
+
+  it('refills the budget once the dialog has been gone for several rounds', () => {
+    const state = { keys: 5, misses: 0 };
+    for (let i = 0; i < BYPASS_RESET_AFTER_MISSES; i++) noteDialogAbsent(state);
+    expect(state.keys).toBe(0);
+  });
+
+  it('restarts the miss run whenever the dialog is seen again', () => {
+    // A flicker (seen, missed, seen, missed, …) must never accumulate its way
+    // to a refill while the dialog is still on screen.
+    const state = { keys: 5, misses: 0 };
+    for (let i = 0; i < 10; i++) {
+      noteDialogAbsent(state);
+      noteDialogPresent(state);
+    }
+    expect(state.keys).toBe(5);
+  });
+
+  it('matches the option labels literally, so a label edit cannot widen the pattern', () => {
+    // rowPattern() interpolates the label into a RegExp built at module load,
+    // and the labels are meant to be edited when the TUI changes. Unescaped,
+    // '.' would silently become a wildcard...
+    expect(rowPattern('a.c').test('  abc')).toBe(false);
+    expect(rowPattern('a.c').test('  a.c')).toBe(true);
+    // ...and an unbalanced group would throw at import time, taking down every
+    // PTY session rather than one dialog.
+    expect(() => rowPattern('Yes (really)')).not.toThrow();
+    expect(rowPattern('Yes (really)').test('  ❯ Yes (really)')).toBe(true);
+  });
+
+  it('bounds the digit path too — an unresponsive numbered dialog is #431 all over again', async () => {
+    // Keys sent at a dialog that ignores them are not discarded, they queue and
+    // land in the prompt later, so the digit gets the same budget as the arrows.
+    expect((await decide(LEGACY_ROWS, BYPASS_MAX_KEYS)).kind).toBe('wait');
+    expect(await decide(LEGACY_ROWS, BYPASS_MAX_KEYS - 1)).toEqual({ kind: 'digit', key: '2' });
+  });
+
+  it('bounds repeated Enter at a dialog that will not dismiss', async () => {
+    expect((await decide(CURRENT_ROWS_AFTER_DOWN, BYPASS_MAX_KEYS)).kind).toBe('wait');
+  });
+
+  it('keeps the accept label in sync with the detection marker in screen.ts', async () => {
+    // The label is duplicated (this module stays dependency-free), so drift
+    // would mean detectDialog() fires on a dialog whose rows we cannot parse.
+    expect(TUI_BYPASS_PERMS).toContain(BYPASS_ACCEPT_LABEL);
+    expect(await decide([`  ❯ ${BYPASS_DECLINE_LABEL}`, `    ${BYPASS_ACCEPT_LABEL}`])).toEqual({
+      kind: 'move',
+      key: BYPASS_KEY_DOWN,
+    });
+  });
+
+  it('ignores prose that merely quotes the labels mid-sentence', async () => {
+    const action = await decide([
+      '  ❯ No, exit',
+      '  You will be asked to pick Yes, I accept before the session starts.',
+    ]);
+    expect(action.kind).toBe('wait');
+  });
+
+  it('acts only on the region the detector fired for (quoted dialog in scrollback)', async () => {
+    // Same guard detectDialog() has: rows sitting in the upper scrollback are
+    // not a live modal, and must not attract a keystroke.
+    const screen = await renderScreen([...dialog(CURRENT_ROWS_AFTER_DOWN), ...FILLER(44), '❯ ']);
+    expect(screen.detectDialog()).toBeNull();
+    expect(decideBypassDialogAction(screen.dialogText(), { keys: 0, misses: 0 }).kind).toBe('wait');
   });
 });
 
