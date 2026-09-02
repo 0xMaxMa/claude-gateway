@@ -292,7 +292,13 @@ export const NAME_W = 36;
 export const NOUN_NAME_W = 48;
 
 export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
-  ['gateway status|restart|stop|logs', 'Manage the gateway process (manager-aware)'],
+  ['gateway status|restart|stop', 'Manage the gateway process (manager-aware)'],
+  // Its own row, not folded into the line above: `logs` is the one entry there
+  // that does *not* go through the owning manager — it reads the files directly
+  // and works when the gateway is wedged or dead, which is when it matters.
+  // Described as lifecycle management, it read as a variant of stop/restart and
+  // was reported as missing from help by someone looking straight at it.
+  ['gateway logs', 'Read the gateway log files (works when it is down)'],
   ['service install|status|uninstall', 'Run the gateway as a systemd-user or PM2 service'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
   ['claude version|update [check]', 'Inspect / update the Claude Code binary'],

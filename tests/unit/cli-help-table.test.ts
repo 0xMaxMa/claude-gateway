@@ -48,6 +48,45 @@ describe('core help table', () => {
     expect(dispatchedCommands().length).toBeGreaterThan(5);
     expect(dispatchedCommands()).toContain('doctor');
   });
+
+  /**
+   * Being listed is not the same as being findable. `logs` was in the table all
+   * along, folded into `gateway status|restart|stop|logs` — under "Manage the
+   * gateway process (manager-aware)", which is true of the other three and
+   * false of this one: it reads the files directly and is at its most useful
+   * when there is no process left to manage. Described as lifecycle management
+   * it read as a variant of stop/restart, and was reported as missing from help
+   * by someone looking straight at the line that contained it.
+   */
+  it('does not file the direct log reader under manager-aware process control', () => {
+    const managed = CORE_HELP.filter(([, description]) => description.includes('manager-aware'));
+    expect(managed.length).toBeGreaterThan(0); // the row still exists to be checked
+    for (const [name] of managed) {
+      expect(name.split(/[\s|]+/)).not.toContain('logs');
+    }
+    expect(CORE_HELP.some(([name]) => name.split(/[\s|]+/).includes('logs'))).toBe(true);
+  });
+
+  /**
+   * `gateway` is the one noun whose verbs are dispatched in their own file, so
+   * the general help can fall behind it silently — which is how a shipped
+   * command went unmentioned for a release.
+   */
+  it('names every gateway verb somewhere in the table', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../../src/cli/commands/gateway.ts'), 'utf8');
+    const start = src.indexOf('switch (verb) {');
+    expect(start).toBeGreaterThan(-1);
+    const verbs = [...src.slice(start, src.indexOf('\n  }', start)).matchAll(/case '([^']+)':/g)].map((m) => m[1]);
+    expect(verbs).toContain('logs');
+
+    const namedInHelp = new Set(CORE_HELP.flatMap(([name]) => name.split(/[\s|]+/)));
+    for (const verb of verbs) {
+      // `start` has its own section above the table (it is the only command
+      // that boots a server), so it is documented either way.
+      if (verb === 'start') continue;
+      expect(namedInHelp.has(verb)).toBe(true);
+    }
+  });
 });
 
 describe('helpRow', () => {
