@@ -72,6 +72,7 @@ does not touch the palette, so `--json` piped into `jq` is unaffected by any of 
 | `claude-gateway gateway status` | Show the owning manager and `/health` on the local bind address |
 | `claude-gateway gateway restart` | Restart via the owning manager (systemd-user/systemd-system/pm2/foreground) |
 | `claude-gateway gateway stop` | Stop the gateway |
+| `claude-gateway gateway logs [--follow] [--lines <n>] [--agent <id>] [--json]` | Read the gateway log files directly (no running server needed) |
 | `claude-gateway doctor` | Check config, key resolution, owning manager, and connectivity |
 | `claude-gateway debug-bundle` | Write a small redacted diagnostics bundle for a stuck session |
 | `claude-gateway api <METHOD> <path>` | Escape hatch: call any endpoint directly |

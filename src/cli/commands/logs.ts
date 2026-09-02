@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { explicitConfigWarning, listLogStreamIds, resolveLogDir } from '../logs-dir';
-import { writeCommandHelp } from '../output';
+import { flushStream, writeCommandHelp } from '../output';
 
 /**
  * `gateway logs` — read the gateway's own logs without knowing where they live.
@@ -211,26 +211,92 @@ export async function runGatewayLogs(
   }
 
   const asJson = flags.json === true;
+  // Whether anyone is still reading our output, and why they stopped.
+  //
+  // A downstream reader that closes early — `gateway logs --follow | head -5`,
+  // a pager quit with `q` — ends the command normally. A write into a pipe
+  // nobody reads never throws; it arrives as an asynchronous 'error' on stdout,
+  // which with no listener is an uncaught exception that kills the CLI with a
+  // stack trace after the output the operator asked for.
+  //
+  // The listener covers the whole command rather than just the follow loop: the
+  // tail is written before following starts, and `gateway logs --lines 20000 |
+  // head -1` is the same broken pipe with no follow involved.
+  const sink: OutputSink = {};
+  const onSinkError = (err: unknown): void => {
+    // Stop either way — but a stdout error that is *not* the reader leaving (a
+    // full disk, a read-only redirect) is a real failure and has to be
+    // reported. Attaching any listener marks the 'error' handled, so one that
+    // ignored those codes would turn a loud crash into a follow that streams
+    // into nothing and still exits 0.
+    if (!isPipeClosed(err)) sink.failure = err as NodeJS.ErrnoException;
+    sink.onBroken?.();
+  };
   const emit = (line: string): void => {
     if (line === '') return;
     process.stdout.write(`${asJson ? line : formatLogLine(line)}\n`);
   };
 
-  let startPos: number;
+  process.stdout.on('error', onSinkError);
   try {
-    // Resume from where the tail stopped, not from a fresh stat: the gateway is
-    // a different process and may have appended in between.
-    const tail = tailFrom(file, parsed.lines);
-    for (const line of tail.lines) emit(line);
-    startPos = tail.endPos;
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    process.stderr.write(`Cannot read ${file} (${e.code ?? e.message})\n`);
-    return 1;
-  }
+    let tail: { lines: string[]; endPos: number } | undefined;
+    try {
+      // Resume from where the tail stopped, not from a fresh stat: the gateway is
+      // a different process and may have appended in between.
+      tail = tailFrom(file, parsed.lines);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      process.stderr.write(`Cannot read ${file} (${e.code ?? e.message})\n`);
+    }
 
-  if (flags.follow !== true) return 0;
-  return await followFile(file, startPos, emit, opts);
+    let exitCode = 1;
+    if (tail) {
+      for (const line of tail.lines) emit(line);
+      if (flags.follow === true) await followFile(file, tail.endPos, emit, opts, sink);
+      exitCode = 0;
+    }
+
+    // Wait for the writes before judging them. A stdout failure is reported
+    // asynchronously, so returning as soon as the last `emit` call returns
+    // decides the exit code before the failure that decides it has arrived —
+    // `gateway logs > <full disk>` exited 0 with an empty stderr, and only the
+    // follow path escaped it, because following happens to keep the process
+    // there long enough for the error to land.
+    //
+    // The same wait is what makes the command self-contained: the `finally`
+    // below detaches the only 'error' listener stdout has, and detaching it
+    // while a write is still in flight leaves that error to the process. That
+    // it did not crash was luck — src/entry.ts calls `exitAfterFlush` on the
+    // next tick, and its own drain re-attached one just in time.
+    await flushStream(process.stdout);
+    if (sink.failure) {
+      process.stderr.write(`Cannot write output (${sink.failure.code ?? sink.failure.message})\n`);
+      return 1;
+    }
+    return exitCode;
+  } finally {
+    process.stdout.off('error', onSinkError);
+  }
+}
+
+/** Output state shared between the command and its follow loop. */
+interface OutputSink {
+  /** The stdout failure, when it was something other than the reader leaving. */
+  failure?: NodeJS.ErrnoException;
+  /** Registered by `followFile` so a failed write ends the follow immediately. */
+  onBroken?: () => void;
+}
+
+/**
+ * Whether an error means "nobody is reading this any more".
+ *
+ * Only EPIPE: measured on this platform, a closed pipe reports EPIPE on every
+ * failed write and never leaves `process.stdout` destroyed, so the
+ * ERR_STREAM_DESTROYED that a torn-down stream would report is not reachable
+ * here. Anything else is treated as a genuine write failure and surfaced.
+ */
+function isPipeClosed(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === 'EPIPE';
 }
 
 /**
@@ -247,7 +313,8 @@ async function followFile(
   fromPos: number,
   emit: (line: string) => void,
   opts: LogsRunOptions,
-): Promise<number> {
+  sink: OutputSink,
+): Promise<void> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   let pos = fromPos;
   let inode: number | undefined;
@@ -306,11 +373,26 @@ async function followFile(
         /* transient (rotation race, permissions) — the next poll retries */
       }
     }, pollMs);
-    if (typeof timer.unref === 'function') timer.unref();
+    // Deliberately NOT unref'ed. An unref'ed interval is right wherever the
+    // process is kept alive by something else — `src/logger.ts:324`'s retention
+    // sweep runs inside the gateway server, which its HTTP listener holds open,
+    // and `src/cli/output.ts:54`'s flush deadline is a bound on a wait, not the
+    // reason to keep waiting. Here the interval is the only ref'ed handle there
+    // is: `process.once('SIGINT')` does not hold the loop open, so unref'ing
+    // drained the loop and exited 0 the moment the tail had been written —
+    // `--follow` printed the tail and returned instead of following (#439).
+    // Nothing leaks: `stop()` clears the interval on every path out.
     const stop = (): void => {
       clearInterval(timer);
+      sink.onBroken = undefined;
+      if (opts.signal) opts.signal.removeEventListener('abort', stop);
+      else process.off('SIGINT', stop);
       resolve();
     };
+    // The reader going away is how a follow normally ends. The 'error' itself
+    // is caught by the command-wide stdout listener; this is what turns it into
+    // "stop polling" rather than a loop that keeps draining into nothing.
+    sink.onBroken = stop;
     if (opts.signal) {
       if (opts.signal.aborted) return stop();
       opts.signal.addEventListener('abort', stop, { once: true });
@@ -326,5 +408,4 @@ async function followFile(
     /* best-effort */
   }
   if (carry !== '') emit(carry);
-  return 0;
 }
