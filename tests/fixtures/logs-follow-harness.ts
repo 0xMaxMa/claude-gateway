@@ -11,16 +11,19 @@
  * handle of its own, leaving the follow poller as the only thing that can keep
  * the process from exiting.
  *
- * `process.exitCode` rather than `process.exit()`: stdout is a pipe here, and
- * exiting outright can discard writes the test is about to assert on.
+ * It exits the way `src/entry.ts` does — `exitAfterFlush`, not a bare
+ * `process.exitCode` — because stdout here is a pipe, and draining it before
+ * exiting is precisely the production behaviour these tests are asserting on.
+ * A harness that exited differently would be testing a CLI that does not ship.
  */
 import { runCli } from '../../src/cli/index';
+import { exitAfterFlush } from '../../src/cli/output';
 
 runCli(process.argv.slice(2))
-  .then((code) => {
-    process.exitCode = code;
+  .then(async (code) => {
+    await exitAfterFlush(code);
   })
-  .catch((err: unknown) => {
+  .catch(async (err: unknown) => {
     process.stderr.write(`${(err as Error)?.stack ?? String(err)}\n`);
-    process.exitCode = 1;
+    await exitAfterFlush(1);
   });

@@ -32,13 +32,22 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function waitUntil(label: string, predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
+/**
+ * Poll until `predicate` holds. `label` is a thunk so the diagnostic it builds
+ * describes the moment the wait gave up, not the moment it started — the
+ * child's stderr is always empty at call time, which is exactly when it is
+ * useless.
+ *
+ * The budget is well under the 15s `npm run integration` imposes, so a real
+ * regression fails with this message rather than jest's generic timeout.
+ */
+async function waitUntil(label: () => string, predicate: () => boolean, timeoutMs = 8_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((r) => setTimeout(r, 25));
   }
-  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
+  throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label()}`);
 }
 
 function record(message: string): string {
@@ -79,20 +88,20 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
 
     // The tail is written before following begins, so its arrival means the
     // process has reached the point where the bug decided whether to exit.
-    await waitUntil(`the tail to be printed (stderr: ${stderr})`, () => stdout.includes('first line'));
+    await waitUntil(() => `the tail to be printed (stderr: ${stderr})`, () => stdout.includes('first line'));
 
     // Appended only now: a follower that already exited can never report it,
     // and one that read it as part of the tail would not prove anything.
     fs.appendFileSync(file, record('appended while following'));
 
     await waitUntil(
-      'the appended line to stream (the process exits here when the poll timer cannot hold the loop open)',
+      () => `the appended line to stream — the process exits here when the poll timer cannot hold the loop open (stderr: ${stderr})`,
       () => stdout.includes('appended while following'),
     );
     expect(exitCode).toBeNull(); // still following, not finished
 
     child.kill('SIGINT');
-    await waitUntil('the child to exit after SIGINT', () => exitCode !== null);
+    await waitUntil(() => `the child to exit after SIGINT (stderr: ${stderr})`, () => exitCode !== null);
     expect(exitCode).toBe(0);
   });
 
@@ -112,7 +121,7 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
 
     // Holding the loop open for `--follow` must not make the plain read hang:
     // the fix has to be scoped to the follow path, not to the command.
-    await waitUntil('the plain read to exit on its own', () => exitCode !== null);
+    await waitUntil(() => 'the plain read to exit on its own', () => exitCode !== null);
     expect(exitCode).toBe(0);
     expect(stdout).toContain('only line');
   });
@@ -133,7 +142,7 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
     child.stderr!.on('data', (d: Buffer) => { stderr += d.toString(); });
     child.on('exit', (code) => { exitCode = code; });
 
-    await waitUntil(`the tail to be printed (stderr: ${stderr})`, () => stdout.includes('first line'));
+    await waitUntil(() => `the tail to be printed (stderr: ${stderr})`, () => stdout.includes('first line'));
 
     // `gateway logs --follow | head -5`: the reader has what it wanted and goes
     // away. Destroying our end of the pipe is what the shell does to the CLI.
@@ -141,15 +150,13 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
 
     // Keep writing, so a follower that ignored the closed pipe would keep
     // trying to write into it rather than sitting idle. Each append ends
-    // mid-line on purpose: the file then never ends in a newline, so there is
-    // always a held-back fragment for the final flush to emit *after* the
-    // follow has torn down its stdout error handler — the one write that has
-    // nothing left to catch it.
+    // mid-line on purpose, so the file never ends in a newline and the final
+    // flush after the loop always has a held-back fragment to emit.
     const writer = setInterval(() => {
       try { fs.appendFileSync(file, `${record('nobody is reading this')}{"unterminated":`); } catch { /* dir gone */ }
     }, 20);
     try {
-      await waitUntil('the follow to end once its reader is gone', () => exitCode !== null);
+      await waitUntil(() => `the follow to end once its reader is gone (stderr: ${stderr})`, () => exitCode !== null);
     } finally {
       clearInterval(writer);
     }
@@ -159,4 +166,37 @@ describe('gateway logs --follow keeps the CLI process alive (issue #439)', () =>
     expect(stderr).not.toMatch(/EPIPE|Error:/);
     expect(exitCode).toBe(0);
   });
+
+  // Treating *every* stdout error as "the reader left" would be worse than the
+  // crash it replaced: attaching a listener marks the 'error' handled, so a
+  // genuine write failure would leave the follow polling forever into nothing
+  // and still exit 0. /dev/full reports ENOSPC on every write, which is that
+  // failure without needing to fill a real disk.
+  const hasDevFull = process.platform === 'linux' && fs.existsSync('/dev/full');
+  (hasDevFull ? it : it.skip)(
+    'I-LOGS-439d: a stdout failure that is not a closed pipe is reported, not swallowed',
+    async () => {
+      const file = path.join(dir, 'gateway.log');
+      fs.writeFileSync(file, record('first line'));
+
+      let stderr = '';
+      let exitCode: number | null = null;
+      const full = fs.openSync('/dev/full', 'w');
+      try {
+        child = spawn(process.execPath, ['-r', TS_NODE, HARNESS, 'gateway', 'logs', '--follow', '--logDir', dir], {
+          stdio: ['ignore', full, 'pipe'],
+          env: { ...process.env, TS_NODE_TRANSPILE_ONLY: 'true' },
+        });
+      } finally {
+        fs.closeSync(full);
+      }
+      child.stderr!.on('data', (d: Buffer) => { stderr += d.toString(); });
+      child.on('exit', (code) => { exitCode = code; });
+
+      await waitUntil(() => `the follow to give up on an unwritable stdout (stderr: ${stderr})`, () => exitCode !== null);
+
+      expect(stderr).toContain('ENOSPC');
+      expect(exitCode).toBe(1);
+    },
+  );
 });
