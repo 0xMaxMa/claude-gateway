@@ -135,6 +135,7 @@ Once installed, drive it through the CLI — it detects whichever manager owns t
 claude-gateway gateway status   # manager, URL, health
 claude-gateway gateway restart
 claude-gateway gateway stop
+claude-gateway gateway logs     # tail the gateway's own log (works even when it is dead)
 ```
 
 Managing PM2 directly still works too:
@@ -214,6 +215,12 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
   "configVersion": "1.0.0",
   "gateway": {
     "logDir": "~/.claude-gateway/logs",
+    "logs": {
+      "level": "info",
+      "maxFileBytes": 16777216,
+      "maxFiles": 3,
+      "retentionDays": 14
+    },
     "timezone": "Asia/Bangkok",
     "api": {
       "keys": [
@@ -276,6 +283,27 @@ returns the `token` (the share endpoint stays enabled) and callers with their ow
 public base — e.g. LINE, which derives its host from the inbound webhook — build
 `<base>/shared/<token>` themselves. HTTP is accepted only for local development
 hosts such as `http://host.docker.internal:10850/gateway`.
+
+### `gateway.logs` (optional)
+
+Verbosity, rotation and retention for the files in `logDir`. The whole block is optional —
+omit it and the defaults below apply.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `level` | `"info"` | Minimum level written, to both the file and stdout. One of `debug`, `info`, `warn`, `error` |
+| `maxFileBytes` | `16777216` (16 MiB) | Rotate `<name>.log` to `<name>.log.1` once an append would carry it past this size |
+| `maxFiles` | `3` | Rotated generations kept per stream; the oldest is deleted. Lowering it collects the generations it orphans at the next rotation. `0` = keep none |
+| `retentionDays` | `14` | Delete logs (live and rotated) older than this, at boot and once a day. `0` = keep forever |
+
+`level` is the one that governs disk usage. Session processes log every stream event at `debug`,
+which on a live host measured 19,995 `debug` lines to 5 `info` lines inside a single 217 MB file —
+so `debug` is off by default. Set `"level": "debug"` when you are actually chasing something, and
+expect the directory to grow quickly while it is on. Rotation and retention bound what is *kept*;
+only the level bounds what is *written*.
+
+Retention is age-based because each session writes its own `<agent>:session:<uuid>.log` and never
+returns to it — `maxFiles` prunes generations of one stream, so it can never reach them.
 
 ### `session`
 
@@ -715,6 +743,7 @@ The `claude-gateway` binary doubles as a command-line client for a running gatew
 claude-gateway                             # help (never starts a server)
 claude-gateway gateway start               # run the gateway in the foreground
 claude-gateway gateway status              # is it running? which manager owns it?
+claude-gateway gateway logs --follow       # stream the gateway log (reads files, needs no server)
 claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
 claude-gateway update check                # newer claude-gateway published?
 claude-gateway claude update               # update Claude Code via its own updater
@@ -726,6 +755,28 @@ claude-gateway crons run <jobId>
 claude-gateway debug-bundle                # small redacted bundle for a stuck session (works even if the server is down)
 claude-gateway api GET /v1/agents          # escape hatch: call any endpoint directly
 ```
+
+### Reading the logs
+
+`gateway logs` reads the log files directly, so it answers whether or not the gateway is
+running — which is usually exactly when you need it.
+
+```bash
+claude-gateway gateway logs                       # last 50 lines of logs/gateway.log
+claude-gateway gateway logs --lines 200 --follow  # more history, then stream
+claude-gateway gateway logs --agent alfred        # that agent's stream instead
+claude-gateway gateway logs --json                # the stored JSON lines, verbatim
+```
+
+Each line is stored as one JSON object and rendered as `<ts> <LEVEL> <message>` with `data`
+appended; `--json` prints the stored line unchanged, for piping into `jq`. `--agent <id>` takes
+any stream id in the log directory — agents (`alfred`), receivers (`alfred:receiver`), and
+sessions (`alfred:session:<uuid>`) each get their own file — and an unknown id lists the ids that
+do exist rather than reporting an empty result. `--follow` survives a rotation: when the file it
+is watching is renamed away it reopens the new one instead of going quiet.
+
+Unlike `debug-bundle`, this output is **not redacted** — it is the local file you could already
+`cat`. Skim before pasting it anywhere.
 
 > **Upgrading from < 1.8:** a service unit that runs the binary with no command still starts the
 > gateway, with a deprecation warning. Point `ExecStart` at `claude-gateway gateway start`, or
@@ -961,6 +1012,7 @@ claude-gateway/
 ├── config.json                         ← gateway config
 ├── logs/
 │   ├── alfred.log
+│   ├── alfred.log.1                    ← rotated generation (see `gateway.logs`)
 │   └── warrior.log
 ├── shared-skills/                      ← shared skills (synced to ~/.claude/skills/ on boot and on change)
 │   └── <skill-name>/

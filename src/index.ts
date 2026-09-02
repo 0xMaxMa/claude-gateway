@@ -31,7 +31,7 @@ import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
 import { ContextIsolationGuard } from './agent/context-isolation';
-import { createLogger } from './logger';
+import { createLogger, configureLogging, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
 import { AgentConfig, GatewayConfig } from './types';
 import { AppsRegistry } from './apps/registry';
@@ -590,6 +590,11 @@ async function main(): Promise<void> {
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
+  // Must precede the first createLogger() call: the level gate and the rotation
+  // thresholds are process-wide policy, and a logger created before the policy
+  // is installed would run the whole boot on defaults.
+  const logsPolicy = configureLogging(config.gateway.logs);
+
   // Created as early as logDir allows, and before the isolation guard below:
   // a config bad enough to drop an agent is exactly the config likely to fail
   // validation too, and a guard throw must not swallow the reason an agent
@@ -798,6 +803,16 @@ async function main(): Promise<void> {
   // the retention-count + max-age union policy. Timer is unref'd, so it never
   // keeps the process alive.
   appInstaller.startBackupCleanup();
+
+  // Log retention (issue #435): sweeps once now and daily thereafter. Session
+  // logs are the reason this is age-based — each session writes its own file
+  // and never returns to it, so the per-stream generation cap cannot reach them.
+  startLogRetentionSweep(logDir, (removed) => {
+    globalLogger.info('Swept expired log files', {
+      count: removed.length,
+      retentionDays: logsPolicy.retentionDays,
+    });
+  });
 
   // Start gateway router
   const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
