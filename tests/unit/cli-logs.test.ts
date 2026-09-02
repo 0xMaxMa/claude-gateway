@@ -10,6 +10,23 @@ import type { CliConfigView } from '../../src/cli/http-client';
  * here writes real files and runs the real command. There is no gateway
  * process: that is the point of the command, and of testing it this way.
  */
+
+/**
+ * The default log directory is `os.homedir()/.claude-gateway/logs`, and one
+ * test needs it to land somewhere hermetic. Neither of the obvious routes
+ * works: `jest.spyOn(os, 'homedir')` throws "Cannot redefine property" on this
+ * Node, and jest hands each test file a *copy* of `process.env`, so reassigning
+ * HOME leaves the native lookup reading the real one. A module mock is what is
+ * left, and it defers to the real implementation unless a test asks otherwise —
+ * without which the suite would read whatever logs happen to exist on the
+ * machine running it.
+ */
+let mockHomeDir: string | undefined;
+jest.mock('os', () => {
+  const actual = jest.requireActual('os');
+  return { ...actual, homedir: () => mockHomeDir ?? actual.homedir() };
+});
+
 describe('cli gateway logs', () => {
   let dir: string;
   let stdout: string[];
@@ -288,5 +305,24 @@ describe('cli gateway logs', () => {
 
     expect(code).toBe(0);
     expect(stdout.join('')).toBe('');
+  });
+
+  it('U-LOGS-22: a --config that cannot be read is named, not silently defaulted', async () => {
+    // Without the warning this reports "No log file at <default dir>" — a
+    // directory the operator never asked about — while the typo in --config
+    // goes unmentioned. Same class of failure as the unexpanded `~`.
+    const missing = path.join(dir, 'typo.json');
+    mockHomeDir = dir; // hermetic default dir — see the module mock above
+    try {
+      const code = await runGatewayLogs({ config: missing });
+
+      expect(code).toBe(1);
+      expect(stderr.join('')).toContain(missing);
+      expect(stderr.join('')).toContain('falling back to the default log directory');
+      // And the fallback path it actually used is still named explicitly.
+      expect(stderr.join('')).toContain(path.join(dir, '.claude-gateway', 'logs'));
+    } finally {
+      mockHomeDir = undefined;
+    }
   });
 });

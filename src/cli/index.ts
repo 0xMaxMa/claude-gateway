@@ -23,9 +23,17 @@ const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow'])
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command
  *  builds its query/body from `cmd.flags` alone, so an unrecognised flag would
- *  otherwise be parsed, ignored, and reported as success. */
+ *  otherwise be parsed, ignored, and reported as success.
+ *
+ *  Not simply `GLOBAL_BOOLEAN_FLAGS` spread in: the two sets answer different
+ *  questions. `follow` has to parse as a boolean everywhere so the gateway verb
+ *  survives, but it means nothing to a resource command, and accepting it there
+ *  would quietly re-open the hole this check exists to close. */
 const GLOBAL_FLAG_NAMES: ReadonlySet<string> = new Set([
-  ...GLOBAL_BOOLEAN_FLAGS,
+  'help',
+  'json',
+  'yes',
+  'print',
   'url',
   'key',
   'config',

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listLogStreamIds, readLogDir, resolveLogDir } from '../../src/cli/logs-dir';
+import { explicitConfigWarning, listLogStreamIds, readLogDir, resolveLogDir } from '../../src/cli/logs-dir';
 
 /**
  * The shared log-directory helper (issue #435).
@@ -85,5 +85,40 @@ describe('cli logs-dir', () => {
 
     expect(ids).toEqual([]);
     expect(error).toBe(`${missing} does not exist`);
+  });
+
+  // `loadCliConfig` cannot distinguish "missing", "unreadable" and "malformed" —
+  // all three come back as `{}` — so resolveLogDir silently answers with the
+  // default directory. Without a warning the caller then reports "no log file
+  // at <default>", naming a directory the operator never asked about while the
+  // typo in --config goes unmentioned.
+  it('U-LD-10: an explicit --config that does not exist is reported, not silently defaulted', () => {
+    const missing = path.join(dir, 'nope.json');
+
+    const warning = explicitConfigWarning({ config: missing });
+
+    expect(warning).toContain(missing);
+    expect(warning).toContain('ENOENT');
+    // The fallback itself still happens — the warning is what makes it legible.
+    expect(resolveLogDir({ config: missing })).toBe(path.join(os.homedir(), '.claude-gateway', 'logs'));
+  });
+
+  it('U-LD-11: an explicit --config that is not valid JSON is reported', () => {
+    const broken = path.join(dir, 'broken.json');
+    fs.writeFileSync(broken, '{ "gateway": ');
+
+    expect(explicitConfigWarning({ config: broken })).toContain('not valid JSON');
+  });
+
+  it('U-LD-12: a readable config, no --config at all, or --logDir winning are all silent', () => {
+    const good = path.join(dir, 'config.json');
+    fs.writeFileSync(good, JSON.stringify({ gateway: { logDir: dir } }));
+
+    expect(explicitConfigWarning({ config: good })).toBeUndefined();
+    // No --config: a fresh install has no config file and the default log
+    // directory is the right answer for it, so there is nothing to warn about.
+    expect(explicitConfigWarning({})).toBeUndefined();
+    // --logDir wins outright, so a bad --config alongside it was never consulted.
+    expect(explicitConfigWarning({ logDir: dir, config: path.join(dir, 'nope.json') })).toBeUndefined();
   });
 });

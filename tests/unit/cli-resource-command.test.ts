@@ -121,4 +121,16 @@ describe('generated resource commands', () => {
     expect(stderr.join('')).toBe('');
     expect(mockRequest).toHaveBeenCalledTimes(1);
   });
+
+  // U-RC-435a — `--follow` is parsed as a boolean everywhere so that
+  // `gateway --follow logs` does not swallow its own verb (#435), but it means
+  // nothing to a resource command. Parsing globally must not make it *accepted*
+  // globally, or the guard above quietly stops covering it.
+  it('U-RC-435a: --follow is still a typo on a resource command', async () => {
+    const code = await runCli(['crons', 'list', '--follow']);
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Unknown flag(s): --follow');
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
 });

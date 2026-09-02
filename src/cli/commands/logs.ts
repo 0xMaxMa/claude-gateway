@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { listLogStreamIds, resolveLogDir } from '../logs-dir';
+import { explicitConfigWarning, listLogStreamIds, resolveLogDir } from '../logs-dir';
 import { writeCommandHelp } from '../output';
 
 /**
@@ -179,6 +179,11 @@ export async function runGatewayLogs(
   }
 
   const logDir = resolveLogDir(flags);
+  // Before anything else reads a path: if `--config` named a file we could not
+  // use, say so now. Otherwise the "no log file at …" below names the default
+  // directory and reads like an answer rather than a misdirection.
+  const configWarning = explicitConfigWarning(flags);
+  if (configWarning) process.stderr.write(`${configWarning}\n`);
   const streamId = typeof flags.agent === 'string' ? flags.agent : 'gateway';
 
   // A stream id reaches the filesystem, so it must not be able to leave the log

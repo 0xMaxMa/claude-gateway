@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { listSessionLogs, resolveLogDir } from '../logs-dir';
+import { explicitConfigWarning, listSessionLogs, resolveLogDir } from '../logs-dir';
 import { redactLine } from '../redact';
 import { writeCommandHelp } from '../output';
 
@@ -82,6 +82,11 @@ export async function runDebugBundle(flags: Record<string, string | boolean>): P
     return 0;
   }
   const logDir = resolveLogDir(flags);
+  // A `--config` that could not be read leaves this pointing at the default
+  // directory, which would otherwise be reported as though it were the one
+  // asked for.
+  const configWarning = explicitConfigWarning(flags);
+  if (configWarning) process.stderr.write(`${configWarning}\n`);
   const sessionFilter = typeof flags.session === 'string' ? flags.session : undefined;
 
   const found = listSessionLogs(logDir);

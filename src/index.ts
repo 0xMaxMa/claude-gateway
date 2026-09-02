@@ -31,7 +31,7 @@ import { CronScheduler } from './cron/scheduler';
 import { CronManager } from './cron/manager';
 import { GatewayRouter } from './api/gateway-router';
 import { ContextIsolationGuard } from './agent/context-isolation';
-import { createLogger, configureLogging, startLogRetentionSweep } from './logger';
+import { createLogger, configureLogging, loggingConfig, startLogRetentionSweep } from './logger';
 import { ConfigWatcher, ConfigChange } from './config/watcher';
 import { AgentConfig, GatewayConfig, LogsConfig } from './types';
 import { AppsRegistry } from './apps/registry';
@@ -593,7 +593,7 @@ async function main(): Promise<void> {
   // Must precede the first createLogger() call: the level gate and the rotation
   // thresholds are process-wide policy, and a logger created before the policy
   // is installed would run the whole boot on defaults.
-  const logsPolicy = configureLogging(config.gateway.logs);
+  configureLogging(config.gateway.logs);
 
   // Created as early as logDir allows, and before the isolation guard below:
   // a config bad enough to drop an agent is exactly the config likely to fail
@@ -810,7 +810,10 @@ async function main(): Promise<void> {
   startLogRetentionSweep(logDir, (removed) => {
     globalLogger.info('Swept expired log files', {
       count: removed.length,
-      retentionDays: logsPolicy.retentionDays,
+      // Read live rather than closing over the boot-time policy: `gateway.logs`
+      // is hot-reloadable, so a captured value would report the threshold that
+      // was in force at boot while the sweep used the current one.
+      retentionDays: loggingConfig().retentionDays,
     });
   });
 

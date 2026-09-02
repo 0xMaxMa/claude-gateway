@@ -25,6 +25,41 @@ export function resolveLogDir(flags: Record<string, string | boolean>): string {
   return path.join(os.homedir(), '.claude-gateway', 'logs');
 }
 
+/**
+ * The reason an explicitly passed `--config` did not contribute a `logDir`, or
+ * undefined when there is nothing to say.
+ *
+ * `loadCliConfig` answers `{}` for a file that is missing, unreadable or
+ * malformed — it cannot distinguish them, and for most commands that is the
+ * right shape. Here it is not: the caller then silently resolves the *default*
+ * log directory and reports "no log file at <default path>", naming a directory
+ * the operator never asked about while the typo in `--config` goes unmentioned.
+ * That is the same class of failure as the unexpanded `~`, arriving by a
+ * different route.
+ *
+ * Only an explicit `--config` is worth complaining about. The default config
+ * being absent is ordinary — a fresh install has no config yet, and the default
+ * log directory is the correct answer for it.
+ */
+export function explicitConfigWarning(flags: Record<string, string | boolean>): string | undefined {
+  if (typeof flags.logDir === 'string') return undefined; // --logDir wins; config was never consulted
+  if (typeof flags.config !== 'string') return undefined;
+  const file = expandHome(flags.config);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return `Warning: --config ${file} could not be read (${e.code ?? e.message}); falling back to the default log directory`;
+  }
+  try {
+    JSON.parse(raw);
+  } catch (err) {
+    return `Warning: --config ${file} is not valid JSON (${(err as Error).message}); falling back to the default log directory`;
+  }
+  return undefined;
+}
+
 export interface LogDirListing {
   names: string[];
   /** Set when the directory could not be read at all — never "no logs found". */
