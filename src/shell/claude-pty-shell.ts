@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as readline from 'readline';
 import { translateArgs, sanitizeUserText } from './args';
-import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking, parseInteractivePrompt } from './screen';
+import { ScreenModel, MenuOption, parseMenuChoice, formatMenuPrompt, formatPermissionPrompt, extractChannelContent, isPtyActivelyWorking, parseInteractivePrompt, TUI_BYPASS_PERMS } from './screen';
 import { PtyHost } from './pty-host';
 import { TranscriptTailer, AssistantRecord, UsageInfo } from './tailer';
 import { ProtocolEmitter } from './emitter';
@@ -204,6 +204,9 @@ class Driver {
   // whose dialog has no row numbers, and the key that accepts (see
   // bypass-dialog.ts). Reset once the dialog leaves the screen.
   private bypassDialog: BypassDialogState = { keys: 0, misses: 0 };
+  // Latch for the "markers on screen but the dialog did not validate" warning
+  // below, so it is reported once per run of such rounds rather than every 2 s.
+  private bypassMarkerWarned = false;
   // In-flight behavioral probe round, advanced synchronously by tick() at a
   // single chokepoint — the same tick-driven pattern as menuCancel and
   // interrupting (review round 2, finding 6; replaced a detached async
@@ -1039,14 +1042,37 @@ class Driver {
     const dialog = this.screen.detectDialog();
     if (!dialog) {
       // No dialog this round. The keystroke allowance is only refilled once it
-      // has been absent for several consecutive rounds: detectDialog() needs
-      // both markers inside the same bottom region, so a repaint that shifts
-      // the box by a row can hide it for a single read while it is still very
-      // much up, and refilling there would defeat the allowance entirely.
+      // has been absent for several consecutive rounds: detection is structural
+      // (see isBypassDialogOnScreen), so a mid-repaint frame can read as absent
+      // for a single round while the dialog is still very much up, and refilling
+      // there would defeat the allowance entirely.
       noteDialogAbsent(this.bypassDialog);
+      // A detector that returns null without a word is how #436 stayed hidden:
+      // the symptom (a 120 s startup timeout) is three layers away from the
+      // cause (detection that never fired), with no breadcrumb in between.
+      //
+      // Gated on the SAME substring test detectDialog() uses, not on one marker:
+      // "Bypass Permissions mode" alone appears in this repo's own README and in
+      // any reply discussing the dialog, so warning on it would be noise. Both
+      // markers present means we cleared the cheap gate and it was the structural
+      // test that refused — the case actually worth a line. Warned once per run
+      // of such rounds; the common cause is a reply quoting the dialog, which is
+      // precisely what must not attract a keystroke.
+      if (TUI_BYPASS_PERMS.every((s) => this.screen.dialogText().includes(s))) {
+        if (!this.bypassMarkerWarned) {
+          this.bypassMarkerWarned = true;
+          logWarn(
+            'Bypass Permissions markers on screen but no live dialog validated — not acting ' +
+              '(quoted text, or a dialog shape this build does not recognise)',
+          );
+        }
+      } else {
+        this.bypassMarkerWarned = false;
+      }
       return;
     }
     noteDialogPresent(this.bypassDialog);
+    this.bypassMarkerWarned = false;
     this.lastDialogActionAt = now;
 
     if (dialog === 'bypass-permissions') {

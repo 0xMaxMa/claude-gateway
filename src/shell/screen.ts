@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/headless';
+import { isBypassDialogOnScreen, BYPASS_CONFIRM_FOOTER } from './bypass-dialog';
 
 export type DialogKind = 'bypass-permissions';
 
@@ -42,15 +43,25 @@ export const TUI_BUSY_MARKER = 'esc to interrupt';
 export const TUI_PROMPT_RE = /^❯ /m;
 export const TUI_BYPASS_PERMS = ['Bypass Permissions mode', 'Yes, I accept'] as const;
 
+/*
+ * NOTE: the bypass dialog's remaining matchers — the option-row patterns and the
+ * "Enter to confirm" footer — live in bypass-dialog.ts, next to the decision
+ * that consumes them, so that module stays dependency-free and unit-testable
+ * on its own. They are deliberately NOT re-exported here: an alias nobody
+ * imports is dead code, and this pointer keeps the "one file to touch when the
+ * UI changes" intent without it.
+ */
+
 /**
- * Rows from the bottom of the screen that detectDialog() scans. A modal dialog is
- * anchored to the bottom; this window comfortably covers a tall dialog box while
- * excluding the upper ~60% of the buffer where conversation/scrollback lives.
+ * Rows from the bottom of the screen scanned for a bottom-anchored overlay.
  *
- * Conservative on purpose: if a future dialog renders taller than this and the
- * markers fall outside the window, the only effect is the auto-accept doesn't
- * fire — the operator simply sees the dialog (fail-safe), it never mis-accepts.
- * Bump this if Claude Code's dialog grows.
+ * Used by parseInteractivePrompt() for the tool-permission prompt, which really
+ * does render at the bottom, below the conversation. It is NOT used for the
+ * bypass-permissions dialog: that one appears at boot, before there is any
+ * conversation to push it down, so it renders at the TOP of an otherwise blank
+ * screen and fell outside this window entirely (issue #436). See
+ * isBypassDialogOnScreen() in bypass-dialog.ts for the structural test that
+ * replaced the positional one there.
  */
 const DIALOG_REGION_ROWS = 20;
 
@@ -101,12 +112,22 @@ export const TUI_SYNTHETIC_MODEL = '<synthetic>';
  * and never collapses runs of spaces, so the broken fragment stays broken after a
  * round-trip through the screen buffer. Only the re-injected copy is altered;
  * live detection of a genuine overlay is untouched.
+ *
+ * The bypass dialog's confirm footer is defanged the same way and for the same
+ * reason. isBypassDialogOnScreen() rejects re-injected history today because the
+ * input box and status bar paint below it, failing the "nothing below the footer"
+ * rule — but that is a fact about how Claude Code happens to render, not an
+ * invariant we control, and the 32MB loop above is precisely the bug that proved
+ * a footer-requirement guard is not enough against a verbatim captured copy.
+ * Breaking the footer costs nothing and makes the bypass detector unreachable
+ * from re-injected text by construction (review round 2, finding M4).
  */
 export function neutralizeTuiTriggers(text: string): string {
   if (!text) return text;
   return text
     .split(TUI_REQUEST_TOO_LARGE).join('Request too large ( max')
-    .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back');
+    .split(TUI_REQUEST_TOO_LARGE_DISMISS).join('esc to go  back')
+    .split(BYPASS_CONFIRM_FOOTER).join('Enter to  confirm');
 }
 
 /** A numbered option row, with an optional leading ❯/> highlight marker. */
@@ -397,21 +418,6 @@ export class ScreenModel {
     return this.rowsText(0, this.term.rows);
   }
 
-  /**
-   * The bottom `rows` lines of the visible screen. Active modal UI — permission
-   * dialogs, error overlays, the input box — renders anchored to the bottom,
-   * whereas conversation/scrollback flows in the upper area. Matching a marker
-   * against this region instead of the full buffer keeps a reply (or re-injected
-   * history) that merely quotes a marker from tripping a detector, since that
-   * text sits above the active zone. Reduces false positives sharply but is not
-   * absolute (text can briefly be the bottom-most line), so prefer an
-   * authoritative transcript signal where one exists.
-   */
-  bottomText(rows: number): string {
-    const start = Math.max(0, this.term.rows - rows);
-    return this.rowsText(start, this.term.rows);
-  }
-
   private rowsText(startRow: number, endRow: number): string {
     const buf = this.term.buffer.active;
     const lines: string[] = [];
@@ -483,22 +489,25 @@ export class ScreenModel {
    * dialog's follow-up action (see decideBypassDialogAction in bypass-dialog.ts)
    * reads the same rows the detection was made from — acting on a wider view
    * could send keystrokes because of text that never triggered the detector.
+   *
+   * That region is now the whole screen: the bypass dialog is not bottom-anchored
+   * (issue #436), so it is told apart from text that merely quotes it by its
+   * structure rather than by where it sits. Since the region no longer excludes
+   * anything, the "act only on what was detected" guarantee is enforced inside
+   * decideBypassDialogAction(), which applies the same structural test.
    */
   dialogText(): string {
-    return this.bottomText(DIALOG_REGION_ROWS);
+    return this.text();
   }
 
   detectDialog(): DialogKind | null {
-    // Scan only the bottom region: a real modal dialog renders there, while a
-    // reply/history quoting "Bypass Permissions mode … Yes, I accept" sits in the
-    // scrollback above and must not trigger the auto-accept keystroke. The dialog
-    // has no transcript signal, so this region guard (plus requiring BOTH markers)
-    // is the available defense.
-    const text = this.dialogText();
-    if (TUI_BYPASS_PERMS.every((s) => text.includes(s))) {
-      return 'bypass-permissions';
-    }
-    return null;
+    // The whole rule lives in isBypassDialogOnScreen(), including the heading
+    // substring check that used to sit here. Keeping half the rule at this layer
+    // was a real drift hazard: decideBypassDialogAction() re-applies the
+    // predicate to refuse acting on a screen that is not a live dialog, and a
+    // half-rule meant the ACTION layer — the one that emits keystrokes — was the
+    // weaker of the two (review round 2, finding H1).
+    return isBypassDialogOnScreen(this.dialogText()) ? 'bypass-permissions' : null;
   }
 
   /**
