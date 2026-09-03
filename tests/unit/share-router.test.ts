@@ -746,6 +746,25 @@ describe('file share router', () => {
         expect(attachmentDisposition('report', 'application/pdf')).toContain('filename="report.pdf"');
       });
 
+      // A mime with no entry in EXT_FOR_MIME is the case where we cannot vouch
+      // for what the bytes are — so it must fail CLOSED. Handing back the
+      // agent's own `.html` there would reopen exactly the reflected-file-
+      // download hole the mapped path closes. Nothing reaches this branch today
+      // (images go out inline, PDF is the only other allowlisted type); this
+      // pins the behaviour for whatever type is allowlisted next.
+      test('an unmapped mime drops the extension instead of trusting the basename', () => {
+        expect(attachmentDisposition('invoice.html', 'application/zip')).toBe(
+          `attachment; filename="invoice"; filename*=UTF-8''invoice`,
+        );
+        expect(attachmentDisposition('payload.svg', 'application/octet-stream')).toBe(
+          `attachment; filename="payload"; filename*=UTF-8''payload`,
+        );
+        // Nothing left after the strip still yields a usable name, not "".
+        expect(attachmentDisposition('.html', 'application/zip')).toBe(
+          `attachment; filename="download"; filename*=UTF-8''download`,
+        );
+      });
+
       test('a PDF disguised with an .html basename is served as .pdf end to end', async () => {
         fs.writeFileSync(path.join(mediaDir, 'invoice.html'), PDF);
         const item = await mintOne(`${SESSION}/invoice.html`, { allow_documents: true });

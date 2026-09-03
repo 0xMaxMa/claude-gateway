@@ -100,7 +100,7 @@ describe('shareEnv dual-read (#444)', () => {
   });
 });
 
-describe('image share store', () => {
+describe('file share store', () => {
   let baseDir: string; // agentsBaseDir
   let mediaDir: string; // agents/a1/media/session-1
   let dbPath: string;

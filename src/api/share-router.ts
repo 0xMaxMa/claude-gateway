@@ -90,11 +90,16 @@ const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf' };
  */
 export function attachmentDisposition(basename: string, mime: string): string {
   const ext = EXT_FOR_MIME[mime];
-  // Drop whatever extension the agent picked; the sniffed one replaces it. An
-  // unmapped mime can't happen today (PDF is the only non-image on the
-  // allowlist) but falls through to the name as-given rather than guessing.
+  // Drop whatever extension the agent picked, ALWAYS — the sniffed one replaces
+  // it, and when the mime maps to no extension the name simply ships without
+  // one. Keeping the agent's extension in that case would be the RFD hole this
+  // function exists to close: an unmapped mime is precisely the case where we
+  // cannot vouch for what the bytes are, so it must fail closed, not fall back
+  // to the attacker-chosen `.html`. (No unmapped mime reaches here today —
+  // images are served inline and PDF is the only other allowlisted type — so
+  // this is the guard for whatever gets allowlisted next.)
   const suffix = ext ? `.${ext}` : '';
-  const rawStem = ext ? basename.replace(/\.[^./\\]*$/, '') : basename;
+  const rawStem = basename.replace(/\.[^./\\]*$/, '');
   // Cap the STEM, so the extension survives truncation — a 4 KB agent-chosen
   // title must not cost the user a file their OS can no longer open (and must
   // not bloat, or behind some proxies break, the response header). Cap by CODE

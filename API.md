@@ -224,8 +224,8 @@ request; the allow-kind is then recorded **per share, narrowed to what the ref
 actually validated as** — a PNG in an `allow_documents` batch is still stored as
 image-only — and the file is **re-sniffed on every fetch**, so replacing the file
 behind a live share never widens what it serves. `agent_id` and `session_id`
-must be valid identifiers (same charset as
-elsewhere) or the request is `400` before any path resolution.
+must be valid identifiers (same charset as elsewhere) or the request is `400`
+before any path resolution.
 
 > **Upgrade / rollback note (#444).** The share table was renamed
 > `image_shares` → `file_shares`. Upgrading renames in place, so shares minted
