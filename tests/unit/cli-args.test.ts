@@ -37,8 +37,17 @@ describe('cli args parseCliArgs', () => {
     });
   });
 
-  it('--flag=value form still wins over a declared boolean set', () => {
-    expect(parseCliArgs(['--force=true'], new Set(['force']))).toEqual({ positionals: [], flags: { force: 'true' } });
+  // Issue #450: `service install --force=true` used to refuse anyway, because
+  // the `=` form returned the raw string `'true'` and `service.ts`'s strict
+  // `flags.force !== true` check rejected it. Declared boolean flags now parse
+  // their `=` form as a boolean too.
+  it('a declared boolean flag\'s --flag=value form parses as a boolean, not a string', () => {
+    expect(parseCliArgs(['--force=true'], new Set(['force']))).toEqual({ positionals: [], flags: { force: true } });
+    expect(parseCliArgs(['--force=false'], new Set(['force']))).toEqual({ positionals: [], flags: { force: false } });
+  });
+
+  it('--flag=value stays a string for a flag not declared boolean', () => {
+    expect(parseCliArgs(['--force=true'])).toEqual({ positionals: [], flags: { force: 'true' } });
   });
 
   // `-h` used to fall through to positionals, so `crons -h` reported

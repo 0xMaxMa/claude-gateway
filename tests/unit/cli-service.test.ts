@@ -265,6 +265,28 @@ describe('service install — system-scope conflict (issue #450)', () => {
     }
   });
 
+  it('re-checks for a conflict right before writing — a unit that appears while confirm() was waiting on the operator still refuses', async () => {
+    // Simulates the TOCTOU window: no conflict at the pre-prompt check, but
+    // one has appeared by the time confirm() resolves and the code is about
+    // to write. `is-enabled` is queried once per systemScopeConflict() call —
+    // once before the prompt, once again right after — so the first call
+    // reports no conflict and every call after reports one.
+    let isEnabledCalls = 0;
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-enabled') {
+        isEnabledCalls++;
+        return Buffer.from(isEnabledCalls === 1 ? 'disabled\n' : 'enabled\n');
+      }
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+
+    const code = await runService(['install'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(stderr.join('')).toMatch(/system scope/);
+    expect(isEnabledCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it('does not refuse when a system-scope unit exists but is only "static", not "enabled"', async () => {
     // A unit can exist and answer `is-enabled` successfully without being
     // `enabled` (e.g. a static unit with no [Install] section) — the check

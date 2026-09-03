@@ -30,6 +30,12 @@ function looksLikeFlag(token: string): boolean {
  * parser has no schema of its own, so it can only be told which names are
  * boolean by the caller. Flags not in this set keep the default heuristic
  * (consume the next token unless it looks like another flag).
+ *
+ * A declared boolean flag's `--flag=value` form is parsed as a boolean too
+ * (`value !== 'false'`), not left as a raw string — otherwise `--force=true`
+ * silently reads as truthy-but-not-`true`, and a strict `flags.force === true`
+ * check downstream (as `service install` does) refuses despite the explicit
+ * override. `--force=false` is the one form that's meant to read as off.
  */
 export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string> = new Set()): ParsedArgs {
   const positionals: string[] = [];
@@ -40,7 +46,9 @@ export function parseCliArgs(tokens: string[], booleanFlags: ReadonlySet<string>
       const body = tok.startsWith('--') ? tok.slice(2) : SHORT_ALIASES[tok.slice(1)];
       const eq = body.indexOf('=');
       if (eq !== -1) {
-        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        const key = body.slice(0, eq);
+        const value = body.slice(eq + 1);
+        flags[key] = booleanFlags.has(key) ? value !== 'false' : value;
         continue;
       }
       if (booleanFlags.has(body)) {

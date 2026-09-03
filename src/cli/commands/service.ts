@@ -232,12 +232,14 @@ async function waitForHealth(config: CliConfigView, flags: Record<string, string
 
 // ─── systemd (user scope) ─────────────────────────────────────────────────────
 
-/** `is-enabled`/`is-active` for `UNIT_NAME` at whatever scope `scopeArgs`
- *  selects (`['--user']` or `[]` for system scope) — the query both
- *  `systemdState()` (user scope, for `service status`) and
+/** `is-enabled`/`is-active` for `UNIT_NAME` at the given scope — the query
+ *  both `systemdState()` (user scope, for `service status`) and
  *  `systemScopeConflict()` (system scope, for the install-time check below)
- *  need, differing only in scope. */
-function unitFlagState(scopeArgs: readonly string[]): { enabled: boolean; active: boolean } {
+ *  need, differing only in scope. A named boolean rather than a raw argv
+ *  fragment (`['--user']`/`[]`) so a future call site passing the wrong array
+ *  fails to compile instead of silently querying the wrong scope. */
+function unitFlagState(userScope: boolean): { enabled: boolean; active: boolean } {
+  const scopeArgs = userScope ? ['--user'] : [];
   let enabled = false;
   let active = false;
   try {
@@ -254,7 +256,7 @@ function unitFlagState(scopeArgs: readonly string[]): { enabled: boolean; active
 }
 
 function systemdState(): { installed: boolean; enabled: boolean; active: boolean } {
-  return { installed: fs.existsSync(unitPath()), ...unitFlagState(['--user']) };
+  return { installed: fs.existsSync(unitPath()), ...unitFlagState(true) };
 }
 
 function systemdStatus(flags: Record<string, string | boolean>): number {
@@ -273,8 +275,21 @@ function systemdStatus(flags: Record<string, string | boolean>): number {
  * without `--user` queries it as any user, so this check costs nothing extra.
  */
 function systemScopeConflict(): boolean {
-  const { enabled, active } = unitFlagState([]);
+  const { enabled, active } = unitFlagState(false);
   return enabled || active;
+}
+
+/** Written to stderr when `systemScopeConflict()` refuses an install — shared
+ *  by both the pre-prompt check and the re-check right after `confirm()`
+ *  below, so the two call sites can't drift into different wording. */
+function writeSystemScopeConflictRefusal(): void {
+  process.stderr.write(
+    `A ${UNIT_NAME} unit already exists at system scope (/etc/systemd/system/${UNIT_NAME}) and is enabled or active.\n` +
+      `Installing a second, independent unit at user scope would race it for the port on the next reboot.\n` +
+      `Disable the existing one first, then re-run this command:\n` +
+      `  sudo systemctl disable --now ${UNIT_NAME}\n` +
+      'Pass --force to install anyway.\n',
+  );
 }
 
 async function systemdInstall(
@@ -297,18 +312,20 @@ async function systemdInstall(
   // a provisioning system this installer has no context on, so this stops
   // and hands back the exact command to resolve it instead.
   if (flags.force !== true && systemScopeConflict()) {
-    process.stderr.write(
-      `A ${UNIT_NAME} unit already exists at system scope (/etc/systemd/system/${UNIT_NAME}) and is enabled or active.\n` +
-        `Installing a second, independent unit at user scope would race it for the port on the next reboot.\n` +
-        `Disable the existing one first, then re-run this command:\n` +
-        `  sudo systemctl disable --now ${UNIT_NAME}\n` +
-        'Pass --force to install anyway.\n',
-    );
+    writeSystemScopeConflictRefusal();
     return 1;
   }
 
   if (!(await confirm(flags, 'install', `Install and start ${UNIT_NAME} for user ${os.userInfo().username}?`))) {
     process.stderr.write('Aborted — nothing was written.\n');
+    return 1;
+  }
+
+  // `confirm()` can block indefinitely on the y/N prompt — re-check right
+  // before writing anything, in case a conflicting unit appeared while it
+  // was waiting on the operator.
+  if (flags.force !== true && systemScopeConflict()) {
+    writeSystemScopeConflictRefusal();
     return 1;
   }
 

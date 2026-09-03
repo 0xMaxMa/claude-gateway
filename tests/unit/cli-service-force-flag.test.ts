@@ -64,4 +64,13 @@ describe('`service --force install` — --force placed before the verb (issue #4
     expect(code).toBe(0);
     expect(mockWriteFileSync).toHaveBeenCalled();
   });
+
+  it('`--force=true` (equals form) also installs despite the conflict', async () => {
+    // parseCliArgs used to return the raw string 'true' for a declared
+    // boolean flag's `--flag=value` form; service.ts's strict
+    // `flags.force !== true` check then refused as if --force were absent.
+    const code = await runCli(['service', 'install', '--force=true', '--yes', '--manager', 'systemd']);
+    expect(code).toBe(0);
+    expect(mockWriteFileSync).toHaveBeenCalled();
+  });
 });
