@@ -24,7 +24,10 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *   GET    /v1/connectors/:id/status         — connected boolean (for polling)
  *   POST   /v1/connectors/:id/connect        — store a secret (admin, auth kind 'secret' only)
  *   POST   /v1/connectors/:id/oauth/receive  — store a pushed access_token (admin, auth kind 'oauth' only)
- *   DELETE /v1/connectors/:id                — clear a secret (admin, built-in only)
+ *   DELETE /v1/connectors/:id                — clear a secret (admin); a genuinely
+ *                                              user-added custom connector keeps its
+ *                                              entry (config/label intact, just
+ *                                              disconnected) — see the handler below
  *   POST   /v1/connectors/custom             — add a user-pasted connector (admin)
  *   DELETE /v1/connectors/custom/:id         — remove one (admin)
  *
@@ -274,6 +277,22 @@ export function createConnectorsRouter(
     }
     try {
       for (const name of entry.secretNames) deleteSecret(customSecretKey(id, name));
+      // A genuinely user-added custom connector (not entry.managed) has no
+      // catalog to fall back on — its config/label/description IS the
+      // customConnectors entry, so wiping the whole entry here used to mean
+      // "Disconnect" silently discarded everything the user pasted, with no
+      // way back short of re-adding it from scratch. Clearing only the
+      // secret (leaving the entry, and thus the row, in place as "not
+      // connected") lets the user reconnect without retyping the config.
+      // Managed entries (github/gmail/etc., pushed by services/api) keep the
+      // old delete-the-entry behavior: their definition lives in the
+      // services/api-owned managed catalog instead, which the web panel
+      // already falls back to for the "not connected" row, and reconnecting
+      // re-pushes a full entry via /oauth/receive regardless.
+      if (!entry.managed) {
+        res.json({ id, connected: false });
+        return;
+      }
       await store.mutate((c) => {
         delete c[id];
       });
