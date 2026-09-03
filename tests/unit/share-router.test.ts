@@ -643,6 +643,32 @@ describe('file share router', () => {
         expect(res.status).toBe(404);
         expect(res.text).toBe('Not Found');
       });
+
+      test('allow_documents does NOT widen a ref that validated as an image', async () => {
+        // share_file sends allow_documents unconditionally, so the flag is the
+        // caller's permission to include a PDF in the batch — not a claim that
+        // every ref is one. Persisting 'any' on a file that sniffed as an image
+        // would let this exact swap succeed, reopening the hole the re-sniff
+        // exists to close.
+        const item = await mintOne(`${SESSION}/ok.png`, { allow_documents: true });
+        expect((await request().get(sharedPath(item.url))).status).toBe(200);
+        expect(store.lookupByToken(item.token)?.allowKind).toBe('image');
+        fs.writeFileSync(path.join(mediaDir, 'ok.png'), PDF);
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe('Not Found');
+      });
+
+      test('a mixed batch narrows per ref — the PDF keeps its wider kind', async () => {
+        const res = await post({
+          refs: [{ path: `${SESSION}/ok.png` }, { path: `${SESSION}/doc.pdf` }],
+          allow_documents: true,
+        });
+        expect(res.status).toBe(201);
+        const [img, pdf] = res.body.items as Array<{ token: string }>;
+        expect(store.lookupByToken(img!.token)?.allowKind).toBe('image');
+        expect(store.lookupByToken(pdf!.token)?.allowKind).toBe('any');
+      });
     });
 
     describe('Content-Disposition filename safety', () => {
@@ -675,9 +701,16 @@ describe('file share router', () => {
           `attachment; filename="______.pdf"; filename*=UTF-8''${encodeURIComponent('รายงาน.pdf')}`,
         );
         // A name that sanitizes away entirely still yields a usable fallback —
-        // with the extension, so the download is still openable.
+        // with the extension, so the download is still openable. BOTH forms get
+        // it: browsers prefer filename*, so a guard applied only to the ASCII
+        // fallback is a guard the user never sees.
         expect(attachmentDisposition('   ', PDF_MIME)).toBe(
-          `attachment; filename="download.pdf"; filename*=UTF-8''%20%20%20.pdf`,
+          `attachment; filename="download.pdf"; filename*=UTF-8''download.pdf`,
+        );
+        // A bare extension leaves no stem at all — without the shared default
+        // filename* would say `.pdf` and the browser would save a hidden file.
+        expect(attachmentDisposition('.pdf', PDF_MIME)).toBe(
+          `attachment; filename="download.pdf"; filename*=UTF-8''download.pdf`,
         );
         // 4 KB of filename must not become a 4 KB header — and truncating it
         // must not eat the extension, or the saved file no longer opens.

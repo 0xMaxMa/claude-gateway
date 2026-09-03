@@ -131,6 +131,19 @@ const shareFileInputSchema = {
   required: [],
 };
 
+// The alias is image-only, so it must not advertise the PDF example: an agent
+// reading its schema would be told a document is acceptable and get a 415.
+// Same shape, image wording — a separate object costs nothing, since both defs
+// are serialized in full either way.
+const shareImageInputSchema = {
+  ...shareFileInputSchema,
+  properties: {
+    ...shareFileInputSchema.properties,
+    path: { type: 'string', description: 'One media path (e.g. "media/session-1/chart.png") or "artifact:<id>" to share.' },
+    paths: { type: 'array', items: { type: 'string' }, description: 'Multiple media image paths / artifact refs (max 5).' },
+  },
+};
+
 const shareFileToolDefs: McpToolDefinition[] = [
   {
     name: 'share_file',
@@ -148,10 +161,9 @@ const shareFileToolDefs: McpToolDefinition[] = [
     // name keep working — and kept IMAGE-ONLY, which is what those instructions
     // meant and what the name still promises. Description is deliberately one
     // line: it must not cost a second copy of the real tool's context budget.
-    // Same schema object — these defs are only ever serialized, never mutated.
     name: LEGACY_TOOL_NAME,
     description:
       'Deprecated image-only alias for share_file — use share_file instead, which also shares PDFs.',
-    inputSchema: shareFileInputSchema,
+    inputSchema: shareImageInputSchema,
   },
 ];

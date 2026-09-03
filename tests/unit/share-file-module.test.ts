@@ -88,6 +88,22 @@ describe('share_file MCP module', () => {
       expect(alias!.description).toContain('share_file');
       expect(alias!.description.length).toBeLessThan(primary!.description.length / 3);
     });
+
+    // The alias is image-only, so its schema must not hold up a PDF as an
+    // example — an agent reading it would be told a document is acceptable and
+    // get a 415 back.
+    test('the alias schema advertises an image example, not a PDF', () => {
+      const [primary, alias] = new ShareFileModule().getTools();
+      const aliasSchema = JSON.stringify(alias!.inputSchema);
+      expect(aliasSchema).not.toContain('.pdf');
+      expect(aliasSchema).toContain('.png');
+      // The primary keeps the PDF example — it really does share them.
+      expect(JSON.stringify(primary!.inputSchema)).toContain('.pdf');
+      // Same shape otherwise: only the wording differs.
+      expect(Object.keys(JSON.parse(aliasSchema).properties)).toEqual(
+        Object.keys(JSON.parse(JSON.stringify(primary!.inputSchema)).properties),
+      );
+    });
   });
 
   describe('create', () => {

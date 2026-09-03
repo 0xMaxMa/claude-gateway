@@ -220,9 +220,11 @@ stored, and shares are unenumerable (there is no list endpoint by design).
 **The default allowlist is raster images only (PNG / JPEG / WebP);** any other
 type is rejected with `415 unsupported_file_type` at both mint and fetch time.
 A mint may pass `allow_documents: true` to widen the allowlist to PDF for that
-request; the allow-kind is recorded per share and the file is **re-sniffed on
-every fetch**, so replacing the file behind a live share never widens what it
-serves. `agent_id` and `session_id` must be valid identifiers (same charset as
+request; the allow-kind is then recorded **per share, narrowed to what the ref
+actually validated as** — a PNG in an `allow_documents` batch is still stored as
+image-only — and the file is **re-sniffed on every fetch**, so replacing the file
+behind a live share never widens what it serves. `agent_id` and `session_id`
+must be valid identifiers (same charset as
 elsewhere) or the request is `400` before any path resolution.
 
 | Method | Path | Auth | Description |

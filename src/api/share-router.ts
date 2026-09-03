@@ -101,13 +101,22 @@ export function attachmentDisposition(basename: string, mime: string): string {
   // good share into a uniform 404. The `\p{Surrogate}` scrub is the belt to
   // that braces: after a code-point slice it can only ever match a surrogate
   // that was already unpaired on the way in.
-  const stem = [...rawStem]
-    .slice(0, MAX_DISPOSITION_NAME_CHARS - suffix.length)
-    .join('')
-    .replace(/\p{Surrogate}/gu, '_');
-  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim();
-  const fallback = `${asciiStem || 'download'}${suffix}`;
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${rfc5987(`${stem}${suffix}`)}`;
+  // Trim and default ONCE, before the two forms diverge. RFC 6266 §4.3 says a
+  // recipient SHOULD prefer `filename*`, and every current browser does, so a
+  // guard applied only to the ASCII fallback is a guard no user ever gets: a
+  // basename of `.pdf` would save as a hidden, name-less file while the
+  // fallback nobody reads politely said `download.pdf`.
+  const stem =
+    [...rawStem]
+      .slice(0, MAX_DISPOSITION_NAME_CHARS - suffix.length)
+      .join('')
+      .replace(/\p{Surrogate}/gu, '_')
+      .trim() || 'download';
+  // Substitution is 1:1 and never yields whitespace, so a non-empty `stem`
+  // cannot ASCII-fold to nothing; the `|| 'download'` is kept as a guard on the
+  // sanitiser rather than a reachable branch.
+  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim() || 'download';
+  return `attachment; filename="${asciiStem}${suffix}"; filename*=UTF-8''${rfc5987(`${stem}${suffix}`)}`;
 }
 
 export type PublicShareRouterOpts = {
@@ -310,6 +319,7 @@ export function createSharesPrivateRouter(
       dedupeRef: string;
       relativePath: string;
       size: number;
+      allowKind: ShareAllowKind;
       taskId?: string;
       provider?: string;
       priorPrompt?: string;
@@ -372,6 +382,16 @@ export function createSharesPrivateRouter(
         dedupeRef,
         relativePath: validated.relativePath,
         size: validated.size,
+        // Persist the kind this ref ACTUALLY validated as, not the request's
+        // ceiling. `allow_documents` is the caller's permission to include a
+        // PDF in the batch, not a declaration that every ref is one — the
+        // share_file tool sends it unconditionally. Recording 'any' on a file
+        // that sniffed as an image would widen exactly the hole the fetch-time
+        // re-sniff exists to close: overwrite the shared PNG with a PDF inside
+        // the TTL and the live token starts serving it, where before the swap
+        // failed closed with a 404. Narrowing per ref keeps the PDF feature and
+        // restores fail-closed for images.
+        allowKind: validated.mime.startsWith('image/') ? 'image' : allowKind,
         taskId,
         provider: refProvider,
         priorPrompt,
@@ -390,7 +410,7 @@ export function createSharesPrivateRouter(
         dedupeRef: r.dedupeRef,
         purpose,
         ttlSeconds,
-        allowKind,
+        allowKind: r.allowKind,
       });
       console.log(`[share] mint share=${mint.shareId} purpose=${purpose} deduped=${mint.deduped}`);
       return {
