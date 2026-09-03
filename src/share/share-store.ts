@@ -314,6 +314,25 @@ export class ShareStore {
     if (!shareCols.some((c) => c.name === 'allow_kind')) {
       this.db.exec(`ALTER TABLE file_shares ADD COLUMN allow_kind TEXT NOT NULL DEFAULT 'image'`);
     }
+    // `image_shares` surviving THIS far means a downgrade recreated it (the
+    // pre-#444 release runs its own CREATE TABLE IF NOT EXISTS) and minted
+    // into it, and we have now rolled forward. The rename guard above no
+    // longer fires — both tables exist — so without this those shares would
+    // 404 until their TTL ran out while the orphan table stayed in the file
+    // forever. Fold the rows in (they are image-only by definition: the
+    // release that wrote them knew nothing else) and drop the orphan, so the
+    // migration is idempotent across a rollback rather than one-shot. Runs
+    // after the ALTER above so `allow_kind` is guaranteed to exist.
+    if (hasTable('image_shares')) {
+      this.db.exec(`
+        INSERT OR IGNORE INTO file_shares
+          (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, revoked_at, allow_kind)
+        SELECT id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, revoked_at, 'image'
+          FROM image_shares
+      `);
+      // DROP TABLE takes the table's indexes with it.
+      this.db.exec('DROP TABLE image_shares');
+    }
   }
 
   // ── artifacts (§8) ────────────────────────────────────────────────────────

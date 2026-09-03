@@ -164,22 +164,47 @@ describe('share_file MCP module', () => {
   });
 
   // #444: agent workspaces (AGENTS.md, skills, memories) still say share_image,
-  // and we do not get to rewrite them — the old name must keep working.
+  // and we do not get to rewrite them — the old name must keep working. It stays
+  // IMAGE-ONLY though: those instructions meant "share an image", and widening
+  // them would change what an already-handed-out token can serve.
   describe('deprecated share_image alias', () => {
-    test('create behaves identically to share_file', async () => {
+    test('create works, but does NOT opt into documents', async () => {
       const res = await new ShareFileModule().handleTool('share_image', {
         action: 'create',
-        path: 'media/session-1/report.pdf',
+        path: 'media/session-1/chart.png',
       });
       expect(res.isError).toBeUndefined();
       expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/shares`);
-      expect(calls[0]!.body!.allow_documents).toBe(true);
+      // Absent, not false — the gateway defaults to image-only.
+      expect(calls[0]!.body!.allow_documents).toBeUndefined();
     });
 
     test('revoke behaves identically to share_file', async () => {
       const res = await new ShareFileModule().handleTool('share_image', { action: 'revoke', share_id: 'shr_1' });
       expect(res.isError).toBeUndefined();
       expect(calls[0]!.method).toBe('DELETE');
+    });
+
+    test('a 415 through the old name points the agent at share_file', async () => {
+      responder = () =>
+        new Response(JSON.stringify({ error: 'file type is not allowed', code: 'unsupported_file_type' }), { status: 415 });
+      const res = await new ShareFileModule().handleTool('share_image', {
+        action: 'create',
+        path: 'media/session-1/report.pdf',
+      });
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('call share_file for documents');
+    });
+
+    test('the same 415 through share_file carries no such hint', async () => {
+      responder = () =>
+        new Response(JSON.stringify({ error: 'file type is not allowed', code: 'unsupported_file_type' }), { status: 415 });
+      const res = await new ShareFileModule().handleTool('share_file', {
+        action: 'create',
+        path: 'media/session-1/report.pdf',
+      });
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).not.toContain('call share_file for documents');
     });
   });
 

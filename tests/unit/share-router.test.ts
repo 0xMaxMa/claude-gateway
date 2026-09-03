@@ -665,36 +665,67 @@ describe('file share router', () => {
       });
 
       test('attachmentDisposition escapes the non-attr-char set and caps the length', () => {
+        const PDF_MIME = 'application/pdf';
         // encodeURIComponent leaves !'()* alone; they are not RFC 5987 attr-char.
-        expect(attachmentDisposition(`x!'()*.pdf`)).toBe(
+        expect(attachmentDisposition(`x!'()*.pdf`, PDF_MIME)).toBe(
           `attachment; filename="x!'()*.pdf"; filename*=UTF-8''x%21%27%28%29%2A.pdf`,
         );
         // Non-ASCII survives only in filename*; the fallback degrades to _.
-        expect(attachmentDisposition('รายงาน.pdf')).toBe(
+        expect(attachmentDisposition('รายงาน.pdf', PDF_MIME)).toBe(
           `attachment; filename="______.pdf"; filename*=UTF-8''${encodeURIComponent('รายงาน.pdf')}`,
         );
-        // A name that sanitizes away entirely still yields a usable fallback.
-        expect(attachmentDisposition('   ')).toBe(`attachment; filename="download"; filename*=UTF-8''%20%20%20`);
-        // 4 KB of filename must not become a 4 KB header.
-        const long = attachmentDisposition(`${'n'.repeat(4096)}.pdf`);
-        expect(long).toBe(`attachment; filename="${'n'.repeat(200)}"; filename*=UTF-8''${'n'.repeat(200)}`);
+        // A name that sanitizes away entirely still yields a usable fallback —
+        // with the extension, so the download is still openable.
+        expect(attachmentDisposition('   ', PDF_MIME)).toBe(
+          `attachment; filename="download.pdf"; filename*=UTF-8''%20%20%20.pdf`,
+        );
+        // 4 KB of filename must not become a 4 KB header — and truncating it
+        // must not eat the extension, or the saved file no longer opens.
+        const long = attachmentDisposition(`${'n'.repeat(4096)}.pdf`, PDF_MIME);
+        expect(long).toBe(`attachment; filename="${'n'.repeat(196)}.pdf"; filename*=UTF-8''${'n'.repeat(196)}.pdf`);
+        expect((long.match(/filename="([^"]*)"/)![1]!).length).toBe(200);
+      });
+
+      // The bytes decide the extension, not the agent-chosen name. Serving
+      // `%PDF-`-prefixed bytes as `invoice.html` would hand the user a file the
+      // browser renders from file://, running whatever script trails the PDF
+      // magic — the reflected-file-download shape.
+      test('the extension describes the SNIFFED type, not the basename', () => {
+        expect(attachmentDisposition('invoice.html', 'application/pdf')).toBe(
+          `attachment; filename="invoice.pdf"; filename*=UTF-8''invoice.pdf`,
+        );
+        expect(attachmentDisposition('payload.svg', 'application/pdf')).toContain('filename="payload.pdf"');
+        // No extension at all still gets the right one appended.
+        expect(attachmentDisposition('report', 'application/pdf')).toContain('filename="report.pdf"');
+      });
+
+      test('a PDF disguised with an .html basename is served as .pdf end to end', async () => {
+        fs.writeFileSync(path.join(mediaDir, 'invoice.html'), PDF);
+        const item = await mintOne(`${SESSION}/invoice.html`, { allow_documents: true });
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toBe('application/pdf');
+        expect(res.headers['content-disposition']).toBe(
+          `attachment; filename="invoice.pdf"; filename*=UTF-8''invoice.pdf`,
+        );
       });
 
       test('the length cap never splits a surrogate pair into an unencodable half', () => {
-        // A code-unit slice would cut this emoji in half at the 200-char cap and
+        // A code-unit slice would cut this emoji in half at the stem cap and
         // leave a lone surrogate, which encodeURIComponent rejects with
         // URIError — inside the serve handler's try, that becomes a bogus 404
         // on a share whose file is perfectly fine. Cap by code point instead.
-        const straddling = `${'a'.repeat(199)}\u{1F389}.pdf`;
-        const cd = attachmentDisposition(straddling);
-        // 199 'a' + the whole emoji = 200 code points; '.pdf' is past the cap.
+        // 195 'a' + the emoji = 196 code points = exactly the stem budget, so a
+        // code-UNIT slice would land mid-pair.
+        const straddling = `${'a'.repeat(195)}\u{1F389}.pdf`;
+        const cd = attachmentDisposition(straddling, 'application/pdf');
         // The ASCII fallback substitutes per code UNIT, so the emoji shows as __.
         expect(cd).toBe(
-          `attachment; filename="${'a'.repeat(199)}__"; filename*=UTF-8''${'a'.repeat(199)}${encodeURIComponent('\u{1F389}')}`,
+          `attachment; filename="${'a'.repeat(195)}__.pdf"; filename*=UTF-8''${'a'.repeat(195)}${encodeURIComponent('\u{1F389}')}.pdf`,
         );
         // An already-unpaired surrogate (never produced by fs, but the header
         // must not be able to throw on any input) degrades instead of throwing.
-        expect(() => attachmentDisposition('x\uD800.pdf')).not.toThrow();
+        expect(() => attachmentDisposition('x\uD800.pdf', 'application/pdf')).not.toThrow();
       });
     });
   });

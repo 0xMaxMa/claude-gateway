@@ -539,5 +539,77 @@ describe('image share store', () => {
         raw.close();
       }
     });
+
+    // The rename guard only fires when file_shares does NOT yet exist, so a
+    // downgrade that recreates image_shares and mints into it would otherwise
+    // strand those rows behind a guard that can never fire again.
+    test('a downgrade/re-upgrade folds the recreated old table back in', () => {
+      const dbPath2 = path.join(baseDir, 'rollback.db');
+      const preToken = 'P'.repeat(32);
+      seedLegacy(dbPath2, preToken); // pre-#444 release, one live share
+
+      new ShareStore(dbPath2).close(); // upgrade: renames to file_shares
+
+      // Downgrade: the old release recreates its own table and mints into it.
+      const rollbackToken = 'B'.repeat(32);
+      const old = new DatabaseSync(dbPath2);
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS image_shares (
+          id            TEXT PRIMARY KEY,
+          token_hash    BLOB NOT NULL UNIQUE,
+          agent_id      TEXT NOT NULL,
+          session_id    TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          purpose       TEXT NOT NULL,
+          created_at    INTEGER NOT NULL,
+          expires_at    INTEGER NOT NULL,
+          revoked_at    INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS image_shares_expiry ON image_shares(expires_at);
+      `);
+      old
+        .prepare(
+          `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'shr_rollback',
+          createHash('sha256').update(rollbackToken).digest(),
+          AGENT,
+          SESSION,
+          `${SESSION}/ok.png`,
+          'codex_ref',
+          Date.now(),
+          Date.now() + 600_000,
+        );
+      old.close();
+
+      // Roll forward again.
+      const rolledForward = new ShareStore(dbPath2);
+      try {
+        // Both the pre-downgrade share AND the one minted during the rollback
+        // window resolve, and the rollback one is image-only as it was minted.
+        expect(rolledForward.lookupByToken(preToken)!.shareId).toBe('shr_legacy');
+        const back = rolledForward.lookupByToken(rollbackToken);
+        expect(back).not.toBeNull();
+        expect(back!.shareId).toBe('shr_rollback');
+        expect(back!.allowKind).toBe('image');
+      } finally {
+        rolledForward.close();
+      }
+
+      const raw = new DatabaseSync(dbPath2);
+      try {
+        const tables = (
+          raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).all() as Array<{ name: string }>
+        ).map((r) => r.name);
+        // The orphan is gone rather than lingering in the file forever.
+        expect(tables).not.toContain('image_shares');
+        const cnt = raw.prepare('SELECT COUNT(*) AS c FROM file_shares').get() as { c: number };
+        expect(cnt.c).toBe(2);
+      } finally {
+        raw.close();
+      }
+    });
   });
 });

@@ -231,7 +231,7 @@ elsewhere) or the request is `400` before any path resolution.
 | `DELETE` | `/api/v1/shares/:shareId` | Key (owner/admin) | Revoke a share (uniform `404` when the key can't access the owner) |
 | `POST` | `/api/v1/image-artifacts` | Key (agent-scoped) | Register generated images as private artifacts (registration never makes a file public) |
 | `GET` | `/api/v1/image-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session image list (oldest first); mints nothing, returns no token |
-| `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream the shared file — images `inline`, documents as an `attachment` (sanitised RFC 5987 filename), always `X-Content-Type-Options: nosniff`; uniform `404` for unknown/expired/revoked/traversal/type-mismatch; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
+| `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream the shared file — images `inline`, documents as an `attachment` whose filename is sanitised (RFC 5987) and whose **extension is forced to match the sniffed type**, not the agent-chosen basename (so `%PDF-` bytes named `invoice.html` download as `invoice.pdf`); always `X-Content-Type-Options: nosniff`; uniform `404` for unknown/expired/revoked/traversal/type-mismatch; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
 
 **Renamed in #444** (the bridge is no longer image-only):
 
@@ -240,7 +240,7 @@ elsewhere) or the request is `400` before any path resolution.
 | Error code | `image_ref_not_found` | `share_ref_not_found` |
 | Error code | `image_too_large` | `file_too_large` |
 | Error code | `unsupported_image_type` | `unsupported_file_type` |
-| MCP tool | `share_image` | `share_file` (old name kept as a deprecated alias) |
+| MCP tool | `share_image` | `share_file` (old name kept as a deprecated alias, still image-only — only `share_file` opts into documents) |
 | Env vars | `IMAGE_SHARE_*` | `SHARE_*` (legacy names still read as a fallback) |
 | SQLite table | `image_shares` | `file_shares` (renamed in place on first open) |
 

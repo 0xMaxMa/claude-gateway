@@ -71,6 +71,13 @@ function rfc5987(value: string): string {
   );
 }
 
+/** The extension a download is given, keyed by the mime we SNIFFED — never by
+ *  the name the agent chose. `invoice.html` holding `%PDF-…` is served as
+ *  `application/pdf`; saved under its own name it would be a .html file that
+ *  the browser renders from `file://`, running whatever script follows the PDF
+ *  magic (reflected file download). The extension must describe the bytes. */
+const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf' };
+
 /**
  * Build the `Content-Disposition` for a non-image share (#444). The basename
  * comes from `relative_path`, which is agent-controlled, so the quoted
@@ -78,22 +85,29 @@ function rfc5987(value: string): string {
  * alone rules out the CR/LF that would split the header — and the real name
  * rides along percent-encoded in `filename*`.
  */
-export function attachmentDisposition(basename: string): string {
-  // Cap first: a media filename is agent-controlled and a 4 KB one would bloat
-  // (or, behind some proxies, break) the response header. Cap by CODE POINT,
-  // not code unit — a plain `.slice()` can cut a surrogate pair in half, and
-  // encodeURIComponent throws URIError on the lone surrogate that leaves
-  // behind. That throw lands in the serve handler's catch and turns a
-  // perfectly good share into a uniform 404. The `\p{Surrogate}` scrub is the
-  // belt to that braces: after a code-point slice it can only ever match a
-  // surrogate that was already unpaired on the way in.
-  const name = [...basename]
-    .slice(0, MAX_DISPOSITION_NAME_CHARS)
+export function attachmentDisposition(basename: string, mime: string): string {
+  const ext = EXT_FOR_MIME[mime];
+  // Drop whatever extension the agent picked; the sniffed one replaces it. An
+  // unmapped mime can't happen today (PDF is the only non-image on the
+  // allowlist) but falls through to the name as-given rather than guessing.
+  const suffix = ext ? `.${ext}` : '';
+  const rawStem = ext ? basename.replace(/\.[^./\\]*$/, '') : basename;
+  // Cap the STEM, so the extension survives truncation — a 4 KB agent-chosen
+  // title must not cost the user a file their OS can no longer open (and must
+  // not bloat, or behind some proxies break, the response header). Cap by CODE
+  // POINT, not code unit — a plain `.slice()` can cut a surrogate pair in half,
+  // and encodeURIComponent throws URIError on the lone surrogate that leaves
+  // behind. That throw lands in the serve handler's catch and turns a perfectly
+  // good share into a uniform 404. The `\p{Surrogate}` scrub is the belt to
+  // that braces: after a code-point slice it can only ever match a surrogate
+  // that was already unpaired on the way in.
+  const stem = [...rawStem]
+    .slice(0, MAX_DISPOSITION_NAME_CHARS - suffix.length)
     .join('')
     .replace(/\p{Surrogate}/gu, '_');
-  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim();
-  const fallback = ascii || 'download';
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${rfc5987(name)}`;
+  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim();
+  const fallback = `${asciiStem || 'download'}${suffix}`;
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${rfc5987(`${stem}${suffix}`)}`;
 }
 
 export type PublicShareRouterOpts = {
@@ -187,7 +201,7 @@ export function createSharesPublicRouter(
       res.status(200).set({
         'Content-Type': mime,
         'Content-Length': String(stat.size),
-        'Content-Disposition': isImage ? 'inline' : attachmentDisposition(path.basename(share.relativePath)),
+        'Content-Disposition': isImage ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime),
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       });
