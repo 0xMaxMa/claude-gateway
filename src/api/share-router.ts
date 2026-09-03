@@ -62,12 +62,14 @@ function publicNotFound(res: Response): void {
   res.status(404).type('text/plain').send('Not Found');
 }
 
-/** RFC 8187 (which obsoletes RFC 5987) `attr-char`: everything
- *  encodeURIComponent leaves alone EXCEPT `!`, `'`, `(`, `)` and `*`, which are
- *  not attr-char and must be escaped. */
+/** Percent-encode for an RFC 8187 `ext-value` (the `filename*` form). RFC 8187
+ *  — which obsoletes RFC 5987 — defines attr-char as ALPHA / DIGIT / any of
+ *  `!#$&+-.^_\`|~`. encodeURIComponent already escapes everything outside that
+ *  set except `'`, `(`, `)` and `*`, so those four are all this has to add.
+ *  (`!` and `~` are left raw on purpose: both ARE attr-char.) */
 function rfc8187(value: string): string {
   return encodeURIComponent(value).replace(
-    /['()*!]/g,
+    /['()*]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
   );
 }

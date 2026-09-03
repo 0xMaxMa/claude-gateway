@@ -669,11 +669,24 @@ describe('file share router', () => {
         expect(store.lookupByToken(img!.token)?.allowKind).toBe('image');
         expect(store.lookupByToken(pdf!.token)?.allowKind).toBe('any');
       });
+
+      // The allow-kind is part of the 60s mint-dedupe key (§17.4), so before
+      // per-ref narrowing the SAME image requested with and without
+      // allow_documents produced two tokens and two rows. Narrowing makes the
+      // flag irrelevant to a file that is an image either way, which is what
+      // lets the same picture dedupe no matter which tool asked for it.
+      test('an image dedupes across allow_documents — the flag does not split it', async () => {
+        const strict = await mintOne(`${SESSION}/ok.png`);
+        const wide = await mintOne(`${SESSION}/ok.png`, { allow_documents: true });
+        expect(wide.token).toBe(strict.token);
+        expect(wide.share_id).toBe(strict.share_id);
+        expect(store.lookupByToken(wide.token)?.allowKind).toBe('image');
+      });
     });
 
     describe('Content-Disposition filename safety', () => {
       const rfc8187 = (v: string) =>
-        encodeURIComponent(v).replace(/['()*!]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+        encodeURIComponent(v).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
       test('a hostile basename still produces one well-formed header line', async () => {
         // The basename comes from relative_path, which is agent-controlled, so a
@@ -692,9 +705,10 @@ describe('file share router', () => {
 
       test('attachmentDisposition escapes the non-attr-char set and caps the length', () => {
         const PDF_MIME = 'application/pdf';
-        // encodeURIComponent leaves !'()* alone; they are not RFC 8187 attr-char.
-        expect(attachmentDisposition(`x!'()*.pdf`, PDF_MIME)).toBe(
-          `attachment; filename="x!'()*.pdf"; filename*=UTF-8''x%21%27%28%29%2A.pdf`,
+        // Of the punctuation encodeURIComponent leaves raw, only ' ( ) * fall
+        // outside RFC 8187 attr-char. `!` and `~` are attr-char and stay raw.
+        expect(attachmentDisposition(`x!~'()*.pdf`, PDF_MIME)).toBe(
+          `attachment; filename="x!~'()*.pdf"; filename*=UTF-8''x!~%27%28%29%2A.pdf`,
         );
         // Non-ASCII survives only in filename*; the fallback degrades to _.
         expect(attachmentDisposition('รายงาน.pdf', PDF_MIME)).toBe(
