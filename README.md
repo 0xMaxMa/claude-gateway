@@ -265,7 +265,8 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 ### `gateway.publicUrl` (optional)
 
 The externally reachable gateway base URL. Set it manually to enable short-lived
-public image shares used by `generate_image` reference edits and `share_image`.
+public file shares used by `generate_image` reference edits and `share_file`
+(formerly `share_image`, which still works as a deprecated image-only alias).
 The URL must end in `/gateway`; changing it requires a gateway restart.
 
 ```json

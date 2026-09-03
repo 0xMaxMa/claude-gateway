@@ -694,6 +694,11 @@ export class SessionProcess extends EventEmitter {
             IMAGE_API_KEY: process.env.IMAGE_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? '',
             IMAGE_DISABLED: process.env.IMAGE_DISABLED ?? '',
             IMAGE_POLL_TIMEOUT_MS: process.env.IMAGE_POLL_TIMEOUT_MS ?? '',
+            // #444: the share bridge's env vars were renamed IMAGE_SHARE_* ->
+            // SHARE_* when it stopped being image-only. Forward BOTH so an
+            // operator who set either name keeps working; the MCP side reads
+            // the neutral name first and falls back to the legacy one.
+            SHARE_MAX_REFS: process.env.SHARE_MAX_REFS ?? '',
             IMAGE_SHARE_MAX_REFS: process.env.IMAGE_SHARE_MAX_REFS ?? '',
             // Short-lived public media URLs (LINE image delivery). line_image
             // mints a share token via the gateway share bridge (using

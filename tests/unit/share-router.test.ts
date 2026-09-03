@@ -12,6 +12,7 @@ import * as supertest from 'supertest';
 import {
   createSharesPublicRouter,
   createSharesPrivateRouter,
+  attachmentDisposition,
 } from '../../src/api/share-router';
 import { resolveGatewayPublicUrl } from '../../src/config/public-url';
 import { ShareStore } from '../../src/share/share-store';
@@ -23,6 +24,8 @@ const PNG = Buffer.concat([
   Buffer.alloc(64, 1),
 ]);
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(80, 2)]);
+const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(96, 5)]);
+const HTML = Buffer.from('<!DOCTYPE html><html><body>hi</body></html>');
 
 const AGENT = 'a1';
 const SESSION = 'session-1';
@@ -42,7 +45,7 @@ const AUTH_A1 = { Authorization: 'Bearer a1-key' };
 const AUTH_B1 = { Authorization: 'Bearer b1-key' };
 const AUTH_STAR = { Authorization: 'Bearer star-key' };
 
-describe('image share router', () => {
+describe('file share router', () => {
   let baseDir: string;
   let mediaDir: string;
   let store: ShareStore;
@@ -294,7 +297,7 @@ describe('image share router', () => {
         .set(AUTH_A1)
         .send({ agent_id: AGENT, session_id: 'other-session', refs: [{ artifact_id: artifact.artifact_id }] });
       expect(wrongSession.status).toBe(404);
-      expect(wrongSession.body.code).toBe('image_ref_not_found');
+      expect(wrongSession.body.code).toBe('share_ref_not_found');
     });
 
     // a mint from an artifact_id ref whose registration
@@ -545,6 +548,251 @@ describe('image share router', () => {
         const keys = Object.keys(item).filter((k) => k !== 'desc').sort();
         expect(keys).toEqual(['available', 'index', 'origin', 'ref', 'relative_path', 'ts']);
       }
+    });
+  });
+
+  // #444 — the share bridge carries documents (PDF) when the caller opts in.
+  // The whole point of the opt-in is that everything which did NOT ask keeps
+  // rejecting non-images exactly as before.
+  describe('documents (#444)', () => {
+    beforeEach(() => {
+      fs.writeFileSync(path.join(mediaDir, 'doc.pdf'), PDF);
+    });
+
+    const post = (body: Record<string, unknown>) =>
+      request().post('/api/v1/shares').set(AUTH_A1).send({ agent_id: AGENT, session_id: SESSION, ...body });
+
+    test('a PDF without allow_documents is still rejected with 415', async () => {
+      const res = await post({ refs: [{ path: `${SESSION}/doc.pdf` }] });
+      expect(res.status).toBe(415);
+      expect(res.body.code).toBe('unsupported_file_type');
+    });
+
+    test('allow_documents mints a PDF share and serves it as an attachment', async () => {
+      const item = await mintOne(`${SESSION}/doc.pdf`, { allow_documents: true });
+      const res = await request().get(sharedPath(item.url));
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-length']).toBe(String(PDF.length));
+      // A non-image is offered as a download, never rendered inline.
+      expect(res.headers['content-disposition']).toBe(
+        `attachment; filename="doc.pdf"; filename*=UTF-8''doc.pdf`,
+      );
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['cache-control']).toBe('private, no-store');
+      expect(Buffer.compare(res.body as Buffer, PDF)).toBe(0);
+    });
+
+    test('HEAD on a PDF share carries the same headers without a body', async () => {
+      const item = await mintOne(`${SESSION}/doc.pdf`, { allow_documents: true });
+      const res = await request().head(sharedPath(item.url));
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-length']).toBe(String(PDF.length));
+      expect(res.headers['content-disposition']).toContain('attachment;');
+    });
+
+    test('an IMAGE minted with allow_documents is still served inline', async () => {
+      // allow_documents widens what MAY be shared; it must not change how an
+      // image that is still an image gets delivered.
+      const item = await mintOne(`${SESSION}/ok.png`, { allow_documents: true });
+      const res = await request().get(sharedPath(item.url));
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('image/png');
+      expect(res.headers['content-disposition']).toBe('inline');
+    });
+
+    test('allow_documents must be a boolean — anything else is 400 before minting', async () => {
+      for (const bad of ['true', 1, {}, []]) {
+        const res = await post({ refs: [{ path: `${SESSION}/ok.png` }], allow_documents: bad });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('allow_documents must be a boolean');
+      }
+      // Explicit false is valid and means image-only.
+      const off = await post({ refs: [{ path: `${SESSION}/doc.pdf` }], allow_documents: false });
+      expect(off.status).toBe(415);
+    });
+
+    test('the artifact registry is NOT widened — a PDF there is still 415', async () => {
+      const res = await request()
+        .post('/api/v1/image-artifacts')
+        .set(AUTH_A1)
+        .send({ agent_id: AGENT, session_id: SESSION, provider: 'p', model: 'm', files: [`${SESSION}/doc.pdf`] });
+      expect(res.status).toBe(415);
+      expect(res.body.code).toBe('unsupported_file_type');
+    });
+
+    // The allow-kind is persisted, the MIME is not: serving always re-sniffs the
+    // bytes on disk, so swapping the file under a live share fails closed in
+    // BOTH directions.
+    describe('TOCTOU — the file is re-sniffed at fetch time, not trusted from mint', () => {
+      test('an image share whose file became a PDF serves 404, not the PDF', async () => {
+        const item = await mintOne(`${SESSION}/ok.png`);
+        expect((await request().get(sharedPath(item.url))).status).toBe(200);
+        fs.writeFileSync(path.join(mediaDir, 'ok.png'), PDF);
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe('Not Found');
+      });
+
+      test('an allow_documents share whose file became HTML serves 404', async () => {
+        const item = await mintOne(`${SESSION}/doc.pdf`, { allow_documents: true });
+        expect((await request().get(sharedPath(item.url))).status).toBe(200);
+        fs.writeFileSync(path.join(mediaDir, 'doc.pdf'), HTML);
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe('Not Found');
+      });
+
+      test('allow_documents does NOT widen a ref that validated as an image', async () => {
+        // share_file sends allow_documents unconditionally, so the flag is the
+        // caller's permission to include a PDF in the batch — not a claim that
+        // every ref is one. Persisting 'any' on a file that sniffed as an image
+        // would let this exact swap succeed, reopening the hole the re-sniff
+        // exists to close.
+        const item = await mintOne(`${SESSION}/ok.png`, { allow_documents: true });
+        expect((await request().get(sharedPath(item.url))).status).toBe(200);
+        expect(store.lookupByToken(item.token)?.allowKind).toBe('image');
+        fs.writeFileSync(path.join(mediaDir, 'ok.png'), PDF);
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(404);
+        expect(res.text).toBe('Not Found');
+      });
+
+      test('a mixed batch narrows per ref — the PDF keeps its wider kind', async () => {
+        const res = await post({
+          refs: [{ path: `${SESSION}/ok.png` }, { path: `${SESSION}/doc.pdf` }],
+          allow_documents: true,
+        });
+        expect(res.status).toBe(201);
+        const [img, pdf] = res.body.items as Array<{ token: string }>;
+        expect(store.lookupByToken(img!.token)?.allowKind).toBe('image');
+        expect(store.lookupByToken(pdf!.token)?.allowKind).toBe('any');
+      });
+
+      // The allow-kind is part of the 60s mint-dedupe key (§17.4), so before
+      // per-ref narrowing the SAME image requested with and without
+      // allow_documents produced two tokens and two rows. Narrowing makes the
+      // flag irrelevant to a file that is an image either way, which is what
+      // lets the same picture dedupe no matter which tool asked for it.
+      test('an image dedupes across allow_documents — the flag does not split it', async () => {
+        const strict = await mintOne(`${SESSION}/ok.png`);
+        const wide = await mintOne(`${SESSION}/ok.png`, { allow_documents: true });
+        expect(wide.token).toBe(strict.token);
+        expect(wide.share_id).toBe(strict.share_id);
+        expect(store.lookupByToken(wide.token)?.allowKind).toBe('image');
+      });
+    });
+
+    describe('Content-Disposition filename safety', () => {
+      const rfc8187 = (v: string) =>
+        encodeURIComponent(v).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
+      test('a hostile basename still produces one well-formed header line', async () => {
+        // The basename comes from relative_path, which is agent-controlled, so a
+        // CRLF in it would otherwise split the response header outright.
+        const hostile = ['a"b', '\\c', '\r\n', 'X-Injected: 1 ', '\u00e9', '.pdf'].join('');
+        fs.writeFileSync(path.join(mediaDir, hostile), PDF);
+        const item = await mintOne(`${SESSION}/${hostile}`, { allow_documents: true });
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(200);
+        const cd = res.headers['content-disposition'] as string;
+        expect(cd).not.toMatch(/[\r\n]/);
+        expect(res.headers['x-injected']).toBeUndefined();
+        // Quoted fallback: printable ASCII only, minus " and \.
+        expect(cd).toBe(`attachment; filename="a_b_c__X-Injected: 1 _.pdf"; filename*=UTF-8''${rfc8187(hostile)}`);
+      });
+
+      test('attachmentDisposition escapes the non-attr-char set and caps the length', () => {
+        const PDF_MIME = 'application/pdf';
+        // Of the punctuation encodeURIComponent leaves raw, only ' ( ) * fall
+        // outside RFC 8187 attr-char. `!` and `~` are attr-char and stay raw.
+        expect(attachmentDisposition(`x!~'()*.pdf`, PDF_MIME)).toBe(
+          `attachment; filename="x!~'()*.pdf"; filename*=UTF-8''x!~%27%28%29%2A.pdf`,
+        );
+        // Non-ASCII survives only in filename*; the fallback degrades to _.
+        expect(attachmentDisposition('รายงาน.pdf', PDF_MIME)).toBe(
+          `attachment; filename="______.pdf"; filename*=UTF-8''${encodeURIComponent('รายงาน.pdf')}`,
+        );
+        // A name that sanitizes away entirely still yields a usable fallback —
+        // with the extension, so the download is still openable. BOTH forms get
+        // it: browsers prefer filename*, so a guard applied only to the ASCII
+        // fallback is a guard the user never sees.
+        expect(attachmentDisposition('   ', PDF_MIME)).toBe(
+          `attachment; filename="download.pdf"; filename*=UTF-8''download.pdf`,
+        );
+        // A bare extension leaves no stem at all — without the shared default
+        // filename* would say `.pdf` and the browser would save a hidden file.
+        expect(attachmentDisposition('.pdf', PDF_MIME)).toBe(
+          `attachment; filename="download.pdf"; filename*=UTF-8''download.pdf`,
+        );
+        // 4 KB of filename must not become a 4 KB header — and truncating it
+        // must not eat the extension, or the saved file no longer opens.
+        const long = attachmentDisposition(`${'n'.repeat(4096)}.pdf`, PDF_MIME);
+        expect(long).toBe(`attachment; filename="${'n'.repeat(196)}.pdf"; filename*=UTF-8''${'n'.repeat(196)}.pdf`);
+        expect((long.match(/filename="([^"]*)"/)![1]!).length).toBe(200);
+      });
+
+      // The bytes decide the extension, not the agent-chosen name. Serving
+      // `%PDF-`-prefixed bytes as `invoice.html` would hand the user a file the
+      // browser renders from file://, running whatever script trails the PDF
+      // magic — the reflected-file-download shape.
+      test('the extension describes the SNIFFED type, not the basename', () => {
+        expect(attachmentDisposition('invoice.html', 'application/pdf')).toBe(
+          `attachment; filename="invoice.pdf"; filename*=UTF-8''invoice.pdf`,
+        );
+        expect(attachmentDisposition('payload.svg', 'application/pdf')).toContain('filename="payload.pdf"');
+        // No extension at all still gets the right one appended.
+        expect(attachmentDisposition('report', 'application/pdf')).toContain('filename="report.pdf"');
+      });
+
+      // A mime with no entry in EXT_FOR_MIME is the case where we cannot vouch
+      // for what the bytes are — so it must fail CLOSED. Handing back the
+      // agent's own `.html` there would reopen exactly the reflected-file-
+      // download hole the mapped path closes. Nothing reaches this branch today
+      // (images go out inline, PDF is the only other allowlisted type); this
+      // pins the behaviour for whatever type is allowlisted next.
+      test('an unmapped mime drops the extension instead of trusting the basename', () => {
+        expect(attachmentDisposition('invoice.html', 'application/zip')).toBe(
+          `attachment; filename="invoice"; filename*=UTF-8''invoice`,
+        );
+        expect(attachmentDisposition('payload.svg', 'application/octet-stream')).toBe(
+          `attachment; filename="payload"; filename*=UTF-8''payload`,
+        );
+        // Nothing left after the strip still yields a usable name, not "".
+        expect(attachmentDisposition('.html', 'application/zip')).toBe(
+          `attachment; filename="download"; filename*=UTF-8''download`,
+        );
+      });
+
+      test('a PDF disguised with an .html basename is served as .pdf end to end', async () => {
+        fs.writeFileSync(path.join(mediaDir, 'invoice.html'), PDF);
+        const item = await mintOne(`${SESSION}/invoice.html`, { allow_documents: true });
+        const res = await request().get(sharedPath(item.url));
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toBe('application/pdf');
+        expect(res.headers['content-disposition']).toBe(
+          `attachment; filename="invoice.pdf"; filename*=UTF-8''invoice.pdf`,
+        );
+      });
+
+      test('the length cap never splits a surrogate pair into an unencodable half', () => {
+        // A code-unit slice would cut this emoji in half at the stem cap and
+        // leave a lone surrogate, which encodeURIComponent rejects with
+        // URIError — inside the serve handler's try, that becomes a bogus 404
+        // on a share whose file is perfectly fine. Cap by code point instead.
+        // 195 'a' + the emoji = 196 code points = exactly the stem budget, so a
+        // code-UNIT slice would land mid-pair.
+        const straddling = `${'a'.repeat(195)}\u{1F389}.pdf`;
+        const cd = attachmentDisposition(straddling, 'application/pdf');
+        // The ASCII fallback substitutes per code UNIT, so the emoji shows as __.
+        expect(cd).toBe(
+          `attachment; filename="${'a'.repeat(195)}__.pdf"; filename*=UTF-8''${'a'.repeat(195)}${encodeURIComponent('\u{1F389}')}.pdf`,
+        );
+        // An already-unpaired surrogate (never produced by fs, but the header
+        // must not be able to throw on any input) degrades instead of throwing.
+        expect(() => attachmentDisposition('x\uD800.pdf', 'application/pdf')).not.toThrow();
+      });
     });
   });
 

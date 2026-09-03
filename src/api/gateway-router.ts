@@ -45,7 +45,7 @@ import {
   createSharesPublicRouter,
   createSharesPrivateRouter,
 } from './share-router';
-import { ShareStore } from '../share/share-store';
+import { ShareStore, shareEnv } from '../share/share-store';
 
 const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
@@ -636,7 +636,7 @@ export class GatewayRouter {
     // trailing slash can't produce "//shared/<token>" in mint URLs.
     try {
       const dbPath =
-        process.env.IMAGE_SHARE_DB_PATH ||
+        shareEnv('DB_PATH') ||
         path.join(os.homedir(), '.claude-gateway', 'shares.db');
       const store = new ShareStore(dbPath);
       this.app.use(createSharesPublicRouter(store, this.agentsRoot()));

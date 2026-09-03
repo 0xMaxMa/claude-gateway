@@ -27,6 +27,7 @@ const ENV_KEYS = [
   'ANTHROPIC_AUTH_TOKEN',
   'IMAGE_DISABLED',
   'IMAGE_POLL_TIMEOUT_MS',
+  'SHARE_MAX_REFS',
   'IMAGE_SHARE_MAX_REFS',
   'GATEWAY_API_URL',
   'GATEWAY_API_KEY',
@@ -173,6 +174,9 @@ describe('generate_image share-bridge normalization (#70)', () => {
         refs: [{ path: 'media/session-1/duck.png' }],
       });
       expect(sc[0]!.headers['Authorization']).toBe('Bearer gw-key');
+      // #444: ref normalization feeds an image-editing provider, so it must NOT
+      // opt into documents — a PDF ref here has to keep failing at the gateway.
+      expect(sc[0]!.body!.allow_documents).toBeUndefined();
       expect(submitCall()!.body!.image).toBe('https://vm.example.com/gateway/shared/tok1');
     });
 
@@ -330,13 +334,58 @@ describe('generate_image share-bridge normalization (#70)', () => {
       expect(calls).toHaveLength(0);
     });
 
-    test('missing artifact → deterministic image_ref_not_found, no submit', async () => {
+    test('missing artifact → deterministic share_ref_not_found, no submit', async () => {
+      shareStatus = 404;
+      shareErrorBody = { error: 'referenced artifact was not found in this agent/session', code: 'share_ref_not_found' };
+      const res = await generate({ image: 'artifact:img_gone' });
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('share_ref_not_found');
+      expect(submitCall()).toBeUndefined();
+    });
+
+    // #444 renamed this code. The MCP subprocess can be talking to a gateway
+    // that predates the rename, so the legacy code must still produce the same
+    // deterministic "does not exist" message rather than a generic failure.
+    test('a pre-#444 gateway still answering image_ref_not_found is handled the same', async () => {
       shareStatus = 404;
       shareErrorBody = { error: 'referenced artifact was not found in this agent/session', code: 'image_ref_not_found' };
       const res = await generate({ image: 'artifact:img_gone' });
       expect(res.isError).toBe(true);
       expect(res.content[0]!.text).toContain('image_ref_not_found');
+      expect(res.content[0]!.text).toContain('does not exist in this session');
       expect(submitCall()).toBeUndefined();
+    });
+
+    // #444: the neutral name wins, but the legacy one still tunes the cap so an
+    // existing deployment does not silently jump back to the default of 5.
+    describe('max-refs env dual-read', () => {
+      test('legacy IMAGE_SHARE_MAX_REFS still caps the ref count', async () => {
+        process.env.IMAGE_SHARE_MAX_REFS = '2';
+        const res = await generate({ images: ['a.png', 'b.png', 'c.png'] });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]!.text).toContain('max 2');
+        expect(calls).toHaveLength(0);
+      });
+
+      test('neutral SHARE_MAX_REFS wins over the legacy name', async () => {
+        process.env.SHARE_MAX_REFS = '3';
+        process.env.IMAGE_SHARE_MAX_REFS = '2';
+        const res = await generate({ images: ['a.png', 'b.png', 'c.png', 'd.png'] });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]!.text).toContain('max 3');
+        expect(calls).toHaveLength(0);
+      });
+
+      // Unset vars reach this subprocess as '' — that must not shadow the
+      // legacy name and silently restore the default cap.
+      test('an empty neutral name falls through to the legacy one', async () => {
+        process.env.SHARE_MAX_REFS = '';
+        process.env.IMAGE_SHARE_MAX_REFS = '2';
+        const res = await generate({ images: ['a.png', 'b.png', 'c.png'] });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]!.text).toContain('max 2');
+        expect(calls).toHaveLength(0);
+      });
     });
 
     test('submit failure → freshly minted shares are best-effort revoked (§18)', async () => {

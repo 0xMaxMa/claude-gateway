@@ -1,6 +1,7 @@
 /**
- * Image share bridge client (#70) — the ONLY way MCP subprocesses touch the
- * share/artifact store. They call the authenticated local Gateway HTTP API
+ * File share bridge client (#70, widened past images in #444) — the ONLY way
+ * MCP subprocesses touch the share/artifact store. They call the authenticated
+ * local Gateway HTTP API
  * (GATEWAY_API_URL + GATEWAY_API_KEY, both already injected into the session
  * subprocess env) and NEVER open the SQLite DB themselves (plan §9/§10).
  *
@@ -53,7 +54,7 @@ export type CatalogItem = {
   desc?: string;
 };
 
-/** Error carrying the gateway's stable machine-readable code (e.g. image_ref_not_found). */
+/** Error carrying the gateway's stable machine-readable code (e.g. share_ref_not_found). */
 export class ShareClientError extends Error {
   readonly code: string;
   readonly status: number;
@@ -109,7 +110,7 @@ async function callGateway(
 /** Mint short-lived share URLs for local/artifact refs — order preserved. */
 export async function createShares(
   refs: ShareRef[],
-  opts: { purpose?: string; ttlSeconds?: number } = {},
+  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean } = {},
 ): Promise<ShareItem[]> {
   const body: Record<string, unknown> = {
     agent_id: process.env.GATEWAY_AGENT_ID,
@@ -118,6 +119,9 @@ export async function createShares(
     refs,
   };
   if (opts.ttlSeconds !== undefined) body.ttl_seconds = opts.ttlSeconds;
+  // Opt-in only: image callers (line_image, generate_image refs) must keep
+  // getting a hard rejection for a non-image ref.
+  if (opts.allowDocuments) body.allow_documents = true;
   const { status, json } = await callGateway('POST', '/api/v1/shares', body);
   if (status !== 201) {
     const code = typeof json.code === 'string' ? json.code : 'share_failed';

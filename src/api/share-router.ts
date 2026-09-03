@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
+import * as path from 'path';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
@@ -8,7 +9,9 @@ import {
   ShareStore,
   ShareError,
   ShareLimits,
-  detectImageMime,
+  ShareAllowKind,
+  mimeDetectorFor,
+  shareEnv,
   shareLimitsFromEnv,
   validateShareFile,
   DEFAULT_SHARE_TTL_SECONDS,
@@ -40,14 +43,15 @@ const MIN_TTL_SECONDS = 10;
 const MAX_TTL_SECONDS = 86_400;
 const MAX_ARTIFACT_FILES = 10;
 const MAX_ARTIFACT_PROMPT_CHARS = 500;
+const MAX_DISPOSITION_NAME_CHARS = 200;
 const DEFAULT_PUBLIC_RATE_PER_MIN = 60;
 
 function errStatus(code: string): number {
   switch (code) {
-    case 'image_ref_not_found': return 404;
-    case 'image_too_large': return 413;
+    case 'share_ref_not_found': return 404;
+    case 'file_too_large': return 413;
     case 'total_size_exceeded': return 413;
-    case 'unsupported_image_type': return 415;
+    case 'unsupported_file_type': return 415;
     default: return 400;
   }
 }
@@ -56,6 +60,71 @@ function errStatus(code: string): number {
  *  deleted / forbidden so the response never leaks WHY (§11). */
 function publicNotFound(res: Response): void {
   res.status(404).type('text/plain').send('Not Found');
+}
+
+/** Percent-encode for an RFC 8187 `ext-value` (the `filename*` form). RFC 8187
+ *  — which obsoletes RFC 5987 — defines attr-char as ALPHA / DIGIT / any of
+ *  `!#$&+-.^_\`|~`. encodeURIComponent already escapes everything outside that
+ *  set except `'`, `(`, `)` and `*`, so those four are all this has to add.
+ *  (`!` and `~` are left raw on purpose: both ARE attr-char.) */
+function rfc8187(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/** The extension a download is given, keyed by the mime we SNIFFED — never by
+ *  the name the agent chose. `invoice.html` holding `%PDF-…` is served as
+ *  `application/pdf`; saved under its own name it would be a .html file that
+ *  the browser renders from `file://`, running whatever script follows the PDF
+ *  magic (reflected file download). The extension must describe the bytes. */
+const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf' };
+
+/**
+ * Build the `Content-Disposition` for a non-image share (#444). The basename
+ * comes from `relative_path`, which is agent-controlled, so the quoted
+ * `filename=` fallback keeps only printable ASCII minus `"` and `\` — that
+ * alone rules out the CR/LF that would split the header — and the real name
+ * rides along percent-encoded in `filename*`.
+ */
+export function attachmentDisposition(basename: string, mime: string): string {
+  const ext = EXT_FOR_MIME[mime];
+  // Drop whatever extension the agent picked, ALWAYS — the sniffed one replaces
+  // it, and when the mime maps to no extension the name simply ships without
+  // one. Keeping the agent's extension in that case would be the RFD hole this
+  // function exists to close: an unmapped mime is precisely the case where we
+  // cannot vouch for what the bytes are, so it must fail closed, not fall back
+  // to the attacker-chosen `.html`. (No unmapped mime reaches here today —
+  // images are served inline and PDF is the only other allowlisted type — so
+  // this is the guard for whatever gets allowlisted next.)
+  const suffix = ext ? `.${ext}` : '';
+  const rawStem = basename.replace(/\.[^./\\]*$/, '');
+  // Cap the STEM, so the extension survives truncation — a 4 KB agent-chosen
+  // title must not cost the user a file their OS can no longer open (and must
+  // not bloat, or behind some proxies break, the response header). Cap by CODE
+  // POINT, not code unit — a plain `.slice()` can cut a surrogate pair in half,
+  // and encodeURIComponent throws URIError on the lone surrogate that leaves
+  // behind. That throw lands in the serve handler's catch and turns a perfectly
+  // good share into a uniform 404. The `\p{Surrogate}` scrub is the belt to
+  // that braces: after a code-point slice it can only ever match a surrogate
+  // that was already unpaired on the way in.
+  // Trim and default ONCE, before the two forms diverge. RFC 6266 §4.3 says a
+  // recipient SHOULD prefer `filename*`, and every current browser does, so a
+  // guard applied only to the ASCII fallback is a guard no user ever gets: a
+  // basename of `.pdf` would save as a hidden, name-less file while the
+  // fallback nobody reads politely said `download.pdf`.
+  const stem =
+    [...rawStem]
+      .slice(0, MAX_DISPOSITION_NAME_CHARS - suffix.length)
+      .join('')
+      .replace(/\p{Surrogate}/gu, '_')
+      .trim() || 'download';
+  // Substitution is 1:1 and never yields whitespace, so a non-empty `stem`
+  // cannot ASCII-fold to nothing; the `|| 'download'` is kept as a guard on the
+  // sanitiser rather than a reachable branch.
+  const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim() || 'download';
+  return `attachment; filename="${asciiStem}${suffix}"; filename*=UTF-8''${rfc8187(`${stem}${suffix}`)}`;
 }
 
 export type PublicShareRouterOpts = {
@@ -70,7 +139,7 @@ export function createSharesPublicRouter(
   opts: PublicShareRouterOpts = {},
 ): Router {
   const router = Router();
-  const envRate = Number(process.env.IMAGE_SHARE_PUBLIC_RATE_PER_MIN);
+  const envRate = Number(shareEnv('PUBLIC_RATE_PER_MIN'));
   const ratePerMinute =
     opts.ratePerMinute ?? (Number.isFinite(envRate) && envRate > 0 ? envRate : DEFAULT_PUBLIC_RATE_PER_MIN);
   const limits = shareLimitsFromEnv();
@@ -135,13 +204,21 @@ export function createSharesPublicRouter(
       if (!stat.isFile() || stat.size > limits.maxFileBytes) throw new Error('invalid file');
       const header = Buffer.alloc(12);
       fs.readSync(fd, header, 0, 12, 0);
-      const mime = detectImageMime(header);
+      // Always re-sniff. The share row records the ALLOW-KIND it was minted
+      // under, never a mime: the file can be replaced between mint and fetch,
+      // so the kind only picks the detector and the bytes on disk decide the
+      // Content-Type (§12.9/§12.10, #444).
+      const mime = mimeDetectorFor(share.allowKind)(header);
       if (!mime) throw new Error('unsupported type');
 
+      // Images keep the exact `inline` they have always had. Anything else is
+      // offered as a download — the share origin must never invite a browser to
+      // render a non-image it just sniffed.
+      const isImage = mime.startsWith('image/');
       res.status(200).set({
         'Content-Type': mime,
         'Content-Length': String(stat.size),
-        'Content-Disposition': 'inline',
+        'Content-Disposition': isImage ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime),
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       });
@@ -180,17 +257,19 @@ export function createSharesPrivateRouter(
   const auth = createApiAuthMiddleware(apiKeys);
   const limits = limitsOverride ?? shareLimitsFromEnv();
   const defaultTtl = (() => {
-    const n = Number(process.env.IMAGE_SHARE_CODEX_TTL_SECONDS);
+    const n = Number(shareEnv('CODEX_TTL_SECONDS'));
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SHARE_TTL_SECONDS;
   })();
 
   /**
    * POST /api/v1/shares — mint one or more shares (§10).
-   * Body: { agent_id, session_id, purpose?, ttl_seconds?, refs: [{artifact_id}|{path}] }
+   * Body: { agent_id, session_id, purpose?, ttl_seconds?, allow_documents?, refs: [{artifact_id}|{path}] }
    * Response: { items: [{ share_id, token, url?, expires_at }] } — order preserved.
    * `token` is always present (host-agnostic capability); `url` is a convenience
    * built from `gateway.publicUrl` and is omitted when that is unset — callers
    * with their own public base (e.g. LINE) build the URL from `token`.
+   * `allow_documents` widens the allowlist to PDF for THIS request only and is
+   * recorded on each minted row (#444); without it a PDF is still 415.
    */
   router.post('/v1/shares', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
@@ -199,6 +278,7 @@ export function createSharesPrivateRouter(
       session_id?: unknown;
       purpose?: unknown;
       ttl_seconds?: unknown;
+      allow_documents?: unknown;
       refs?: unknown;
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
@@ -224,6 +304,11 @@ export function createSharesPrivateRouter(
       }
       ttlSeconds = Math.min(Math.max(Math.floor(body.ttl_seconds), MIN_TTL_SECONDS), MAX_TTL_SECONDS);
     }
+    if (body.allow_documents !== undefined && typeof body.allow_documents !== 'boolean') {
+      res.status(400).json({ error: 'allow_documents must be a boolean' });
+      return;
+    }
+    const allowKind: ShareAllowKind = body.allow_documents === true ? 'any' : 'image';
     const refs = body.refs;
     if (!Array.isArray(refs) || refs.length === 0) {
       res.status(400).json({ error: 'refs must be a non-empty array' });
@@ -242,6 +327,7 @@ export function createSharesPrivateRouter(
       dedupeRef: string;
       relativePath: string;
       size: number;
+      allowKind: ShareAllowKind;
       taskId?: string;
       provider?: string;
       priorPrompt?: string;
@@ -263,7 +349,7 @@ export function createSharesPrivateRouter(
       if (typeof ref.artifact_id === 'string' && ref.artifact_id.trim()) {
         const artifact = store.resolveArtifact(agentId, sessionId, ref.artifact_id.trim());
         if (!artifact) {
-          res.status(404).json({ error: 'referenced artifact was not found in this agent/session', code: 'image_ref_not_found' });
+          res.status(404).json({ error: 'referenced artifact was not found in this agent/session', code: 'share_ref_not_found' });
           return;
         }
         dedupeRef = `artifact:${artifact.artifactId}`;
@@ -280,7 +366,7 @@ export function createSharesPrivateRouter(
       }
       let validated;
       try {
-        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes);
+        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes, allowKind);
       } catch (err) {
         if (err instanceof ShareError) {
           res.status(errStatus(err.code)).json({ error: err.message, code: err.code });
@@ -304,6 +390,16 @@ export function createSharesPrivateRouter(
         dedupeRef,
         relativePath: validated.relativePath,
         size: validated.size,
+        // Persist the kind this ref ACTUALLY validated as, not the request's
+        // ceiling. `allow_documents` is the caller's permission to include a
+        // PDF in the batch, not a declaration that every ref is one — the
+        // share_file tool sends it unconditionally. Recording 'any' on a file
+        // that sniffed as an image would widen exactly the hole the fetch-time
+        // re-sniff exists to close: overwrite the shared PNG with a PDF inside
+        // the TTL and the live token starts serving it, where before the swap
+        // failed closed with a 404. Narrowing per ref keeps the PDF feature and
+        // restores fail-closed for images.
+        allowKind: validated.mime.startsWith('image/') ? 'image' : allowKind,
         taskId,
         provider: refProvider,
         priorPrompt,
@@ -322,6 +418,7 @@ export function createSharesPrivateRouter(
         dedupeRef: r.dedupeRef,
         purpose,
         ttlSeconds,
+        allowKind: r.allowKind,
       });
       console.log(`[share] mint share=${mint.shareId} purpose=${purpose} deduped=${mint.deduped}`);
       return {
@@ -413,6 +510,9 @@ export function createSharesPrivateRouter(
       const file = (files as string[])[index]!;
       let validated;
       try {
+        // Deliberately NOT widened by #444: this registry feeds the session
+        // IMAGE catalog (generate_image refs, "the second image"), so it takes
+        // the default 'image' allow-kind and a PDF here is still a 415.
         validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes);
       } catch (err) {
         const code = err instanceof ShareError ? err.code : 'invalid_path';

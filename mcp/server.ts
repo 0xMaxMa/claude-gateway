@@ -21,7 +21,7 @@ import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
 import { BrowserModule } from './tools/browser/module';
 import { ImageModule } from './tools/image/module';
-import { ShareImageModule } from './tools/share-image/module';
+import { ShareFileModule } from './tools/share-file/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
 import { MemoryModule } from './tools/memory/module';
@@ -46,7 +46,7 @@ const modules: AnyModule[] = [
   new AgentModule(),
   new BrowserModule(),
   new ImageModule(),
-  new ShareImageModule(),
+  new ShareFileModule(),
   new AppsModule(),
   new ApiModule(),
   new MemoryModule(),
