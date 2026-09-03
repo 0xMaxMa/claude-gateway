@@ -56,6 +56,45 @@ describe('model registry — Opus 5 is a first-class model', () => {
   });
 });
 
+describe('model registry — Fable 5.1 is a first-class model', () => {
+  it('DEFAULT_MODELS includes both Fable 5.1 variants with correct context windows', () => {
+    expect(byId(DEFAULT_MODELS, 'claude-fable-5-1')?.contextWindow).toBe(200000);
+    expect(byId(DEFAULT_MODELS, 'claude-fable-5-1[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('the template includes both Fable 5.1 variants with correct context windows', () => {
+    const models = templateModels();
+    expect(byId(models, 'claude-fable-5-1')?.contextWindow).toBe(200000);
+    expect(byId(models, 'claude-fable-5-1[1m]')?.contextWindow).toBe(1000000);
+  });
+
+  it('Fable 5 is demoted to the `fable5` alias (kept, not dropped)', () => {
+    expect(byAlias(DEFAULT_MODELS, 'fable5')?.id).toBe('claude-fable-5');
+    expect(byAlias(DEFAULT_MODELS, 'fable5[1m]')?.id).toBe('claude-fable-5[1m]');
+    expect(byAlias(templateModels(), 'fable5')?.id).toBe('claude-fable-5');
+    expect(byAlias(templateModels(), 'fable5[1m]')?.id).toBe('claude-fable-5[1m]');
+  });
+
+  /**
+   * The "bare alias = newest of the family" convention, applied to Fable the
+   * same way `opus` -> Opus 5 and `sonnet` -> Sonnet 5 already are.
+   *
+   * Worth knowing while reading this: `fable` therefore names a model not
+   * every provider has entitled yet (ours 400s on it until
+   * Crown-Labs/getpod#2538 lands). That is deliberate and it moves nobody —
+   * handleModelCommand stores the resolved *id*, not the alias, so agents
+   * already on Fable 5 stay on claude-fable-5, and migrateModels() rewrites
+   * their row's alias to `fable5` rather than leaving two rows claiming
+   * `fable`.
+   */
+  it('the bare `fable` alias resolves to Fable 5.1 in both registries', () => {
+    expect(byAlias(DEFAULT_MODELS, 'fable')?.id).toBe('claude-fable-5-1');
+    expect(byAlias(DEFAULT_MODELS, 'fable[1m]')?.id).toBe('claude-fable-5-1[1m]');
+    expect(byAlias(templateModels(), 'fable')?.id).toBe('claude-fable-5-1');
+    expect(byAlias(templateModels(), 'fable[1m]')?.id).toBe('claude-fable-5-1[1m]');
+  });
+});
+
 describe('model registry — DEFAULT_MODELS and template stay in sync', () => {
   it('uses OpenAI-documented 1,050,000-token windows for all GPT models', () => {
     const gptIds = ['gpt-5.6-sol[1m]', 'gpt-5.6-terra[1m]', 'gpt-5.6-luna[1m]', 'gpt-5.5[1m]'];

@@ -415,3 +415,122 @@ describe('config migration — GPT models reach existing installs', () => {
     });
   });
 });
+
+/**
+ * Fable 5.1 reaches existing installs.
+ *
+ * Same shape as the GPT block above, and for the same reason: an install that
+ * already pins its own gateway.models list never sees a model added only to
+ * DEFAULT_MODELS. The template entry AND the configVersion bump are both part
+ * of the feature — migrateModels() only runs when the template version is
+ * ahead of the user's, so forgetting the bump ships a model nobody receives.
+ *
+ * The pre-Fable-5.1 fixture pins configVersion 1.0.30, the version immediately
+ * before this change: that makes the first test fail if the bump is reverted,
+ * rather than passing on the slack left by some older bump.
+ */
+describe('config migration — Fable 5.1 reaches existing installs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fable51-upgrade-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A realistic pre-Fable-5.1 install: bind already set (so bind isn't the
+   *  migration trigger), the previous Fable rows, plus a custom BYOK model. */
+  function writePreFable51Config(): string {
+    const configPath = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          configVersion: '1.0.30',
+          gateway: {
+            bind: '0.0.0.0',
+            models: [
+              { id: 'claude-fable-5[1m]', label: 'Fable 5 (1M)', alias: 'fable[1m]', contextWindow: 1000000 },
+              { id: 'claude-fable-5', label: 'Fable 5', alias: 'fable', contextWindow: 200000 },
+              { id: 'openrouter/custom-model', label: 'My BYOK', alias: 'mine', contextWindow: 128000 },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    return configPath;
+  }
+
+  it('uses a template version newer than the pre-Fable-5.1 registry', () => {
+    expect(compareSemver(templateVersion(), '1.0.30')).toBeGreaterThan(0);
+  });
+
+  it('adds both Fable 5.1 variants with the right aliases and windows', () => {
+    const configPath = writePreFable51Config();
+
+    const result = runRealUpgrade(configPath);
+
+    expect(result.needed).toBe(true);
+    expect(result.addedFields).toContain('gateway.models[claude-fable-5-1]');
+    expect(result.addedFields).toContain('gateway.models[claude-fable-5-1[1m]]');
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.configVersion).toBe(templateVersion());
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-fable-5-1',
+      label: 'Fable 5.1',
+      alias: 'fable',
+      contextWindow: 200000,
+    });
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'claude-fable-5-1[1m]',
+      label: 'Fable 5.1 (1M)',
+      alias: 'fable[1m]',
+      contextWindow: 1000000,
+    });
+  });
+
+  /**
+   * The upgrade repoints `fable` from Fable 5 to Fable 5.1, so an existing
+   * install's own claude-fable-5 row — which stores alias `fable` — has to be
+   * rewritten to `fable5`. If it were merely left alone, the migrated config
+   * would carry two rows both claiming `fable`, and /model fable would resolve
+   * to whichever came first. This is the guard for that.
+   */
+  it('rewrites the existing Fable 5 rows to the demoted `fable5` alias', () => {
+    const configPath = writePreFable51Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const byAlias = (alias: string) =>
+      migrated.gateway.models.find((m: { alias: string }) => m.alias === alias);
+    const byId = (id: string) =>
+      migrated.gateway.models.find((m: { id: string }) => m.id === id);
+
+    expect(byId('claude-fable-5')?.alias).toBe('fable5');
+    expect(byId('claude-fable-5[1m]')?.alias).toBe('fable5[1m]');
+    expect(byAlias('fable')?.id).toBe('claude-fable-5-1');
+    expect(byAlias('fable[1m]')?.id).toBe('claude-fable-5-1[1m]');
+
+    const aliases = migrated.gateway.models.map((m: { alias: string }) => m.alias);
+    expect(new Set(aliases).size).toBe(aliases.length);
+  });
+
+  it('preserves a user-owned model that is not in the template', () => {
+    const configPath = writePreFable51Config();
+    runRealUpgrade(configPath);
+
+    const migrated = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(migrated.gateway.models).toContainEqual({
+      id: 'openrouter/custom-model',
+      label: 'My BYOK',
+      alias: 'mine',
+      contextWindow: 128000,
+    });
+  });
+});
