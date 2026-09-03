@@ -77,9 +77,18 @@ export function registerShutdownSignals(
   const target = opts.target ?? process;
 
   let inFlight: Promise<void> | null = null;
+  // Captured once, by whichever signal actually starts the teardown — not
+  // re-read when it resolves. A second signal that merely joins an
+  // already-in-flight shutdown (e.g. an operator's own `kill <pid>` landing
+  // while an update-triggered self-restart is still draining connections)
+  // must not let an unrelated `requestExitCode()` call made in that window
+  // change the exit code of a shutdown it didn't start.
+  let exitCode = 0;
 
   const shutdown = (signal: string): Promise<void> => {
     if (inFlight) return inFlight;
+    exitCode = pendingExitCode;
+    pendingExitCode = 0;
     opts.onBegin?.(signal);
     inFlight = opts.run(signal);
     return inFlight;
@@ -92,13 +101,8 @@ export function registerShutdownSignals(
       // signal — holding its port and its children — which is a worse outcome
       // than an unclean exit. Exit non-zero so the failure stays visible.
       void shutdown(signal).then(
-        () => {
-          const code = pendingExitCode;
-          pendingExitCode = 0;
-          exit(code);
-        },
+        () => exit(exitCode),
         (err) => {
-          pendingExitCode = 0;
           onError(err);
           exit(1);
         },

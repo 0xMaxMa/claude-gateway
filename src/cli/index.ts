@@ -17,8 +17,11 @@ import { runChannels } from './commands/channels';
  *  token as a value (see parseCliArgs). `follow` is here rather than in the
  *  gateway command because the verb is a positional: `gateway --follow logs`
  *  would otherwise parse `logs` as the flag's value and leave no command at all.
- *  No generated resource command declares a `--follow` value flag. */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow']);
+ *  No generated resource command declares a `--follow` value flag. `force` is
+ *  here for the same reason: `service --force install` (flag before the verb)
+ *  would otherwise swallow `install` as `--force`'s value and leave `service`
+ *  with no verb at all — see issue #450. */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command

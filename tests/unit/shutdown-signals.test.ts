@@ -185,4 +185,39 @@ describe('requestExitCode (issue #450)', () => {
 
     expect(exits).toEqual([1]);
   });
+
+  // A second, unrelated `requestExitCode()` call landing *after* a teardown
+  // has already started (but before it resolves) must not change that
+  // teardown's exit code — e.g. an operator's own `kill <pid>` starts the
+  // shutdown with nothing pending, and the update endpoint's timer (racing
+  // to self-restart) calls `requestExitCode(EX_TEMPFAIL)` while it's still
+  // draining. The operator's deliberate stop must still exit 0, not inherit
+  // a code requested for a shutdown it didn't start.
+  it('a requestExitCode() call made after a shutdown has already started does not affect it', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+    let releaseShutdown!: () => void;
+    const teardownDone = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+
+    registerShutdownSignals({
+      run: async () => { await teardownDone; },
+      exit: (code) => exits.push(code),
+      target,
+    });
+
+    // Nothing pending yet — this teardown starts wanting exit 0.
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exits).toEqual([]);
+
+    // A later, unrelated request while the teardown above is still running.
+    requestExitCode(EX_TEMPFAIL);
+
+    releaseShutdown();
+    await new Promise((r) => setImmediate(r));
+
+    // The already-started teardown must exit with the code it began with (0),
+    // not the EX_TEMPFAIL requested after it was already under way.
+    expect(exits).toEqual([0]);
+  });
 });
