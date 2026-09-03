@@ -471,6 +471,33 @@ describe('AgentManager', () => {
       // Not world-readable: it is a copy of the host's Claude config.
       expect(fs.statSync(seedFile).mode & 0o077).toBe(0);
     });
+
+    it('stages the seed atomically, leaving no partial file when the copy fails', async () => {
+      // A container copies this file in its start command, which can run while
+      // the gateway is re-staging. Writing in place would let it read a
+      // half-written config; write-then-rename means it sees the old file or
+      // the new one. A failed copy must therefore leave the previous seed
+      // intact and no temp file behind.
+      const entry = makeEntry(tmpDir);
+      await manager.upsertAgent(entry);
+
+      const seedDir = path.join(tmpDir, 'agents', 'my-agent', '.claude-seed');
+      const seedFile = path.join(seedDir, '.claude.json');
+      const before = fs.readFileSync(seedFile, 'utf-8');
+
+      // Make the copy fail for real rather than mocking it: a directory where
+      // the host config should be passes existsSync and then throws EISDIR.
+      const hostClaudeJson = path.join(os.homedir(), '.claude.json');
+      fs.rmSync(hostClaudeJson);
+      fs.mkdirSync(hostClaudeJson);
+
+      // upsertAgent swallows a staging failure by design — the point is what it
+      // leaves on disk.
+      await manager.upsertAgent(entry);
+
+      expect(fs.readFileSync(seedFile, 'utf-8')).toBe(before);
+      expect(fs.readdirSync(seedDir).filter((f) => f.includes('.tmp.'))).toEqual([]);
+    });
   });
 
   // ─── deleteAgent() ────────────────────────────────────────────────────────

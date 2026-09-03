@@ -13,6 +13,7 @@ import { createLogger } from '../logger';
 import { ptyStreamRegistry } from '../shell/pty-stream-registry';
 import { neutralizeTuiTriggers } from '../shell/screen';
 import { resolveClaudeBin, pathWithNativeBin } from './claude-bin';
+import { claudeSettingsEnv, readClaudeSettings } from '../config/claude-settings';
 import {
   CODING_TOOLS,
   TOOL_LABELS,
@@ -467,17 +468,14 @@ export class SessionProcess extends EventEmitter {
   }
 
   /**
-   * Read stdio MCP servers from Claude Code's user-scoped config (~/.claude/settings.json).
+   * Read stdio MCP servers from Claude Code's user-scoped config
+   * (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`).
    * Returns empty object if file doesn't exist, can't be parsed, or has no mcpServers.
    */
   private readUserScopedMcp(): Record<string, unknown> {
-    try {
-      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-      const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      return (parsed?.mcpServers as Record<string, unknown>) ?? {};
-    } catch {
-      return {};
-    }
+    const servers = readClaudeSettings()?.mcpServers;
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return {};
+    return servers as Record<string, unknown>;
   }
 
   /**
@@ -521,19 +519,11 @@ export class SessionProcess extends EventEmitter {
    * not part of that group and keeps its own independent fallback.
    */
   private resolveContainerAuthEnv(): Record<string, string> {
-    let fileEnv: Record<string, unknown> = {};
-    try {
-      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-      const parsed: unknown = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      const rawEnv = (parsed as { env?: unknown } | null)?.env;
-      // Only a plain object is usable. An `env` that is a string or an array
-      // would make the `in` checks below throw or read array indices.
-      if (rawEnv && typeof rawEnv === 'object' && !Array.isArray(rawEnv)) {
-        fileEnv = rawEnv as Record<string, unknown>;
-      }
-    } catch {
-      // No readable user settings — the gateway's own env is then the only source.
-    }
+    // Resolved through the shared helper so an operator who relocated the config
+    // with CLAUDE_CONFIG_DIR is honoured here too. Hardcoding ~/.claude would
+    // read a path that does not exist and forward nothing — reproducing the very
+    // "Not logged in" failure this method was written to prevent.
+    const fileEnv = claudeSettingsEnv();
 
     // Presence, not validity: a credential key spelled out in settings.json is
     // authoritative for the whole group even when its value is malformed, so a

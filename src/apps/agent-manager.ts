@@ -102,6 +102,14 @@ export class AgentManager {
    * Mode is set explicitly because mkdir/copyFile modes are umask-dependent: the
    * seed is a copy of the host's Claude config and must not be world-readable,
    * even though the host file itself is commonly 0644.
+   *
+   * The copy is staged through a temp file and renamed into place — the same
+   * write-then-rename idiom writeConfig() uses below. A container runs `cp` on
+   * this file at its own start, which can land mid-copy on a gateway restart;
+   * rename makes the container see either the old file or the new one, never a
+   * half-written config. Rename is safe here precisely because the *directory*
+   * is what gets mounted: entries resolve per access, which is the property this
+   * whole seed mechanism relies on.
    */
   private stageClaudeSeed(agentName: string): { seedSource: string; seeded: boolean } {
     const seedDir = path.join(this.agentsDir, agentName, '.claude-seed');
@@ -112,8 +120,15 @@ export class AgentManager {
     let seeded = false;
     if (fs.existsSync(hostClaudeJson)) {
       const dest = path.join(seedDir, '.claude.json');
-      fs.copyFileSync(hostClaudeJson, dest);
-      fs.chmodSync(dest, 0o600);
+      const tmp = `${dest}.tmp.${process.pid}`;
+      try {
+        fs.copyFileSync(hostClaudeJson, tmp);
+        fs.chmodSync(tmp, 0o600);
+        fs.renameSync(tmp, dest);
+      } catch (err) {
+        try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+        throw err;
+      }
       seeded = true;
     }
     return { seedSource: fs.realpathSync(seedDir), seeded };
@@ -256,11 +271,21 @@ export class AgentManager {
     fs.mkdirSync(agentDir, { recursive: true });
 
     // Refresh the staged Claude config from the host. reconcileAgents() calls
-    // this for every running app-agent at gateway start, so a host-side config
-    // change reaches containers on the next gateway restart rather than waiting
-    // for the app to be updated. Best-effort: a failure here must not stop the
-    // agent from being registered, since the container falls back to the
-    // previously staged copy.
+    // this for every running app-agent at gateway start, so the staged copy
+    // tracks the host without waiting for the app to be reinstalled or updated.
+    //
+    // Refreshing the seed is not the same as refreshing a container: the copy
+    // into the container runs in its start command, and nothing here restarts
+    // containers (composeUp is only called from the installer). With
+    // `restart: unless-stopped` they outlive a gateway restart, so a container
+    // already running picks the new seed up at its next start, not at ours.
+    // Credentials do not depend on this — they are forwarded per session spawn
+    // by resolveContainerAuthEnv() — so the lag only affects the rest of
+    // ~/.claude.json. Agents installed before the seed directory existed keep
+    // their old compose until the app is updated, and ignore it entirely.
+    //
+    // Best-effort: a failure here must not stop the agent from being
+    // registered, since the container falls back to the previously staged copy.
     try {
       this.stageClaudeSeed(agentName);
     } catch { /* keep the existing seed */ }
@@ -318,6 +343,12 @@ export class AgentManager {
     // the host on the next install/update, so an app that has been removed must
     // not leave a copy of the host's Claude config sitting on disk. The rest of
     // the agent dir (sessions, media) is deliberately preserved.
+    //
+    // No isSymbolicLink() guard here, unlike the workspace link above: rmSync
+    // does not traverse a symlink even with recursive, it unlinks the link
+    // itself, so a symlink standing at this path cannot lead the delete outside
+    // the agent dir. The workspace guard exists for a different reason — that
+    // path may legitimately hold a *user* agent's real workspace.
     try {
       fs.rmSync(path.join(this.agentsDir, agentName, '.claude-seed'), {
         recursive: true,

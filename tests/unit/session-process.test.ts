@@ -3114,6 +3114,43 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     }
   });
 
+  it('U-SP-AUTH9: credentials are read from CLAUDE_CONFIG_DIR when the operator relocated it', async () => {
+    // The gateway already honours CLAUDE_CONFIG_DIR everywhere else it reads
+    // settings.json (model catalog, image module). A resolver that hardcoded
+    // ~/.claude would read a path that does not exist for such an operator and
+    // forward no credential at all — the exact "Not logged in" failure this
+    // forwarding was added to prevent, just reached from a different direction.
+    const relocated = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-cfgdir-'));
+    fs.writeFileSync(
+      path.join(relocated, 'settings.json'),
+      JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok-from-relocated-dir' } }),
+    );
+    // A home that deliberately holds NO .claude/settings.json, so a pass can
+    // only come from the relocated directory.
+    const bareHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-barehome-'));
+    mockHomeDir = bareHome;
+    process.env.CLAUDE_CONFIG_DIR = relocated;
+    try {
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+      });
+      const sp = makeSp('chat:auth9', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+      expect(spawnArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+      expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('tok-from-relocated-dir');
+
+      await sp.stop();
+    } finally {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      fs.rmSync(relocated, { recursive: true, force: true });
+      fs.rmSync(bareHome, { recursive: true, force: true });
+    }
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`  // event (NOT on stderr). It must still be captured into lastStderrLine so the
   // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
