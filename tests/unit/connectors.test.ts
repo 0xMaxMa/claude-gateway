@@ -247,6 +247,37 @@ describe('resolve', () => {
       },
     });
   });
+
+  // A user-added generic-OAuth custom connector (oauth: true, added via
+  // POST /v1/connectors/custom, no explicit authKind — that field is only
+  // ever set by services/api's managed push, see CustomConnectorEntry's doc
+  // comment) must still report authKind: 'oauth', not fall through to
+  // 'secret' just because secretNames is non-empty — the web panel's Auth
+  // column and icon both key off this.
+  it("listConnectorStatus: a user-added oauth:true custom connector reports authKind 'oauth', not 'secret'", () => {
+    const { listConnectorStatus } = require('../../src/connectors/resolve');
+    const customConnectors = {
+      firecrawl: {
+        label: 'Firecrawl',
+        config: {
+          type: 'http',
+          url: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+          headers: { Authorization: 'Bearer {access_token}' },
+        },
+        secretNames: ['access_token'],
+        oauth: true,
+      },
+    };
+    const status = listConnectorStatus(customConnectors).find(
+      (c: { id: string }) => c.id === 'firecrawl',
+    );
+    expect(status).toMatchObject({
+      id: 'firecrawl',
+      authKind: 'oauth',
+      source: 'custom',
+      oauth: true,
+    });
+  });
 });
 
 describe('boot-safety', () => {
@@ -405,6 +436,60 @@ describe('connectors-router', () => {
     expect(del.status).toBe(200);
     expect(getSecret('CUSTOM__github__access_token')).toBeNull();
     expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors).toEqual({});
+  });
+
+  // A genuinely user-added custom connector (no entry.managed — nothing pushed
+  // it, the user pasted it themselves) has no catalog to fall back on for its
+  // config/label/description, unlike github/gmail/etc. above. Disconnecting it
+  // must not discard that config — only the secret — so the row survives and
+  // can be reconnected without retyping everything.
+  it("DELETE on a genuinely user-added custom connector clears the secret but keeps the entry (soft disconnect)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
+    const app = makeApp(cfgPath);
+    const { getSecret } = require('../../src/connectors/token-env');
+
+    const add = await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'Smithery Calendar',
+        description: 'Calendar via Smithery',
+        config: {
+          type: 'streamable-http',
+          url: 'https://server.smithery.ai/calendar/mcp',
+          headers: { Authorization: 'Bearer {api_key}' },
+        },
+        secrets: { api_key: 'sk-abc' },
+      });
+    expect(add.status).toBe(200);
+    const id = add.body.id;
+    expect(getSecret(`CUSTOM__${id}__api_key`)).toBe('sk-abc');
+
+    const del = await request(app).delete(`/api/v1/connectors/${id}`).set('X-Api-Key', adminKey);
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ id, connected: false });
+
+    // Secret is gone...
+    expect(getSecret(`CUSTOM__${id}__api_key`)).toBeNull();
+    // ...but the entry — and therefore the row — is still there.
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    expect(written.gateway.customConnectors[id]).toMatchObject({
+      label: 'Smithery Calendar',
+      description: 'Calendar via Smithery',
+      config: {
+        type: 'streamable-http',
+        url: 'https://server.smithery.ai/calendar/mcp',
+        headers: { Authorization: 'Bearer {api_key}' },
+      },
+      secretNames: ['api_key'],
+    });
+
+    const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(list.body.connectors).toEqual([
+      expect.objectContaining({ id, label: 'Smithery Calendar', source: 'custom', connected: false }),
+    ]);
   });
 
   it('unknown connector → 404', async () => {

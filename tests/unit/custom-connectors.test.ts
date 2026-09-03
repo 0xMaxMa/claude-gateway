@@ -235,25 +235,41 @@ describe('connectors-router — custom connectors', () => {
     expect(del.status).toBe(404);
   });
 
-  it('delete clears the namespaced secret + config entry (unified DELETE route)', async () => {
+  it('delete clears the namespaced secret but keeps the config entry (soft disconnect, unified DELETE route)', async () => {
+    // A genuinely user-added custom connector has no fallback catalog the way
+    // github/gmail/etc. do (see resolve.ts's managed-vs-custom split) — its
+    // config IS the customConnectors entry, so DELETE must not discard it or
+    // the row (and everything the user pasted) is gone for good. Only the
+    // secret is cleared; reconnecting just needs a fresh token/OAuth grant.
     const cfgPath = tmpConfig();
     const app = makeApp(cfgPath);
     const { getSecret } = require('../../src/connectors/token-env');
 
+    const rollforgeConfig = {
+      command: 'npx',
+      args: ['@agentutility/mcp-rollforge'],
+      env: { TOKEN: '{token}' },
+    };
     await request(app)
       .post('/api/v1/connectors/custom')
       .set('X-Api-Key', adminKey)
-      .send({
-        label: 'Rollforge',
-        config: { command: 'npx', args: ['@agentutility/mcp-rollforge'], env: { TOKEN: '{token}' } },
-        secrets: { token: 'shhh' },
-      });
+      .send({ label: 'Rollforge', config: rollforgeConfig, secrets: { token: 'shhh' } });
     expect(getSecret('CUSTOM__rollforge__token')).toBe('shhh');
 
     const del = await request(app).delete('/api/v1/connectors/rollforge').set('X-Api-Key', adminKey);
     expect(del.status).toBe(200);
+    expect(del.body).toEqual({ id: 'rollforge', connected: false });
     expect(getSecret('CUSTOM__rollforge__token')).toBeNull();
-    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors).toEqual({});
+
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors;
+    expect(written.rollforge).toMatchObject({ label: 'Rollforge', config: rollforgeConfig });
+
+    // The row survives, reported as not connected — not silently dropped
+    // from GET /v1/connectors the way a hard delete would.
+    const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(list.body.connectors).toEqual([
+      expect.objectContaining({ id: 'rollforge', label: 'Rollforge', connected: false, source: 'custom' }),
+    ]);
   });
 
   it('unified DELETE requires admin even for a custom-connector id (checked before the catalog/custom lookup)', async () => {

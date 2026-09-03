@@ -269,7 +269,7 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     expect(body.get('resource')).toBe(metadata.resource);
   });
 
-  it('with a configured oauthReturnUrl, the success page auto-redirects there', async () => {
+  it('with a configured oauthReturnUrl, a real HTTP redirect goes straight there — no interstitial page', async () => {
     const pendingStore = new PendingOAuthStore();
     const state = pendingStore.create({
       connectorId: 'firecrawl',
@@ -284,9 +284,8 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
 
     const app = makeApp(pendingStore, 'https://app.getpod.ai/connectors');
     const res = await request(app).get(`/oauth/mcp/callback?state=${state}&code=c1`);
-    expect(res.status).toBe(200);
-    expect(res.text).toContain('http-equiv="refresh"');
-    expect(res.text).toContain('https://app.getpod.ai/connectors');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('https://app.getpod.ai/connectors');
   });
 
   it('an invalid oauthReturnUrl falls back to the plain "close this tab" message instead of crashing', async () => {
@@ -305,8 +304,40 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     const app = makeApp(pendingStore, 'not-a-valid-url');
     const res = await request(app).get(`/oauth/mcp/callback?state=${state}&code=c1`);
     expect(res.status).toBe(200);
-    expect(res.text).not.toContain('http-equiv="refresh"');
+    expect(res.headers.location).toBeUndefined();
     expect(res.text).toMatch(/close this tab/);
+  });
+
+  // The exact bug a real user hit: with oauthReturnUrl configured, denying
+  // consent used to leave the browser stranded on a bare gateway page with
+  // no way back — only the success path redirected. Every terminal outcome
+  // must redirect back when the app knows where "back" is.
+  it('with a configured oauthReturnUrl, denying consent also redirects back — with the reason in a query param, not stranded on a bare gateway page', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+
+    const app = makeApp(pendingStore, 'https://app.getpod.ai/connectors');
+    const res = await request(app).get(`/oauth/mcp/callback?state=${state}&error=access_denied`);
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.location);
+    expect(location.origin + location.pathname).toBe('https://app.getpod.ai/connectors');
+    expect(location.searchParams.get('connector_oauth_error')).toBe('access_denied');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('with a configured oauthReturnUrl, an expired/unknown state also redirects back instead of a bare 400 page', async () => {
+    const app = makeApp(new PendingOAuthStore(), 'https://app.getpod.ai/connectors');
+    const res = await request(app).get('/oauth/mcp/callback?state=nope&code=abc');
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.location);
+    expect(location.origin + location.pathname).toBe('https://app.getpod.ai/connectors');
+    expect(location.searchParams.get('connector_oauth_error')).toBe('expired_link');
   });
 
   it('the same state cannot be replayed — a second callback with the same state 400s', async () => {

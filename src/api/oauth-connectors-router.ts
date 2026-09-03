@@ -132,10 +132,26 @@ export function createOauthCallbackRouter(
     }
   }
 
-  function successPage(): string {
-    if (!validReturnUrl) return '<h1>Connected — you can close this tab.</h1>';
-    return `<!doctype html><html><head><meta http-equiv="refresh" content="2;url=${validReturnUrl}"></head>
-<body><h1>Connected!</h1><p>Redirecting you back… <a href="${validReturnUrl}">click here</a> if nothing happens.</p></body></html>`;
+  // No interstitial "Connected!" page + timed meta-refresh here on purpose —
+  // that just makes the user wait and watch a flash of gateway-branded HTML
+  // before landing back in the app. A real HTTP redirect goes straight to
+  // validReturnUrl with nothing to look at in between — on EVERY terminal
+  // outcome, not just success (a denied/expired/failed sign-in used to leave
+  // the user stranded on a bare, unbranded gateway page with no way back).
+  // The plain HTML pages below are only for the unconfigured (self-hosted,
+  // no oauthReturnUrl) case, where there's nowhere else to send the browser.
+  const CLOSE_TAB_PAGE = '<h1>Connected — you can close this tab.</h1>';
+
+  /** Terminal-failure response: redirect back with the reason as a query
+   *  param when the app knows where "back" is, else render it in place. */
+  function fail(res: Response, status: number, message: string, errorCode: string): void {
+    if (validReturnUrl) {
+      const url = new URL(validReturnUrl);
+      url.searchParams.set('connector_oauth_error', errorCode);
+      res.redirect(302, url.toString());
+      return;
+    }
+    res.status(status).send(`<h1>${message}</h1>`);
   }
 
   router.get('/oauth/mcp/callback', async (req: Request, res: Response) => {
@@ -145,15 +161,20 @@ export function createOauthCallbackRouter(
 
     const flow = state ? pendingStore.consume(state) : null;
     if (!flow) {
-      res.status(400).send('<h1>This sign-in link expired or was already used.</h1><p>Go back to GetPod and click Connect again.</p>');
+      fail(
+        res,
+        400,
+        'This sign-in link expired or was already used. Go back to GetPod and click Connect again.',
+        'expired_link',
+      );
       return;
     }
     if (providerError) {
-      res.status(400).send(`<h1>Sign-in failed: ${providerError}</h1>`);
+      fail(res, 400, `Sign-in failed: ${providerError}`, providerError);
       return;
     }
     if (!code) {
-      res.status(400).send('<h1>Sign-in failed: no authorization code returned.</h1>');
+      fail(res, 400, 'Sign-in failed: no authorization code returned.', 'missing_code');
       return;
     }
 
@@ -172,9 +193,13 @@ export function createOauthCallbackRouter(
         expiresAtSecretKey(flow.connectorId),
         String(Date.now() + (token.expires_in ?? 3600) * 1000),
       );
-      res.send(successPage());
+      if (validReturnUrl) {
+        res.redirect(302, validReturnUrl);
+        return;
+      }
+      res.send(CLOSE_TAB_PAGE);
     } catch (err) {
-      res.status(502).send(`<h1>Sign-in failed: ${(err as Error).message}</h1>`);
+      fail(res, 502, `Sign-in failed: ${(err as Error).message}`, 'exchange_failed');
     }
   });
 
