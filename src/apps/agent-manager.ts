@@ -107,14 +107,41 @@ export class AgentManager {
     // Claude Code rewrites ~/.claude.json atomically at startup (write temp +
     // rename over the target). Bind-mounting the host file at its real path makes
     // that rename fail with `Device or resource busy` (a mountpoint cannot be
-    // replaced via rename, regardless of ro/rw), so the session cannot persist the
-    // auth state carried by settings.json's env block and falls back to
-    // "Not logged in". Instead we bind-mount the host file to a read-only *seed*
-    // path (host file never mutated) and copy it into a writable ~/.claude.json at
-    // container start (see `command` below) so the atomic rewrite succeeds. The
-    // copy targets the literal homeDir: container-start HOME is `/`, but the
+    // replaced via rename, regardless of ro/rw), so the container needs a writable
+    // *copy* rather than a mount: we stage a gateway-owned seed and copy out of it
+    // at container start (see `command` below).
+    //
+    // The seed is a DIRECTORY, never the host file itself. A Docker *file* bind
+    // mount pins an inode rather than a path, so an atomic rewrite on the host
+    // allocates a new inode and leaves the container reading the old, unlinked one
+    // for the rest of its life — the bug that made container agents answer
+    // "Not logged in · Please run /login" after any host settings change.
+    // Directory mounts resolve entries per access, so re-staging the copy here is
+    // enough for the next (re)start to pick it up; no container recreate needed.
+    //
+    // The copy targets the literal homeDir: container-start HOME is `/`, but the
     // gateway runs turns with `docker exec -e HOME=<homeDir>` (see process.ts).
-    const claudeJsonSeed = `${homeDir}/.claude.json.seed`;
+    const containerSeedDir = `${homeDir}/.claude-seed`;
+    const seedDir = path.join(this.agentsDir, agentName, '.claude-seed');
+    fs.mkdirSync(seedDir, { recursive: true });
+    fs.chmodSync(seedDir, 0o700); // mkdir mode is umask-dependent; this is not
+    const hostClaudeJson = path.join(homeDir, '.claude.json');
+    const seededClaudeJson = fs.existsSync(hostClaudeJson);
+    if (seededClaudeJson) {
+      const dest = path.join(seedDir, '.claude.json');
+      fs.copyFileSync(hostClaudeJson, dest);
+      fs.chmodSync(dest, 0o600);
+    }
+    const seedSource = fs.realpathSync(seedDir);
+
+    // ~/.claude/settings.json is deliberately NOT mounted. On the host it exists
+    // to carry credentials, and mounting that file is exactly what broke container
+    // agents (stale inode after an atomic host rewrite). Credentials now reach the
+    // container as `docker exec -e` env resolved per turn from the live host file
+    // (see resolveContainerAuthEnv in session/process.ts), which also lets an
+    // already-broken container recover without being recreated. The file's
+    // remaining keys — plugins, marketplaces, statusLine — are host-scoped and
+    // point at paths that were never mounted into the container anyway.
 
     // Mount the agent's media directory into the container at the SAME absolute
     // path as the host. The gateway hands the agent uploaded-image paths (and the
@@ -142,13 +169,20 @@ export class AgentManager {
       `    && chown -R ${uid}:${uid} ${homeDir}`,
     ].join('\n') + '\n');
 
+    // Seed a writable ~/.claude.json from the read-only seed mount, then idle.
+    // The copy re-runs on every (re)start, and because the seed is a directory
+    // mount it resolves the *current* staged file rather than a pinned inode.
+    // Steps are `;`-separated, not `&&`: a failed copy must surface on stderr
+    // (visible in `docker logs`) without preventing the container from starting.
+    // `exec` keeps the container's PID 1 as sleep.
+    const seedCopy = seededClaudeJson
+      ? `cp ${containerSeedDir}/.claude.json ${homeDir}/.claude.json; `
+      : '';
+
     const agentService = {
       build: { context: entry.installPath, dockerfile: 'Dockerfile.agent' },
       user: `${uid}:${uid}`,
-      // Seed a writable ~/.claude.json from the read-only seed mount, then idle.
-      // `cp` overwrites on every (re)start so the container always picks up the
-      // current host auth; `exec` keeps the container's PID 1 as sleep.
-      command: `sh -c 'cp ${claudeJsonSeed} ${homeDir}/.claude.json && exec sleep infinity'`,
+      command: `sh -c '${seedCopy}exec sleep infinity'`,
       container_name: `${entry.name}-agent`,
       restart: 'unless-stopped',
       cap_drop: ['ALL'],
@@ -158,8 +192,7 @@ export class AgentManager {
         `${claudeBin}:${claudeBin}:ro`,
         `${nodeBin}:/usr/bin/node:ro`,
         `${npmRoot}:${npmRoot}:ro`,
-        `${homeDir}/.claude.json:${claudeJsonSeed}:ro`,
-        `${homeDir}/.claude/settings.json:${homeDir}/.claude/settings.json:ro`,
+        `${seedSource}:${containerSeedDir}:ro`,
         `${workspaceDir}:/workspace`,
         `${agentMediaSource}:${agentMediaDir}:rw`,
       ],

@@ -22,6 +22,18 @@ import {
 
 export const MAX_HISTORY_MESSAGES = 50;
 
+/**
+ * Claude credential / API-routing env vars forwarded from the host into an
+ * app-agent container. Deliberately narrow — auth and endpoint only. Model and
+ * behaviour settings come from the agent's own config, not the host env.
+ */
+export const CONTAINER_AUTH_ENV_KEYS = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+] as const;
+
 // The MCP reply tools that deliver an agent's user-facing message to a channel.
 // Their text lives in the tool_use `input.text`, not in an assistant text block,
 // so it is never captured by `assistantBuffer` — the reply is delivered to the
@@ -453,6 +465,50 @@ export class SessionProcess extends EventEmitter {
   }
 
   /**
+   * Resolve the Claude credentials handed to an app-agent container this spawn.
+   *
+   * Container agents used to receive their credentials as a read-only bind mount
+   * of the host ~/.claude/settings.json. A Docker *file* bind mount pins an
+   * inode rather than a path, and Claude Code rewrites that file by atomic
+   * rename — so the first host settings change left every long-lived container
+   * reading a deleted inode. Claude Code silently ignores a settings.json whose
+   * inode is unlinked, so the agent stayed healthy and answered every real user
+   * "Not logged in · Please run /login" until someone recreated the container.
+   *
+   * Resolving by path here, once per spawn, is immune to that: the container is
+   * handed the current credentials on every turn, and a container already stuck
+   * on a stale mount recovers on its next turn with no restart.
+   *
+   * settings.json wins over the gateway's own environment. That matches Claude
+   * Code, which applies the file's `env` block over whatever it inherited, and
+   * it keeps the live file as the single source of truth — a long-lived gateway
+   * started with an exported token would otherwise pin the container to a
+   * credential that can never be rotated without restarting the service.
+   */
+  private resolveContainerAuthEnv(): Record<string, string> {
+    let fileEnv: Record<string, unknown> = {};
+    try {
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      fileEnv = (parsed?.env as Record<string, unknown>) ?? {};
+    } catch {
+      // No readable user settings — the gateway's own env is then the only source.
+    }
+
+    const resolved: Record<string, string> = {};
+    for (const key of CONTAINER_AUTH_ENV_KEYS) {
+      const value = fileEnv[key] ?? process.env[key];
+      // settings.json is untrusted input: forward only a clean, non-empty
+      // string. A NUL byte throws at spawn, and a newline is never legitimate
+      // in a credential or a base URL.
+      if (typeof value !== 'string' || value.length === 0) continue;
+      if (/[\0\r\n]/.test(value)) continue;
+      resolved[key] = value;
+    }
+    return resolved;
+  }
+
+  /**
    * Read stdio MCP servers from Claude Code's project-scoped config (~/.claude.json).
    * Looks up projects[workspace].mcpServers for the agent's workspace path.
    * Returns empty object if not found or on any error.
@@ -781,7 +837,16 @@ export class SessionProcess extends EventEmitter {
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
     if (process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
-    const dockerEnvFlags = Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+
+    // Credentials are forwarded by NAME only (`-e KEY`, no `=value`), which makes
+    // Docker read the value from this process's own environment (set on the spawn
+    // below). The token therefore never lands on the docker argv, where any local
+    // user could read it out of `ps`.
+    const containerAuthEnv = isAppAgent ? this.resolveContainerAuthEnv() : {};
+    const dockerEnvFlags = [
+      ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+      ...Object.keys(containerAuthEnv).flatMap((k) => ['-e', k]),
+    ];
 
     const spawnArgs = isAppAgent
       ? [
@@ -809,6 +874,7 @@ export class SessionProcess extends EventEmitter {
     const proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
+        ...containerAuthEnv,
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
         CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
