@@ -451,6 +451,18 @@ describe('image share store', () => {
   // MUST run before the CREATE TABLE IF NOT EXISTS, or the store would sit on an
   // empty new table and 404 every share minted before the upgrade.
   describe('migration from a pre-#444 database', () => {
+    let logSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+    });
+
+    const logLines = (): string[] => logSpy.mock.calls.map((c) => String(c[0]));
+
     const seedLegacy = (legacyPath: string, token: string): void => {
       const legacy = new DatabaseSync(legacyPath);
       legacy.exec(`
@@ -610,6 +622,63 @@ describe('image share store', () => {
       } finally {
         raw.close();
       }
+    });
+
+    // A schema migration that changes what the database holds must leave a
+    // trace an operator can find afterwards — "no silent failures" covers the
+    // silent recovery too, not just the silent break.
+    test('both migration paths announce themselves in the log', () => {
+      const renamePath = path.join(baseDir, 'log-rename.db');
+      seedLegacy(renamePath, 'R'.repeat(32));
+      new ShareStore(renamePath).close();
+      expect(logLines()).toContain('[share] renamed legacy image_shares table to file_shares');
+
+      // A fresh database migrates nothing and must stay quiet.
+      logSpy.mockClear();
+      new ShareStore(path.join(baseDir, 'log-fresh.db')).close();
+      expect(logLines().filter((l) => l.startsWith('[share]'))).toEqual([]);
+    });
+
+    test('the rollback fold reports how many rows it moved', () => {
+      const dbPath3 = path.join(baseDir, 'log-fold.db');
+      seedLegacy(dbPath3, 'F'.repeat(32));
+      new ShareStore(dbPath3).close();
+
+      // Downgrade window: the old release recreates its table and mints one row.
+      const old = new DatabaseSync(dbPath3);
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS image_shares (
+          id            TEXT PRIMARY KEY,
+          token_hash    BLOB NOT NULL UNIQUE,
+          agent_id      TEXT NOT NULL,
+          session_id    TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          purpose       TEXT NOT NULL,
+          created_at    INTEGER NOT NULL,
+          expires_at    INTEGER NOT NULL,
+          revoked_at    INTEGER
+        );
+      `);
+      old
+        .prepare(
+          `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'shr_logged',
+          createHash('sha256').update('G'.repeat(32)).digest(),
+          AGENT,
+          SESSION,
+          `${SESSION}/ok.png`,
+          'codex_ref',
+          Date.now(),
+          Date.now() + 600_000,
+        );
+      old.close();
+
+      logSpy.mockClear();
+      new ShareStore(dbPath3).close();
+      expect(logLines()).toContain('[share] migrated legacy image_shares: rows=1 folded=1 skipped=0');
     });
   });
 });

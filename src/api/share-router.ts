@@ -62,9 +62,10 @@ function publicNotFound(res: Response): void {
   res.status(404).type('text/plain').send('Not Found');
 }
 
-/** RFC 5987 `attr-char`: everything encodeURIComponent leaves alone EXCEPT
- *  `!`, `'`, `(`, `)` and `*`, which are not attr-char and must be escaped. */
-function rfc5987(value: string): string {
+/** RFC 8187 (which obsoletes RFC 5987) `attr-char`: everything
+ *  encodeURIComponent leaves alone EXCEPT `!`, `'`, `(`, `)` and `*`, which are
+ *  not attr-char and must be escaped. */
+function rfc8187(value: string): string {
   return encodeURIComponent(value).replace(
     /['()*!]/g,
     (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
@@ -116,7 +117,7 @@ export function attachmentDisposition(basename: string, mime: string): string {
   // cannot ASCII-fold to nothing; the `|| 'download'` is kept as a guard on the
   // sanitiser rather than a reachable branch.
   const asciiStem = stem.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim() || 'download';
-  return `attachment; filename="${asciiStem}${suffix}"; filename*=UTF-8''${rfc5987(`${stem}${suffix}`)}`;
+  return `attachment; filename="${asciiStem}${suffix}"; filename*=UTF-8''${rfc8187(`${stem}${suffix}`)}`;
 }
 
 export type PublicShareRouterOpts = {

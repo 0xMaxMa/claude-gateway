@@ -672,7 +672,7 @@ describe('file share router', () => {
     });
 
     describe('Content-Disposition filename safety', () => {
-      const rfc5987 = (v: string) =>
+      const rfc8187 = (v: string) =>
         encodeURIComponent(v).replace(/['()*!]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 
       test('a hostile basename still produces one well-formed header line', async () => {
@@ -687,12 +687,12 @@ describe('file share router', () => {
         expect(cd).not.toMatch(/[\r\n]/);
         expect(res.headers['x-injected']).toBeUndefined();
         // Quoted fallback: printable ASCII only, minus " and \.
-        expect(cd).toBe(`attachment; filename="a_b_c__X-Injected: 1 _.pdf"; filename*=UTF-8''${rfc5987(hostile)}`);
+        expect(cd).toBe(`attachment; filename="a_b_c__X-Injected: 1 _.pdf"; filename*=UTF-8''${rfc8187(hostile)}`);
       });
 
       test('attachmentDisposition escapes the non-attr-char set and caps the length', () => {
         const PDF_MIME = 'application/pdf';
-        // encodeURIComponent leaves !'()* alone; they are not RFC 5987 attr-char.
+        // encodeURIComponent leaves !'()* alone; they are not RFC 8187 attr-char.
         expect(attachmentDisposition(`x!'()*.pdf`, PDF_MIME)).toBe(
           `attachment; filename="x!'()*.pdf"; filename*=UTF-8''x%21%27%28%29%2A.pdf`,
         );

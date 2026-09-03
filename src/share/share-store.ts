@@ -269,6 +269,7 @@ export class ShareStore {
       // RENAME TO carries indexes over under their OLD names, so drop the old
       // one rather than let CREATE INDEX IF NOT EXISTS add a duplicate.
       this.db.exec('DROP INDEX IF EXISTS image_shares_expiry');
+      console.log('[share] renamed legacy image_shares table to file_shares');
     }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS file_shares (
@@ -324,14 +325,27 @@ export class ShareStore {
     // migration is idempotent across a rollback rather than one-shot. Runs
     // after the ALTER above so `allow_kind` is guaranteed to exist.
     if (hasTable('image_shares')) {
+      const legacy = this.db.prepare(`SELECT COUNT(*) AS n FROM image_shares`).get() as { n: number };
+      const before = this.db.prepare(`SELECT COUNT(*) AS n FROM file_shares`).get() as { n: number };
       this.db.exec(`
         INSERT OR IGNORE INTO file_shares
           (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, revoked_at, allow_kind)
         SELECT id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, revoked_at, 'image'
           FROM image_shares
       `);
+      const after = this.db.prepare(`SELECT COUNT(*) AS n FROM file_shares`).get() as { n: number };
       // DROP TABLE takes the table's indexes with it.
       this.db.exec('DROP TABLE image_shares');
+      // Say so. Reaching here at all means this deployment was rolled back
+      // across #444 and rolled forward again — rare, and worth a line in the
+      // log rather than a database that quietly changed shape. `skipped` is
+      // non-zero only when OR IGNORE hit the token_hash UNIQUE, i.e. the same
+      // token exists in both tables; the file_shares row wins because it is the
+      // one this build minted. No token or path is logged (§19).
+      const folded = after.n - before.n;
+      console.log(
+        `[share] migrated legacy image_shares: rows=${legacy.n} folded=${folded} skipped=${legacy.n - folded}`,
+      );
     }
   }
 
