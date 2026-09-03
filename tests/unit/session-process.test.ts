@@ -2842,8 +2842,317 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
   });
 
   // --------------------------------------------------------------------------
-  // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`
-  // event (NOT on stderr). It must still be captured into lastStderrLine so the
+  // U-SP-AUTH1/2/3: app-agent containers get their Claude credentials as
+  // `docker exec` env resolved from the live host settings.json each spawn.
+  //
+  // Regression: credentials used to reach the container as a read-only bind
+  // mount of ~/.claude/settings.json. A Docker *file* bind mount pins an inode,
+  // not a path, and Claude Code rewrites that file by atomic rename — so the
+  // first host settings change left every long-lived container reading a
+  // deleted inode. Claude Code silently ignores a settings.json whose inode is
+  // unlinked, so the agent stayed healthy and answered every real user
+  // "Not logged in · Please run /login".
+  // --------------------------------------------------------------------------
+  function withFakeAuthHome(env: Record<string, unknown>, fn: () => Promise<void>): Promise<void> {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-authhome-'));
+    fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(fakeHome, '.claude', 'settings.json'), JSON.stringify({ env }));
+    mockHomeDir = fakeHome;
+    return fn().finally(() => fs.rmSync(fakeHome, { recursive: true, force: true }));
+  }
+
+  it('U-SP-AUTH1: app-agent forwards host settings.json credentials into the container', async () => {
+    await withFakeAuthHome(
+      { CLAUDE_CODE_OAUTH_TOKEN: 'tok-from-settings', ANTHROPIC_BASE_URL: 'https://example.invalid' },
+      async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth1', 'telegram', appAgent, gatewayConfig, sessionStore);
+        await sp.start();
+
+        const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+
+        // Passed by NAME only, so Docker inherits the value from the gateway's env.
+        expect(spawnArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(spawnArgs).toContain('ANTHROPIC_BASE_URL');
+        expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('tok-from-settings');
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://example.invalid');
+
+        await sp.stop();
+      },
+    );
+  });
+
+  it('U-SP-AUTH2: the credential value never appears on the docker argv', async () => {
+    await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'super-secret-token' }, async () => {
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+      });
+      const sp = makeSp('chat:auth2', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+
+      // `-e KEY=value` would expose the token to any local user via `ps`.
+      const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(spawnArgs.some((a) => a.includes('super-secret-token'))).toBe(false);
+      // Anchor the assertion above: the token must be genuinely forwarded (via
+      // the process env docker inherits), just never written onto argv. Without
+      // this, "not on argv" also holds when nothing is forwarded at all — the
+      // pre-fix behaviour — and the spec would pass on the very bug it guards.
+      expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('super-secret-token');
+
+      await sp.stop();
+    });
+  });
+
+  it('U-SP-AUTH3: a malformed credential in settings.json is not forwarded', async () => {
+    await withFakeAuthHome(
+      {
+        CLAUDE_CODE_OAUTH_TOKEN: '',
+        ANTHROPIC_API_KEY: 42,
+        ANTHROPIC_AUTH_TOKEN: 'bad\nvalue',
+        // A well-formed value alongside the bad ones, to anchor the negative
+        // assertions below: without it, "not forwarded" also holds when nothing
+        // is forwarded at all — the pre-fix behaviour — and this spec would pass
+        // on the very bug it guards.
+        ANTHROPIC_BASE_URL: 'https://example.invalid',
+      },
+      async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth3', 'telegram', appAgent, gatewayConfig, sessionStore);
+        await sp.start();
+
+        const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+          string,
+          string[],
+          { env: Record<string, string> },
+        ];
+        // Empty, non-string and newline-bearing values are all rejected at the boundary.
+        expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
+        expect(spawnArgs).not.toContain('ANTHROPIC_AUTH_TOKEN');
+        // ...while the clean value in the same file did make it through, proving
+        // the resolver ran and rejected only the malformed keys.
+        expect(spawnArgs).toContain('ANTHROPIC_BASE_URL');
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://example.invalid');
+
+        await sp.stop();
+      },
+    );
+  });
+
+  it('U-SP-AUTH4: a host session gets no container credential flags', async () => {
+    await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'tok-from-settings' }, async () => {
+      const sp = makeSp('chat:auth4', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      // Non-app-agents run claude directly; the credential plumbing is container-only.
+      const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+      expect(spawnBin).not.toBe('docker');
+      expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+      await sp.stop();
+
+      // Anchor: the same settings.json DOES produce the flag for an app-agent, so
+      // the assertion above is about the host path rather than about nothing being
+      // forwarded anywhere — which is what the pre-fix code did, and would have
+      // passed this spec.
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+      });
+      const spContainer = makeSp('chat:auth4b', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await spContainer.start();
+      const [, containerArgs] = spawnMock.mock.calls[1] as [string, string[]];
+      expect(containerArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+
+      await spContainer.stop();
+    });
+  });
+
+  it('U-SP-AUTH5: settings.json wins over the gateway env, which is only a fallback', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://from-gateway-env.invalid';
+    process.env.ANTHROPIC_AUTH_TOKEN = 'tok-from-gateway-env';
+    try {
+      // The file carries the base URL but not the auth token.
+      await withFakeAuthHome({ ANTHROPIC_BASE_URL: 'https://from-settings.invalid' }, async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth5', 'telegram', appAgent, gatewayConfig, sessionStore);
+        await sp.start();
+
+        const [, , spawnOpts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+        // The live file is the source of truth, so rotating it takes effect without
+        // restarting a long-lived gateway that was started with an exported value.
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://from-settings.invalid');
+        // Keys the file does not carry still fall through to the gateway env.
+        expect(spawnOpts.env.ANTHROPIC_AUTH_TOKEN).toBe('tok-from-gateway-env');
+
+        await sp.stop();
+      });
+    } finally {
+      delete process.env.ANTHROPIC_BASE_URL;
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+    }
+  });
+
+  it('U-SP-AUTH6: a credential in settings.json blocks the env from adding a second one', async () => {
+    // Credentials resolve as a group. If the file proves an identity, the
+    // gateway env must not contribute a *different* one — a file OAuth token
+    // forwarded alongside an env ANTHROPIC_API_KEY hands the container two
+    // identities and lets the CLI silently pick between them. A base URL only
+    // selects an endpoint, so it still falls through independently.
+    process.env.ANTHROPIC_API_KEY = 'key-from-gateway-env';
+    process.env.ANTHROPIC_BASE_URL = 'https://from-gateway-env.invalid';
+    try {
+      await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'token-from-settings' }, async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth6', 'telegram', appAgent, gatewayConfig, sessionStore);
+        await sp.start();
+
+        const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+          string,
+          string[],
+          { env: Record<string, string> },
+        ];
+        expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('token-from-settings');
+        // The competing env credential is neither forwarded nor announced to docker.
+        expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
+        // Endpoint routing is not an identity, so it still falls through.
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://from-gateway-env.invalid');
+        expect(spawnArgs).toContain('ANTHROPIC_BASE_URL');
+
+        await sp.stop();
+      });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_BASE_URL;
+    }
+  });
+
+  it('U-SP-AUTH7: the Telegram bot token is forwarded by name, never on the docker argv', async () => {
+    // Same threat model as the Claude credential: /proc/<pid>/cmdline is
+    // world-readable on a stock kernel while /proc/<pid>/environ is owner-only,
+    // so a `-e KEY=value` here would expose a bot-account bearer token to every
+    // local user via `ps`.
+    await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }, async () => {
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+        telegram: { botToken: 'bot-secret-12345' },
+      });
+      const sp = makeSp('chat:auth7', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(spawnArgs.some((a) => a.includes('bot-secret-12345'))).toBe(false);
+      // Anchor: announced by name and present in the env docker inherits, so the
+      // container still receives it.
+      expect(spawnArgs).toContain('TELEGRAM_BOT_TOKEN');
+      expect(spawnOpts.env.TELEGRAM_BOT_TOKEN).toBe('bot-secret-12345');
+
+      await sp.stop();
+    });
+  });
+
+  it('U-SP-AUTH8: a container agent with no resolvable credential warns instead of failing silently', async () => {
+    // The bug this path exists to fix presented as a container that looked
+    // healthy while telling real users "Not logged in". A malformed token that
+    // silently forwards nothing would reproduce exactly that, so it must be
+    // announced. Presence-not-validity means the empty token still owns the
+    // group and blocks the env from substituting a different identity.
+    process.env.ANTHROPIC_API_KEY = 'key-from-gateway-env';
+    try {
+      await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: '' }, async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth8', 'telegram', appAgent, gatewayConfig, sessionStore);
+        const warn = jest.spyOn((sp as unknown as { logger: { warn: (...a: unknown[]) => void } }).logger, 'warn');
+        await sp.start();
+
+        const [, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+        expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
+
+        const warned = warn.mock.calls.find((c) => String(c[0]).includes('No Claude credential'));
+        expect(warned).toBeDefined();
+        // The reason is reported without ever logging the value itself.
+        expect(JSON.stringify(warned?.[1])).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(JSON.stringify(warned?.[1])).toContain('empty');
+
+        await sp.stop();
+      });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+
+  it('U-SP-AUTH9: credentials are read from CLAUDE_CONFIG_DIR when the operator relocated it', async () => {
+    // The gateway already honours CLAUDE_CONFIG_DIR everywhere else it reads
+    // settings.json (model catalog, image module). A resolver that hardcoded
+    // ~/.claude would read a path that does not exist for such an operator and
+    // forward no credential at all — the exact "Not logged in" failure this
+    // forwarding was added to prevent, just reached from a different direction.
+    const relocated = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-cfgdir-'));
+    fs.writeFileSync(
+      path.join(relocated, 'settings.json'),
+      JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok-from-relocated-dir' } }),
+    );
+    // A home that deliberately holds NO .claude/settings.json, so a pass can
+    // only come from the relocated directory.
+    const bareHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-barehome-'));
+    mockHomeDir = bareHome;
+    process.env.CLAUDE_CONFIG_DIR = relocated;
+    try {
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+      });
+      const sp = makeSp('chat:auth9', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [string, string[], { env: Record<string, string> }];
+      expect(spawnArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+      expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('tok-from-relocated-dir');
+
+      await sp.stop();
+    } finally {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      fs.rmSync(relocated, { recursive: true, force: true });
+      fs.rmSync(bareHome, { recursive: true, force: true });
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`  // event (NOT on stderr). It must still be captured into lastStderrLine so the
   // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
   // --------------------------------------------------------------------------
   it('U-SP-BIN5: captures a spawn ENOENT error into lastStderrLine', async () => {

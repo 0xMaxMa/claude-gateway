@@ -5,6 +5,24 @@ import yaml from 'js-yaml';
 import { AgentManager } from '../../../src/apps/agent-manager';
 import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 
+// ── os.homedir mock (set per-test) ────────────────────────────────────────────
+// injectAgentService() reads and stages the host ~/.claude.json, so the suite
+// points HOME at a fixture dir: deterministic on a bare CI box, and it never
+// touches the real user's home. Both specifiers are mocked because the source
+// imports 'node:os' while some deps import bare 'os'.
+// `var`, not `let`: agent-manager.ts calls os.homedir() at module scope, which
+// runs before a `let` in this file would leave its temporal dead zone.
+// eslint-disable-next-line no-var
+var mockHomeDir: string | null = null;
+jest.mock('node:os', () => {
+  const real = jest.requireActual<typeof os>('node:os');
+  return { ...real, homedir: () => mockHomeDir ?? real.homedir() };
+});
+jest.mock('os', () => {
+  const real = jest.requireActual<typeof os>('node:os');
+  return { ...real, homedir: () => mockHomeDir ?? real.homedir() };
+});
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
@@ -71,10 +89,15 @@ describe('AgentManager', () => {
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
+    // Fixture home: injectAgentService() stages ~/.claude.json into the seed dir.
+    mockHomeDir = path.join(tmpDir, 'home');
+    fs.mkdirSync(path.join(mockHomeDir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(mockHomeDir, '.claude.json'), JSON.stringify({ projects: {} }), 'utf-8');
     manager = makeManager(tmpDir);
   });
 
   afterEach(() => {
+    mockHomeDir = null;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -136,10 +159,62 @@ describe('AgentManager', () => {
       expect(volumes).toBeDefined();
       expect(volumes.some((v) => v.includes('claude') && v.endsWith(':ro'))).toBe(true);
       expect(volumes.some((v) => v.endsWith(':/workspace'))).toBe(true);
-      // ~/.claude.json is mounted read-only to a *seed* path (copied to a writable
-      // file at container start — see the regression test below), not at its real path.
-      expect(volumes.some((v) => v.includes('.claude.json.seed') && v.endsWith(':ro'))).toBe(true);
-      expect(volumes.some((v) => v.includes('settings.json') && v.endsWith(':ro'))).toBe(true);
+      // ~/.claude.json reaches the container through a read-only seed *directory*
+      // (copied to a writable file at container start — see the regression tests
+      // below), never as a mount of the host file itself.
+      expect(volumes.some((v) => v.includes('.claude-seed') && v.endsWith(':ro'))).toBe(true);
+    });
+
+    it('never bind-mounts an individual host Claude config file (regression: stale inode => "Not logged in")', () => {
+      // A Docker *file* bind mount pins an inode, not a path. Claude Code rewrites
+      // ~/.claude/settings.json and ~/.claude.json by atomic rename, which
+      // allocates a new inode on the host and unlinks the old one — leaving a
+      // long-lived container reading a deleted inode for the rest of its life.
+      // Claude Code silently ignores a settings.json whose inode is unlinked, so
+      // every app-agent turn returned "Not logged in · Please run /login" with no
+      // crash and nothing in the logs. Mount sources must therefore be directories.
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+
+      const composePath = path.join(entry.installPath, 'docker-compose.yml');
+      const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
+      const services = composed['services'] as Record<string, unknown>;
+      const agentSvc = services['agent'] as Record<string, unknown>;
+      const volumes = agentSvc['volumes'] as string[];
+      const home = os.homedir();
+
+      const sources = volumes.map((v) => v.split(':')[0]);
+      expect(sources).not.toContain(path.join(home, '.claude', 'settings.json'));
+      expect(sources).not.toContain(path.join(home, '.claude.json'));
+    });
+
+    it('stages the Claude config seed as a private directory the gateway owns', () => {
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+
+      const composePath = path.join(entry.installPath, 'docker-compose.yml');
+      const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
+      const services = composed['services'] as Record<string, unknown>;
+      const agentSvc = services['agent'] as Record<string, unknown>;
+      const volumes = agentSvc['volumes'] as string[];
+      const home = os.homedir();
+
+      // Staged next to the agent's media dir, outside the app's install path so an
+      // app service's own compose can never mount it.
+      const seedDir = path.join(tmpDir, 'agents', 'my-agent', '.claude-seed');
+      expect(fs.statSync(seedDir).isDirectory()).toBe(true);
+      expect(fs.statSync(seedDir).mode & 0o777).toBe(0o700);
+
+      // The host ~/.claude.json is copied in, not mounted, and stays private.
+      const staged = path.join(seedDir, '.claude.json');
+      expect(fs.readFileSync(staged, 'utf-8')).toBe(fs.readFileSync(path.join(home, '.claude.json'), 'utf-8'));
+      expect(fs.statSync(staged).mode & 0o777).toBe(0o600);
+
+      // Mounted read-only as a directory, so Docker resolves entries per access.
+      const seedMount = volumes.find((v) => v.split(':')[1] === `${home}/.claude-seed`);
+      expect(seedMount).toBeDefined();
+      expect(seedMount!.endsWith(':ro')).toBe(true);
+      expect(seedMount!.split(':')[0]).toBe(fs.realpathSync(seedDir));
     });
 
     it('seeds a writable ~/.claude.json via copy instead of a read-only mount at its real path (regression: app-agent "Not logged in")', () => {
@@ -147,8 +222,8 @@ describe('AgentManager', () => {
       // rename over the target). Bind-mounting the host file at its real container
       // path makes that rename fail with EBUSY, so auth state is never persisted
       // and every app-agent turn returns "Not logged in · Please run /login".
-      // Fix: mount the host file read-only to a seed path (host file untouched) and
-      // copy it into a writable ~/.claude.json at container start.
+      // Fix: stage the host file in a read-only seed dir and copy it into a
+      // writable ~/.claude.json at container start.
       const entry = makeEntry(tmpDir);
       manager.injectAgentService(entry);
 
@@ -164,15 +239,29 @@ describe('AgentManager', () => {
       const realPathMount = volumes.find((v) => v.split(':')[1] === `${home}/.claude.json`);
       expect(realPathMount).toBeUndefined();
 
-      // It is mounted read-only to a seed path, sourced from the host file.
-      const seedMount = volumes.find((v) => v.split(':')[1] === `${home}/.claude.json.seed`);
-      expect(seedMount).toBeDefined();
-      expect(seedMount!.endsWith(':ro')).toBe(true);
-      expect(seedMount!.split(':')[0]).toBe(`${home}/.claude.json`);
-
       // The container copies the seed into a writable ~/.claude.json at start.
+      // Paths are quoted: homeDir is host-derived, and an unquoted path with a
+      // space would split into extra `cp` operands and land the config elsewhere.
       const command = agentSvc['command'] as string;
-      expect(command).toContain(`cp ${home}/.claude.json.seed ${home}/.claude.json`);
+      expect(command).toContain(`cp "${home}/.claude-seed/.claude.json" "${home}/.claude.json"`);
+      // `;` not `&&`: a failed copy must not stop the container from starting.
+      expect(command).toContain('; exec sleep infinity');
+    });
+
+    it('omits the seed copy when the host has no ~/.claude.json', () => {
+      fs.rmSync(path.join(mockHomeDir!, '.claude.json'));
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+
+      const composePath = path.join(entry.installPath, 'docker-compose.yml');
+      const composed = yaml.load(fs.readFileSync(composePath, 'utf-8')) as Record<string, unknown>;
+      const services = composed['services'] as Record<string, unknown>;
+      const agentSvc = services['agent'] as Record<string, unknown>;
+
+      // No dangling `cp` of a file that does not exist — the container still idles.
+      const command = agentSvc['command'] as string;
+      expect(command).not.toContain('cp ');
+      expect(command).toContain('sleep infinity');
     });
 
     it('mounts the agent media dir at the identical host path (:rw) and pre-creates it', () => {
@@ -358,6 +447,57 @@ describe('AgentManager', () => {
       const workspaceLink = path.join(tmpDir, 'agents', 'my-agent');
       expect(fs.existsSync(workspaceLink)).toBe(false);
     });
+
+    it('re-stages the Claude config seed, so a gateway restart refreshes it', async () => {
+      // reconcileAgents() calls upsertAgent for every running app-agent at gateway
+      // start. Staging only from injectAgentService would pin the seed to the last
+      // install/update, so a host-side `claude /login` could stay invisible to
+      // containers indefinitely.
+      const entry = makeEntry(tmpDir);
+      await manager.upsertAgent(entry);
+
+      const seedFile = path.join(tmpDir, 'agents', 'my-agent', '.claude-seed', '.claude.json');
+      expect(fs.existsSync(seedFile)).toBe(true);
+
+      // Rewrite the host file the way Claude Code does — atomic rename, new inode.
+      const hostClaudeJson = path.join(os.homedir(), '.claude.json');
+      const tmpHost = `${hostClaudeJson}.tmp`;
+      fs.writeFileSync(tmpHost, JSON.stringify({ marker: 'rotated' }), 'utf-8');
+      fs.renameSync(tmpHost, hostClaudeJson);
+
+      await manager.upsertAgent(entry);
+
+      expect(JSON.parse(fs.readFileSync(seedFile, 'utf-8'))).toEqual({ marker: 'rotated' });
+      // Not world-readable: it is a copy of the host's Claude config.
+      expect(fs.statSync(seedFile).mode & 0o077).toBe(0);
+    });
+
+    it('stages the seed atomically, leaving no partial file when the copy fails', async () => {
+      // A container copies this file in its start command, which can run while
+      // the gateway is re-staging. Writing in place would let it read a
+      // half-written config; write-then-rename means it sees the old file or
+      // the new one. A failed copy must therefore leave the previous seed
+      // intact and no temp file behind.
+      const entry = makeEntry(tmpDir);
+      await manager.upsertAgent(entry);
+
+      const seedDir = path.join(tmpDir, 'agents', 'my-agent', '.claude-seed');
+      const seedFile = path.join(seedDir, '.claude.json');
+      const before = fs.readFileSync(seedFile, 'utf-8');
+
+      // Make the copy fail for real rather than mocking it: a directory where
+      // the host config should be passes existsSync and then throws EISDIR.
+      const hostClaudeJson = path.join(os.homedir(), '.claude.json');
+      fs.rmSync(hostClaudeJson);
+      fs.mkdirSync(hostClaudeJson);
+
+      // upsertAgent swallows a staging failure by design — the point is what it
+      // leaves on disk.
+      await manager.upsertAgent(entry);
+
+      expect(fs.readFileSync(seedFile, 'utf-8')).toBe(before);
+      expect(fs.readdirSync(seedDir).filter((f) => f.includes('.tmp.'))).toEqual([]);
+    });
   });
 
   // ─── deleteAgent() ────────────────────────────────────────────────────────
@@ -375,6 +515,28 @@ describe('AgentManager', () => {
       // Workspace symlink is removed but agent dir (and sessions) are kept
       expect(fs.existsSync(workspaceLink)).toBe(false);
       expect(fs.existsSync(agentDir)).toBe(true);
+    });
+
+    it('drops the Claude config seed on delete but keeps session history', async () => {
+      // The seed is a copy of the host ~/.claude.json, re-staged from the host on
+      // every install/update. It is derived data, so a removed app must not leave
+      // a copy of the host's Claude config behind — unlike sessions, which are
+      // kept so a reinstall resumes the same conversations.
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+      await manager.upsertAgent(entry);
+
+      const agentDir = path.join(tmpDir, 'agents', 'my-agent');
+      const seedDir = path.join(agentDir, '.claude-seed');
+      const sessions = path.join(agentDir, 'sessions');
+      fs.mkdirSync(sessions, { recursive: true });
+      fs.writeFileSync(path.join(sessions, 'a.json'), '{}', 'utf-8');
+      expect(fs.existsSync(path.join(seedDir, '.claude.json'))).toBe(true);
+
+      await manager.deleteAgent(entry);
+
+      expect(fs.existsSync(seedDir)).toBe(false);
+      expect(fs.existsSync(path.join(sessions, 'a.json'))).toBe(true);
     });
 
     it('removes the config.json entry', async () => {

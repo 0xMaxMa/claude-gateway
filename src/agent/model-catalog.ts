@@ -16,9 +16,7 @@
  * `mcp/`. Keep the two in step.
  */
 
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import { claudeSettingsEnv } from '../config/claude-settings';
 import type { ModelConfig } from '../types';
 
 /** A stale catalog beats a hung picker — the fetch sits in front of a UI action. */
@@ -87,12 +85,10 @@ let settingsEnvFetchedAt = 0;
 
 function settingsEnv(key: string, now: number = Date.now()): string {
   if (settingsEnvCache === undefined || now - settingsEnvFetchedAt >= CATALOG_TTL_MS) {
-    try {
-      const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-      settingsEnvCache = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'))?.env ?? null;
-    } catch {
-      settingsEnvCache = null;
-    }
+    // Locating and parsing the file is shared with the other readers of it (see
+    // config/claude-settings), so CLAUDE_CONFIG_DIR is honoured identically
+    // everywhere. Only the TTL cache below is specific to the catalog.
+    settingsEnvCache = claudeSettingsEnv();
     settingsEnvFetchedAt = now;
   }
   const v = settingsEnvCache?.[key];
