@@ -396,7 +396,140 @@ services:
     });
   });
 
-  // ── DELETE /api/v1/apps/:name ──────────────────────────────────────────
+  // ── Boot-restore state on the read routes (#446) ────────────────────────
+
+  // A boot restore deliberately suppresses status reconciliation while it owns
+  // an app (installer.ts:1439), and the apps it restores are exactly those
+  // stored as `running` — so mid-rebuild both read routes reported a flat
+  // `running` for an app with no containers behind it, indistinguishable from
+  // one that is genuinely serving. They now carry `restoring: true` alongside
+  // the unchanged status. These tests drive a REAL restore and read the routes
+  // while `compose up` is parked, rather than reaching into the private set.
+  describe('boot restore state (#446)', () => {
+    /** A router over an installer whose `compose up` parks until released. */
+    function makeParkedRestore(): {
+      api: express.Application;
+      installer: AppInstaller;
+      /** Resolves once `compose up` has actually been entered. */
+      upStarted: Promise<void>;
+      release: () => void;
+    } {
+      let release!: () => void;
+      const parked = new Promise<void>((r) => { release = r; });
+      let signalUp!: () => void;
+      const upStarted = new Promise<void>((r) => { signalUp = r; });
+
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        if (args.includes('up')) {
+          signalUp();
+          await parked;
+        }
+        // Empty output throughout: no images to probe, and an empty `ps` maps to
+        // `stopped` — which is precisely what the suppression must keep the read
+        // routes from reporting while the restore is still in flight.
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      const { installer, api } = makeRestoreApi(asyncSpawn);
+      return { api, installer, upStarted, release };
+    }
+
+    /** Router + installer sharing one registry, with `asyncSpawn` driving restore. */
+    function makeRestoreApi(
+      asyncSpawn: (cmd: string, args: string[], opts?: object) => Promise<{ stdout: string; stderr: string; status: number }>,
+    ): { api: express.Application; installer: AppInstaller } {
+      const { callbacks } = makeInstaller(registry);
+      const installer = new AppInstaller(
+        registry,
+        registryClient,
+        callbacks,
+        jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 }) as ConstructorParameters<typeof AppInstaller>[3],
+        makeTmpDir(),
+        undefined,
+        asyncSpawn as ConstructorParameters<typeof AppInstaller>[6],
+      );
+      const api = express();
+      api.use(express.json());
+      api.use('/api', createAppsRouter(registry, installer, registryClient, API_KEYS));
+      return { api, installer };
+    }
+
+    function get(api: express.Application, url: string) {
+      return request(api).get(url).set('Authorization', `Bearer ${READ_KEY.key}`);
+    }
+
+    beforeEach(async () => {
+      await registry.upsert(makeEntry({ name: 'test-app', status: 'running' }));
+    });
+
+    it('marks an in-flight restore on GET /api/v1/apps without altering its status', async () => {
+      const { api, installer, upStarted, release } = makeParkedRestore();
+
+      const restore = installer.restoreRunningApps();
+      await upStarted;
+      const mid = await get(api, '/api/v1/apps');
+      release();
+      await restore;
+
+      expect(mid.status).toBe(200);
+      // The point of the fix: pre-fix this field is undefined and a client sees
+      // a plain `running`, identical to a healthy app.
+      expect(mid.body.apps[0].restoring).toBe(true);
+      expect(mid.body.apps[0].status).toBe('running');
+    });
+
+    it('omits the field entirely once the restore has finished', async () => {
+      const { api, installer, upStarted, release } = makeParkedRestore();
+
+      const restore = installer.restoreRunningApps();
+      await upStarted;
+      release();
+      await restore;
+
+      const after = await get(api, '/api/v1/apps');
+      // Absent, not `false` — same contract as restoreError/restoreFailedAt, so
+      // no existing consumer gains a new always-present key.
+      expect(after.body.apps[0].restoring).toBeUndefined();
+      expect('restoring' in after.body.apps[0]).toBe(false);
+    });
+
+    it('marks it on GET /api/v1/apps/:name too, through the same decorator', async () => {
+      const { api, installer, upStarted, release } = makeParkedRestore();
+
+      const restore = installer.restoreRunningApps();
+      await upStarted;
+      const mid = await get(api, '/api/v1/apps/test-app');
+      release();
+      await restore;
+
+      expect(mid.body.restoring).toBe(true);
+      expect(mid.body.status).toBe('running');
+    });
+
+    it('leaves an app mid-install reporting building, not restoring', async () => {
+      // An install owns the status via a different mechanism; the two must stay
+      // distinguishable rather than both collapsing into "busy".
+      await registry.upsert(makeEntry({ name: 'test-app', status: 'building' }));
+      const res = await get(app, '/api/v1/apps');
+      expect(res.body.apps[0].status).toBe('building');
+      expect(res.body.apps[0].restoring).toBeUndefined();
+    });
+
+    it('reports a failed restore as restoreError with no lingering restoring flag', async () => {
+      const { api, installer } = makeRestoreApi(async (_cmd, args) => {
+        if (args.includes('up')) return { stdout: '', stderr: 'mocked error: up', status: 1 };
+        return { stdout: '', stderr: '', status: 0 };
+      });
+
+      await installer.restoreRunningApps();
+      const res = await get(api, '/api/v1/apps');
+
+      // The in-flight marker is released in restoreRunningApps()'s per-app
+      // `finally`, so the two states are mutually exclusive in the response.
+      expect(res.body.apps[0].restoreError).toBeDefined();
+      expect(res.body.apps[0].restoring).toBeUndefined();
+    });
+  });
 
   describe('DELETE /api/v1/apps/:name', () => {
     it('returns 403 for non-admin key', async () => {

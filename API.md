@@ -3229,14 +3229,15 @@ curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps | jq
 
 > **Live status:** `GET /api/v1/apps` and `GET /api/v1/apps/:name` reconcile the stored status against the live Docker runtime (`docker compose ps`) on read, so a container that crashed, was OOM-killed, was stopped from outside the gateway, or is stuck in a crash-restart loop reports `stopped`/`error` rather than a stale `running`. A `running` container (or one doing a clean/transient restart) → `running`; a container stuck `restarting` after a non-zero exit (crash-loop), an exit with a non-signal non-zero code, or a `dead` container → `error`; no containers, a clean exit, or a container force-killed by an explicit stop (exit 137/SIGKILL or 143/SIGTERM) → `stopped`. If Docker cannot be queried (daemon down, compose file missing) the last stored status is returned unchanged, and an app mid-install (`building`) is not reconciled.
 
-> **Boot restore:** an app whose containers the boot-time restore is still bringing up is **not** reconciled either — its stored status is returned as-is, so a read landing mid-restore cannot see the not-yet-created containers and write `stopped` underneath it. If that restore **failed**, the app reports `error` together with two extra fields, and the stored `running` intent is deliberately left alone so the next boot retries it:
+> **Boot restore:** an app whose containers the boot-time restore is still bringing up is **not** reconciled either — its stored status is returned as-is, so a read landing mid-restore cannot see the not-yet-created containers and write `stopped` underneath it. Because the apps restored are exactly those stored as `running`, that status alone cannot tell a rebuild in progress from an app that is actually serving, so the entry carries `restoring` while the restore is in flight. If that restore **failed**, the app reports `error` together with two further fields, and the stored `running` intent is deliberately left alone so the next boot retries it:
 >
 > | Field | Description |
 > |-------|-------------|
+> | `restoring` | `true` while this process's boot restore is still bringing the app up — its containers may not exist yet, so the reported `status` is the stored intent, not observed state |
 > | `restoreError` | Why this process's boot restore of the app failed (compose error or timeout) |
 > | `restoreFailedAt` | ISO timestamp of that failure |
 >
-> Both are absent unless a restore failed, and are in-memory only — they describe the current gateway process. They clear as soon as the app is observed `running`, or on an explicit start/stop.
+> All three are absent unless they apply (never `false`), and are in-memory only — they describe the current gateway process. `restoring` clears the moment that app's own restore ends, so it never overlaps with `restoreError`. The failure fields clear as soon as the app is observed `running`, or on an explicit start/stop.
 
 **`source` values:** `registry` | `custom` | `local`
 

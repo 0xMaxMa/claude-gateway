@@ -1536,6 +1536,25 @@ export class AppInstaller {
     return this.restoreFailures.get(appName);
   }
 
+  /**
+   * Whether this process's boot restore is currently bringing `appName` up.
+   *
+   * Reads {@link restoringNames} — the same set {@link queryRuntimeStatus}
+   * consults at :1439 — rather than tracking a second copy, so the flag cannot
+   * disagree with the suppression it describes. That suppression is why the
+   * accessor is needed at all: while a restore holds an app, its stored status
+   * is returned unreconciled, and the set restored is exactly the apps stored
+   * as `running` ({@link restoreRunningApps}), so a rebuild that takes minutes
+   * on a cold host reports a flat `running` with no containers behind it. The
+   * apps API pairs this with that status so a client can tell rebuilding from
+   * serving (issue #446); the failed case is {@link getRestoreFailure}.
+   *
+   * In-memory and process-local: never persisted to `apps.json`.
+   */
+  isRestoring(appName: string): boolean {
+    return this.restoringNames.has(appName);
+  }
+
   // ─── Internal install pipeline ────────────────────────────────────────────
 
   private async runInstall(job: JobState, options: InstallOptions): Promise<void> {
