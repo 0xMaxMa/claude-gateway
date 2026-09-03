@@ -47,6 +47,10 @@ function makeInstaller(
   registry: AppsRegistry,
   appsDir?: string,
   spawn?: (cmd: string, args: string[], opts?: object) => { stdout: string; stderr: string; status: number },
+  // Boot restore runs through the async seam, not the sync one, so a test that
+  // drives restoreRunningApps() has to be able to substitute it (#446).
+  // Omitted → the constructor's real default, i.e. unchanged for every caller.
+  asyncSpawn?: (cmd: string, args: string[], opts?: object) => Promise<{ stdout: string; stderr: string; status: number }>,
 ): { installer: AppInstaller; callbacks: InstallerCallbacks } {
   const callbacks: InstallerCallbacks = {
     registerRoutes: jest.fn((_appName: string, _ports: ComposePort[]) => {}),
@@ -60,6 +64,8 @@ function makeInstaller(
     callbacks,
     (spawn ?? jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 })) as ConstructorParameters<typeof AppInstaller>[3],
     appsDir ?? makeTmpDir(),
+    undefined,
+    asyncSpawn as ConstructorParameters<typeof AppInstaller>[6],
   );
   return { installer, callbacks };
 }
@@ -438,16 +444,7 @@ services:
     function makeRestoreApi(
       asyncSpawn: (cmd: string, args: string[], opts?: object) => Promise<{ stdout: string; stderr: string; status: number }>,
     ): { api: express.Application; installer: AppInstaller } {
-      const { callbacks } = makeInstaller(registry);
-      const installer = new AppInstaller(
-        registry,
-        registryClient,
-        callbacks,
-        jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 }) as ConstructorParameters<typeof AppInstaller>[3],
-        makeTmpDir(),
-        undefined,
-        asyncSpawn as ConstructorParameters<typeof AppInstaller>[6],
-      );
+      const { installer } = makeInstaller(registry, undefined, undefined, asyncSpawn);
       const api = express();
       api.use(express.json());
       api.use('/api', createAppsRouter(registry, installer, registryClient, API_KEYS));

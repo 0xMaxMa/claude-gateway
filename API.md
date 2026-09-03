@@ -3237,7 +3237,7 @@ curl -H "X-Api-Key: my-key" http://localhost:10850/api/v1/apps | jq
 > | `restoreError` | Why this process's boot restore of the app failed (compose error or timeout) |
 > | `restoreFailedAt` | ISO timestamp of that failure |
 >
-> All three are absent unless they apply (never `false`), and are in-memory only — they describe the current gateway process. `restoring` clears the moment that app's own restore ends, so it never overlaps with `restoreError`. The failure fields clear as soon as the app is observed `running`, or on an explicit start/stop.
+> All three are absent unless they apply (never `false`), and are in-memory only — they describe the current gateway process. `restoring` clears the moment that app's own restore ends, so a boot's restore surfaces as either in-flight or failed rather than both at once. The failure fields clear as soon as the app is observed `running`, or on an explicit start/stop.
 
 **`source` values:** `registry` | `custom` | `local`
 
