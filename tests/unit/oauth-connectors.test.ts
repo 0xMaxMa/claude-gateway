@@ -1,9 +1,12 @@
 /**
- * 'oauth'-kind connectors (Gmail/Drive/Calendar) — the gateway never does the
- * OAuth dance itself (client_secret lives in getpod-ai's services/api, which
- * runs infra the user never gets shell access to). This just covers the
- * receiving end: POST /oauth/receive stores a pushed access_token, and the
- * ordinary paste-token /connect route correctly refuses 'oauth'-kind ids.
+ * Managed OAuth connectors (github/Gmail/Drive/Calendar) — the gateway never
+ * does the OAuth dance itself (client_secret lives in getpod-ai's services/api,
+ * which runs infra the user never gets shell access to) and has no catalog
+ * entry for any of them (CONNECTOR_CATALOG is empty by default — see
+ * catalog.ts). This covers the receiving end: POST /oauth/receive stores a
+ * pushed access_token + full connector shape as a managed custom connector
+ * (authKind:'oauth', managed:true), reported as source:'built-in' so the web
+ * panel doesn't show a "Custom" badge on something GetPod pushed in.
  */
 
 import express from 'express';
@@ -52,42 +55,72 @@ describe('connectors-router — oauth-kind connectors', () => {
     return cfgPath;
   }
 
-  it('GET /v1/connectors reports github/gmail/google-drive/google-calendar as authKind "oauth"', async () => {
-    const res = await request(makeApp(tmpConfig())).get('/api/v1/connectors').set('X-Api-Key', adminKey);
-    const byId = Object.fromEntries(res.body.connectors.map((c: { id: string; authKind: string }) => [c.id, c.authKind]));
-    expect(byId.github).toBe('oauth');
-    expect(byId.gmail).toBe('oauth');
-    expect(byId['google-drive']).toBe('oauth');
-    expect(byId['google-calendar']).toBe('oauth');
+  /** The shape services/api's real push sends — see internal/vm/connector_push.go. */
+  function pushPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      access_token: 'at-pushed-1',
+      label: 'Gmail',
+      description: 'Search threads, read messages, manage labels, and draft email.',
+      config: {
+        type: 'http',
+        url: 'https://gmailmcp.googleapis.com/mcp/v1',
+        headers: { Authorization: 'Bearer {access_token}' },
+      },
+      sourceUrl: 'https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server',
+      ...overrides,
+    };
+  }
+
+  it('GET /v1/connectors reports a pushed connector as authKind "oauth", source "built-in"', async () => {
+    const app = makeApp(tmpConfig());
+    await request(app).post('/api/v1/connectors/gmail/oauth/receive').set('X-Api-Key', adminKey).send(pushPayload());
+
+    const res = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    const gmail = res.body.connectors.find((c: { id: string }) => c.id === 'gmail');
+    expect(gmail).toMatchObject({ id: 'gmail', authKind: 'oauth', source: 'built-in', connected: true });
   });
 
-  it('POST /connect rejects an oauth-kind connector (not a paste-token flow)', async () => {
+  it('POST /connect 404s for an id with no built-in catalog entry (CONNECTOR_CATALOG is empty by default)', async () => {
     const res = await request(makeApp(tmpConfig()))
       .post('/api/v1/connectors/gmail/connect')
       .set('X-Api-Key', adminKey)
       .send({ token: 'whatever' });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
   });
 
-  it('oauth/receive requires admin', async () => {
+  it('oauth/receive requires admin (checked before any payload validation)', async () => {
     const res = await request(makeApp(tmpConfig()))
       .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', scopedKey)
-      .send({ access_token: 'at-1' });
+      .send(pushPayload());
     expect(res.status).toBe(403);
   });
 
-  it('oauth/receive rejects a non-oauth connector', async () => {
-    // microsoft-365 is auth kind 'none' — github is 'oauth' now too, so it's
-    // no longer a valid non-oauth example here.
-    const res = await request(makeApp(tmpConfig()))
-      .post('/api/v1/connectors/microsoft-365/oauth/receive')
+  it('oauth/receive rejects a config whose placeholders are not exactly {access_token}', async () => {
+    const app = makeApp(tmpConfig());
+
+    const noPlaceholder = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', adminKey)
-      .send({ access_token: 'at-1' });
-    expect(res.status).toBe(400);
+      .send(pushPayload({ config: { type: 'http', url: 'https://example.com' } }));
+    expect(noPlaceholder.status).toBe(400);
+
+    const extraPlaceholder = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(
+        pushPayload({
+          config: {
+            type: 'http',
+            url: 'https://example.com',
+            headers: { Authorization: 'Bearer {access_token}', 'X-Extra': '{something_else}' },
+          },
+        }),
+      );
+    expect(extraPlaceholder.status).toBe(400);
   });
 
-  it('oauth/receive rejects a missing/blank access_token', async () => {
+  it('oauth/receive rejects a missing/blank access_token, or a missing label/config', async () => {
     const app = makeApp(tmpConfig());
     const missing = await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')
@@ -98,30 +131,47 @@ describe('connectors-router — oauth-kind connectors', () => {
     const blank = await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', adminKey)
-      .send({ access_token: '   ' });
+      .send(pushPayload({ access_token: '   ' }));
     expect(blank.status).toBe(400);
+
+    const noLabel = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload({ label: undefined }));
+    expect(noLabel.status).toBe(400);
+
+    const noConfig = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload({ config: undefined }));
+    expect(noConfig.status).toBe(400);
   });
 
-  it('oauth/receive stores the token and marks the connector connected', async () => {
+  it('oauth/receive stores the full shape + secret, marks the connector connected', async () => {
     const cfgPath = tmpConfig();
     const app = makeApp(cfgPath);
 
     const res = await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', adminKey)
-      .send({ access_token: 'at-pushed-1' });
+      .send(pushPayload());
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ id: 'gmail', connected: true });
 
     const { getSecret } = require('../../src/connectors/token-env');
-    expect(getSecret('GMAIL_ACCESS_TOKEN')).toBe('at-pushed-1');
+    expect(getSecret('CUSTOM__gmail__access_token')).toBe('at-pushed-1');
 
     const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     const gmail = list.body.connectors.find((c: { id: string }) => c.id === 'gmail');
     expect(gmail.connected).toBe(true);
 
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    expect(written.gateway.connectors.gmail).toEqual({ secretEnv: 'GMAIL_ACCESS_TOKEN' });
+    expect(written.gateway.customConnectors.gmail).toMatchObject({
+      label: 'Gmail',
+      secretNames: ['access_token'],
+      authKind: 'oauth',
+      managed: true,
+    });
   });
 
   it('oauth/receive restarts sessions using the connector across every tracked AgentRunner', async () => {
@@ -133,23 +183,23 @@ describe('connectors-router — oauth-kind connectors', () => {
     const res = await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', adminKey)
-      .send({ access_token: 'at-2' });
+      .send(pushPayload());
 
     expect(res.status).toBe(200);
     expect(restartSessionsUsingConnector).toHaveBeenCalledWith('gmail');
   });
 
-  it('disconnect clears the secret for an oauth-kind connector', async () => {
+  it('disconnect clears the secret for a managed oauth connector via the unified DELETE route', async () => {
     const app = makeApp(tmpConfig());
     await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')
       .set('X-Api-Key', adminKey)
-      .send({ access_token: 'at-3' });
+      .send(pushPayload());
 
     const del = await request(app).delete('/api/v1/connectors/gmail').set('X-Api-Key', adminKey);
     expect(del.status).toBe(200);
 
     const { getSecret } = require('../../src/connectors/token-env');
-    expect(getSecret('GMAIL_ACCESS_TOKEN')).toBeNull();
+    expect(getSecret('CUSTOM__gmail__access_token')).toBeNull();
   });
 });

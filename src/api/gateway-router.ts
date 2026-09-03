@@ -38,6 +38,10 @@ import { createSkillsRouter } from './skills-router';
 import { createPackagesRouter } from './packages';
 import { createWebhooksRouter } from './webhooks-router';
 import { createConnectorsRouter } from './connectors-router';
+import { createOauthConnectorsRouter, createOauthCallbackRouter } from './oauth-connectors-router';
+import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
+import { pendingOAuthStore } from '../connectors/pending-oauth-store';
+import { refreshExpiringOAuthConnectors } from '../connectors/oauth-refresh-sweep';
 import { AppsRegistry } from '../apps/registry';
 import { AppInstaller } from '../apps/installer';
 import { RegistryClient } from '../apps/registry-client';
@@ -282,6 +286,11 @@ export class GatewayRouter {
   private readonly appInstaller?: AppInstaller;
   private readonly appRegistryClient?: RegistryClient;
 
+  /** Shared with oauth-connectors-router.ts so a custom-connector add/delete
+   *  and an OAuth-flow completion can't race each other's read-modify-write
+   *  of gateway.customConnectors — see custom-connectors-store.ts. */
+  private readonly customConnectorsStore: CustomConnectorsStore;
+
   constructor(
     agents: Map<string, AgentRunner>,
     configs: Map<string, AgentConfig>,
@@ -301,6 +310,7 @@ export class GatewayRouter {
     this.appsRegistry = appsRegistry;
     this.appInstaller = appInstaller;
     this.appRegistryClient = appRegistryClient;
+    this.customConnectorsStore = createCustomConnectorsStore(configPath);
     this.app = express();
 
     // Initialise counters for all known agents
@@ -733,9 +743,32 @@ export class GatewayRouter {
         this.gatewayConfig.gateway.api.keys,
         this.configPath,
         this.agents,
+        this.customConnectorsStore,
       );
       this.app.use('/api', connectorsRouter);
+
+      // Admin-gated "start an OAuth sign-in" endpoint for oauth:true custom
+      // connectors (Firecrawl etc.) — see oauth-connectors-router.ts's doc
+      // comment for why this is split from the public callback route below.
+      const oauthConnectorsRouter = createOauthConnectorsRouter(
+        this.gatewayConfig.gateway.api.keys,
+        this.gatewayConfig,
+        this.customConnectorsStore,
+      );
+      this.app.use('/api', oauthConnectorsRouter);
     }
+
+    // Public (no auth) — this is what the OAuth provider redirects the end
+    // user's own browser to after they sign in. Mounted at the app root, not
+    // under /api, mirroring the /app/:name/:portName proxy below.
+    this.app.use(
+      createOauthCallbackRouter(
+        undefined,
+        typeof this.gatewayConfig?.gateway?.oauthReturnUrl === 'string'
+          ? this.gatewayConfig.gateway.oauthReturnUrl
+          : undefined,
+      ),
+    );
 
     // Mount cron manager routes with same API key auth as agent router
     if (this.cronManager) {
@@ -1379,6 +1412,10 @@ export class GatewayRouter {
           if (rec.resetAt < now) this.loginAttempts.delete(ip);
         }
         cliPairingStore.prune();
+        pendingOAuthStore.prune();
+        refreshExpiringOAuthConnectors(this.customConnectorsStore).catch((err) => {
+          console.error(`oauth-refresh-sweep: ${(err as Error).message}`);
+        });
       }, 60_000);
       this.ticketPruner.unref();
 

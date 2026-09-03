@@ -72,74 +72,112 @@ describe('token-env', () => {
 });
 
 describe('resolve', () => {
-  it('enabled + connected → github http entry with bearer; disabled/disconnected → omitted', () => {
+  it('CONNECTOR_CATALOG is empty by default — nothing resolves from it, regardless of config', () => {
+    const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+    expect(resolveEnabledConnectors({})).toEqual({});
+    expect(resolveEnabledConnectors({ connectors: { anything: { enabled: true } } })).toEqual({});
+  });
+
+  // github/gmail/etc. are no longer built-in catalog entries — they're managed
+  // custom connectors pushed by services/api (see connectors-router.ts's
+  // /oauth/receive). This exercises the exact shape that route writes:
+  // authKind:'oauth' + managed:true, resolved through the generic
+  // customConnectors path like any other custom connector.
+  it('managed connector (github): enabled + connected → http entry with bearer; disabled/disconnected → omitted', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     const { resolveEnabledConnectors, listConnectorStatus } =
       require('../../src/connectors/resolve');
 
-    // Enablement is opt-out (default enabled) — microsoft-365 needs no secret
-    // so it resolves by default regardless of config; explicitly opt it out
-    // in these assertions to keep this test focused on github.
-    const noMs365 = { connectors: { 'microsoft-365': { enabled: false as const } } };
+    const customConnectors = {
+      github: {
+        label: 'GitHub',
+        description: 'Repos, issues, and pull requests via the official GitHub MCP server.',
+        config: {
+          type: 'http',
+          url: 'https://api.githubcopilot.com/mcp/',
+          headers: { Authorization: 'Bearer {access_token}' },
+        },
+        secretNames: ['access_token'],
+        sourceUrl: 'https://github.com/github/github-mcp-server',
+        authKind: 'oauth' as const,
+        managed: true,
+      },
+    };
 
-    // no config, not connected → omitted
-    expect(resolveEnabledConnectors(noMs365)).toEqual({});
+    // not connected → omitted
+    expect(resolveEnabledConnectors({}, customConnectors)).toEqual({});
 
     // enabled but not connected → omitted
     expect(
-      resolveEnabledConnectors({
-        connectors: { github: { enabled: true }, 'microsoft-365': { enabled: false } },
-      }),
+      resolveEnabledConnectors({ connectors: { github: { enabled: true } } }, customConnectors),
     ).toEqual({});
 
-    // enabled + connected → entry present
-    setSecret('GITHUB_TOKEN', 'ghp_xyz');
-    const resolved = resolveEnabledConnectors({
-      connectors: { github: { enabled: true }, 'microsoft-365': { enabled: false } },
-    });
+    // enabled + connected → entry present, placeholder substituted
+    setSecret('CUSTOM__github__access_token', 'ghp_xyz');
+    const resolved = resolveEnabledConnectors(
+      { connectors: { github: { enabled: true } } },
+      customConnectors,
+    );
     expect(resolved.github).toEqual({
       type: 'http',
       url: 'https://api.githubcopilot.com/mcp/',
       headers: { Authorization: 'Bearer ghp_xyz' },
     });
 
-    // connected reflected in status — github is now a real OAuth connector
-    // (services/api-driven, no paste-token setup help to surface).
-    const status = listConnectorStatus().find((c: { id: string }) => c.id === 'github');
-    expect(status).toMatchObject({ id: 'github', authKind: 'oauth', connected: true });
+    // disabled for this agent → omitted even though connected
+    expect(
+      resolveEnabledConnectors({ connectors: { github: { enabled: false } } }, customConnectors),
+    ).toEqual({});
+
+    // status reports it as built-in (not "Custom") and oauth-kind, no setup help
+    const status = listConnectorStatus(customConnectors).find(
+      (c: { id: string }) => c.id === 'github',
+    );
+    expect(status).toMatchObject({
+      id: 'github',
+      authKind: 'oauth',
+      connected: true,
+      source: 'built-in',
+    });
     expect(status.setup).toBeUndefined();
   });
 
-  // POC (manual-token) Google connectors: each keeps its own secret slot even
-  // though the community servers they wrap both read GOOGLE_ACCESS_TOKEN — so
-  // connecting Gmail must not flip Drive's `connected` too.
-  it('gmail + google-drive: independent secret slots, each resolves its own stdio entry', () => {
+  // Two independent managed connectors pushed by services/api must not share
+  // connected state, even though both are custom-connector entries.
+  it('two managed connectors: independent secret slots, each resolves its own entry', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     const { resolveEnabledConnectors, listConnectorStatus } =
       require('../../src/connectors/resolve');
 
-    const enabled = {
-      connectors: {
-        gmail: { enabled: true },
-        'google-drive': { enabled: true },
-        // Opt-out: microsoft-365 needs no secret, so opt-in default resolves
-        // it regardless — excluded here to keep this test focused on Google.
-        'microsoft-365': { enabled: false as const },
+    const customConnectors = {
+      gmail: {
+        label: 'Gmail',
+        config: { type: 'http', url: 'https://gmailmcp.googleapis.com/mcp/v1', headers: { Authorization: 'Bearer {access_token}' } },
+        secretNames: ['access_token'],
+        authKind: 'oauth' as const,
+        managed: true,
+      },
+      'google-drive': {
+        label: 'Google Drive',
+        config: { type: 'http', url: 'https://drivemcp.googleapis.com/mcp/v1', headers: { Authorization: 'Bearer {access_token}' } },
+        secretNames: ['access_token'],
+        authKind: 'oauth' as const,
+        managed: true,
       },
     };
-    expect(resolveEnabledConnectors(enabled)).toEqual({});
+    const enabled = { connectors: { gmail: { enabled: true }, 'google-drive': { enabled: true } } };
+    expect(resolveEnabledConnectors(enabled, customConnectors)).toEqual({});
 
-    setSecret('GMAIL_ACCESS_TOKEN', 'ya29.gmail');
-    const gmailOnly = resolveEnabledConnectors(enabled);
+    setSecret('CUSTOM__gmail__access_token', 'ya29.gmail');
+    const gmailOnly = resolveEnabledConnectors(enabled, customConnectors);
     expect(gmailOnly.gmail).toEqual({
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'gmail-mcp'],
-      env: { GOOGLE_ACCESS_TOKEN: 'ya29.gmail' },
+      type: 'http',
+      url: 'https://gmailmcp.googleapis.com/mcp/v1',
+      headers: { Authorization: 'Bearer ya29.gmail' },
     });
     expect(gmailOnly['google-drive']).toBeUndefined();
 
-    const statusAfterGmail = listConnectorStatus();
+    const statusAfterGmail = listConnectorStatus(customConnectors);
     expect(statusAfterGmail.find((c: { id: string }) => c.id === 'gmail')).toMatchObject({
       connected: true,
     });
@@ -147,17 +185,16 @@ describe('resolve', () => {
       connected: false,
     });
 
-    setSecret('GDRIVE_ACCESS_TOKEN', 'ya29.drive');
-    const both = resolveEnabledConnectors(enabled);
+    setSecret('CUSTOM__google-drive__access_token', 'ya29.drive');
+    const both = resolveEnabledConnectors(enabled, customConnectors);
     expect(both['google-drive']).toEqual({
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'google-drive-mcp'],
-      env: { GOOGLE_ACCESS_TOKEN: 'ya29.drive' },
+      type: 'http',
+      url: 'https://drivemcp.googleapis.com/mcp/v1',
+      headers: { Authorization: 'Bearer ya29.drive' },
     });
   });
 
-  it('custom connector: opt-out default enablement; partially-connected → omitted; fully-connected → substituted', () => {
+  it('genuine user-pasted custom connector: opt-out default enablement; partially-connected → omitted; fully-connected → substituted', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
 
@@ -172,15 +209,13 @@ describe('resolve', () => {
         secretNames: ['smithery_api_key', 'unset_var'],
       },
     };
-    // microsoft-365 opted out throughout — see the "opt-out" comment above.
-    const noMs365 = { 'microsoft-365': { enabled: false as const } };
-    const agentConfig = { connectors: { calendar: { enabled: true }, ...noMs365 } };
+    const agentConfig = { connectors: { calendar: { enabled: true } } };
 
     // No config at all (not even mentioning `calendar`) → still resolves once
     // secrets exist, because enablement defaults to on (opt-out model).
     setSecret('CUSTOM__calendar__smithery_api_key', 'sk-abc');
     setSecret('CUSTOM__calendar__unset_var', 'val');
-    expect(resolveEnabledConnectors({ connectors: noMs365 }, customConnectors)).toEqual({
+    expect(resolveEnabledConnectors({}, customConnectors)).toEqual({
       calendar: {
         type: 'streamable-http',
         url: 'https://server.smithery.ai/calendar/mcp',
@@ -190,10 +225,7 @@ describe('resolve', () => {
 
     // Explicitly disabled for this agent → omitted even though fully connected.
     expect(
-      resolveEnabledConnectors(
-        { connectors: { calendar: { enabled: false }, ...noMs365 } },
-        customConnectors,
-      ),
+      resolveEnabledConnectors({ connectors: { calendar: { enabled: false } } }, customConnectors),
     ).toEqual({});
 
     // Reset secrets to re-test the partial-connection path from a clean slate.
@@ -257,18 +289,10 @@ describe('connectors-router', () => {
     return app;
   }
 
-  it('GET /v1/connectors returns catalog with connected=false initially', async () => {
+  it('GET /v1/connectors returns an empty catalog by default (CONNECTOR_CATALOG is empty)', async () => {
     const res = await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(res.status).toBe(200);
-    const github = res.body.connectors.find((c: { id: string }) => c.id === 'github');
-    expect(github).toMatchObject({
-      id: 'github',
-      label: 'GitHub',
-      authKind: 'oauth',
-      connected: false,
-    });
-    expect(github.setup).toBeUndefined();
-    expect(github.repoUrl).toBe('https://github.com/github/github-mcp-server');
+    expect(res.body.connectors).toEqual([]);
   });
 
   it('rejects missing / invalid key', async () => {
@@ -276,46 +300,111 @@ describe('connectors-router', () => {
     expect((await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', 'nope')).status).toBe(403);
   });
 
+  // CONNECTOR_CATALOG is empty by default now, so /connect 404s for every id
+  // before ever reaching requireAdmin — mock one synthetic 'secret'-kind
+  // built-in entry (the shape a deployer's own fork might hardcode) so this
+  // still exercises the route's actual admin gate, not just its 404 path.
+  // jest.isolateModules scopes the mock to this test only — it does NOT leak
+  // into later tests the way a bare jest.doMock would (doMock registrations
+  // survive jest.resetModules(), which only clears cached instances).
   it('non-admin cannot connect', async () => {
-    const res = await request(makeApp())
-      .post('/api/v1/connectors/github/connect')
-      .set('X-Api-Key', scopedKey)
-      .send({ token: 'ghp_x' });
+    const stubSpec = {
+      id: 'stub-secret',
+      label: 'Stub',
+      transport: 'http',
+      auth: { kind: 'secret', secretEnv: 'STUB_TOKEN' },
+      build: () => ({}),
+    };
+    let res!: request.Response;
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../../src/connectors/catalog', () => ({
+        CONNECTOR_CATALOG: [stubSpec],
+        getConnectorSpec: (id: string) => (id === 'stub-secret' ? stubSpec : undefined),
+      }));
+      const { createConnectorsRouter } = require('../../src/api/connectors-router');
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createConnectorsRouter(apiKeys));
+      res = await request(app)
+        .post('/api/v1/connectors/stub-secret/connect')
+        .set('X-Api-Key', scopedKey)
+        .send({ token: 'ghp_x' });
+    });
+    // jest.doMock registrations outlive isolateModulesAsync's registry scope
+    // (it only isolates the module cache, not the mock registry) — undo it
+    // explicitly so later tests' fresh `require`s get the real catalog again.
+    jest.dontMock('../../src/connectors/catalog');
     expect(res.status).toBe(403);
   });
 
-  // github is oauth-kind now (services/api pushes the token via /oauth/receive,
-  // same as gmail/drive/calendar — see tests/unit/oauth-connectors.test.ts for
-  // that route's dedicated coverage). This test keeps the router-level
-  // connect→status→delete round trip exercised end-to-end from this suite.
-  it('oauth/receive stores the access token + writes config.json; delete clears both', async () => {
+  // github is a services/api-managed custom connector now (pushed via
+  // /oauth/receive with a full config shape, not just a token — same as
+  // gmail/drive/calendar; see tests/unit/oauth-connectors.test.ts for that
+  // route's dedicated payload-shape coverage). This test keeps the
+  // router-level push→status→delete round trip exercised end-to-end.
+  it('oauth/receive stores the full managed shape + secret; delete clears both', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
     const cfgPath = path.join(dir, 'config.json');
     fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
     const app = makeApp(cfgPath);
     const { getSecret } = require('../../src/connectors/token-env');
+    const pushPayload = {
+      access_token: 'ghu_pushed',
+      label: 'GitHub',
+      description: 'Repos, issues, and pull requests via the official GitHub MCP server.',
+      config: {
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer {access_token}' },
+      },
+      sourceUrl: 'https://github.com/github/github-mcp-server',
+    };
 
     // empty access_token rejected
-    const bad = await request(app).post('/api/v1/connectors/github/oauth/receive').set('X-Api-Key', adminKey).send({ access_token: '  ' });
+    const bad = await request(app)
+      .post('/api/v1/connectors/github/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send({ ...pushPayload, access_token: '  ' });
     expect(bad.status).toBe(400);
 
     // receive
-    const ok = await request(app).post('/api/v1/connectors/github/oauth/receive').set('X-Api-Key', adminKey).send({ access_token: 'ghu_pushed' });
+    const ok = await request(app)
+      .post('/api/v1/connectors/github/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload);
     expect(ok.status).toBe(200);
     expect(ok.body).toEqual({ id: 'github', connected: true });
-    expect(getSecret('GITHUB_TOKEN')).toBe('ghu_pushed');
+    expect(getSecret('CUSTOM__github__access_token')).toBe('ghu_pushed');
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    expect(written.gateway.connectors).toEqual({ github: { secretEnv: 'GITHUB_TOKEN' } });
+    expect(written.gateway.customConnectors.github).toMatchObject({
+      label: 'GitHub',
+      secretNames: ['access_token'],
+      authKind: 'oauth',
+      managed: true,
+    });
+
+    // GET /v1/connectors reports it as built-in (not "Custom") and oauth-kind
+    const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(list.body.connectors).toEqual([
+      expect.objectContaining({
+        id: 'github',
+        label: 'GitHub',
+        authKind: 'oauth',
+        connected: true,
+        source: 'built-in',
+        repoUrl: pushPayload.sourceUrl,
+      }),
+    ]);
 
     // status reflects connected
     const status = await request(app).get('/api/v1/connectors/github/status').set('X-Api-Key', adminKey);
     expect(status.body).toEqual({ id: 'github', connected: true });
 
-    // delete
+    // delete — via the unified route (github has no catalog entry, falls back to customConnectors)
     const del = await request(app).delete('/api/v1/connectors/github').set('X-Api-Key', adminKey);
     expect(del.status).toBe(200);
-    expect(getSecret('GITHUB_TOKEN')).toBeNull();
-    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.connectors).toEqual({});
+    expect(getSecret('CUSTOM__github__access_token')).toBeNull();
+    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors).toEqual({});
   });
 
   it('unknown connector → 404', async () => {

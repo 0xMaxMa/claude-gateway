@@ -238,6 +238,14 @@ export interface GatewayConfig {
      * disabled. A trailing slash is trimmed when building links.
      */
     publicUrl?: string;
+    /**
+     * Optional "come back here after signing in" URL for the generic MCP
+     * OAuth callback (oauth-connectors-router.ts) — e.g. a downstream
+     * product's own connectors page. This gateway is product-agnostic, so
+     * it never hardcodes one; unset = the callback just shows a plain
+     * "Connected, close this tab" page instead of auto-redirecting anywhere.
+     */
+    oauthReturnUrl?: string;
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];

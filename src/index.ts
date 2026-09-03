@@ -921,6 +921,13 @@ async function main(): Promise<void> {
         if (change.field === 'gateway.headless') {
           // Applies to sessions spawned after the change; running sessions keep their backend.
           config.gateway.headless = change.newValue as boolean | undefined;
+        } else if (change.field === 'gateway.customConnectors') {
+          // Same "new spawns only" scope as the agent-level 'connectors' case
+          // below — an already-running session's subprocess isn't hot-patched
+          // (see restartSessionsUsingConnector for that case), but every
+          // subsequent chat/spawn now sees connect/disconnect/add-custom
+          // changes without a gateway restart.
+          config.gateway.customConnectors = change.newValue as GatewayConfig['gateway']['customConnectors'];
         }
         if (change.field === 'gateway.logs') {
           // Re-installing the policy is enough: every logger reads it per call,
@@ -956,6 +963,11 @@ async function main(): Promise<void> {
         case 'heartbeat.rateLimitMinutes':
           if (!agentConfig.heartbeat) agentConfig.heartbeat = {};
           agentConfig.heartbeat.rateLimitMinutes = change.newValue as number;
+          break;
+        case 'connectors':
+          // Per-agent connector enablement toggles — same scope note as
+          // gateway.customConnectors above.
+          agentConfig.connectors = change.newValue as AgentConfig['connectors'];
           break;
       }
     }

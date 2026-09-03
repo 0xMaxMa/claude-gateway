@@ -12,6 +12,12 @@ const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
   'session.idleTimeoutMinutes',
   'session.maxConcurrent',
   'heartbeat.rateLimitMinutes',
+  // Per-agent connector enablement ({connectorId: {enabled}}) — only affects
+  // NEW session spawns (SessionProcess reads it fresh via AgentRunner's own
+  // live object reference, see index.ts's 'changes' handler); an
+  // already-running session's subprocess still needs an explicit restart
+  // (restartSessionsUsingConnector) to pick it up mid-conversation.
+  'connectors',
 ];
 
 // Gateway-level (non-agent) fields that can be hot-reloaded; agentId will be '' in ConfigChange
@@ -21,6 +27,10 @@ const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
   // call — and turning the level up to chase a live problem is precisely when a
   // restart is unaffordable, since it kills the sessions being investigated.
   'gateway.logs',
+  // Same "new spawns only" caveat as 'connectors' above — customConnectors is
+  // where built-in oauth-managed AND user-pasted connector definitions both
+  // live (see connectors/types.ts's CustomConnectorEntry).
+  'gateway.customConnectors',
 ];
 
 export interface ConfigChange {
@@ -209,6 +219,7 @@ export class ConfigWatcher extends EventEmitter {
         { field: 'telegram.botToken', oldVal: oldAgent.telegram?.botToken, newVal: newAgent.telegram?.botToken },
         { field: 'discord.botToken', oldVal: oldAgent.discord?.botToken, newVal: newAgent.discord?.botToken },
         { field: 'description', oldVal: oldAgent.description, newVal: newAgent.description },
+        { field: 'connectors', oldVal: oldAgent.connectors, newVal: newAgent.connectors },
       ];
 
       for (const { field, oldVal, newVal } of fieldPairs) {
@@ -229,6 +240,7 @@ export class ConfigWatcher extends EventEmitter {
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
       { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },
+      { field: 'gateway.customConnectors', oldVal: oldCfg.gateway.customConnectors, newVal: newCfg.gateway.customConnectors },
     ];
     for (const { field, oldVal, newVal } of gatewayFieldPairs) {
       if (!deepEqual(oldVal, newVal)) {
