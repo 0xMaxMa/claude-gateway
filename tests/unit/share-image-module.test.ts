@@ -118,6 +118,17 @@ describe('share_image MCP module', () => {
       expect(calls).toHaveLength(0);
     });
 
+    // #444: this tool is the agent's explicit "publish this file" verb, so it
+    // opts into the full share allowlist (images + PDF). The narrow image
+    // consumers (line_image, generate_image ref normalization) must NOT.
+    test('always opts into documents so a PDF can be shared', async () => {
+      await new ShareImageModule().handleTool('share_image', {
+        action: 'create',
+        path: 'media/session-1/report.pdf',
+      });
+      expect(calls[0]!.body!.allow_documents).toBe(true);
+    });
+
     test('gateway error code is surfaced', async () => {
       responder = () => new Response(JSON.stringify({ error: 'nope', code: 'image_ref_not_found' }), { status: 404 });
       const res = await new ShareImageModule().handleTool('share_image', { action: 'create', path: 'gone.png' });

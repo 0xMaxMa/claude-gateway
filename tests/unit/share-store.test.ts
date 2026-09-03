@@ -16,6 +16,7 @@ import {
   SHARE_TOKEN_RE,
   validateShareFile,
   detectImageMime,
+  detectShareMime,
 } from '../../src/share/share-store';
 
 const PNG = Buffer.concat([
@@ -29,6 +30,7 @@ const WEBP = Buffer.concat([
   Buffer.from('WEBP'),
   Buffer.alloc(64, 3),
 ]);
+const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 5)]);
 
 const AGENT = 'a1';
 const SESSION = 'session-1';
@@ -283,6 +285,156 @@ describe('image share store', () => {
       expect(detectImageMime(WEBP)).toBe('image/webp');
       expect(detectImageMime(Buffer.from('GIF89a-not-allowed'))).toBeNull();
       expect(detectImageMime(Buffer.from('%PDF-1.4'))).toBeNull();
+    });
+  });
+
+  // #444 — the wider share allowlist. detectImageMime stays image-only for the
+  // callers that genuinely need an image (line_image, generate_image refs, the
+  // session image catalog); detectShareMime is what the share bridge uses when
+  // the caller opted into documents.
+  describe('detectShareMime (#444)', () => {
+    test('classifies the image formats AND PDF', () => {
+      expect(detectShareMime(PNG)).toBe('image/png');
+      expect(detectShareMime(JPEG)).toBe('image/jpeg');
+      expect(detectShareMime(WEBP)).toBe('image/webp');
+      expect(detectShareMime(PDF)).toBe('application/pdf');
+    });
+
+    test('still rejects everything off the allowlist — HTML/SVG are never shareable', () => {
+      expect(detectShareMime(Buffer.from('GIF89a-not-allowed'))).toBeNull();
+      expect(detectShareMime(Buffer.from('<!DOCTYPE html><html>'))).toBeNull();
+      expect(detectShareMime(Buffer.from('<svg xmlns="http://'))).toBeNull();
+      expect(detectShareMime(Buffer.from('plain text, no magic'))).toBeNull();
+      // A near-miss on the PDF magic must not slip through.
+      expect(detectShareMime(Buffer.from('%PDF+1.7'))).toBeNull();
+      expect(detectShareMime(Buffer.from('%PDF'))).toBeNull();
+    });
+  });
+
+  describe('document shares (#444)', () => {
+    beforeEach(() => {
+      fs.writeFileSync(path.join(mediaDir, 'doc.pdf'), PDF);
+    });
+
+    const codeOf = (fn: () => unknown): string => {
+      try {
+        fn();
+      } catch (err) {
+        if (err instanceof ShareError) return err.code;
+        return `unexpected:${(err as Error).message}`;
+      }
+      return 'no-error';
+    };
+
+    test('validateShareFile rejects a PDF by default and accepts it with allow="any"', () => {
+      expect(codeOf(() => validateShareFile(baseDir, AGENT, `${SESSION}/doc.pdf`))).toBe(
+        'unsupported_image_type',
+      );
+      const ok = validateShareFile(baseDir, AGENT, `${SESSION}/doc.pdf`, undefined, 'any');
+      expect(ok.mime).toBe('application/pdf');
+      expect(ok.relativePath).toBe(`${SESSION}/doc.pdf`);
+    });
+
+    test('allow="any" does NOT relax anything else — containment, size and the allowlist still bite', () => {
+      fs.writeFileSync(path.join(mediaDir, 'page.html'), '<!DOCTYPE html><html>x</html>');
+      const outside = path.join(baseDir, 'outside.pdf');
+      fs.writeFileSync(outside, PDF);
+      fs.symlinkSync(outside, path.join(mediaDir, 'sneaky.pdf'));
+      const any = (ref: string, cap?: number) => validateShareFile(baseDir, AGENT, ref, cap, 'any');
+
+      expect(codeOf(() => any(`${SESSION}/page.html`))).toBe('unsupported_image_type');
+      expect(codeOf(() => any('../../outside.pdf'))).toBe('invalid_path');
+      expect(codeOf(() => any(`${SESSION}/sneaky.pdf`))).toBe('invalid_path');
+      expect(codeOf(() => any(SESSION))).toBe('invalid_path');
+      expect(codeOf(() => any(`${SESSION}/doc.pdf`, 16))).toBe('image_too_large');
+      expect(codeOf(() => any(`${SESSION}/gone.pdf`))).toBe('image_ref_not_found');
+    });
+
+    test('the allow-kind is persisted per share and round-trips through lookup', () => {
+      const img = mint();
+      expect(store.lookupByToken(img.token)!.allowKind).toBe('image');
+
+      const doc = mint({
+        relativePath: `${SESSION}/doc.pdf`,
+        dedupeRef: `path:${SESSION}/doc.pdf`,
+        allowKind: 'any',
+      });
+      expect(store.lookupByToken(doc.token)!.allowKind).toBe('any');
+    });
+
+    test('two mints of the SAME ref under different allow-kinds do not collapse', () => {
+      // They are different capabilities: one may serve a PDF, the other may not.
+      const strict = mint();
+      const wide = mint({ allowKind: 'any' });
+      expect(wide.token).not.toBe(strict.token);
+      expect(store.lookupByToken(strict.token)!.allowKind).toBe('image');
+      expect(store.lookupByToken(wide.token)!.allowKind).toBe('any');
+    });
+
+    test('an unrecognised persisted allow_kind falls back to the STRICTEST kind', () => {
+      const m = mint();
+      const raw = new DatabaseSync(dbPath);
+      raw.prepare('UPDATE image_shares SET allow_kind = ? WHERE id = ?').run('everything', m.shareId);
+      raw.close();
+      expect(store.lookupByToken(m.token)!.allowKind).toBe('image');
+    });
+  });
+
+  // The `allow_kind` column is added in place, exactly like `prompt` on
+  // image_artifacts: CREATE TABLE IF NOT EXISTS leaves an existing DB untouched.
+  describe('allow_kind migration on a pre-#444 database', () => {
+    test('an old DB opens, gains the column defaulted to image, and keeps its live shares', () => {
+      const legacyPath = path.join(baseDir, 'legacy.db');
+      const legacy = new DatabaseSync(legacyPath);
+      legacy.exec(`
+        CREATE TABLE image_shares (
+          id            TEXT PRIMARY KEY,
+          token_hash    BLOB NOT NULL UNIQUE,
+          agent_id      TEXT NOT NULL,
+          session_id    TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          purpose       TEXT NOT NULL,
+          created_at    INTEGER NOT NULL,
+          expires_at    INTEGER NOT NULL,
+          revoked_at    INTEGER
+        );
+      `);
+      const token = 'L'.repeat(32);
+      legacy
+        .prepare(
+          `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'shr_legacy',
+          createHash('sha256').update(token).digest(),
+          AGENT,
+          SESSION,
+          `${SESSION}/ok.png`,
+          'codex_ref',
+          Date.now(),
+          Date.now() + 600_000,
+        );
+      legacy.close();
+
+      const migrated = new ShareStore(legacyPath);
+      try {
+        const row = migrated.lookupByToken(token);
+        expect(row).not.toBeNull();
+        expect(row!.shareId).toBe('shr_legacy');
+        expect(row!.relativePath).toBe(`${SESSION}/ok.png`);
+        expect(row!.allowKind).toBe('image');
+      } finally {
+        migrated.close();
+      }
+
+      // Opening it again is a no-op, not a duplicate-column error.
+      const reopened = new ShareStore(legacyPath);
+      try {
+        expect(reopened.lookupByToken(token)!.allowKind).toBe('image');
+      } finally {
+        reopened.close();
+      }
     });
   });
 });

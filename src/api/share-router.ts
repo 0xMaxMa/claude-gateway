@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
+import * as path from 'path';
 import { createApiAuthMiddleware, canAccessAgent } from './auth';
 import { isValidAgentId, isValidSessionId } from './router';
 import { MediaStore } from '../history/media-store';
@@ -8,7 +9,8 @@ import {
   ShareStore,
   ShareError,
   ShareLimits,
-  detectImageMime,
+  ShareAllowKind,
+  mimeDetectorFor,
   shareLimitsFromEnv,
   validateShareFile,
   DEFAULT_SHARE_TTL_SECONDS,
@@ -40,6 +42,7 @@ const MIN_TTL_SECONDS = 10;
 const MAX_TTL_SECONDS = 86_400;
 const MAX_ARTIFACT_FILES = 10;
 const MAX_ARTIFACT_PROMPT_CHARS = 500;
+const MAX_DISPOSITION_NAME_CHARS = 200;
 const DEFAULT_PUBLIC_RATE_PER_MIN = 60;
 
 function errStatus(code: string): number {
@@ -56,6 +59,31 @@ function errStatus(code: string): number {
  *  deleted / forbidden so the response never leaks WHY (§11). */
 function publicNotFound(res: Response): void {
   res.status(404).type('text/plain').send('Not Found');
+}
+
+/** RFC 5987 `attr-char`: everything encodeURIComponent leaves alone EXCEPT
+ *  `!`, `'`, `(`, `)` and `*`, which are not attr-char and must be escaped. */
+function rfc5987(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*!]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * Build the `Content-Disposition` for a non-image share (#444). The basename
+ * comes from `relative_path`, which is agent-controlled, so the quoted
+ * `filename=` fallback keeps only printable ASCII minus `"` and `\` — that
+ * alone rules out the CR/LF that would split the header — and the real name
+ * rides along percent-encoded in `filename*`.
+ */
+export function attachmentDisposition(basename: string): string {
+  // Cap first: a media filename is agent-controlled and a 4 KB one would bloat
+  // (or, behind some proxies, break) the response header.
+  const name = basename.slice(0, MAX_DISPOSITION_NAME_CHARS);
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim();
+  const fallback = ascii || 'download';
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${rfc5987(name)}`;
 }
 
 export type PublicShareRouterOpts = {
@@ -135,13 +163,21 @@ export function createSharesPublicRouter(
       if (!stat.isFile() || stat.size > limits.maxFileBytes) throw new Error('invalid file');
       const header = Buffer.alloc(12);
       fs.readSync(fd, header, 0, 12, 0);
-      const mime = detectImageMime(header);
+      // Always re-sniff. The share row records the ALLOW-KIND it was minted
+      // under, never a mime: the file can be replaced between mint and fetch,
+      // so the kind only picks the detector and the bytes on disk decide the
+      // Content-Type (§12.9/§12.10, #444).
+      const mime = mimeDetectorFor(share.allowKind)(header);
       if (!mime) throw new Error('unsupported type');
 
+      // Images keep the exact `inline` they have always had. Anything else is
+      // offered as a download — the share origin must never invite a browser to
+      // render a non-image it just sniffed.
+      const isImage = mime.startsWith('image/');
       res.status(200).set({
         'Content-Type': mime,
         'Content-Length': String(stat.size),
-        'Content-Disposition': 'inline',
+        'Content-Disposition': isImage ? 'inline' : attachmentDisposition(path.basename(share.relativePath)),
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       });
@@ -186,11 +222,13 @@ export function createSharesPrivateRouter(
 
   /**
    * POST /api/v1/shares — mint one or more shares (§10).
-   * Body: { agent_id, session_id, purpose?, ttl_seconds?, refs: [{artifact_id}|{path}] }
+   * Body: { agent_id, session_id, purpose?, ttl_seconds?, allow_documents?, refs: [{artifact_id}|{path}] }
    * Response: { items: [{ share_id, token, url?, expires_at }] } — order preserved.
    * `token` is always present (host-agnostic capability); `url` is a convenience
    * built from `gateway.publicUrl` and is omitted when that is unset — callers
    * with their own public base (e.g. LINE) build the URL from `token`.
+   * `allow_documents` widens the allowlist to PDF for THIS request only and is
+   * recorded on each minted row (#444); without it a PDF is still 415.
    */
   router.post('/v1/shares', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
@@ -199,6 +237,7 @@ export function createSharesPrivateRouter(
       session_id?: unknown;
       purpose?: unknown;
       ttl_seconds?: unknown;
+      allow_documents?: unknown;
       refs?: unknown;
     };
     const agentId = typeof body.agent_id === 'string' ? body.agent_id.trim() : '';
@@ -224,6 +263,11 @@ export function createSharesPrivateRouter(
       }
       ttlSeconds = Math.min(Math.max(Math.floor(body.ttl_seconds), MIN_TTL_SECONDS), MAX_TTL_SECONDS);
     }
+    if (body.allow_documents !== undefined && typeof body.allow_documents !== 'boolean') {
+      res.status(400).json({ error: 'allow_documents must be a boolean' });
+      return;
+    }
+    const allowKind: ShareAllowKind = body.allow_documents === true ? 'any' : 'image';
     const refs = body.refs;
     if (!Array.isArray(refs) || refs.length === 0) {
       res.status(400).json({ error: 'refs must be a non-empty array' });
@@ -280,7 +324,7 @@ export function createSharesPrivateRouter(
       }
       let validated;
       try {
-        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes);
+        validated = validateShareFile(agentsBaseDir, agentId, candidatePath, limits.maxFileBytes, allowKind);
       } catch (err) {
         if (err instanceof ShareError) {
           res.status(errStatus(err.code)).json({ error: err.message, code: err.code });
@@ -322,6 +366,7 @@ export function createSharesPrivateRouter(
         dedupeRef: r.dedupeRef,
         purpose,
         ttlSeconds,
+        allowKind,
       });
       console.log(`[share] mint share=${mint.shareId} purpose=${purpose} deduped=${mint.deduped}`);
       return {
@@ -413,6 +458,9 @@ export function createSharesPrivateRouter(
       const file = (files as string[])[index]!;
       let validated;
       try {
+        // Deliberately NOT widened by #444: this registry feeds the session
+        // IMAGE catalog (generate_image refs, "the second image"), so it takes
+        // the default 'image' allow-kind and a PDF here is still a 415.
         validated = validateShareFile(agentsBaseDir, agentId, file, limits.maxFileBytes);
       } catch (err) {
         const code = err instanceof ShareError ? err.code : 'invalid_path';

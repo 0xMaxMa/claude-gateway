@@ -59,7 +59,13 @@ export class ShareImageModule implements ToolModule {
     const refs: ShareRef[] = paths.map((p) =>
       p.startsWith('artifact:') ? { artifact_id: p.slice('artifact:'.length) } : { path: p },
     );
-    const opts: { purpose?: string; ttlSeconds?: number } = {};
+    const opts: { purpose?: string; ttlSeconds?: number; allowDocuments: boolean } = {
+      // The standalone tool is the agent's explicit "publish this file" verb, so
+      // it opts into the full share allowlist (images + PDF). The narrow image
+      // consumers — line_image, generate_image ref normalization — deliberately
+      // do NOT, and keep rejecting anything that is not a raster image.
+      allowDocuments: true,
+    };
     if (typeof args.purpose === 'string' && args.purpose.trim()) opts.purpose = args.purpose.trim();
     if (typeof args.ttl_seconds === 'number' && args.ttl_seconds > 0) opts.ttlSeconds = args.ttl_seconds;
     try {

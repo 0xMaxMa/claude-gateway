@@ -60,7 +60,10 @@ export class ShareError extends Error {
   }
 }
 
-/** Phase-1 formats: PNG / JPEG / WebP only (§11). GIF/SVG/PDF are rejected. */
+/** Raster image formats: PNG / JPEG / WebP (§11). GIF/SVG/PDF are NOT images
+ *  here — callers that genuinely need "is this an image" (LINE image messages,
+ *  provider image-edit refs, the session image catalog) must keep using this
+ *  one rather than the wider detectShareMime below. */
 export function detectImageMime(header: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
   if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return 'image/jpeg';
   if (header.length >= 8 && header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47) return 'image/png';
@@ -70,6 +73,46 @@ export function detectImageMime(header: Buffer): 'image/png' | 'image/jpeg' | 'i
     header[8] === 0x57 && header[9] === 0x45 && header[10] === 0x42 && header[11] === 0x50
   ) return 'image/webp';
   return null;
+}
+
+/**
+ * What a share is allowed to carry. Persisted per share row and re-checked at
+ * fetch time — it is NOT a cached mime (#444). The file behind a live share can
+ * be replaced between mint and fetch, so serving always re-sniffs the magic
+ * bytes; this kind only selects WHICH detector runs. That keeps both directions
+ * safe: an `image` share whose file became a PDF still 404s, and an `any` share
+ * whose file became HTML still 404s.
+ */
+export type ShareAllowKind = 'image' | 'any';
+
+export const SHARE_ALLOW_KINDS: readonly ShareAllowKind[] = ['image', 'any'];
+
+export function isShareAllowKind(v: unknown): v is ShareAllowKind {
+  return typeof v === 'string' && (SHARE_ALLOW_KINDS as readonly string[]).includes(v);
+}
+
+/** `%PDF-` — the only non-image format on the share allowlist (#444). */
+function isPdf(header: Buffer): boolean {
+  return (
+    header.length >= 5 &&
+    header[0] === 0x25 && header[1] === 0x50 && header[2] === 0x44 && header[3] === 0x46 && header[4] === 0x2d
+  );
+}
+
+/**
+ * The full share allowlist: the three raster image types plus PDF. Deliberately
+ * limited to inert binary formats — `text/html`, `image/svg+xml` and
+ * `application/octet-stream` are NOT here and must not be added, because the
+ * share origin serves them to a browser and they would turn it into an XSS
+ * surface (§11).
+ */
+export function detectShareMime(header: Buffer): string | null {
+  return detectImageMime(header) ?? (isPdf(header) ? 'application/pdf' : null);
+}
+
+/** Pick the sniffer that matches a share's allow-kind. */
+export function mimeDetectorFor(allow: ShareAllowKind): (header: Buffer) => string | null {
+  return allow === 'any' ? detectShareMime : detectImageMime;
 }
 
 export type ValidatedShareFile = {
@@ -85,12 +128,16 @@ export type ValidatedShareFile = {
  * escapes, require a regular file, validate magic bytes and the per-file cap.
  * Returns only the media-root-relative path — client-supplied absolute paths
  * are never persisted. Throws ShareError with a stable code.
+ *
+ * `allow` defaults to 'image' so every existing caller keeps today's behaviour;
+ * only a caller that has explicitly opted into documents passes 'any' (#444).
  */
 export function validateShareFile(
   agentsBaseDir: string,
   agentId: string,
   ref: string,
   maxFileBytes: number = DEFAULT_MAX_FILE_BYTES,
+  allow: ShareAllowKind = 'image',
 ): ValidatedShareFile {
   const root = MediaStore.agentMediaRoot(agentsBaseDir, agentId);
   let resolved: string;
@@ -127,9 +174,14 @@ export function validateShareFile(
   } finally {
     fs.closeSync(fd);
   }
-  const mime = detectImageMime(header);
+  const mime = mimeDetectorFor(allow)(header);
   if (!mime) {
-    throw new ShareError('unsupported_image_type', 'only PNG, JPEG and WebP can be shared');
+    throw new ShareError(
+      'unsupported_image_type',
+      allow === 'any'
+        ? 'only PNG, JPEG, WebP and PDF can be shared'
+        : 'only PNG, JPEG and WebP can be shared',
+    );
   }
   const relativePath = path.relative(root, resolved);
   if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
@@ -153,6 +205,9 @@ export type ShareRow = {
   sessionId: string;
   relativePath: string;
   purpose: string;
+  /** What this share was minted to carry. Serving re-sniffs the file and uses
+   *  this only to pick the detector — never as a cached mime (#444). */
+  allowKind: ShareAllowKind;
 };
 
 export type ArtifactRow = {
@@ -199,7 +254,8 @@ export class ShareStore {
         purpose       TEXT NOT NULL,
         created_at    INTEGER NOT NULL,
         expires_at    INTEGER NOT NULL,
-        revoked_at    INTEGER
+        revoked_at    INTEGER,
+        allow_kind    TEXT NOT NULL DEFAULT 'image'
       );
       CREATE INDEX IF NOT EXISTS image_shares_expiry ON image_shares(expires_at);
 
@@ -224,6 +280,13 @@ export class ShareStore {
     const cols = this.db.prepare(`PRAGMA table_info(image_artifacts)`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'prompt')) {
       this.db.exec('ALTER TABLE image_artifacts ADD COLUMN prompt TEXT');
+    }
+    // Same story for `allow_kind` (#444): DBs minted before documents were
+    // allowed carry image-only shares, and 'image' is exactly their existing
+    // behaviour, so the default backfills them correctly.
+    const shareCols = this.db.prepare(`PRAGMA table_info(image_shares)`).all() as Array<{ name: string }>;
+    if (!shareCols.some((c) => c.name === 'allow_kind')) {
+      this.db.exec(`ALTER TABLE image_shares ADD COLUMN allow_kind TEXT NOT NULL DEFAULT 'image'`);
     }
   }
 
@@ -315,8 +378,10 @@ export class ShareStore {
   /**
    * Mint a share. `dedupeRef` is the caller-facing identity of the ref
    * (e.g. "artifact:img_x" or "path:<relative>") — an identical mint for the
-   * same (agent, session, ref, purpose) within MINT_DEDUPE_WINDOW_MS returns
-   * the SAME token (§17.4) so provider-side dedupe keeps working.
+   * same (agent, session, ref, purpose, allowKind) within MINT_DEDUPE_WINDOW_MS
+   * returns the SAME token (§17.4) so provider-side dedupe keeps working.
+   * `allowKind` is part of the key because two mints of the same file under
+   * different allow-kinds are different capabilities and must not collapse.
    */
   mintShare(a: {
     agentId: string;
@@ -325,8 +390,10 @@ export class ShareStore {
     dedupeRef: string;
     purpose: string;
     ttlSeconds: number;
+    allowKind?: ShareAllowKind;
   }): MintedShare {
-    const key = [a.agentId, a.sessionId, a.dedupeRef, a.purpose].join(' ');
+    const allowKind: ShareAllowKind = a.allowKind ?? 'image';
+    const key = [a.agentId, a.sessionId, a.dedupeRef, a.purpose, allowKind].join('\0');
     const now = Date.now();
     const cached = this.mintCache.get(key);
     if (cached && now - cached.mintedAtMs < MINT_DEDUPE_WINDOW_MS && cached.expiresAtMs > now) {
@@ -337,9 +404,9 @@ export class ShareStore {
     const shareId = `shr_${randomBytes(9).toString('base64url')}`;
     const expiresAtMs = now + a.ttlSeconds * 1000;
     this.db.prepare(
-      `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(shareId, tokenHash, a.agentId, a.sessionId, a.relativePath, a.purpose, now, expiresAtMs);
+      `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, allow_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(shareId, tokenHash, a.agentId, a.sessionId, a.relativePath, a.purpose, now, expiresAtMs, allowKind);
     this.mintCache.set(key, { shareId, token, expiresAtMs, deduped: false, mintedAtMs: now });
     this.pruneMintCache(now);
     return { shareId, token, expiresAtMs, deduped: false };
@@ -350,11 +417,18 @@ export class ShareStore {
     if (!SHARE_TOKEN_RE.test(token)) return null;
     const tokenHash = createHash('sha256').update(token).digest();
     const row = this.db.prepare(
-      `SELECT id, agent_id, session_id, relative_path, purpose
+      `SELECT id, agent_id, session_id, relative_path, purpose, allow_kind
        FROM image_shares
        WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
     ).get(tokenHash, Date.now()) as
-      | { id: string; agent_id: string; session_id: string; relative_path: string; purpose: string }
+      | {
+          id: string;
+          agent_id: string;
+          session_id: string;
+          relative_path: string;
+          purpose: string;
+          allow_kind: string | null;
+        }
       | undefined;
     if (!row) return null;
     return {
@@ -363,6 +437,9 @@ export class ShareStore {
       sessionId: row.session_id,
       relativePath: row.relative_path,
       purpose: row.purpose,
+      // Anything unrecognised (or a legacy NULL) falls back to the strictest
+      // kind — an unknown value must never widen what a share can serve.
+      allowKind: isShareAllowKind(row.allow_kind) ? row.allow_kind : 'image',
     };
   }
 

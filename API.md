@@ -217,18 +217,21 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 Short-lived public image shares + private image artifacts (enabled only when
 `gateway.publicUrl` is set). A token IS the capability — only its SHA-256 hash is
 stored, and shares are unenumerable (there is no list endpoint by design).
-**Phase-1 supports raster images only (PNG / JPEG / WebP);** any other type is
-rejected with `415 unsupported_image_type` at both mint and fetch time. `agent_id`
-and `session_id` must be valid identifiers (same charset as elsewhere) or the
-request is `400` before any path resolution.
+**The default allowlist is raster images only (PNG / JPEG / WebP);** any other
+type is rejected with `415 unsupported_image_type` at both mint and fetch time.
+A mint may pass `allow_documents: true` to widen the allowlist to PDF for that
+request; the allow-kind is recorded per share and the file is **re-sniffed on
+every fetch**, so replacing the file behind a live share never widens what it
+serves. `agent_id` and `session_id` must be valid identifiers (same charset as
+elsewhere) or the request is `400` before any path resolution.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/v1/shares` | Key (agent-scoped) | Mint one or more shares for artifact refs / media paths → `{ items: [{ share_id, token, url?, expires_at, task_id?, provider?, prior_prompt? }] }` (order preserved; TTL 10s–24h, default 30 min; idempotent within a 60s window). `token` is a host-agnostic capability and is always present; `url` is a convenience built from `gateway.publicUrl` and is omitted when that is unset — callers with their own public base (e.g. LINE) build `<base>/shared/<token>` themselves. `task_id`/`provider`/`prior_prompt` are echoed **only for artifact refs** (never path refs) and only when the artifact's generation recorded them — `task_id`/`provider` are the provider-side handle a resume-capable backend needs (absent when the generating provider has no resume concept), and `prior_prompt` is the prompt that produced the artifact; `generate_image`'s `continue_from` consumes these to resume or hand off an edit session |
+| `POST` | `/api/v1/shares` | Key (agent-scoped) | Mint one or more shares for artifact refs / media paths → `{ items: [{ share_id, token, url?, expires_at, task_id?, provider?, prior_prompt? }] }` (order preserved; TTL 10s–24h, default 30 min; idempotent within a 60s window, keyed by allow-kind as well as ref). Optional `allow_documents: true` widens this request's allowlist to PDF; anything non-boolean is `400`. `token` is a host-agnostic capability and is always present; `url` is a convenience built from `gateway.publicUrl` and is omitted when that is unset — callers with their own public base (e.g. LINE) build `<base>/shared/<token>` themselves. `task_id`/`provider`/`prior_prompt` are echoed **only for artifact refs** (never path refs) and only when the artifact's generation recorded them — `task_id`/`provider` are the provider-side handle a resume-capable backend needs (absent when the generating provider has no resume concept), and `prior_prompt` is the prompt that produced the artifact; `generate_image`'s `continue_from` consumes these to resume or hand off an edit session |
 | `DELETE` | `/api/v1/shares/:shareId` | Key (owner/admin) | Revoke a share (uniform `404` when the key can't access the owner) |
 | `POST` | `/api/v1/image-artifacts` | Key (agent-scoped) | Register generated images as private artifacts (registration never makes a file public) |
 | `GET` | `/api/v1/image-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session image list (oldest first); mints nothing, returns no token |
-| `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream a shared image inline; uniform `404` for unknown/expired/revoked/traversal; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
+| `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream the shared file — images `inline`, documents as an `attachment` (sanitised RFC 5987 filename), always `X-Content-Type-Options: nosniff`; uniform `404` for unknown/expired/revoked/traversal/type-mismatch; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
 
 ### PTY Shell API
 

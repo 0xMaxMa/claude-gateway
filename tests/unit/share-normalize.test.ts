@@ -173,6 +173,9 @@ describe('generate_image share-bridge normalization (#70)', () => {
         refs: [{ path: 'media/session-1/duck.png' }],
       });
       expect(sc[0]!.headers['Authorization']).toBe('Bearer gw-key');
+      // #444: ref normalization feeds an image-editing provider, so it must NOT
+      // opt into documents — a PDF ref here has to keep failing at the gateway.
+      expect(sc[0]!.body!.allow_documents).toBeUndefined();
       expect(submitCall()!.body!.image).toBe('https://vm.example.com/gateway/shared/tok1');
     });
 

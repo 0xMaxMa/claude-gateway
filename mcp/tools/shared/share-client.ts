@@ -109,7 +109,7 @@ async function callGateway(
 /** Mint short-lived share URLs for local/artifact refs — order preserved. */
 export async function createShares(
   refs: ShareRef[],
-  opts: { purpose?: string; ttlSeconds?: number } = {},
+  opts: { purpose?: string; ttlSeconds?: number; allowDocuments?: boolean } = {},
 ): Promise<ShareItem[]> {
   const body: Record<string, unknown> = {
     agent_id: process.env.GATEWAY_AGENT_ID,
@@ -118,6 +118,9 @@ export async function createShares(
     refs,
   };
   if (opts.ttlSeconds !== undefined) body.ttl_seconds = opts.ttlSeconds;
+  // Opt-in only: image callers (line_image, generate_image refs) must keep
+  // getting a hard rejection for a non-image ref.
+  if (opts.allowDocuments) body.allow_documents = true;
   const { status, json } = await callGateway('POST', '/api/v1/shares', body);
   if (status !== 201) {
     const code = typeof json.code === 'string' ? json.code : 'share_failed';
