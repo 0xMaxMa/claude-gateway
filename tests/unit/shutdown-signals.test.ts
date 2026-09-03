@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { SHUTDOWN_SIGNALS, registerShutdownSignals } from '../../src/shutdown-signals';
+import { EX_TEMPFAIL, SHUTDOWN_SIGNALS, registerShutdownSignals, requestExitCode } from '../../src/shutdown-signals';
 
 describe('shutdown signal wiring (issue #405)', () => {
   // ── U-SD-405a: the defect itself ───────────────────────────────────────────
@@ -122,5 +122,102 @@ describe('shutdown signal wiring (issue #405)', () => {
     // and still holding its port and its children.
     expect(exits).toEqual([1]);
     expect((errors[0] as Error).message).toBe('router.stop() blew up');
+  });
+});
+
+describe('requestExitCode (issue #450)', () => {
+  it('overrides the exit code for the very next signal-driven shutdown', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exits.push(code), target });
+
+    requestExitCode(EX_TEMPFAIL);
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([EX_TEMPFAIL]);
+  });
+
+  it('defaults to exit 0 when nothing requested a code', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exits.push(code), target });
+
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([0]);
+  });
+
+  it('is consumed once — a requested code does not leak into a later shutdown', async () => {
+    const targetA = new EventEmitter();
+    const exitsA: number[] = [];
+    requestExitCode(EX_TEMPFAIL);
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exitsA.push(code), target: targetA });
+    targetA.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitsA).toEqual([EX_TEMPFAIL]);
+
+    const targetB = new EventEmitter();
+    const exitsB: number[] = [];
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exitsB.push(code), target: targetB });
+    targetB.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitsB).toEqual([0]);
+  });
+
+  it('a shutdown that throws still exits 1, ignoring any requested code', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+    requestExitCode(EX_TEMPFAIL);
+
+    registerShutdownSignals({
+      run: async () => { throw new Error('boom'); },
+      exit: (code) => exits.push(code),
+      onError: () => {},
+      target,
+    });
+
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([1]);
+  });
+
+  // A second, unrelated `requestExitCode()` call landing *after* a teardown
+  // has already started (but before it resolves) must not change that
+  // teardown's exit code — e.g. an operator's own `kill <pid>` starts the
+  // shutdown with nothing pending, and the update endpoint's timer (racing
+  // to self-restart) calls `requestExitCode(EX_TEMPFAIL)` while it's still
+  // draining. The operator's deliberate stop must still exit 0, not inherit
+  // a code requested for a shutdown it didn't start.
+  it('a requestExitCode() call made after a shutdown has already started does not affect it', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+    let releaseShutdown!: () => void;
+    const teardownDone = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+
+    registerShutdownSignals({
+      run: async () => { await teardownDone; },
+      exit: (code) => exits.push(code),
+      target,
+    });
+
+    // Nothing pending yet — this teardown starts wanting exit 0.
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exits).toEqual([]);
+
+    // A later, unrelated request while the teardown above is still running.
+    requestExitCode(EX_TEMPFAIL);
+
+    releaseShutdown();
+    await new Promise((r) => setImmediate(r));
+
+    // The already-started teardown must exit with the code it began with (0),
+    // not the EX_TEMPFAIL requested after it was already under way.
+    expect(exits).toEqual([0]);
   });
 });

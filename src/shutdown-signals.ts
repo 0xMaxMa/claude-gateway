@@ -26,6 +26,30 @@
  */
 export const SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGHUP'];
 
+/**
+ * sysexits.h `EX_TEMPFAIL` — "temporary failure, user is invited to retry".
+ * Used by callers that trigger their own shutdown (see `requestExitCode`) but
+ * need `Restart=on-failure` systemd units to treat the exit as failure-worth-
+ * restarting, rather than the default clean-shutdown code 0. See issue #450:
+ * an API-triggered update SIGTERMs the gateway itself expecting the
+ * supervisor to bring it back, but `on-failure` only restarts on a non-zero
+ * exit or a signal kill, not on a graceful `exit(0)`.
+ */
+export const EX_TEMPFAIL = 75;
+
+let pendingExitCode = 0;
+
+/**
+ * Overrides the exit code the *next* signal-driven shutdown uses, then resets
+ * to 0 (the default clean-exit code) once consumed — so a caller that
+ * triggers its own shutdown (e.g. the package updater sending itself
+ * SIGTERM) can request `on-failure` supervisors restart it, without pinning
+ * every future shutdown to the same code.
+ */
+export function requestExitCode(code: number): void {
+  pendingExitCode = code;
+}
+
 export interface ShutdownSignalOptions {
   /** The teardown itself. Invoked at most once, no matter how many signals arrive. */
   run: (signal: string) => Promise<void>;
@@ -53,9 +77,18 @@ export function registerShutdownSignals(
   const target = opts.target ?? process;
 
   let inFlight: Promise<void> | null = null;
+  // Captured once, by whichever signal actually starts the teardown — not
+  // re-read when it resolves. A second signal that merely joins an
+  // already-in-flight shutdown (e.g. an operator's own `kill <pid>` landing
+  // while an update-triggered self-restart is still draining connections)
+  // must not let an unrelated `requestExitCode()` call made in that window
+  // change the exit code of a shutdown it didn't start.
+  let exitCode = 0;
 
   const shutdown = (signal: string): Promise<void> => {
     if (inFlight) return inFlight;
+    exitCode = pendingExitCode;
+    pendingExitCode = 0;
     opts.onBegin?.(signal);
     inFlight = opts.run(signal);
     return inFlight;
@@ -68,7 +101,7 @@ export function registerShutdownSignals(
       // signal — holding its port and its children — which is a worse outcome
       // than an unclean exit. Exit non-zero so the failure stays visible.
       void shutdown(signal).then(
-        () => exit(0),
+        () => exit(exitCode),
         (err) => {
           onError(err);
           exit(1);

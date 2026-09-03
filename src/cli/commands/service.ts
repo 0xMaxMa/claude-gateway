@@ -146,7 +146,7 @@ Environment="HOME=${q(spec.home)}"
 Environment="PATH=${q(spec.pathEnv)}"
 Environment="GATEWAY_CONFIG=${q(spec.config)}"
 ExecStart="${q(spec.node)}" "${q(spec.entry)}" gateway start --config "${q(spec.config)}"
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -232,26 +232,64 @@ async function waitForHealth(config: CliConfigView, flags: Record<string, string
 
 // ─── systemd (user scope) ─────────────────────────────────────────────────────
 
-function systemdState(): { installed: boolean; enabled: boolean; active: boolean } {
+/** `is-enabled`/`is-active` for `UNIT_NAME` at the given scope — the query
+ *  both `systemdState()` (user scope, for `service status`) and
+ *  `systemScopeConflict()` (system scope, for the install-time check below)
+ *  need, differing only in scope. A named boolean rather than a raw argv
+ *  fragment (`['--user']`/`[]`) so a future call site passing the wrong array
+ *  fails to compile instead of silently querying the wrong scope. */
+function unitFlagState(userScope: boolean): { enabled: boolean; active: boolean } {
+  const scopeArgs = userScope ? ['--user'] : [];
   let enabled = false;
   let active = false;
   try {
-    enabled = capture('systemctl', ['--user', 'is-enabled', UNIT_NAME]).trim() === 'enabled';
+    enabled = capture('systemctl', [...scopeArgs, 'is-enabled', UNIT_NAME]).trim() === 'enabled';
   } catch {
     /* systemctl absent, or the unit is disabled/missing */
   }
   try {
-    active = capture('systemctl', ['--user', 'is-active', UNIT_NAME]).trim() === 'active';
+    active = capture('systemctl', [...scopeArgs, 'is-active', UNIT_NAME]).trim() === 'active';
   } catch {
     /* systemctl absent, or the unit is inactive */
   }
-  return { installed: fs.existsSync(unitPath()), enabled, active };
+  return { enabled, active };
+}
+
+function systemdState(): { installed: boolean; enabled: boolean; active: boolean } {
+  return { installed: fs.existsSync(unitPath()), ...unitFlagState(true) };
 }
 
 function systemdStatus(flags: Record<string, string | boolean>): number {
   const state = systemdState();
   printJson({ manager: 'systemd-user', unit: unitPath(), ...state }, flags);
   return state.active ? 0 : 1;
+}
+
+/**
+ * True when a same-named unit already exists and is enabled or active at
+ * *system* scope (`/etc/systemd/system/`) — e.g. from an externally
+ * provisioned image. Installing the user-scope unit alongside it would leave
+ * both `enabled`, racing for the port on the next reboot (see issue #450).
+ *
+ * Reading system scope needs no privileges: `systemctl is-enabled`/`is-active`
+ * without `--user` queries it as any user, so this check costs nothing extra.
+ */
+function systemScopeConflict(): boolean {
+  const { enabled, active } = unitFlagState(false);
+  return enabled || active;
+}
+
+/** Written to stderr when `systemScopeConflict()` refuses an install — shared
+ *  by both the pre-prompt check and the re-check right after `confirm()`
+ *  below, so the two call sites can't drift into different wording. */
+function writeSystemScopeConflictRefusal(): void {
+  process.stderr.write(
+    `A ${UNIT_NAME} unit already exists at system scope (/etc/systemd/system/${UNIT_NAME}) and is enabled or active.\n` +
+      `Installing a second, independent unit at user scope would race it for the port on the next reboot.\n` +
+      `Disable the existing one first, then re-run this command:\n` +
+      `  sudo systemctl disable --now ${UNIT_NAME}\n` +
+      'Pass --force to install anyway.\n',
+  );
 }
 
 async function systemdInstall(
@@ -266,8 +304,28 @@ async function systemdInstall(
   // stderr, not stdout: stdout carries the JSON result (see printJson).
   printFilePreview(file, unit, (line) => process.stderr.write(line + '\n'));
   if (flags.print === true) return 0;
+
+  // Refuse by default rather than only warning: a warning a user proceeds
+  // past (or never reads) still ends up with two enabled units. Disabling the
+  // conflicting unit automatically would need sudo — deliberately outside
+  // this command's scope (see the file-level comment) — and it may belong to
+  // a provisioning system this installer has no context on, so this stops
+  // and hands back the exact command to resolve it instead.
+  if (flags.force !== true && systemScopeConflict()) {
+    writeSystemScopeConflictRefusal();
+    return 1;
+  }
+
   if (!(await confirm(flags, 'install', `Install and start ${UNIT_NAME} for user ${os.userInfo().username}?`))) {
     process.stderr.write('Aborted — nothing was written.\n');
+    return 1;
+  }
+
+  // `confirm()` can block indefinitely on the y/N prompt — re-check right
+  // before writing anything, in case a conflicting unit appeared while it
+  // was waiting on the operator.
+  if (flags.force !== true && systemScopeConflict()) {
+    writeSystemScopeConflictRefusal();
     return 1;
   }
 
@@ -467,7 +525,7 @@ async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<nu
 // ─── entry point ──────────────────────────────────────────────────────────────
 
 const USAGE_LINE =
-  'claude-gateway service <install|status|uninstall> [--manager systemd|pm2] [--config <path>] [--yes] [--print]';
+  'claude-gateway service <install|status|uninstall> [--manager systemd|pm2] [--config <path>] [--yes] [--print] [--force]';
 
 /** Pick the manager to act on when `--manager` is omitted. `status`/`uninstall`
  *  act on whatever is actually installed; `install` always defaults to systemd
@@ -504,7 +562,11 @@ export async function runService(
       'service',
       'run the gateway as a systemd-user or PM2 service',
       USAGE_LINE,
-      ['  systemd installs a user unit in ~/.config/systemd/user (no sudo).'],
+      [
+        '  systemd installs a user unit in ~/.config/systemd/user (no sudo).',
+        '  install refuses if a claude-gateway unit already exists at system scope;',
+        '  --force overrides that check.',
+      ],
     );
     return flags.help === true ? 0 : 1;
   }
