@@ -23,6 +23,14 @@ function slugBase(label: string): string {
  * A slug not already used by a built-in catalog id or an existing custom id.
  * Appends -2, -3, ... on collision (custom ids are user-facing, not secret,
  * so a readable suffix beats a random one).
+ *
+ * Note: CONNECTOR_CATALOG is empty by default, so this no longer reserves
+ * ids like 'github'/'gmail' the way it did when they were built-in entries —
+ * those are now managed custom connectors pushed by services/api (see
+ * connectors-router.ts's /oauth/receive). A user-added custom connector could
+ * theoretically slug-collide with one of those ids. Accepted as a low-severity,
+ * self-recoverable edge case (both paths are admin-trusted anyway) rather than
+ * reserving a hardcoded list here — not fixed.
  */
 export function slugify(label: string, existingCustomIds: Iterable<string>): string {
   const taken = new Set<string>(CONNECTOR_CATALOG.map((c) => c.id));

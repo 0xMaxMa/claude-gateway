@@ -97,10 +97,14 @@ export function listConnectorStatus(
       id,
       label: entry.label,
       description: entry.description,
-      authKind: entry.secretNames.length > 0 ? 'secret' : 'none',
+      authKind: entry.authKind ?? (entry.secretNames.length > 0 ? 'secret' : 'none'),
       connected,
-      source: 'custom',
+      // A services/api-managed entry (github/gmail/google-drive/google-calendar)
+      // reports as 'built-in' so the web panel doesn't show the "Custom" badge
+      // on something GetPod implemented, not something the user pasted.
+      source: entry.managed ? 'built-in' : 'custom',
       repoUrl: entry.sourceUrl,
+      oauth: entry.oauth,
     };
   });
 

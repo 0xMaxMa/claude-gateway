@@ -31,8 +31,13 @@ describe('custom helpers', () => {
   it('slugify: lowercases, dashes, and de-dupes against catalog + existing ids', () => {
     const { slugify } = require('../../src/connectors/custom');
     expect(slugify('Weather API!', [])).toBe('weather-api');
-    // Collides with the built-in 'github' id
-    expect(slugify('GitHub', [])).toBe('github-2');
+    // CONNECTOR_CATALOG is empty by default now, so there's no built-in id
+    // left to collide with — 'github' (and gmail/drive/calendar) are managed
+    // custom connector ids pushed by services/api, not reserved here. A user
+    // adding their own custom connector labeled "GitHub" could theoretically
+    // slug-collide with a services/api-managed id (accepted edge case, see
+    // custom.ts's note — admin-trusted either way, self-recoverable).
+    expect(slugify('GitHub', [])).toBe('github');
     // Collides with an existing custom id
     expect(slugify('Foo', ['foo'])).toBe('foo-2');
     expect(slugify('Foo', ['foo', 'foo-2'])).toBe('foo-3');
@@ -154,9 +159,22 @@ describe('connectors-router — custom connectors', () => {
     });
   });
 
-  it('creates with secrets provided inline → connected:true, and GET /v1/connectors merges it in with source "custom"', async () => {
+  it('creates with secrets provided inline → connected:true, and GET /v1/connectors merges both a managed and a genuine custom entry with the right source', async () => {
     const cfgPath = tmpConfig();
     const app = makeApp(cfgPath);
+
+    // A services/api-managed push (github) reports source: 'built-in' — see
+    // oauth-connectors.test.ts for that route's dedicated coverage; this test
+    // is about the GET /v1/connectors merge, not the push itself.
+    await request(app)
+      .post('/api/v1/connectors/github/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send({
+        access_token: 'ghu_x',
+        label: 'GitHub',
+        config: { type: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: 'Bearer {access_token}' } },
+      });
+
     const create = await request(app)
       .post('/api/v1/connectors/custom')
       .set('X-Api-Key', adminKey)
@@ -209,11 +227,15 @@ describe('connectors-router — custom connectors', () => {
     const app = makeApp(tmpConfig());
     const status = await request(app).get('/api/v1/connectors/nope/status').set('X-Api-Key', adminKey);
     expect(status.status).toBe(404);
-    const del = await request(app).delete('/api/v1/connectors/custom/nope').set('X-Api-Key', adminKey);
+    // DELETE /custom/:id was retired — deleting a custom connector now goes
+    // through the same unified DELETE /v1/connectors/:id every other
+    // connector uses (falls back to customConnectors when the catalog lookup
+    // misses; see connectors-router.ts).
+    const del = await request(app).delete('/api/v1/connectors/nope').set('X-Api-Key', adminKey);
     expect(del.status).toBe(404);
   });
 
-  it('delete clears the namespaced secret + config entry', async () => {
+  it('delete clears the namespaced secret + config entry (unified DELETE route)', async () => {
     const cfgPath = tmpConfig();
     const app = makeApp(cfgPath);
     const { getSecret } = require('../../src/connectors/token-env');
@@ -228,9 +250,20 @@ describe('connectors-router — custom connectors', () => {
       });
     expect(getSecret('CUSTOM__rollforge__token')).toBe('shhh');
 
-    const del = await request(app).delete('/api/v1/connectors/custom/rollforge').set('X-Api-Key', adminKey);
+    const del = await request(app).delete('/api/v1/connectors/rollforge').set('X-Api-Key', adminKey);
     expect(del.status).toBe(200);
     expect(getSecret('CUSTOM__rollforge__token')).toBeNull();
     expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors).toEqual({});
+  });
+
+  it('unified DELETE requires admin even for a custom-connector id (checked before the catalog/custom lookup)', async () => {
+    const app = makeApp(tmpConfig());
+    await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({ label: 'Rollforge', config: { command: 'npx' } });
+
+    const res = await request(app).delete('/api/v1/connectors/rollforge').set('X-Api-Key', scopedKey);
+    expect(res.status).toBe(403);
   });
 });

@@ -1,123 +1,24 @@
 /**
  * Hardcoded connector catalog.
  *
- * The catalog is well-known server metadata (not user data), so it lives in code:
- * it doubles as the security boundary (only vetted servers can be injected) and
- * avoids a config-migration. Per-connector secrets live in mcp-token.env; per-agent
- * enablement lives in AgentConfig.connectors.
+ * Empty by default. This tier is for a deployer's OWN hand-reviewed, hardcoded
+ * connectors whose auth kind is already supported (none / secret) — add an
+ * entry here and token-env, resolve, the router and the web panel are all
+ * generic enough to pick it up with no other changes.
  *
- * To add a connector whose auth kind is already supported (none / secret), just add
- * an entry here — token-env, resolve, the router and the web panel are all generic.
+ * GetPod's own offerings (github/gmail/google-drive/google-calendar) are
+ * deliberately NOT here — they're pushed in as managed custom connectors by
+ * services/api instead (see connectors-router.ts's POST /oauth/receive and
+ * services/api's internal/vm/connector_push.go). Keeping GetPod's own product
+ * decisions (which endpoint, which scopes) out of this file matters because
+ * this repo is a fork meant to be PR'd back upstream — baking product opinion
+ * into shared fork code would make every future endpoint/scope change touch a
+ * file we also want to keep diff-minimal for that PR.
  */
 
 import type { ConnectorSpec } from './types';
 
-export const CONNECTOR_CATALOG: ConnectorSpec[] = [
-  {
-    id: 'github',
-    label: 'GitHub',
-    description: 'Repos, issues, and pull requests via the official GitHub MCP server.',
-    transport: 'http',
-    // Real OAuth (authorization_code, no refresh — GitHub OAuth App user
-    // tokens don't expire unless the org opts into expiring tokens, which
-    // getpod's App doesn't) — same push-only shape as the Google connectors
-    // below: the client_secret lives in getpod-ai's services/api only, this
-    // gateway only ever receives the short-lived-in-name-only access_token
-    // via POST /v1/connectors/:id/oauth/receive. See types.ts's 'oauth' doc.
-    auth: { kind: 'oauth', secretEnv: 'GITHUB_TOKEN' },
-    repoUrl: 'https://github.com/github/github-mcp-server',
-    build: (secret) => ({
-      type: 'http',
-      url: 'https://api.githubcopilot.com/mcp/',
-      headers: { Authorization: `Bearer ${secret ?? ''}` },
-    }),
-    // Local docker stdio alternative (kept for reference; needs the cached image and
-    // does not work inside app-agent containers without docker-in-docker):
-    //   transport: 'stdio',
-    //   build: (secret) => ({
-    //     command: 'docker',
-    //     args: ['run', '-i', '--rm', '-e', 'GITHUB_PERSONAL_ACCESS_TOKEN',
-    //            'ghcr.io/github/github-mcp-server'],
-    //     env: { GITHUB_PERSONAL_ACCESS_TOKEN: secret ?? '' },
-    //   }),
-  },
-  // ── Google connectors — real OAuth (authorization_code + refresh), but the
-  // whole client_secret-touching flow lives in getpod-ai's services/api, NOT
-  // here — this gateway only ever receives a short-lived access_token via
-  // POST /v1/connectors/:id/oauth/receive (connectors-router.ts). Reason: this
-  // gateway runs inside the user's own VM, reachable by that user's own
-  // shell/SSH — a client_secret shared across every user can't live here
-  // safely. See types.ts's 'oauth' auth kind doc comment.
-  //
-  // Both community servers below (io.github.domdomegg/{gmail,google-drive,
-  // google-cal}-mcp on the MCP registry) read the SAME env var name
-  // (GOOGLE_ACCESS_TOKEN) in their process, but each catalog entry stores its
-  // OWN secret under a distinct key (GMAIL_ACCESS_TOKEN / GDRIVE_ACCESS_TOKEN /
-  // GCAL_ACCESS_TOKEN) so connecting one doesn't silently mark the others
-  // "connected" too.
-  {
-    id: 'gmail',
-    label: 'Gmail',
-    description: 'Read, search, and send email via Gmail.',
-    transport: 'stdio',
-    auth: { kind: 'oauth', secretEnv: 'GMAIL_ACCESS_TOKEN' },
-    repoUrl: 'https://github.com/domdomegg/gmail-mcp',
-    build: (secret) => ({
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'gmail-mcp'],
-      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
-    }),
-  },
-  {
-    id: 'google-drive',
-    label: 'Google Drive',
-    description: 'List, search, and manage files in Google Drive.',
-    transport: 'stdio',
-    auth: { kind: 'oauth', secretEnv: 'GDRIVE_ACCESS_TOKEN' },
-    repoUrl: 'https://github.com/domdomegg/google-drive-mcp',
-    build: (secret) => ({
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'google-drive-mcp'],
-      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
-    }),
-  },
-  {
-    id: 'google-calendar',
-    label: 'Google Calendar',
-    description: 'List, create, and manage calendar events.',
-    transport: 'stdio',
-    auth: { kind: 'oauth', secretEnv: 'GCAL_ACCESS_TOKEN' },
-    repoUrl: 'https://github.com/domdomegg/google-cal-mcp',
-    build: (secret) => ({
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'google-cal-mcp'],
-      env: { GOOGLE_ACCESS_TOKEN: secret ?? '' },
-    }),
-  },
-  // Microsoft 365 (Outlook/OneDrive/Teams) — the one registry entry
-  // (com.proscendia/microsoft-365) is a remote streamable-http server with NO
-  // static header/token: it does its own Microsoft OAuth at connect-time
-  // (server-side, once the MCP client opens the connection), so there is
-  // nothing for us to store — auth.kind 'none'. UNVERIFIED whether Claude
-  // Code's MCP client actually completes that handshake; enabling this for an
-  // agent is the live test.
-  {
-    id: 'microsoft-365',
-    label: 'Microsoft 365',
-    description: 'Outlook, OneDrive, and Teams via the user\'s own Microsoft account.',
-    transport: 'http',
-    auth: { kind: 'none' },
-    // No GitHub repo published by the vendor — link to their site instead.
-    repoUrl: 'https://proscendia.com',
-    build: () => ({
-      type: 'http',
-      url: 'https://microsoft-mcp.proscendia.com/mcp',
-    }),
-  },
-];
+export const CONNECTOR_CATALOG: ConnectorSpec[] = [];
 
 export function getConnectorSpec(id: string): ConnectorSpec | undefined {
   return CONNECTOR_CATALOG.find((c) => c.id === id);

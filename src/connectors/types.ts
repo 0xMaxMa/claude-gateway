@@ -12,6 +12,12 @@
 export type ConnectorAuthKind = 'none' | 'secret' | 'oauth_device' | 'oauth';
 export type ConnectorTransport = 'http' | 'stdio';
 
+// Note: there is deliberately no 'oauth' variant here. A *built-in*
+// ConnectorSpec can never be oauth-kind — that concept now lives only on
+// CustomConnectorEntry.authKind below, since every oauth-managed connector
+// (github/gmail/google-drive/google-calendar) is pushed in as a managed
+// custom connector by services/api, not declared in catalog.ts. See
+// CustomConnectorEntry's doc comment for why.
 export type ConnectorAuth =
   | { kind: 'none' }
   | { kind: 'secret'; secretEnv: string } // paste a token (e.g. GitHub PAT)
@@ -22,19 +28,6 @@ export type ConnectorAuth =
       scopes: string[];
       deviceCodeUrl: string;
       tokenUrl: string;
-    }
-  | {
-      // Managed externally by services/api (getpod-ai), NOT by this gateway —
-      // the gateway never sees a client_secret or a refresh_token, only ever
-      // receives a short-lived access_token via POST
-      // /v1/connectors/:id/oauth/receive (connectors-router.ts). Reason: this
-      // gateway runs inside the user's own VM (SSH + agent shell access), so
-      // a client_secret shared across every user could never live here
-      // safely. The web panel shows a "Connect" link to services/api's own
-      // OAuth start endpoint instead of the paste-a-token modal `secretEnv`
-      // kinds use.
-      kind: 'oauth';
-      secretEnv: string;
     };
 
 /**
@@ -92,6 +85,10 @@ export interface ConnectorStatus {
   source: 'built-in' | 'custom';
   /** repoUrl (built-in) or sourceUrl (custom) — see their doc comments. */
   repoUrl?: string;
+  /** Mirrors CustomConnectorEntry.oauth — tells the web panel to render a
+   *  "Connect" link pointed at THIS gateway's oauth/start endpoint instead of
+   *  a paste-token modal. Always absent for built-in entries. */
+  oauth?: boolean;
 }
 
 /** Returns the env-var name a spec's secret is stored under, or null for kind 'none'. */
@@ -117,4 +114,33 @@ export interface CustomConnectorEntry {
   secretNames: string[];
   /** Where the user says this config came from — their own reference, unverified. */
   sourceUrl?: string;
+  /**
+   * Set ONLY by services/api's push (POST /oauth/receive) for a GetPod-managed
+   * OAuth connector (github/gmail/google-drive/google-calendar) — never by a
+   * genuine user-pasted add (POST /v1/connectors/custom leaves this unset).
+   * listConnectorStatus reports this verbatim instead of inferring from
+   * secretNames, since a managed entry IS oauth-kind even though it lives in
+   * the same customConnectors storage as a user-pasted one.
+   */
+  authKind?: 'oauth';
+  /**
+   * Set ONLY by services/api's push, same as authKind above — tells
+   * listConnectorStatus to report `source: 'built-in'` instead of 'custom' so
+   * the web panel doesn't show the "Custom" badge on something GetPod
+   * implemented and pushed in, not something the user pasted themselves.
+   */
+  managed?: boolean;
+  /**
+   * Set when the admin who added this connector marked it as "this MCP
+   * server uses OAuth sign-in" (see api/oauth-connectors-router.ts). Purely a
+   * discovery/UX hint — it does NOT change how the secret is resolved
+   * (`config` must still carry an `{access_token}` placeholder, and
+   * `secretNames` must still include `'access_token'`, exactly like a
+   * user-pasted static-token connector; connectors/resolve.ts needs no
+   * awareness of this field at all). It only tells the web panel to show a
+   * "Connect" button that hits `oauth/start` on THIS gateway (not
+   * services/api), and tells `oauth/start` which `config.url` to run
+   * discovery against.
+   */
+  oauth?: boolean;
 }

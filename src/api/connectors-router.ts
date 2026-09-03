@@ -8,6 +8,7 @@ import { listConnectorStatus } from '../connectors/resolve';
 import { secretEnvOf } from '../connectors/types';
 import { setSecret, deleteSecret, hasSecret } from '../connectors/token-env';
 import { slugify, extractPlaceholders, customSecretKey } from '../connectors/custom';
+import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import type { AgentRunner } from '../agent/runner';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
@@ -43,9 +44,11 @@ export function createConnectorsRouter(
   apiKeys?: ApiKey[],
   configPath?: string,
   agents?: Map<string, AgentRunner>,
+  customConnectorsStore?: CustomConnectorsStore,
 ): Router {
   const router = Router();
   if (apiKeys?.length) router.use(createApiAuthMiddleware(apiKeys));
+  const store = customConnectorsStore ?? createCustomConnectorsStore(configPath);
 
   // Serialise read-modify-write of config.json's gateway.connectors subtree.
   let writeLock: Promise<void> = Promise.resolve();
@@ -70,44 +73,6 @@ export function createConnectorsRouter(
     return run;
   }
 
-  // Same read-modify-write-tmp-rename pattern as mutateGatewayConnectors above,
-  // targeting gateway.customConnectors instead. Shares the same writeLock so a
-  // built-in connect and a custom add can't race each other's read-modify-write.
-  async function mutateCustomConnectors(
-    fn: (connectors: Record<string, CustomConnectorEntry>) => void,
-  ): Promise<void> {
-    if (!configPath) return;
-    const run = writeLock.catch(() => {}).then(async () => {
-      const raw = await fsp.readFile(configPath, 'utf-8');
-      const config = JSON.parse(raw) as {
-        gateway?: { customConnectors?: Record<string, CustomConnectorEntry> };
-        [k: string]: unknown;
-      };
-      config.gateway = config.gateway ?? {};
-      config.gateway.customConnectors = config.gateway.customConnectors ?? {};
-      fn(config.gateway.customConnectors);
-      const tmp = `${configPath}.tmp.${randomUUID()}`;
-      await fsp.writeFile(tmp, JSON.stringify(config, null, 2), 'utf-8');
-      await fsp.rename(tmp, configPath);
-    });
-    writeLock = run.catch(() => {});
-    return run;
-  }
-
-  /** Fresh read of gateway.customConnectors — mirrors token-env.ts's "no caching" stance. */
-  async function readCustomConnectors(): Promise<Record<string, CustomConnectorEntry>> {
-    if (!configPath) return {};
-    try {
-      const raw = await fsp.readFile(configPath, 'utf-8');
-      const config = JSON.parse(raw) as {
-        gateway?: { customConnectors?: Record<string, CustomConnectorEntry> };
-      };
-      return config.gateway?.customConnectors ?? {};
-    } catch {
-      return {};
-    }
-  }
-
   function requireAdmin(req: Request, res: Response): boolean {
     if (!apiKeys?.length) return true; // no auth configured — allow
     if (!isAdmin((req as AuthedRequest).apiKey)) {
@@ -119,7 +84,7 @@ export function createConnectorsRouter(
 
   // List catalog + connected state (built-in + custom)
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
-    res.json({ connectors: listConnectorStatus(await readCustomConnectors()) });
+    res.json({ connectors: listConnectorStatus(await store.read()) });
   });
 
   // Single connector status (used by the web to poll) — built-in first, custom fallback
@@ -132,7 +97,7 @@ export function createConnectorsRouter(
       return;
     }
 
-    const custom = (await readCustomConnectors())[req.params.id];
+    const custom = (await store.read())[req.params.id];
     if (!custom) {
       res.status(404).json({ error: `Unknown connector '${req.params.id}'` });
       return;
@@ -154,13 +119,6 @@ export function createConnectorsRouter(
 
     if (spec.auth.kind === 'none') {
       res.json({ id: spec.id, connected: true });
-      return;
-    }
-
-    if (spec.auth.kind === 'oauth') {
-      res.status(400).json({
-        error: `'${spec.id}' is connected via getpod-ai (OAuth), not a pasted token`,
-      });
       return;
     }
 
@@ -187,34 +145,81 @@ export function createConnectorsRouter(
     }
   });
 
-  // Receive a fresh access_token pushed by getpod-ai's services/api for an
-  // 'oauth'-kind connector — this is how Google connectors get connected (and
-  // kept fresh on refresh) now. Admin-gated exactly like /connect; the caller
-  // is services/api itself, reaching this over the internal network with the
+  // Receive a fresh access_token + full connector shape pushed by getpod-ai's
+  // services/api for a GetPod-managed OAuth connector (github/gmail/
+  // google-drive/google-calendar) — this is how those connect (and stay fresh
+  // on refresh) now. Admin-gated exactly like /connect; the caller is
+  // services/api itself, reaching this over the internal network with the
   // same admin API key any other admin caller would use.
+  //
+  // Unlike /connect, there's no catalog lookup here — CONNECTOR_CATALOG is
+  // empty by default, and these ids are never in it (see catalog.ts's doc
+  // comment). The entry is written into gateway.customConnectors instead,
+  // same storage a user-pasted custom connector uses, with `managed: true` +
+  // `authKind: 'oauth'` marking it as services/api's, not the user's (see
+  // CustomConnectorEntry's doc comment). `secretNames` is never trusted from
+  // the request body — derived from `config` via extractPlaceholders, the
+  // same helper /custom's add route uses, and required to be exactly
+  // ['access_token'] (this route only ever manages one pushed secret).
   router.post('/v1/connectors/:id/oauth/receive', async (req: Request, res: Response) => {
-    const spec = getConnectorSpec(req.params.id);
-    if (!spec) {
-      res.status(404).json({ error: `Unknown connector '${req.params.id}'` });
-      return;
-    }
     if (!requireAdmin(req, res)) return;
-    if (spec.auth.kind !== 'oauth') {
-      res.status(400).json({ error: `'${spec.id}' does not use managed OAuth` });
-      return;
-    }
+    const id = req.params.id;
 
-    const accessToken = (req.body as { access_token?: unknown })?.access_token;
+    const body = req.body as {
+      access_token?: unknown;
+      label?: unknown;
+      description?: unknown;
+      config?: unknown;
+      sourceUrl?: unknown;
+    };
+
+    const accessToken = body?.access_token;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
       res.status(400).json({ error: 'access_token is required and must be a non-empty string' });
       return;
     }
+    if (typeof body.label !== 'string' || !body.label.trim()) {
+      res.status(400).json({ error: 'label is required and must be a non-empty string' });
+      return;
+    }
+    if (typeof body.config !== 'object' || body.config === null || Array.isArray(body.config)) {
+      res.status(400).json({ error: 'config is required and must be a JSON object' });
+      return;
+    }
+    if (body.description !== undefined && typeof body.description !== 'string') {
+      res.status(400).json({ error: 'description must be a string' });
+      return;
+    }
+    if (body.sourceUrl !== undefined && typeof body.sourceUrl !== 'string') {
+      res.status(400).json({ error: 'sourceUrl must be a string' });
+      return;
+    }
 
-    const envName = spec.auth.secretEnv;
+    const placeholders = extractPlaceholders(body.config);
+    if (placeholders.length !== 1 || placeholders[0] !== 'access_token') {
+      res.status(400).json({
+        error: "config must contain exactly one {access_token} placeholder and no others",
+      });
+      return;
+    }
+
+    const entry: CustomConnectorEntry = {
+      label: body.label.trim(),
+      description: typeof body.description === 'string' ? body.description : undefined,
+      config: body.config as Record<string, unknown>,
+      secretNames: ['access_token'],
+      sourceUrl:
+        typeof body.sourceUrl === 'string' && body.sourceUrl.trim()
+          ? body.sourceUrl.trim()
+          : undefined,
+      authKind: 'oauth',
+      managed: true,
+    };
+
     try {
-      setSecret(envName, accessToken.trim());
-      await mutateGatewayConnectors((c) => {
-        c[spec.id] = { secretEnv: envName };
+      setSecret(customSecretKey(id, 'access_token'), accessToken.trim());
+      await store.mutate((c) => {
+        c[id] = entry;
       });
 
       // A live session already resolved this connector with the stale (or
@@ -224,32 +229,55 @@ export function createConnectorsRouter(
       // can't be hot-patched).
       if (agents) {
         await Promise.all(
-          [...agents.values()].map((runner) => runner.restartSessionsUsingConnector(spec.id)),
+          [...agents.values()].map((runner) => runner.restartSessionsUsingConnector(id)),
         );
       }
 
-      res.json({ id: spec.id, connected: true });
+      res.json({ id, connected: true });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
   });
 
-  // Disconnect — clear the secret + wiring
+  // Disconnect — clear the secret + wiring. Unified across built-in (catalog)
+  // and custom/managed (customConnectors) storage: checks admin first (this
+  // route used to check "does the id exist" before "is the caller admin" —
+  // unifying with the custom-delete logic below means picking one order, and
+  // admin-first doesn't leak whether an id exists to a non-admin caller),
+  // then tries the catalog, then falls back to customConnectors instead of
+  // 404ing — github/gmail/etc. live there now (see /oauth/receive above), and
+  // this used to be a 404 dead-end for them before this fallback existed.
   router.delete('/v1/connectors/:id', async (req: Request, res: Response) => {
-    const spec = getConnectorSpec(req.params.id);
-    if (!spec) {
-      res.status(404).json({ error: `Unknown connector '${req.params.id}'` });
+    if (!requireAdmin(req, res)) return;
+    const id = req.params.id;
+
+    const spec = getConnectorSpec(id);
+    if (spec) {
+      const envName = secretEnvOf(spec);
+      try {
+        if (envName) deleteSecret(envName);
+        await mutateGatewayConnectors((c) => {
+          delete c[spec.id];
+        });
+        res.json({ id: spec.id, connected: false });
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
       return;
     }
-    if (!requireAdmin(req, res)) return;
 
-    const envName = secretEnvOf(spec);
+    const existing = await store.read();
+    const entry = existing[id];
+    if (!entry) {
+      res.status(404).json({ error: `Unknown connector '${id}'` });
+      return;
+    }
     try {
-      if (envName) deleteSecret(envName);
-      await mutateGatewayConnectors((c) => {
-        delete c[spec.id];
+      for (const name of entry.secretNames) deleteSecret(customSecretKey(id, name));
+      await store.mutate((c) => {
+        delete c[id];
       });
-      res.json({ id: spec.id, connected: false });
+      res.json({ id, connected: false });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -267,6 +295,7 @@ export function createConnectorsRouter(
       config?: unknown;
       secrets?: unknown;
       sourceUrl?: unknown;
+      oauth?: unknown;
     };
 
     if (typeof body.label !== 'string' || !body.label.trim()) {
@@ -279,6 +308,10 @@ export function createConnectorsRouter(
       Array.isArray(body.config)
     ) {
       res.status(400).json({ error: 'config is required and must be a JSON object' });
+      return;
+    }
+    if (body.oauth !== undefined && typeof body.oauth !== 'boolean') {
+      res.status(400).json({ error: 'oauth must be a boolean' });
       return;
     }
     if (body.description !== undefined && typeof body.description !== 'string') {
@@ -304,9 +337,22 @@ export function createConnectorsRouter(
       secrets = body.secrets as Record<string, string>;
     }
 
-    const existing = await readCustomConnectors();
+    const oauth = body.oauth === true;
+    if (oauth && typeof (body.config as { url?: unknown }).url !== 'string') {
+      res.status(400).json({ error: 'config.url is required when oauth is true' });
+      return;
+    }
+
+    const existing = await store.read();
     const id = slugify(body.label, Object.keys(existing));
     const secretNames = extractPlaceholders(body.config);
+    if (oauth && !secretNames.includes('access_token')) {
+      res.status(400).json({
+        error:
+          'oauth connectors need an {access_token} placeholder in config (e.g. headers.Authorization: "Bearer {access_token}")',
+      });
+      return;
+    }
 
     try {
       for (const name of secretNames) {
@@ -322,8 +368,9 @@ export function createConnectorsRouter(
           typeof body.sourceUrl === 'string' && body.sourceUrl.trim()
             ? body.sourceUrl.trim()
             : undefined,
+        oauth: oauth || undefined,
       };
-      await mutateCustomConnectors((c) => {
+      await store.mutate((c) => {
         c[id] = entry;
       });
       const connected = secretNames.every((name: string) => hasSecret(customSecretKey(id, name)));
@@ -333,27 +380,10 @@ export function createConnectorsRouter(
     }
   });
 
-  // Remove a custom connector — clears its namespaced secrets + config entry.
-  router.delete('/v1/connectors/custom/:id', async (req: Request, res: Response) => {
-    if (!requireAdmin(req, res)) return;
-
-    const existing = await readCustomConnectors();
-    const entry = existing[req.params.id];
-    if (!entry) {
-      res.status(404).json({ error: `Unknown custom connector '${req.params.id}'` });
-      return;
-    }
-
-    try {
-      for (const name of entry.secretNames) deleteSecret(customSecretKey(req.params.id, name));
-      await mutateCustomConnectors((c) => {
-        delete c[req.params.id];
-      });
-      res.json({ id: req.params.id, connected: false });
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
-  });
+  // Custom connector removal is now handled by the unified
+  // `DELETE /v1/connectors/:id` above (falls back to customConnectors when
+  // the id isn't a built-in catalog entry) — this used to be a separate
+  // `/custom/:id` route; retired in favor of one delete path for both.
 
   return router;
 }
