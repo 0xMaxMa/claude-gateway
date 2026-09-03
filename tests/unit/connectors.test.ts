@@ -320,6 +320,21 @@ describe('connectors-router', () => {
     return app;
   }
 
+  /** Write a temp config.json pre-seeded with the given customConnectors, return its path. */
+  function tmpConfig(customConnectors: Record<string, unknown>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        { gateway: { logDir: '/tmp', timezone: 'UTC', customConnectors }, agents: [] },
+        null,
+        2,
+      ),
+    );
+    return cfgPath;
+  }
+
   it('GET /v1/connectors returns an empty catalog by default (CONNECTOR_CATALOG is empty)', async () => {
     const res = await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(res.status).toBe(200);
@@ -490,6 +505,94 @@ describe('connectors-router', () => {
     expect(list.body.connectors).toEqual([
       expect.objectContaining({ id, label: 'Smithery Calendar', source: 'custom', connected: false }),
     ]);
+  });
+
+  // The exact bug the soft-disconnect fix above exposed: once DELETE keeps a
+  // custom connector's entry alive, POST .../connect must actually be able to
+  // reconnect it — before this fallback existed, this route only ever looked
+  // in the built-in CONNECTOR_CATALOG and 404'd for any customConnectors id.
+  it('POST .../connect reconnects a single-secret custom connector after DELETE soft-disconnected it', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
+    const app = makeApp(cfgPath);
+    const { getSecret } = require('../../src/connectors/token-env');
+
+    const add = await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'Stripe',
+        config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+        secrets: { api_key: 'sk_test_old' },
+      });
+    const id = add.body.id;
+
+    await request(app).delete(`/api/v1/connectors/${id}`).set('X-Api-Key', adminKey);
+    expect(getSecret(`CUSTOM__${id}__api_key`)).toBeNull();
+
+    const reconnect = await request(app)
+      .post(`/api/v1/connectors/${id}/connect`)
+      .set('X-Api-Key', adminKey)
+      .send({ token: 'sk_test_new' });
+    expect(reconnect.status).toBe(200);
+    expect(reconnect.body).toEqual({ id, connected: true });
+    expect(getSecret(`CUSTOM__${id}__api_key`)).toBe('sk_test_new');
+
+    const status = await request(app).get(`/api/v1/connectors/${id}/status`).set('X-Api-Key', adminKey);
+    expect(status.body).toEqual({ id, connected: true });
+  });
+
+  it('POST .../connect on an oauth:true custom connector rejects with a clear message instead of trying to store a plain token', async () => {
+    const app = makeApp(tmpConfig({
+      firecrawl: {
+        label: 'Firecrawl',
+        config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth', headers: { Authorization: 'Bearer {access_token}' } },
+        secretNames: ['access_token'],
+        oauth: true,
+      },
+    }));
+    const res = await request(app)
+      .post('/api/v1/connectors/firecrawl/connect')
+      .set('X-Api-Key', adminKey)
+      .send({ token: 'whatever' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/oauth\/start/);
+  });
+
+  it('POST .../connect on a multi-secret custom connector rejects instead of silently storing the token under one name', async () => {
+    const app = makeApp(tmpConfig({
+      calendar: {
+        label: 'Calendar',
+        config: {
+          type: 'streamable-http',
+          url: 'https://server.smithery.ai/calendar/mcp',
+          headers: { Authorization: 'Bearer {smithery_api_key}', 'X-Extra': '{unset_var}' },
+        },
+        secretNames: ['smithery_api_key', 'unset_var'],
+      },
+    }));
+    const res = await request(app)
+      .post('/api/v1/connectors/calendar/connect')
+      .set('X-Api-Key', adminKey)
+      .send({ token: 'whatever' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/needs 2 secrets/);
+  });
+
+  it('non-admin cannot reconnect a customConnectors entry either', async () => {
+    const app = makeApp(tmpConfig({
+      stripe: {
+        label: 'Stripe',
+        config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+        secretNames: ['api_key'],
+      },
+    }));
+    const res = await request(app)
+      .post('/api/v1/connectors/stripe/connect')
+      .set('X-Api-Key', scopedKey)
+      .send({ token: 'whatever' });
+    expect(res.status).toBe(403);
   });
 
   it('unknown connector → 404', async () => {
