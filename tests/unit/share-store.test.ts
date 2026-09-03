@@ -17,6 +17,9 @@ import {
   validateShareFile,
   detectImageMime,
   detectShareMime,
+  shareEnv,
+  shareLimitsFromEnv,
+  DEFAULT_MAX_REFS,
 } from '../../src/share/share-store';
 
 const PNG = Buffer.concat([
@@ -34,6 +37,68 @@ const PDF = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 5)]);
 
 const AGENT = 'a1';
 const SESSION = 'session-1';
+
+// #444: the share bridge's env vars were renamed IMAGE_SHARE_* -> SHARE_*.
+// Both names stay readable so an existing deployment does not silently lose its
+// tuning on upgrade, and the neutral name wins when both are set.
+describe('shareEnv dual-read (#444)', () => {
+  const KEYS = ['SHARE_MAX_REFS', 'IMAGE_SHARE_MAX_REFS'] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of KEYS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('neither set → undefined, and the limit falls back to its default', () => {
+    expect(shareEnv('MAX_REFS')).toBeUndefined();
+    expect(shareLimitsFromEnv().maxRefs).toBe(DEFAULT_MAX_REFS);
+  });
+
+  test('only the legacy name set → legacy value is used', () => {
+    process.env.IMAGE_SHARE_MAX_REFS = '3';
+    expect(shareEnv('MAX_REFS')).toBe('3');
+    expect(shareLimitsFromEnv().maxRefs).toBe(3);
+  });
+
+  test('only the neutral name set → neutral value is used', () => {
+    process.env.SHARE_MAX_REFS = '7';
+    expect(shareEnv('MAX_REFS')).toBe('7');
+    expect(shareLimitsFromEnv().maxRefs).toBe(7);
+  });
+
+  test('both set → the neutral name wins', () => {
+    process.env.SHARE_MAX_REFS = '7';
+    process.env.IMAGE_SHARE_MAX_REFS = '3';
+    expect(shareEnv('MAX_REFS')).toBe('7');
+    expect(shareLimitsFromEnv().maxRefs).toBe(7);
+  });
+
+  // src/session/process.ts forwards UNSET vars to the MCP subprocess as '',
+  // so an empty neutral name must not shadow a genuinely-set legacy one.
+  test('empty neutral name does not shadow a set legacy name', () => {
+    process.env.SHARE_MAX_REFS = '';
+    process.env.IMAGE_SHARE_MAX_REFS = '3';
+    expect(shareEnv('MAX_REFS')).toBe('3');
+    expect(shareLimitsFromEnv().maxRefs).toBe(3);
+  });
+
+  test('both empty → undefined, not the empty string', () => {
+    process.env.SHARE_MAX_REFS = '';
+    process.env.IMAGE_SHARE_MAX_REFS = '';
+    expect(shareEnv('MAX_REFS')).toBeUndefined();
+    expect(shareLimitsFromEnv().maxRefs).toBe(DEFAULT_MAX_REFS);
+  });
+});
 
 describe('image share store', () => {
   let baseDir: string; // agentsBaseDir
@@ -83,7 +148,7 @@ describe('image share store', () => {
       const m = mint();
       const raw = new DatabaseSync(dbPath);
       const row = raw
-        .prepare('SELECT token_hash, id, agent_id, session_id, relative_path, purpose FROM image_shares')
+        .prepare('SELECT token_hash, id, agent_id, session_id, relative_path, purpose FROM file_shares')
         .get() as Record<string, unknown>;
       raw.close();
       const expectedHash = createHash('sha256').update(m.token).digest();
@@ -134,7 +199,7 @@ describe('image share store', () => {
       expect(store.lookupByToken(m.token)).toBeNull();
       store.cleanupExpired();
       const raw = new DatabaseSync(dbPath);
-      const cnt = raw.prepare('SELECT COUNT(*) AS c FROM image_shares').get() as { c: number };
+      const cnt = raw.prepare('SELECT COUNT(*) AS c FROM file_shares').get() as { c: number };
       raw.close();
       expect(Number(cnt.c)).toBe(0);
     });
@@ -265,16 +330,16 @@ describe('image share store', () => {
         path.join(mediaDir, 'anim.gif'),
         Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(32, 4)]),
       );
-      expect(codeOf(() => validate(`${SESSION}/note.txt`))).toBe('unsupported_image_type');
-      expect(codeOf(() => validate(`${SESSION}/anim.gif`))).toBe('unsupported_image_type');
+      expect(codeOf(() => validate(`${SESSION}/note.txt`))).toBe('unsupported_file_type');
+      expect(codeOf(() => validate(`${SESSION}/anim.gif`))).toBe('unsupported_file_type');
     });
 
     test('rejects a file over the per-file cap', () => {
-      expect(codeOf(() => validate(`${SESSION}/ok.png`, 16))).toBe('image_too_large');
+      expect(codeOf(() => validate(`${SESSION}/ok.png`, 16))).toBe('file_too_large');
     });
 
-    test('missing file → deterministic image_ref_not_found', () => {
-      expect(codeOf(() => validate(`${SESSION}/gone.png`))).toBe('image_ref_not_found');
+    test('missing file → deterministic share_ref_not_found', () => {
+      expect(codeOf(() => validate(`${SESSION}/gone.png`))).toBe('share_ref_not_found');
     });
   });
 
@@ -328,7 +393,7 @@ describe('image share store', () => {
 
     test('validateShareFile rejects a PDF by default and accepts it with allow="any"', () => {
       expect(codeOf(() => validateShareFile(baseDir, AGENT, `${SESSION}/doc.pdf`))).toBe(
-        'unsupported_image_type',
+        'unsupported_file_type',
       );
       const ok = validateShareFile(baseDir, AGENT, `${SESSION}/doc.pdf`, undefined, 'any');
       expect(ok.mime).toBe('application/pdf');
@@ -342,12 +407,12 @@ describe('image share store', () => {
       fs.symlinkSync(outside, path.join(mediaDir, 'sneaky.pdf'));
       const any = (ref: string, cap?: number) => validateShareFile(baseDir, AGENT, ref, cap, 'any');
 
-      expect(codeOf(() => any(`${SESSION}/page.html`))).toBe('unsupported_image_type');
+      expect(codeOf(() => any(`${SESSION}/page.html`))).toBe('unsupported_file_type');
       expect(codeOf(() => any('../../outside.pdf'))).toBe('invalid_path');
       expect(codeOf(() => any(`${SESSION}/sneaky.pdf`))).toBe('invalid_path');
       expect(codeOf(() => any(SESSION))).toBe('invalid_path');
-      expect(codeOf(() => any(`${SESSION}/doc.pdf`, 16))).toBe('image_too_large');
-      expect(codeOf(() => any(`${SESSION}/gone.pdf`))).toBe('image_ref_not_found');
+      expect(codeOf(() => any(`${SESSION}/doc.pdf`, 16))).toBe('file_too_large');
+      expect(codeOf(() => any(`${SESSION}/gone.pdf`))).toBe('share_ref_not_found');
     });
 
     test('the allow-kind is persisted per share and round-trips through lookup', () => {
@@ -374,7 +439,7 @@ describe('image share store', () => {
     test('an unrecognised persisted allow_kind falls back to the STRICTEST kind', () => {
       const m = mint();
       const raw = new DatabaseSync(dbPath);
-      raw.prepare('UPDATE image_shares SET allow_kind = ? WHERE id = ?').run('everything', m.shareId);
+      raw.prepare('UPDATE file_shares SET allow_kind = ? WHERE id = ?').run('everything', m.shareId);
       raw.close();
       expect(store.lookupByToken(m.token)!.allowKind).toBe('image');
     });
@@ -382,9 +447,11 @@ describe('image share store', () => {
 
   // The `allow_kind` column is added in place, exactly like `prompt` on
   // image_artifacts: CREATE TABLE IF NOT EXISTS leaves an existing DB untouched.
-  describe('allow_kind migration on a pre-#444 database', () => {
-    test('an old DB opens, gains the column defaulted to image, and keeps its live shares', () => {
-      const legacyPath = path.join(baseDir, 'legacy.db');
+  // The table itself is renamed image_shares -> file_shares, and that rename
+  // MUST run before the CREATE TABLE IF NOT EXISTS, or the store would sit on an
+  // empty new table and 404 every share minted before the upgrade.
+  describe('migration from a pre-#444 database', () => {
+    const seedLegacy = (legacyPath: string, token: string): void => {
       const legacy = new DatabaseSync(legacyPath);
       legacy.exec(`
         CREATE TABLE image_shares (
@@ -398,8 +465,8 @@ describe('image share store', () => {
           expires_at    INTEGER NOT NULL,
           revoked_at    INTEGER
         );
+        CREATE INDEX IF NOT EXISTS image_shares_expiry ON image_shares(expires_at);
       `);
-      const token = 'L'.repeat(32);
       legacy
         .prepare(
           `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at)
@@ -416,6 +483,12 @@ describe('image share store', () => {
           Date.now() + 600_000,
         );
       legacy.close();
+    };
+
+    test('an old DB opens, gains the column defaulted to image, and keeps its live shares', () => {
+      const legacyPath = path.join(baseDir, 'legacy.db');
+      const token = 'L'.repeat(32);
+      seedLegacy(legacyPath, token);
 
       const migrated = new ShareStore(legacyPath);
       try {
@@ -434,6 +507,36 @@ describe('image share store', () => {
         expect(reopened.lookupByToken(token)!.allowKind).toBe('image');
       } finally {
         reopened.close();
+      }
+    });
+
+    test('the table is RENAMED, not shadowed by an empty new one', () => {
+      const legacyPath = path.join(baseDir, 'legacy-rename.db');
+      const token = 'R'.repeat(32);
+      seedLegacy(legacyPath, token);
+
+      const migrated = new ShareStore(legacyPath);
+      migrated.close();
+
+      const raw = new DatabaseSync(legacyPath);
+      try {
+        const tables = (
+          raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).all() as Array<{ name: string }>
+        ).map((r) => r.name);
+        expect(tables).toContain('file_shares');
+        expect(tables).not.toContain('image_shares');
+        // The row survived the rename rather than being left behind.
+        const cnt = raw.prepare('SELECT COUNT(*) AS c FROM file_shares').get() as { c: number };
+        expect(cnt.c).toBe(1);
+        // RENAME TO carries indexes over under their OLD names — the old one is
+        // dropped so the new CREATE INDEX cannot leave a duplicate behind.
+        const indexes = (
+          raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'file_shares'`).all() as Array<{ name: string }>
+        ).map((r) => r.name);
+        expect(indexes).toContain('file_shares_expiry');
+        expect(indexes).not.toContain('image_shares_expiry');
+      } finally {
+        raw.close();
       }
     });
   });

@@ -212,13 +212,13 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 | `POST` | `/api/v1/agents/:agentId/media` | Key | Upload a media file (image/* or PDF) — returns `mediaPath` |
 | `GET` | `/api/v1/agents/:agentId/media/*` | Key | Serve a media file by path |
 
-### Image Share Bridge API
+### File Share Bridge API
 
-Short-lived public image shares + private image artifacts (enabled only when
+Short-lived public file shares + private image artifacts (enabled only when
 `gateway.publicUrl` is set). A token IS the capability — only its SHA-256 hash is
 stored, and shares are unenumerable (there is no list endpoint by design).
 **The default allowlist is raster images only (PNG / JPEG / WebP);** any other
-type is rejected with `415 unsupported_image_type` at both mint and fetch time.
+type is rejected with `415 unsupported_file_type` at both mint and fetch time.
 A mint may pass `allow_documents: true` to widen the allowlist to PDF for that
 request; the allow-kind is recorded per share and the file is **re-sniffed on
 every fetch**, so replacing the file behind a live share never widens what it
@@ -232,6 +232,20 @@ elsewhere) or the request is `400` before any path resolution.
 | `POST` | `/api/v1/image-artifacts` | Key (agent-scoped) | Register generated images as private artifacts (registration never makes a file public) |
 | `GET` | `/api/v1/image-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session image list (oldest first); mints nothing, returns no token |
 | `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream the shared file — images `inline`, documents as an `attachment` (sanitised RFC 5987 filename), always `X-Content-Type-Options: nosniff`; uniform `404` for unknown/expired/revoked/traversal/type-mismatch; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
+
+**Renamed in #444** (the bridge is no longer image-only):
+
+| Kind | Was | Now |
+|------|-----|-----|
+| Error code | `image_ref_not_found` | `share_ref_not_found` |
+| Error code | `image_too_large` | `file_too_large` |
+| Error code | `unsupported_image_type` | `unsupported_file_type` |
+| MCP tool | `share_image` | `share_file` (old name kept as a deprecated alias) |
+| Env vars | `IMAGE_SHARE_*` | `SHARE_*` (legacy names still read as a fallback) |
+| SQLite table | `image_shares` | `file_shares` (renamed in place on first open) |
+
+The error codes are the only breaking part: `code` values in `4xx` bodies changed.
+HTTP statuses, request/response shapes and the token format are unchanged.
 
 ### PTY Shell API
 

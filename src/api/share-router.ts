@@ -11,6 +11,7 @@ import {
   ShareLimits,
   ShareAllowKind,
   mimeDetectorFor,
+  shareEnv,
   shareLimitsFromEnv,
   validateShareFile,
   DEFAULT_SHARE_TTL_SECONDS,
@@ -47,10 +48,10 @@ const DEFAULT_PUBLIC_RATE_PER_MIN = 60;
 
 function errStatus(code: string): number {
   switch (code) {
-    case 'image_ref_not_found': return 404;
-    case 'image_too_large': return 413;
+    case 'share_ref_not_found': return 404;
+    case 'file_too_large': return 413;
     case 'total_size_exceeded': return 413;
-    case 'unsupported_image_type': return 415;
+    case 'unsupported_file_type': return 415;
     default: return 400;
   }
 }
@@ -98,7 +99,7 @@ export function createSharesPublicRouter(
   opts: PublicShareRouterOpts = {},
 ): Router {
   const router = Router();
-  const envRate = Number(process.env.IMAGE_SHARE_PUBLIC_RATE_PER_MIN);
+  const envRate = Number(shareEnv('PUBLIC_RATE_PER_MIN'));
   const ratePerMinute =
     opts.ratePerMinute ?? (Number.isFinite(envRate) && envRate > 0 ? envRate : DEFAULT_PUBLIC_RATE_PER_MIN);
   const limits = shareLimitsFromEnv();
@@ -216,7 +217,7 @@ export function createSharesPrivateRouter(
   const auth = createApiAuthMiddleware(apiKeys);
   const limits = limitsOverride ?? shareLimitsFromEnv();
   const defaultTtl = (() => {
-    const n = Number(process.env.IMAGE_SHARE_CODEX_TTL_SECONDS);
+    const n = Number(shareEnv('CODEX_TTL_SECONDS'));
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_SHARE_TTL_SECONDS;
   })();
 
@@ -307,7 +308,7 @@ export function createSharesPrivateRouter(
       if (typeof ref.artifact_id === 'string' && ref.artifact_id.trim()) {
         const artifact = store.resolveArtifact(agentId, sessionId, ref.artifact_id.trim());
         if (!artifact) {
-          res.status(404).json({ error: 'referenced artifact was not found in this agent/session', code: 'image_ref_not_found' });
+          res.status(404).json({ error: 'referenced artifact was not found in this agent/session', code: 'share_ref_not_found' });
           return;
         }
         dedupeRef = `artifact:${artifact.artifactId}`;

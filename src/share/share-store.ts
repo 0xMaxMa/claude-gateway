@@ -39,15 +39,27 @@ export type ShareLimits = {
   maxTotalBytes: number;
 };
 
+/**
+ * Read a share setting, preferring the neutral `SHARE_*` name and falling back
+ * to the legacy `IMAGE_SHARE_*` one (#444). Both names are forwarded to session
+ * subprocesses, so an operator who set either keeps working. An empty value
+ * counts as unset — `src/session/process.ts` forwards unset vars as `''`, and
+ * without this an empty new name would shadow a real legacy one.
+ */
+export function shareEnv(suffix: string): string | undefined {
+  const pick = (v: string | undefined): string | undefined => (v !== undefined && v !== '' ? v : undefined);
+  return pick(process.env[`SHARE_${suffix}`]) ?? pick(process.env[`IMAGE_SHARE_${suffix}`]);
+}
+
 export function shareLimitsFromEnv(): ShareLimits {
   const num = (v: string | undefined, dflt: number): number => {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
   };
   return {
-    maxRefs: num(process.env.IMAGE_SHARE_MAX_REFS, DEFAULT_MAX_REFS),
-    maxFileBytes: num(process.env.IMAGE_SHARE_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES),
-    maxTotalBytes: num(process.env.IMAGE_SHARE_MAX_TOTAL_BYTES, DEFAULT_MAX_TOTAL_BYTES),
+    maxRefs: num(shareEnv('MAX_REFS'), DEFAULT_MAX_REFS),
+    maxFileBytes: num(shareEnv('MAX_FILE_BYTES'), DEFAULT_MAX_FILE_BYTES),
+    maxTotalBytes: num(shareEnv('MAX_TOTAL_BYTES'), DEFAULT_MAX_TOTAL_BYTES),
   };
 }
 
@@ -159,13 +171,13 @@ export function validateShareFile(
   try {
     stat = fs.lstatSync(resolved); // realpath already followed links; lstat guards devices/FIFOs
   } catch {
-    throw new ShareError('image_ref_not_found', 'referenced image file does not exist');
+    throw new ShareError('share_ref_not_found', 'referenced file does not exist');
   }
   if (!stat.isFile()) {
     throw new ShareError('invalid_path', 'referenced path is not a regular file');
   }
   if (stat.size > maxFileBytes) {
-    throw new ShareError('image_too_large', `image exceeds ${maxFileBytes} bytes`);
+    throw new ShareError('file_too_large', `file exceeds ${maxFileBytes} bytes`);
   }
   const header = Buffer.alloc(12);
   const fd = fs.openSync(resolved, 'r');
@@ -177,7 +189,7 @@ export function validateShareFile(
   const mime = mimeDetectorFor(allow)(header);
   if (!mime) {
     throw new ShareError(
-      'unsupported_image_type',
+      'unsupported_file_type',
       allow === 'any'
         ? 'only PNG, JPEG, WebP and PDF can be shared'
         : 'only PNG, JPEG and WebP can be shared',
@@ -244,8 +256,22 @@ export class ShareStore {
     this.db.exec('PRAGMA journal_mode=WAL');
     this.db.exec('PRAGMA busy_timeout=5000');
     this.db.exec('PRAGMA foreign_keys=ON');
+    // #444: the table was `image_shares` back when the bridge could only carry
+    // images. Rename in place — and BEFORE the CREATE TABLE IF NOT EXISTS
+    // below, which would otherwise create an empty `file_shares` beside the
+    // real data and silently 404 every live share. Shares are ephemeral (TTL
+    // <= 24h, swept by cleanupExpired) so nothing durable is at stake, but
+    // renaming keeps shares minted before the upgrade resolving after it.
+    const hasTable = (name: string): boolean =>
+      !!this.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name);
+    if (hasTable('image_shares') && !hasTable('file_shares')) {
+      this.db.exec('ALTER TABLE image_shares RENAME TO file_shares');
+      // RENAME TO carries indexes over under their OLD names, so drop the old
+      // one rather than let CREATE INDEX IF NOT EXISTS add a duplicate.
+      this.db.exec('DROP INDEX IF EXISTS image_shares_expiry');
+    }
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS image_shares (
+      CREATE TABLE IF NOT EXISTS file_shares (
         id            TEXT PRIMARY KEY,
         token_hash    BLOB NOT NULL UNIQUE,
         agent_id      TEXT NOT NULL,
@@ -257,7 +283,7 @@ export class ShareStore {
         revoked_at    INTEGER,
         allow_kind    TEXT NOT NULL DEFAULT 'image'
       );
-      CREATE INDEX IF NOT EXISTS image_shares_expiry ON image_shares(expires_at);
+      CREATE INDEX IF NOT EXISTS file_shares_expiry ON file_shares(expires_at);
 
       CREATE TABLE IF NOT EXISTS image_artifacts (
         id            TEXT PRIMARY KEY,
@@ -284,9 +310,9 @@ export class ShareStore {
     // Same story for `allow_kind` (#444): DBs minted before documents were
     // allowed carry image-only shares, and 'image' is exactly their existing
     // behaviour, so the default backfills them correctly.
-    const shareCols = this.db.prepare(`PRAGMA table_info(image_shares)`).all() as Array<{ name: string }>;
+    const shareCols = this.db.prepare(`PRAGMA table_info(file_shares)`).all() as Array<{ name: string }>;
     if (!shareCols.some((c) => c.name === 'allow_kind')) {
-      this.db.exec(`ALTER TABLE image_shares ADD COLUMN allow_kind TEXT NOT NULL DEFAULT 'image'`);
+      this.db.exec(`ALTER TABLE file_shares ADD COLUMN allow_kind TEXT NOT NULL DEFAULT 'image'`);
     }
   }
 
@@ -404,7 +430,7 @@ export class ShareStore {
     const shareId = `shr_${randomBytes(9).toString('base64url')}`;
     const expiresAtMs = now + a.ttlSeconds * 1000;
     this.db.prepare(
-      `INSERT INTO image_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, allow_kind)
+      `INSERT INTO file_shares (id, token_hash, agent_id, session_id, relative_path, purpose, created_at, expires_at, allow_kind)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(shareId, tokenHash, a.agentId, a.sessionId, a.relativePath, a.purpose, now, expiresAtMs, allowKind);
     this.mintCache.set(key, { shareId, token, expiresAtMs, deduped: false, mintedAtMs: now });
@@ -418,7 +444,7 @@ export class ShareStore {
     const tokenHash = createHash('sha256').update(token).digest();
     const row = this.db.prepare(
       `SELECT id, agent_id, session_id, relative_path, purpose, allow_kind
-       FROM image_shares
+       FROM file_shares
        WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?`,
     ).get(tokenHash, Date.now()) as
       | {
@@ -445,7 +471,7 @@ export class ShareStore {
 
   getShareOwner(shareId: string): { agentId: string; sessionId: string; purpose: string } | null {
     const row = this.db.prepare(
-      `SELECT agent_id, session_id, purpose FROM image_shares WHERE id = ? AND revoked_at IS NULL`,
+      `SELECT agent_id, session_id, purpose FROM file_shares WHERE id = ? AND revoked_at IS NULL`,
     ).get(shareId) as { agent_id: string; session_id: string; purpose: string } | undefined;
     return row ? { agentId: row.agent_id, sessionId: row.session_id, purpose: row.purpose } : null;
   }
@@ -454,7 +480,7 @@ export class ShareStore {
    *  it so a post-revoke mint issues a FRESH token. Returns false when unknown. */
   revokeShare(shareId: string): boolean {
     const res = this.db.prepare(
-      `UPDATE image_shares SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+      `UPDATE file_shares SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
     ).run(Date.now(), shareId);
     for (const [key, entry] of this.mintCache) {
       if (entry.shareId === shareId) this.mintCache.delete(key);
@@ -465,7 +491,7 @@ export class ShareStore {
   /** Lazy cleanup — delete expired rows. Safe to call opportunistically. */
   cleanupExpired(): void {
     try {
-      this.db.prepare(`DELETE FROM image_shares WHERE expires_at <= ?`).run(Date.now());
+      this.db.prepare(`DELETE FROM file_shares WHERE expires_at <= ?`).run(Date.now());
     } catch {
       /* best-effort */
     }

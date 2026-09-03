@@ -456,7 +456,11 @@ export class ImageModule implements ToolModule {
       error: { content: [{ type: 'text', text }], isError: true },
     });
     const maxRefs = (() => {
-      const n = Number(process.env.IMAGE_SHARE_MAX_REFS);
+      // #444: the neutral SHARE_* name wins; IMAGE_SHARE_* is the legacy
+      // fallback. Both are forwarded to this subprocess, and unset vars arrive
+      // as '' — so treat empty as unset rather than letting it shadow the other.
+      const raw = process.env.SHARE_MAX_REFS || process.env.IMAGE_SHARE_MAX_REFS;
+      const n = Number(raw);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
     })();
     if (refs.length > maxRefs) {
@@ -493,8 +497,11 @@ export class ImageModule implements ToolModule {
         minted = await createShares(localRefs.map((e) => e.ref), { purpose: 'codex_ref' });
       } catch (err) {
         if (err instanceof ShareClientError) {
-          if (err.code === 'image_ref_not_found') {
-            return fail('generate_image: image_ref_not_found: the referenced image/artifact does not exist in this session.');
+          // #444 renamed this gateway error code image_ref_not_found ->
+          // share_ref_not_found. Match both: this subprocess can be talking to
+          // a gateway that predates the rename.
+          if (err.code === 'share_ref_not_found' || err.code === 'image_ref_not_found') {
+            return fail(`generate_image: ${err.code}: the referenced image/artifact does not exist in this session.`);
           }
           return fail(`generate_image: ${err.code}: ${err.message}`);
         }

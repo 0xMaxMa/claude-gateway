@@ -53,7 +53,7 @@ export type CatalogItem = {
   desc?: string;
 };
 
-/** Error carrying the gateway's stable machine-readable code (e.g. image_ref_not_found). */
+/** Error carrying the gateway's stable machine-readable code (e.g. share_ref_not_found). */
 export class ShareClientError extends Error {
   readonly code: string;
   readonly status: number;

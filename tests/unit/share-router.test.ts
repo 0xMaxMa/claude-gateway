@@ -297,7 +297,7 @@ describe('image share router', () => {
         .set(AUTH_A1)
         .send({ agent_id: AGENT, session_id: 'other-session', refs: [{ artifact_id: artifact.artifact_id }] });
       expect(wrongSession.status).toBe(404);
-      expect(wrongSession.body.code).toBe('image_ref_not_found');
+      expect(wrongSession.body.code).toBe('share_ref_not_found');
     });
 
     // a mint from an artifact_id ref whose registration
@@ -565,7 +565,7 @@ describe('image share router', () => {
     test('a PDF without allow_documents is still rejected with 415', async () => {
       const res = await post({ refs: [{ path: `${SESSION}/doc.pdf` }] });
       expect(res.status).toBe(415);
-      expect(res.body.code).toBe('unsupported_image_type');
+      expect(res.body.code).toBe('unsupported_file_type');
     });
 
     test('allow_documents mints a PDF share and serves it as an attachment', async () => {
@@ -619,7 +619,7 @@ describe('image share router', () => {
         .set(AUTH_A1)
         .send({ agent_id: AGENT, session_id: SESSION, provider: 'p', model: 'm', files: [`${SESSION}/doc.pdf`] });
       expect(res.status).toBe(415);
-      expect(res.body.code).toBe('unsupported_image_type');
+      expect(res.body.code).toBe('unsupported_file_type');
     });
 
     // The allow-kind is persisted, the MIME is not: serving always re-sniffs the

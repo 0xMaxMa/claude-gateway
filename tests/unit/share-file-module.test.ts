@@ -1,10 +1,11 @@
 /**
- * Unit tests for the standalone share_image MCP tool (#70) —
- * mcp/tools/share-image/module.ts. Locks in: gateway-context gating, create/revoke
- * plumbing through the authenticated gateway API, and the DELIBERATE absence
- * of any list action (plan §15).
+ * Unit tests for the standalone share_file MCP tool (#70, renamed from
+ * share_image in #444) — mcp/tools/share-file/module.ts. Locks in:
+ * gateway-context gating, create/revoke plumbing through the authenticated
+ * gateway API, the deprecated share_image alias, and the DELIBERATE absence of
+ * any list action (plan §15).
  */
-import { ShareImageModule } from '../../mcp/tools/share-image/module';
+import { ShareFileModule } from '../../mcp/tools/share-file/module';
 
 const GATEWAY = 'http://127.0.0.1:19999';
 
@@ -17,7 +18,7 @@ const ENV_KEYS = [
 
 type Captured = { url: string; method: string; body?: Record<string, unknown> };
 
-describe('share_image MCP module', () => {
+describe('share_file MCP module', () => {
   const saved: Record<string, string | undefined> = {};
   const realFetch = global.fetch;
   let calls: Captured[];
@@ -64,24 +65,34 @@ describe('share_image MCP module', () => {
 
   describe('gating', () => {
     test('enabled only when the full gateway API context is present', () => {
-      expect(new ShareImageModule().isEnabled()).toBe(true);
+      expect(new ShareFileModule().isEnabled()).toBe(true);
       delete process.env.GATEWAY_SESSION_ID;
-      expect(new ShareImageModule().isEnabled()).toBe(false);
+      expect(new ShareFileModule().isEnabled()).toBe(false);
     });
 
-    test('exposes exactly one tool and NO list action', () => {
-      const tools = new ShareImageModule().getTools();
-      expect(tools).toHaveLength(1);
-      expect(tools[0]!.name).toBe('share_image');
-      const schema = JSON.stringify(tools[0]!.inputSchema);
-      expect(schema).not.toContain('"list"');
-      expect((JSON.parse(schema).properties.action.enum as string[])).toEqual(['create', 'revoke']);
+    test('exposes share_file plus the deprecated alias, and NO list action', () => {
+      const tools = new ShareFileModule().getTools();
+      expect(tools.map((t) => t.name)).toEqual(['share_file', 'share_image']);
+      for (const tool of tools) {
+        const schema = JSON.stringify(tool.inputSchema);
+        expect(schema).not.toContain('"list"');
+        expect((JSON.parse(schema).properties.action.enum as string[])).toEqual(['create', 'revoke']);
+      }
+    });
+
+    // #444: the alias exists to keep agent instructions written against the old
+    // name working — it must not cost a second copy of the real description.
+    test('the alias description is a one-liner pointing at share_file', () => {
+      const [primary, alias] = new ShareFileModule().getTools();
+      expect(alias!.description).toContain('Deprecated');
+      expect(alias!.description).toContain('share_file');
+      expect(alias!.description.length).toBeLessThan(primary!.description.length / 3);
     });
   });
 
   describe('create', () => {
     test('single path → POST /api/v1/shares with identity from env', async () => {
-      const res = await new ShareImageModule().handleTool('share_image', {
+      const res = await new ShareFileModule().handleTool('share_file', {
         action: 'create',
         path: 'media/session-1/image.png',
         ttl_seconds: 900,
@@ -101,7 +112,7 @@ describe('share_image MCP module', () => {
     });
 
     test('batch paths + artifact refs are classified correctly', async () => {
-      await new ShareImageModule().handleTool('share_image', {
+      await new ShareFileModule().handleTool('share_file', {
         action: 'create',
         paths: ['media/session-1/a.png', 'artifact:img_x'],
       });
@@ -109,7 +120,7 @@ describe('share_image MCP module', () => {
     });
 
     test('path AND paths together → error, no call', async () => {
-      const res = await new ShareImageModule().handleTool('share_image', {
+      const res = await new ShareFileModule().handleTool('share_file', {
         action: 'create',
         path: 'a.png',
         paths: ['b.png'],
@@ -122,7 +133,7 @@ describe('share_image MCP module', () => {
     // opts into the full share allowlist (images + PDF). The narrow image
     // consumers (line_image, generate_image ref normalization) must NOT.
     test('always opts into documents so a PDF can be shared', async () => {
-      await new ShareImageModule().handleTool('share_image', {
+      await new ShareFileModule().handleTool('share_file', {
         action: 'create',
         path: 'media/session-1/report.pdf',
       });
@@ -130,30 +141,57 @@ describe('share_image MCP module', () => {
     });
 
     test('gateway error code is surfaced', async () => {
-      responder = () => new Response(JSON.stringify({ error: 'nope', code: 'image_ref_not_found' }), { status: 404 });
-      const res = await new ShareImageModule().handleTool('share_image', { action: 'create', path: 'gone.png' });
+      responder = () => new Response(JSON.stringify({ error: 'nope', code: 'share_ref_not_found' }), { status: 404 });
+      const res = await new ShareFileModule().handleTool('share_file', { action: 'create', path: 'gone.png' });
       expect(res.isError).toBe(true);
-      expect(res.content[0]!.text).toContain('image_ref_not_found');
+      expect(res.content[0]!.text).toContain('share_ref_not_found');
     });
   });
 
   describe('revoke', () => {
     test('DELETE /api/v1/shares/:id', async () => {
-      const res = await new ShareImageModule().handleTool('share_image', { action: 'revoke', share_id: 'shr_1' });
+      const res = await new ShareFileModule().handleTool('share_file', { action: 'revoke', share_id: 'shr_1' });
       expect(res.isError).toBeUndefined();
       expect(calls[0]!.method).toBe('DELETE');
       expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/shares/shr_1`);
     });
 
     test('missing share_id → error, no call', async () => {
-      const res = await new ShareImageModule().handleTool('share_image', { action: 'revoke' });
+      const res = await new ShareFileModule().handleTool('share_file', { action: 'revoke' });
       expect(res.isError).toBe(true);
       expect(calls).toHaveLength(0);
     });
   });
 
+  // #444: agent workspaces (AGENTS.md, skills, memories) still say share_image,
+  // and we do not get to rewrite them — the old name must keep working.
+  describe('deprecated share_image alias', () => {
+    test('create behaves identically to share_file', async () => {
+      const res = await new ShareFileModule().handleTool('share_image', {
+        action: 'create',
+        path: 'media/session-1/report.pdf',
+      });
+      expect(res.isError).toBeUndefined();
+      expect(calls[0]!.url).toBe(`${GATEWAY}/api/v1/shares`);
+      expect(calls[0]!.body!.allow_documents).toBe(true);
+    });
+
+    test('revoke behaves identically to share_file', async () => {
+      const res = await new ShareFileModule().handleTool('share_image', { action: 'revoke', share_id: 'shr_1' });
+      expect(res.isError).toBeUndefined();
+      expect(calls[0]!.method).toBe('DELETE');
+    });
+  });
+
+  test('unknown tool name → error, no call', async () => {
+    const res = await new ShareFileModule().handleTool('share_document', { action: 'create', path: 'a.png' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain('Unknown tool');
+    expect(calls).toHaveLength(0);
+  });
+
   test('unknown action (including "list") → error, no call', async () => {
-    const res = await new ShareImageModule().handleTool('share_image', { action: 'list' });
+    const res = await new ShareFileModule().handleTool('share_file', { action: 'list' });
     expect(res.isError).toBe(true);
     expect(calls).toHaveLength(0);
   });
