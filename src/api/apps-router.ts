@@ -22,7 +22,18 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *
  * Both fields are absent on a healthy app rather than present-and-false, so the
  * response shape is unchanged for existing consumers. One function, used by
- * both read routes, so the list and the single-app view cannot drift apart.
+ * both read routes, so the list and the single-app view cannot drift apart —
+ * and those two are the only routes that return an AppEntry at all
+ * (`POST /:name/start|stop|restart` answers `{ name, action }`), so there is no
+ * third surface where the state could go missing.
+ *
+ * The flag is read AFTER the caller has reconciled the status, so a restore
+ * that finishes during that await is reported as the status it left behind
+ * (`running`, suppressed) with no `restoring` — stale by one tick, in the
+ * direction that understates work in progress for an app that just came up
+ * successfully. Reading it first would invert the skew and claim an app is
+ * still rebuilding after it is up; neither can be made atomic across two
+ * awaits, and this direction never reports a rebuilding app as ready.
  */
 function withRestoreState(
   installer: AppInstaller,

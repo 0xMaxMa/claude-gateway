@@ -490,6 +490,29 @@ services:
       expect('restoring' in after.body.apps[0]).toBe(false);
     });
 
+    it('reports restoring from the first request of the boot, before the restore starts', async () => {
+      // The boot order the fix establishes: markRestorePending() is awaited
+      // before the server listens, so the very first response already carries
+      // the flag. Pre-fix the marking happened inside restoreRunningApps(),
+      // after the server was live — so a client polling at boot saw a bare
+      // `running` for an app whose containers did not exist yet, and the read
+      // itself persisted `stopped` underneath the pending restore (#425).
+      const { api, installer, upStarted, release } = makeParkedRestore();
+
+      const pending = await installer.markRestorePending();
+      const atBoot = await get(api, '/api/v1/apps');
+      expect(atBoot.body.apps[0].restoring).toBe(true);
+      expect(atBoot.body.apps[0].status).toBe('running');
+
+      const restore = installer.restoreRunningApps(pending);
+      await upStarted;
+      release();
+      await restore;
+
+      const after = await get(api, '/api/v1/apps');
+      expect('restoring' in after.body.apps[0]).toBe(false);
+    });
+
     it('marks it on GET /api/v1/apps/:name too, through the same decorator', async () => {
       const { api, installer, upStarted, release } = makeParkedRestore();
 
