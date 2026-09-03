@@ -80,8 +80,17 @@ function rfc5987(value: string): string {
  */
 export function attachmentDisposition(basename: string): string {
   // Cap first: a media filename is agent-controlled and a 4 KB one would bloat
-  // (or, behind some proxies, break) the response header.
-  const name = basename.slice(0, MAX_DISPOSITION_NAME_CHARS);
+  // (or, behind some proxies, break) the response header. Cap by CODE POINT,
+  // not code unit — a plain `.slice()` can cut a surrogate pair in half, and
+  // encodeURIComponent throws URIError on the lone surrogate that leaves
+  // behind. That throw lands in the serve handler's catch and turns a
+  // perfectly good share into a uniform 404. The `\p{Surrogate}` scrub is the
+  // belt to that braces: after a code-point slice it can only ever match a
+  // surrogate that was already unpaired on the way in.
+  const name = [...basename]
+    .slice(0, MAX_DISPOSITION_NAME_CHARS)
+    .join('')
+    .replace(/\p{Surrogate}/gu, '_');
   const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_').trim();
   const fallback = ascii || 'download';
   return `attachment; filename="${fallback}"; filename*=UTF-8''${rfc5987(name)}`;

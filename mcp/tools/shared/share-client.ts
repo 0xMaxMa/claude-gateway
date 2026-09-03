@@ -1,6 +1,7 @@
 /**
- * Image share bridge client (#70) — the ONLY way MCP subprocesses touch the
- * share/artifact store. They call the authenticated local Gateway HTTP API
+ * File share bridge client (#70, widened past images in #444) — the ONLY way
+ * MCP subprocesses touch the share/artifact store. They call the authenticated
+ * local Gateway HTTP API
  * (GATEWAY_API_URL + GATEWAY_API_KEY, both already injected into the session
  * subprocess env) and NEVER open the SQLite DB themselves (plan §9/§10).
  *

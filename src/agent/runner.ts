@@ -1324,7 +1324,7 @@ export class AgentRunner extends EventEmitter {
    * returned — the ui-upload STAGING paths. promoteUiUploads then MOVES those
    * files into per-session storage, so a note or history row built from the
    * raw params would hand out dead paths (the agent's generate_image call
-   * fails image_ref_not_found and has to guess its way to the real file).
+   * fails share_ref_not_found and has to guess its way to the real file).
    * Substitute every ref that matches a promoted staging path with its new
    * session path; refs that were never staged (catalog refs, artifact:<id>)
    * pass through untouched. (#74)

@@ -45,7 +45,7 @@ const AUTH_A1 = { Authorization: 'Bearer a1-key' };
 const AUTH_B1 = { Authorization: 'Bearer b1-key' };
 const AUTH_STAR = { Authorization: 'Bearer star-key' };
 
-describe('image share router', () => {
+describe('file share router', () => {
   let baseDir: string;
   let mediaDir: string;
   let store: ShareStore;
@@ -678,6 +678,23 @@ describe('image share router', () => {
         // 4 KB of filename must not become a 4 KB header.
         const long = attachmentDisposition(`${'n'.repeat(4096)}.pdf`);
         expect(long).toBe(`attachment; filename="${'n'.repeat(200)}"; filename*=UTF-8''${'n'.repeat(200)}`);
+      });
+
+      test('the length cap never splits a surrogate pair into an unencodable half', () => {
+        // A code-unit slice would cut this emoji in half at the 200-char cap and
+        // leave a lone surrogate, which encodeURIComponent rejects with
+        // URIError — inside the serve handler's try, that becomes a bogus 404
+        // on a share whose file is perfectly fine. Cap by code point instead.
+        const straddling = `${'a'.repeat(199)}\u{1F389}.pdf`;
+        const cd = attachmentDisposition(straddling);
+        // 199 'a' + the whole emoji = 200 code points; '.pdf' is past the cap.
+        // The ASCII fallback substitutes per code UNIT, so the emoji shows as __.
+        expect(cd).toBe(
+          `attachment; filename="${'a'.repeat(199)}__"; filename*=UTF-8''${'a'.repeat(199)}${encodeURIComponent('\u{1F389}')}`,
+        );
+        // An already-unpaired surrogate (never produced by fs, but the header
+        // must not be able to throw on any input) degrades instead of throwing.
+        expect(() => attachmentDisposition('x\uD800.pdf')).not.toThrow();
       });
     });
   });
