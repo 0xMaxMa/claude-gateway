@@ -30,6 +30,8 @@
  * T25: GET — current newer than registry latest → hasUpdate:false (no false positive)
  * T26: update when current is ahead of latest → updated:false, native updater not invoked
  * T27: native updater runs but version unchanged (no-op) → updated:false (honest)
+ * T28: claude-gateway self-restart requests EX_TEMPFAIL so an on-failure unit
+ *      still restarts on a graceful exit (issue #450)
  */
 
 import express from 'express';
@@ -39,13 +41,19 @@ import { ApiKey } from '../../src/types';
 // Must mock child_process and fs before importing the module under test
 jest.mock('child_process', () => ({ execSync: jest.fn() }));
 jest.mock('fs', () => ({ readdirSync: jest.fn(), rmSync: jest.fn() }));
+jest.mock('../../src/shutdown-signals', () => ({
+  ...jest.requireActual('../../src/shutdown-signals'),
+  requestExitCode: jest.fn(),
+}));
 
 import { execSync } from 'child_process';
 import { readdirSync, rmSync } from 'fs';
 import { createPackagesRouter, _resetCache, _resetLock, _setLock } from '../../src/api/packages';
+import { EX_TEMPFAIL, requestExitCode } from '../../src/shutdown-signals';
 
 const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
 const mockRmSync = rmSync as jest.MockedFunction<typeof rmSync>;
+const mockRequestExitCode = requestExitCode as jest.MockedFunction<typeof requestExitCode>;
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
@@ -314,6 +322,25 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
 
     if (savedInvocationId !== undefined) process.env.INVOCATION_ID = savedInvocationId;
     else delete process.env.INVOCATION_ID;
+  });
+
+  it('T28: requests EX_TEMPFAIL before self-killing, so an on-failure unit restarts on a graceful exit', async () => {
+    mockReaddirSync.mockReturnValue([] as unknown as ReturnType<typeof readdirSync>);
+    mockNpmList('@0xmaxma/claude-gateway', '1.2.0');
+    mockFetch({ '@0xmaxma/claude-gateway': '1.3.1' });
+
+    await request(makeApp())
+      .post('/api/v1/packages/claude-gateway/update')
+      .set('X-Api-Key', ADMIN_KEY);
+
+    // Requested synchronously, before the kill is even scheduled — a graceful
+    // exit(0) reads as success to `Restart=on-failure`, so systemd (or any
+    // other on-failure supervisor) never restarts it without this.
+    expect(mockRequestExitCode).toHaveBeenCalledWith(EX_TEMPFAIL);
+    expect(killSpy).not.toHaveBeenCalled();
+
+    jest.runAllTimers();
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
   });
 
   it('T12: npm install fails → 500 with stderr', async () => {

@@ -124,6 +124,12 @@ claude-gateway service uninstall            # asks first — this stops a runnin
 Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
 non-interactive run is refused rather than left hanging).
 
+`install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
+exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
+CLI) — installing a second, independent unit alongside it would race for the port on the next
+reboot. It prints the exact `sudo systemctl disable --now claude-gateway.service` to resolve it;
+pass `--force` to install anyway.
+
 The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
 `loginctl enable-linger $USER` once if it must keep running while you're logged out.
 Prefer [PM2](https://pm2.keymetrics.io)? `claude-gateway service install --manager pm2` registers

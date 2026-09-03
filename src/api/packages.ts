@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
+import { EX_TEMPFAIL, requestExitCode } from '../shutdown-signals';
 import {
   PACKAGES,
   PackageInfo,
@@ -174,6 +175,13 @@ export function createPackagesRouter(apiKeys?: ApiKey[]): Router {
           warning: isManaged ? 'service will restart' : 'process will stop — restart manually',
         });
 
+        // A graceful `exit(0)` reads as success to `Restart=on-failure` systemd
+        // units — including ones this same codebase generates — so it never
+        // restarts. Request EX_TEMPFAIL so an `on-failure` unit treats this
+        // exit as failure-worth-restarting; `Restart=always` and pm2's
+        // `autorestart` already restart on any exit code, so this is a no-op
+        // for them. See issue #450.
+        requestExitCode(EX_TEMPFAIL);
         setTimeout(() => process.kill(process.pid, 'SIGTERM'), 500);
       } else {
         res.json({ package: packageName, from, to, updated: true, warning: null });

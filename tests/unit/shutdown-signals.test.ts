@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { SHUTDOWN_SIGNALS, registerShutdownSignals } from '../../src/shutdown-signals';
+import { EX_TEMPFAIL, SHUTDOWN_SIGNALS, registerShutdownSignals, requestExitCode } from '../../src/shutdown-signals';
 
 describe('shutdown signal wiring (issue #405)', () => {
   // ── U-SD-405a: the defect itself ───────────────────────────────────────────
@@ -122,5 +122,67 @@ describe('shutdown signal wiring (issue #405)', () => {
     // and still holding its port and its children.
     expect(exits).toEqual([1]);
     expect((errors[0] as Error).message).toBe('router.stop() blew up');
+  });
+});
+
+describe('requestExitCode (issue #450)', () => {
+  it('overrides the exit code for the very next signal-driven shutdown', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exits.push(code), target });
+
+    requestExitCode(EX_TEMPFAIL);
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([EX_TEMPFAIL]);
+  });
+
+  it('defaults to exit 0 when nothing requested a code', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exits.push(code), target });
+
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([0]);
+  });
+
+  it('is consumed once — a requested code does not leak into a later shutdown', async () => {
+    const targetA = new EventEmitter();
+    const exitsA: number[] = [];
+    requestExitCode(EX_TEMPFAIL);
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exitsA.push(code), target: targetA });
+    targetA.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitsA).toEqual([EX_TEMPFAIL]);
+
+    const targetB = new EventEmitter();
+    const exitsB: number[] = [];
+    registerShutdownSignals({ run: async () => {}, exit: (code) => exitsB.push(code), target: targetB });
+    targetB.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+    expect(exitsB).toEqual([0]);
+  });
+
+  it('a shutdown that throws still exits 1, ignoring any requested code', async () => {
+    const target = new EventEmitter();
+    const exits: number[] = [];
+    requestExitCode(EX_TEMPFAIL);
+
+    registerShutdownSignals({
+      run: async () => { throw new Error('boom'); },
+      exit: (code) => exits.push(code),
+      onError: () => {},
+      target,
+    });
+
+    target.emit('SIGTERM');
+    await new Promise((r) => setImmediate(r));
+
+    expect(exits).toEqual([1]);
   });
 });

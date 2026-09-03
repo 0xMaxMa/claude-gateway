@@ -101,7 +101,12 @@ describe('service — generated launch configuration', () => {
     // is a valid launch target, so the shape is what this asserts.
     expect(execStart).toMatch(/^ExecStart="\/.*" "\/.*(entry|index)\.js" gateway start --config "\/.*"$/);
     expect(unit).toContain('WantedBy=default.target');
-    expect(unit).toContain('Restart=on-failure');
+    // `on-failure` treats a graceful exit(0) as success and never restarts —
+    // exactly the failure mode in issue #450 (an API-triggered update
+    // SIGTERMs the gateway expecting a restart it never gets). `always`
+    // restarts unconditionally, which also covers the update-triggered exit.
+    expect(unit).toContain('Restart=always');
+    expect(unit).not.toContain('Restart=on-failure');
   });
 
   it('never writes a secret into the unit — only paths', () => {
@@ -224,6 +229,74 @@ describe('service install — confirmation gate', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe('service install — system-scope conflict (issue #450)', () => {
+  /** A same-named unit already exists at *system* scope and is enabled. */
+  function systemUnitEnabled(): void {
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-enabled') {
+        return Buffer.from('enabled\n');
+      }
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+  }
+
+  it('refuses to install — writes nothing, runs no systemctl mutation — when a system-scope unit is enabled', async () => {
+    systemUnitEnabled();
+    const code = await runService(['install'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/system scope/);
+    expect(stderr.join('')).toMatch(/sudo systemctl disable --now claude-gateway\.service/);
+  });
+
+  it('--force installs anyway despite the conflict', async () => {
+    systemUnitEnabled();
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true, force: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(unitPath, expect.stringContaining('gateway start'), expect.objectContaining({ mode: 0o600 }));
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not refuse when a system-scope unit exists but is only "static", not "enabled"', async () => {
+    // A unit can exist and answer `is-enabled` successfully without being
+    // `enabled` (e.g. a static unit with no [Install] section) — the check
+    // must compare the literal value, not just whether the command succeeded.
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-enabled') {
+        return Buffer.from('static\n');
+      }
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-active') {
+        return Buffer.from('inactive\n');
+      }
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('checks system scope, not user scope, for the conflict', async () => {
+    systemUnitEnabled();
+    await runService(['install'], { manager: 'systemd', yes: true });
+    // The system-scope check must not be confused with (or piggyback on) the
+    // user-scope `systemdState()` reads used elsewhere in this file.
+    const isChecks = (mockExecFileSync.mock.calls as unknown as Array<[string, string[]]>).filter(
+      ([file, args]) => file === 'systemctl' && (args[0] === 'is-enabled' || args[0] === 'is-active'),
+    );
+    expect(isChecks.length).toBeGreaterThan(0);
+    for (const [, args] of isChecks) expect(args).not.toContain('--user');
   });
 });
 
