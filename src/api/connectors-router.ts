@@ -22,7 +22,11 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  * Routes (mounted under /api):
  *   GET    /v1/connectors                    — built-in + custom catalog, connected state
  *   GET    /v1/connectors/:id/status         — connected boolean (for polling)
- *   POST   /v1/connectors/:id/connect        — store a secret (admin, auth kind 'secret' only)
+ *   POST   /v1/connectors/:id/connect        — store a secret (admin); built-in catalog
+ *                                              first, falls back to a single-secret
+ *                                              customConnectors entry (e.g. reconnecting
+ *                                              a paste-token connector after DELETE
+ *                                              soft-disconnected it) — see the handler
  *   POST   /v1/connectors/:id/oauth/receive  — store a pushed access_token (admin, auth kind 'oauth' only)
  *   DELETE /v1/connectors/:id                — clear a secret (admin); a genuinely
  *                                              user-added custom connector keeps its
@@ -111,22 +115,66 @@ export function createConnectorsRouter(
     res.json({ id: req.params.id, connected });
   });
 
-  // Connect — store the secret (iteration 1: auth kind 'secret')
+  // Connect — store the secret. Built-in catalog first (auth kind 'secret'
+  // only); falls back to a customConnectors entry with exactly one secret
+  // name, same admin-first-then-catalog-then-custom order DELETE already
+  // uses below. That fallback is what makes reconnecting a paste-token
+  // custom connector (e.g. Stripe) actually work after DELETE soft-disconnects
+  // it — the entry survives disconnect, so it must be reconnectable here, not
+  // only via re-adding it from scratch through POST /v1/connectors/custom.
   router.post('/v1/connectors/:id/connect', async (req: Request, res: Response) => {
-    const spec = getConnectorSpec(req.params.id);
-    if (!spec) {
-      res.status(404).json({ error: `Unknown connector '${req.params.id}'` });
-      return;
-    }
     if (!requireAdmin(req, res)) return;
+    const id = req.params.id;
 
-    if (spec.auth.kind === 'none') {
-      res.json({ id: spec.id, connected: true });
+    const spec = getConnectorSpec(id);
+    if (spec) {
+      if (spec.auth.kind === 'none') {
+        res.json({ id: spec.id, connected: true });
+        return;
+      }
+
+      if (spec.auth.kind !== 'secret') {
+        res.status(501).json({ error: `Auth kind '${spec.auth.kind}' not yet implemented` });
+        return;
+      }
+
+      const token = (req.body as { token?: unknown })?.token;
+      if (typeof token !== 'string' || !token.trim()) {
+        res.status(400).json({ error: 'token is required and must be a non-empty string' });
+        return;
+      }
+
+      const envName = spec.auth.secretEnv;
+      try {
+        setSecret(envName, token.trim());
+        await mutateGatewayConnectors((c) => {
+          c[spec.id] = { secretEnv: envName };
+        });
+        res.json({ id: spec.id, connected: true });
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
       return;
     }
 
-    if (spec.auth.kind !== 'secret') {
-      res.status(501).json({ error: `Auth kind '${spec.auth.kind}' not yet implemented` });
+    const entry = (await store.read())[id];
+    if (!entry) {
+      res.status(404).json({ error: `Unknown connector '${id}'` });
+      return;
+    }
+    if (entry.oauth) {
+      res.status(400).json({
+        error: `Connector '${id}' uses OAuth sign-in — start it via POST /v1/connectors/custom/${id}/oauth/start instead`,
+      });
+      return;
+    }
+    if (entry.secretNames.length !== 1) {
+      res.status(400).json({
+        error:
+          entry.secretNames.length === 0
+            ? `Connector '${id}' has no secrets to set — nothing to connect here.`
+            : `Connector '${id}' needs ${entry.secretNames.length} secrets (${entry.secretNames.join(', ')}) — this route only accepts a single value. Remove and re-add it with every value via POST /v1/connectors/custom.`,
+      });
       return;
     }
 
@@ -135,14 +183,9 @@ export function createConnectorsRouter(
       res.status(400).json({ error: 'token is required and must be a non-empty string' });
       return;
     }
-
-    const envName = spec.auth.secretEnv;
     try {
-      setSecret(envName, token.trim());
-      await mutateGatewayConnectors((c) => {
-        c[spec.id] = { secretEnv: envName };
-      });
-      res.json({ id: spec.id, connected: true });
+      setSecret(customSecretKey(id, entry.secretNames[0]), token.trim());
+      res.json({ id, connected: true });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
