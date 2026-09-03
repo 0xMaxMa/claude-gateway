@@ -240,8 +240,10 @@ describe('AgentManager', () => {
       expect(realPathMount).toBeUndefined();
 
       // The container copies the seed into a writable ~/.claude.json at start.
+      // Paths are quoted: homeDir is host-derived, and an unquoted path with a
+      // space would split into extra `cp` operands and land the config elsewhere.
       const command = agentSvc['command'] as string;
-      expect(command).toContain(`cp ${home}/.claude-seed/.claude.json ${home}/.claude.json`);
+      expect(command).toContain(`cp "${home}/.claude-seed/.claude.json" "${home}/.claude.json"`);
       // `;` not `&&`: a failed copy must not stop the container from starting.
       expect(command).toContain('; exec sleep infinity');
     });
@@ -444,6 +446,30 @@ describe('AgentManager', () => {
 
       const workspaceLink = path.join(tmpDir, 'agents', 'my-agent');
       expect(fs.existsSync(workspaceLink)).toBe(false);
+    });
+
+    it('re-stages the Claude config seed, so a gateway restart refreshes it', async () => {
+      // reconcileAgents() calls upsertAgent for every running app-agent at gateway
+      // start. Staging only from injectAgentService would pin the seed to the last
+      // install/update, so a host-side `claude /login` could stay invisible to
+      // containers indefinitely.
+      const entry = makeEntry(tmpDir);
+      await manager.upsertAgent(entry);
+
+      const seedFile = path.join(tmpDir, 'agents', 'my-agent', '.claude-seed', '.claude.json');
+      expect(fs.existsSync(seedFile)).toBe(true);
+
+      // Rewrite the host file the way Claude Code does — atomic rename, new inode.
+      const hostClaudeJson = path.join(os.homedir(), '.claude.json');
+      const tmpHost = `${hostClaudeJson}.tmp`;
+      fs.writeFileSync(tmpHost, JSON.stringify({ marker: 'rotated' }), 'utf-8');
+      fs.renameSync(tmpHost, hostClaudeJson);
+
+      await manager.upsertAgent(entry);
+
+      expect(JSON.parse(fs.readFileSync(seedFile, 'utf-8'))).toEqual({ marker: 'rotated' });
+      // Not world-readable: it is a copy of the host's Claude config.
+      expect(fs.statSync(seedFile).mode & 0o077).toBe(0);
     });
   });
 

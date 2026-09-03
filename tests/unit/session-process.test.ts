@@ -2915,7 +2915,16 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
 
   it('U-SP-AUTH3: a malformed credential in settings.json is not forwarded', async () => {
     await withFakeAuthHome(
-      { CLAUDE_CODE_OAUTH_TOKEN: '', ANTHROPIC_API_KEY: 42, ANTHROPIC_AUTH_TOKEN: 'bad\nvalue' },
+      {
+        CLAUDE_CODE_OAUTH_TOKEN: '',
+        ANTHROPIC_API_KEY: 42,
+        ANTHROPIC_AUTH_TOKEN: 'bad\nvalue',
+        // A well-formed value alongside the bad ones, to anchor the negative
+        // assertions below: without it, "not forwarded" also holds when nothing
+        // is forwarded at all — the pre-fix behaviour — and this spec would pass
+        // on the very bug it guards.
+        ANTHROPIC_BASE_URL: 'https://example.invalid',
+      },
       async () => {
         const appAgent = makeAgentConfig({
           workspace: agentConfig.workspace,
@@ -2925,11 +2934,19 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
         const sp = makeSp('chat:auth3', 'telegram', appAgent, gatewayConfig, sessionStore);
         await sp.start();
 
-        const [, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+        const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+          string,
+          string[],
+          { env: Record<string, string> },
+        ];
         // Empty, non-string and newline-bearing values are all rejected at the boundary.
         expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
         expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
         expect(spawnArgs).not.toContain('ANTHROPIC_AUTH_TOKEN');
+        // ...while the clean value in the same file did make it through, proving
+        // the resolver ran and rejected only the malformed keys.
+        expect(spawnArgs).toContain('ANTHROPIC_BASE_URL');
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://example.invalid');
 
         await sp.stop();
       },
@@ -2945,8 +2962,23 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
       const [spawnBin, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
       expect(spawnBin).not.toBe('docker');
       expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
-
       await sp.stop();
+
+      // Anchor: the same settings.json DOES produce the flag for an app-agent, so
+      // the assertion above is about the host path rather than about nothing being
+      // forwarded anywhere — which is what the pre-fix code did, and would have
+      // passed this spec.
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+      });
+      const spContainer = makeSp('chat:auth4b', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await spContainer.start();
+      const [, containerArgs] = spawnMock.mock.calls[1] as [string, string[]];
+      expect(containerArgs).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+
+      await spContainer.stop();
     });
   });
 
@@ -3014,6 +3046,71 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     } finally {
       delete process.env.ANTHROPIC_API_KEY;
       delete process.env.ANTHROPIC_BASE_URL;
+    }
+  });
+
+  it('U-SP-AUTH7: the Telegram bot token is forwarded by name, never on the docker argv', async () => {
+    // Same threat model as the Claude credential: /proc/<pid>/cmdline is
+    // world-readable on a stock kernel while /proc/<pid>/environ is owner-only,
+    // so a `-e KEY=value` here would expose a bot-account bearer token to every
+    // local user via `ps`.
+    await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'tok' }, async () => {
+      const appAgent = makeAgentConfig({
+        workspace: agentConfig.workspace,
+        type: 'app-agent',
+        container: 'my-app-container',
+        telegram: { botToken: 'bot-secret-12345' },
+      });
+      const sp = makeSp('chat:auth7', 'telegram', appAgent, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: Record<string, string> },
+      ];
+      expect(spawnArgs.some((a) => a.includes('bot-secret-12345'))).toBe(false);
+      // Anchor: announced by name and present in the env docker inherits, so the
+      // container still receives it.
+      expect(spawnArgs).toContain('TELEGRAM_BOT_TOKEN');
+      expect(spawnOpts.env.TELEGRAM_BOT_TOKEN).toBe('bot-secret-12345');
+
+      await sp.stop();
+    });
+  });
+
+  it('U-SP-AUTH8: a container agent with no resolvable credential warns instead of failing silently', async () => {
+    // The bug this path exists to fix presented as a container that looked
+    // healthy while telling real users "Not logged in". A malformed token that
+    // silently forwards nothing would reproduce exactly that, so it must be
+    // announced. Presence-not-validity means the empty token still owns the
+    // group and blocks the env from substituting a different identity.
+    process.env.ANTHROPIC_API_KEY = 'key-from-gateway-env';
+    try {
+      await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: '' }, async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth8', 'telegram', appAgent, gatewayConfig, sessionStore);
+        const warn = jest.spyOn((sp as unknown as { logger: { warn: (...a: unknown[]) => void } }).logger, 'warn');
+        await sp.start();
+
+        const [, spawnArgs] = spawnMock.mock.calls[0] as [string, string[]];
+        expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
+
+        const warned = warn.mock.calls.find((c) => String(c[0]).includes('No Claude credential'));
+        expect(warned).toBeDefined();
+        // The reason is reported without ever logging the value itself.
+        expect(JSON.stringify(warned?.[1])).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+        expect(JSON.stringify(warned?.[1])).toContain('empty');
+
+        await sp.stop();
+      });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
     }
   });
 

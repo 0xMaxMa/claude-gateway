@@ -26,24 +26,28 @@ export const MAX_HISTORY_MESSAGES = 50;
  * Claude credential / API-routing env vars forwarded from the host into an
  * app-agent container. Deliberately narrow — auth and endpoint only. Model and
  * behaviour settings come from the agent's own config, not the host env.
- */
-export const CONTAINER_AUTH_ENV_KEYS = [
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_BASE_URL',
-] as const;
-
-/**
- * The subset of CONTAINER_AUTH_ENV_KEYS that proves an identity, as opposed to
- * merely selecting an endpoint. These resolve as a group so a container is
- * never handed two credentials from two different sources — see
- * resolveContainerAuthEnv().
+ *
+ * The keys that prove an identity, as opposed to merely selecting an endpoint.
+ * These resolve as a group so a container is never handed two credentials from
+ * two different sources — see resolveContainerAuthEnv().
  */
 const CONTAINER_CREDENTIAL_KEYS: readonly string[] = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+];
+
+/**
+ * The credential keys plus the endpoint selector. Derived from
+ * CONTAINER_CREDENTIAL_KEYS rather than repeated, so the two lists cannot drift:
+ * a credential added to one is automatically forwarded by the other.
+ *
+ * ANTHROPIC_BASE_URL is not a credential — it only selects an endpoint — so it
+ * sits outside the group that resolves atomically in resolveContainerAuthEnv().
+ */
+const CONTAINER_AUTH_ENV_KEYS: readonly string[] = [
+  ...CONTAINER_CREDENTIAL_KEYS,
+  'ANTHROPIC_BASE_URL',
 ];
 
 // The MCP reply tools that deliver an agent's user-facing message to a channel.
@@ -487,15 +491,27 @@ export class SessionProcess extends EventEmitter {
    * inode is unlinked, so the agent stayed healthy and answered every real user
    * "Not logged in · Please run /login" until someone recreated the container.
    *
-   * Resolving by path here, once per spawn, is immune to that: the container is
-   * handed the current credentials on every turn, and a container already stuck
-   * on a stale mount recovers on its next turn with no restart.
+   * That mechanism was verified directly rather than inferred: with content held
+   * byte-identical (same md5) and only the link count differing, a container
+   * reading the unlinked inode reported "Not logged in" and sent no request,
+   * while the same file at nlink=1 authenticated normally.
+   *
+   * Resolving by path here is immune to that: the container is handed the
+   * current credentials every time a session subprocess is spawned. Because the
+   * unlinked file is *ignored* rather than merely stale, the forwarded env is
+   * what the CLI ends up using — so a container stuck on a stale mount recovers
+   * on its next session spawn, with no container recreate. Note the cadence is
+   * per spawn, not per turn: one `docker exec` serves a whole session and later
+   * turns are written to its stdin, so a rotated credential reaches a live
+   * session only when it is respawned (idle reap, restart or config change).
    *
    * settings.json wins over the gateway's own environment. That matches Claude
-   * Code, which applies the file's `env` block over whatever it inherited, and
-   * it keeps the live file as the single source of truth — a long-lived gateway
-   * started with an exported token would otherwise pin the container to a
-   * credential that can never be rotated without restarting the service.
+   * Code, which applies the file's `env` block over whatever it inherited (also
+   * verified: with both sources set to different endpoints, every request went
+   * to the file's), and it keeps the live file as the single source of truth — a
+   * long-lived gateway started with an exported token would otherwise pin the
+   * container to a credential that can never be rotated without restarting the
+   * service.
    *
    * Credentials resolve as a GROUP, not key by key. If the file declares an
    * identity at all, the gateway's environment must not contribute a *different*
@@ -525,21 +541,54 @@ export class SessionProcess extends EventEmitter {
     const fileDeclaresCredential = CONTAINER_CREDENTIAL_KEYS.some((k) => k in fileEnv);
 
     const resolved: Record<string, string> = {};
+    const dropped: Array<{ key: string; reason: string }> = [];
     for (const key of CONTAINER_AUTH_ENV_KEYS) {
       let value: unknown;
+      let origin: string;
       if (key in fileEnv) {
         value = fileEnv[key];
+        origin = 'settings.json';
       } else if (fileDeclaresCredential && CONTAINER_CREDENTIAL_KEYS.includes(key)) {
         continue; // the file owns the identity — don't mix in another one
       } else {
         value = process.env[key];
+        origin = 'gateway env';
       }
       // settings.json is untrusted input: forward only a clean, non-empty
       // string. A NUL byte throws at spawn, and a newline is never legitimate
       // in a credential or a base URL.
-      if (typeof value !== 'string' || value.length === 0) continue;
-      if (/[\0\r\n]/.test(value)) continue;
+      if (value === undefined) continue; // simply not set anywhere — not a defect
+      if (typeof value !== 'string') {
+        dropped.push({ key, reason: `${origin} value is ${typeof value}, not a string` });
+        continue;
+      }
+      if (value.length === 0) {
+        dropped.push({ key, reason: `${origin} value is empty` });
+        continue;
+      }
+      if (/[\0\r\n]/.test(value)) {
+        dropped.push({ key, reason: `${origin} value contains a NUL or newline` });
+        continue;
+      }
       resolved[key] = value;
+    }
+
+    // Never fail silently. The bug this whole path exists to fix presented as a
+    // container that looked healthy while answering real users "Not logged in",
+    // so a spawn that forwards no credential at all must say so — otherwise a
+    // malformed token in settings.json reproduces the original symptom with the
+    // original silence. `dropped` names the reason without ever logging a value.
+    const forwardedCredentials = CONTAINER_CREDENTIAL_KEYS.filter((k) => k in resolved);
+    if (forwardedCredentials.length === 0) {
+      this.logger.warn(
+        'No Claude credential could be resolved for this container agent — it will likely report "Not logged in"',
+        { sessionId: this.sessionId, dropped, checked: CONTAINER_AUTH_ENV_KEYS },
+      );
+    } else if (dropped.length > 0) {
+      this.logger.debug('Some container auth env vars were not forwarded', {
+        sessionId: this.sessionId,
+        dropped,
+      });
     }
     return resolved;
   }
@@ -869,19 +918,24 @@ export class SessionProcess extends EventEmitter {
     const containerEnv: Record<string, string> = {
       HOME: os.homedir(),
       CLAUDE_WORKSPACE: '/workspace',
-      TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
     if (process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
 
-    // Credentials are forwarded by NAME only (`-e KEY`, no `=value`), which makes
+    // Secrets are forwarded by NAME only (`-e KEY`, no `=value`), which makes
     // Docker read the value from this process's own environment (set on the spawn
-    // below). The token therefore never lands on the docker argv, where any local
-    // user could read it out of `ps`.
+    // below). The value therefore never lands on the docker argv, where any local
+    // user could read it out of `ps`: /proc/<pid>/cmdline is world-readable on a
+    // stock kernel, whereas /proc/<pid>/environ is owner-only.
+    //
+    // TELEGRAM_BOT_TOKEN travels by name for exactly the same reason as the
+    // Claude credentials — it is a bearer token for the agent's whole bot
+    // account. It is already placed in the spawn env below, unconditionally.
     const containerAuthEnv = isAppAgent ? this.resolveContainerAuthEnv() : {};
+    const byNameKeys = ['TELEGRAM_BOT_TOKEN', ...Object.keys(containerAuthEnv)];
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      ...Object.keys(containerAuthEnv).flatMap((k) => ['-e', k]),
+      ...byNameKeys.flatMap((k) => ['-e', k]),
     ];
 
     const spawnArgs = isAppAgent

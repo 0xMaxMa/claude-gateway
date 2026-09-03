@@ -81,6 +81,45 @@ export class AgentManager {
   }
 
   /**
+   * Stage the host's ~/.claude.json into a gateway-owned seed directory for one
+   * agent, and report where it landed.
+   *
+   * The seed is a DIRECTORY, never the host file itself. A Docker *file* bind
+   * mount pins an inode rather than a path, so an atomic rewrite on the host
+   * allocates a new inode and leaves the container reading the old, unlinked one
+   * for the rest of its life. Claude Code rewrites ~/.claude.json exactly that
+   * way, so mounting it directly meant the container's view froze at the first
+   * rewrite and never recovered. A directory mount resolves its entries per
+   * access, so re-staging the file is enough — the container picks it up on its
+   * next (re)start with no recreate.
+   *
+   * Called from injectAgentService (install/update/reconfigure) and from
+   * upsertAgent, which reconcileAgents runs for every app-agent at gateway
+   * start. Without the second call site the seed would only ever refresh when
+   * the app itself was touched, so a host `claude /login` under a different
+   * account could stay invisible to containers indefinitely.
+   *
+   * Mode is set explicitly because mkdir/copyFile modes are umask-dependent: the
+   * seed is a copy of the host's Claude config and must not be world-readable,
+   * even though the host file itself is commonly 0644.
+   */
+  private stageClaudeSeed(agentName: string): { seedSource: string; seeded: boolean } {
+    const seedDir = path.join(this.agentsDir, agentName, '.claude-seed');
+    fs.mkdirSync(seedDir, { recursive: true });
+    fs.chmodSync(seedDir, 0o700);
+
+    const hostClaudeJson = path.join(os.homedir(), '.claude.json');
+    let seeded = false;
+    if (fs.existsSync(hostClaudeJson)) {
+      const dest = path.join(seedDir, '.claude.json');
+      fs.copyFileSync(hostClaudeJson, dest);
+      fs.chmodSync(dest, 0o600);
+      seeded = true;
+    }
+    return { seedSource: fs.realpathSync(seedDir), seeded };
+  }
+
+  /**
    * Inject the `agent` service into an already-generated docker-compose.yml.
    * No-op if entry has no agentDeclaration or agentPaths.
    *
@@ -111,37 +150,24 @@ export class AgentManager {
     // *copy* rather than a mount: we stage a gateway-owned seed and copy out of it
     // at container start (see `command` below).
     //
-    // The seed is a DIRECTORY, never the host file itself. A Docker *file* bind
-    // mount pins an inode rather than a path, so an atomic rewrite on the host
-    // allocates a new inode and leaves the container reading the old, unlinked one
-    // for the rest of its life — the bug that made container agents answer
-    // "Not logged in · Please run /login" after any host settings change.
-    // Directory mounts resolve entries per access, so re-staging the copy here is
-    // enough for the next (re)start to pick it up; no container recreate needed.
-    //
     // The copy targets the literal homeDir: container-start HOME is `/`, but the
     // gateway runs turns with `docker exec -e HOME=<homeDir>` (see process.ts).
     const containerSeedDir = `${homeDir}/.claude-seed`;
-    const seedDir = path.join(this.agentsDir, agentName, '.claude-seed');
-    fs.mkdirSync(seedDir, { recursive: true });
-    fs.chmodSync(seedDir, 0o700); // mkdir mode is umask-dependent; this is not
-    const hostClaudeJson = path.join(homeDir, '.claude.json');
-    const seededClaudeJson = fs.existsSync(hostClaudeJson);
-    if (seededClaudeJson) {
-      const dest = path.join(seedDir, '.claude.json');
-      fs.copyFileSync(hostClaudeJson, dest);
-      fs.chmodSync(dest, 0o600);
-    }
-    const seedSource = fs.realpathSync(seedDir);
+    const { seedSource, seeded: seededClaudeJson } = this.stageClaudeSeed(agentName);
 
     // ~/.claude/settings.json is deliberately NOT mounted. On the host it exists
     // to carry credentials, and mounting that file is exactly what broke container
     // agents (stale inode after an atomic host rewrite). Credentials now reach the
-    // container as `docker exec -e` env resolved per turn from the live host file
-    // (see resolveContainerAuthEnv in session/process.ts), which also lets an
-    // already-broken container recover without being recreated. The file's
-    // remaining keys — plugins, marketplaces, statusLine — are host-scoped and
-    // point at paths that were never mounted into the container anyway.
+    // container as `docker exec -e` env resolved from the live host file on every
+    // session spawn (see resolveContainerAuthEnv in session/process.ts), which
+    // also lets an already-broken container recover without being recreated.
+    //
+    // The file's remaining keys are host-scoped: enabledPlugins and
+    // extraKnownMarketplaces point at paths that were never mounted into the
+    // container, and skipDangerousModePermissionPrompt only suppresses the
+    // interactive bypass dialog, which a container agent never sees — app-agents
+    // are forced onto the headless backend, and headless always passes
+    // --dangerously-skip-permissions.
 
     // Mount the agent's media directory into the container at the SAME absolute
     // path as the host. The gateway hands the agent uploaded-image paths (and the
@@ -175,8 +201,12 @@ export class AgentManager {
     // Steps are `;`-separated, not `&&`: a failed copy must surface on stderr
     // (visible in `docker logs`) without preventing the container from starting.
     // `exec` keeps the container's PID 1 as sleep.
+    //
+    // Paths are double-quoted inside the single-quoted `sh -c` argument: homeDir
+    // is host-derived and may contain spaces, which would otherwise split into
+    // extra `cp` operands and copy the config to the wrong place.
     const seedCopy = seededClaudeJson
-      ? `cp ${containerSeedDir}/.claude.json ${homeDir}/.claude.json; `
+      ? `cp "${containerSeedDir}/.claude.json" "${homeDir}/.claude.json"; `
       : '';
 
     const agentService = {
@@ -224,6 +254,16 @@ export class AgentManager {
     const targetDir = fs.realpathSync(path.join(entry.installPath, agentRelPath));
 
     fs.mkdirSync(agentDir, { recursive: true });
+
+    // Refresh the staged Claude config from the host. reconcileAgents() calls
+    // this for every running app-agent at gateway start, so a host-side config
+    // change reaches containers on the next gateway restart rather than waiting
+    // for the app to be updated. Best-effort: a failure here must not stop the
+    // agent from being registered, since the container falls back to the
+    // previously staged copy.
+    try {
+      this.stageClaudeSeed(agentName);
+    } catch { /* keep the existing seed */ }
 
     try { fs.rmSync(workspaceLink, { force: true, recursive: true }); } catch { /* ignore */ }
     fs.symlinkSync(targetDir, workspaceLink);
