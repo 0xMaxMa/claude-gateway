@@ -21,6 +21,22 @@ import {
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
+// This route is PUBLIC (see module doc comment) and some of what lands in its
+// plain-HTML fallback pages is not ours to trust: `error` is a raw query
+// param off an unauthenticated request, and a token-exchange failure message
+// can embed a token endpoint's own raw JSON response body (see mcp-oauth.ts's
+// tokenRequest()) — reachable via an admin-added custom connector whose
+// token endpoint is attacker-controlled. Escape before ever interpolating
+// into an `<h1>`.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Generic OAuth 2.1 + PKCE flow for "custom" connectors marked
  * `oauth: true` (see CustomConnectorEntry) — e.g. Firecrawl's
@@ -151,7 +167,7 @@ export function createOauthCallbackRouter(
       res.redirect(302, url.toString());
       return;
     }
-    res.status(status).send(`<h1>${message}</h1>`);
+    res.status(status).send(`<h1>${escapeHtml(message)}</h1>`);
   }
 
   router.get('/oauth/mcp/callback', async (req: Request, res: Response) => {

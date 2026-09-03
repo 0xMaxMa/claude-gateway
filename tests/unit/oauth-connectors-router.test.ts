@@ -232,6 +232,29 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  // This route is public (no auth) — `error` is a raw, attacker-controllable
+  // query param. Without escaping, a state a real admin's browser is holding
+  // (leaked via referrer/history/logs) plus a crafted `error` value would be
+  // reflected straight into the HTML response.
+  it('HTML-escapes the provider error before putting it in the fallback page (no oauthReturnUrl configured)', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+    const app = makeApp(pendingStore); // no returnUrl — takes the plain-HTML fallback path
+    const payload = '<script>alert(1)</script>';
+    const res = await request(app).get(
+      `/oauth/mcp/callback?state=${state}&error=${encodeURIComponent(payload)}`,
+    );
+    expect(res.status).toBe(400);
+    expect(res.text).not.toContain('<script>');
+    expect(res.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
   it('exchanges the code and writes access_token, refresh_token, client_id, and expiry into mcp-token.env', async () => {
     const pendingStore = new PendingOAuthStore();
     const state = pendingStore.create({
