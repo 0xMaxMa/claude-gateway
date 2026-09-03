@@ -3865,7 +3865,7 @@ curl -H "X-Api-Key: admin-secret" \
 
 Installs the latest version of the specified package. `:name` accepts `claude-gateway` or `claude-code`.
 
-- **claude-gateway**: runs `npm install -g @0xmaxma/claude-gateway@latest` then calls `process.exit(0)` so the process manager (systemd/pm2) restarts the service.
+- **claude-gateway**: runs `npm install -g @0xmaxma/claude-gateway@latest` then sends itself `SIGTERM`, requesting a non-zero (`EX_TEMPFAIL`) exit code so a `Restart=on-failure` unit restarts it too — a graceful `exit(0)` reads as success to `on-failure` and never restarts (issue #450). `Restart=always` units and pm2's `autorestart` restart on any exit code regardless.
 - **claude-code**: runs the native updater (`claude update`) so the actual binary on PATH is updated. No restart needed. (npm install is not used — Claude Code ships via the native installer, so an npm-global copy would not be the running binary.)
 
 If the package is already on the latest version the call is a no-op (`updated: false`).

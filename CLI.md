@@ -93,7 +93,7 @@ never mistaken for one.
 
 | Command | Description |
 |---------|-------------|
-| `claude-gateway service install [--manager systemd\|pm2] [--config <path>] [--yes] [--print]` | Generate and start a service |
+| `claude-gateway service install [--manager systemd\|pm2] [--config <path>] [--yes] [--print] [--force]` | Generate and start a service |
 | `claude-gateway service status [--manager systemd\|pm2]` | Report installed/enabled/active state as JSON |
 | `claude-gateway service uninstall [--manager systemd\|pm2] [--yes]` | Stop and remove the service |
 
@@ -108,6 +108,9 @@ never mistaken for one.
   and refuse to run non-interactively without it.
 - `install` verifies `/health` on the **local bind address**, and `uninstall` reports the state the
   manager actually reports afterwards — never the state that was intended.
+- (systemd) `install` refuses by default if a `claude-gateway.service` unit already exists and is
+  enabled or active at *system* scope (e.g. from provisioning outside this CLI) — it prints the exact
+  `sudo systemctl disable --now claude-gateway.service` to resolve it; pass `--force` to install anyway.
 - After installing, `gateway restart`/`stop` detect and drive that same service.
 
 ## Versions & updates

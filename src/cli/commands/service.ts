@@ -232,20 +232,29 @@ async function waitForHealth(config: CliConfigView, flags: Record<string, string
 
 // ─── systemd (user scope) ─────────────────────────────────────────────────────
 
-function systemdState(): { installed: boolean; enabled: boolean; active: boolean } {
+/** `is-enabled`/`is-active` for `UNIT_NAME` at whatever scope `scopeArgs`
+ *  selects (`['--user']` or `[]` for system scope) — the query both
+ *  `systemdState()` (user scope, for `service status`) and
+ *  `systemScopeConflict()` (system scope, for the install-time check below)
+ *  need, differing only in scope. */
+function unitFlagState(scopeArgs: readonly string[]): { enabled: boolean; active: boolean } {
   let enabled = false;
   let active = false;
   try {
-    enabled = capture('systemctl', ['--user', 'is-enabled', UNIT_NAME]).trim() === 'enabled';
+    enabled = capture('systemctl', [...scopeArgs, 'is-enabled', UNIT_NAME]).trim() === 'enabled';
   } catch {
     /* systemctl absent, or the unit is disabled/missing */
   }
   try {
-    active = capture('systemctl', ['--user', 'is-active', UNIT_NAME]).trim() === 'active';
+    active = capture('systemctl', [...scopeArgs, 'is-active', UNIT_NAME]).trim() === 'active';
   } catch {
     /* systemctl absent, or the unit is inactive */
   }
-  return { installed: fs.existsSync(unitPath()), enabled, active };
+  return { enabled, active };
+}
+
+function systemdState(): { installed: boolean; enabled: boolean; active: boolean } {
+  return { installed: fs.existsSync(unitPath()), ...unitFlagState(['--user']) };
 }
 
 function systemdStatus(flags: Record<string, string | boolean>): number {
@@ -264,17 +273,8 @@ function systemdStatus(flags: Record<string, string | boolean>): number {
  * without `--user` queries it as any user, so this check costs nothing extra.
  */
 function systemScopeConflict(): boolean {
-  try {
-    if (capture('systemctl', ['is-enabled', UNIT_NAME]).trim() === 'enabled') return true;
-  } catch {
-    /* disabled, static, or not installed at system scope */
-  }
-  try {
-    if (capture('systemctl', ['is-active', UNIT_NAME]).trim() === 'active') return true;
-  } catch {
-    /* inactive, or not installed at system scope */
-  }
-  return false;
+  const { enabled, active } = unitFlagState([]);
+  return enabled || active;
 }
 
 async function systemdInstall(

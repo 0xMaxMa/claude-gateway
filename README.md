@@ -122,7 +122,9 @@ claude-gateway service uninstall            # asks first — this stops a runnin
 ```
 
 Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
-non-interactive run is refused rather than left hanging).
+non-interactive run is refused rather than left hanging). Always stop the gateway through
+`service uninstall` or `systemctl --user stop claude-gateway.service` — a bare `kill <pid>` bypasses
+systemd's own stop tracking, so `Restart=always` brings it right back regardless of exit code.
 
 `install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
 exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
