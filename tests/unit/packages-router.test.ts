@@ -333,14 +333,16 @@ describe('T7-T15: POST /api/v1/packages/:name/update', () => {
       .post('/api/v1/packages/claude-gateway/update')
       .set('X-Api-Key', ADMIN_KEY);
 
-    // Requested synchronously, before the kill is even scheduled — a graceful
-    // exit(0) reads as success to `Restart=on-failure`, so systemd (or any
-    // other on-failure supervisor) never restarts it without this.
-    expect(mockRequestExitCode).toHaveBeenCalledWith(EX_TEMPFAIL);
+    // Requested atomically with the kill (inside the timer), not right after
+    // the response — narrowing the window where an unrelated shutdown could
+    // consume the pending code instead of this one.
+    expect(mockRequestExitCode).not.toHaveBeenCalled();
     expect(killSpy).not.toHaveBeenCalled();
 
     jest.runAllTimers();
+    expect(mockRequestExitCode).toHaveBeenCalledWith(EX_TEMPFAIL);
     expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    expect(mockRequestExitCode.mock.invocationCallOrder[0]).toBeLessThan(killSpy.mock.invocationCallOrder[0]);
   });
 
   it('T12: npm install fails → 500 with stderr', async () => {
