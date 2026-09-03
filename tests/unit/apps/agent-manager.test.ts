@@ -464,6 +464,28 @@ describe('AgentManager', () => {
       expect(fs.existsSync(agentDir)).toBe(true);
     });
 
+    it('drops the Claude config seed on delete but keeps session history', async () => {
+      // The seed is a copy of the host ~/.claude.json, re-staged from the host on
+      // every install/update. It is derived data, so a removed app must not leave
+      // a copy of the host's Claude config behind — unlike sessions, which are
+      // kept so a reinstall resumes the same conversations.
+      const entry = makeEntry(tmpDir);
+      manager.injectAgentService(entry);
+      await manager.upsertAgent(entry);
+
+      const agentDir = path.join(tmpDir, 'agents', 'my-agent');
+      const seedDir = path.join(agentDir, '.claude-seed');
+      const sessions = path.join(agentDir, 'sessions');
+      fs.mkdirSync(sessions, { recursive: true });
+      fs.writeFileSync(path.join(sessions, 'a.json'), '{}', 'utf-8');
+      expect(fs.existsSync(path.join(seedDir, '.claude.json'))).toBe(true);
+
+      await manager.deleteAgent(entry);
+
+      expect(fs.existsSync(seedDir)).toBe(false);
+      expect(fs.existsSync(path.join(sessions, 'a.json'))).toBe(true);
+    });
+
     it('removes the config.json entry', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);

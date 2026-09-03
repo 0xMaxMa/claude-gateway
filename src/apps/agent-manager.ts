@@ -261,8 +261,9 @@ export class AgentManager {
 
   /**
    * Remove by agent name — used in install rollback where AppEntry may not be in scope.
-   * Only removes the workspace symlink; preserves sessions/ and other data so that
-   * a reinstall picks up the same conversation history.
+   * Removes the workspace symlink and the re-stageable Claude config seed;
+   * preserves sessions/ and other data so that a reinstall picks up the same
+   * conversation history.
    */
   async deleteAgentByName(agentName: string): Promise<void> {
     const workspaceLink = path.join(this.agentsDir, agentName, 'workspace');
@@ -273,6 +274,16 @@ export class AgentManager {
         fs.rmSync(workspaceLink, { force: true });
       }
     } catch { /* already gone */ }
+    // The Claude config seed is derived data, not history: it is re-staged from
+    // the host on the next install/update, so an app that has been removed must
+    // not leave a copy of the host's Claude config sitting on disk. The rest of
+    // the agent dir (sessions, media) is deliberately preserved.
+    try {
+      fs.rmSync(path.join(this.agentsDir, agentName, '.claude-seed'), {
+        recursive: true,
+        force: true,
+      });
+    } catch { /* best-effort */ }
     await this.removeConfigEntry(agentName);
   }
 

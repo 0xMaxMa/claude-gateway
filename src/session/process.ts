@@ -34,6 +34,18 @@ export const CONTAINER_AUTH_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
 ] as const;
 
+/**
+ * The subset of CONTAINER_AUTH_ENV_KEYS that proves an identity, as opposed to
+ * merely selecting an endpoint. These resolve as a group so a container is
+ * never handed two credentials from two different sources — see
+ * resolveContainerAuthEnv().
+ */
+const CONTAINER_CREDENTIAL_KEYS: readonly string[] = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+];
+
 // The MCP reply tools that deliver an agent's user-facing message to a channel.
 // Their text lives in the tool_use `input.text`, not in an assistant text block,
 // so it is never captured by `assistantBuffer` — the reply is delivered to the
@@ -484,20 +496,44 @@ export class SessionProcess extends EventEmitter {
    * it keeps the live file as the single source of truth — a long-lived gateway
    * started with an exported token would otherwise pin the container to a
    * credential that can never be rotated without restarting the service.
+   *
+   * Credentials resolve as a GROUP, not key by key. If the file declares an
+   * identity at all, the gateway's environment must not contribute a *different*
+   * one: forwarding a file OAuth token alongside an environment
+   * ANTHROPIC_API_KEY would hand the container two identities and let the CLI
+   * choose between them silently. A base URL only selects an endpoint, so it is
+   * not part of that group and keeps its own independent fallback.
    */
   private resolveContainerAuthEnv(): Record<string, string> {
     let fileEnv: Record<string, unknown> = {};
     try {
       const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-      const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      fileEnv = (parsed?.env as Record<string, unknown>) ?? {};
+      const parsed: unknown = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      const rawEnv = (parsed as { env?: unknown } | null)?.env;
+      // Only a plain object is usable. An `env` that is a string or an array
+      // would make the `in` checks below throw or read array indices.
+      if (rawEnv && typeof rawEnv === 'object' && !Array.isArray(rawEnv)) {
+        fileEnv = rawEnv as Record<string, unknown>;
+      }
     } catch {
       // No readable user settings — the gateway's own env is then the only source.
     }
 
+    // Presence, not validity: a credential key spelled out in settings.json is
+    // authoritative for the whole group even when its value is malformed, so a
+    // broken token can never silently fall back to a different identity.
+    const fileDeclaresCredential = CONTAINER_CREDENTIAL_KEYS.some((k) => k in fileEnv);
+
     const resolved: Record<string, string> = {};
     for (const key of CONTAINER_AUTH_ENV_KEYS) {
-      const value = fileEnv[key] ?? process.env[key];
+      let value: unknown;
+      if (key in fileEnv) {
+        value = fileEnv[key];
+      } else if (fileDeclaresCredential && CONTAINER_CREDENTIAL_KEYS.includes(key)) {
+        continue; // the file owns the identity — don't mix in another one
+      } else {
+        value = process.env[key];
+      }
       // settings.json is untrusted input: forward only a clean, non-empty
       // string. A NUL byte throws at spawn, and a newline is never legitimate
       // in a credential or a base URL.

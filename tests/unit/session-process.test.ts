@@ -2979,6 +2979,44 @@ describe('SessionProcess — corrupted thinking-block recovery', () => {
     }
   });
 
+  it('U-SP-AUTH6: a credential in settings.json blocks the env from adding a second one', async () => {
+    // Credentials resolve as a group. If the file proves an identity, the
+    // gateway env must not contribute a *different* one — a file OAuth token
+    // forwarded alongside an env ANTHROPIC_API_KEY hands the container two
+    // identities and lets the CLI silently pick between them. A base URL only
+    // selects an endpoint, so it still falls through independently.
+    process.env.ANTHROPIC_API_KEY = 'key-from-gateway-env';
+    process.env.ANTHROPIC_BASE_URL = 'https://from-gateway-env.invalid';
+    try {
+      await withFakeAuthHome({ CLAUDE_CODE_OAUTH_TOKEN: 'token-from-settings' }, async () => {
+        const appAgent = makeAgentConfig({
+          workspace: agentConfig.workspace,
+          type: 'app-agent',
+          container: 'my-app-container',
+        });
+        const sp = makeSp('chat:auth6', 'telegram', appAgent, gatewayConfig, sessionStore);
+        await sp.start();
+
+        const [, spawnArgs, spawnOpts] = spawnMock.mock.calls[0] as [
+          string,
+          string[],
+          { env: Record<string, string> },
+        ];
+        expect(spawnOpts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('token-from-settings');
+        // The competing env credential is neither forwarded nor announced to docker.
+        expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY');
+        // Endpoint routing is not an identity, so it still falls through.
+        expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('https://from-gateway-env.invalid');
+        expect(spawnArgs).toContain('ANTHROPIC_BASE_URL');
+
+        await sp.stop();
+      });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_BASE_URL;
+    }
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-BIN5: a genuinely unresolvable binary surfaces as an ENOENT `error`  // event (NOT on stderr). It must still be captured into lastStderrLine so the
   // fatal max-restarts log can name the cause and fire the CLAUDE_BIN hint.
