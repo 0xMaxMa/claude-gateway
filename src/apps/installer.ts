@@ -1477,10 +1477,16 @@ export class AppInstaller {
    * is recorded ({@link getRestoreFailure}) so it is visible through the apps API
    * rather than only in the log, and so reconcileStatus() keeps the app eligible
    * for the next boot's restore instead of latching it off (issue #425).
+   *
+   * @param pending the batch from a prior {@link markRestorePending} call. Boot
+   *   passes one so the marking is already done before the HTTP server starts
+   *   listening; omitting it marks the batch here, which is correct for any
+   *   caller that is not racing live status reads.
    */
-  async restoreRunningApps(): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
-    const apps = await this.registry.list();
-    const running = apps.filter((e) => e.status === 'running');
+  async restoreRunningApps(
+    pending?: AppEntry[],
+  ): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
+    const running = pending ?? (await this.markRestorePending());
     const failures: Array<{ app: string; error: string }> = [];
 
     // Mark the WHOLE batch in flight before any worker starts, not per worker.
@@ -1491,6 +1497,8 @@ export class AppInstaller {
     // no-latch guard in reconcileStatus() no longer applies (it requires the
     // stored status to still be `running`), so a later failure would latch the
     // app off for good — the exact outcome this path exists to prevent (#425).
+    // Re-marking a `pending` batch is a no-op (Set.add is idempotent) and keeps
+    // the invariant owned here rather than by the caller.
     for (const entry of running) this.restoringNames.add(entry.name);
 
     // Bounded-concurrency worker pool: workers pull from a shared cursor until
@@ -1527,6 +1535,31 @@ export class AppInstaller {
   }
 
   /**
+   * Phase 1 of the boot restore: read the registry and mark every app stored as
+   * `running` in flight, returning that batch for {@link restoreRunningApps}.
+   *
+   * Exists because the marking is what makes the suppression in {@link
+   * queryRuntimeStatus} apply, and it cannot be done synchronously — the
+   * registry read is async. Doing it inside restoreRunningApps() left a window
+   * between the HTTP server accepting requests and the marks landing: a
+   * `GET /api/v1/apps` in that window queries Docker, finds no containers (the
+   * host reboot took them down), and persists `running` → `stopped`. If that
+   * write lands before the registry read here, the app is filtered out of the
+   * batch and never restored at all — the #425 latch-off, reached through the
+   * very code that exists to prevent it. Boot therefore awaits this BEFORE
+   * `router.start()`, then fires the restore itself in the background.
+   *
+   * Callers that are not racing live reads can skip it: restoreRunningApps()
+   * calls this itself when no batch is supplied.
+   */
+  async markRestorePending(): Promise<AppEntry[]> {
+    const apps = await this.registry.list();
+    const running = apps.filter((e) => e.status === 'running');
+    for (const entry of running) this.restoringNames.add(entry.name);
+    return running;
+  }
+
+  /**
    * Why this boot's restore of `appName` failed, or `undefined` when the last
    * restore succeeded (or never ran). Lets `GET /api/v1/apps` tell an app the
    * gateway tried and failed to start apart from one an operator stopped —
@@ -1534,6 +1567,25 @@ export class AppInstaller {
    */
   getRestoreFailure(appName: string): RestoreFailure | undefined {
     return this.restoreFailures.get(appName);
+  }
+
+  /**
+   * Whether this process's boot restore is currently bringing `appName` up.
+   *
+   * Reads {@link restoringNames} — the same set {@link queryRuntimeStatus}
+   * consults at :1439 — rather than tracking a second copy, so the flag cannot
+   * disagree with the suppression it describes. That suppression is why the
+   * accessor is needed at all: while a restore holds an app, its stored status
+   * is returned unreconciled, and the set restored is exactly the apps stored
+   * as `running` ({@link restoreRunningApps}), so a rebuild that takes minutes
+   * on a cold host reports a flat `running` with no containers behind it. The
+   * apps API pairs this with that status so a client can tell rebuilding from
+   * serving (issue #446); the failed case is {@link getRestoreFailure}.
+   *
+   * In-memory and process-local: never persisted to `apps.json`.
+   */
+  isRestoring(appName: string): boolean {
+    return this.restoringNames.has(appName);
   }
 
   // ─── Internal install pipeline ────────────────────────────────────────────

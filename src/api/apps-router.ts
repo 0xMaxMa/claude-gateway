@@ -9,18 +9,40 @@ import { assertValidHostPort } from '../apps/compose-generator';
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 /**
- * Attach this boot's restore failure to an app entry, when one is recorded, so
- * an app the gateway tried and failed to start is distinguishable from one an
- * operator deliberately stopped (issue #425). Absent on every healthy app, so
- * the response shape is unchanged for existing consumers.
+ * Attach this boot's restore state to an app entry: `restoring` while the
+ * boot-time restore is bringing it up, and the recorded failure when that
+ * restore failed — so an app the gateway is still rebuilding, one it tried and
+ * failed to start, and one an operator deliberately stopped are three
+ * distinguishable things (issues #425, #446).
+ *
+ * `restoring` is needed because a restore in flight deliberately suppresses
+ * status reconciliation (installer.ts:1439), and the apps it restores are
+ * exactly those stored as `running` — so without this the response says
+ * `running` for minutes while the containers do not exist yet.
+ *
+ * Both fields are absent on a healthy app rather than present-and-false, so the
+ * response shape is unchanged for existing consumers. One function, used by
+ * both read routes, so the list and the single-app view cannot drift apart —
+ * and those two are the only routes that return an AppEntry at all
+ * (`POST /:name/start|stop|restart` answers `{ name, action }`), so there is no
+ * third surface where the state could go missing.
+ *
+ * The flag is read AFTER the caller has reconciled the status, so a restore
+ * that finishes during that await is reported as the status it left behind
+ * (`running`, suppressed) with no `restoring` — stale by one tick, in the
+ * direction that understates work in progress for an app that just came up
+ * successfully. Reading it first would invert the skew and claim an app is
+ * still rebuilding after it is up; neither can be made atomic across two
+ * awaits, and this direction never reports a rebuilding app as ready.
  */
-function withRestoreFailure(
+function withRestoreState(
   installer: AppInstaller,
   entry: AppEntry,
-): AppEntry & { restoreError?: string; restoreFailedAt?: string } {
+): AppEntry & { restoring?: true; restoreError?: string; restoreFailedAt?: string } {
+  const base = installer.isRestoring(entry.name) ? { ...entry, restoring: true as const } : entry;
   const failure = installer.getRestoreFailure(entry.name);
-  if (!failure) return entry;
-  return { ...entry, restoreError: failure.error, restoreFailedAt: failure.at };
+  if (!failure) return base;
+  return { ...base, restoreError: failure.error, restoreFailedAt: failure.at };
 }
 
 /**
@@ -114,7 +136,7 @@ export function createAppsRouter(
       // Reconcile each stored status against the live Docker runtime so a
       // container that crashed/was killed externally no longer reports running.
       const reconciled = await installer.reconcileStatuses(apps);
-      res.json({ apps: reconciled.map((e) => withRestoreFailure(installer, e)) });
+      res.json({ apps: reconciled.map((e) => withRestoreState(installer, e)) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -221,7 +243,7 @@ export function createAppsRouter(
       }
       // Reconcile the stored status against the live Docker runtime before return.
       const reconciled = await installer.reconcileStatus(entry);
-      res.json(withRestoreFailure(installer, reconciled));
+      res.json(withRestoreState(installer, reconciled));
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

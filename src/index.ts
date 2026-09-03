@@ -817,6 +817,14 @@ async function main(): Promise<void> {
     });
   });
 
+  // Mark the apps this boot will restore BEFORE the server accepts a single
+  // request. The marks are what stop a status read from querying Docker, seeing
+  // the containers the host reboot took down, and persisting `running` →
+  // `stopped` underneath a restore that has not started yet — which would also
+  // drop the app from the restore batch for good (#425). The restore itself
+  // stays in the background below; only this cheap registry read is awaited.
+  const restorePending = await appInstaller.markRestorePending();
+
   // Start gateway router
   const router = new GatewayRouter(agentRunners, agentConfigs, undefined, config, cronManager, CONFIG_PATH, appsRegistry, appInstaller, registryClient);
   await router.start(PORT);
@@ -870,8 +878,10 @@ async function main(): Promise<void> {
   // never blocks the event loop or route wiring. Routes come up immediately below;
   // until each app's containers finish `compose up --wait`, a request may briefly
   // 502 (ECONNREFUSED), which self-heals within seconds. Non-fatal per app.
+  // The batch was read and marked in flight before the server started listening,
+  // so every app in it has been reporting `restoring` since the first request.
   void appInstaller
-    .restoreRunningApps()
+    .restoreRunningApps(restorePending)
     .then(({ attempted, failures }) => {
       for (const f of failures) {
         globalLogger.warn(`App store: failed to start "${f.app}" containers on restore (non-fatal): ${f.error}`);

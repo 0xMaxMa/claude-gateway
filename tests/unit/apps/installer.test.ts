@@ -1142,6 +1142,43 @@ services:
       expect((await registry.get('app-e'))?.status).toBe('running');
     }, 60000);
 
+    it('marks the batch before the restore runs, so a read at boot cannot latch the app off', async () => {
+      // Boot awaits markRestorePending() BEFORE the HTTP server listens, then
+      // fires restoreRunningApps() in the background. Previously the marking
+      // lived inside restoreRunningApps(), behind its own `await registry.list()`
+      // — and the server was already accepting requests by then. A status read
+      // landing in that window found no containers (the host reboot took them
+      // down), mapped them to `stopped`, and persisted it; if that write landed
+      // before the list read, the app was filtered out of the batch and never
+      // restored, with the no-latch guard powerless because it requires the
+      // stored status to still be `running` (#425).
+      const inst = makeInstaller();
+      await waitForJob(inst, inst.install({ localPath: makeAppDir(srcDir, 'my-app') }), 5000);
+
+      // Empty output throughout: an empty `ps` maps to `stopped`.
+      const asyncSpawn = jest.fn(async (_cmd: string, _args: string[], _opts?: object) => ({
+        stdout: '',
+        stderr: '',
+        status: 0,
+      }));
+      const installer2 = makeInstaller(successSpawn, asyncSpawn);
+
+      // Boot phase 1 — awaited before the port is open.
+      const pending = await installer2.markRestorePending();
+      expect(pending.map((e) => e.name)).toEqual(['my-app']);
+      expect(installer2.isRestoring('my-app')).toBe(true);
+
+      // A request served after listen but before the background restore starts.
+      const readAtBoot = await installer2.reconcileStatus((await registry.get('my-app'))!);
+      expect(readAtBoot.status).toBe('running'); // pre-fix: 'stopped'
+      expect((await registry.get('my-app'))?.status).toBe('running');
+
+      // Boot phase 2 — the app is still in the batch, and the mark is released.
+      const { attempted } = await installer2.restoreRunningApps(pending);
+      expect(attempted).toBe(1); // pre-fix: 0, the app was dropped
+      expect(installer2.isRestoring('my-app')).toBe(false);
+    });
+
     it('clears the restore failure once the app is observed running', async () => {
       // Anti-over-correction: the marker must not pin an app to `error` forever.
       const appDir = makeAppDir(srcDir, 'my-app');
