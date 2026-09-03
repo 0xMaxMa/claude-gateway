@@ -61,12 +61,31 @@ const TOO_LARGE_HISTORY_LADDER: readonly number[] = [MAX_HISTORY_MESSAGES, 40, 3
 
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
+// Fable 5.1 takes the bare `fable` alias and Fable 5 is demoted to `fable5`,
+// following the "bare alias = newest of the family" convention the rest of this
+// list uses — the same demotion Opus 4.8 took to `opus48` when Opus 5 landed.
+//
+// Note that `fable` therefore points at a model not every provider has
+// entitled yet; ours answers `400 model not supported` for it today, until
+// Crown-Labs/getpod#2538 adds it to the catalog. This only affects someone
+// typing `/model fable` from now on: selection stores the resolved id, not the
+// alias, so an agent already on Fable 5 stays on claude-fable-5 and existing
+// configs have their claude-fable-5 row rewritten to `fable5` by
+// migrateModels(). Nobody is moved onto 5.1 by this change.
+//
+// Both Fable 5.x entries carry the same 200k/1M split as the rest: their CLI
+// catalog entry says `native_1m`, but native 1M only applies when the base URL
+// is api.anthropic.com. Behind a proxy the `[1m]` id suffix and the
+// `context-1m-2025-08-07` beta header are what actually buy the larger window,
+// which is exactly what the paired rows below encode.
 export const DEFAULT_MODELS: ModelConfig[] = [
-  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable[1m]',   contextWindow: 1000000 },
+  { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]',   contextWindow: 1000000 },
+  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]',  contextWindow: 1000000 },
   { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus[1m]',    contextWindow: 1000000 },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]',  contextWindow: 1000000 },
   { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]',  contextWindow: 1000000 },
-  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable',       contextWindow: 200000 },
+  { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable',       contextWindow: 200000 },
+  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5',      contextWindow: 200000 },
   { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus',        contextWindow: 200000 },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48',      contextWindow: 200000 },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46',      contextWindow: 200000 },

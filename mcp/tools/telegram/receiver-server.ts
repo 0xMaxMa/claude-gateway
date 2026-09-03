@@ -884,12 +884,22 @@ const BOT_COMMANDS = [
 // reached only when the gateway call itself fails, so it is two fallbacks deep
 // and will drift — keep it roughly in step with DEFAULT_MODELS
 // (src/agent/runner.ts) and config.template.json gateway.models.
+//
+// `alias` is never read in this process: validModelRows() keeps only id and
+// label, and the picker's callback data is `model:<id>`. It is carried anyway
+// so this list stays diffable against the two registries it mirrors, and so
+// the cross-registry sync test can compare alias mappings — that test is the
+// only thing standing between this copy and the silent drift that already lost
+// it Opus 5 once. Do not drop the column to "clean up"; it would blind the
+// guard, not simplify it.
 const AVAILABLE_MODELS = [
-  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable[1m]' },
+  { id: 'claude-fable-5-1[1m]',      label: 'Fable 5.1 (1M)',   alias: 'fable[1m]' },
+  { id: 'claude-fable-5[1m]',        label: 'Fable 5 (1M)',     alias: 'fable5[1m]' },
   { id: 'claude-opus-5[1m]',         label: 'Opus 5 (1M)',      alias: 'opus[1m]' },
   { id: 'claude-opus-4-8[1m]',       label: 'Opus 4.8 (1M)',    alias: 'opus48[1m]' },
   { id: 'claude-sonnet-5[1m]',       label: 'Sonnet 5 (1M)',    alias: 'sonnet[1m]' },
-  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable' },
+  { id: 'claude-fable-5-1',          label: 'Fable 5.1',        alias: 'fable' },
+  { id: 'claude-fable-5',            label: 'Fable 5',          alias: 'fable5' },
   { id: 'claude-opus-5',             label: 'Opus 5',           alias: 'opus' },
   { id: 'claude-opus-4-8',           label: 'Opus 4.8',         alias: 'opus48' },
   { id: 'claude-opus-4-6',           label: 'Opus 4.6',         alias: 'opus46' },
