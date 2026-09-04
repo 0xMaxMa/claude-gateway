@@ -2718,8 +2718,9 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Called after a connector's secret changes: either services/api pushed a
-   * fresh access_token for a managed connector (POST /oauth/receive), or the
+   * Called after a connector's secret changes: either an external control
+   * plane pushed a fresh access_token for a managed connector (POST
+   * /oauth/receive), or the
    * background refresh sweep in oauth-refresh-sweep.ts (invoked from
    * gateway-router.ts's 60s interval) rotated one for a user's own oauth:true
    * custom connector. A no-op when this agent doesn't actually resolve that

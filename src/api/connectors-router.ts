@@ -49,12 +49,13 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  * retired.)
  *
  * 'oauth'-kind connectors (Gmail/Drive/Calendar) never do the actual OAuth
- * dance here — getpod-ai's services/api owns the client_secret, the token
- * exchange, and the refresh loop (this gateway runs inside the user's own VM,
- * reachable by that user's own shell/SSH, so a shared client_secret can't live
- * here safely — see types.ts's 'oauth' kind doc comment). services/api pushes
- * the resulting short-lived access_token here via /oauth/receive, over the
- * internal network, authenticated the same way any other admin API caller is.
+ * dance here — an external control plane the deployer runs owns the
+ * client_secret, the token exchange, and the refresh loop (this gateway runs
+ * inside the user's own VM, reachable by that user's own shell/SSH, so a
+ * shared client_secret can't live here safely — see types.ts's 'oauth' kind
+ * doc comment). That control plane pushes the resulting short-lived
+ * access_token here via /oauth/receive, over the internal network,
+ * authenticated the same way any other admin API caller is.
  *
  * `agents` (all live AgentRunners) is only needed so /oauth/receive can
  * restart sessions using the connector — every other route works the same
@@ -180,18 +181,18 @@ export function createConnectorsRouter(
     }
   });
 
-  // Receive a fresh access_token + full connector shape pushed by getpod-ai's
-  // services/api for a GetPod-managed OAuth connector (github/gmail/
-  // google-drive/google-calendar) — this is how those connect (and stay fresh
-  // on refresh) now. Admin-gated exactly like /connect; the caller is
-  // services/api itself, reaching this over the internal network with the
+  // Receive a fresh access_token + full connector shape pushed by an external
+  // control plane for a managed OAuth connector (github/gmail/google-drive/
+  // google-calendar, say) — this is how those connect (and stay fresh on
+  // refresh) now. Admin-gated exactly like /connect; the caller is that
+  // control plane itself, reaching this over the internal network with the
   // same admin API key any other admin caller would use.
   //
   // Unlike /connect, there's no catalog lookup here — CONNECTOR_CATALOG is
   // empty by default, and these ids are never in it (see catalog.ts's doc
   // comment). The entry is written into gateway.customConnectors instead,
   // same storage a user-pasted custom connector uses, with `managed: true` +
-  // `authKind: 'oauth'` marking it as services/api's, not the user's (see
+  // `authKind: 'oauth'` marking it as that control plane's, not the user's (see
   // CustomConnectorEntry's doc comment). `secretNames` is never trusted from
   // the request body — derived from `config` via extractPlaceholders, the
   // same helper /custom's add route uses, and required to be exactly
@@ -336,11 +337,11 @@ export function createConnectorsRouter(
       // (click Disconnect, row stays "Connected"), so fall through to a real
       // delete instead — there's nothing to preserve for a reconnect anyway.
       //
-      // Managed entries (github/gmail/etc., pushed by services/api) keep the
-      // old delete-the-entry behavior: their definition lives in the
-      // services/api-owned managed catalog instead, which the web panel
-      // already falls back to for the "not connected" row, and reconnecting
-      // re-pushes a full entry via /oauth/receive regardless.
+      // Managed entries (github/gmail/etc., pushed by an external control
+      // plane) keep the old delete-the-entry behavior: their definition
+      // lives in that control plane's own catalog instead, which the web
+      // panel already falls back to for the "not connected" row, and
+      // reconnecting re-pushes a full entry via /oauth/receive regardless.
       if (!entry.managed && entry.secretNames.length > 0) {
         res.json({ id, connected: false });
         return;

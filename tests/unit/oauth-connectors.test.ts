@@ -1,12 +1,12 @@
 /**
  * Managed OAuth connectors (github/Gmail/Drive/Calendar) — the gateway never
- * does the OAuth dance itself (client_secret lives in getpod-ai's services/api,
- * which runs infra the user never gets shell access to) and has no catalog
- * entry for any of them (CONNECTOR_CATALOG is empty by default — see
+ * does the OAuth dance itself (client_secret lives in an external control
+ * plane, which runs infra the user never gets shell access to) and has no
+ * catalog entry for any of them (CONNECTOR_CATALOG is empty by default — see
  * catalog.ts). This covers the receiving end: POST /oauth/receive stores a
  * pushed access_token + full connector shape as a managed custom connector
  * (authKind:'oauth', managed:true), reported as source:'built-in' so the web
- * panel doesn't show a "Custom" badge on something GetPod pushed in.
+ * panel doesn't show a "Custom" badge on something that control plane pushed in.
  */
 
 import express from 'express';
@@ -55,7 +55,7 @@ describe('connectors-router — oauth-kind connectors', () => {
     return cfgPath;
   }
 
-  /** The shape services/api's real push sends — see internal/vm/connector_push.go. */
+  /** The shape a real control-plane push sends. */
   function pushPayload(overrides: Record<string, unknown> = {}) {
     return {
       access_token: 'at-pushed-1',

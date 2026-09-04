@@ -79,7 +79,7 @@ describe('resolve', () => {
   });
 
   // github/gmail/etc. are no longer built-in catalog entries — they're managed
-  // custom connectors pushed by services/api (see connectors-router.ts's
+  // custom connectors pushed by an external control plane (see connectors-router.ts's
   // /oauth/receive). This exercises the exact shape that route writes:
   // authKind:'oauth' + managed:true, resolved through the generic
   // customConnectors path like any other custom connector.
@@ -142,7 +142,7 @@ describe('resolve', () => {
     expect(status.setup).toBeUndefined();
   });
 
-  // Two independent managed connectors pushed by services/api must not share
+  // Two independent managed connectors pushed by an external control plane must not share
   // connected state, even though both are custom-connector entries.
   it('two managed connectors: independent secret slots, each resolves its own entry', () => {
     const { setSecret } = require('../../src/connectors/token-env');
@@ -250,7 +250,7 @@ describe('resolve', () => {
 
   // A user-added generic-OAuth custom connector (oauth: true, added via
   // POST /v1/connectors/custom, no explicit authKind — that field is only
-  // ever set by services/api's managed push, see CustomConnectorEntry's doc
+  // ever set by an external control plane's managed push, see CustomConnectorEntry's doc
   // comment) must still report authKind: 'oauth', not fall through to
   // 'secret' just because secretNames is non-empty — the web panel's Auth
   // column and icon both key off this.
@@ -530,7 +530,7 @@ describe('connectors-router', () => {
     expect(getSecret(customSecretKey('github', 'access_token'))).toBe('ghu_real_oauth_token'); // untouched
   });
 
-  // github is a services/api-managed custom connector now (pushed via
+  // github is an externally-managed custom connector now (pushed via
   // /oauth/receive with a full config shape, not just a token — same as
   // gmail/drive/calendar; see tests/unit/oauth-connectors.test.ts for that
   // route's dedicated payload-shape coverage). This test keeps the

@@ -62,7 +62,7 @@ function tmpConfig(customConnectors: Record<string, unknown> = {}) {
         gateway: {
           logDir: '/tmp',
           timezone: 'UTC',
-          publicUrl: 'https://pod-abc.vm.getpod.ai/gateway',
+          publicUrl: 'https://pod-abc.vm.example.com/gateway',
           customConnectors,
         },
         agents: [],
@@ -84,7 +84,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
       '/api',
       createOauthConnectorsRouter(
         apiKeys,
-        { gateway: { publicUrl: 'https://pod-abc.vm.getpod.ai/gateway' } },
+        { gateway: { publicUrl: 'https://pod-abc.vm.example.com/gateway' } },
         store,
         pendingStore,
       ),
@@ -125,7 +125,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
       '/api',
       createOauthConnectorsRouter(
         [{ key: 'scoped', agents: ['a1'] }, ...apiKeys],
-        { gateway: { publicUrl: 'https://pod-abc.vm.getpod.ai/gateway' } },
+        { gateway: { publicUrl: 'https://pod-abc.vm.example.com/gateway' } },
         store,
       ),
     );
@@ -163,7 +163,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     const url = new URL(res.body.authorizeUrl);
     expect(url.origin + url.pathname).toBe('https://www.firecrawl.dev/api/oauth/authorize');
     expect(url.searchParams.get('client_id')).toBe('dyn_abc123');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://pod-abc.vm.getpod.ai/gateway/oauth/mcp/callback');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://pod-abc.vm.example.com/gateway/oauth/mcp/callback');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('resource')).toBe('https://mcp.firecrawl.dev/v2/mcp-oauth');
     expect(url.searchParams.get('scope')).toBe('firecrawl:global offline_access');
@@ -229,7 +229,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     const store = createCustomConnectorsStore(cfgPath);
     const appV1 = express();
     appV1.use(express.json());
-    appV1.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc.vm.getpod.ai/gateway' } }, store, pendingStore));
+    appV1.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc.vm.example.com/gateway' } }, store, pendingStore));
 
     const discoveryMocks = () => [
       jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth"` }),
@@ -247,7 +247,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     // Same connector, new gateway.publicUrl (e.g. a fresh tunnel) → different redirect_uri.
     const appV2 = express();
     appV2.use(express.json());
-    appV2.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc-new-tunnel.vm.getpod.ai/gateway' } }, store, pendingStore));
+    appV2.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc-new-tunnel.vm.example.com/gateway' } }, store, pendingStore));
     for (const m of discoveryMocks()) mockFetch.mockResolvedValueOnce(m);
     mockFetch.mockResolvedValueOnce(jsonResponse(201, { client_id: 'dyn_new_redirect' }));
     const res = await request(appV2).post('/api/v1/connectors/custom/firecrawl/oauth/start').set('X-Api-Key', adminKey);
@@ -385,10 +385,10 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
       jsonResponse(200, { access_token: 'fco_1', token_type: 'bearer', expires_in: 3600 }),
     );
 
-    const app = makeApp(pendingStore, 'https://app.getpod.ai/connectors');
+    const app = makeApp(pendingStore, 'https://app.example.com/connectors');
     const res = await request(app).get(`/oauth/mcp/callback?state=${state}&code=c1`);
     expect(res.status).toBe(302);
-    expect(res.headers.location).toBe('https://app.getpod.ai/connectors');
+    expect(res.headers.location).toBe('https://app.example.com/connectors');
   });
 
   it('an invalid oauthReturnUrl falls back to the plain "close this tab" message instead of crashing', async () => {
@@ -425,21 +425,21 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
       codeVerifier: 'verifier',
     });
 
-    const app = makeApp(pendingStore, 'https://app.getpod.ai/connectors');
+    const app = makeApp(pendingStore, 'https://app.example.com/connectors');
     const res = await request(app).get(`/oauth/mcp/callback?state=${state}&error=access_denied`);
     expect(res.status).toBe(302);
     const location = new URL(res.headers.location);
-    expect(location.origin + location.pathname).toBe('https://app.getpod.ai/connectors');
+    expect(location.origin + location.pathname).toBe('https://app.example.com/connectors');
     expect(location.searchParams.get('connector_oauth_error')).toBe('access_denied');
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('with a configured oauthReturnUrl, an expired/unknown state also redirects back instead of a bare 400 page', async () => {
-    const app = makeApp(new PendingOAuthStore(), 'https://app.getpod.ai/connectors');
+    const app = makeApp(new PendingOAuthStore(), 'https://app.example.com/connectors');
     const res = await request(app).get('/oauth/mcp/callback?state=nope&code=abc');
     expect(res.status).toBe(302);
     const location = new URL(res.headers.location);
-    expect(location.origin + location.pathname).toBe('https://app.getpod.ai/connectors');
+    expect(location.origin + location.pathname).toBe('https://app.example.com/connectors');
     expect(location.searchParams.get('connector_oauth_error')).toBe('expired_link');
   });
 

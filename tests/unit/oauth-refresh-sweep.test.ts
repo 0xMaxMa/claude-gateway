@@ -276,7 +276,7 @@ describe('refreshExpiringOAuthConnectors', () => {
 
     const restartSessionsUsingConnector = jest.fn().mockResolvedValue({ restarted: true });
     const agents = new Map<string, AgentRunner>([
-      ['getpod', { restartSessionsUsingConnector } as unknown as AgentRunner],
+      ['main', { restartSessionsUsingConnector } as unknown as AgentRunner],
     ]);
 
     const store = createCustomConnectorsStore(tmpConfigWith({ firecrawl: firecrawlEntry }));

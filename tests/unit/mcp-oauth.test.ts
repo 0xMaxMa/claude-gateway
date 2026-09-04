@@ -128,7 +128,7 @@ describe('registerClient / resolveClientId', () => {
     const clientId = await registerClient(
       'https://www.firecrawl.dev/api/oauth/register',
       'https://pod.example.com/gateway/oauth/mcp/callback',
-      'GetPod (firecrawl)',
+      'claude-gateway (firecrawl)',
     );
     expect(clientId).toBe('dyn_abc123');
     const [, init] = mockFetch.mock.calls[0];

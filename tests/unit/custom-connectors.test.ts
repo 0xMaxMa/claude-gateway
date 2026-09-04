@@ -33,9 +33,9 @@ describe('custom helpers', () => {
     expect(slugify('Weather API!', [])).toBe('weather-api');
     // CONNECTOR_CATALOG is empty by default now, so there's no built-in id
     // left to collide with — 'github' (and gmail/drive/calendar) are managed
-    // custom connector ids pushed by services/api, not reserved here. A user
+    // custom connector ids pushed by an external control plane, not reserved here. A user
     // adding their own custom connector labeled "GitHub" could theoretically
-    // slug-collide with a services/api-managed id (accepted edge case, see
+    // slug-collide with an externally-managed id (accepted edge case, see
     // custom.ts's note — admin-trusted either way, self-recoverable).
     expect(slugify('GitHub', [])).toBe('github');
     // Collides with an existing custom id
@@ -163,7 +163,7 @@ describe('connectors-router — custom connectors', () => {
     const cfgPath = tmpConfig();
     const app = makeApp(cfgPath);
 
-    // A services/api-managed push (github) reports source: 'built-in' — see
+    // An externally-managed push (github) reports source: 'built-in' — see
     // oauth-connectors.test.ts for that route's dedicated coverage; this test
     // is about the GET /v1/connectors merge, not the push itself.
     await request(app)
