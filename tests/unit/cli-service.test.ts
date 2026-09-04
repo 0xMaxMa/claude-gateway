@@ -131,6 +131,14 @@ describe('service — generated launch configuration', () => {
     expect(unit).not.toContain('Restart=on-failure');
   });
 
+  it('uses Type=exec, not Type=simple — reported "started" only once the actual execve() succeeds', () => {
+    // simple would report the unit started right after fork(), before
+    // knowing whether ExecStart could even be exec'd at all.
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!);
+    expect(unit).toContain('Type=exec');
+    expect(unit).not.toContain('Type=simple');
+  });
+
   it('sets OOMPolicy=continue so an OOM-killed child process cannot take the whole gateway down', () => {
     // systemd's default OOMPolicy=stop treats an OOM-killed process anywhere
     // in this unit's cgroup as the unit failing, which combined with

@@ -213,7 +213,12 @@ Wants=network-online.target
 After=${after}
 
 [Service]
-Type=simple
+# exec (not simple): the unit is only considered "started" once the actual
+# execve() succeeds — simple would report started right after fork(), before
+# knowing whether ExecStart could even run at all, which reports a healthier
+# state than reality if the binary/entry can't be exec'd. No known downside
+# for a plain, long-running daemon like this.
+Type=exec
 ${userLine}# WorkingDirectory is deliberately unquoted, unlike every other value here:
 # systemd takes the rest of the line as the path, and rejects a quoted one
 # ("path is not absolute"). Escaping is unnecessary for the same reason.
