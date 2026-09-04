@@ -26,7 +26,7 @@ function slugBase(label: string): string {
  *
  * Note: CONNECTOR_CATALOG is empty by default, so this no longer reserves
  * ids like 'github'/'gmail' the way it did when they were built-in entries —
- * those are now managed custom connectors pushed by services/api (see
+ * those are now managed custom connectors pushed by an external control plane (see
  * connectors-router.ts's /oauth/receive). A user-added custom connector could
  * theoretically slug-collide with one of those ids. Accepted as a low-severity,
  * self-recoverable edge case (both paths are admin-trusted anyway) rather than

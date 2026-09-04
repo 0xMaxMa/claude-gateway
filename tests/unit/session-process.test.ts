@@ -320,7 +320,7 @@ describe('SessionProcess', () => {
       return JSON.parse(fs.readFileSync(p, 'utf-8')).mcpServers;
     }
 
-    // github is a services/api-managed custom connector now (CONNECTOR_CATALOG
+    // github is an externally-managed custom connector now (CONNECTOR_CATALOG
     // is empty by default — see catalog.ts), so these inject via
     // gatewayConfig.gateway.customConnectors + the CUSTOM__<id>__<name> secret
     // key, not a built-in catalog entry + a bare GITHUB_TOKEN.

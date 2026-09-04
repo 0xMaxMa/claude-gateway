@@ -113,9 +113,10 @@ export function listConnectorStatus(
       description: entry.description,
       authKind: entry.authKind ?? (entry.oauth ? 'oauth' : entry.secretNames.length > 0 ? 'secret' : 'none'),
       connected,
-      // A services/api-managed entry (github/gmail/google-drive/google-calendar)
-      // reports as 'built-in' so the web panel doesn't show the "Custom" badge
-      // on something GetPod implemented, not something the user pasted.
+      // An externally-managed entry (github/gmail/google-drive/google-calendar,
+      // say) reports as 'built-in' so the web panel doesn't show the "Custom"
+      // badge on something the deployer's own control plane pushed in, not
+      // something the user pasted.
       source: entry.managed ? 'built-in' : 'custom',
       repoUrl: entry.sourceUrl,
       oauth: entry.oauth,

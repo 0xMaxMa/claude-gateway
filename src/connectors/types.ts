@@ -16,7 +16,7 @@ export type ConnectorTransport = 'http' | 'stdio';
 // ConnectorSpec can never be oauth-kind — that concept now lives only on
 // CustomConnectorEntry.authKind below, since every oauth-managed connector
 // (github/gmail/google-drive/google-calendar) is pushed in as a managed
-// custom connector by services/api, not declared in catalog.ts. See
+// custom connector by an external control plane, not declared in catalog.ts. See
 // CustomConnectorEntry's doc comment for why.
 export type ConnectorAuth =
   | { kind: 'none' }
@@ -115,19 +115,20 @@ export interface CustomConnectorEntry {
   /** Where the user says this config came from — their own reference, unverified. */
   sourceUrl?: string;
   /**
-   * Set ONLY by services/api's push (POST /oauth/receive) for a GetPod-managed
-   * OAuth connector (github/gmail/google-drive/google-calendar) — never by a
-   * genuine user-pasted add (POST /v1/connectors/custom leaves this unset).
-   * listConnectorStatus reports this verbatim instead of inferring from
-   * secretNames, since a managed entry IS oauth-kind even though it lives in
-   * the same customConnectors storage as a user-pasted one.
+   * Set ONLY by an external control plane's push (POST /oauth/receive) for a
+   * managed OAuth connector (github/gmail/google-drive/google-calendar, say)
+   * — never by a genuine user-pasted add (POST /v1/connectors/custom leaves
+   * this unset). listConnectorStatus reports this verbatim instead of
+   * inferring from secretNames, since a managed entry IS oauth-kind even
+   * though it lives in the same customConnectors storage as a user-pasted one.
    */
   authKind?: 'oauth';
   /**
-   * Set ONLY by services/api's push, same as authKind above — tells
+   * Set ONLY by that same push, same as authKind above — tells
    * listConnectorStatus to report `source: 'built-in'` instead of 'custom' so
-   * the web panel doesn't show the "Custom" badge on something GetPod
-   * implemented and pushed in, not something the user pasted themselves.
+   * the web panel doesn't show the "Custom" badge on something the deployer's
+   * own control plane implemented and pushed in, not something the user
+   * pasted themselves.
    */
   managed?: boolean;
   /**
@@ -138,9 +139,9 @@ export interface CustomConnectorEntry {
    * `secretNames` must still include `'access_token'`, exactly like a
    * user-pasted static-token connector; connectors/resolve.ts needs no
    * awareness of this field at all). It only tells the web panel to show a
-   * "Connect" button that hits `oauth/start` on THIS gateway (not
-   * services/api), and tells `oauth/start` which `config.url` to run
-   * discovery against.
+   * "Connect" button that hits `oauth/start` on THIS gateway (not an
+   * external control plane), and tells `oauth/start` which `config.url` to
+   * run discovery against.
    */
   oauth?: boolean;
 }

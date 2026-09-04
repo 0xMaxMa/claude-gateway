@@ -1,9 +1,9 @@
 /**
  * Periodic refresh for OAuth-flavored custom connectors (CustomConnectorEntry.oauth
- * === true) — the gateway-side analog of services/api's
- * google_connector_subscription.go (StartGoogleConnectorRefreshSweep /
- * refreshExpiringGoogleConnectors). Runs on the same 60s interval as
- * cliPairingStore.prune() (see gateway-router.ts) via refreshExpiringOAuthConnectors().
+ * === true) — the gateway-side counterpart to whatever refresh loop an external
+ * control plane runs for its own managed connectors. Runs on the same 60s
+ * interval as cliPairingStore.prune() (see gateway-router.ts) via
+ * refreshExpiringOAuthConnectors().
  *
  * Storage note: refresh_token, the client_id used to obtain it, the access_token's
  * expiry timestamp, and this sweep's own failure bookkeeping are stored via the

@@ -51,9 +51,10 @@ function escapeHtml(s: string): string {
  * Generic OAuth 2.1 + PKCE flow for "custom" connectors marked
  * `oauth: true` (see CustomConnectorEntry) — e.g. Firecrawl's
  * `https://mcp.firecrawl.dev/v2/mcp-oauth`. This is the gateway-owned
- * counterpart to services/api's google_connector.go/github_connector.go: the
- * whole dance (discovery, DCR, PKCE, token exchange, refresh) happens here,
- * inside the user's own VM — services/api never sees the resulting token.
+ * counterpart to an external control plane's own OAuth handlers (used for
+ * managed connectors like Gmail/GitHub): the whole dance (discovery, DCR,
+ * PKCE, token exchange, refresh) happens here, inside the user's own VM —
+ * no external service ever sees the resulting token.
  *
  * Two routers, deliberately NOT combined into one:
  *   - createOauthConnectorsRouter(): admin-gated, mounted under /api like every
@@ -157,7 +158,7 @@ export function createOauthCallbackRouter(
 ): Router {
   const router = Router();
   // This gateway is a generic, product-agnostic fork — it has no business
-  // hardcoding a downstream product's own domain (e.g. app.getpod.ai).
+  // hardcoding a downstream product's own domain (e.g. app.example.com).
   // Whoever deploys it can opt into an auto-redirect by setting
   // gateway.oauthReturnUrl in config.json; absent that, the plain "close this
   // tab" message below is the safe default. Validated once, at router
@@ -204,7 +205,7 @@ export function createOauthCallbackRouter(
       fail(
         res,
         400,
-        'This sign-in link expired or was already used. Go back to GetPod and click Connect again.',
+        'This sign-in link expired or was already used. Go back and click Connect again.',
         'expired_link',
       );
       return;

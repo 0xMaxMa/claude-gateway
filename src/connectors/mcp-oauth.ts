@@ -146,7 +146,7 @@ export async function resolveClientId(
   redirectUri: string,
 ): Promise<string> {
   if (metadata.registrationEndpoint) {
-    return registerClient(metadata.registrationEndpoint, redirectUri, `GetPod (${connectorId})`);
+    return registerClient(metadata.registrationEndpoint, redirectUri, `claude-gateway (${connectorId})`);
   }
   const envKey = `MCP_OAUTH_CLIENT_ID__${connectorId.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}`;
   const staticClientId = process.env[envKey];

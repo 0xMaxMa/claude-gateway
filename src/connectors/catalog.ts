@@ -6,14 +6,13 @@
  * entry here and token-env, resolve, the router and the web panel are all
  * generic enough to pick it up with no other changes.
  *
- * GetPod's own offerings (github/gmail/google-drive/google-calendar) are
- * deliberately NOT here — they're pushed in as managed custom connectors by
- * services/api instead (see connectors-router.ts's POST /oauth/receive and
- * services/api's internal/vm/connector_push.go). Keeping GetPod's own product
- * decisions (which endpoint, which scopes) out of this file matters because
- * this repo is a fork meant to be PR'd back upstream — baking product opinion
- * into shared fork code would make every future endpoint/scope change touch a
- * file we also want to keep diff-minimal for that PR.
+ * Managed OAuth connectors (Google Workspace, GitHub, or anything else an
+ * external control plane owns the client_secret for) are deliberately NOT
+ * here — they're pushed in as managed custom connectors instead (see
+ * connectors-router.ts's POST /oauth/receive). Keeping that kind of
+ * product-specific decision (which endpoint, which scopes) out of this file
+ * keeps the built-in catalog generic, free of any one deployer's own product
+ * opinions.
  */
 
 import type { ConnectorSpec } from './types';
