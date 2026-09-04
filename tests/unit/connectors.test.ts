@@ -507,6 +507,46 @@ describe('connectors-router', () => {
     ]);
   });
 
+  // A "No auth" custom connector (no {placeholder} in its pasted config, so
+  // secretNames: []) has no secret for the soft-disconnect above to clear.
+  // listConnectorStatus's `secretNames.every(...)` is vacuously true on an
+  // empty array, so soft-disconnecting it would report connected: true again
+  // on the very next GET — Disconnect would look broken (click it, the row
+  // never leaves "Connected"). DELETE must remove the entry outright instead.
+  it('DELETE on a "No auth" (zero-secret) custom connector removes the entry, not a no-op soft disconnect', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
+    const app = makeApp(cfgPath);
+
+    const add = await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'sdfasdfasf',
+        config: { type: 'http', url: 'https://example.com/mcp' },
+      });
+    expect(add.status).toBe(200);
+    const id = add.body.id;
+
+    // Reported connected — and always would be, per the vacuous every([]).
+    const before = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(before.body.connectors).toEqual([
+      expect.objectContaining({ id, label: 'sdfasdfasf', authKind: 'none', connected: true }),
+    ]);
+
+    const del = await request(app).delete(`/api/v1/connectors/${id}`).set('X-Api-Key', adminKey);
+    expect(del.status).toBe(200);
+    expect(del.body).toEqual({ id, connected: false });
+
+    // The entry itself is gone — not left behind still reporting connected.
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    expect(written.gateway.customConnectors ?? {}).toEqual({});
+
+    const after = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(after.body.connectors).toEqual([]);
+  });
+
   // The exact bug the soft-disconnect fix above exposed: once DELETE keeps a
   // custom connector's entry alive, POST .../connect must actually be able to
   // reconnect it — before this fallback existed, this route only ever looked

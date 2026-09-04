@@ -31,7 +31,9 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *   DELETE /v1/connectors/:id                — clear a secret (admin); a genuinely
  *                                              user-added custom connector keeps its
  *                                              entry (config/label intact, just
- *                                              disconnected) — see the handler below
+ *                                              disconnected) UNLESS it has no secret
+ *                                              to clear ("No auth"), in which case the
+ *                                              whole entry is removed — see the handler below
  *   POST   /v1/connectors/custom             — add a user-pasted connector (admin)
  *   DELETE /v1/connectors/custom/:id         — remove one (admin)
  *
@@ -327,12 +329,21 @@ export function createConnectorsRouter(
       // way back short of re-adding it from scratch. Clearing only the
       // secret (leaving the entry, and thus the row, in place as "not
       // connected") lets the user reconnect without retyping the config.
+      //
+      // That soft-disconnect only makes sense when there's a secret to
+      // clear. A "No auth" custom connector (secretNames: []) has none —
+      // listConnectorStatus's `secretNames.every(...)` is vacuously true on
+      // an empty array, so it reports connected forever no matter what this
+      // route does. Soft-disconnecting it is a no-op that looks like a bug
+      // (click Disconnect, row stays "Connected"), so fall through to a real
+      // delete instead — there's nothing to preserve for a reconnect anyway.
+      //
       // Managed entries (github/gmail/etc., pushed by services/api) keep the
       // old delete-the-entry behavior: their definition lives in the
       // services/api-owned managed catalog instead, which the web panel
       // already falls back to for the "not connected" row, and reconnecting
       // re-pushes a full entry via /oauth/receive regardless.
-      if (!entry.managed) {
+      if (!entry.managed && entry.secretNames.length > 0) {
         res.json({ id, connected: false });
         return;
       }
