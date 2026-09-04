@@ -1007,7 +1007,13 @@ export class AgentRunner extends EventEmitter {
     if (agent) {
       agent.claude.model = newModel;
       const tmp = this.configPath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
+      // mode: 0o600 — rename() carries this file's mode onto config.json,
+      // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+      // writeFileSync's mode option is IGNORED if a stale tmp file from a
+      // prior crashed write is already sitting at this fixed path, so chmod
+      // explicitly rather than relying on it.
+      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      fs.chmodSync(tmp, 0o600);
       fs.renameSync(tmp, this.configPath);
     }
   }
@@ -2904,6 +2910,7 @@ export class AgentRunner extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopping = false;
+    await this.sweepStaleSessionDirs();
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
@@ -2929,6 +2936,43 @@ export class AgentRunner extends EventEmitter {
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
+  }
+
+  /**
+   * Remove any `.sessions/<id>/` directory not backed by a currently-live
+   * `SessionProcess` — leftovers from a hard kill (SIGKILL, crash, host
+   * reboot) that `SessionProcess.stop()`'s own cleanup never got to run for.
+   * Each holds a `mcp-config.json` with fully-substituted secrets (channel
+   * bot tokens, GATEWAY_API_KEY) that must not accumulate unbounded (#460).
+   *
+   * Called once per runner instance at the top of `start()`, before any of
+   * this agent's own sessions exist yet, so `this.sessions` is normally
+   * empty here — but the liveness check is real, not just a formality: skip
+   * anything present in `this.sessions` regardless, rather than assuming
+   * "start() always runs on an empty pool" and deleting unconditionally.
+   *
+   * Async (fsPromises) rather than sync fs calls: a first upgrade to this fix
+   * can face a real backlog of leftovers accumulated before it existed, and
+   * synchronous readdir/rm would block the event loop — and every other
+   * agent's start() sharing this process — for the duration.
+   */
+  private async sweepStaleSessionDirs(): Promise<void> {
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    let entries: import('fs').Dirent[];
+    try {
+      entries = await fsPromises.readdir(sessionsRoot, { withFileTypes: true });
+    } catch {
+      return; // no .sessions directory yet — nothing to sweep
+    }
+    const liveSessionIds = new Set(Array.from(this.sessions.values(), (s) => s.sessionId));
+    for (const entry of entries) {
+      if (!entry.isDirectory() || liveSessionIds.has(entry.name)) continue;
+      try {
+        await fsPromises.rm(path.join(sessionsRoot, entry.name), { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup — a stubborn leftover isn't worth failing boot over */
+      }
+    }
   }
 
   updateAgentConfig(newConfig: AgentConfig): void {

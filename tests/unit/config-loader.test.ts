@@ -12,6 +12,19 @@ import {
 
 const FIXTURES = path.join(__dirname, '../fixtures/configs');
 
+/**
+ * The directory self-heal (#460) is scoped to `os.homedir()/.claude-gateway`
+ * only. `jest.spyOn(os, 'homedir')` throws "Cannot redefine property" on this
+ * Node, so a module mock is used instead — see tests/unit/cli-logs.test.ts
+ * for the same pattern. Defers to the real implementation unless a test asks
+ * otherwise.
+ */
+let mockHomeDir: string | undefined;
+jest.mock('os', () => {
+  const actual = jest.requireActual('os');
+  return { ...actual, homedir: () => mockHomeDir ?? actual.homedir() };
+});
+
 describe('config-loader', () => {
   let tmpDir: string;
 
@@ -427,5 +440,88 @@ describe('config-loader', () => {
 
       expect(warn).not.toHaveBeenCalled();
     });
+
+  // -------------------------------------------------------------------------
+  // #460: loadConfig repairs a config.json left wider than 0600
+  // -------------------------------------------------------------------------
+  describe('permission self-heal (#460)', () => {
+    it('chmods a 0644 config.json back to 0600 on load', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o644 });
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+
+    it('leaves an already-0600 config.json at 0600 (idempotent)', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+
+    // Independent-review finding: bootstrap.ts's mkdirSync(dir, {mode:0o700})
+    // only applies its mode on *creation* — a directory that already existed
+    // before #460 (i.e. every existing install) never gets repaired by that
+    // fix alone. loadConfig() must repair the directory too, on every load,
+    // not just the file — but ONLY the default `~/.claude-gateway` home, not
+    // an arbitrary directory a custom --config/GATEWAY_CONFIG path resolves
+    // to (a later independent-review finding: forcing 0700 on a directory an
+    // operator may be deliberately sharing with something else would be an
+    // overreach the operator didn't ask for).
+    describe('directory chmod, scoped to the default gateway home', () => {
+      let fakeHome: string;
+      let gatewayHomeDir: string;
+
+      beforeEach(() => {
+        fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-home-'));
+        gatewayHomeDir = path.join(fakeHome, '.claude-gateway');
+        fs.mkdirSync(gatewayHomeDir, { mode: 0o700 });
+        mockHomeDir = fakeHome;
+      });
+
+      afterEach(() => {
+        mockHomeDir = undefined;
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      });
+
+      it('chmods the default gateway home directory back to 0700 on load, not just config.json itself', () => {
+        const configPath = path.join(gatewayHomeDir, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+        // Created at 0700 above — chmod wider first to simulate a pre-#460
+        // install whose directory was never restricted.
+        fs.chmodSync(gatewayHomeDir, 0o755);
+
+        loadConfig(configPath);
+
+        expect(fs.statSync(gatewayHomeDir).mode & 0o777).toBe(0o700);
+      });
+
+      it('leaves an already-0700 default gateway home directory at 0700 (idempotent)', () => {
+        const configPath = path.join(gatewayHomeDir, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+
+        loadConfig(configPath);
+
+        expect(fs.statSync(gatewayHomeDir).mode & 0o777).toBe(0o700);
+      });
+
+      it('does not chmod a custom config directory outside the default gateway home', () => {
+        // tmpDir here stands in for a --config/GATEWAY_CONFIG path pointed at
+        // a directory the operator shares with something else — its own
+        // permissions are the operator's call, not loadConfig()'s.
+        const configPath = path.join(tmpDir, 'config.json');
+        fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+        fs.chmodSync(tmpDir, 0o755);
+
+        loadConfig(configPath);
+
+        expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o755);
+      });
+    });
+  });
   });
 });

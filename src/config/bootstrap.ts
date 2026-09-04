@@ -44,7 +44,10 @@ export function ensureConfigExists(configPath: string, templatePath: string): Bo
     ],
   };
 
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  // 0o700: config.json living inside carries secrets (admin API key, agent
+  // bot tokens). Without an explicit mode this lands at 0755, letting any
+  // local user traverse in and read whatever's inside (issue #460).
+  fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
   try {
     // 'wx' fails with EEXIST instead of overwriting if another process won a
     // concurrent first-boot race; mode 0o600 keeps the embedded admin key

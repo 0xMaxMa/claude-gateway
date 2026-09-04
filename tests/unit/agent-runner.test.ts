@@ -324,6 +324,43 @@ describe('AgentRunner (session pool)', () => {
     expect(internal.tooLargeRecoveries.has('chat:reset')).toBe(false);
     expect(internal.tooLargeExhausted.has('chat:reset')).toBe(false);
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // #460: .sessions/<id>/mcp-config.json holds fully-substituted secrets
+  // (channel bot tokens, GATEWAY_API_KEY) and must not accumulate unbounded —
+  // a hard kill (SIGKILL, crash, host reboot) skips SessionProcess.stop()'s
+  // own cleanup, so start() sweeps what's left behind.
+  // --------------------------------------------------------------------------
+  it('#460: start() removes a stale leftover .sessions/<id>/ directory from a previous run', async () => {
+    const staleDir = path.join(agentConfig.workspace, '.sessions', 'chat:stale-from-crash');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'mcp-config.json'), '{"mcpServers":{}}');
+
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(fs.existsSync(staleDir)).toBe(false);
+  }, 15000);
+
+  it('#460: does not sweep a directory backed by a currently-live session', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+
+    await sendChannelPost(port, 'chat:111', 'hello');
+    await waitForSession(runner, 'chat:111');
+    const liveSessionId = getSessions(runner).get('chat:111')!.sessionId;
+    const liveDir = path.join(agentConfig.workspace, '.sessions', liveSessionId);
+    expect(fs.existsSync(liveDir)).toBe(true); // sanity: writeMcpConfig() already created it
+
+    // Exercise the sweep directly rather than a second start() — this
+    // AgentRunner only ever calls it once, at the top of start(), before any
+    // of its own sessions exist. Calling it again proves the liveness check
+    // itself is correct, not just "it happens to run before sessions do".
+    await (runner as unknown as { sweepStaleSessionDirs(): Promise<void> }).sweepStaleSessionDirs();
+
+    expect(fs.existsSync(liveDir)).toBe(true);
+  }, 15000);
 });
 
 // ── tokenUsage → session model persistence (#273) ────────────────────────────

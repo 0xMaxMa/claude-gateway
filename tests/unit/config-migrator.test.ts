@@ -420,6 +420,41 @@ describe('config-migrator', () => {
       expect(backup).toEqual(original);
     });
 
+    it('writes config.json and its .bak backup at 0600, regardless of the source file\'s original mode (#460)', () => {
+      const original = { configVersion: '0.0.1', gateway: { logDir: '/logs' } };
+      const configPath = writeJson('config.json', original); // writeJson has no explicit mode — starts at the umask default
+      const template: Record<string, unknown> = {
+        configVersion: '1.0.0',
+        gateway: { logDir: '/default', timezone: 'UTC' },
+      };
+      const config = structuredClone(original) as Record<string, unknown>;
+
+      applyMigration(configPath, config, template, '1.0.0');
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(configPath + '.bak').mode & 0o777).toBe(0o600);
+    });
+
+    // #460 (independent review, round 3): applyMigration() writes to a FIXED
+    // tmp path (`config.json.tmp`), not a unique one — writeFileSync's `mode`
+    // option is silently ignored when that path already exists (e.g. left
+    // behind by a prior crashed migration), so an explicit chmodSync is
+    // required after the write, not just the mode option on it.
+    it('still ends up at 0600 even when a stale .tmp file from a prior crashed migration is already sitting at the fixed tmp path', () => {
+      const original = { configVersion: '0.0.1', gateway: { logDir: '/logs' } };
+      const configPath = writeJson('config.json', original);
+      fs.writeFileSync(configPath + '.tmp', 'stale leftover', { mode: 0o644 });
+      const template: Record<string, unknown> = {
+        configVersion: '1.0.0',
+        gateway: { logDir: '/default', timezone: 'UTC' },
+      };
+      const config = structuredClone(original) as Record<string, unknown>;
+
+      applyMigration(configPath, config, template, '1.0.0');
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+
     it('respects ignorePaths during merge', () => {
       const original = { configVersion: '0.0.1', gateway: { logDir: '/logs' } };
       const configPath = writeJson('config.json', original);

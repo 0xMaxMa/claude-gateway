@@ -424,6 +424,19 @@ describe('AgentManager', () => {
       expect(config.agents.filter((a) => a['id'] === 'my-agent')).toHaveLength(1);
     });
 
+    // #460: config.json carries agent bot tokens and the admin API key.
+    // writeConfig()'s tmp-then-rename pattern silently downgraded it from
+    // 0600 to the tmp file's default mode (0644) on every write.
+    it('writes config.json at 0600, even on the very first write to a fresh directory', async () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      const entry = makeEntry(tmpDir);
+
+      await manager.upsertAgent(entry);
+
+      expect(fs.existsSync(configPath)).toBe(true);
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+
     it('updates symlink if it already exists', async () => {
       const entry = makeEntry(tmpDir);
       await manager.upsertAgent(entry);

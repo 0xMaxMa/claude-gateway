@@ -603,10 +603,21 @@ export function applyMigration(
   // Backup before writing
   const backupPath = configPath + '.bak';
   fs.copyFileSync(configPath, backupPath);
+  // copyFileSync preserves configPath's current mode, which may already be a
+  // downgraded 0644 from before this fix — chmod explicitly rather than
+  // relying on the source being 0600 by the time this runs (issue #460).
+  fs.chmodSync(backupPath, 0o600);
 
   // Write atomically via temp file
   const tmpPath = configPath + '.tmp';
-  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  // mode: 0o600 — rename() carries this file's mode onto config.json,
+  // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+  // writeFileSync's mode option is IGNORED if a stale tmp file from a prior
+  // crashed migration is already sitting at this fixed path (same reasoning
+  // as backupPath's explicit chmod above), so chmod explicitly rather than
+  // relying on it.
+  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(tmpPath, 0o600);
   fs.renameSync(tmpPath, configPath);
 
   return { migrated: true, addedFields: added, removedFields: removed, warnings };
