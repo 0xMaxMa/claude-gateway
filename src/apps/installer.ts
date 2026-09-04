@@ -2162,7 +2162,7 @@ export class AppInstaller {
           }
           const upArgs = ['docker', 'compose', '-p', appName, 'up', '-d'];
           if (rebuild) upArgs.push('--build');
-          this.run(upArgs, finalDir, rebuild ? 600_000 : 120_000);
+          await this.runAsync(upArgs, finalDir, rebuild ? 600_000 : 120_000);
           this.callbacks.registerRoutes(appName, entry.ports.map((p) => ({
             name: p.name,
             service: p.service,

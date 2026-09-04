@@ -2173,6 +2173,87 @@ services:
       expect(job.logs.some((l) => l.includes('was not preserved'))).toBe(true);
     });
 
+    it('runs the rollback "compose up --build" through the async spawn seam, not spawnSync', async () => {
+      // Found in manual review of #452's fix: the rebuild-on-rollback branch
+      // above (previous test) still called `this.run()` (spawnSync) directly
+      // instead of the async seam composeUp()'s own `up`/`build` steps moved
+      // to, so a rollback that needs to rebuild could block the event loop for
+      // up to 10 minutes — the exact failure #452 reports, but during error
+      // recovery, which is the worst moment for the gateway to stop serving.
+      const appName = 'rollback-async-app';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const dockerRespond = (args: string[], spawnOpts?: { cwd?: string }) => {
+        if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
+          return { stdout: JSON.stringify({ services: { app: { volumes: [] } } }), stderr: '', status: 0 };
+        }
+        if (args.includes('images') && args.includes('json')) {
+          const row = { ID: 'previmageid0000', Repository: `${appName}-app`, Tag: 'latest' };
+          return { stdout: JSON.stringify([row]), stderr: '', status: 0 };
+        }
+        // `docker image tag` fails, so the preserved image has no backup ref —
+        // restorePreservedImages() can't put it back, forcing a rebuild.
+        if (args[0] === 'image' && args[1] === 'tag') {
+          return { stdout: '', stderr: 'No such image', status: 1 };
+        }
+        if (args.includes('up')) {
+          state.upCalls += 1;
+          if (state.failNewUp && state.upCalls === 1) {
+            return { stdout: '', stderr: 'new stack failed', status: 1 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      };
+      const syncCalls: string[][] = [];
+      const spawn = jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && spawnOpts?.cwd) {
+          fs.writeFileSync(path.join(spawnOpts.cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    build: .
+    ports:
+      - name: api
+        host: 5413
+        container: 5413
+        type: api
+    healthcheck:
+      test: exit 0
+      interval: 30s
+`.trim(), 'utf-8');
+        }
+        if (cmd !== 'docker') return { stdout: '', stderr: '', status: 0 };
+        syncCalls.push(args);
+        return dockerRespond(args, spawnOpts);
+      });
+      const asyncCalls: string[][] = [];
+      const asyncSpawn = jest.fn(async (cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd !== 'docker') return { stdout: '', stderr: '', status: 0 };
+        asyncCalls.push(args);
+        return dockerRespond(args, spawnOpts);
+      });
+      const installer = makeInstaller(spawn, asyncSpawn);
+      await waitForJob(installer, installer.install({ githubUrl: `https://github.com/test/${appName}` }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      syncCalls.length = 0;
+      asyncCalls.length = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('failed');
+
+      const isRollbackUp = (a: string[]) => a.includes('up') && !a.includes('--wait') && a.includes('--build');
+      expect(syncCalls.some(isRollbackUp)).toBe(false);
+      expect(asyncCalls.some(isRollbackUp)).toBe(true);
+    });
+
     it('updates an app whose on-disk dir name ≠ app.yaml name (legacy install, issue #275)', async () => {
       // Legacy installs named the on-disk dir after the source repo basename,
       // so installPath basename can differ from the app name. The dir-swap must
