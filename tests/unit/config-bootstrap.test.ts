@@ -75,6 +75,13 @@ describe('config-bootstrap', () => {
     expect(mode).toBe(0o600);
   });
 
+  it('creates the config directory with owner-only permissions (0700), not the 0755 default (#460)', () => {
+    ensureConfigExists(configPath, TEMPLATE_PATH);
+
+    const dirMode = fs.statSync(path.dirname(configPath)).mode & 0o777;
+    expect(dirMode).toBe(0o700);
+  });
+
   it('loses a concurrent-first-boot race safely instead of overwriting the winner', () => {
     // Simulate a second process racing to create the same file first, after
     // this call already decided (via existsSync) that no config exists yet.

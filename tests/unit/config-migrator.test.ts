@@ -420,6 +420,21 @@ describe('config-migrator', () => {
       expect(backup).toEqual(original);
     });
 
+    it('writes config.json and its .bak backup at 0600, regardless of the source file\'s original mode (#460)', () => {
+      const original = { configVersion: '0.0.1', gateway: { logDir: '/logs' } };
+      const configPath = writeJson('config.json', original); // writeJson has no explicit mode — starts at the umask default
+      const template: Record<string, unknown> = {
+        configVersion: '1.0.0',
+        gateway: { logDir: '/default', timezone: 'UTC' },
+      };
+      const config = structuredClone(original) as Record<string, unknown>;
+
+      applyMigration(configPath, config, template, '1.0.0');
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(configPath + '.bak').mode & 0o777).toBe(0o600);
+    });
+
     it('respects ignorePaths during merge', () => {
       const original = { configVersion: '0.0.1', gateway: { logDir: '/logs' } };
       const configPath = writeJson('config.json', original);

@@ -1007,7 +1007,9 @@ export class AgentRunner extends EventEmitter {
     if (agent) {
       agent.claude.model = newModel;
       const tmp = this.configPath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
+      // mode: 0o600 — rename() carries this file's mode onto config.json,
+      // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
       fs.renameSync(tmp, this.configPath);
     }
   }
@@ -2904,6 +2906,7 @@ export class AgentRunner extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopping = false;
+    this.sweepStaleSessionDirs();
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
@@ -2929,6 +2932,38 @@ export class AgentRunner extends EventEmitter {
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
+  }
+
+  /**
+   * Remove any `.sessions/<id>/` directory not backed by a currently-live
+   * `SessionProcess` — leftovers from a hard kill (SIGKILL, crash, host
+   * reboot) that `SessionProcess.stop()`'s own cleanup never got to run for.
+   * Each holds a `mcp-config.json` with fully-substituted secrets (channel
+   * bot tokens, GATEWAY_API_KEY) that must not accumulate unbounded (#460).
+   *
+   * Called once per runner instance at the top of `start()`, before any of
+   * this agent's own sessions exist yet, so `this.sessions` is normally
+   * empty here — but the liveness check is real, not just a formality: skip
+   * anything present in `this.sessions` regardless, rather than assuming
+   * "start() always runs on an empty pool" and deleting unconditionally.
+   */
+  private sweepStaleSessionDirs(): void {
+    const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+    } catch {
+      return; // no .sessions directory yet — nothing to sweep
+    }
+    const liveSessionIds = new Set(Array.from(this.sessions.values(), (s) => s.sessionId));
+    for (const entry of entries) {
+      if (!entry.isDirectory() || liveSessionIds.has(entry.name)) continue;
+      try {
+        fs.rmSync(path.join(sessionsRoot, entry.name), { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup — a stubborn leftover isn't worth failing boot over */
+      }
+    }
   }
 
   updateAgentConfig(newConfig: AgentConfig): void {

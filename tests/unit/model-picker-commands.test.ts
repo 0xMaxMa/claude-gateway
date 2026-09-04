@@ -198,6 +198,18 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(persistedModel()).toBe('claude-opus-5');
   }, 15000);
 
+  // #460: config.json carries agent bot tokens and the admin API key.
+  // persistModelToConfig()'s tmp-then-rename pattern silently downgraded it
+  // from 0600 to the tmp file's default mode (0644) on every model switch.
+  it('keeps config.json at 0600 after a model switch, even though it started at the fixture\'s default mode', async () => {
+    const port = await startRunner();
+
+    await postChannelMessage(port, chatId, '/model opus', 'discord');
+    await waitForForward();
+
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+  }, 15000);
+
   it('restarts the running session so the new model actually takes effect', async () => {
     // setModel only rewrites config. The session process was spawned with the
     // old model on its command line, so without a restart "Model set to X" is

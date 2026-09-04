@@ -302,6 +302,22 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // #460: mcp-config.json holds fully-substituted secrets (bot tokens,
+  // GATEWAY_API_KEY) and must not outlive the session that needed it.
+  // --------------------------------------------------------------------------
+  it('#460: stop() removes the session directory, deleting mcp-config.json with it', async () => {
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+
+    const sessionDir = path.join(agentConfig.workspace, '.sessions', 'chat:111');
+    expect(fs.existsSync(sessionDir)).toBe(true);
+
+    await sp.stop();
+
+    expect(fs.existsSync(sessionDir)).toBe(false);
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-06: No MCP config for api source
   // --------------------------------------------------------------------------
   it('U-SP-06: No MCP config written for api source', async () => {

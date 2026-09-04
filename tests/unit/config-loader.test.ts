@@ -427,5 +427,28 @@ describe('config-loader', () => {
 
       expect(warn).not.toHaveBeenCalled();
     });
+
+  // -------------------------------------------------------------------------
+  // #460: loadConfig repairs a config.json left wider than 0600
+  // -------------------------------------------------------------------------
+  describe('permission self-heal (#460)', () => {
+    it('chmods a 0644 config.json back to 0600 on load', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o644 });
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+
+    it('leaves an already-0600 config.json at 0600 (idempotent)', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+    });
+  });
   });
 });

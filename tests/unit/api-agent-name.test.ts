@@ -86,6 +86,14 @@ describe('Agent display name API', () => {
     expect(configs.get(AGENT_ID)!.name).toBe('Alfred the Butler');
   });
 
+  // #460: config.json carries agent bot tokens and the admin API key.
+  // writeAgentsToConfigImpl()'s tmp-then-rename pattern silently downgraded
+  // it from 0600 to the tmp file's default mode (0644) on every write.
+  it('keeps config.json at 0600 after a PATCH write, even though it started at the fixture\'s default mode', async () => {
+    await patch({ name: 'Alfred the Butler' });
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+  });
+
   it('trims whitespace on the persisted name', async () => {
     await patch({ name: '  Spacey Name  ' });
     const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));

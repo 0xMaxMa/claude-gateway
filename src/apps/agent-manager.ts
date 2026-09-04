@@ -435,9 +435,14 @@ export class AgentManager {
   }
 
   private writeConfig(config: RawConfig): void {
-    fs.mkdirSync(path.dirname(this.configPath), { recursive: true });
+    // mode: 0o700 — same secret-bearing directory bootstrap.ts creates; this
+    // mkdirSync is usually a recursive no-op once that's already run, but
+    // must not itself default to 0755 on any path that reaches here first.
+    fs.mkdirSync(path.dirname(this.configPath), { recursive: true, mode: 0o700 });
     const tmp = `${this.configPath}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf-8');
+    // mode: 0o600 — rename() carries this file's mode onto config.json,
+    // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
     fs.renameSync(tmp, this.configPath);
   }
 

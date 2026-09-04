@@ -1756,6 +1756,13 @@ export class SessionProcess extends EventEmitter {
     if (this.source === 'telegram') {
       try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
     }
+    // mcp-config.json under here holds fully-substituted secrets (channel bot
+    // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
+    // the session that needed it (issue #460). Recreated automatically on the
+    // next spawn, so removing it here is safe across restarts.
+    try {
+      fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
+    } catch {}
     if (!this.process) return;
 
     return new Promise((resolve) => {

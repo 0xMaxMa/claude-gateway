@@ -344,7 +344,11 @@ export function createApiRouter(
     }
     mutate(config.agents);
     const tmp = cfgPath + '.tmp.' + randomUUID();
-    await fsp.writeFile(tmp, JSON.stringify(config, null, 2), 'utf-8');
+    // mode: 0o600 — config.json carries the admin API key and every agent's
+    // channel bot tokens; rename() onto cfgPath carries this file's mode
+    // with it, so an unmoded tmp file silently downgrades an existing 0600
+    // config to 0644 on its very first edit (issue #460).
+    await fsp.writeFile(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
     await fsp.rename(tmp, cfgPath);
   }
 

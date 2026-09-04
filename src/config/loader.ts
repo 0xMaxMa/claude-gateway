@@ -166,6 +166,19 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
     throw new ConfigValidationError(`Cannot read config file at "${configPath}": ${(err as Error).message}`);
   }
 
+  // Self-heal a config.json left wider than 0600 by a writer that predates
+  // #460's fix (or ran before this fix reached that call site) — every
+  // reload is a chance to repair it, not just the first one after upgrading.
+  // Best-effort: an unreadable/immutable mode bit must not block loading a
+  // config that otherwise parses and validates fine.
+  try {
+    if ((fs.statSync(configPath).mode & 0o777) !== 0o600) {
+      fs.chmodSync(configPath, 0o600);
+    }
+  } catch {
+    /* stat/chmod failed — not fatal, config still loads */
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
