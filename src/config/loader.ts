@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
@@ -185,9 +186,16 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   // recursive mkdirSync on an already-existing one is a no-op mode-wise, so
   // an install that predates #460 (i.e. every existing install) never
   // benefits from that fix at all, staying 0755 forever otherwise.
+  //
+  // Scoped to the default `~/.claude-gateway` home only — a `--config` /
+  // `GATEWAY_CONFIG` pointed at a directory the operator shares with
+  // something else (a sidecar, another service under a different user) must
+  // keep whatever permissions they set on it; only config.json itself
+  // (chmod'd above, unconditionally) needs locking down in that case.
   try {
     const dir = path.dirname(configPath);
-    if ((fs.statSync(dir).mode & 0o777) !== 0o700) {
+    const defaultGatewayHome = path.join(os.homedir(), '.claude-gateway');
+    if (dir === defaultGatewayHome && (fs.statSync(dir).mode & 0o777) !== 0o700) {
       fs.chmodSync(dir, 0o700);
     }
   } catch {

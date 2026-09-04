@@ -210,6 +210,21 @@ describe('AgentRunner — /models and /model on Discord and LINE (issue #409)', 
     expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
   }, 15000);
 
+  // #460 (independent review, round 3): persistModelToConfig() writes to a
+  // FIXED tmp path (`config.json.tmp`), not a unique one — writeFileSync's
+  // `mode` option is silently ignored when that path already exists (e.g.
+  // left behind by a prior crashed write), so an explicit chmodSync is
+  // required after the write, not just the mode option on it.
+  it('still ends up at 0600 even when a stale .tmp file from a prior crashed write is already sitting at the fixed tmp path', async () => {
+    fs.writeFileSync(configPath + '.tmp', 'stale leftover', { mode: 0o644 });
+
+    const port = await startRunner();
+    await postChannelMessage(port, chatId, '/model opus', 'discord');
+    await waitForForward();
+
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+  }, 15000);
+
   it('restarts the running session so the new model actually takes effect', async () => {
     // setModel only rewrites config. The session process was spawned with the
     // old model on its command line, so without a restart "Model set to X" is

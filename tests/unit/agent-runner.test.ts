@@ -357,7 +357,7 @@ describe('AgentRunner (session pool)', () => {
     // AgentRunner only ever calls it once, at the top of start(), before any
     // of its own sessions exist. Calling it again proves the liveness check
     // itself is correct, not just "it happens to run before sessions do".
-    (runner as unknown as { sweepStaleSessionDirs(): void }).sweepStaleSessionDirs();
+    await (runner as unknown as { sweepStaleSessionDirs(): Promise<void> }).sweepStaleSessionDirs();
 
     expect(fs.existsSync(liveDir)).toBe(true);
   }, 15000);

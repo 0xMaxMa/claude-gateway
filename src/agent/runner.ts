@@ -1009,7 +1009,11 @@ export class AgentRunner extends EventEmitter {
       const tmp = this.configPath + '.tmp';
       // mode: 0o600 — rename() carries this file's mode onto config.json,
       // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+      // writeFileSync's mode option is IGNORED if a stale tmp file from a
+      // prior crashed write is already sitting at this fixed path, so chmod
+      // explicitly rather than relying on it.
       fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      fs.chmodSync(tmp, 0o600);
       fs.renameSync(tmp, this.configPath);
     }
   }
@@ -2906,7 +2910,7 @@ export class AgentRunner extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopping = false;
-    this.sweepStaleSessionDirs();
+    await this.sweepStaleSessionDirs();
     await this.startCallbackServer();
     if (this.agentConfig.telegram?.botToken) {
       this.receiver = new TelegramReceiver(
@@ -2946,12 +2950,17 @@ export class AgentRunner extends EventEmitter {
    * empty here — but the liveness check is real, not just a formality: skip
    * anything present in `this.sessions` regardless, rather than assuming
    * "start() always runs on an empty pool" and deleting unconditionally.
+   *
+   * Async (fsPromises) rather than sync fs calls: a first upgrade to this fix
+   * can face a real backlog of leftovers accumulated before it existed, and
+   * synchronous readdir/rm would block the event loop — and every other
+   * agent's start() sharing this process — for the duration.
    */
-  private sweepStaleSessionDirs(): void {
+  private async sweepStaleSessionDirs(): Promise<void> {
     const sessionsRoot = path.join(this.agentConfig.workspace, '.sessions');
-    let entries: fs.Dirent[];
+    let entries: import('fs').Dirent[];
     try {
-      entries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+      entries = await fsPromises.readdir(sessionsRoot, { withFileTypes: true });
     } catch {
       return; // no .sessions directory yet — nothing to sweep
     }
@@ -2959,7 +2968,7 @@ export class AgentRunner extends EventEmitter {
     for (const entry of entries) {
       if (!entry.isDirectory() || liveSessionIds.has(entry.name)) continue;
       try {
-        fs.rmSync(path.join(sessionsRoot, entry.name), { recursive: true, force: true });
+        await fsPromises.rm(path.join(sessionsRoot, entry.name), { recursive: true, force: true });
       } catch {
         /* best-effort cleanup — a stubborn leftover isn't worth failing boot over */
       }
