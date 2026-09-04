@@ -315,6 +315,7 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
       }
     }
   ]
+}
 ```
 
 ### `gateway.timezone` (optional)
