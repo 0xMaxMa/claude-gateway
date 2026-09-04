@@ -137,8 +137,10 @@ The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
 The unit sets `OOMPolicy=continue` so that an OOM-killed child process (e.g. a dev server an
 agent spawned on its own) doesn't take the whole gateway down with it — only `Restart=always`
 restarting the *gateway's own* process is intended. Installs from before this was added need to
-re-run `claude-gateway service install` to regenerate the unit file and pick up the directive; it
-is not applied retroactively to an already-installed unit.
+re-run `claude-gateway service install` to regenerate the unit file *and then*
+`systemctl --user restart claude-gateway.service` — reinstalling alone reloads systemd's unit
+definition but does not restart an already-running unit, so the live process keeps the old
+`OOMPolicy` until it's explicitly restarted (or the host reboots).
 Prefer [PM2](https://pm2.keymetrics.io)? `claude-gateway service install --manager pm2` registers
 and saves the process instead (run `pm2 startup` separately for boot-time start).
 
