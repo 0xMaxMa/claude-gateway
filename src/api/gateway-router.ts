@@ -1413,7 +1413,7 @@ export class GatewayRouter {
         }
         cliPairingStore.prune();
         pendingOAuthStore.prune();
-        refreshExpiringOAuthConnectors(this.customConnectorsStore).catch((err) => {
+        refreshExpiringOAuthConnectors(this.customConnectorsStore, this.agents).catch((err) => {
           console.error(`oauth-refresh-sweep: ${(err as Error).message}`);
         });
       }, 60_000);

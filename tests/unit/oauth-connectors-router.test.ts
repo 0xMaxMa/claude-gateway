@@ -180,6 +180,82 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     expect(res.body.error).toMatch(/Expected a 401/);
   });
 
+  // Regression: every /oauth/start call re-ran DCR unconditionally, so every
+  // abandoned or retried "Connect" click registered (and orphaned, at the
+  // provider) a brand-new OAuth client. The second call for the same
+  // connector must reuse the client_id from the first instead of
+  // registering again.
+  it('reuses the DCR-registered client_id on a second /oauth/start call for the same connector — no second registration', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const app = makeApp(tmpConfig({ firecrawl: firecrawlEntry }), pendingStore);
+
+    const discoveryMocks = () => [
+      jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth"` }),
+      jsonResponse(200, { authorization_servers: ['https://www.firecrawl.dev'] }),
+      jsonResponse(200, {
+        authorization_endpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+        token_endpoint: 'https://www.firecrawl.dev/api/oauth/token',
+        registration_endpoint: 'https://www.firecrawl.dev/api/oauth/register',
+      }),
+    ];
+
+    // First call: discovery (3) + DCR registration (1) = 4 fetches.
+    for (const m of discoveryMocks()) mockFetch.mockResolvedValueOnce(m);
+    mockFetch.mockResolvedValueOnce(jsonResponse(201, { client_id: 'dyn_first_registration' }));
+    const first = await request(app)
+      .post('/api/v1/connectors/custom/firecrawl/oauth/start')
+      .set('X-Api-Key', adminKey);
+    expect(first.status).toBe(200);
+    expect(new URL(first.body.authorizeUrl).searchParams.get('client_id')).toBe('dyn_first_registration');
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+
+    // Second call: discovery only (3) — no registration call this time.
+    for (const m of discoveryMocks()) mockFetch.mockResolvedValueOnce(m);
+    const second = await request(app)
+      .post('/api/v1/connectors/custom/firecrawl/oauth/start')
+      .set('X-Api-Key', adminKey);
+    expect(second.status).toBe(200);
+    expect(new URL(second.body.authorizeUrl).searchParams.get('client_id')).toBe('dyn_first_registration');
+    expect(mockFetch).toHaveBeenCalledTimes(4 + 3); // not 4 + 4 — no re-registration
+  });
+
+  // A cached client_id was registered against a specific redirect_uri — if
+  // gateway.publicUrl changes, that redirect_uri is no longer valid at the
+  // provider, so the cache must be invalidated and a fresh client registered.
+  it('re-registers instead of reusing the cache when the redirect_uri (gateway.publicUrl) has changed', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const cfgPath = tmpConfig({ firecrawl: firecrawlEntry });
+    const { createOauthConnectorsRouter } = require('../../src/api/oauth-connectors-router');
+    const store = createCustomConnectorsStore(cfgPath);
+    const appV1 = express();
+    appV1.use(express.json());
+    appV1.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc.vm.getpod.ai/gateway' } }, store, pendingStore));
+
+    const discoveryMocks = () => [
+      jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth"` }),
+      jsonResponse(200, { authorization_servers: ['https://www.firecrawl.dev'] }),
+      jsonResponse(200, {
+        authorization_endpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+        token_endpoint: 'https://www.firecrawl.dev/api/oauth/token',
+        registration_endpoint: 'https://www.firecrawl.dev/api/oauth/register',
+      }),
+    ];
+    for (const m of discoveryMocks()) mockFetch.mockResolvedValueOnce(m);
+    mockFetch.mockResolvedValueOnce(jsonResponse(201, { client_id: 'dyn_old_redirect' }));
+    await request(appV1).post('/api/v1/connectors/custom/firecrawl/oauth/start').set('X-Api-Key', adminKey);
+
+    // Same connector, new gateway.publicUrl (e.g. a fresh tunnel) → different redirect_uri.
+    const appV2 = express();
+    appV2.use(express.json());
+    appV2.use('/api', createOauthConnectorsRouter(apiKeys, { gateway: { publicUrl: 'https://pod-abc-new-tunnel.vm.getpod.ai/gateway' } }, store, pendingStore));
+    for (const m of discoveryMocks()) mockFetch.mockResolvedValueOnce(m);
+    mockFetch.mockResolvedValueOnce(jsonResponse(201, { client_id: 'dyn_new_redirect' }));
+    const res = await request(appV2).post('/api/v1/connectors/custom/firecrawl/oauth/start').set('X-Api-Key', adminKey);
+
+    expect(res.status).toBe(200);
+    expect(new URL(res.body.authorizeUrl).searchParams.get('client_id')).toBe('dyn_new_redirect');
+  });
+
   it("500s when gateway.publicUrl isn't a valid /gateway URL", async () => {
     const { createOauthConnectorsRouter } = require('../../src/api/oauth-connectors-router');
     const store = createCustomConnectorsStore(tmpConfig({ firecrawl: firecrawlEntry }));
@@ -284,6 +360,10 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     expect(env['CUSTOM__firecrawl____refresh_token']).toBe('fcr_new');
     expect(env['CUSTOM__firecrawl____client_id']).toBe('dyn_abc');
     expect(Number(env['CUSTOM__firecrawl____token_expires_at'])).toBeGreaterThan(Date.now());
+    // Bumped so oauth-refresh-sweep.ts can detect a fresher token written
+    // here while one of its own refreshes was still in flight, and discard
+    // its own now-stale result instead of clobbering this one.
+    expect(env['CUSTOM__firecrawl____token_generation']).toBeTruthy();
 
     // The token endpoint call itself used the stored PKCE verifier + resource.
     const [, init] = mockFetch.mock.calls[0];

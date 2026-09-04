@@ -2718,9 +2718,12 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
-   * Called after a connector's secret changes (most commonly: the background
-   * OAuth refresher in index.ts rotated an access token). A no-op when this
-   * agent doesn't actually resolve that connector — restarting a long-lived
+   * Called after a connector's secret changes: either services/api pushed a
+   * fresh access_token for a managed connector (POST /oauth/receive), or the
+   * background refresh sweep in oauth-refresh-sweep.ts (invoked from
+   * gateway-router.ts's 60s interval) rotated one for a user's own oauth:true
+   * custom connector. A no-op when this agent doesn't actually resolve that
+   * connector — restarting a long-lived
    * session that never uses the connector would be pure disruption. Otherwise
    * reuses restartOrDefer's lossless defer-idle path: the stdio MCP subprocess
    * only reads its env once at spawn (see session/process.ts's writeMcpConfig
