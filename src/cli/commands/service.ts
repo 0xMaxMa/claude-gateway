@@ -499,9 +499,14 @@ function resolveSystemdUnitOptions(flags: Record<string, string | boolean>, scop
       process.stderr.write('Invalid --run-as value — must not contain a NUL byte or line break.\n');
       return null;
     }
-    runAs = flags['run-as'];
+    runAs = flags['run-as'].trim();
+  } else if (flags['run-as'] !== undefined) {
+    // Loudly rejected rather than silently dropped, like every other
+    // nonsensical combination this function checks — --run-as only means
+    // anything for a unit that runs as a fixed system account.
+    process.stderr.write('--run-as only applies to --scope system.\n');
+    return null;
   }
-
 
   return { scope, runAs, after, envFile, extraEnv };
 }
@@ -525,9 +530,13 @@ async function systemdInstall(
   if (flags.print === true) return 0;
 
   // The root check goes here, after the print short-circuit above, matching
-  // the crossScopeConflict() check below: `--print` is a pure read — it
-  // must always show the preview regardless of any other reason install
-  // itself would be refused.
+  // the crossScopeConflict() check below: both are STATE/PRIVILEGE gates
+  // unrelated to what the unit would contain, so `--print` — a pure read —
+  // must never need them just to render a preview. This is narrower than
+  // "print always succeeds": resolveSystemdUnitOptions() above (e.g. the
+  // --run-as requirement) still runs first, because without valid input
+  // there is no unit content to preview at all — print can't show bytes
+  // that could never be written.
   if (scope === 'system' && !isRoot()) {
     process.stderr.write(
       `--scope system must be run as root — it writes ${unitPath('system')} and can restart a system-wide unit.\n` +
@@ -572,7 +581,14 @@ async function systemdInstall(
   let previousContent: string | null;
   try {
     previousContent = fs.readFileSync(file, 'utf8') as unknown as string;
-  } catch {
+  } catch (err) {
+    // Distinct from "no prior unit" (ENOENT, the normal first-install case):
+    // any other error (e.g. EACCES) is surfaced rather than silently treated
+    // as a fresh install, matching the unlinkSync error handling below.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      process.stderr.write(`Could not read the existing unit at ${file}: ${(err as Error).message}\n`);
+      return 1;
+    }
     previousContent = null;
   }
   const wasActive = unitFlagState(scope === 'user').active;
@@ -825,16 +841,39 @@ function parseManager(flags: Record<string, string | boolean>, action: ServiceAc
  *  (exit 0) while the system-scope unit keeps running untouched (issue #457
  *  review). Mirrors `detectServiceManager()`'s "detect what's actually there"
  *  approach for --manager. */
-function detectServiceScope(action: ServiceAction): ServiceScope {
+function detectServiceScope(action: ServiceAction): ServiceScope | null {
   if (action === 'install') return 'user';
-  if (fs.existsSync(unitPath('user'))) return 'user';
-  if (fs.existsSync(unitPath('system'))) return 'system';
+  const userInstalled = fs.existsSync(unitPath('user'));
+  const systemInstalled = fs.existsSync(unitPath('system'));
+  // Both installed at once (e.g. a --force system-scope install alongside a
+  // still-enabled user-scope one) is exactly the state crossScopeConflict()
+  // exists to prevent — but --force means it can happen anyway. Silently
+  // picking one would leave the other's real state unreported by `status`,
+  // or untouched by `uninstall` while it reports success (issue #457
+  // review) — refuse and make the caller say which one explicitly instead.
+  if (userInstalled && systemInstalled) return null;
+  if (userInstalled) return 'user';
+  if (systemInstalled) return 'system';
   return 'user';
 }
 
 function parseScope(flags: Record<string, string | boolean>, action: ServiceAction): ServiceScope | null {
   const raw = flags.scope;
-  if (raw === undefined) return detectServiceScope(action);
+  if (raw === undefined) {
+    // Scope is a systemd-only concept — skip probing for it entirely when
+    // the manager is explicitly pm2. Beyond being pointless work, treating
+    // unrelated systemd unit paths as ambiguous input to a decision pm2
+    // never uses could wrongly refuse a pm2 action over a conflict that
+    // doesn't apply to it at all.
+    if (flags.manager === 'pm2') return 'user';
+    const detected = detectServiceScope(action);
+    if (detected === null) {
+      process.stderr.write(
+        `Both a user-scope and a system-scope ${UNIT_NAME} unit are installed — pass --scope user or --scope system to say which one.\n`,
+      );
+    }
+    return detected;
+  }
   if (raw === 'user' || raw === 'system') return raw;
   process.stderr.write('Unknown --scope. Expected user or system.\n');
   return null;
@@ -881,9 +920,19 @@ export async function runService(
   const manager = parseManager(flags, action, scope);
   if (!manager) return 1;
 
-  if (manager === 'pm2' && scope === 'system') {
-    process.stderr.write('--scope system only applies to the systemd manager, not pm2.\n');
-    return 1;
+  if (manager === 'pm2') {
+    if (scope === 'system') {
+      process.stderr.write('--scope system only applies to the systemd manager, not pm2.\n');
+      return 1;
+    }
+    // Every other systemd-only unit customization flag: reject rather than
+    // silently drop, so `--manager pm2 --env-file secrets.env` doesn't exit 0
+    // having wired in nothing the caller asked for.
+    const systemdOnlyFlag = (['after', 'env', 'env-file', 'run-as'] as const).find((name) => flags[name] !== undefined);
+    if (systemdOnlyFlag) {
+      process.stderr.write(`--${systemdOnlyFlag} only applies to the systemd manager, not pm2.\n`);
+      return 1;
+    }
   }
 
   if (manager === 'systemd') {

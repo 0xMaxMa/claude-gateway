@@ -353,9 +353,15 @@ describe('service — argument validation', () => {
 });
 
 describe('service uninstall', () => {
-  /** systemd reports the unit as installed+active until it is removed. */
+  /** systemd reports the (user-scope) unit as installed+active until it is
+   *  removed. Scoped to the user-scope path specifically, not a blanket
+   *  `mockReturnValue(true)` — with scope auto-detection now probing both
+   *  paths when --scope is omitted (issue #457 review), a blanket true would
+   *  make the system-scope path look installed too and trip the "both
+   *  scopes installed, say which one" refusal instead of exercising what
+   *  this helper is actually named for. */
   function unitIsLive(): void {
-    mockExistsSync.mockReturnValue(true);
+    mockExistsSync.mockImplementation((p: unknown) => String(p) === unitPath);
     mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
       if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
       if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
@@ -925,5 +931,95 @@ describe('service install — chmod is applied explicitly, not left to writeFile
       (process.getuid as unknown as jest.Mock).mockRestore();
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe('service status/uninstall — both scopes installed at once (issue #457 review round 2)', () => {
+  /** A --force system-scope install alongside a still-active user-scope one
+   *  is exactly how this state can arise in practice. */
+  function bothScopesInstalled(): void {
+    mockExistsSync.mockReturnValue(true);
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+      if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+  }
+
+  it('refuses a scope-omitted status when both a user-scope and a system-scope unit are installed', async () => {
+    bothScopesInstalled();
+    const code = await runService(['status'], { manager: 'systemd' });
+    expect(code).toBe(1);
+    expect(stderr.join('')).toMatch(/Both a user-scope and a system-scope/);
+  });
+
+  it('refuses a scope-omitted uninstall when both scopes are installed — never silently acts on only one', async () => {
+    bothScopesInstalled();
+    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expectNoStateChange();
+    expect(fs.unlinkSync).not.toHaveBeenCalled();
+    expect(stderr.join('')).toMatch(/Both a user-scope and a system-scope/);
+  });
+
+  it('an explicit --scope still works normally even when both are installed', async () => {
+    bothScopesInstalled();
+    const code = await runService(['status'], { manager: 'systemd', scope: 'system' });
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ manager: 'systemd-system' }));
+  });
+
+  it('a pm2 request is unaffected by two systemd scopes both being installed — scope is irrelevant to pm2', async () => {
+    bothScopesInstalled();
+    mockExecFileSync.mockReturnValue(Buffer.from(JSON.stringify([{ name: 'gateway', pm2_env: { status: 'online' } }])) as never);
+    const code = await runService(['status'], { manager: 'pm2' });
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ manager: 'pm2' }));
+  });
+});
+
+describe('service install — --run-as only applies to --scope system (issue #457 review round 2)', () => {
+  it('rejects --run-as passed with the default (user) scope instead of silently dropping it', async () => {
+    const code = await runService(['install'], { manager: 'systemd', yes: true, 'run-as': 'gwuser' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/--run-as only applies to --scope system/);
+  });
+
+  it('trims --run-as before writing it into User=, matching how --after/--env are normalized', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': '  gwuser  ', yes: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(systemUnitPath, expect.stringContaining('User=gwuser\n'), expect.anything());
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe('service install — systemd-only flags rejected under --manager pm2 (issue #457 review round 2)', () => {
+  it.each(['after', 'env', 'env-file', 'run-as'])('rejects --%s with --manager pm2 instead of silently dropping it', async (flagName) => {
+    const code = await runService(['install'], { manager: 'pm2', yes: true, [flagName]: 'x' });
+    expect(code).toBe(1);
+    expect(stderr.join('')).toMatch(new RegExp(`--${flagName} only applies to the systemd manager`));
+  });
+});
+
+describe('service install — a non-ENOENT read error on the existing unit is surfaced, not swallowed (issue #457 review round 2)', () => {
+  it('aborts and reports the read failure instead of silently treating it as a fresh install', async () => {
+    mockReadFileSync.mockImplementation(() => {
+      const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
+    });
+    const code = await runService(['install'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/Could not read the existing unit/);
   });
 });
