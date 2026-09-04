@@ -750,6 +750,11 @@ describe('service install — restart-on-change for an already-running unit (iss
       const code = await runService(['install'], { manager: 'systemd', yes: true });
       expect(code).toBe(0);
       expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'restart', 'claude-gateway.service'], expect.anything());
+      // Restart alone doesn't guarantee the unit is enabled — the previous
+      // active state could have been active-but-disabled — so the restart
+      // path must still explicitly enable it, just via a separate call
+      // instead of the combined `enable --now` the non-restart path uses.
+      expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'enable', 'claude-gateway.service'], expect.anything());
       expect(mockExecFileSync).not.toHaveBeenCalledWith('systemctl', ['--user', 'enable', '--now', 'claude-gateway.service'], expect.anything());
     } finally {
       fetchSpy.mockRestore();
@@ -1021,5 +1026,20 @@ describe('service install — a non-ENOENT read error on the existing unit is su
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expectNoStateChange();
     expect(stderr.join('')).toMatch(/Could not read the existing unit/);
+  });
+});
+
+describe('service install — --after target names cannot contain whitespace (issue #457 review round 3)', () => {
+  it('rejects a space inside a single --after entry instead of silently splitting it into two targets', async () => {
+    const code = await runService(['install'], { manager: 'systemd', yes: true, after: 'foo.target bar.service' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/cannot contain whitespace/);
+  });
+
+  it('still accepts properly comma-separated targets with no embedded whitespace', () => {
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!, { scope: 'user', after: ['docker.service', 'foo.target'], extraEnv: {} });
+    expect(unit).toContain('After=network-online.target docker.service foo.target');
   });
 });

@@ -408,6 +408,16 @@ function parseAfterTargets(flags: Record<string, string | boolean>): string[] | 
       process.stderr.write(`Invalid --after target "${target}" — must not contain a NUL byte or line break.\n`);
       return null;
     }
+    // No valid systemd unit/target name contains whitespace — a space
+    // inside one comma-separated entry almost always means the caller meant
+    // two separate targets and used a space instead of a comma by mistake.
+    // Silently accepting it would splice an unintended second `After=`
+    // target in via renderSystemdUnit()'s space-join, rather than erroring
+    // on the typo.
+    if (/\s/.test(target)) {
+      process.stderr.write(`Invalid --after target "${target}" — systemd unit/target names cannot contain whitespace (use a comma to separate multiple targets).\n`);
+      return null;
+    }
   }
   return targets;
 }
@@ -606,6 +616,14 @@ async function systemdInstall(
     fs.chmodSync(file, scope === 'user' ? 0o600 : 0o644);
     run('systemctl', [...scopeArgs, 'daemon-reload']);
     if (wasActive && previousContent !== null && previousContent !== unit) {
+      // `restart` alone doesn't guarantee the unit is enabled — if it had
+      // drifted to active-but-disabled (started manually, or an
+      // externally-provisioned unit that was only ever started, not
+      // enabled), only restarting would leave it silently unable to survive
+      // the next reboot. The pre-#457 code always ran `enable --now`
+      // unconditionally on every install, which held that invariant
+      // regardless of prior state; this branch has to keep holding it too.
+      run('systemctl', [...scopeArgs, 'enable', UNIT_NAME]);
       run('systemctl', [...scopeArgs, 'restart', UNIT_NAME]);
     } else {
       run('systemctl', [...scopeArgs, 'enable', '--now', UNIT_NAME]);
