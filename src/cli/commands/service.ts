@@ -148,6 +148,12 @@ Environment="GATEWAY_CONFIG=${q(spec.config)}"
 ExecStart="${q(spec.node)}" "${q(spec.entry)}" gateway start --config "${q(spec.config)}"
 Restart=always
 RestartSec=5
+# Without this, systemd's default OOMPolicy=stop treats an OOM-killed
+# process ANYWHERE in this unit's cgroup (e.g. a dev server an agent spawned
+# on its own) as the whole unit failing, and Restart=always then restarts
+# the entire gateway — dropping every agent's session for an OOM kill that
+# had nothing to do with gateway health.
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
