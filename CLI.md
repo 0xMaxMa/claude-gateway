@@ -118,6 +118,11 @@ never mistaken for one.
   and refuse to run non-interactively without it.
 - `install` verifies `/health` on the **local bind address**, and `uninstall` reports the state the
   manager actually reports afterwards — never the state that was intended.
+- `install` exit codes: `0` fully healthy, `1` install/enable itself failed (or a validation/
+  confirmation gate refused — nothing was written), `2` install/enable succeeded but `/health`
+  never answered within the poll window. Distinguishing `1` from `2` by exit code alone means a
+  caller doesn't have to parse the JSON result on stdout just to tell "didn't happen" apart from
+  "happened, health unconfirmed".
 - (systemd, user-scope installs) `install` refuses by default if a `claude-gateway.service` unit
   already exists and is enabled or active at *system* scope (e.g. from provisioning outside this
   CLI) — it prints the exact `sudo systemctl disable --now claude-gateway.service` to resolve it;

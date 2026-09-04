@@ -126,6 +126,12 @@ non-interactive run is refused rather than left hanging). Always stop the gatewa
 `service uninstall` or `systemctl --user stop claude-gateway.service` — a bare `kill <pid>` bypasses
 systemd's own stop tracking, so `Restart=always` brings it right back regardless of exit code.
 
+`install`'s exit code distinguishes three outcomes: `0` fully healthy, `1` install/enable itself
+failed or a validation/confirmation gate refused (nothing was written), `2` install/enable
+succeeded but `/health` never answered within the poll window. A script that only checks the exit
+code — not the JSON result on stdout — can still tell "didn't happen" apart from "happened, health
+unconfirmed" this way.
+
 `install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
 exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
 CLI) — installing a second, independent unit alongside it would race for the port on the next

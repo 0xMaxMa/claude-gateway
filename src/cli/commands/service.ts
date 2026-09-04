@@ -31,6 +31,13 @@ const UNIT_NAME = 'claude-gateway.service';
 const PM2_NAME = 'gateway';
 const HEALTH_ATTEMPTS = 20;
 const HEALTH_INTERVAL_MS = 500;
+/** `install`'s exit code when everything succeeded (unit written, enabled/
+ *  started) but `/health` never answered within the poll window — distinct
+ *  from `1` (install/enable itself failed, or a validation/confirmation gate
+ *  refused) so a caller checking the exit code alone, not just the JSON
+ *  result on stdout, can tell "didn't happen" apart from "happened, health
+ *  unconfirmed". */
+const EXIT_HEALTH_TIMEOUT = 2;
 /** Env var names the installer itself sets — `--env` may not override these. */
 const RESERVED_ENV_KEYS = new Set(['HOME', 'PATH', 'GATEWAY_CONFIG']);
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -761,7 +768,7 @@ async function systemdInstall(
   );
   if (!healthy) {
     process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`);
-    return 1;
+    return EXIT_HEALTH_TIMEOUT;
   }
   return 0;
 }
@@ -884,7 +891,7 @@ async function pm2Install(
   process.stderr.write('PM2 process list saved. Run `pm2 startup` once if you also want start-on-boot.\n');
   if (!healthy) {
     process.stderr.write(`Service did not answer /health yet — check: pm2 logs ${PM2_NAME}\n`);
-    return 1;
+    return EXIT_HEALTH_TIMEOUT;
   }
   return 0;
 }

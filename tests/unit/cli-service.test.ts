@@ -1282,3 +1282,51 @@ describe('service install — chown reasserts ownership when --run-as changes on
     }
   });
 });
+
+describe('service install — exit code distinguishes health-check timeout from an actual failure (manual /code-review round)', () => {
+  it('systemd: exits 2 (not 1) when install/enable succeeded but /health never answers', async () => {
+    jest.useFakeTimers();
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false } as Response);
+    try {
+      const promise = runService(['install'], { manager: 'systemd', yes: true });
+      // 20 attempts * 500ms interval, plus slack for the probe's own await chain.
+      await jest.advanceTimersByTimeAsync(20 * 500 + 5_000);
+      const code = await promise;
+      expect(code).toBe(2);
+      // The install itself genuinely succeeded — only health is unconfirmed.
+      expect(mockWriteFileSync).toHaveBeenCalled();
+      expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ health: 'down' }));
+    } finally {
+      fetchSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('systemd: still exits 1, not 2, when install/enable itself fails outright', async () => {
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && args.includes('enable')) throw new Error('boom');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    const code = await runService(['install'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).toHaveBeenCalled(); // unit was written before the enable call failed
+  });
+
+  it('pm2: exits 2 (not 1) when registration succeeded but /health never answers', async () => {
+    jest.useFakeTimers();
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'pm2' && args[0] === 'jlist') return Buffer.from('[]');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false } as Response);
+    try {
+      const promise = runService(['install'], { manager: 'pm2', yes: true });
+      await jest.advanceTimersByTimeAsync(20 * 500 + 5_000);
+      const code = await promise;
+      expect(code).toBe(2);
+    } finally {
+      fetchSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+});
