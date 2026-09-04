@@ -37,33 +37,47 @@ export function resolveEnabledConnectors(
     if (enabled[spec.id]?.enabled === false) continue; // explicitly opted out
 
     const envName = secretEnvOf(spec);
-    if (envName === null) {
-      // No-auth connector — always injectable when enabled.
-      out[spec.id] = spec.build(null);
-      continue;
-    }
+    try {
+      if (envName === null) {
+        // No-auth connector — always injectable when enabled.
+        out[spec.id] = spec.build(null);
+        continue;
+      }
 
-    const secret = tokenEnv[envName];
-    if (!secret) continue; // not connected — skip regardless of enablement
-    out[spec.id] = spec.build(secret);
+      const secret = tokenEnv[envName];
+      if (!secret) continue; // not connected — skip regardless of enablement
+      out[spec.id] = spec.build(secret);
+    } catch (err) {
+      // A deployer-defined CONNECTOR_CATALOG entry's build() throwing must
+      // not abort resolution for every OTHER connector — or worse, the whole
+      // session spawn — for every user of this agent. Skip just this one.
+      console.error(`resolveEnabledConnectors: connector=${spec.id} build() failed: ${(err as Error).message}`);
+    }
   }
 
   for (const [id, entry] of Object.entries(customConnectors)) {
     if (enabled[id]?.enabled === false) continue; // explicitly opted out
 
-    const secrets: Record<string, string> = {};
-    let allPresent = true;
-    for (const name of entry.secretNames) {
-      const value = tokenEnv[customSecretKey(id, name)];
-      if (!value) {
-        allPresent = false;
-        break;
+    try {
+      const secrets: Record<string, string> = {};
+      let allPresent = true;
+      for (const name of entry.secretNames) {
+        const value = tokenEnv[customSecretKey(id, name)];
+        if (!value) {
+          allPresent = false;
+          break;
+        }
+        secrets[name] = value;
       }
-      secrets[name] = value;
-    }
-    if (!allPresent) continue; // enabled but not fully connected — skip
+      if (!allPresent) continue; // enabled but not fully connected — skip
 
-    out[id] = substitutePlaceholders(entry.config, secrets);
+      out[id] = substitutePlaceholders(entry.config, secrets);
+    } catch (err) {
+      // Same isolation as the built-in loop above — a malformed pasted
+      // config (see CustomConnectorEntry's doc comment: admin-trusted, not
+      // code-reviewed) must not take down every other connector's resolution.
+      console.error(`resolveEnabledConnectors: connector=${id} resolve failed: ${(err as Error).message}`);
+    }
   }
 
   return out;
