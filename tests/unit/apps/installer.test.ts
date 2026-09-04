@@ -782,6 +782,75 @@ services:
       expect(asyncCalls.some(isComposeBuild)).toBe(true);
       expect(asyncCalls.some(isComposeUp)).toBe(true);
     });
+
+    it('runs the agent pre-pull ("docker pull debian:stable-slim") through the async spawn seam too', async () => {
+      // Found in independent review of #452's fix: an app that declares an
+      // agent service triggers a pre-pull of the agent base image inside the
+      // same install job, still issued on `this.run()` (spawnSync) even after
+      // build/up moved to the async seam — up to a 300s block on a host
+      // without the image cached.
+      const agentMgr = makeAgentMgr('never-conflicts');
+      const syncCalls: string[][] = [];
+      const asyncCalls: string[][] = [];
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        syncCalls.push(args);
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${'a'.repeat(40)}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: agent-prepull-app
+version: 1.0.0
+commit: "${'a'.repeat(40)}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5702
+        container: 5702
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5702/health
+      interval: 30s
+  agent:
+    path: ./agent
+    name: prepull-bot
+`.trim(),
+            'utf-8',
+          );
+          fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        asyncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = new AppInstaller(
+        registry,
+        new RegistryClient(),
+        callbacks,
+        spawn as unknown as ConstructorParameters<typeof AppInstaller>[3],
+        appsDir,
+        agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
+        asyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      );
+
+      const job = await waitForJob(
+        installer,
+        installer.install({ githubUrl: 'https://github.com/test/agent-prepull-app' }),
+        5000,
+      );
+      expect(job.status).toBe('completed');
+
+      const isPrepull = (a: string[]) => a[0] === 'pull' && a.includes('debian:stable-slim');
+      expect(syncCalls.some(isPrepull)).toBe(false);
+      expect(asyncCalls.some(isPrepull)).toBe(true);
+    });
   });
 
   // ─── getJob() ─────────────────────────────────────────────────────────────

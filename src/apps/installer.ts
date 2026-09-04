@@ -1848,7 +1848,7 @@ export class AppInstaller {
       // Pre-pull the agent base image so compose up --wait doesn't time out during pull
       this.log(job, 'Pre-pulling agent base image');
       try {
-        this.run(['docker', 'pull', 'debian:stable-slim'], appDir, 300_000);
+        await this.runAsync(['docker', 'pull', 'debian:stable-slim'], appDir, 300_000);
       } catch {
         // non-fatal — compose up will attempt its own pull
       }
