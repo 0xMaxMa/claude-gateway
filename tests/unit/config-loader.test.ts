@@ -449,6 +449,33 @@ describe('config-loader', () => {
 
       expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
     });
+
+    // Independent-review finding: bootstrap.ts's mkdirSync(dir, {mode:0o700})
+    // only applies its mode on *creation* — a directory that already existed
+    // before #460 (i.e. every existing install) never gets repaired by that
+    // fix alone. loadConfig() must repair the directory too, on every load,
+    // not just the file.
+    it('chmods the containing directory back to 0700 on load, not just config.json itself', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+      // mkdtempSync already creates tmpDir at 0700 — chmod wider first to
+      // simulate a pre-#460 install whose directory was never restricted.
+      fs.chmodSync(tmpDir, 0o755);
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
+    });
+
+    it('leaves an already-0700 config directory at 0700 (idempotent)', () => {
+      const configPath = path.join(tmpDir, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify({ gateway: { logDir: '/logs' }, agents: [] }), { mode: 0o600 });
+      fs.chmodSync(tmpDir, 0o700);
+
+      loadConfig(configPath);
+
+      expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
+    });
   });
   });
 });

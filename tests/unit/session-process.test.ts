@@ -317,6 +317,38 @@ describe('SessionProcess', () => {
     expect(fs.existsSync(sessionDir)).toBe(false);
   });
 
+  // Independent-review finding: the directory must survive the up-to-10s
+  // graceful-shutdown window, not disappear the instant SIGTERM is sent —
+  // the still-alive subprocess (or a still-running container bind-mounting
+  // this path) could still need it right up until it actually exits.
+  it("#460: stop() does not remove the session directory until the subprocess has actually exited", async () => {
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    const child = lastProcess!;
+
+    const sessionDir = path.join(agentConfig.workspace, '.sessions', 'chat:111');
+    expect(fs.existsSync(sessionDir)).toBe(true);
+
+    // Don't auto-emit 'exit' on kill — simulate a subprocess still mid-shutdown.
+    child.kill = jest.fn((_signal?: string) => {
+      child.killed = true;
+      return true;
+    });
+
+    const stopPromise = sp.stop();
+    // Let stop()'s own awaits (restartWatcher.close(), etc.) settle up to the
+    // point it calls kill(), without letting a real 10s timer elapse.
+    await new Promise((r) => setImmediate(r));
+
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(fs.existsSync(sessionDir)).toBe(true); // still there — process hasn't exited yet
+
+    child.emit('exit', 0, 'SIGTERM');
+    await stopPromise;
+
+    expect(fs.existsSync(sessionDir)).toBe(false);
+  });
+
   // --------------------------------------------------------------------------
   // U-SP-06: No MCP config for api source
   // --------------------------------------------------------------------------

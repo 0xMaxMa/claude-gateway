@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
 
@@ -174,6 +175,20 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   try {
     if ((fs.statSync(configPath).mode & 0o777) !== 0o600) {
       fs.chmodSync(configPath, 0o600);
+    }
+  } catch {
+    /* stat/chmod failed — not fatal, config still loads */
+  }
+
+  // Same repair for the containing directory: bootstrap.ts's mkdirSync(dir,
+  // {mode: 0o700}) only applies its mode when it *creates* the directory —
+  // recursive mkdirSync on an already-existing one is a no-op mode-wise, so
+  // an install that predates #460 (i.e. every existing install) never
+  // benefits from that fix at all, staying 0755 forever otherwise.
+  try {
+    const dir = path.dirname(configPath);
+    if ((fs.statSync(dir).mode & 0o777) !== 0o700) {
+      fs.chmodSync(dir, 0o700);
     }
   } catch {
     /* stat/chmod failed — not fatal, config still loads */

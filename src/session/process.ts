@@ -1759,11 +1759,20 @@ export class SessionProcess extends EventEmitter {
     // mcp-config.json under here holds fully-substituted secrets (channel bot
     // tokens, GATEWAY_API_KEY, connector OAuth tokens) — it must not outlive
     // the session that needed it (issue #460). Recreated automatically on the
-    // next spawn, so removing it here is safe across restarts.
-    try {
-      fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
-    } catch {}
-    if (!this.process) return;
+    // next spawn, so removing it here is safe across restarts. Deferred until
+    // the process has actually exited below (not removed up front here) — the
+    // subprocess (or, for a container agent, the still-running container that
+    // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
+    // window immediately after this point, and must not find it gone under it.
+    const removeSessionDir = (): void => {
+      try {
+        fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
+      } catch {}
+    };
+    if (!this.process) {
+      removeSessionDir();
+      return;
+    }
 
     return new Promise((resolve) => {
       const proc = this.process!;
@@ -1774,6 +1783,7 @@ export class SessionProcess extends EventEmitter {
           forceKillTimer = null;
         }
         this.process = null;
+        removeSessionDir();
         resolve();
       });
       proc.kill('SIGTERM');
