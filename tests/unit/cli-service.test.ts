@@ -109,6 +109,16 @@ describe('service — generated launch configuration', () => {
     expect(unit).not.toContain('Restart=on-failure');
   });
 
+  it('sets OOMPolicy=continue so an OOM-killed child process cannot take the whole gateway down', () => {
+    // systemd's default OOMPolicy=stop treats an OOM-killed process anywhere
+    // in this unit's cgroup as the unit failing, which combined with
+    // Restart=always restarts the entire gateway for an OOM kill of, say, an
+    // agent's own dev server — dropping every other agent's session too
+    // (issue #454). `continue` logs the kill without restarting the unit.
+    const unit = renderSystemdUnit(resolveLaunchSpec({})!);
+    expect(unit).toContain('OOMPolicy=continue');
+  });
+
   it('never writes a secret into the unit — only paths', () => {
     const unit = renderSystemdUnit(resolveLaunchSpec({})!);
     for (const line of unit.split('\n').filter((l) => l.startsWith('Environment='))) {
