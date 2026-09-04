@@ -164,13 +164,23 @@ never mistaken for one.
 
 | Command | Description |
 |---------|-------------|
-| \`claude-gateway service install [--manager systemd\\|pm2] [--config <path>] [--yes] [--print] [--force]\` | Generate and start a service |
-| \`claude-gateway service status [--manager systemd\\|pm2]\` | Report installed/enabled/active state as JSON |
-| \`claude-gateway service uninstall [--manager systemd\\|pm2] [--yes]\` | Stop and remove the service |
+| \`claude-gateway service install [--manager systemd\\|pm2] [--scope user\\|system] [--run-as <user>] [--after <target,...>] [--env-file <path>] [--env KEY=VALUE,...] [--config <path>] [--yes] [--print] [--force]\` | Generate and start a service |
+| \`claude-gateway service status [--manager systemd\\|pm2] [--scope user\\|system]\` | Report installed/enabled/active state as JSON |
+| \`claude-gateway service uninstall [--manager systemd\\|pm2] [--scope user\\|system] [--yes]\` | Stop and remove the service |
 
 - \`systemd\` (the default) installs a **user** unit at \`~/.config/systemd/user/claude-gateway.service\` —
   no \`sudo\`, and it runs as the user that owns \`~/.claude-gateway\`. Run
   \`loginctl enable-linger <user>\` once if it must survive logout.
+- \`--scope system\` (systemd only) installs a root-owned unit at
+  \`/etc/systemd/system/claude-gateway.service\` instead, for automated/infra provisioning that needs
+  a fixed system account. Requires already running as root (never escalates via \`sudo\`) and
+  \`--run-as <user>\`, which becomes the unit's \`User=\`; \`WantedBy=\` is \`multi-user.target\` instead of
+  \`default.target\`, and the \`loginctl\` hint is skipped. It never triggers the system-scope conflict
+  check below against itself.
+- \`--after <target,...>\`, \`--env-file <path>\`, and \`--env KEY=VALUE,...\` customize the generated unit
+  (either scope): extra \`After=\` ordering targets, an \`EnvironmentFile=-<path>\` for secrets that never
+  appear in the unit text, and additional non-secret \`Environment=\` lines. \`--env\` refuses to override
+  \`HOME\`, \`PATH\`, or \`GATEWAY_CONFIG\`.
 - Every path in the generated unit (node, entry point, config, working directory) is absolute, and
   \`ExecStart\` always uses the explicit \`gateway start\` command. No secrets are written into the
   unit — the gateway reads \`~/.claude-gateway/.env\` itself.
@@ -179,9 +189,17 @@ never mistaken for one.
   and refuse to run non-interactively without it.
 - \`install\` verifies \`/health\` on the **local bind address**, and \`uninstall\` reports the state the
   manager actually reports afterwards — never the state that was intended.
-- (systemd) \`install\` refuses by default if a \`claude-gateway.service\` unit already exists and is
-  enabled or active at *system* scope (e.g. from provisioning outside this CLI) — it prints the exact
-  \`sudo systemctl disable --now claude-gateway.service\` to resolve it; pass \`--force\` to install anyway.
+- \`install\` exit codes: \`0\` fully healthy, \`1\` install/enable itself failed (or a validation/
+  confirmation gate refused — nothing was written), \`2\` install/enable succeeded but \`/health\`
+  never answered within the poll window. Distinguishing \`1\` from \`2\` by exit code alone means a
+  caller doesn't have to parse the JSON result on stdout just to tell "didn't happen" apart from
+  "happened, health unconfirmed".
+- (systemd, user-scope installs) \`install\` refuses by default if a \`claude-gateway.service\` unit
+  already exists and is enabled or active at *system* scope (e.g. from provisioning outside this
+  CLI) — it prints the exact \`sudo systemctl disable --now claude-gateway.service\` to resolve it;
+  pass \`--force\` to install anyway.
+- Re-running \`install\` against an already-active unit whose rendered content changed restarts it
+  automatically; unchanged content leaves the running unit alone.
 - After installing, \`gateway restart\`/\`stop\` detect and drive that same service.
 
 ## Versions & updates

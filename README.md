@@ -126,6 +126,12 @@ non-interactive run is refused rather than left hanging). Always stop the gatewa
 `service uninstall` or `systemctl --user stop claude-gateway.service` — a bare `kill <pid>` bypasses
 systemd's own stop tracking, so `Restart=always` brings it right back regardless of exit code.
 
+`install`'s exit code distinguishes three outcomes: `0` fully healthy, `1` install/enable itself
+failed or a validation/confirmation gate refused (nothing was written), `2` install/enable
+succeeded but `/health` never answered within the poll window. A script that only checks the exit
+code — not the JSON result on stdout — can still tell "didn't happen" apart from "happened, health
+unconfirmed" this way.
+
 `install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
 exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
 CLI) — installing a second, independent unit alongside it would race for the port on the next
@@ -136,13 +142,48 @@ The systemd path writes `~/.config/systemd/user/claude-gateway.service`. Run
 `loginctl enable-linger $USER` once if it must keep running while you're logged out.
 The unit sets `OOMPolicy=continue` so that an OOM-killed child process (e.g. a dev server an
 agent spawned on its own) doesn't take the whole gateway down with it — only `Restart=always`
-restarting the *gateway's own* process is intended. Installs from before this was added need to
-re-run `claude-gateway service install` to regenerate the unit file *and then*
-`systemctl --user restart claude-gateway.service` — reinstalling alone reloads systemd's unit
-definition but does not restart an already-running unit, so the live process keeps the old
-`OOMPolicy` until it's explicitly restarted (or the host reboots).
+restarting the *gateway's own* process is intended. Re-running `claude-gateway service install`
+against an already-active unit whose rendered content changed (a newer CLI version, or different
+flags) automatically restarts it via `systemctl ... restart`, so the update takes effect
+immediately; re-running with unchanged content leaves the running unit alone.
 Prefer [PM2](https://pm2.keymetrics.io)? `claude-gateway service install --manager pm2` registers
 and saves the process instead (run `pm2 startup` separately for boot-time start).
+
+**System-scope installs (for automated/infra provisioning)**
+
+Pass `--scope system` to install a root-owned unit at `/etc/systemd/system/claude-gateway.service`
+instead — for provisioning that needs the gateway to run under a fixed system account rather than
+whoever happens to run the install interactively. It requires:
+
+```bash
+sudo claude-gateway service install --scope system --run-as gwuser --yes
+```
+
+- The caller must already be root — `--scope system` never escalates via `sudo` on its own, and
+  refuses immediately if it isn't.
+- `--run-as <user>` is required and becomes the unit's `User=`; `WantedBy=` is
+  `multi-user.target` instead of `default.target`, so it starts at boot regardless of any login
+  session (the `loginctl enable-linger` hint is skipped — it's meaningless here).
+- `WorkingDirectory=`/`HOME=`/the config path all resolve to `--run-as`'s own home directory
+  (looked up via `getent passwd`, not the installing root process's home) — the unit runs as that
+  user, so its paths must be theirs. A `~/...` in `--config`/`--env-file` expands against that same
+  home. `$GATEWAY_CONFIG` from the installing (root) process's own environment is **not** consulted
+  for a system-scope install — only an explicit `--config` is — since it belongs to root's
+  environment, not `--run-as`'s. If the user's `~/.claude-gateway` doesn't exist yet, the install
+  creates it and `chown`s it to them; if it already exists but is owned by someone else (e.g. a
+  prior install used a different `--run-as`), ownership is reassigned to match. An
+  already-correctly-owned directory is left untouched. Refuses if `--run-as` doesn't resolve to a
+  real user on this host.
+- A system-scope install never refuses itself over the system-scope conflict check described
+  above — that check exists to protect a *user*-scope install from colliding with an externally
+  provisioned system-scope unit, and a system-scope install *is* that unit.
+- `--after <target1,target2>`, `--env-file <path>`, and `--env KEY=VALUE[,KEY=VALUE...]` further
+  customize the generated unit (both scopes): extra `After=` ordering targets, an
+  `EnvironmentFile=-<path>` for feeding secrets in without ever writing them into the unit text,
+  and additional non-secret `Environment=` lines. `--env` refuses to override `HOME`, `PATH`, or
+  `GATEWAY_CONFIG` (the installer's own reserved names) — use `--env-file` for anything sensitive.
+- `service status --scope system` and `service uninstall --scope system` work the same way against
+  the system-scope unit (uninstall also requires root).
 
 Once installed, drive it through the CLI — it detects whichever manager owns the process:
 

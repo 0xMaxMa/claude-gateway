@@ -12,6 +12,8 @@ jest.mock('fs', () => ({
   mkdirSync: jest.fn(),
   writeFileSync: jest.fn(),
   unlinkSync: jest.fn(),
+  readFileSync: jest.fn(),
+  chmodSync: jest.fn(),
 }));
 jest.mock('../../src/cli/http-client', () => ({
   ...jest.requireActual('../../src/cli/http-client'),
