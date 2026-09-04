@@ -466,7 +466,10 @@ describe('service — unit customization: --after / --env-file / --env (issue #4
       extraEnv: {},
       envFile: '/etc/claude-gateway/extra.env',
     });
-    expect(unit).toContain('EnvironmentFile=-"/etc/claude-gateway/extra.env"');
+    // Unquoted, like WorkingDirectory= — systemd reads a quoted value here as
+    // part of the path and rejects it (verified with `systemd-analyze verify`).
+    expect(unit).toContain('EnvironmentFile=-/etc/claude-gateway/extra.env');
+    expect(unit).not.toContain('EnvironmentFile=-"');
   });
 
   it('adds extra Environment="KEY=VALUE" lines, quoted the same way as the built-in vars', () => {
@@ -520,6 +523,53 @@ describe('service — unit customization: --after / --env-file / --env (issue #4
     expectNoStateChange();
     expect(stderr.join('')).toMatch(/installer itself/);
   });
+
+  it('rejects a line break in an --env value instead of letting it inject an extra unit directive', async () => {
+    const code = await runService(['install'], { manager: 'systemd', yes: true, env: 'FOO=bar\nExecStart=/bin/evil' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/line break/);
+  });
+
+  it('rejects a line break in an --after target', async () => {
+    const code = await runService(['install'], { manager: 'systemd', yes: true, after: 'docker.service\n[Service]\nExecStart=/bin/evil' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/line break/);
+  });
+
+  it('rejects a line break in --env-file', async () => {
+    const code = await runService(['install'], { manager: 'systemd', yes: true, 'env-file': '/etc/x\n[Service]\nExecStart=/bin/evil' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/line break/);
+  });
+
+  it('rejects a line break in --run-as', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', yes: true, 'run-as': 'gwuser\nExecStart=/bin/evil' });
+      expect(code).toBe(1);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(stderr.join('')).toMatch(/line break/);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+    }
+  });
+
+  it('rejects a NUL byte in an --env value the same way as a line break', async () => {
+    // Matches the settings.json value guard in src/session/process.ts, which
+    // rejects the same two byte classes for the same reason (NUL throws at
+    // spawn; a newline is never legitimate mid-value).
+    const code = await runService(['install'], { manager: 'systemd', yes: true, env: 'FOO=bar\0baz' });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/NUL byte/);
+  });
 });
 
 describe('service install/uninstall/status — --scope system (issue #457)', () => {
@@ -548,6 +598,19 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expectNoStateChange();
     expect(stderr.join('')).toMatch(/must be run as root/);
+  });
+
+  it('shows the --print preview for --scope system even when not root — a pure read must never need root', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(1000);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', print: true });
+      expect(code).toBe(0);
+      expect(stderr.join('')).toContain('User=gwuser');
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expectNoStateChange();
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+    }
   });
 
   it('refuses --scope system uninstall when not running as root', async () => {
@@ -607,6 +670,21 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
       expect(stderr.join('')).not.toMatch(/already exists at system scope/);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not double-space the systemctl hint for system scope (no --user token to join)', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+        if (file === 'systemctl' && args.includes('enable')) throw new Error('boom');
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(1);
+      expect(stderr.join('')).toContain('Inspect it with: systemctl status claude-gateway.service --no-pager');
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
     }
   });
 

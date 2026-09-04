@@ -168,7 +168,11 @@ export function renderSystemdUnit(spec: LaunchSpec, opts: SystemdUnitOptions = D
     .map(([key, value]) => `Environment="${key}=${q(value)}"`)
     .join('\n');
   const userLine = opts.scope === 'system' && opts.runAs ? `User=${opts.runAs}\n` : '';
-  const envFileLine = opts.envFile ? `EnvironmentFile=-"${q(opts.envFile)}"\n` : '';
+  // Unquoted, like WorkingDirectory= above: EnvironmentFile= takes a single
+  // bare path (with an optional leading `-`), not a quoted value — wrapping it
+  // in quotes makes systemd read the quote character as part of the path and
+  // reject it as "not absolute" (verified with `systemd-analyze verify`).
+  const envFileLine = opts.envFile ? `EnvironmentFile=-${opts.envFile}\n` : '';
   const wantedBy = opts.scope === 'system' ? 'multi-user.target' : 'default.target';
   return `[Unit]
 Description=Claude Gateway
@@ -231,6 +235,18 @@ function unitPath(scope: ServiceScope): string {
  *  it fails fast instead, so the caller stays in control of the escalation. */
 function isRoot(): boolean {
   return typeof process.getuid === 'function' && process.getuid() === 0;
+}
+
+/** `systemctl`/`journalctl` args for the given scope. */
+function scopeCliArgs(scope: ServiceScope): string[] {
+  return scope === 'user' ? ['--user'] : [];
+}
+
+/** Same, rendered for a hint message — with a trailing space so `system`
+ *  scope (an empty args array) doesn't leave a double space before the next
+ *  word, e.g. "journalctl  -u ...". */
+function scopeHintPrefix(scope: ServiceScope): string {
+  return scope === 'user' ? '--user ' : '';
 }
 
 function run(file: string, args: string[]): void {
@@ -353,6 +369,18 @@ function writeSystemScopeConflictRefusal(): void {
   );
 }
 
+/** Every flag parsed below is spliced into a single line of the rendered unit
+ *  verbatim (target names, env values, the run-as user, the env-file path) —
+ *  a NUL or newline in any of them would let the caller inject an extra
+ *  directive, or a whole new `[Section]`, into unit text meant to hold one
+ *  value (NUL also throws downstream at spawn — same convention as the
+ *  settings.json value guard in src/session/process.ts). Reject outright
+ *  rather than encoding: this codebase never trusts external input without
+ *  validating it at the boundary. */
+function hasUnsafeUnitChars(value: string): boolean {
+  return /[\0\r\n]/.test(value);
+}
+
 /** `--after <target1,target2,...>` — extra `After=` ordering targets, appended
  *  to the unit's default `network-online.target`. Comma-separated rather than
  *  a repeatable flag: the shared CLI parser (src/cli/args.ts) has no concept
@@ -365,10 +393,17 @@ function parseAfterTargets(flags: Record<string, string | boolean>): string[] | 
     process.stderr.write('--after requires a comma-separated list of systemd unit/target names.\n');
     return null;
   }
-  return raw
+  const targets = raw
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  for (const target of targets) {
+    if (hasUnsafeUnitChars(target)) {
+      process.stderr.write(`Invalid --after target "${target}" — must not contain a NUL byte or line break.\n`);
+      return null;
+    }
+  }
+  return targets;
 }
 
 /** `--env KEY=VALUE[,KEY=VALUE...]` — extra `Environment=` lines. Rejects
@@ -402,6 +437,10 @@ function parseExtraEnv(flags: Record<string, string | boolean>): Record<string, 
       process.stderr.write(`--env cannot override "${key}" — it is set by the installer itself.\n`);
       return null;
     }
+    if (hasUnsafeUnitChars(value)) {
+      process.stderr.write(`Invalid --env value for "${key}" — must not contain a NUL byte or line break.\n`);
+      return null;
+    }
     out[key] = value;
   }
   return out;
@@ -409,9 +448,17 @@ function parseExtraEnv(flags: Record<string, string | boolean>): Record<string, 
 
 /** `--env-file <path>` — adds `EnvironmentFile=-<path>` so a caller can feed
  *  secrets to the unit without ever putting them in its text. `-` means
- *  systemd tolerates the file being absent. */
-function parseEnvFile(flags: Record<string, string | boolean>): string | undefined {
-  return typeof flags['env-file'] === 'string' ? path.resolve(expandHome(flags['env-file'])) : undefined;
+ *  systemd tolerates the file being absent. Returns null (with a message
+ *  already on stderr) for a path containing a line break — everything else
+ *  reuses the null-on-invalid contract `resolveSystemdUnitOptions()` expects. */
+function parseEnvFile(flags: Record<string, string | boolean>): string | undefined | null {
+  if (typeof flags['env-file'] !== 'string') return undefined;
+  const resolved = path.resolve(expandHome(flags['env-file']));
+  if (hasUnsafeUnitChars(resolved)) {
+    process.stderr.write('Invalid --env-file path — must not contain a NUL byte or line break.\n');
+    return null;
+  }
+  return resolved;
 }
 
 /** Resolve and validate everything `renderSystemdUnit()` needs beyond the
@@ -424,6 +471,7 @@ function resolveSystemdUnitOptions(flags: Record<string, string | boolean>, scop
   const extraEnv = parseExtraEnv(flags);
   if (extraEnv === null) return null;
   const envFile = parseEnvFile(flags);
+  if (envFile === null) return null;
 
   let runAs: string | undefined;
   if (scope === 'system') {
@@ -431,8 +479,13 @@ function resolveSystemdUnitOptions(flags: Record<string, string | boolean>, scop
       process.stderr.write('--scope system requires --run-as <user>.\n');
       return null;
     }
+    if (hasUnsafeUnitChars(flags['run-as'])) {
+      process.stderr.write('Invalid --run-as value — must not contain a NUL byte or line break.\n');
+      return null;
+    }
     runAs = flags['run-as'];
   }
+
 
   return { scope, runAs, after, envFile, extraEnv };
 }
@@ -442,13 +495,6 @@ async function systemdInstall(
   config: CliConfigView,
   scope: ServiceScope,
 ): Promise<number> {
-  if (scope === 'system' && !isRoot()) {
-    process.stderr.write(
-      `--scope system must be run as root — it writes ${unitPath('system')} and can restart a system-wide unit.\n` +
-        'Re-run as root; this command never escalates via sudo on its own.\n',
-    );
-    return 1;
-  }
   const unitOpts = resolveSystemdUnitOptions(flags, scope);
   if (!unitOpts) return 1;
 
@@ -456,11 +502,23 @@ async function systemdInstall(
   if (!spec) return 1;
   const unit = renderSystemdUnit(spec, unitOpts);
   const file = unitPath(scope);
-  const scopeArgs = scope === 'user' ? ['--user'] : [];
+  const scopeArgs = scopeCliArgs(scope);
 
   // stderr, not stdout: stdout carries the JSON result (see printJson).
   printFilePreview(file, unit, (line) => process.stderr.write(line + '\n'));
   if (flags.print === true) return 0;
+
+  // The root check goes here, after the print short-circuit above, matching
+  // the systemScopeConflict() check below: `--print` is a pure read — it
+  // must always show the preview regardless of any other reason install
+  // itself would be refused.
+  if (scope === 'system' && !isRoot()) {
+    process.stderr.write(
+      `--scope system must be run as root — it writes ${unitPath('system')} and can restart a system-wide unit.\n` +
+        'Re-run as root; this command never escalates via sudo on its own.\n',
+    );
+    return 1;
+  }
 
   // The system-scope conflict guard exists to protect a *user-scope* install
   // from racing an externally-provisioned system-scope unit (issue #450). A
@@ -516,7 +574,7 @@ async function systemdInstall(
   } catch (err) {
     process.stderr.write(
       `Could not install or start the ${scope} service: ${(err as Error).message}\n` +
-        `Inspect it with: systemctl ${scopeArgs.join(' ')} status ${UNIT_NAME} --no-pager\n`,
+        `Inspect it with: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`,
     );
     return 1;
   }
@@ -529,7 +587,7 @@ async function systemdInstall(
       : `Installed ${UNIT_NAME}.\n` + `To keep it running after you log out: loginctl enable-linger ${os.userInfo().username}\n`,
   );
   if (!healthy) {
-    process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeArgs.join(' ')} -u ${UNIT_NAME} -n 50 --no-pager\n`);
+    process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`);
     return 1;
   }
   return 0;
@@ -541,7 +599,7 @@ async function systemdUninstall(flags: Record<string, string | boolean>, scope: 
     return 1;
   }
   const file = unitPath(scope);
-  const scopeArgs = scope === 'user' ? ['--user'] : [];
+  const scopeArgs = scopeCliArgs(scope);
   const before = systemdState(scope);
   if (!before.installed && !before.enabled && !before.active) {
     // Nothing to stop — prompting to stop a service that isn't there only
@@ -579,7 +637,7 @@ async function systemdUninstall(flags: Record<string, string | boolean>, scope: 
   const state = systemdState(scope);
   printJson({ manager: systemdManagerLabel(scope), unit: file, ...state }, flags);
   if (state.active || state.installed) {
-    process.stderr.write(`${UNIT_NAME} is still present — check: systemctl ${scopeArgs.join(' ')} status ${UNIT_NAME} --no-pager\n`);
+    process.stderr.write(`${UNIT_NAME} is still present — check: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`);
     return 1;
   }
   return 0;
