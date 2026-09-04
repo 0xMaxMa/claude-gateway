@@ -3,7 +3,7 @@ import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import type { CustomConnectorsStore } from '../connectors/custom-connectors-store';
 import { customSecretKey } from '../connectors/custom';
-import { setSecret } from '../connectors/token-env';
+import { getSecret, setSecret } from '../connectors/token-env';
 import { resolveGatewayPublicUrl } from '../config/public-url';
 import {
   discoverOAuthMetadata,
@@ -17,7 +17,17 @@ import {
   refreshTokenSecretKey,
   clientIdSecretKey,
   expiresAtSecretKey,
+  tokenGenerationSecretKey,
 } from '../connectors/oauth-refresh-sweep';
+
+/** Where a connector's registered redirect_uri is cached alongside its
+ *  client_id (below) — only reuse the cached client_id when this still
+ *  matches gateway.publicUrl's current callback URL; otherwise the cached
+ *  client is registered against a redirect_uri the provider would now
+ *  reject, so re-registering is the correct move, not an optimization to skip. */
+function clientRedirectUriSecretKey(id: string): string {
+  return customSecretKey(id, '__client_redirect_uri');
+}
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -104,7 +114,21 @@ export function createOauthConnectorsRouter(
 
     try {
       const metadata = await discoverOAuthMetadata(mcpUrl);
-      const clientId = await resolveClientId(metadata, id, redirectUri);
+      // Reuse a client this connector already registered via DCR, rather
+      // than minting (and orphaning, at the provider) a brand-new one on
+      // every Connect click — including retries after an abandoned attempt.
+      // Only valid while the redirect_uri it was registered with still
+      // matches; a changed gateway.publicUrl invalidates the cache.
+      const cachedClientId = getSecret(clientIdSecretKey(id));
+      const cachedRedirectUri = getSecret(clientRedirectUriSecretKey(id));
+      let clientId: string;
+      if (cachedClientId && cachedRedirectUri === redirectUri) {
+        clientId = cachedClientId;
+      } else {
+        clientId = await resolveClientId(metadata, id, redirectUri);
+        setSecret(clientIdSecretKey(id), clientId);
+        setSecret(clientRedirectUriSecretKey(id), redirectUri);
+      }
       const { codeVerifier, codeChallenge } = generatePkce();
       const state = pendingStore.create({ connectorId: id, metadata, clientId, redirectUri, codeVerifier });
       const scope = metadata.scopesSupported.length > 0 ? metadata.scopesSupported.join(' ') : 'offline_access';
@@ -209,6 +233,11 @@ export function createOauthCallbackRouter(
         expiresAtSecretKey(flow.connectorId),
         String(Date.now() + (token.expires_in ?? 3600) * 1000),
       );
+      // Bumped so the background refresh sweep (oauth-refresh-sweep.ts) can
+      // tell, after its own two-network-round-trip refresh, whether a fresher
+      // token landed here in the meantime — and if so, discard its own
+      // now-stale result instead of clobbering this one.
+      setSecret(tokenGenerationSecretKey(flow.connectorId), String(Date.now()));
       if (validReturnUrl) {
         res.redirect(302, validReturnUrl);
         return;
