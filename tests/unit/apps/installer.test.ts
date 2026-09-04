@@ -154,7 +154,16 @@ describe('AppInstaller', () => {
 
   function makeInstaller(
     spawnFn = successSpawn,
-    asyncSpawnFn = successAsyncSpawn,
+    // Derived from spawnFn by default (not a bare successAsyncSpawn) so a
+    // caller that only overrides the sync mock — e.g. to simulate a failing
+    // `docker compose build`/`up`, both of which now run on the async seam —
+    // still sees that behavior on the async path instead of silently
+    // succeeding. Callers that need the async and sync paths to disagree
+    // (e.g. the boot-restore tests) pass an explicit second argument, which
+    // this default never overrides.
+    asyncSpawnFn = jest.fn(
+      async (cmd: string, args: string[], opts?: object) => spawnFn(cmd, args, opts),
+    ),
     restoreConfig?: { buildTimeoutMs?: number; waitTimeoutMs?: number },
   ) {
     return new AppInstaller(
@@ -176,6 +185,12 @@ describe('AppInstaller', () => {
     spawn: typeof successSpawn,
     agentMgr: ReturnType<typeof makeAgentMgr>,
   ) {
+    // Same rationale as makeInstaller's default: derive the async mock from
+    // the sync one so a `compose build`/`up` failure simulated on the sync
+    // side (both now run on the async seam) is not silently swallowed.
+    const asyncSpawn = jest.fn(
+      async (cmd: string, args: string[], opts?: object) => spawn(cmd, args, opts),
+    );
     return new AppInstaller(
       registry,
       new RegistryClient(),
@@ -183,7 +198,7 @@ describe('AppInstaller', () => {
       spawn,
       appsDir,
       agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
-      successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      asyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
     );
   }
 
@@ -730,6 +745,111 @@ services:
 
       expect(job2.status).toBe('failed');
       expect(job2.error).toMatch(/already installed/);
+    });
+  });
+
+  // ─── docker compose build/up — async spawn seam (#452) ──────────────────
+
+  describe('install() — docker compose build/up run non-blocking', () => {
+    it('runs "docker compose build" and "compose up --wait" through the async spawn seam, never spawnSync', async () => {
+      // Regression for #452: install used the spawnSync-backed seam for both
+      // `docker compose build` and `docker compose up -d --wait`, freezing the
+      // gateway's event loop (verified live: /health did not respond for 85s
+      // during a real build) for the whole duration. Two independently-tracked
+      // mocks — one sync, one async — pin which seam each command travels
+      // through: on the pre-fix code every `docker` call, including build/up,
+      // arrives on the sync mock and the async mock never sees them.
+      const appDir = makeAppDir(srcDir, 'async-app');
+      const syncCalls: string[][] = [];
+      const asyncCalls: string[][] = [];
+      const spawn = jest.fn((_cmd: string, args: string[], _opts?: object) => {
+        syncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        asyncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeInstaller(spawn, asyncSpawn);
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect(job.status).toBe('completed');
+
+      const isComposeBuild = (a: string[]) => a[0] === 'compose' && a.includes('build');
+      const isComposeUp = (a: string[]) => a[0] === 'compose' && a.includes('up') && a.includes('--wait');
+
+      expect(syncCalls.some(isComposeBuild)).toBe(false);
+      expect(syncCalls.some(isComposeUp)).toBe(false);
+      expect(asyncCalls.some(isComposeBuild)).toBe(true);
+      expect(asyncCalls.some(isComposeUp)).toBe(true);
+    });
+
+    it('runs the agent pre-pull ("docker pull debian:stable-slim") through the async spawn seam too', async () => {
+      // Found in independent review of #452's fix: an app that declares an
+      // agent service triggers a pre-pull of the agent base image inside the
+      // same install job, still issued on `this.run()` (spawnSync) even after
+      // build/up moved to the async seam — up to a 300s block on a host
+      // without the image cached.
+      const agentMgr = makeAgentMgr('never-conflicts');
+      const syncCalls: string[][] = [];
+      const asyncCalls: string[][] = [];
+      const spawn = jest.fn((cmd: string, args: string[], opts?: { cwd?: string }) => {
+        syncCalls.push(args);
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${'a'.repeat(40)}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && opts?.cwd) {
+          fs.writeFileSync(
+            path.join(opts.cwd, 'app.yaml'),
+            `
+apiVersion: apps.getpod.ai/v1
+name: agent-prepull-app
+version: 1.0.0
+commit: "${'a'.repeat(40)}"
+services:
+  app:
+    image: nginx:1.25
+    ports:
+      - name: api
+        host: 5702
+        container: 5702
+        type: api
+    healthcheck:
+      test: wget -qO- http://localhost:5702/health
+      interval: 30s
+  agent:
+    path: ./agent
+    name: prepull-bot
+`.trim(),
+            'utf-8',
+          );
+          fs.mkdirSync(path.join(opts.cwd, 'agent'), { recursive: true });
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        asyncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = new AppInstaller(
+        registry,
+        new RegistryClient(),
+        callbacks,
+        spawn as unknown as ConstructorParameters<typeof AppInstaller>[3],
+        appsDir,
+        agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
+        asyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      );
+
+      const job = await waitForJob(
+        installer,
+        installer.install({ githubUrl: 'https://github.com/test/agent-prepull-app' }),
+        5000,
+      );
+      expect(job.status).toBe('completed');
+
+      const isPrepull = (a: string[]) => a[0] === 'pull' && a.includes('debian:stable-slim');
+      expect(syncCalls.some(isPrepull)).toBe(false);
+      expect(asyncCalls.some(isPrepull)).toBe(true);
     });
   });
 
@@ -2051,6 +2171,87 @@ services:
       expect(rollbackUp?.args).toContain('--build');
       expect(job.logs.some((l) => l.includes('could not preserve image'))).toBe(true);
       expect(job.logs.some((l) => l.includes('was not preserved'))).toBe(true);
+    });
+
+    it('runs the rollback "compose up --build" through the async spawn seam, not spawnSync', async () => {
+      // Found in manual review of #452's fix: the rebuild-on-rollback branch
+      // above (previous test) still called `this.run()` (spawnSync) directly
+      // instead of the async seam composeUp()'s own `up`/`build` steps moved
+      // to, so a rollback that needs to rebuild could block the event loop for
+      // up to 10 minutes — the exact failure #452 reports, but during error
+      // recovery, which is the worst moment for the gateway to stop serving.
+      const appName = 'rollback-async-app';
+      const state = { head: 'a'.repeat(40), version: '1.0.0', upCalls: 0, failNewUp: false };
+      const dockerRespond = (args: string[], spawnOpts?: { cwd?: string }) => {
+        if (args.includes('config') && args.includes('--format') && spawnOpts?.cwd) {
+          return { stdout: JSON.stringify({ services: { app: { volumes: [] } } }), stderr: '', status: 0 };
+        }
+        if (args.includes('images') && args.includes('json')) {
+          const row = { ID: 'previmageid0000', Repository: `${appName}-app`, Tag: 'latest' };
+          return { stdout: JSON.stringify([row]), stderr: '', status: 0 };
+        }
+        // `docker image tag` fails, so the preserved image has no backup ref —
+        // restorePreservedImages() can't put it back, forcing a rebuild.
+        if (args[0] === 'image' && args[1] === 'tag') {
+          return { stdout: '', stderr: 'No such image', status: 1 };
+        }
+        if (args.includes('up')) {
+          state.upCalls += 1;
+          if (state.failNewUp && state.upCalls === 1) {
+            return { stdout: '', stderr: 'new stack failed', status: 1 };
+          }
+        }
+        return { stdout: '', stderr: '', status: 0 };
+      };
+      const syncCalls: string[][] = [];
+      const spawn = jest.fn((cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd === 'git' && args[0] === 'ls-remote') {
+          return { stdout: `${state.head}\tHEAD\n`, stderr: '', status: 0 };
+        }
+        if (cmd === 'git' && args[0] === 'checkout' && spawnOpts?.cwd) {
+          fs.writeFileSync(path.join(spawnOpts.cwd, 'app.yaml'), `
+apiVersion: apps.getpod.ai/v1
+name: ${appName}
+version: ${state.version}
+commit: "${state.head}"
+services:
+  app:
+    build: .
+    ports:
+      - name: api
+        host: 5413
+        container: 5413
+        type: api
+    healthcheck:
+      test: exit 0
+      interval: 30s
+`.trim(), 'utf-8');
+        }
+        if (cmd !== 'docker') return { stdout: '', stderr: '', status: 0 };
+        syncCalls.push(args);
+        return dockerRespond(args, spawnOpts);
+      });
+      const asyncCalls: string[][] = [];
+      const asyncSpawn = jest.fn(async (cmd: string, args: string[], spawnOpts?: { cwd?: string }) => {
+        if (cmd !== 'docker') return { stdout: '', stderr: '', status: 0 };
+        asyncCalls.push(args);
+        return dockerRespond(args, spawnOpts);
+      });
+      const installer = makeInstaller(spawn, asyncSpawn);
+      await waitForJob(installer, installer.install({ githubUrl: `https://github.com/test/${appName}` }), 5000);
+
+      state.head = 'b'.repeat(40);
+      state.version = '2.0.0';
+      state.failNewUp = true;
+      state.upCalls = 0;
+      syncCalls.length = 0;
+      asyncCalls.length = 0;
+      const job = await waitForJob(installer, installer.update(appName), 5000);
+      expect(job.status).toBe('failed');
+
+      const isRollbackUp = (a: string[]) => a.includes('up') && !a.includes('--wait') && a.includes('--build');
+      expect(syncCalls.some(isRollbackUp)).toBe(false);
+      expect(asyncCalls.some(isRollbackUp)).toBe(true);
     });
 
     it('updates an app whose on-disk dir name ≠ app.yaml name (legacy install, issue #275)', async () => {
