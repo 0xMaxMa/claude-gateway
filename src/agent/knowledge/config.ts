@@ -128,15 +128,25 @@ export const REFLECTION_DEFAULTS: ResolvedKnowledgeReflectionCfg = {
 export function resolveReflectionConfig(
   agentCfg?: KnowledgeReflectionConfig,
   globalCfg?: KnowledgeReflectionConfig,
+  /** `gateway.timezone` — the shared default when neither override sets `timezone`. */
+  gatewayTimezone?: string,
 ): ResolvedKnowledgeReflectionCfg {
   const d = REFLECTION_DEFAULTS;
-  const rawTz = pick(agentCfg?.timezone, globalCfg?.timezone, d.timezone);
+  // Each precedence level is validated in turn — an invalid-but-present agent/global
+  // override does not count as "set" and falls through to the next level (issue #462 review).
+  const timezone = isValidTimezone(agentCfg?.timezone)
+    ? agentCfg.timezone
+    : isValidTimezone(globalCfg?.timezone)
+      ? globalCfg.timezone
+      : isValidTimezone(gatewayTimezone)
+        ? gatewayTimezone
+        : d.timezone;
   return {
     enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
     dayOfWeek: numOr(pick(agentCfg?.dayOfWeek, globalCfg?.dayOfWeek, d.dayOfWeek), d.dayOfWeek, 0, 6),
     hour: numOr(pick(agentCfg?.hour, globalCfg?.hour, d.hour), d.hour, 0, 23),
     minute: numOr(pick(agentCfg?.minute, globalCfg?.minute, d.minute), d.minute, 0, 59),
-    timezone: isValidTimezone(rawTz) ? rawTz : d.timezone,
+    timezone,
     maxClustersPerRun: numOr(
       pick(agentCfg?.maxClustersPerRun, globalCfg?.maxClustersPerRun, d.maxClustersPerRun),
       d.maxClustersPerRun,

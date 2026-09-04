@@ -46,6 +46,32 @@ describe('resolveSkillLearningConfig — precedence (agent > global > default)',
     expect(resolveSkillLearningConfig(undefined, { pruneTimezone: '' }).pruneTimezone).toBe('UTC');
     expect(resolveSkillLearningConfig({ pruneTimezone: 'Asia/Bangkok' }).pruneTimezone).toBe('Asia/Bangkok'); // valid preserved
   });
+
+  it('gateway.timezone is the shared fallback when neither override sets pruneTimezone (issue #462)', () => {
+    expect(resolveSkillLearningConfig(undefined, undefined, 'Asia/Bangkok').pruneTimezone).toBe('Asia/Bangkok');
+  });
+
+  it('a per-feature pruneTimezone (agent or global) still wins over gateway.timezone', () => {
+    expect(resolveSkillLearningConfig({ pruneTimezone: 'America/New_York' }, undefined, 'Asia/Bangkok').pruneTimezone).toBe(
+      'America/New_York',
+    );
+    expect(resolveSkillLearningConfig(undefined, { pruneTimezone: 'Europe/London' }, 'Asia/Bangkok').pruneTimezone).toBe(
+      'Europe/London',
+    );
+  });
+
+  it('an invalid gateway.timezone falls back to UTC, not to the invalid string', () => {
+    expect(resolveSkillLearningConfig(undefined, undefined, 'Not/AZone').pruneTimezone).toBe('UTC');
+  });
+
+  it('an invalid per-feature pruneTimezone falls through to gateway.timezone, not straight to UTC', () => {
+    expect(resolveSkillLearningConfig({ pruneTimezone: 'Not/AZone' }, undefined, 'Asia/Bangkok').pruneTimezone).toBe(
+      'Asia/Bangkok',
+    );
+    expect(resolveSkillLearningConfig(undefined, { pruneTimezone: 'Not/AZone' }, 'Asia/Bangkok').pruneTimezone).toBe(
+      'Asia/Bangkok',
+    );
+  });
 });
 
 describe('isValidTimezone', () => {

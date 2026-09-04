@@ -753,6 +753,7 @@ export class SessionProcess extends EventEmitter {
     const personal = resolveDreamingConfig(
       this.agentConfig.dreaming,
       this.gatewayConfig.gateway.dreaming,
+      this.gatewayConfig.gateway.timezone,
     ).staleness;
     const shared = resolveSharedConfig(
       this.agentConfig.knowledge?.shared,

@@ -12,6 +12,7 @@ import {
   writeSharedNote,
   sharedNoteFilename,
   ArchiveDB,
+  resolveReflectionConfig,
 } from '../../src/agent/knowledge';
 import type { ResolvedKnowledgeSharedCfg } from '../../src/agent/knowledge';
 
@@ -151,5 +152,30 @@ describe('indexSharedArchive', () => {
     } finally {
       fs.rmSync(cfg.root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('resolveReflectionConfig — gateway.timezone shared default (issue #462)', () => {
+  it('gateway.timezone is the shared fallback when neither override sets timezone', () => {
+    expect(resolveReflectionConfig(undefined, undefined, 'Asia/Bangkok').timezone).toBe('Asia/Bangkok');
+  });
+
+  it('a per-feature timezone (agent or global) still wins over gateway.timezone', () => {
+    expect(resolveReflectionConfig({ timezone: 'America/New_York' }, undefined, 'Asia/Bangkok').timezone).toBe(
+      'America/New_York',
+    );
+    expect(resolveReflectionConfig(undefined, { timezone: 'Europe/London' }, 'Asia/Bangkok').timezone).toBe(
+      'Europe/London',
+    );
+  });
+
+  it('an invalid per-feature timezone falls through to gateway.timezone, not straight to UTC', () => {
+    expect(resolveReflectionConfig({ timezone: 'Not/AZone' }, undefined, 'Asia/Bangkok').timezone).toBe(
+      'Asia/Bangkok',
+    );
+  });
+
+  it('an invalid gateway.timezone falls back to UTC, not to the invalid string', () => {
+    expect(resolveReflectionConfig(undefined, undefined, 'Not/AZone').timezone).toBe('UTC');
   });
 });

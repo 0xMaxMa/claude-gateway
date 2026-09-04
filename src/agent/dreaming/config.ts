@@ -85,9 +85,20 @@ export function resolveStalenessConfig(
 export function resolveDreamingConfig(
   agentCfg?: DreamingConfig,
   globalCfg?: DreamingConfig,
+  /** `gateway.timezone` — the shared default when neither override sets `dreamTimezone`. */
+  gatewayTimezone?: string,
 ): ResolvedDreamingCfg {
   const d = DREAMING_DEFAULTS;
-  const rawTz = pick(agentCfg?.dreamTimezone, globalCfg?.dreamTimezone, d.dreamTimezone);
+  // Each precedence level is validated in turn — an invalid-but-present agent/global
+  // override does not count as "set" and falls through to the next level, same as
+  // resolveSkillLearningConfig and AppInstaller's cleanupTimezone (issue #462 review).
+  const dreamTimezone = isValidTimezone(agentCfg?.dreamTimezone)
+    ? agentCfg.dreamTimezone
+    : isValidTimezone(globalCfg?.dreamTimezone)
+      ? globalCfg.dreamTimezone
+      : isValidTimezone(gatewayTimezone)
+        ? gatewayTimezone
+        : d.dreamTimezone;
   const mode = pick(agentCfg?.mode, globalCfg?.mode, d.mode);
   return {
     enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
@@ -96,7 +107,7 @@ export function resolveDreamingConfig(
     dreamHour: numOr(pick(agentCfg?.dreamHour, globalCfg?.dreamHour, d.dreamHour), d.dreamHour, 0, 23),
     // dreamMinute pairs with dreamHour for minute-level scheduling — clamp 0..59.
     dreamMinute: numOr(pick(agentCfg?.dreamMinute, globalCfg?.dreamMinute, d.dreamMinute), d.dreamMinute, 0, 59),
-    dreamTimezone: isValidTimezone(rawTz) ? rawTz : 'UTC',
+    dreamTimezone,
     quietMinutes: numOr(pick(agentCfg?.quietMinutes, globalCfg?.quietMinutes, d.quietMinutes), d.quietMinutes, 0, Infinity),
     lookbackDays: numOr(pick(agentCfg?.lookbackDays, globalCfg?.lookbackDays, d.lookbackDays), d.lookbackDays, 0, Infinity),
     maxChangesPerRun: numOr(pick(agentCfg?.maxChangesPerRun, globalCfg?.maxChangesPerRun, d.maxChangesPerRun), d.maxChangesPerRun, 0, Infinity),

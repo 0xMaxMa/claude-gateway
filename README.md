@@ -318,6 +318,17 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
 }
 ```
 
+### `gateway.timezone` (optional)
+
+IANA timezone, default `"UTC"`. Shared default for the per-feature scheduling
+timezones below when they are unset or invalid: `gateway.history.cleanupTimezone`,
+`gateway.appBackup.cleanupTimezone`, `gateway.skillLearning.pruneTimezone`,
+`gateway.dreaming.dreamTimezone`, and `gateway.knowledge.reflection.timezone`. A
+valid per-feature field still overrides this shared default for that one feature;
+an invalid per-feature value falls through to `gateway.timezone` rather than being
+treated as set. An invalid `gateway.timezone` itself falls back to `"UTC"` rather
+than crashing that scheduler.
+
 ### `gateway.publicUrl` (optional)
 
 The externally reachable gateway base URL. Set it manually to enable short-lived
@@ -395,7 +406,7 @@ Global default retention policy. Can be overridden per-agent with an `history` k
 | `retentionDays` | `null` (keep forever) | Delete messages older than N days on each cleanup cycle |
 | `maxHistoryMessages` | `50` | Max history messages re-injected into a session at spawn. Lower it to shrink the context loaded at session start. `0` = inject no history |
 | `cleanupHour` | `3` | Hour of day to run cleanup (24h, in `cleanupTimezone`) |
-| `cleanupTimezone` | `"UTC"` | IANA timezone for the cleanup schedule |
+| `cleanupTimezone` | `"UTC"` | IANA timezone for the cleanup schedule; falls back to `gateway.timezone` when unset or invalid |
 
 Per-agent override example:
 ```json
@@ -484,7 +495,7 @@ Controls [skill self-improvement](#skill-self-improvement) — agents learning r
 | `maxAgeDays` | `30` | Curator prunes auto-skills older than this (with too few uses) |
 | `minUsesToKeep` | `2` | Auto-skills used fewer times than this are prune candidates |
 | `maxReviewsPerDay` | `20` | Per-day cap on background review runs |
-| `pruneHour` / `pruneTimezone` | `3` / `UTC` | When the daily curator runs |
+| `pruneHour` / `pruneTimezone` | `3` / `UTC` | When the daily curator runs; `pruneTimezone` falls back to `gateway.timezone` when unset or invalid |
 | `notify` | `true` | Push a per-write ping to every configured channel (see [notifications](#skill-self-improvement)); the `SKILLS_LEARNED.md` diary is written regardless |
 
 ```json
@@ -539,7 +550,7 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
 | `mode` | `"auto"` | `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative); `propose` = diary-only dry-run |
-| `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
+| `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → `gateway.timezone`, then UTC); `dreamTimezone` falls back to `gateway.timezone` when unset or invalid |
 | `dreamMinute` | `0` | Minute-of-hour the dream fires at, paired with `dreamHour` (0–59). Set with `staggerWindowMinutes: 0` to fire at an exact `HH:MM` (e.g. for a controlled re-test) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |
@@ -579,7 +590,7 @@ Two read-only MCP tools expose it to the agent: **`memory_search`** (keyword/FTS
 | `shared.graph` | `false` | Compile the memory-wiki graph + dashboards over the shared vault to `<vault>/reports/*.md` (opt-in). Independent of the dashboard **Knowledge base** tab, which computes its graph on-demand |
 | `shared.staleness` | *(object)* | Shared-note TTL lifecycle GC; uses the same fields/defaults as `dreaming.staleness` (whole notes only; no numeric `supersedes #N` syntax) |
 | `reflection.enabled` | `true` | Enable the singleton, per-shared-vault reflection scheduler (daily timer; see cadence note below) |
-| `reflection.dayOfWeek` / `hour` / `minute` / `timezone` | `0` / `4` / `0` / `UTC` | `hour`/`minute` is the **daily** staleness-GC slot; `dayOfWeek` selects the weekday that additionally runs LLM consolidation (Sunday 04:00 UTC by default; invalid timezone falls back to UTC) |
+| `reflection.dayOfWeek` / `hour` / `minute` / `timezone` | `0` / `4` / `0` / `UTC` | `hour`/`minute` is the **daily** staleness-GC slot; `dayOfWeek` selects the weekday that additionally runs LLM consolidation (Sunday 04:00 UTC by default; invalid timezone falls back to `gateway.timezone`, then `UTC`) |
 | `reflection.maxClustersPerRun` / `reviewModel` | `5` / `claude-haiku-4-5-…` | Hard cap on changed linked-note clusters per consolidation run and the bounded synthesis model |
 
 **Shared KB.** A shared SQLite/FTS5 vault outside any single agent's workspace lets agents build a common knowledge base. Notes under `<root>/<project>/notes/*.md` are indexed and reachable via `memory_search` with `corpus:"shared"` (the shared vault) or `corpus:"all"` (this agent's memory + shared, merged by relevance). Concurrent writers are safe without a lock — atomic note writes (temp+rename) plus a cross-process `PRAGMA busy_timeout` on the index. Per-agent overrides under the agent's own `knowledge` block. The MCP layer runs under Bun, so the read tools query `kb.sqlite` via `bun:sqlite`. Two write paths feed the vault, sharing one freeform-name namespace (issue #386, no agent-id prefix, no ownership scoping): the nightly dreaming promoter (gated by `mode:"auto"`; it promotes only content that carries a real fact — content that is nothing but `MEMORY.md` index-pointer bullets is skipped, since those links resolve only inside the promoting agent's own workspace — and names each note after the proposal's `topic` slug when the reviewer supplied one, falling back to its `reason`, so a recurring fact updates the same note across nights instead of piling up near-duplicates; a fallback name that reads as an editing instruction rather than the name of a fact is passed over, and the note is named from the fact itself instead — the promotion is only abandoned when nothing nameable remains, and every skip is logged — including a write the note-size cap refuses and an unexpected write failure. A name that doesn't collide is checked against a near-duplicate search, but an unattended **merge** now also requires real token containment against the candidate — below that bar the fact gets its own note, since two notes are recoverable while two unrelated facts fused into one are not. `[[wikilink]]`s to related notes use a lower bar than merges, because a link is additive where a merge is destructive — and they are attached whether the fact merges or lands as a new note, so a note below the merge bar is never a disconnected graph node. Containment is scored against each candidate's full body rather than the matched chunk, though against a capped seed — the bar means "half of the fact's leading topic words are already here", not half of the whole fact. Retired `stale__*` notes are never merge targets; a recurrence of a retired name folds the retired body back in and removes the twin on both the create and the update path, because a retired note stays searchable and a twin beside a live note of the same name would answer every query twice forever. The twin is only dropped once the merged write lands (issue #398)) and the **`memory_shared_create`**/**`memory_shared_get`**/**`memory_shared_update`**/**`memory_shared_delete`** MCP tools, which let any agent create, read, update, or delete any note on demand regardless of `mode`. `memory_shared_create` warns instead of writing when it finds content-similar existing notes (pass `confirm:true` to proceed — related notes get `[[wikilink]]`ed into the new note rather than left disconnected); `memory_shared_update` warns instead of writing when the edit would drop 50%+ of the existing note's lines (same `confirm:true` escape hatch). Immediate reindex after every write or delete.

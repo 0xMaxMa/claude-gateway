@@ -20,6 +20,7 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 import { isBuiltinCommand } from './builtin-commands';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
+import { isValidTimezone } from './skill-learning/config';
 import {
   TurnStreamRegistry,
   callbackSink,
@@ -3128,7 +3129,14 @@ export class AgentRunner extends EventEmitter {
       gw.history?.retentionDays,
     );
     const cleanupHour = gw.history?.cleanupHour ?? 0;
-    const cleanupTimezone = gw.history?.cleanupTimezone ?? 'UTC';
+    // Each precedence level is validated in turn — an invalid-but-present
+    // cleanupTimezone does not count as "set" and falls through to gw.timezone
+    // rather than jumping straight to UTC (issue #462 review).
+    const cleanupTimezone = isValidTimezone(gw.history?.cleanupTimezone)
+      ? gw.history.cleanupTimezone
+      : isValidTimezone(gw.timezone)
+        ? gw.timezone
+        : 'UTC';
     const agentMediaRoot = MediaStore.agentMediaRoot(this.agentsBaseDir, this.agentConfig.id);
     const logPath = path.join(this.agentDir, 'cleanup.log');
 

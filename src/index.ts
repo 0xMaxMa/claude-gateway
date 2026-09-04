@@ -281,6 +281,7 @@ async function startAgent(
       sharedSkillsDir,
       globalCfg: gatewayConfig.gateway.skillLearning,
       agentCfg: agentConfig.skillLearning,
+      gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       channels: {
         telegramBotToken: agentConfig.telegram?.botToken,
@@ -302,6 +303,7 @@ async function startAgent(
       workspaceDir: agentConfig.workspace,
       globalCfg: gatewayConfig.gateway.dreaming,
       agentCfg: agentConfig.dreaming,
+      gatewayTimezone: gatewayConfig.gateway.timezone,
       logger,
       // K4 auto-applier net-negative gate uses the same soft budgets as compose.
       memoryBudgetChars: memoryBudget.memoryBudgetChars,
@@ -319,7 +321,7 @@ async function startAgent(
         memoryBudget.writeRouting === true
           ? makeRouteOut(
               makeClaudeSpawn(
-                resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming)
+                resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming, gatewayConfig.gateway.timezone)
                   .reviewModel,
               ),
             )
@@ -350,6 +352,7 @@ async function startAgent(
         const reflectionCfg = resolveReflectionConfig(
           agentConfig.knowledge?.reflection,
           gatewayConfig.gateway.knowledge?.reflection,
+          gatewayConfig.gateway.timezone,
         );
         const reflection = new SharedReflectionManager({
           sharedCfg,
@@ -786,6 +789,7 @@ async function main(): Promise<void> {
     config.gateway?.appBackup,
     undefined,
     config.gateway?.appRestore,
+    config.gateway.timezone,
   );
 
   // Reclaim update scratch dirs a previous crash left beside an install path.

@@ -5,6 +5,7 @@ import { AppInstaller, InstallerCallbacks, JobState, AppBackupConfig } from '../
 import { AppsRegistry, AppEntry } from '../../../src/apps/registry';
 import { RegistryClient } from '../../../src/apps/registry-client';
 import { ComposeSocket } from '../../../src/apps/compose-generator';
+import * as historyCleanup from '../../../src/history/cleanup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -137,7 +138,7 @@ describe('AppInstaller — backup/restore', () => {
     registry = new AppsRegistry(path.join(tmpDir, 'apps.json'));
   });
 
-  function makeInstaller(spawnFn: jest.Mock, cfg?: AppBackupConfig) {
+  function makeInstaller(spawnFn: jest.Mock, cfg?: AppBackupConfig, gatewayTimezone?: string) {
     return new AppInstaller(
       registry,
       new RegistryClient(),
@@ -149,6 +150,8 @@ describe('AppInstaller — backup/restore', () => {
       undefined, // housekeepingConfig
       cfg,
       backupsDir,
+      undefined, // appRestoreConfig
+      gatewayTimezone,
     );
   }
 
@@ -621,6 +624,37 @@ describe('AppInstaller — backup/restore', () => {
       cancel = installer.startBackupCleanup();
     }).not.toThrow();
     cancel();
+  });
+
+  it('U-AGE-TZ-GW: gateway.timezone is the shared fallback when cleanupTimezone is unset (issue #462)', () => {
+    const spy = jest.spyOn(historyCleanup, 'msUntilNextHour');
+    const installer = makeInstaller(jest.fn(), { retention: 3, maxAgeDays: 30 }, 'Asia/Bangkok');
+    const cancel = installer.startBackupCleanup();
+    expect(spy).toHaveBeenCalledWith(0, 'Asia/Bangkok');
+    cancel();
+    spy.mockRestore();
+  });
+
+  it('U-AGE-TZ-GW-OVERRIDE: an explicit cleanupTimezone still wins over gateway.timezone', () => {
+    const spy = jest.spyOn(historyCleanup, 'msUntilNextHour');
+    const installer = makeInstaller(
+      jest.fn(),
+      { retention: 3, maxAgeDays: 30, cleanupTimezone: 'Europe/London' },
+      'Asia/Bangkok',
+    );
+    const cancel = installer.startBackupCleanup();
+    expect(spy).toHaveBeenCalledWith(0, 'Europe/London');
+    cancel();
+    spy.mockRestore();
+  });
+
+  it('U-AGE-TZ-GW-INVALID: an invalid gateway.timezone falls back to UTC, not the invalid string', () => {
+    const spy = jest.spyOn(historyCleanup, 'msUntilNextHour');
+    const installer = makeInstaller(jest.fn(), { retention: 3, maxAgeDays: 30 }, 'Not/A_Zone');
+    const cancel = installer.startBackupCleanup();
+    expect(spy).toHaveBeenCalledWith(0, 'UTC');
+    cancel();
+    spy.mockRestore();
   });
 
   it('U-AGE-5: startBackupCleanup returns a no-op canceller when both caps are disabled', () => {
