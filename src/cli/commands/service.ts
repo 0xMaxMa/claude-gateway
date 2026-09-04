@@ -6,7 +6,6 @@ import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { createRl, ask, printFilePreview } from '../prompt';
 import { probeHealth } from '../health';
 import { printJson } from '../output';
-import { expandHome } from '../../utils/paths';
 import { writeCommandHelp } from '../output';
 
 /**
@@ -55,9 +54,25 @@ function gatewayHome(home: string = os.homedir()): string {
   return path.join(home, '.claude-gateway');
 }
 
-function configPath(flags: Record<string, string | boolean>, home: string = os.homedir()): string {
-  const explicit = typeof flags.config === 'string' ? flags.config : process.env.GATEWAY_CONFIG;
-  return path.resolve(expandHome(explicit ?? path.join(gatewayHome(home), 'config.json')));
+/** Same `~`/`~/...` expansion as the shared `expandHome()` (src/utils/paths.ts),
+ *  but against an explicit `home` rather than always `os.homedir()`. That
+ *  shared helper is used by the server too and means "this process's own
+ *  home" everywhere else — for a `--scope system --run-as <user>` install,
+ *  this process's own home is root's, not the target user's, so a `~` in
+ *  `--config`/`--env-file` needs its own expansion here instead. */
+function expandHomeAs(p: string, home: string): string {
+  if (p === '~') return home;
+  if (p.startsWith('~/')) return path.join(home, p.slice(2));
+  return p;
+}
+
+/** `allowEnvFallback` is false for a `--scope system` install: `$GATEWAY_CONFIG`
+ *  belongs to the *installing* (root) process's environment, which has no
+ *  reliable relationship to `--run-as`'s intended config — inheriting it
+ *  would silently point the unit at a path the run-as user can't read. */
+function configPath(flags: Record<string, string | boolean>, home: string = os.homedir(), allowEnvFallback: boolean = true): string {
+  const explicit = typeof flags.config === 'string' ? flags.config : allowEnvFallback ? process.env.GATEWAY_CONFIG : undefined;
+  return path.resolve(expandHomeAs(explicit ?? path.join(gatewayHome(home), 'config.json'), home));
 }
 
 /**
@@ -136,8 +151,13 @@ function resolveRunAsUser(username: string): { uid: number; gid: number; home: s
  *  `home` defaults to the installing process's own home. A `--scope system
  *  --run-as <user>` install passes that user's real home instead — the unit
  *  runs as them (`User=<user>`), so its WorkingDirectory/HOME/config path
- *  must be theirs, not the root process that wrote the unit. */
-export function resolveLaunchSpec(flags: Record<string, string | boolean>, home: string = os.homedir()): LaunchSpec | null {
+ *  must be theirs, not the root process that wrote the unit. `allowEnvConfig`
+ *  is false for that same case — see `configPath()`. */
+export function resolveLaunchSpec(
+  flags: Record<string, string | boolean>,
+  home: string = os.homedir(),
+  allowEnvConfig: boolean = true,
+): LaunchSpec | null {
   // dist/cli/commands/service.js → dist/entry.js, the thin dispatcher that
   // loads only the side it needs. index.js is still a working boot entry and is
   // used when a partially-updated install predates the split, so a unit is
@@ -157,7 +177,7 @@ export function resolveLaunchSpec(flags: Record<string, string | boolean>, home:
     node,
     entry,
     cwd: gatewayHome(home),
-    config: configPath(flags, home),
+    config: configPath(flags, home, allowEnvConfig),
     home,
     pathEnv: servicePath(home),
   };
@@ -503,8 +523,10 @@ function parseExtraEnv(flags: Record<string, string | boolean>): Record<string, 
  *  secrets to the unit without ever putting them in its text. `-` means
  *  systemd tolerates the file being absent. Returns null (with a message
  *  already on stderr) for a path containing a line break — everything else
- *  reuses the null-on-invalid contract `resolveSystemdUnitOptions()` expects. */
-function parseEnvFile(flags: Record<string, string | boolean>): string | undefined | null {
+ *  reuses the null-on-invalid contract `resolveSystemdUnitOptions()` expects.
+ *  `home` expands a leading `~` — the --run-as user's home for a system-scope
+ *  install, not the installing (root) process's own. */
+function parseEnvFile(flags: Record<string, string | boolean>, home: string): string | undefined | null {
   const raw = flags['env-file'];
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string' || raw.trim() === '') {
@@ -516,7 +538,7 @@ function parseEnvFile(flags: Record<string, string | boolean>): string | undefin
     process.stderr.write('--env-file requires a path.\n');
     return null;
   }
-  const resolved = path.resolve(expandHome(raw));
+  const resolved = path.resolve(expandHomeAs(raw, home));
   if (hasUnsafeUnitChars(resolved)) {
     process.stderr.write('Invalid --env-file path — must not contain a NUL byte or line break.\n');
     return null;
@@ -524,36 +546,54 @@ function parseEnvFile(flags: Record<string, string | boolean>): string | undefin
   return resolved;
 }
 
-/** Resolve and validate everything `renderSystemdUnit()` needs beyond the
- *  shared LaunchSpec triple. Returns null (with a message already on stderr)
- *  on any invalid input — install must never write a unit from a half-parsed
- *  flag set. */
-function resolveSystemdUnitOptions(flags: Record<string, string | boolean>, scope: ServiceScope): SystemdUnitOptions | null {
+/** Validate/trim `--run-as`'s format and its combination with `scope` — not
+ *  whether the named user actually exists (that's `resolveRunAsUser()`, a
+ *  separate concern this function knows nothing about, since it also needs
+ *  no privilege but does need a subprocess call). Returns `undefined` when
+ *  `scope !== 'system'` and `--run-as` wasn't passed (the normal case), or
+ *  null (message already on stderr) on any invalid combination. Split out
+ *  from `resolveSystemdUnitOptions()` so the caller can resolve `--run-as`'s
+ *  home *before* parsing `--env-file`, which needs that home to expand a
+ *  leading `~` correctly. */
+function resolveRunAsFlag(flags: Record<string, string | boolean>, scope: ServiceScope): string | undefined | null {
+  if (scope !== 'system') {
+    if (flags['run-as'] !== undefined) {
+      // Loudly rejected rather than silently dropped, like every other
+      // nonsensical combination this function checks — --run-as only means
+      // anything for a unit that runs as a fixed system account.
+      process.stderr.write('--run-as only applies to --scope system.\n');
+      return null;
+    }
+    return undefined;
+  }
+  if (typeof flags['run-as'] !== 'string' || flags['run-as'].trim() === '') {
+    process.stderr.write('--scope system requires --run-as <user>.\n');
+    return null;
+  }
+  if (hasUnsafeUnitChars(flags['run-as'])) {
+    process.stderr.write('Invalid --run-as value — must not contain a NUL byte or line break.\n');
+    return null;
+  }
+  return flags['run-as'].trim();
+}
+
+/** Resolve and validate `--after`/`--env`/`--env-file` beyond the shared
+ *  LaunchSpec triple. Returns null (with a message already on stderr) on any
+ *  invalid input — install must never write a unit from a half-parsed flag
+ *  set. `runAs` and `home` are already resolved by the caller (see
+ *  `resolveRunAsFlag()`/`resolveRunAsUser()`). */
+function resolveSystemdUnitOptions(
+  flags: Record<string, string | boolean>,
+  scope: ServiceScope,
+  runAs: string | undefined,
+  home: string,
+): SystemdUnitOptions | null {
   const after = parseAfterTargets(flags);
   if (after === null) return null;
   const extraEnv = parseExtraEnv(flags);
   if (extraEnv === null) return null;
-  const envFile = parseEnvFile(flags);
+  const envFile = parseEnvFile(flags, home);
   if (envFile === null) return null;
-
-  let runAs: string | undefined;
-  if (scope === 'system') {
-    if (typeof flags['run-as'] !== 'string' || flags['run-as'].trim() === '') {
-      process.stderr.write('--scope system requires --run-as <user>.\n');
-      return null;
-    }
-    if (hasUnsafeUnitChars(flags['run-as'])) {
-      process.stderr.write('Invalid --run-as value — must not contain a NUL byte or line break.\n');
-      return null;
-    }
-    runAs = flags['run-as'].trim();
-  } else if (flags['run-as'] !== undefined) {
-    // Loudly rejected rather than silently dropped, like every other
-    // nonsensical combination this function checks — --run-as only means
-    // anything for a unit that runs as a fixed system account.
-    process.stderr.write('--run-as only applies to --scope system.\n');
-    return null;
-  }
 
   return { scope, runAs, after, envFile, extraEnv };
 }
@@ -563,27 +603,35 @@ async function systemdInstall(
   config: CliConfigView,
   scope: ServiceScope,
 ): Promise<number> {
-  const unitOpts = resolveSystemdUnitOptions(flags, scope);
-  if (!unitOpts) return 1;
+  const runAsFlag = resolveRunAsFlag(flags, scope);
+  if (runAsFlag === null) return 1;
 
   // A --scope system install runs this CLI as root, but the rendered unit
-  // runs the gateway as unitOpts.runAs — WorkingDirectory/HOME/config must be
+  // runs the gateway as runAsFlag — WorkingDirectory/HOME/config must be
   // *that* user's, not root's, or the process starts in the wrong place with
   // the wrong HOME entirely (getent is a read-only NSS lookup, so this needs
-  // no privilege and can run even for a --print preview).
+  // no privilege and can run even for a --print preview). Resolved before
+  // parsing --env-file/--config below, which need this home to expand a
+  // leading `~` against the right account.
   let home = os.homedir();
   let runAsIds: { uid: number; gid: number } | null = null;
-  if (scope === 'system' && unitOpts.runAs) {
-    const resolved = resolveRunAsUser(unitOpts.runAs);
+  if (scope === 'system' && runAsFlag) {
+    const resolved = resolveRunAsUser(runAsFlag);
     if (!resolved) {
-      process.stderr.write(`Could not resolve --run-as ${unitOpts.runAs} via \`getent passwd\` — does that user exist on this host?\n`);
+      process.stderr.write(`Could not resolve --run-as ${runAsFlag} via \`getent passwd\` — does that user exist on this host?\n`);
       return 1;
     }
     home = resolved.home;
     runAsIds = { uid: resolved.uid, gid: resolved.gid };
   }
 
-  const spec = resolveLaunchSpec(flags, home);
+  const unitOpts = resolveSystemdUnitOptions(flags, scope, runAsFlag, home);
+  if (!unitOpts) return 1;
+
+  // $GATEWAY_CONFIG belongs to the installing (root) process's own
+  // environment for a system-scope install — not reliably meaningful for
+  // runAsFlag, so it's not consulted there; only an explicit --config is.
+  const spec = resolveLaunchSpec(flags, home, scope !== 'system');
   if (!spec) return 1;
   const unit = renderSystemdUnit(spec, unitOpts);
   const file = unitPath(scope);
@@ -661,13 +709,16 @@ async function systemdInstall(
     // A --scope system install creates this directory as root — if it didn't
     // already exist, it comes out root-owned, and the gateway (running as
     // runAsIds, not root) would be unable to write its pid file/logs into
-    // its own WorkingDirectory. Chown it to match only when this install
-    // just created it: an already-existing directory (e.g. the run-as user
-    // already used the gateway under their own account before this) is
-    // trusted to already have correct ownership, not silently reassigned.
+    // its own WorkingDirectory. Also reassert ownership when the directory
+    // already exists but belongs to someone other than the *current*
+    // --run-as target — e.g. a prior install used a different --run-as user
+    // and this one reassigns the service to another account — rather than
+    // only checking "did this install just create it", which missed that
+    // case entirely. A directory that already belongs to the right user is
+    // left alone (no redundant chown).
     const cwdExisted = fs.existsSync(spec.cwd);
     fs.mkdirSync(spec.cwd, { recursive: true });
-    if (runAsIds && !cwdExisted) {
+    if (runAsIds && (!cwdExisted || fs.statSync(spec.cwd).uid !== runAsIds.uid)) {
       fs.chownSync(spec.cwd, runAsIds.uid, runAsIds.gid);
     }
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: scope === 'user' ? 0o700 : 0o755 });

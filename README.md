@@ -160,10 +160,14 @@ sudo claude-gateway service install --scope system --run-as gwuser --yes
   session (the `loginctl enable-linger` hint is skipped — it's meaningless here).
 - `WorkingDirectory=`/`HOME=`/the config path all resolve to `--run-as`'s own home directory
   (looked up via `getent passwd`, not the installing root process's home) — the unit runs as that
-  user, so its paths must be theirs. If the user's `~/.claude-gateway` doesn't exist yet, the
-  install creates it and `chown`s it to them (an already-existing directory is left alone,
-  trusting whatever ownership it already has). Refuses if `--run-as` doesn't resolve to a real
-  user on this host.
+  user, so its paths must be theirs. A `~/...` in `--config`/`--env-file` expands against that same
+  home. `$GATEWAY_CONFIG` from the installing (root) process's own environment is **not** consulted
+  for a system-scope install — only an explicit `--config` is — since it belongs to root's
+  environment, not `--run-as`'s. If the user's `~/.claude-gateway` doesn't exist yet, the install
+  creates it and `chown`s it to them; if it already exists but is owned by someone else (e.g. a
+  prior install used a different `--run-as`), ownership is reassigned to match. An
+  already-correctly-owned directory is left untouched. Refuses if `--run-as` doesn't resolve to a
+  real user on this host.
 - A system-scope install never refuses itself over the system-scope conflict check described
   above — that check exists to protect a *user*-scope install from colliding with an externally
   provisioned system-scope unit, and a system-scope install *is* that unit.
