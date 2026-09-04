@@ -5,6 +5,7 @@ jest.mock('fs', () => ({
   writeFileSync: jest.fn(),
   unlinkSync: jest.fn(),
   readFileSync: jest.fn(),
+  chmodSync: jest.fn(),
 }));
 
 import * as fs from 'fs';
@@ -402,7 +403,11 @@ describe('service uninstall', () => {
     mockExistsSync.mockReturnValueOnce(true).mockReturnValue(false);
     mockExecFileSync.mockReturnValue(Buffer.from('') as never);
 
-    const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+    // Explicit scope: with --scope omitted, detectServiceScope() now makes
+    // its own existsSync probe first (issue #457 review) — pass it directly
+    // so this test's mockReturnValueOnce sequencing still lines up with the
+    // single existsSync read systemdState() makes inside systemdUninstall().
+    const code = await runService(['uninstall'], { manager: 'systemd', scope: 'user', yes: true });
 
     expect(code).toBe(0);
     expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'disable', '--now', 'claude-gateway.service'], expect.anything());
@@ -418,7 +423,7 @@ describe('service uninstall', () => {
       err.code = 'ENOENT';
       throw err;
     });
-    expect(await runService(['uninstall'], { manager: 'systemd', yes: true })).toBe(0);
+    expect(await runService(['uninstall'], { manager: 'systemd', scope: 'user', yes: true })).toBe(0);
   });
 
   it('reports the observed state, not the intent, when the unit survives removal', async () => {
@@ -778,6 +783,146 @@ describe('service install — restart-on-change for an already-running unit (iss
       expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['--user', 'enable', '--now', 'claude-gateway.service'], expect.anything());
       expect(mockExecFileSync).not.toHaveBeenCalledWith('systemctl', ['--user', 'restart', 'claude-gateway.service'], expect.anything());
     } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe('service install — cross-scope conflict, both directions (issue #457 review)', () => {
+  it('refuses a --scope system install when a user-scope unit is already enabled', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+        if (file === 'systemctl' && args.includes('--user') && args.includes('is-enabled')) return Buffer.from('enabled\n');
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(1);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expectNoStateChange();
+      expect(stderr.join('')).toMatch(/already exists at user scope/);
+      expect(stderr.join('')).toMatch(/systemctl --user disable --now claude-gateway\.service/);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+    }
+  });
+
+  it('--force installs --scope system anyway despite an active user-scope unit', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+        if (file === 'systemctl' && args.includes('--user') && args.includes('is-enabled')) return Buffer.from('enabled\n');
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true, force: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(systemUnitPath, expect.stringContaining('User=gwuser'), expect.anything());
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('still refuses a plain --scope user install when a system-scope unit is enabled (original issue #450 direction, unchanged)', async () => {
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-enabled') return Buffer.from('enabled\n');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    const code = await runService(['install'], { manager: 'systemd', yes: true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(stderr.join('')).toMatch(/already exists at system scope/);
+    expect(stderr.join('')).toMatch(/sudo systemctl disable --now claude-gateway\.service/);
+  });
+});
+
+describe('service status/uninstall — scope auto-detection when --scope is omitted (issue #457 review)', () => {
+  it('status with no --scope finds a system-scope-only install instead of reporting not-installed', async () => {
+    mockExistsSync.mockImplementation((p: unknown) => String(p) === systemUnitPath);
+    mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-active') return Buffer.from('active\n');
+      if (file === 'systemctl' && !args.includes('--user') && args[0] === 'is-enabled') return Buffer.from('enabled\n');
+      return Buffer.from('');
+    }) as unknown as typeof execFileSync);
+    const code = await runService(['status'], { manager: 'systemd' });
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ manager: 'systemd-system', unit: systemUnitPath, active: true }));
+  });
+
+  it('uninstall with no --scope finds and removes a system-scope-only install instead of silently reporting success', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      // No user-scope unit ever. System-scope: installed for the scope-detect
+      // read and the before-state read, gone by the final state read after
+      // removal — same "installed, then gone" shape as the plain uninstall
+      // test above, just keyed by path since two paths are probed now.
+      let systemPathReads = 0;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        if (String(p) === unitPath) return false;
+        systemPathReads++;
+        return systemPathReads <= 2;
+      });
+      mockExecFileSync.mockReturnValue(Buffer.from('') as never);
+      const code = await runService(['uninstall'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+      expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['disable', '--now', 'claude-gateway.service'], expect.anything());
+      expect(fs.unlinkSync).toHaveBeenCalledWith(systemUnitPath);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+    }
+  });
+
+  it('install still always defaults to --scope user even when the (unrelated) entry-point/other-scope existsSync checks are true — never auto-detects a scope for install', async () => {
+    // detectServiceScope() special-cases action==='install' to return 'user'
+    // unconditionally, without even reading existsSync — so this only needs
+    // the default beforeEach mock (existsSync → true everywhere, which is
+    // also what resolveLaunchSpec()'s own entry-point check needs to succeed).
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(unitPath, expect.anything(), expect.anything());
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe('service install — --env-file requires a value (issue #457 review)', () => {
+  it('rejects a bare --env-file with no path instead of silently treating it as omitted', async () => {
+    // The shared CLI parser reads a flag with no following value (last token,
+    // or immediately followed by another flag) as boolean true — a plain
+    // `typeof !== 'string'` check would silently read that as "not passed".
+    const code = await runService(['install'], { manager: 'systemd', yes: true, 'env-file': true });
+    expect(code).toBe(1);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+    expect(stderr.join('')).toMatch(/--env-file requires a path/);
+  });
+});
+
+describe('service install — chmod is applied explicitly, not left to writeFileSync (issue #457 review)', () => {
+  it('chmods the unit file to 0600 after writing it at user scope', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+      expect(fs.chmodSync).toHaveBeenCalledWith(unitPath, 0o600);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("chmods the unit file to 0644 after writing it at system scope — writeFileSync's mode is a no-op on an existing file", async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(0);
+      expect(fs.chmodSync).toHaveBeenCalledWith(systemUnitPath, 0o644);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
       fetchSpy.mockRestore();
     }
   });

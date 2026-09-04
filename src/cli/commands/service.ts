@@ -306,11 +306,10 @@ async function waitForHealth(config: CliConfigView, flags: Record<string, string
 
 /** `is-enabled`/`is-active` for `UNIT_NAME` at the given scope — the query
  *  both `systemdState()` (the install's own scope, for `service status`) and
- *  `systemScopeConflict()` (always system scope, for the user-scope
- *  install-time check below) need, differing only in scope. A named boolean
- *  rather than a raw argv fragment (`['--user']`/`[]`) so a future call site
- *  passing the wrong array fails to compile instead of silently querying the
- *  wrong scope. */
+ *  `crossScopeConflict()` (the opposite scope, for the install-time check
+ *  below) need, differing only in scope. A named boolean rather than a raw
+ *  argv fragment (`['--user']`/`[]`) so a future call site passing the wrong
+ *  array fails to compile instead of silently querying the wrong scope. */
 function unitFlagState(userScope: boolean): { enabled: boolean; active: boolean } {
   const scopeArgs = userScope ? ['--user'] : [];
   let enabled = false;
@@ -343,28 +342,35 @@ function systemdStatus(flags: Record<string, string | boolean>, scope: ServiceSc
 }
 
 /**
- * True when a same-named unit already exists and is enabled or active at
- * *system* scope (`/etc/systemd/system/`) — e.g. from an externally
- * provisioned image. Installing the user-scope unit alongside it would leave
- * both `enabled`, racing for the port on the next reboot (see issue #450).
+ * True when a same-named unit already exists and is enabled or active at the
+ * scope OPPOSITE to the one being installed — e.g. installing user scope
+ * while an externally-provisioned system-scope unit is already enabled (the
+ * original case, issue #450), or installing system scope while a prior
+ * user-scope install is still active (issue #457 review — a system-scope
+ * install only ever self-checked, missing this direction entirely). Either
+ * way, two independent units end up racing for the same port on the next
+ * boot.
  *
- * Reading system scope needs no privileges: `systemctl is-enabled`/`is-active`
- * without `--user` queries it as any user, so this check costs nothing extra.
+ * Reading the opposite scope needs no privileges: `systemctl
+ * is-enabled`/`is-active` in either scope queries as any user, so this check
+ * costs nothing extra.
  */
-function systemScopeConflict(): boolean {
-  const { enabled, active } = unitFlagState(false);
+function crossScopeConflict(scope: ServiceScope): boolean {
+  const { enabled, active } = unitFlagState(scope === 'system');
   return enabled || active;
 }
 
-/** Written to stderr when `systemScopeConflict()` refuses an install — shared
+/** Written to stderr when `crossScopeConflict()` refuses an install — shared
  *  by both the pre-prompt check and the re-check right after `confirm()`
  *  below, so the two call sites can't drift into different wording. */
-function writeSystemScopeConflictRefusal(): void {
+function writeCrossScopeConflictRefusal(scope: ServiceScope): void {
+  const otherScope: ServiceScope = scope === 'user' ? 'system' : 'user';
+  const disableHint = otherScope === 'system' ? `  sudo systemctl disable --now ${UNIT_NAME}\n` : `  systemctl --user disable --now ${UNIT_NAME}\n`;
   process.stderr.write(
-    `A ${UNIT_NAME} unit already exists at system scope (/etc/systemd/system/${UNIT_NAME}) and is enabled or active.\n` +
-      `Installing a second, independent unit at user scope would race it for the port on the next reboot.\n` +
+    `A ${UNIT_NAME} unit already exists at ${otherScope} scope (${unitPath(otherScope)}) and is enabled or active.\n` +
+      `Installing a second, independent unit at ${scope} scope would race it for the port on the next reboot.\n` +
       `Disable the existing one first, then re-run this command:\n` +
-      `  sudo systemctl disable --now ${UNIT_NAME}\n` +
+      disableHint +
       'Pass --force to install anyway.\n',
   );
 }
@@ -452,8 +458,18 @@ function parseExtraEnv(flags: Record<string, string | boolean>): Record<string, 
  *  already on stderr) for a path containing a line break — everything else
  *  reuses the null-on-invalid contract `resolveSystemdUnitOptions()` expects. */
 function parseEnvFile(flags: Record<string, string | boolean>): string | undefined | null {
-  if (typeof flags['env-file'] !== 'string') return undefined;
-  const resolved = path.resolve(expandHome(flags['env-file']));
+  const raw = flags['env-file'];
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    // Distinct from "not passed at all": the shared CLI parser (src/cli/args.ts)
+    // reads a flag with no following value (last token, or immediately
+    // followed by another flag) as boolean `true` — silently treating that as
+    // "omitted" would install with no EnvironmentFile= line while the caller
+    // believes their secrets file is wired in.
+    process.stderr.write('--env-file requires a path.\n');
+    return null;
+  }
+  const resolved = path.resolve(expandHome(raw));
   if (hasUnsafeUnitChars(resolved)) {
     process.stderr.write('Invalid --env-file path — must not contain a NUL byte or line break.\n');
     return null;
@@ -509,7 +525,7 @@ async function systemdInstall(
   if (flags.print === true) return 0;
 
   // The root check goes here, after the print short-circuit above, matching
-  // the systemScopeConflict() check below: `--print` is a pure read — it
+  // the crossScopeConflict() check below: `--print` is a pure read — it
   // must always show the preview regardless of any other reason install
   // itself would be refused.
   if (scope === 'system' && !isRoot()) {
@@ -520,12 +536,12 @@ async function systemdInstall(
     return 1;
   }
 
-  // The system-scope conflict guard exists to protect a *user-scope* install
-  // from racing an externally-provisioned system-scope unit (issue #450). A
-  // system-scope install IS that externally-provisioned unit — checking it
-  // against itself would always refuse.
-  if (scope === 'user' && flags.force !== true && systemScopeConflict()) {
-    writeSystemScopeConflictRefusal();
+  // Guards against installing alongside an already-enabled/active unit at the
+  // OTHER scope (either direction — see crossScopeConflict()'s doc comment).
+  // A scope's install only ever conflicts with the opposite scope, never with
+  // itself, so a repeated install of the same scope never trips this.
+  if (flags.force !== true && crossScopeConflict(scope)) {
+    writeCrossScopeConflictRefusal(scope);
     return 1;
   }
 
@@ -541,8 +557,8 @@ async function systemdInstall(
   // `confirm()` can block indefinitely on the y/N prompt — re-check right
   // before writing anything, in case a conflicting unit appeared while it
   // was waiting on the operator.
-  if (scope === 'user' && flags.force !== true && systemScopeConflict()) {
-    writeSystemScopeConflictRefusal();
+  if (flags.force !== true && crossScopeConflict(scope)) {
+    writeCrossScopeConflictRefusal(scope);
     return 1;
   }
 
@@ -565,6 +581,13 @@ async function systemdInstall(
     fs.mkdirSync(spec.cwd, { recursive: true });
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: scope === 'user' ? 0o700 : 0o755 });
     fs.writeFileSync(file, unit, { encoding: 'utf8', mode: scope === 'user' ? 0o600 : 0o644 });
+    // writeFileSync's `mode` option only applies when the file is newly
+    // created — overwriting an existing one (e.g. adopting an
+    // externally-provisioned unit, or a repeated install) leaves its current
+    // permission bits untouched. chmod explicitly so the intended mode is
+    // guaranteed either way — this file can carry --env values, so its
+    // permissions are a real boundary, not cosmetic.
+    fs.chmodSync(file, scope === 'user' ? 0o600 : 0o644);
     run('systemctl', [...scopeArgs, 'daemon-reload']);
     if (wasActive && previousContent !== null && previousContent !== unit) {
       run('systemctl', [...scopeArgs, 'restart', UNIT_NAME]);
@@ -792,9 +815,26 @@ function parseManager(flags: Record<string, string | boolean>, action: ServiceAc
   return null;
 }
 
-function parseScope(flags: Record<string, string | boolean>): ServiceScope | null {
+/** Pick the systemd scope to act on when `--scope` is omitted. `install`
+ *  always defaults to `user` — it must never silently write a root-owned
+ *  unit nobody explicitly asked for, no matter what already exists.
+ *  `status`/`uninstall` instead detect: prefer an installed user-scope unit,
+ *  fall back to system-scope. Without this, a bare `service status` after a
+ *  `--scope system` install silently checks the (nonexistent) user-scope path
+ *  and reports "not installed" — and `service uninstall` would report success
+ *  (exit 0) while the system-scope unit keeps running untouched (issue #457
+ *  review). Mirrors `detectServiceManager()`'s "detect what's actually there"
+ *  approach for --manager. */
+function detectServiceScope(action: ServiceAction): ServiceScope {
+  if (action === 'install') return 'user';
+  if (fs.existsSync(unitPath('user'))) return 'user';
+  if (fs.existsSync(unitPath('system'))) return 'system';
+  return 'user';
+}
+
+function parseScope(flags: Record<string, string | boolean>, action: ServiceAction): ServiceScope | null {
   const raw = flags.scope;
-  if (raw === undefined) return 'user';
+  if (raw === undefined) return detectServiceScope(action);
   if (raw === 'user' || raw === 'system') return raw;
   process.stderr.write('Unknown --scope. Expected user or system.\n');
   return null;
@@ -835,7 +875,7 @@ export async function runService(
     return 1;
   }
 
-  const scope = parseScope(flags);
+  const scope = parseScope(flags, action);
   if (!scope) return 1;
 
   const manager = parseManager(flags, action, scope);
