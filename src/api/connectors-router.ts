@@ -1,6 +1,4 @@
 import { Router, Request, Response } from 'express';
-import * as fsp from 'fs/promises';
-import { randomUUID } from 'crypto';
 import { ApiKey, CustomConnectorEntry } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import { getConnectorSpec } from '../connectors/catalog';
@@ -9,15 +7,23 @@ import { secretEnvOf } from '../connectors/types';
 import { setSecret, deleteSecret, hasSecret } from '../connectors/token-env';
 import { slugify, extractPlaceholders, customSecretKey } from '../connectors/custom';
 import { createCustomConnectorsStore, type CustomConnectorsStore } from '../connectors/custom-connectors-store';
+import {
+  refreshTokenSecretKey,
+  clientIdSecretKey,
+  expiresAtSecretKey,
+  refreshFailCountSecretKey,
+  refreshBackoffUntilSecretKey,
+} from '../connectors/oauth-refresh-sweep';
 import type { AgentRunner } from '../agent/runner';
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
 /**
  * Connector management API. The gateway acts as catalog + secret manager + config
- * injector: connecting a connector stores its secret in mcp-token.env and records the
- * non-secret wiring in config.json (gateway.connectors). The actual MCP server is
- * injected into each session by SessionProcess (see resolveEnabledConnectors).
+ * injector: connecting a connector stores its secret in mcp-token.env — that store
+ * alone is authoritative for "connected" (see resolve.ts's listConnectorStatus). The
+ * actual MCP server is injected into each session by SessionProcess (see
+ * resolveEnabledConnectors).
  *
  * Routes (mounted under /api):
  *   GET    /v1/connectors                    — built-in + custom catalog, connected state
@@ -35,7 +41,12 @@ type AuthedRequest = Request & { apiKey: ApiKey };
  *                                              to clear ("No auth"), in which case the
  *                                              whole entry is removed — see the handler below
  *   POST   /v1/connectors/custom             — add a user-pasted connector (admin)
- *   DELETE /v1/connectors/custom/:id         — remove one (admin)
+ *
+ * (Removal of a custom connector is NOT a separate route — it's the same
+ * unified DELETE /v1/connectors/:id above, which falls back to
+ * customConnectors when the id isn't a built-in catalog entry. See the note
+ * at the bottom of this file for why the old dedicated /custom/:id route was
+ * retired.)
  *
  * 'oauth'-kind connectors (Gmail/Drive/Calendar) never do the actual OAuth
  * dance here — getpod-ai's services/api owns the client_secret, the token
@@ -58,29 +69,6 @@ export function createConnectorsRouter(
   const router = Router();
   if (apiKeys?.length) router.use(createApiAuthMiddleware(apiKeys));
   const store = customConnectorsStore ?? createCustomConnectorsStore(configPath);
-
-  // Serialise read-modify-write of config.json's gateway.connectors subtree.
-  let writeLock: Promise<void> = Promise.resolve();
-  async function mutateGatewayConnectors(
-    fn: (connectors: Record<string, { secretEnv: string }>) => void,
-  ): Promise<void> {
-    if (!configPath) return; // no persistence target (e.g. tests) — secret store is authoritative
-    const run = writeLock.catch(() => {}).then(async () => {
-      const raw = await fsp.readFile(configPath, 'utf-8');
-      const config = JSON.parse(raw) as {
-        gateway?: { connectors?: Record<string, { secretEnv: string }> };
-        [k: string]: unknown;
-      };
-      config.gateway = config.gateway ?? {};
-      config.gateway.connectors = config.gateway.connectors ?? {};
-      fn(config.gateway.connectors);
-      const tmp = `${configPath}.tmp.${randomUUID()}`;
-      await fsp.writeFile(tmp, JSON.stringify(config, null, 2), 'utf-8');
-      await fsp.rename(tmp, configPath);
-    });
-    writeLock = run.catch(() => {});
-    return run;
-  }
 
   function requireAdmin(req: Request, res: Response): boolean {
     if (!apiKeys?.length) return true; // no auth configured — allow
@@ -149,9 +137,6 @@ export function createConnectorsRouter(
       const envName = spec.auth.secretEnv;
       try {
         setSecret(envName, token.trim());
-        await mutateGatewayConnectors((c) => {
-          c[spec.id] = { secretEnv: envName };
-        });
         res.json({ id: spec.id, connected: true });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
@@ -164,9 +149,11 @@ export function createConnectorsRouter(
       res.status(404).json({ error: `Unknown connector '${id}'` });
       return;
     }
-    if (entry.oauth) {
+    if (entry.oauth || entry.managed) {
       res.status(400).json({
-        error: `Connector '${id}' uses OAuth sign-in — start it via POST /v1/connectors/custom/${id}/oauth/start instead`,
+        error: entry.managed
+          ? `Connector '${id}' is managed externally — its token is pushed via POST /v1/connectors/${id}/oauth/receive, not set here.`
+          : `Connector '${id}' uses OAuth sign-in — start it via POST /v1/connectors/custom/${id}/oauth/start instead`,
       });
       return;
     }
@@ -304,9 +291,6 @@ export function createConnectorsRouter(
       const envName = secretEnvOf(spec);
       try {
         if (envName) deleteSecret(envName);
-        await mutateGatewayConnectors((c) => {
-          delete c[spec.id];
-        });
         res.json({ id: spec.id, connected: false });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
@@ -322,6 +306,20 @@ export function createConnectorsRouter(
     }
     try {
       for (const name of entry.secretNames) deleteSecret(customSecretKey(id, name));
+      // An oauth:true entry's refresh_token/client_id/expiry (and any
+      // recorded failure backoff) live outside secretNames — they're
+      // sweep-internal bookkeeping, not a {placeholder} from the pasted
+      // config (see oauth-refresh-sweep.ts's storage note), so the loop
+      // above never touches them. Left alone, the still-valid refresh_token
+      // would let refreshExpiringOAuthConnectors silently mint a fresh
+      // access_token and resurrect a connector the user just disconnected.
+      if (entry.oauth) {
+        deleteSecret(refreshTokenSecretKey(id));
+        deleteSecret(clientIdSecretKey(id));
+        deleteSecret(expiresAtSecretKey(id));
+        deleteSecret(refreshFailCountSecretKey(id));
+        deleteSecret(refreshBackoffUntilSecretKey(id));
+      }
       // A genuinely user-added custom connector (not entry.managed) has no
       // catalog to fall back on — its config/label/description IS the
       // customConnectors entry, so wiping the whole entry here used to mean

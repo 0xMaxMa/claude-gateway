@@ -278,6 +278,69 @@ describe('resolve', () => {
       oauth: true,
     });
   });
+
+  // Regression: a deployer-defined CONNECTOR_CATALOG entry's build() throwing
+  // used to propagate straight out of resolveEnabledConnectors — called
+  // unguarded inside session spawn (session/process.ts's writeMcpConfig), so
+  // one bad catalog entry aborted the ENTIRE session for every user of the
+  // agent, not just the resolution of that one connector.
+  it('a built-in catalog entry whose build() throws is skipped, not fatal to the whole resolution', () => {
+    const throwingSpec = {
+      id: 'flaky',
+      label: 'Flaky',
+      transport: 'http',
+      auth: { kind: 'none' },
+      build: () => {
+        throw new Error('boom');
+      },
+    };
+    let result!: Record<string, unknown>;
+    jest.isolateModules(() => {
+      jest.doMock('../../src/connectors/catalog', () => ({
+        CONNECTOR_CATALOG: [throwingSpec],
+        getConnectorSpec: () => undefined,
+      }));
+      const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+      result = resolveEnabledConnectors({});
+    });
+    jest.dontMock('../../src/connectors/catalog');
+    expect(result).toEqual({});
+  });
+
+  // Same isolation for the customConnectors path — a malformed pasted config
+  // (admin-trusted, not code-reviewed) must not take down every OTHER
+  // connector's resolution for this session.
+  it('a custom connector whose substitution throws is skipped, not fatal to the whole resolution', () => {
+    const { setSecret } = require('../../src/connectors/token-env');
+    setSecret('CUSTOM__broken__api_key', 'sk-abc');
+    setSecret('CUSTOM__fine__api_key', 'sk-xyz');
+
+    let result!: Record<string, unknown>;
+    jest.isolateModules(() => {
+      jest.doMock('../../src/connectors/custom', () => {
+        const real = jest.requireActual('../../src/connectors/custom');
+        return {
+          ...real,
+          substitutePlaceholders: (config: unknown, secrets: Record<string, string>) => {
+            if (JSON.stringify(config).includes('broken')) throw new Error('malformed config');
+            return real.substitutePlaceholders(config, secrets);
+          },
+        };
+      });
+      const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+      result = resolveEnabledConnectors(
+        {},
+        {
+          broken: { label: 'Broken', config: { url: 'https://broken.example/{api_key}' }, secretNames: ['api_key'] },
+          fine: { label: 'Fine', config: { url: 'https://fine.example', headers: { Authorization: 'Bearer {api_key}' } }, secretNames: ['api_key'] },
+        },
+      );
+    });
+    jest.dontMock('../../src/connectors/custom');
+
+    expect(result.broken).toBeUndefined();
+    expect(result.fine).toEqual({ url: 'https://fine.example', headers: { Authorization: 'Bearer sk-xyz' } });
+  });
 });
 
 describe('boot-safety', () => {
@@ -381,6 +444,90 @@ describe('connectors-router', () => {
     // explicitly so later tests' fresh `require`s get the real catalog again.
     jest.dontMock('../../src/connectors/catalog');
     expect(res.status).toBe(403);
+  });
+
+  // Regression: connect/delete for a built-in catalog entry used to also
+  // read-modify-write config.json's gateway.connectors subtree via a
+  // dedicated function+lock (mutateGatewayConnectors) that nothing ever read
+  // back — dead state with its own uncoordinated lock racing
+  // custom-connectors-store.ts's lock on the same file. That write path was
+  // removed; this proves the actually-meaningful behavior (the secret itself,
+  // and connected status derived from it) still works end-to-end with no
+  // config.json at all.
+  it('catalog secret-kind connect/delete round-trip works with no config.json (no dead file write to break)', async () => {
+    const stubSpec = {
+      id: 'stub-secret',
+      label: 'Stub',
+      transport: 'http',
+      auth: { kind: 'secret', secretEnv: 'STUB_TOKEN' },
+      build: () => ({}),
+    };
+    let connectRes!: request.Response;
+    let statusAfterConnect!: request.Response;
+    let deleteRes!: request.Response;
+    let statusAfterDelete!: request.Response;
+    await jest.isolateModulesAsync(async () => {
+      jest.doMock('../../src/connectors/catalog', () => ({
+        CONNECTOR_CATALOG: [stubSpec],
+        getConnectorSpec: (id: string) => (id === 'stub-secret' ? stubSpec : undefined),
+      }));
+      const { createConnectorsRouter } = require('../../src/api/connectors-router');
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createConnectorsRouter(apiKeys)); // no configPath at all
+      connectRes = await request(app)
+        .post('/api/v1/connectors/stub-secret/connect')
+        .set('X-Api-Key', adminKey)
+        .send({ token: 'stub-token-value' });
+      statusAfterConnect = await request(app)
+        .get('/api/v1/connectors/stub-secret/status')
+        .set('X-Api-Key', adminKey);
+      deleteRes = await request(app)
+        .delete('/api/v1/connectors/stub-secret')
+        .set('X-Api-Key', adminKey);
+      statusAfterDelete = await request(app)
+        .get('/api/v1/connectors/stub-secret/status')
+        .set('X-Api-Key', adminKey);
+    });
+    jest.dontMock('../../src/connectors/catalog');
+
+    expect(connectRes.status).toBe(200);
+    expect(connectRes.body).toEqual({ id: 'stub-secret', connected: true });
+    expect(statusAfterConnect.body).toEqual({ id: 'stub-secret', connected: true });
+    expect(deleteRes.status).toBe(200);
+    expect(deleteRes.body).toEqual({ id: 'stub-secret', connected: false });
+    expect(statusAfterDelete.body).toEqual({ id: 'stub-secret', connected: false });
+  });
+
+  // Regression: a managed connector (github/gmail/etc., pushed via
+  // /oauth/receive) has authKind:'oauth' + managed:true but — unlike a
+  // user's own oauth:true custom connector — never sets `oauth: true` itself.
+  // /connect's guard used to check only `entry.oauth`, so a managed entry
+  // slipped through it and could be overwritten with an arbitrary string via
+  // this route, bypassing the real OAuth flow and skipping the session
+  // restart /oauth/receive does.
+  it('/connect rejects a managed connector — cannot overwrite its real OAuth token with an arbitrary string', async () => {
+    const cfgPath = tmpConfig({
+      github: {
+        label: 'GitHub',
+        config: { type: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: 'Bearer {access_token}' } },
+        secretNames: ['access_token'],
+        authKind: 'oauth',
+        managed: true,
+      },
+    });
+    const { setSecret, getSecret } = require('../../src/connectors/token-env');
+    const { customSecretKey } = require('../../src/connectors/custom');
+    setSecret(customSecretKey('github', 'access_token'), 'ghu_real_oauth_token');
+
+    const res = await request(makeApp(cfgPath))
+      .post('/api/v1/connectors/github/connect')
+      .set('X-Api-Key', adminKey)
+      .send({ token: 'anything-an-attacker-or-mistake-typed' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/managed externally/i);
+    expect(getSecret(customSecretKey('github', 'access_token'))).toBe('ghu_real_oauth_token'); // untouched
   });
 
   // github is a services/api-managed custom connector now (pushed via
@@ -545,6 +692,49 @@ describe('connectors-router', () => {
 
     const after = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(after.body.connectors).toEqual([]);
+  });
+
+  // Regression: disconnecting an oauth:true custom connector used to only
+  // clear its secretNames (just 'access_token') — the refresh sweep's own
+  // bookkeeping (__refresh_token/__client_id/__token_expires_at) lived
+  // outside secretNames and survived, so oauth-refresh-sweep.ts would
+  // silently mint a fresh access_token and resurrect a connector the user
+  // just disconnected the next time its (unaffected) expiry came due.
+  it('DELETE on an oauth:true custom connector also clears the refresh sweep\'s own secrets', async () => {
+    const cfgPath = tmpConfig({
+      firecrawl: {
+        label: 'Firecrawl',
+        config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth', headers: { Authorization: 'Bearer {access_token}' } },
+        secretNames: ['access_token'],
+        oauth: true,
+      },
+    });
+    const { setSecret, getSecret } = require('../../src/connectors/token-env');
+    const { customSecretKey } = require('../../src/connectors/custom');
+    const {
+      refreshTokenSecretKey,
+      clientIdSecretKey,
+      expiresAtSecretKey,
+      refreshFailCountSecretKey,
+      refreshBackoffUntilSecretKey,
+    } = require('../../src/connectors/oauth-refresh-sweep');
+
+    setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_live');
+    setSecret(refreshTokenSecretKey('firecrawl'), 'fcr_live');
+    setSecret(clientIdSecretKey('firecrawl'), 'dyn_live');
+    setSecret(expiresAtSecretKey('firecrawl'), String(Date.now() + 3600_000));
+    setSecret(refreshFailCountSecretKey('firecrawl'), '1');
+    setSecret(refreshBackoffUntilSecretKey('firecrawl'), String(Date.now() + 60_000));
+
+    const del = await request(makeApp(cfgPath)).delete('/api/v1/connectors/firecrawl').set('X-Api-Key', adminKey);
+    expect(del.status).toBe(200);
+
+    expect(getSecret(customSecretKey('firecrawl', 'access_token'))).toBeNull();
+    expect(getSecret(refreshTokenSecretKey('firecrawl'))).toBeNull();
+    expect(getSecret(clientIdSecretKey('firecrawl'))).toBeNull();
+    expect(getSecret(expiresAtSecretKey('firecrawl'))).toBeNull();
+    expect(getSecret(refreshFailCountSecretKey('firecrawl'))).toBeNull();
+    expect(getSecret(refreshBackoffUntilSecretKey('firecrawl'))).toBeNull();
   });
 
   // The exact bug the soft-disconnect fix above exposed: once DELETE keeps a
