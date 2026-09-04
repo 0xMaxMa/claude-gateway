@@ -63,6 +63,15 @@ describe('resolveSkillLearningConfig — precedence (agent > global > default)',
   it('an invalid gateway.timezone falls back to UTC, not to the invalid string', () => {
     expect(resolveSkillLearningConfig(undefined, undefined, 'Not/AZone').pruneTimezone).toBe('UTC');
   });
+
+  it('an invalid per-feature pruneTimezone falls through to gateway.timezone, not straight to UTC', () => {
+    expect(resolveSkillLearningConfig({ pruneTimezone: 'Not/AZone' }, undefined, 'Asia/Bangkok').pruneTimezone).toBe(
+      'Asia/Bangkok',
+    );
+    expect(resolveSkillLearningConfig(undefined, { pruneTimezone: 'Not/AZone' }, 'Asia/Bangkok').pruneTimezone).toBe(
+      'Asia/Bangkok',
+    );
+  });
 });
 
 describe('isValidTimezone', () => {

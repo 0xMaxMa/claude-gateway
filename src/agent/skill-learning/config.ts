@@ -44,7 +44,15 @@ export function resolveSkillLearningConfig(
   // Normalize the timezone once, here, so every consumer (curator scheduler,
   // telemetry day-window) receives a value Intl accepts — an invalid tz falls
   // back to UTC rather than each consumer re-guarding (or crashing) on its own.
-  const rawTz = agentCfg?.pruneTimezone ?? globalCfg?.pruneTimezone ?? gatewayTimezone ?? d.pruneTimezone;
+  // Each precedence level is validated in turn — an invalid-but-present agent/global
+  // override does not count as "set" and falls through to the next level (issue #462 review).
+  const pruneTimezone = isValidTimezone(agentCfg?.pruneTimezone)
+    ? agentCfg.pruneTimezone
+    : isValidTimezone(globalCfg?.pruneTimezone)
+      ? globalCfg.pruneTimezone
+      : isValidTimezone(gatewayTimezone)
+        ? gatewayTimezone
+        : d.pruneTimezone;
   return {
     enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),
     mode: pick(agentCfg?.mode, globalCfg?.mode, d.mode),
@@ -54,7 +62,7 @@ export function resolveSkillLearningConfig(
     maxAgeDays: pick(agentCfg?.maxAgeDays, globalCfg?.maxAgeDays, d.maxAgeDays),
     minUsesToKeep: pick(agentCfg?.minUsesToKeep, globalCfg?.minUsesToKeep, d.minUsesToKeep),
     pruneHour: pick(agentCfg?.pruneHour, globalCfg?.pruneHour, d.pruneHour),
-    pruneTimezone: isValidTimezone(rawTz) ? rawTz : 'UTC',
+    pruneTimezone,
     maxReviewsPerDay: pick(agentCfg?.maxReviewsPerDay, globalCfg?.maxReviewsPerDay, d.maxReviewsPerDay),
     notify: pick(agentCfg?.notify, globalCfg?.notify, d.notify),
   };

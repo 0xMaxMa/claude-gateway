@@ -3129,8 +3129,14 @@ export class AgentRunner extends EventEmitter {
       gw.history?.retentionDays,
     );
     const cleanupHour = gw.history?.cleanupHour ?? 0;
-    const rawCleanupTimezone = gw.history?.cleanupTimezone ?? gw.timezone ?? 'UTC';
-    const cleanupTimezone = isValidTimezone(rawCleanupTimezone) ? rawCleanupTimezone : 'UTC';
+    // Each precedence level is validated in turn — an invalid-but-present
+    // cleanupTimezone does not count as "set" and falls through to gw.timezone
+    // rather than jumping straight to UTC (issue #462 review).
+    const cleanupTimezone = isValidTimezone(gw.history?.cleanupTimezone)
+      ? gw.history.cleanupTimezone
+      : isValidTimezone(gw.timezone)
+        ? gw.timezone
+        : 'UTC';
     const agentMediaRoot = MediaStore.agentMediaRoot(this.agentsBaseDir, this.agentConfig.id);
     const logPath = path.join(this.agentDir, 'cleanup.log');
 

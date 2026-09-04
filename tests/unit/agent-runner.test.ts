@@ -5638,4 +5638,14 @@ describe('AgentRunner — history cleanup scheduler timezone', () => {
 
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'UTC' }));
   }, 15000);
+
+  it('U-AR-TZ-INVALID-FALLTHROUGH: an invalid history.cleanupTimezone falls through to gateway.timezone, not straight to UTC', async () => {
+    const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
+    gatewayConfig.gateway.timezone = 'Asia/Bangkok';
+    gatewayConfig.gateway.history = { cleanupTimezone: 'Not/AZone' };
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'Asia/Bangkok' }));
+  }, 15000);
 });

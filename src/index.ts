@@ -321,7 +321,7 @@ async function startAgent(
         memoryBudget.writeRouting === true
           ? makeRouteOut(
               makeClaudeSpawn(
-                resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming)
+                resolveDreamingConfig(agentConfig.dreaming, gatewayConfig.gateway.dreaming, gatewayConfig.gateway.timezone)
                   .reviewModel,
               ),
             )
@@ -352,6 +352,7 @@ async function startAgent(
         const reflectionCfg = resolveReflectionConfig(
           agentConfig.knowledge?.reflection,
           gatewayConfig.gateway.knowledge?.reflection,
+          gatewayConfig.gateway.timezone,
         );
         const reflection = new SharedReflectionManager({
           sharedCfg,

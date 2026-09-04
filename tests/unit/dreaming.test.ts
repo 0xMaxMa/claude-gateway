@@ -95,6 +95,15 @@ describe('dreaming/config: resolveDreamingConfig', () => {
   it('D-CFG-9: an invalid gateway.timezone falls back to UTC, not to the invalid string', () => {
     expect(resolveDreamingConfig(undefined, undefined, 'Not/AZone').dreamTimezone).toBe('UTC');
   });
+
+  it('D-CFG-10: an invalid per-feature dreamTimezone falls through to gateway.timezone, not straight to UTC', () => {
+    expect(resolveDreamingConfig({ dreamTimezone: 'Not/AZone' }, undefined, 'Asia/Bangkok').dreamTimezone).toBe(
+      'Asia/Bangkok',
+    );
+    expect(resolveDreamingConfig(undefined, { dreamTimezone: 'Not/AZone' }, 'Asia/Bangkok').dreamTimezone).toBe(
+      'Asia/Bangkok',
+    );
+  });
 });
 
 // ── gather ──────────────────────────────────────────────────────────────────
