@@ -6,6 +6,7 @@ jest.mock('fs', () => ({
   unlinkSync: jest.fn(),
   readFileSync: jest.fn(),
   chmodSync: jest.fn(),
+  chownSync: jest.fn(),
 }));
 
 import * as fs from 'fs';
@@ -29,6 +30,20 @@ const mockReadFileSync = fs.readFileSync as unknown as jest.Mock;
 
 const unitPath = path.join(os.homedir(), '.config', 'systemd', 'user', 'claude-gateway.service');
 const systemUnitPath = '/etc/systemd/system/claude-gateway.service';
+const gwuserHome = '/home/gwuser';
+
+/** `resolveRunAsUser()` looks the --run-as user up via `getent passwd`
+ *  before building the launch spec — every --scope system --run-as gwuser
+ *  test needs this mocked too now, not just systemctl. Wraps a
+ *  systemctl-focused implementation with a getent response for 'gwuser'. */
+function withGetentGwuser(systemctlImpl: (file: string, args: string[]) => Buffer): (file: string, args: string[]) => Buffer {
+  return (file, args) => {
+    if (file === 'getent' && args[0] === 'passwd' && args[1] === 'gwuser') {
+      return Buffer.from(`gwuser:x:1500:1500:gwuser,,,:${gwuserHome}:/bin/bash\n`);
+    }
+    return systemctlImpl(file, args);
+  };
+}
 
 /**
  * Assert nothing was *changed*. Read-only probes are fine and expected —
@@ -604,6 +619,7 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
 
   it('refuses --scope system install when not running as root — never escalates via sudo', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(1000);
+    mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
     const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
     expect(code).toBe(1);
     expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -613,10 +629,12 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
 
   it('shows the --print preview for --scope system even when not root — a pure read must never need root', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(1000);
+    mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
     try {
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', print: true });
       expect(code).toBe(0);
       expect(stderr.join('')).toContain('User=gwuser');
+      expect(stderr.join('')).toContain(`WorkingDirectory=${gwuserHome}/.claude-gateway`);
       expect(mockWriteFileSync).not.toHaveBeenCalled();
       expectNoStateChange();
     } finally {
@@ -642,6 +660,7 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
 
   it('writes /etc/systemd/system unit with User= and WantedBy=multi-user.target, as root with --run-as', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(0);
+    mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
@@ -652,6 +671,14 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
         expect.objectContaining({ mode: 0o644 }),
       );
       expect(mockWriteFileSync).toHaveBeenCalledWith(systemUnitPath, expect.stringContaining('WantedBy=multi-user.target'), expect.anything());
+      // The unit runs as gwuser, so its WorkingDirectory/HOME/config must be
+      // gwuser's — not root's, even though this install itself runs as root.
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        systemUnitPath,
+        expect.stringContaining(`WorkingDirectory=${gwuserHome}/.claude-gateway`),
+        expect.anything(),
+      );
+      expect(mockWriteFileSync).toHaveBeenCalledWith(systemUnitPath, expect.stringContaining(`Environment="HOME=${gwuserHome}"`), expect.anything());
       expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['daemon-reload'], expect.anything());
       expect(mockExecFileSync).toHaveBeenCalledWith('systemctl', ['enable', '--now', 'claude-gateway.service'], expect.anything());
       // system scope must never shell out to sudo either — same rule as user scope
@@ -668,11 +695,11 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
     jest.spyOn(process, 'getuid').mockReturnValue(0);
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
-      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      mockExecFileSync.mockImplementation((withGetentGwuser(((file: string, args: string[]) => {
         if (file === 'systemctl' && args[0] === 'is-enabled') return Buffer.from('enabled\n');
         if (file === 'systemctl' && args[0] === 'is-active') return Buffer.from('active\n');
         return Buffer.from('');
-      }) as unknown as typeof execFileSync);
+      }) as (file: string, args: string[]) => Buffer) as unknown) as typeof execFileSync);
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
       expect(code).toBe(0);
       // The self-conflict guard specifically must not fire; the success
@@ -687,10 +714,10 @@ describe('service install/uninstall/status — --scope system (issue #457)', () 
   it('does not double-space the systemctl hint for system scope (no --user token to join)', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(0);
     try {
-      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      mockExecFileSync.mockImplementation((withGetentGwuser(((file: string, args: string[]) => {
         if (file === 'systemctl' && args.includes('enable')) throw new Error('boom');
         return Buffer.from('');
-      }) as unknown as typeof execFileSync);
+      }) as (file: string, args: string[]) => Buffer) as unknown) as typeof execFileSync);
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
       expect(code).toBe(1);
       expect(stderr.join('')).toContain('Inspect it with: systemctl status claude-gateway.service --no-pager');
@@ -803,10 +830,10 @@ describe('service install — cross-scope conflict, both directions (issue #457 
   it('refuses a --scope system install when a user-scope unit is already enabled', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(0);
     try {
-      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      mockExecFileSync.mockImplementation((withGetentGwuser(((file: string, args: string[]) => {
         if (file === 'systemctl' && args.includes('--user') && args.includes('is-enabled')) return Buffer.from('enabled\n');
         return Buffer.from('');
-      }) as unknown as typeof execFileSync);
+      }) as (file: string, args: string[]) => Buffer) as unknown) as typeof execFileSync);
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
       expect(code).toBe(1);
       expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -822,10 +849,10 @@ describe('service install — cross-scope conflict, both directions (issue #457 
     jest.spyOn(process, 'getuid').mockReturnValue(0);
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
-      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+      mockExecFileSync.mockImplementation((withGetentGwuser(((file: string, args: string[]) => {
         if (file === 'systemctl' && args.includes('--user') && args.includes('is-enabled')) return Buffer.from('enabled\n');
         return Buffer.from('');
-      }) as unknown as typeof execFileSync);
+      }) as (file: string, args: string[]) => Buffer) as unknown) as typeof execFileSync);
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true, force: true });
       expect(code).toBe(0);
       expect(mockWriteFileSync).toHaveBeenCalledWith(systemUnitPath, expect.stringContaining('User=gwuser'), expect.anything());
@@ -927,6 +954,7 @@ describe('service install — chmod is applied explicitly, not left to writeFile
 
   it("chmods the unit file to 0644 after writing it at system scope — writeFileSync's mode is a no-op on an existing file", async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(0);
+    mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
@@ -994,6 +1022,7 @@ describe('service install — --run-as only applies to --scope system (issue #45
 
   it('trims --run-as before writing it into User=, matching how --after/--env are normalized', async () => {
     jest.spyOn(process, 'getuid').mockReturnValue(0);
+    mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
     try {
       const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': '  gwuser  ', yes: true });
@@ -1041,5 +1070,91 @@ describe('service install — --after target names cannot contain whitespace (is
   it('still accepts properly comma-separated targets with no embedded whitespace', () => {
     const unit = renderSystemdUnit(resolveLaunchSpec({})!, { scope: 'user', after: ['docker.service', 'foo.target'], extraEnv: {} });
     expect(unit).toContain('After=network-online.target docker.service foo.target');
+  });
+});
+
+describe('service install — --scope system resolves --run-as user\'s real home (issue #457 review, external report)', () => {
+  it('refuses when the --run-as user cannot be resolved via getent, instead of falling back to the installer\'s own home', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      // getent fails for every user — simulates a nonexistent --run-as user,
+      // or getent itself being unavailable.
+      mockExecFileSync.mockImplementation((() => {
+        throw new Error('getent: gwuser: not found');
+      }) as unknown as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(1);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expectNoStateChange();
+      expect(stderr.join('')).toMatch(/Could not resolve --run-as gwuser/);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+    }
+  });
+
+  it('chowns a freshly-created WorkingDirectory to the --run-as user — root creates it, but the unit runs as someone else', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      // The gateway's own cwd doesn't exist yet; everything else the code
+      // touches (entry.js resolution, PATH candidates) still needs to.
+      mockExistsSync.mockImplementation((p: unknown) => String(p) !== `${gwuserHome}/.claude-gateway`);
+      mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(0);
+      expect(fs.mkdirSync).toHaveBeenCalledWith(`${gwuserHome}/.claude-gateway`, { recursive: true });
+      expect(fs.chownSync).toHaveBeenCalledWith(`${gwuserHome}/.claude-gateway`, 1500, 1500);
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not chown an already-existing WorkingDirectory — trusts ownership from prior use rather than reassigning it', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      // Default beforeEach mock: existsSync → true everywhere, including
+      // gwuser's .claude-gateway — it already exists.
+      mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(0);
+      expect(fs.chownSync).not.toHaveBeenCalled();
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('the rendered unit config path is also under the --run-as user\'s home, not the installer\'s', async () => {
+    jest.spyOn(process, 'getuid').mockReturnValue(0);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      mockExecFileSync.mockImplementation((withGetentGwuser(() => Buffer.from('')) as unknown) as typeof execFileSync);
+      const code = await runService(['install'], { manager: 'systemd', scope: 'system', 'run-as': 'gwuser', yes: true });
+      expect(code).toBe(0);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        systemUnitPath,
+        expect.stringContaining(`GATEWAY_CONFIG=${gwuserHome}/.claude-gateway/config.json`),
+        expect.anything(),
+      );
+    } finally {
+      (process.getuid as unknown as jest.Mock).mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('a plain --scope user install is unaffected — still uses the installer\'s own os.homedir(), no getent lookup at all', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+    try {
+      const code = await runService(['install'], { manager: 'systemd', yes: true });
+      expect(code).toBe(0);
+      for (const [file] of mockExecFileSync.mock.calls as unknown as Array<[string]>) {
+        expect(file).not.toBe('getent');
+      }
+      expect(mockWriteFileSync).toHaveBeenCalledWith(unitPath, expect.stringContaining(`Environment="HOME=${os.homedir()}"`), expect.anything());
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

@@ -51,13 +51,13 @@ export interface LaunchSpec {
   pathEnv: string;
 }
 
-function gatewayHome(): string {
-  return path.join(os.homedir(), '.claude-gateway');
+function gatewayHome(home: string = os.homedir()): string {
+  return path.join(home, '.claude-gateway');
 }
 
-function configPath(flags: Record<string, string | boolean>): string {
+function configPath(flags: Record<string, string | boolean>, home: string = os.homedir()): string {
   const explicit = typeof flags.config === 'string' ? flags.config : process.env.GATEWAY_CONFIG;
-  return path.resolve(expandHome(explicit ?? path.join(gatewayHome(), 'config.json')));
+  return path.resolve(expandHome(explicit ?? path.join(gatewayHome(home), 'config.json')));
 }
 
 /**
@@ -69,13 +69,18 @@ function configPath(flags: Record<string, string | boolean>): string {
  * directories the gateway actually needs — the node that will run it, the
  * `claude` binary it spawns, and the standard system paths — keeping only
  * those that exist.
+ *
+ * `home` defaults to the *installing* process's home (`os.homedir()`), but a
+ * `--scope system --run-as <user>` install passes the run-as user's home
+ * instead — a root-run install must not bake root's own `~/.local/bin` /
+ * `~/.bun/bin` into a unit that runs as someone else entirely.
  */
-export function servicePath(): string {
+export function servicePath(home: string = os.homedir()): string {
   const candidates = [
     path.dirname(process.execPath),
     claudeBinDir(),
-    path.join(os.homedir(), '.local', 'bin'),
-    path.join(os.homedir(), '.bun', 'bin'),
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.bun', 'bin'),
     '/usr/local/sbin',
     '/usr/local/bin',
     '/usr/sbin',
@@ -102,10 +107,37 @@ function claudeBinDir(): string | null {
   }
 }
 
+/**
+ * `getent passwd <user>` → that user's uid/gid/home, or null if the user
+ * doesn't exist or `getent` itself isn't available. NSS-aware (works for
+ * LDAP/sssd-backed accounts, not just local `/etc/passwd` entries), which a
+ * naive `/etc/passwd` file parse would silently miss — the standard,
+ * distro-agnostic way to resolve this on Linux.
+ */
+function resolveRunAsUser(username: string): { uid: number; gid: number; home: string } | null {
+  try {
+    const line = capture('getent', ['passwd', username]).trim();
+    // name:password:UID:GID:GECOS:directory:shell
+    const fields = line.split(':');
+    const uid = Number(fields[2]);
+    const gid = Number(fields[3]);
+    const home = fields[5];
+    if (!Number.isInteger(uid) || !Number.isInteger(gid) || !home || !path.isAbsolute(home)) return null;
+    return { uid, gid, home };
+  } catch {
+    return null;
+  }
+}
+
 /** Resolve the absolute launch triple (node, entry, cwd) for a generated unit.
  *  Returns null — with a message — when the entry point can't be located, so a
- *  broken install never produces a unit that silently fails at boot. */
-export function resolveLaunchSpec(flags: Record<string, string | boolean>): LaunchSpec | null {
+ *  broken install never produces a unit that silently fails at boot.
+ *
+ *  `home` defaults to the installing process's own home. A `--scope system
+ *  --run-as <user>` install passes that user's real home instead — the unit
+ *  runs as them (`User=<user>`), so its WorkingDirectory/HOME/config path
+ *  must be theirs, not the root process that wrote the unit. */
+export function resolveLaunchSpec(flags: Record<string, string | boolean>, home: string = os.homedir()): LaunchSpec | null {
   // dist/cli/commands/service.js → dist/entry.js, the thin dispatcher that
   // loads only the side it needs. index.js is still a working boot entry and is
   // used when a partially-updated install predates the split, so a unit is
@@ -124,10 +156,10 @@ export function resolveLaunchSpec(flags: Record<string, string | boolean>): Laun
   return {
     node,
     entry,
-    cwd: gatewayHome(),
-    config: configPath(flags),
-    home: os.homedir(),
-    pathEnv: servicePath(),
+    cwd: gatewayHome(home),
+    config: configPath(flags, home),
+    home,
+    pathEnv: servicePath(home),
   };
 }
 
@@ -529,7 +561,24 @@ async function systemdInstall(
   const unitOpts = resolveSystemdUnitOptions(flags, scope);
   if (!unitOpts) return 1;
 
-  const spec = resolveLaunchSpec(flags);
+  // A --scope system install runs this CLI as root, but the rendered unit
+  // runs the gateway as unitOpts.runAs — WorkingDirectory/HOME/config must be
+  // *that* user's, not root's, or the process starts in the wrong place with
+  // the wrong HOME entirely (getent is a read-only NSS lookup, so this needs
+  // no privilege and can run even for a --print preview).
+  let home = os.homedir();
+  let runAsIds: { uid: number; gid: number } | null = null;
+  if (scope === 'system' && unitOpts.runAs) {
+    const resolved = resolveRunAsUser(unitOpts.runAs);
+    if (!resolved) {
+      process.stderr.write(`Could not resolve --run-as ${unitOpts.runAs} via \`getent passwd\` — does that user exist on this host?\n`);
+      return 1;
+    }
+    home = resolved.home;
+    runAsIds = { uid: resolved.uid, gid: resolved.gid };
+  }
+
+  const spec = resolveLaunchSpec(flags, home);
   if (!spec) return 1;
   const unit = renderSystemdUnit(spec, unitOpts);
   const file = unitPath(scope);
@@ -604,7 +653,18 @@ async function systemdInstall(
   const wasActive = unitFlagState(scope === 'user').active;
 
   try {
+    // A --scope system install creates this directory as root — if it didn't
+    // already exist, it comes out root-owned, and the gateway (running as
+    // runAsIds, not root) would be unable to write its pid file/logs into
+    // its own WorkingDirectory. Chown it to match only when this install
+    // just created it: an already-existing directory (e.g. the run-as user
+    // already used the gateway under their own account before this) is
+    // trusted to already have correct ownership, not silently reassigned.
+    const cwdExisted = fs.existsSync(spec.cwd);
     fs.mkdirSync(spec.cwd, { recursive: true });
+    if (runAsIds && !cwdExisted) {
+      fs.chownSync(spec.cwd, runAsIds.uid, runAsIds.gid);
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: scope === 'user' ? 0o700 : 0o755 });
     fs.writeFileSync(file, unit, { encoding: 'utf8', mode: scope === 'user' ? 0o600 : 0o644 });
     // writeFileSync's `mode` option only applies when the file is newly
