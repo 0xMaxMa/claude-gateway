@@ -52,6 +52,8 @@ export interface SkillLearningManagerOpts {
   sharedSkillsDir?: string;
   globalCfg?: SkillLearningConfig;
   agentCfg?: SkillLearningConfig;
+  /** `gateway.timezone` — the shared default when neither `globalCfg`/`agentCfg` sets `pruneTimezone`. */
+  gatewayTimezone?: string;
   logger?: { info: (msg: string) => void; warn?: (msg: string) => void };
   /** Injectable reviewer spawn — tests script the model; production uses the real claude -p. */
   reviewSpawn?: ClaudeSpawnFn;
@@ -88,7 +90,7 @@ export class SkillLearningManager {
     this.logger = opts.logger;
     this.reviewSpawn = opts.reviewSpawn;
     this.now = opts.now ?? Date.now;
-    this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg);
+    this.cfg = resolveSkillLearningConfig(opts.agentCfg, opts.globalCfg, opts.gatewayTimezone);
     this.notifier =
       opts.notifier ??
       new SkillNotifier({

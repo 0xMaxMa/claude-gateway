@@ -51,6 +51,7 @@ jest.mock('child_process', () => ({
 import { AgentRunner, MAX_IMAGE_SIZE_BYTES } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, StreamEvent } from '../../src/types';
 import { SessionProcess } from '../../src/session/process';
+import * as historyCleanup from '../../src/history/cleanup';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -5575,5 +5576,66 @@ describe('AgentRunner — reply failure after an earlier reply in the same turn 
       .map(m => m.content);
     expect(contents).toContain('interim update');
     expect(contents).toContain('final report');
+  }, 15000);
+});
+
+// ── History cleanup scheduler: gateway.timezone as shared fallback (issue #462) ──
+describe('AgentRunner — history cleanup scheduler timezone', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-tz-test-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) {
+      await runner.stop();
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.restoreAllMocks();
+  });
+
+  it('U-AR-TZ-GW: gateway.timezone is the shared fallback when history.cleanupTimezone is unset', async () => {
+    const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
+    gatewayConfig.gateway.timezone = 'Asia/Bangkok';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'Asia/Bangkok' }));
+  }, 15000);
+
+  it('U-AR-TZ-OVERRIDE: an explicit history.cleanupTimezone still wins over gateway.timezone', async () => {
+    const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
+    gatewayConfig.gateway.timezone = 'Asia/Bangkok';
+    gatewayConfig.gateway.history = { cleanupTimezone: 'Europe/London' };
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'Europe/London' }));
+  }, 15000);
+
+  it('U-AR-TZ-INVALID: an invalid gateway.timezone falls back to UTC instead of throwing at start()', async () => {
+    const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
+    gatewayConfig.gateway.timezone = 'Not/AZone';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await expect(runner.start()).resolves.not.toThrow();
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'UTC' }));
+  }, 15000);
+
+  it('U-AR-TZ-INVALID-PERFEATURE: an invalid history.cleanupTimezone falls back to UTC instead of throwing at start()', async () => {
+    const spy = jest.spyOn(historyCleanup, 'scheduleCleanup');
+    gatewayConfig.gateway.history = { cleanupTimezone: 'Not/AZone' };
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await expect(runner.start()).resolves.not.toThrow();
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'UTC' }));
   }, 15000);
 });

@@ -315,8 +315,16 @@ Config lives at `~/.claude-gateway/config.json` (or set `GATEWAY_CONFIG` env var
       }
     }
   ]
-}
 ```
+
+### `gateway.timezone` (optional)
+
+IANA timezone, default `"UTC"`. Shared default for the four per-feature scheduling
+timezones below when they are left unset: `gateway.history.cleanupTimezone`,
+`gateway.appBackup.cleanupTimezone`, `gateway.skillLearning.pruneTimezone`, and
+`gateway.dreaming.dreamTimezone`. Setting a per-feature field still overrides this
+shared default for that one feature. An invalid IANA string (here or in any
+per-feature field) falls back to `"UTC"` rather than crashing that scheduler.
 
 ### `gateway.publicUrl` (optional)
 
@@ -395,7 +403,7 @@ Global default retention policy. Can be overridden per-agent with an `history` k
 | `retentionDays` | `null` (keep forever) | Delete messages older than N days on each cleanup cycle |
 | `maxHistoryMessages` | `50` | Max history messages re-injected into a session at spawn. Lower it to shrink the context loaded at session start. `0` = inject no history |
 | `cleanupHour` | `3` | Hour of day to run cleanup (24h, in `cleanupTimezone`) |
-| `cleanupTimezone` | `"UTC"` | IANA timezone for the cleanup schedule |
+| `cleanupTimezone` | `"UTC"` | IANA timezone for the cleanup schedule; falls back to `gateway.timezone` when unset |
 
 Per-agent override example:
 ```json
@@ -484,7 +492,7 @@ Controls [skill self-improvement](#skill-self-improvement) — agents learning r
 | `maxAgeDays` | `30` | Curator prunes auto-skills older than this (with too few uses) |
 | `minUsesToKeep` | `2` | Auto-skills used fewer times than this are prune candidates |
 | `maxReviewsPerDay` | `20` | Per-day cap on background review runs |
-| `pruneHour` / `pruneTimezone` | `3` / `UTC` | When the daily curator runs |
+| `pruneHour` / `pruneTimezone` | `3` / `UTC` | When the daily curator runs; `pruneTimezone` falls back to `gateway.timezone` when unset |
 | `notify` | `true` | Push a per-write ping to every configured channel (see [notifications](#skill-self-improvement)); the `SKILLS_LEARNED.md` diary is written regardless |
 
 ```json
@@ -539,7 +547,7 @@ Nightly memory **dreaming** — background consolidation of an agent's long-term
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch (`false` ⇒ no scheduler, no run) |
 | `mode` | `"auto"` | `auto` = apply ops via the safe applier (backup, bounded-loss, net-negative); `propose` = diary-only dry-run |
-| `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC) |
+| `dreamHour` / `dreamTimezone` | `3` / `UTC` | When the nightly dream runs (invalid tz → UTC); `dreamTimezone` falls back to `gateway.timezone` when unset |
 | `dreamMinute` | `0` | Minute-of-hour the dream fires at, paired with `dreamHour` (0–59). Set with `staggerWindowMinutes: 0` to fire at an exact `HH:MM` (e.g. for a controlled re-test) |
 | `quietMinutes` | `30` | Skip a run if a session was active within this window |
 | `lookbackDays` | `3` | How far back to scan sessions |

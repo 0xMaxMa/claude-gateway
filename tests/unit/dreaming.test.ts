@@ -78,6 +78,23 @@ describe('dreaming/config: resolveDreamingConfig', () => {
     expect(resolveDreamingConfig({ promotionThreshold: 5 }).promotionThreshold).toBe(DREAMING_DEFAULTS.promotionThreshold);
     expect(resolveDreamingConfig({ maxChangesPerRun: 0 }).maxChangesPerRun).toBe(0); // explicit disable kept
   });
+
+  it('D-CFG-7: gateway.timezone is the shared fallback when neither override sets dreamTimezone (issue #462)', () => {
+    expect(resolveDreamingConfig(undefined, undefined, 'Asia/Bangkok').dreamTimezone).toBe('Asia/Bangkok');
+  });
+
+  it('D-CFG-8: a per-feature dreamTimezone (agent or global) still wins over gateway.timezone', () => {
+    expect(resolveDreamingConfig({ dreamTimezone: 'America/New_York' }, undefined, 'Asia/Bangkok').dreamTimezone).toBe(
+      'America/New_York',
+    );
+    expect(resolveDreamingConfig(undefined, { dreamTimezone: 'Europe/London' }, 'Asia/Bangkok').dreamTimezone).toBe(
+      'Europe/London',
+    );
+  });
+
+  it('D-CFG-9: an invalid gateway.timezone falls back to UTC, not to the invalid string', () => {
+    expect(resolveDreamingConfig(undefined, undefined, 'Not/AZone').dreamTimezone).toBe('UTC');
+  });
 });
 
 // ── gather ──────────────────────────────────────────────────────────────────

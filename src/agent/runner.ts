@@ -20,6 +20,7 @@ import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../s
 import { isBuiltinCommand } from './builtin-commands';
 import { fetchModelCatalog, DEFAULT_CONTEXT_WINDOW } from './model-catalog';
 import { SafeModeManager } from './safe-mode';
+import { isValidTimezone } from './skill-learning/config';
 import {
   TurnStreamRegistry,
   callbackSink,
@@ -3128,7 +3129,8 @@ export class AgentRunner extends EventEmitter {
       gw.history?.retentionDays,
     );
     const cleanupHour = gw.history?.cleanupHour ?? 0;
-    const cleanupTimezone = gw.history?.cleanupTimezone ?? 'UTC';
+    const rawCleanupTimezone = gw.history?.cleanupTimezone ?? gw.timezone ?? 'UTC';
+    const cleanupTimezone = isValidTimezone(rawCleanupTimezone) ? rawCleanupTimezone : 'UTC';
     const agentMediaRoot = MediaStore.agentMediaRoot(this.agentsBaseDir, this.agentConfig.id);
     const logPath = path.join(this.agentDir, 'cleanup.log');
 

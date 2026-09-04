@@ -85,9 +85,11 @@ export function resolveStalenessConfig(
 export function resolveDreamingConfig(
   agentCfg?: DreamingConfig,
   globalCfg?: DreamingConfig,
+  /** `gateway.timezone` — the shared default when neither override sets `dreamTimezone`. */
+  gatewayTimezone?: string,
 ): ResolvedDreamingCfg {
   const d = DREAMING_DEFAULTS;
-  const rawTz = pick(agentCfg?.dreamTimezone, globalCfg?.dreamTimezone, d.dreamTimezone);
+  const rawTz = agentCfg?.dreamTimezone ?? globalCfg?.dreamTimezone ?? gatewayTimezone ?? d.dreamTimezone;
   const mode = pick(agentCfg?.mode, globalCfg?.mode, d.mode);
   return {
     enabled: pick(agentCfg?.enabled, globalCfg?.enabled, d.enabled),

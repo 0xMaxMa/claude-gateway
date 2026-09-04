@@ -420,6 +420,8 @@ export class AppInstaller {
     appBackupConfig?: AppBackupConfig,
     backupsDir?: string,
     appRestoreConfig?: AppRestoreConfig,
+    /** `gateway.timezone` — the shared default when `appBackupConfig.cleanupTimezone` is unset/invalid. */
+    gatewayTimezone?: string,
   ) {
     this.appsDir = appsDir ?? DEFAULT_APPS_DIR;
     this.backupsDir = backupsDir ?? path.join(this.appsDir, APP_BACKUPS_DIRNAME);
@@ -443,7 +445,11 @@ export class AppInstaller {
         appBackupConfig.cleanupHour <= 23
           ? appBackupConfig.cleanupHour
           : 0,
-      cleanupTimezone: isValidTimezone(appBackupConfig?.cleanupTimezone) ? appBackupConfig!.cleanupTimezone! : 'UTC',
+      cleanupTimezone: isValidTimezone(appBackupConfig?.cleanupTimezone)
+        ? appBackupConfig!.cleanupTimezone!
+        : isValidTimezone(gatewayTimezone)
+          ? gatewayTimezone
+          : 'UTC',
       autoBackupBeforeUninstall: appBackupConfig?.autoBackupBeforeUninstall ?? true,
       autoBackupBeforeUpdate: appBackupConfig?.autoBackupBeforeUpdate ?? true,
     };

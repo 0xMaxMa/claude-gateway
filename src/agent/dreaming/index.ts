@@ -35,6 +35,8 @@ export interface DreamingManagerDeps {
   workspaceDir: string;
   globalCfg?: DreamingConfig;
   agentCfg?: DreamingConfig;
+  /** `gateway.timezone` — the shared default when neither `globalCfg`/`agentCfg` sets `dreamTimezone`. */
+  gatewayTimezone?: string;
   logger?: {
     info: (msg: string, data?: Record<string, unknown>) => void;
     warn?: (msg: string, data?: Record<string, unknown>) => void;
@@ -146,7 +148,7 @@ export class DreamingManager {
 
   constructor(deps: DreamingManagerDeps) {
     this.deps = deps;
-    this.cfg = resolveDreamingConfig(deps.agentCfg, deps.globalCfg);
+    this.cfg = resolveDreamingConfig(deps.agentCfg, deps.globalCfg, deps.gatewayTimezone);
   }
 
   private log(msg: string, data?: Record<string, unknown>): void {
