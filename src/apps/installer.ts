@@ -960,7 +960,7 @@ export class AppInstaller {
       if (wasRunning) {
         try {
           log(`Restarting "${appName}"`);
-          this.composeUp(appName, appDir);
+          await this.composeUp(appName, appDir);
         } catch (restartErr) {
           log(
             `WARNING: failed to restart "${appName}" after backup: ${
@@ -1073,7 +1073,7 @@ export class AppInstaller {
       this.copyIfExists(path.join(staging, 'config', '.env'), path.join(appDir, '.env'));
 
       log(`Starting "${appName}" on restored data`);
-      this.composeUp(appName, appDir);
+      await this.composeUp(appName, appDir);
       await this.registry.updateStatus(appName, 'running').catch(() => {});
 
       log(`Restore of "${backupId}" complete`);
@@ -1353,7 +1353,7 @@ export class AppInstaller {
         await this.registry.updateStatus(appName, 'stopped');
       } else {
         // start / restart: stop conflicting containers and wait for healthcheck
-        this.composeUp(appName, entry.installPath);
+        await this.composeUp(appName, entry.installPath);
         await this.registry.updateStatus(appName, 'running');
       }
       // An explicit operator action supersedes this boot's restore attempt: a
@@ -1869,11 +1869,11 @@ export class AppInstaller {
     try {
       // ── docker compose build ──────────────────────────────────────────────
       this.log(job, 'Building images');
-      this.run(['docker', 'compose', '-p', appName, 'build'], appDir, 600_000);
+      await this.runAsync(['docker', 'compose', '-p', appName, 'build'], appDir, 600_000);
 
       // ── docker compose up -d ──────────────────────────────────────────────
       this.log(job, 'Starting containers');
-      this.composeUp(appName, appDir, job);
+      await this.composeUp(appName, appDir, job);
     } catch (err) {
       this.log(job, 'Build/start failed — rolling back');
       throw err; // outer catch handles full cleanup
@@ -2055,7 +2055,7 @@ export class AppInstaller {
 
       // ── Build new images in tmp dir ───────────────────────────────────────
       this.log(job, 'Building new images');
-      this.run(['docker', 'compose', '-p', appName, 'build'], tmpDir, 600_000);
+      await this.runAsync(['docker', 'compose', '-p', appName, 'build'], tmpDir, 600_000);
 
       // ── Backup MEMORY.md before any disruption ────────────────────────────
       let memoryBackup: string | null = null;
@@ -2115,7 +2115,7 @@ export class AppInstaller {
         // ── Start new containers ────────────────────────────────────────────
         this.log(job, 'Starting new containers');
         reachedContainerStart = true;
-        this.composeUp(appName, finalDir, job);
+        await this.composeUp(appName, finalDir, job);
       } catch (upErr) {
         // The catch spans the whole swap, so a failure here is not necessarily a
         // container failure — saying it is sends diagnosis to the wrong
@@ -2442,7 +2442,7 @@ export class AppInstaller {
       // compose does not detect an env_file content change on its own. This is an
       // `up`, not a `down -v`, so named volumes (and their data) survive.
       this.log(job, 'Recreating container');
-      this.composeUp(appName, appDir, job, { forceRecreate: true });
+      await this.composeUp(appName, appDir, job, { forceRecreate: true });
 
       await this.registry.updateStatus(appName, 'running');
 
@@ -2481,7 +2481,7 @@ export class AppInstaller {
         if (hasPortChange && oldComposeContent !== null) {
           fs.writeFileSync(composePath, oldComposeContent);
         }
-        this.composeUp(appName, appDir, job, { forceRecreate: true });
+        await this.composeUp(appName, appDir, job, { forceRecreate: true });
         if (hasPortChange) {
           this.callbacks.registerRoutes(
             appName,
@@ -3055,19 +3055,27 @@ export class AppInstaller {
    * Stop conflicting containers then run `docker compose up -d --wait`.
    * Captures container logs into the job on failure before rethrowing.
    * job is optional — when omitted (e.g. startStopRestart) logs go to stderr.
+   *
+   * Uses the async spawn seam for the `up` itself (which can legitimately run
+   * for minutes waiting on a healthcheck), so this never freezes the gateway
+   * event loop while a container starts — every caller (install/update/
+   * reconfigure/backup/restore/startStopRestart) is on the request-serving
+   * path. `stopConflictingContainers` stays on the sync seam: it is a handful
+   * of short, bounded `docker ps`/`stop`/`rm` calls, not the long-running step
+   * this fix targets.
    */
-  private composeUp(appName: string, dir: string, job?: JobState, opts?: { forceRecreate?: boolean }): void {
+  private async composeUp(appName: string, dir: string, job?: JobState, opts?: { forceRecreate?: boolean }): Promise<void> {
     this.stopConflictingContainers(appName);
     const args = ['docker', 'compose', '-p', appName, 'up', '-d', '--wait'];
     if (opts?.forceRecreate) {
       args.push('--force-recreate');
     }
     try {
-      this.run(args, dir, 600_000);
+      await this.runAsync(args, dir, 600_000);
     } catch (upErr) {
       if (job) {
         try {
-          const { stdout } = this.run(
+          const { stdout } = await this.runAsync(
             ['docker', 'compose', '-p', appName, 'logs', '--no-color', '--tail=50'],
             dir,
             10_000,

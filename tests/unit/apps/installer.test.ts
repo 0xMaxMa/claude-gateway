@@ -154,7 +154,16 @@ describe('AppInstaller', () => {
 
   function makeInstaller(
     spawnFn = successSpawn,
-    asyncSpawnFn = successAsyncSpawn,
+    // Derived from spawnFn by default (not a bare successAsyncSpawn) so a
+    // caller that only overrides the sync mock — e.g. to simulate a failing
+    // `docker compose build`/`up`, both of which now run on the async seam —
+    // still sees that behavior on the async path instead of silently
+    // succeeding. Callers that need the async and sync paths to disagree
+    // (e.g. the boot-restore tests) pass an explicit second argument, which
+    // this default never overrides.
+    asyncSpawnFn = jest.fn(
+      async (cmd: string, args: string[], opts?: object) => spawnFn(cmd, args, opts),
+    ),
     restoreConfig?: { buildTimeoutMs?: number; waitTimeoutMs?: number },
   ) {
     return new AppInstaller(
@@ -176,6 +185,12 @@ describe('AppInstaller', () => {
     spawn: typeof successSpawn,
     agentMgr: ReturnType<typeof makeAgentMgr>,
   ) {
+    // Same rationale as makeInstaller's default: derive the async mock from
+    // the sync one so a `compose build`/`up` failure simulated on the sync
+    // side (both now run on the async seam) is not silently swallowed.
+    const asyncSpawn = jest.fn(
+      async (cmd: string, args: string[], opts?: object) => spawn(cmd, args, opts),
+    );
     return new AppInstaller(
       registry,
       new RegistryClient(),
@@ -183,7 +198,7 @@ describe('AppInstaller', () => {
       spawn,
       appsDir,
       agentMgr as unknown as ConstructorParameters<typeof AppInstaller>[5],
-      successAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      asyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
     );
   }
 
@@ -730,6 +745,42 @@ services:
 
       expect(job2.status).toBe('failed');
       expect(job2.error).toMatch(/already installed/);
+    });
+  });
+
+  // ─── docker compose build/up — async spawn seam (#452) ──────────────────
+
+  describe('install() — docker compose build/up run non-blocking', () => {
+    it('runs "docker compose build" and "compose up --wait" through the async spawn seam, never spawnSync', async () => {
+      // Regression for #452: install used the spawnSync-backed seam for both
+      // `docker compose build` and `docker compose up -d --wait`, freezing the
+      // gateway's event loop (verified live: /health did not respond for 85s
+      // during a real build) for the whole duration. Two independently-tracked
+      // mocks — one sync, one async — pin which seam each command travels
+      // through: on the pre-fix code every `docker` call, including build/up,
+      // arrives on the sync mock and the async mock never sees them.
+      const appDir = makeAppDir(srcDir, 'async-app');
+      const syncCalls: string[][] = [];
+      const asyncCalls: string[][] = [];
+      const spawn = jest.fn((_cmd: string, args: string[], _opts?: object) => {
+        syncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const asyncSpawn = jest.fn(async (_cmd: string, args: string[], _opts?: object) => {
+        asyncCalls.push(args);
+        return { stdout: '', stderr: '', status: 0 };
+      });
+      const installer = makeInstaller(spawn, asyncSpawn);
+      const job = await waitForJob(installer, installer.install({ localPath: appDir }), 5000);
+      expect(job.status).toBe('completed');
+
+      const isComposeBuild = (a: string[]) => a[0] === 'compose' && a.includes('build');
+      const isComposeUp = (a: string[]) => a[0] === 'compose' && a.includes('up') && a.includes('--wait');
+
+      expect(syncCalls.some(isComposeBuild)).toBe(false);
+      expect(syncCalls.some(isComposeUp)).toBe(false);
+      expect(asyncCalls.some(isComposeBuild)).toBe(true);
+      expect(asyncCalls.some(isComposeUp)).toBe(true);
     });
   });
 

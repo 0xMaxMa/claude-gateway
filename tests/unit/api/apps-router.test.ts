@@ -47,9 +47,13 @@ function makeInstaller(
   registry: AppsRegistry,
   appsDir?: string,
   spawn?: (cmd: string, args: string[], opts?: object) => { stdout: string; stderr: string; status: number },
-  // Boot restore runs through the async seam, not the sync one, so a test that
-  // drives restoreRunningApps() has to be able to substitute it (#446).
-  // Omitted → the constructor's real default, i.e. unchanged for every caller.
+  // Boot restore, and now composeUp()'s `up`/`build` steps too (#452), run
+  // through the async seam, not the sync one. A test that needs the two seams
+  // to disagree (e.g. driving restoreRunningApps() per #446) passes this
+  // explicitly. Omitted → derived from `spawn` so a caller that only mocks
+  // the sync side still gets a matching, always-resolving async mock instead
+  // of silently falling through to the constructor's real default (which
+  // would spawn an actual `docker` child process from a unit test).
   asyncSpawn?: (cmd: string, args: string[], opts?: object) => Promise<{ stdout: string; stderr: string; status: number }>,
 ): { installer: AppInstaller; callbacks: InstallerCallbacks } {
   const callbacks: InstallerCallbacks = {
@@ -58,14 +62,15 @@ function makeInstaller(
     startSocket: jest.fn((_socketPath: string, _socket: ComposeSocket) => Promise.resolve()),
     stopSockets: jest.fn((_appName: string) => {}),
   };
+  const syncSpawn = spawn ?? jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 });
   const installer = new AppInstaller(
     registry,
     new RegistryClient(),
     callbacks,
-    (spawn ?? jest.fn().mockReturnValue({ stdout: '', stderr: '', status: 0 })) as ConstructorParameters<typeof AppInstaller>[3],
+    syncSpawn as ConstructorParameters<typeof AppInstaller>[3],
     appsDir ?? makeTmpDir(),
     undefined,
-    asyncSpawn as ConstructorParameters<typeof AppInstaller>[6],
+    (asyncSpawn ?? (async (cmd: string, args: string[], opts?: object) => syncSpawn(cmd, args, opts))) as ConstructorParameters<typeof AppInstaller>[6],
   );
   return { installer, callbacks };
 }

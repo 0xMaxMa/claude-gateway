@@ -108,8 +108,20 @@ function backupSpawn(
   });
 }
 
-/** async seam: returning status 1 makes queryRuntimeStatus fall back to the stored status. */
-const keepStoredAsyncSpawn = jest.fn(async () => ({ stdout: '', stderr: '', status: 1 }));
+/**
+ * Async seam for backup/restore's AppInstaller. `docker compose ps` fails
+ * (status 1) so `queryRuntimeStatus` falls back to the stored status, never
+ * driving these tests off a live-status side channel. Everything else —
+ * notably `compose up --wait`, which composeUp() now runs on this same seam
+ * (issue #452) — delegates to the same sync mock backup/restore already
+ * assert against, so a test's `calls` log still sees the restart/start step.
+ */
+function makeAsyncSpawn(spawnFn: jest.Mock) {
+  return jest.fn(async (cmd: string, args: string[], opts?: object) => {
+    if (args.includes('ps')) return { stdout: '', stderr: '', status: 1 };
+    return spawnFn(cmd, args, opts);
+  });
+}
 
 describe('AppInstaller — backup/restore', () => {
   let tmpDir: string;
@@ -133,7 +145,7 @@ describe('AppInstaller — backup/restore', () => {
       spawnFn as unknown as ConstructorParameters<typeof AppInstaller>[3],
       appsDir,
       undefined,
-      keepStoredAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      makeAsyncSpawn(spawnFn) as unknown as ConstructorParameters<typeof AppInstaller>[6],
       undefined, // housekeepingConfig
       cfg,
       backupsDir,
@@ -224,14 +236,15 @@ describe('AppInstaller — backup/restore', () => {
     const { calls } = makeCallLog();
     // Construct without the injected backupsDir so the default (derived from
     // appsDir) is exercised — locks the user-specified `apps/.backups/<app>` layout.
+    const spawnFn = backupSpawn(calls, { volumes: ['data'] });
     const installer = new AppInstaller(
       registry,
       new RegistryClient(),
       makeCallbacks(),
-      backupSpawn(calls, { volumes: ['data'] }) as unknown as ConstructorParameters<typeof AppInstaller>[3],
+      spawnFn as unknown as ConstructorParameters<typeof AppInstaller>[3],
       appsDir,
       undefined,
-      keepStoredAsyncSpawn as unknown as ConstructorParameters<typeof AppInstaller>[6],
+      makeAsyncSpawn(spawnFn) as unknown as ConstructorParameters<typeof AppInstaller>[6],
       undefined, // housekeepingConfig
       undefined, // appBackupConfig
       // no backupsDir arg → default under <appsDir>/.backups
