@@ -335,6 +335,28 @@ async function refreshOne(
         customSecretKey(id, 'access_token'),
         ...internalSecretKeysOf(id, { includeDcrRegistration: clearsDcrRegistration(err) }),
       ]);
+      // …and restart, for the same reason the success path above does and the
+      // unified DELETE route does. A live session's MCP subprocess was spawned with
+      // the token just deleted baked into its env and cannot be hot-patched, so
+      // without this it keeps advertising the connector's tools and failing every
+      // call against them with a 401 the model has no way to interpret. Respawned,
+      // the connector resolves with no secret, session/process.ts leaves it out of
+      // the MCP config, and the tools are simply absent — which is the truth.
+      //
+      // Guarded per runner for the reason spelled out on the success path: an
+      // unguarded rejection lands in this same catch block and would be re-counted
+      // as a refresh failure.
+      if (agents) {
+        await Promise.all(
+          [...agents.values()].map((runner) =>
+            runner.restartSessionsUsingConnector(id).catch((e: Error) => {
+              console.error(
+                `oauth-refresh-sweep: restart after give-up for connector=${id} failed: ${e.message}`,
+              );
+            }),
+          ),
+        );
+      }
     } else if (permanent) {
       // One rewrite, same reason as the success path: splitting the new permanent
       // count from the cleared transient one left a window where both were set,

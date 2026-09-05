@@ -44,7 +44,13 @@ export function resolveEnabledConnectors(
 ): Record<string, unknown> {
   const enabled = agentConfig.connectors ?? {};
   const tokenEnv = readTokenEnv();
-  const out: Record<string, unknown> = {};
+  // Null-prototype for the reason the `secrets` map below is one, one level up:
+  // `restartSessionsUsingConnector` asks this map what a single id resolves to
+  // (`resolved[connectorId]`), and a connector id may legitimately be `constructor`
+  // or `valueOf`. On a plain object that lookup answers with an inherited Function
+  // for an id that resolves to nothing — a "changed" fingerprint that restarts every
+  // session on the box, forever, since it never matches what a spawn recorded.
+  const out: Record<string, unknown> = Object.create(null);
   const isEnabled = (id: string): boolean => enabled[id]?.enabled ?? defaultEnabled;
 
   for (const [id, entry] of Object.entries(customConnectors)) {
@@ -90,9 +96,9 @@ export function resolveEnabledConnectors(
  * credentials deleted — the most actionable state this block can describe, and the
  * one a caller most needs to see before it happens.
  *
- * `unrefreshable` covers the case with no streak at all. A provider that issues no
+ * `unrefreshable` covers the cases with no streak at all. A provider that issues no
  * refresh_token (an AS advertising scopes that don't include `offline_access` — see
- * the scope fallback in oauth-connectors-router.ts) leaves the sweep nothing to
+ * the scope fallback in mcp-oauth.ts's `resolveScope`) leaves the sweep nothing to
  * refresh with, so it skips the connector on every tick and never records a failure.
  * Without this flag that connector keeps a green checkmark forever over an
  * access_token that expired an hour in, which is the exact state the sweep's module
@@ -111,8 +117,23 @@ export function refreshStatusOf(
   // it is a fact about what is already in the file, and computing it here means it
   // cannot drift out of sync with the tokens it describes.
   const expiresAt = parseCounter(tokenEnv[expiresAtSecretKey(id)]);
+  // Three states, one flag: there is a token here, nothing can renew it, and it is
+  // not currently known-good.
+  //
+  // `expiresAt === 0` is the third one, and it is not the "not signed in yet" case —
+  // that has no access_token at all, and the row already reports `connected: false`
+  // without help from here. A 'gateway' connector that HAS an access_token and no
+  // recorded expiry is one whose token this gateway never minted: every path that
+  // writes one writes an expiry alongside it, defaulting to an hour when the AS
+  // omits `expires_in` (see the callback and the sweep). The way to get here is to
+  // paste an access_token into an `oauth: true` add — now rejected at that route,
+  // but rows already in this state predate the check and are exactly the ones that
+  // need saying out loud, since they will simply stop working at a moment nothing
+  // recorded.
   const unrefreshable =
-    !tokenEnv[refreshTokenSecretKey(id)] && expiresAt > 0 && expiresAt <= Date.now();
+    !!tokenEnv[customSecretKey(id, 'access_token')] &&
+    !tokenEnv[refreshTokenSecretKey(id)] &&
+    (expiresAt === 0 || expiresAt <= Date.now());
   if (!consecutiveFailures && !permanentFailures && !unrefreshable) return undefined;
   return {
     consecutiveFailures,

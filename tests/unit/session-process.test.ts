@@ -517,6 +517,96 @@ describe('SessionProcess', () => {
         expect([...RESERVED_CONNECTOR_IDS]).toContain(name);
       }
     });
+
+    // ------------------------------------------------------------------------
+    // connectorConfigChanged — the restart decision, asked per session
+    //
+    // Regression (round 10). This used to be an agent-level question answered by
+    // AgentRunner.usesConnector(id), which re-resolved the connector against the
+    // CURRENT mcp-token.env and reported whether it came out enabled. That is a
+    // question about the connector, not about the session, and it gave the wrong
+    // answer in both directions:
+    //
+    //   - After a delete or a give-up (oauth-refresh-sweep.ts's permanent-failure
+    //     branch), the secrets are gone by the time the restart is asked for, so
+    //     the connector resolves to nothing and the answer is "nobody uses it" —
+    //     for the very sessions still running with the revoked credential. The
+    //     API's DELETE route worked around it by asking first and passing
+    //     `force: true`; the sweep did not, so a give-up never withdrew anything.
+    //   - After a refresh, the answer is "yes" for every session of every agent
+    //     the connector is enabled for, including the ones that were spawned
+    //     before it was ever connected and hold no copy of it. The sweep runs on
+    //     a timer, so that cost a box-wide respawn about once per token lifetime.
+    //
+    // Comparing against what the session was actually spawned with answers both.
+    // ------------------------------------------------------------------------
+    describe('connectorConfigChanged', () => {
+      const resolvedGithub = {
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_inject' },
+      };
+
+      async function spawnWithGithub(): Promise<InstanceType<typeof SessionProcess>> {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+        expect(readMcpConfig().github).toEqual(resolvedGithub);
+        return sp;
+      }
+
+      it('unchanged: the same resolved entry is not a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(sp.connectorConfigChanged('github', { ...resolvedGithub })).toBe(false);
+      });
+
+      it('deleted / given up on: resolving to nothing IS the change', async () => {
+        const sp = await spawnWithGithub();
+        // What the DELETE route and the sweep's give-up branch both produce: the
+        // secrets are already gone, so the connector resolves to undefined.
+        expect(sp.connectorConfigChanged('github', undefined)).toBe(true);
+      });
+
+      it('rotated: a new access_token in the same shape is a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(
+          sp.connectorConfigChanged('github', {
+            ...resolvedGithub,
+            headers: { Authorization: 'Bearer ghp_rotated' },
+          }),
+        ).toBe(true);
+      });
+
+      it('newly connected: absent at spawn, present now, is a change', async () => {
+        agentConfig.connectors = {};
+        gatewayConfig.gateway.customConnectors = {};
+        const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+        expect(sp.connectorConfigChanged('github', resolvedGithub)).toBe(true);
+      });
+
+      it('a connector this session never had, still absent, is not a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(sp.connectorConfigChanged('stripe', undefined)).toBe(false);
+      });
+
+      // An api session without allow_tools gets no mcp-config.json at all
+      // (writeMcpConfig early-returns null), so no connector can reach it. An
+      // empty spawn map would read as "spawned, holding nothing" and make every
+      // newly connected connector look like a change worth killing it over.
+      it('a session with no generated mcp config is never a candidate', async () => {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        expect(sp.connectorConfigChanged('github', resolvedGithub)).toBe(false);
+        expect(sp.connectorConfigChanged('github', undefined)).toBe(false);
+      });
+    });
   });
 
   // --------------------------------------------------------------------------

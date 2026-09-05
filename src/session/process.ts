@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -24,6 +25,16 @@ import { resolveEnabledConnectors } from '../connectors/resolve';
 import { isReservedConnectorId } from '../connectors/custom';
 
 export const MAX_HISTORY_MESSAGES = 50;
+
+/**
+ * Digest of one resolved connector's mcpServers entry — command, args and the
+ * substituted secret alike. Hashed rather than kept verbatim so a rotated
+ * access_token is comparable without holding a second copy of it in memory for
+ * the life of the session; only equality is ever asked of it.
+ */
+function connectorFingerprint(server: unknown): string {
+  return createHash('sha256').update(JSON.stringify(server) ?? 'undefined').digest('hex');
+}
 
 /**
  * Claude credential / API-routing env vars forwarded from the host into an
@@ -298,6 +309,20 @@ export class SessionProcess extends EventEmitter {
   private _querySettled = false;
   // For API sessions: history context to prepend to the first sendMessage() after a model-switch respawn
   private pendingInitialPrompt?: string;
+  // Fingerprint per connector actually written into THIS session's mcp-config.json,
+  // rewritten on every spawn by writeMcpConfig(). It answers the only question a
+  // connector-triggered restart needs to ask — "is what this subprocess is running
+  // with still what the connector resolves to?" — which neither the agent's current
+  // enablement nor mcp-token.env can answer after the fact: a rotated token resolves
+  // enabled either way, and a deleted one resolves to nothing for a session that is
+  // still holding it. See connectorConfigChanged.
+  //
+  // `null` until writeMcpConfig has run, and it stays null for the sessions that get
+  // no generated config at all (`source === 'api'` without allow_tools). An empty Map
+  // would be a different claim — "spawned, with no connectors" — and would make every
+  // newly connected connector look like a change to a session that cannot use MCP
+  // servers in the first place.
+  private spawnedConnectors: Map<string, string> | null = null;
 
   constructor(
     sessionId: string,
@@ -601,6 +626,33 @@ export class SessionProcess extends EventEmitter {
     }
   }
 
+  /**
+   * True when `resolvedServer` — what `connectorId` resolves to for this agent
+   * right now, or `undefined` when it resolves to nothing — differs from what
+   * this session's subprocess was actually spawned with.
+   *
+   * This is the whole restart decision for a connector change, and it has to be
+   * asked per session rather than per agent. The three cases a caller has:
+   *   - a token rotated: both sides present, different value → restart
+   *   - a connector deleted or its refresh given up on: `undefined` here,
+   *     present at spawn → restart (asking mcp-token.env instead answers "not
+   *     connected", i.e. "nobody uses it", for the sessions still holding it)
+   *   - a connector just connected: present here, absent at spawn → restart
+   * and one case that used to cost every session on the box a respawn: nothing
+   * about this connector changed for this session → no restart. That matters
+   * because the refresh sweep fires on a timer, so an agent-level answer
+   * restarted every session of every agent roughly once per token lifetime.
+   *
+   * A session that has never written an mcp-config.json is never a candidate: it
+   * either has not spawned yet, and will read the current state when it does, or
+   * it is a tool-less API session that gets no MCP servers at all.
+   */
+  connectorConfigChanged(connectorId: string, resolvedServer: unknown): boolean {
+    if (!this.spawnedConnectors) return false;
+    const now = resolvedServer === undefined ? undefined : connectorFingerprint(resolvedServer);
+    return this.spawnedConnectors.get(connectorId) !== now;
+  }
+
   private writeMcpConfig(): string | null {
     if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
 
@@ -635,6 +687,7 @@ export class SessionProcess extends EventEmitter {
       this.gatewayConfig.gateway.customConnectors,
       this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true,
     );
+    const spawnedConnectors = new Map<string, string>();
     for (const [name, server] of Object.entries(connectorServers)) {
       // Defence in depth: slugify() and /oauth/receive both refuse these ids now,
       // so this can only fire on an entry hand-written into config.json.
@@ -650,7 +703,9 @@ export class SessionProcess extends EventEmitter {
         );
       }
       extraServers[name] = server;
+      spawnedConnectors.set(name, connectorFingerprint(server));
     }
+    this.spawnedConnectors = spawnedConnectors;
 
     const mcpConfig = {
       mcpServers: {
