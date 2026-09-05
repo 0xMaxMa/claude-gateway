@@ -465,8 +465,18 @@ describe('resolve', () => {
     it('omits the refresh block entirely when the sweep is healthy', () => {
       const { setSecret } = require('../../src/connectors/token-env');
       const { customSecretKey } = require('../../src/connectors/custom');
+      const {
+        refreshTokenSecretKey,
+        expiresAtSecretKey,
+      } = require('../../src/connectors/oauth-refresh-sweep');
 
+      // What a real sign-in leaves behind: the token, the refresh_token that
+      // renews it, and an expiry. An access_token on its own is NOT this state —
+      // nothing can renew it and no path that mints one writes it that way, so
+      // refreshStatusOf reports it as unrefreshable (see its doc).
       setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_ok');
+      setSecret(refreshTokenSecretKey('firecrawl'), 'fcr_ok');
+      setSecret(expiresAtSecretKey('firecrawl'), String(Date.now() + 3600_000));
       expect(statusOfFirecrawl().refresh).toBeUndefined();
       // Absent, not present-and-undefined: the single-status route omits the key,
       // and an in-process caller testing `'refresh' in status` (or counting keys)
@@ -475,12 +485,12 @@ describe('resolve', () => {
     });
 
     // Reachable through ordinary configuration, not a hand-edited file: the scope
-    // sent to the AS is `metadata.scopesSupported.join(' ')` whenever it advertises
-    // any scopes at all, falling back to 'offline_access' only when the list is
-    // empty — so an AS advertising scopes that don't include it issues a token
-    // response with no refresh_token. The sweep then has nothing to refresh with
-    // and skips the connector forever without recording a failure, which left a
-    // green checkmark standing over a token that expired an hour in.
+    // sent to the AS is whatever discovery advertised (see resolveScope), falling
+    // back to 'offline_access' only when nothing advertises anything — so a server
+    // whose scopes don't include it issues a token response with no refresh_token.
+    // The sweep then has nothing to refresh with and skips the connector forever
+    // without recording a failure, which left a green checkmark standing over a
+    // token that expired an hour in.
     it('flags a connector that can never refresh once its token has actually expired', () => {
       const { setSecret } = require('../../src/connectors/token-env');
       const { customSecretKey } = require('../../src/connectors/custom');
@@ -628,6 +638,41 @@ describe('connectors-router', () => {
     const res = await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(res.status).toBe(200);
     expect(res.body.connectors).toEqual([]);
+  });
+
+  // Regression (round 10). `store.read()` does no runtime shape validation —
+  // `secretNames` is required by the TypeScript type and by nothing else — so a
+  // connector hand-written into config.json without it made `entry.secretNames
+  // .length` a TypeError. On Express 4 a rejected async handler is not caught by
+  // the router: it reaches index.ts's `unhandledRejection` hook, which runs
+  // emergencyShutdown() and exits the process. One malformed line in config.json
+  // therefore took down every agent on the box, from an authenticated request
+  // that should have cost its caller a 500. The validation now sits inside the
+  // same try as the rest of the handler.
+  it('POST /:id/connect 500s on a malformed entry instead of rejecting out of the handler', async () => {
+    const cfgPath = tmpConfig({
+      broken: {
+        label: 'Broken',
+        config: { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer {api_key}' } },
+        // secretNames deliberately absent — what a hand-edited config.json looks like.
+      },
+    });
+    const app = makeApp(cfgPath);
+
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const res = await request(app)
+        .post('/api/v1/connectors/broken/connect')
+        .set('X-Api-Key', adminKey)
+        .send({ token: 'sk-live' });
+      expect(res.status).toBe(500);
+      // Give a rejection one macrotask to surface, as it would in production.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
   });
 
   it('rejects missing / invalid key', async () => {
@@ -990,9 +1035,8 @@ describe('connectors-router', () => {
     /** A stand-in AgentRunner that records the restarts asked of it. */
     function fakeAgents() {
       const restartSessionsUsingConnector = jest.fn().mockResolvedValue({ restarted: true });
-      const usesConnector = jest.fn().mockReturnValue(true);
-      const runner = { restartSessionsUsingConnector, usesConnector } as unknown as AgentRunner;
-      return { restartSessionsUsingConnector, usesConnector, agents: new Map([['a1', runner]]) };
+      const runner = { restartSessionsUsingConnector } as unknown as AgentRunner;
+      return { restartSessionsUsingConnector, agents: new Map([['a1', runner]]) };
     }
 
     function makeAppWithAgents(configPath: string | undefined, agents: Map<string, AgentRunner>) {
@@ -1029,7 +1073,8 @@ describe('connectors-router', () => {
       expect(add.status).toBe(200);
       expect(add.body.connected).toBe(true);
       // The overlay carries the just-written entry: the config watcher has not
-      // told the runner about it yet, so without it usesConnector says no.
+      // told the runner about it yet, so without it the connector resolves to
+      // nothing and every session's fingerprint comparison says "no change".
       expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
         add.body.id,
         expect.objectContaining({
@@ -1077,8 +1122,18 @@ describe('connectors-router', () => {
       expect(restartSessionsUsingConnector).toHaveBeenCalledWith('stripe', expect.anything());
     });
 
-    it('DELETE asks who uses the connector BEFORE the secrets go away, then restarts them', async () => {
-      const { restartSessionsUsingConnector, usesConnector, agents } = fakeAgents();
+    // Regression (round 10): DELETE used to ask each runner `usesConnector(id)`
+    // BEFORE removing the secrets and pass the answer down as `force`, because
+    // afterwards the connector resolves to nothing and the agent-level question
+    // "do you use it?" answers "no" for everybody. That ordering was fragile —
+    // the sweep's give-up path deleted the secrets first and then restarted with
+    // no force, so a revoked token was never actually withdrawn from a running
+    // session. The restart decision now lives on the session, which compares
+    // what it was SPAWNED with against what the connector resolves to now, so
+    // "resolves to nothing" is itself the change and needs no force flag and no
+    // careful ordering.
+    it('DELETE restarts the sessions even though the connector now resolves to nothing', async () => {
+      const { restartSessionsUsingConnector, agents } = fakeAgents();
       const { getSecret } = require('../../src/connectors/token-env');
       const cfgPath = tmpConfig({
         stripe: {
@@ -1089,12 +1144,6 @@ describe('connectors-router', () => {
       });
       const app = makeAppWithAgents(cfgPath, agents);
 
-      // usesConnector must be consulted while the secret still exists —
-      // afterwards nothing resolves and the honest answer is always "nobody".
-      usesConnector.mockImplementation(() => {
-        expect(getSecret('CUSTOM__stripe__api_key')).toBe('sk-live-placeholder');
-        return true;
-      });
       await request(app)
         .post('/api/v1/connectors/stripe/connect')
         .set('X-Api-Key', adminKey)
@@ -1103,12 +1152,14 @@ describe('connectors-router', () => {
 
       const del = await request(app).delete('/api/v1/connectors/stripe').set('X-Api-Key', adminKey);
       expect(del.status).toBe(200);
-      expect(usesConnector).toHaveBeenCalled();
-      // force: the runner must not re-check — by now the secret is gone.
-      expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
-        'stripe',
-        expect.objectContaining({ force: true }),
-      );
+      // The secret really is gone by the time the restart is asked for.
+      expect(getSecret('CUSTOM__stripe__api_key')).toBeNull();
+      // Still no force flag — but the entry itself is gone from config.json, and
+      // the runner's in-memory gateway config is not reloaded synchronously, so
+      // DELETE says so explicitly with a `null` overlay entry (round 11). A
+      // connector with no placeholders would otherwise resolve unchanged here
+      // and no session would restart.
+      expect(restartSessionsUsingConnector).toHaveBeenCalledWith('stripe', { overlay: { stripe: null } });
     });
 
     it('a failing restart does not turn a successful connect into a 500', async () => {

@@ -6,7 +6,7 @@ import yaml from 'js-yaml';
 import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
-import { withConfigWriteLock } from '../config/config-write-lock';
+import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -435,11 +435,7 @@ export class AgentManager {
     // mkdirSync is usually a recursive no-op once that's already run, but
     // must not itself default to 0755 on any path that reaches here first.
     fs.mkdirSync(path.dirname(this.configPath), { recursive: true, mode: 0o700 });
-    const tmp = `${this.configPath}.tmp.${process.pid}`;
-    // mode: 0o600 — rename() carries this file's mode onto config.json,
-    // silently downgrading an existing 0600 config to 0644 otherwise (#460).
-    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmp, this.configPath);
+    writeConfigAtomicSync(this.configPath, config);
   }
 
   private async upsertConfigEntry(agentId: string, entry: Record<string, unknown>): Promise<void> {

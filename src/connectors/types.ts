@@ -65,8 +65,8 @@ export interface ConnectorStatus {
    * Transient failures (network, DNS, a 5xx: reasons the authorization server never
    * declared) deliberately never delete the grant, so `connected` stays true off the
    * still-present access_token even once that token has expired and every call
-   * through it is failing. Without this the panel shows an indefinite green
-   * checkmark over a connector that stopped working hours ago.
+   * through it is failing. Without this the API reports an indefinitely healthy
+   * connector that stopped working hours ago.
    */
   refresh?: {
     /** Consecutive transient failures; resets to 0 on the first success. */

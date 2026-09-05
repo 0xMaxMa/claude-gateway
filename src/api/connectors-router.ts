@@ -2,7 +2,14 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ApiKey, CustomConnectorEntry } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import { listConnectorStatus, refreshStatusOf } from '../connectors/resolve';
-import { setSecret, setSecrets, deleteSecrets, hasSecret, readTokenEnv } from '../connectors/token-env';
+import {
+  setSecret,
+  setSecrets,
+  deleteSecrets,
+  updateSecrets,
+  hasSecret,
+  readTokenEnv,
+} from '../connectors/token-env';
 import {
   slugify,
   extractPlaceholders,
@@ -100,27 +107,29 @@ export function createConnectorsRouter(
    * A session's MCP subprocess reads its config once, at spawn (see
    * session/process.ts's writeMcpConfig): connecting a connector while a session is
    * running therefore does nothing visible until that session restarts. Without this
-   * the web panel flips to "Connected ✓" while the agent the user is talking to still
+   * a status poller flips to "connected" while the agent the user is talking to still
    * has no such tool, for as long as the session lives.
    *
    * `overlay` carries an entry this route has just written but the config watcher may
-   * not have propagated to the runners yet; `force` is for the delete path, which must
-   * decide before the secrets are gone (afterwards nothing resolves and the answer is
-   * always "no one uses it"). Never throws — a restart failure must not turn a
-   * successful connect into a 500.
+   * not have propagated to the runners yet. Never throws — a restart failure must not
+   * turn a successful connect into a 500.
+   *
+   * Called on the delete paths too, after the secrets are gone: "this connector now
+   * resolves to nothing" is itself the change each session is compared against (see
+   * AgentRunner.restartSessionsUsingConnector). The hard-delete branch passes
+   * `{ [id]: null }`, the overlay's way of saying the entry was removed — a
+   * `'none'`-owner connector has no secrets whose absence would signal the change on
+   * its own, so against the runners' not-yet-refreshed config snapshot it would
+   * otherwise still resolve identically and nothing would restart.
    */
   async function restartSessionsUsing(
     id: string,
-    opts?: { overlay?: Record<string, CustomConnectorEntry>; runners?: AgentRunner[] },
+    opts?: { overlay?: Record<string, CustomConnectorEntry | null> },
   ): Promise<void> {
-    const runners = opts?.runners ?? (agents ? [...agents.values()] : []);
     await Promise.all(
-      runners.map((runner) =>
+      (agents ? [...agents.values()] : []).map((runner) =>
         runner
-          .restartSessionsUsingConnector(id, {
-            overlay: opts?.overlay,
-            force: opts?.runners !== undefined,
-          })
+          .restartSessionsUsingConnector(id, { overlay: opts?.overlay })
           .catch((err: Error) => {
             console.error(`connectors-router: restart for connector=${id} failed: ${err.message}`);
           }),
@@ -134,9 +143,9 @@ export function createConnectorsRouter(
   // does not catch a rejected handler promise: it escapes to the process-wide
   // `unhandledRejection` hook in index.ts, which runs emergencyShutdown and
   // exits. A read failure inside this one route therefore used to take down every
-  // agent and every channel on the box — and since the web panel polls it, the
+  // agent and every channel on the box — and since callers poll this route, the
   // restarted gateway got killed again on the next poll. Answering 500 keeps the
-  // blast radius to the panel that asked.
+  // blast radius to the client that asked.
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
     try {
       res.json({ connectors: listConnectorStatus(await store.read()) });
@@ -194,41 +203,64 @@ export function createConnectorsRouter(
     if (!requireAdmin(req, res)) return;
     const id = req.params.id;
 
-    const entry = (await store.read())[id];
-    if (!entry) {
-      res.status(404).json({ error: `Unknown connector '${id}'` });
-      return;
-    }
-    // Only a 'static' connector has a credential a human is supposed to paste.
-    // The other two owners each have their own way in, and naming it is the whole
-    // value of this branch — a bare "not allowed here" leaves the caller guessing.
-    if (entry.credentialOwner === 'gateway' || entry.credentialOwner === 'external') {
-      res.status(400).json({
-        error:
-          entry.credentialOwner === 'external'
-            ? `Connector '${id}' has its credential owned externally — its token is pushed via POST /v1/connectors/${id}/oauth/receive, not set here.`
-            : `Connector '${id}' uses OAuth sign-in — start it via POST /v1/connectors/custom/${id}/oauth/start instead`,
-      });
-      return;
-    }
-    if (entry.secretNames.length !== 1) {
-      res.status(400).json({
-        error:
-          entry.secretNames.length === 0
-            ? `Connector '${id}' has no secrets to set — nothing to connect here.`
-            : `Connector '${id}' needs ${entry.secretNames.length} secrets (${entry.secretNames.join(', ')}) — this route only accepts a single value. Remove and re-add it with every value via POST /v1/connectors/custom.`,
-      });
-      return;
-    }
-
+    // Body validation happens inside the locked callback below, in the position it
+    // always had — after the entry checks, so an unknown id still answers 404 rather
+    // than "token is required". It is pure CPU, so it costs the lock nothing.
     const token = (req.body as { token?: unknown })?.token;
-    if (typeof token !== 'string' || !token.trim()) {
-      res.status(400).json({ error: 'token is required and must be a non-empty string' });
-      return;
-    }
+
+    // Everything below, validation included, sits inside the try. `withEntry`
+    // does no shape validation — `secretNames` is required by the TypeScript type
+    // and by nothing at runtime — so an entry hand-written into config.json
+    // without it turns the checks below into a TypeError, and on Express 4 a
+    // rejected async handler escapes to index.ts's `unhandledRejection` hook,
+    // which calls emergencyShutdown(). The read paths were already hardened for
+    // exactly this (see token-env.ts and custom-connectors-store.ts); a
+    // malformed entry must cost the caller a 500, not every agent on the box.
     try {
-      setSecret(customSecretKey(id, entry.secretNames[0]), token.trim());
-      await restartSessionsUsing(id, { overlay: { [id]: entry } });
+      // `withEntry`, not `read()`: the entry decides both whether a pasted token
+      // belongs here and WHICH secret name it is filed under, and /oauth/receive
+      // rewrites exactly those two fields on an existing id. Read outside the lock,
+      // a push landing in between left this route storing the token under a name
+      // the entry no longer declares — nothing ever reads it back, and no route
+      // clears it either, since every delete path enumerates the CURRENT
+      // secretNames. Deciding inside the lock makes that ordering impossible.
+      const outcome = await store.withEntry(id, ({ entry }) => {
+        if (!entry) return { status: 404, error: `Unknown connector '${id}'` } as const;
+        // Only a 'static' connector has a credential a human is supposed to paste.
+        // The other two owners each have their own way in, and naming it is the whole
+        // value of this branch — a bare "not allowed here" leaves the caller guessing.
+        if (entry.credentialOwner === 'gateway' || entry.credentialOwner === 'external') {
+          return {
+            status: 400,
+            error:
+              entry.credentialOwner === 'external'
+                ? `Connector '${id}' has its credential owned externally — its token is pushed via POST /v1/connectors/${id}/oauth/receive, not set here.`
+                : `Connector '${id}' uses OAuth sign-in — start it via POST /v1/connectors/custom/${id}/oauth/start instead`,
+          } as const;
+        }
+        if (entry.secretNames.length !== 1) {
+          return {
+            status: 400,
+            error:
+              entry.secretNames.length === 0
+                ? `Connector '${id}' has no secrets to set — nothing to connect here.`
+                : `Connector '${id}' needs ${entry.secretNames.length} secrets (${entry.secretNames.join(', ')}) — this route only accepts a single value. Remove and re-add it with every value via POST /v1/connectors/custom.`,
+          } as const;
+        }
+        if (typeof token !== 'string' || !token.trim()) {
+          return { status: 400, error: 'token is required and must be a non-empty string' } as const;
+        }
+        setSecret(customSecretKey(id, entry.secretNames[0]), token.trim());
+        return { status: 200, entry } as const;
+      });
+      if (outcome.status !== 200) {
+        res.status(outcome.status).json({ error: outcome.error });
+        return;
+      }
+      // Outside the lock: restarting sessions is slow, needs nothing from the
+      // entry beyond the copy taken above, and a runner that rewrites config.json
+      // while we still held it would deadlock (see withEntry's doc).
+      await restartSessionsUsing(id, { overlay: { [id]: outcome.entry } });
       res.json({ id, connected: true });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -313,11 +345,62 @@ export function createConnectorsRouter(
       credentialOwner: 'external',
     };
 
+    // This route always writes credentialOwner 'external', so pushing onto an id
+    // that was 'gateway'-owned is a handover: from here on nothing refreshes it —
+    // the sweep only ever acts on 'gateway' entries — and DELETE only clears the
+    // sweep's internal keys under that same `credentialOwner === 'gateway'` guard,
+    // which no longer holds. The refresh_token, cached DCR client_id and failure
+    // bookkeeping left behind would therefore outlive every path that could remove
+    // them, sitting in mcp-token.env as a live credential belonging to a grant the
+    // gateway has stopped managing. Cleared here, in the same write that stores the
+    // pushed token, so the handover is atomic rather than a two-step that can be
+    // interrupted between halves.
+    //
+    // The same argument applies to the previous entry's OWN secrets, under names
+    // this route does not reuse: it overwrites `secretNames` with ['access_token'],
+    // and every path that could remove a custom secret enumerates the CURRENT
+    // secretNames — DELETE maps over them, /connect is closed to 'external'. A
+    // 'static' connector's pasted `{api_key}` would sit in the 0600 store as a live
+    // third-party key with no supported operation left that clears it.
+    // Captured INSIDE store.mutate, not from a `read()` before it. The two are
+    // the same value only if nothing writes config.json in between, and the
+    // whole reason `mutate` exists is that things do: an unlocked read here
+    // races the entry this very route is about to overwrite. Lose that race —
+    // an admin completes a browser sign-in on this id, or /connect stores a
+    // pasted token, between the read and the locked write — and `previousOwner`
+    // says 'static' for an entry that is now 'gateway'-owned, so the
+    // internalSecretKeysOf() removal below is skipped and the fresh
+    // refresh_token survives a handover to 'external'. Nothing collects it
+    // afterwards: the sweep ignores non-'gateway' entries and DELETE clears
+    // internal keys only under that same guard, leaving a live credential in
+    // mcp-token.env for a grant this gateway no longer manages — precisely the
+    // orphan the comment above exists to prevent. `mutate` reads the file under
+    // the write lock, so the entry it hands us is the one being replaced.
+    //
+    // Left at their defaults when there is no persistence target (tests), where
+    // `mutate` returns before invoking this callback — same as the `read()` that
+    // returned {} there.
+    let previousOwner: string | undefined;
+    let staleSecretKeys: string[] = [];
+
     try {
-      setSecret(customSecretKey(id, 'access_token'), accessToken.trim());
+      // config.json first, secrets second — matching the /custom add route below.
+      // If the second write fails, `listConnectorStatus` finds no secret and reports
+      // the row disconnected, which is honest and re-pushable. The other order
+      // fails to an orphaned secret under an id that DELETE 404s on, so nothing
+      // can ever clear it.
       await store.mutate((c) => {
+        const previous = c[id];
+        previousOwner = previous?.credentialOwner;
+        staleSecretKeys = (previous?.secretNames ?? [])
+          .filter((name: string) => !entry.secretNames.includes(name))
+          .map((name: string) => customSecretKey(id, name));
         c[id] = entry;
       });
+      updateSecrets({ [customSecretKey(id, 'access_token')]: accessToken.trim() }, [
+        ...staleSecretKeys,
+        ...(previousOwner === 'gateway' ? internalSecretKeysOf(id) : []),
+      ]);
 
       // A live session already resolved this connector with the stale (or
       // absent) token baked into its MCP subprocess's env — restart it so the
@@ -343,68 +426,110 @@ export function createConnectorsRouter(
     if (!requireAdmin(req, res)) return;
     const id = req.params.id;
 
-    const existing = await store.read();
-    const entry = existing[id];
-    if (!entry) {
-      res.status(404).json({ error: `Unknown connector '${id}'` });
-      return;
-    }
     try {
-      const usingRunners = agents
-        ? [...agents.values()].filter((runner) => runner.usesConnector(id, { [id]: entry }))
-        : [];
-      const toDelete = entry.secretNames.map((name: string) => customSecretKey(id, name));
-      // A 'gateway'-owned entry's refresh_token/client_id/expiry (and any
-      // recorded failure backoff, generation counter or cached DCR
-      // registration) live outside secretNames — they're sweep-internal
-      // bookkeeping, not a {placeholder} from the pasted config (see
-      // oauth-refresh-sweep.ts's storage note), so the names above never cover
-      // them. Left alone, the still-valid refresh_token would let
-      // refreshExpiringOAuthConnectors silently mint a fresh access_token and
-      // resurrect a connector the user just disconnected.
-      //
-      // Enumerated by `internalSecretKeysOf` rather than listed here, because
-      // this list drifted: `__dcr_client_id` and `__client_redirect_uri` were
-      // added to the OAuth start path and never added to any delete path, so a
-      // provider-side registration that had been deleted stayed cached forever.
-      // Disconnect-and-reconnect — the one recovery a user can perform from the
-      // UI — read the dead client back out, saw its redirect_uri still matched,
-      // skipped re-registration, and failed again every time.
-      if (entry.credentialOwner === 'gateway') toDelete.push(...internalSecretKeysOf(id));
-      deleteSecrets(toDelete);
-      // Whether "Disconnect" keeps the entry or removes it follows from who owns
-      // the credential, which is the same question as "is there anything here
-      // worth preserving for a reconnect".
-      //
-      // 'static' and 'gateway': the definition IS this entry — the config the
-      // user pasted, its label and description exist nowhere else. Wiping it
-      // would make Disconnect silently discard all of that, with no way back
-      // short of re-adding from scratch. Clear only the secret and leave the row
-      // in place as "not connected", so reconnecting costs one paste or one
-      // sign-in.
-      //
-      // 'none': there is no secret to clear. listConnectorStatus's
-      // `secretNames.every(...)` is vacuously true on an empty array, so the row
-      // would report connected forever no matter what this route did — a
-      // soft disconnect is a no-op that looks like a bug (click Disconnect, row
-      // stays "Connected"). Nothing to preserve for a reconnect either.
-      //
-      // 'external': the definition lives in the control plane that pushed it,
-      // which the caller can re-push in full via /oauth/receive at any time.
-      if (entry.credentialOwner === 'static' || entry.credentialOwner === 'gateway') {
-        await restartSessionsUsing(id, { runners: usingRunners });
-        res.json({ id, connected: false });
+      // `withEntry`, not `read()`. Every decision this route makes comes off the
+      // entry — `credentialOwner` picks soft-disconnect vs hard-delete AND whether
+      // the sweep's internal keys are cleared, `secretNames` picks which of its own
+      // secrets go — and /oauth/receive rewrites all three of those fields on an
+      // existing id in a single locked write. Read outside the lock, a push landing
+      // in between left this route clearing secrets under names the entry no longer
+      // declares, skipping the internal-key removal for an owner that had just
+      // stopped being 'gateway' (or performing it for one that had just become
+      // 'external'), and keeping an entry whose new owner says remove it. Every one
+      // of those leaves a live credential in mcp-token.env that no later route can
+      // reach. Deciding inside the lock is what /oauth/receive itself was fixed to
+      // do; this is the other side of the same race.
+      const outcome = await store.withEntry(id, ({ entry, remove }) => {
+        if (!entry) return { found: false } as const;
+        // Which of the entry's own secrets Disconnect clears depends on which of
+        // them a reconnect can put back.
+        //
+        // 'gateway': only `access_token` is the gateway's to mint — the OAuth
+        // callback writes that one key and nothing else from `secretNames` (see
+        // oauth-connectors-router.ts's updateSecrets call). Any OTHER placeholder
+        // on a `oauth: true` connector — a `{workspace_id}`, a `{team_domain}` —
+        // came from the `secrets` map pasted into POST /v1/connectors/custom, and
+        // no route can restore it: /connect is closed to 'gateway' owners and the
+        // add route mints a NEW id via slugify(). Clearing them all therefore made
+        // one Disconnect permanent for any multi-placeholder OAuth connector —
+        // sign-in succeeded, `secretNames.every(hasSecret)` stayed false because of
+        // the placeholder nothing had refilled, and the row read "Not connected"
+        // forever with no recovery short of hand-editing config.json. Only the
+        // credential the user asked to revoke is cleared; the rest is inert
+        // configuration that costs nothing to keep and is the difference between
+        // "reconnect is one sign-in" and "remove and re-add from scratch".
+        //
+        // Every other owner: `secretNames` is exactly what a reconnect re-supplies
+        // (one /connect paste for 'static', one /oauth/receive push for
+        // 'external', nothing at all for 'none'), so all of it goes.
+        const toDelete =
+          entry.credentialOwner === 'gateway'
+            ? [customSecretKey(id, 'access_token')]
+            : entry.secretNames.map((name: string) => customSecretKey(id, name));
+        // A 'gateway'-owned entry's refresh_token/client_id/expiry (and any
+        // recorded failure backoff, generation counter or cached DCR
+        // registration) live outside secretNames — they're sweep-internal
+        // bookkeeping, not a {placeholder} from the pasted config (see
+        // oauth-refresh-sweep.ts's storage note), so the names above never cover
+        // them. Left alone, the still-valid refresh_token would let
+        // refreshExpiringOAuthConnectors silently mint a fresh access_token and
+        // resurrect a connector the user just disconnected.
+        //
+        // Enumerated by `internalSecretKeysOf` rather than listed here, because
+        // this list drifted: `__dcr_client_id` and `__client_redirect_uri` were
+        // added to the OAuth start path and never added to any delete path, so a
+        // provider-side registration that had been deleted stayed cached forever.
+        // Disconnect-and-reconnect — the one recovery a user can perform from the
+        // UI — read the dead client back out, saw its redirect_uri still matched,
+        // skipped re-registration, and failed again every time.
+        if (entry.credentialOwner === 'gateway') toDelete.push(...internalSecretKeysOf(id));
+        deleteSecrets(toDelete);
+        // Whether "Disconnect" keeps the entry or removes it follows from who owns
+        // the credential, which is the same question as "is there anything here
+        // worth preserving for a reconnect".
+        //
+        // 'static' and 'gateway': the definition IS this entry — the config the
+        // user pasted, its label and description exist nowhere else. Wiping it
+        // would make Disconnect silently discard all of that, with no way back
+        // short of re-adding from scratch. Clear only the secret and leave the row
+        // in place as "not connected", so reconnecting costs one paste or one
+        // sign-in.
+        //
+        // 'none': there is no secret to clear. listConnectorStatus's
+        // `secretNames.every(...)` is vacuously true on an empty array, so the row
+        // would report connected forever no matter what this route did — a
+        // soft disconnect is a no-op that looks like a bug (click Disconnect, row
+        // stays "Connected"). Nothing to preserve for a reconnect either.
+        //
+        // 'external': the definition lives in the control plane that pushed it,
+        // which the caller can re-push in full via /oauth/receive at any time.
+        if (entry.credentialOwner === 'static' || entry.credentialOwner === 'gateway') {
+          return { found: true, hard: false } as const;
+        }
+        // The entry AND the per-agent enablement flags that reference it, in this
+        // one locked write: with the entry gone nothing would ever come back for
+        // orphaned flags, so splitting this in two would reintroduce exactly the
+        // orphan it exists to prevent (see dropConnector's doc). A soft
+        // disconnect above keeps the entry, so it keeps its enablement too.
+        remove();
+        return { found: true, hard: true } as const;
+      });
+      if (!outcome.found) {
+        res.status(404).json({ error: `Unknown connector '${id}'` });
         return;
       }
-      await store.mutate((c) => {
-        delete c[id];
-      });
-      // Only on a real delete: the per-agent enablement flags for this id are
-      // now orphans, and a later connector that slugs to the same id would
-      // inherit them (see removeAgentEnablement's doc). A soft disconnect
-      // above keeps the entry, so it keeps its enablement too.
-      await store.removeAgentEnablement(id);
-      await restartSessionsUsing(id, { runners: usingRunners });
+      // `null` is the overlay's way of saying "this entry is gone", and the
+      // hard-delete branch is the one place that needs it. A 'none'-owner
+      // connector has no secret whose disappearance would change its resolved
+      // shape, and the runners' config snapshot is refreshed by a file watcher
+      // that has almost certainly not fired for the write above — so without the
+      // overlay every session's spawn-time fingerprint still matches, nothing
+      // restarts, and agents keep talking to a connector the API has just
+      // reported deleted until something unrelated restarts them.
+      //
+      // After the lock, not inside it: a restart can take seconds, and a runner
+      // that rewrites config.json on the way would deadlock against it.
+      await restartSessionsUsing(id, outcome.hard ? { overlay: { [id]: null } } : undefined);
       res.json({ id, connected: false });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -487,6 +612,36 @@ export function createConnectorsRouter(
       res.status(400).json({
         error:
           'oauth connectors need an {access_token} placeholder in config (e.g. headers.Authorization: "Bearer {access_token}")',
+      });
+      return;
+    }
+    if (oauth && secrets.access_token !== undefined) {
+      // A pasted access_token on a connector that says "the gateway signs this in"
+      // is a state nothing here can maintain. `oauth: true` makes the entry
+      // 'gateway'-owned, and the refresh sweep renews a 'gateway' token from the
+      // refresh_token the sign-in stores — which a paste cannot supply, since the
+      // gateway never saw the exchange it came out of.
+      //
+      // Accepted, the row read "connected" off `secretNames.every(hasSecret)`
+      // immediately and stayed that way: the sweep skips a connector with no
+      // refresh_token, so it records no failure, and `unrefreshable` could not
+      // catch it either because it keyed on a stored expiry that only a real
+      // sign-in ever writes. The connector then simply stopped working whenever
+      // the pasted token aged out, with a green checkmark still on it and nothing
+      // in any log — the exact state oauth-refresh-sweep.ts's module comment says
+      // it exists to prevent.
+      //
+      // Both real intents remain reachable: sign in through /oauth/start, or
+      // re-send this request without `oauth` to get a 'static' connector, which is
+      // what a hand-held token actually is. Other placeholders on an oauth
+      // connector are untouched — a {workspace_id} is inert configuration the
+      // sign-in neither writes nor can supply.
+      res.status(400).json({
+        error:
+          'access_token cannot be pasted into an oauth connector — the gateway mints it at' +
+          ' POST /v1/connectors/custom/:id/oauth/start and needs the refresh_token from that' +
+          ' exchange to keep it alive. Omit `oauth` to store a hand-held token as a static' +
+          ' connector instead.',
       });
       return;
     }

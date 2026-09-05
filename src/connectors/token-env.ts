@@ -23,12 +23,25 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-/** Resolve the mcp-token.env path (override via GATEWAY_MCP_TOKEN_ENV_PATH, used by tests). */
+import { expandHome } from '../utils/paths';
+
+/**
+ * Resolve the mcp-token.env path (override via GATEWAY_MCP_TOKEN_ENV_PATH, used by
+ * tests and by operators who keep secrets off the default volume).
+ *
+ * Tilde-expanded, because .env.example ships the override commented out as
+ * `~/.claude-gateway/mcp-token.env` and index.ts does the same for its sibling
+ * GATEWAY_CONFIG. A shell does not expand `~` inside a .env file, so without this
+ * an operator who uncomments the documented line gets a literal `~` directory
+ * created under the gateway's cwd by ensureDir() below — every existing connector
+ * then reads as disconnected and freshly minted OAuth tokens are written to the
+ * wrong file, with nothing logged to say so.
+ */
 function tokenEnvPath(): string {
-  return (
-    process.env.GATEWAY_MCP_TOKEN_ENV_PATH ??
-    path.join(os.homedir(), '.claude-gateway', 'mcp-token.env')
-  );
+  const override = process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+  return override
+    ? expandHome(override)
+    : path.join(os.homedir(), '.claude-gateway', 'mcp-token.env');
 }
 
 /**
@@ -111,7 +124,7 @@ function readTokenEnvForUpdate(): Record<string, string> {
   }
 }
 
-// An unreadable file stays unreadable, and the web panel polls status every couple of
+// An unreadable file stays unreadable, and status pollers hit this every couple of
 // seconds. Logging every failure buries the log; logging none is how an EACCES goes
 // unnoticed for a week. One line per minute keeps the signal.
 const READ_FAILURE_LOG_INTERVAL_MS = 60 * 1000;
@@ -194,7 +207,23 @@ function writeAll(map: Record<string, string>): void {
       .join('\n') + '\n';
   const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
   fs.writeFileSync(tmp, body, { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    // `tmp` holds every secret this process knows. A rename that fails — a full
+    // disk, the directory replaced underneath us, EACCES after a permissions
+    // change — leaves that complete copy sitting next to the real file under a
+    // name nothing will ever clean up, and no later write reuses the path
+    // (pid+timestamp), so it accumulates one leaked credential dump per failure.
+    // Best-effort: the original error is what the caller needs to see, so a
+    // failed unlink must not replace it.
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing better to do — surface the rename failure below */
+    }
+    throw err;
+  }
 }
 
 /**
