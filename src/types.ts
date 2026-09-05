@@ -484,8 +484,16 @@ export interface GatewayConfig {
      * Set `false` on a gateway that hosts agents for more than one person. There,
      * the default hands a credential connected by one operator to every agent on
      * the box, including agents whose chat users are not that operator; opt-in
-     * per agent is the safer posture. Kept as a switch rather than a change of
-     * default so no existing install silently loses its connectors on upgrade.
+     * per agent is the safer posture.
+     *
+     * A switch rather than a safer default, because the common deployment is one
+     * operator's own VM running their own agents — there, opt-in would mean
+     * connecting a connector and then enabling it again on every agent before it
+     * did anything, and the second step is easy to forget and hard to diagnose
+     * ("it says Connected, why has the agent no tools?"). Nothing about upgrades
+     * is at stake either way: connectors ship for the first time in this change,
+     * so there is no install that already has one (see connectors/types.ts's note
+     * on `credentialOwner` for the same reasoning applied to on-disk shape).
      */
     connectorsDefaultEnabled?: boolean;
   };

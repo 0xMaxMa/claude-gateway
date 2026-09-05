@@ -31,6 +31,21 @@ const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
   // where every connector definition lives regardless of who owns its
   // credential (see connectors/types.ts's CustomConnectorEntry).
   'gateway.customConnectors',
+  // The default the per-agent `connectors` map is read against
+  // (resolveEnabledConnectors' third argument). Hot-reloadable for the same
+  // reason and with the same scope as the two above: both readers —
+  // SessionProcess.writeMcpConfig and AgentRunner.restartSessionsUsingConnector
+  // — take it off the live config object at call time, so replacing it here is
+  // enough for every subsequent spawn. Flipping it to `false` is how an operator
+  // shuts every not-explicitly-enabled connector off on a shared box; making
+  // that wait for a gateway restart would mean killing the sessions in order to
+  // narrow what they can reach.
+  //
+  // gateway.oauthReturnUrl is deliberately NOT here: createOauthCallbackRouter
+  // captures it as a plain argument at mount time (gateway-router.ts), so a live
+  // edit cannot reach the mounted router. It is listed in gatewayFieldPairs
+  // below so the change is still reported — as restart-required, like publicUrl.
+  'gateway.connectorsDefaultEnabled',
 ];
 
 export interface ConfigChange {
@@ -241,6 +256,8 @@ export class ConfigWatcher extends EventEmitter {
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
       { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },
       { field: 'gateway.customConnectors', oldVal: oldCfg.gateway.customConnectors, newVal: newCfg.gateway.customConnectors },
+      { field: 'gateway.connectorsDefaultEnabled', oldVal: oldCfg.gateway.connectorsDefaultEnabled, newVal: newCfg.gateway.connectorsDefaultEnabled },
+      { field: 'gateway.oauthReturnUrl', oldVal: oldCfg.gateway.oauthReturnUrl, newVal: newCfg.gateway.oauthReturnUrl },
     ];
     for (const { field, oldVal, newVal } of gatewayFieldPairs) {
       if (!deepEqual(oldVal, newVal)) {

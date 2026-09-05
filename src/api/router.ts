@@ -10,7 +10,7 @@ import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
 import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
-import { withConfigWriteLock } from '../config/config-write-lock';
+import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
@@ -342,13 +342,7 @@ export function createApiRouter(
       if (exists) throw Object.assign(new Error(`Agent '${newId}' already exists in config`), { code: 'DUPLICATE' });
     }
     mutate(config.agents);
-    const tmp = cfgPath + '.tmp.' + randomUUID();
-    // mode: 0o600 — config.json carries the admin API key and every agent's
-    // channel bot tokens; rename() onto cfgPath carries this file's mode
-    // with it, so an unmoded tmp file silently downgrades an existing 0600
-    // config to 0644 on its very first edit (issue #460).
-    await fsp.writeFile(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    await fsp.rename(tmp, cfgPath);
+    await writeConfigAtomic(cfgPath, config);
   }
 
   // Process-wide, keyed by config path — NOT a lock private to this router. The
@@ -1630,6 +1624,25 @@ export function createApiRouter(
     // connectors: a partial map of { [connectorId]: { enabled: boolean } } to merge.
     const connectorPatch: Record<string, { enabled: boolean }> = {};
     if (connectors !== undefined) {
+      // Admin, unlike the rest of this route. Every connector route is admin-only
+      // (see connectors-router.ts's requireAdmin), and enabling one here reaches the
+      // same credential those routes guard: a connector's secret is resolved into
+      // the agent's mcp-config at spawn, so flipping this flag is what actually
+      // hands an agent the token an admin connected. Under the multi-owner posture
+      // README documents — `gateway.connectorsDefaultEnabled: false`, connectors off
+      // unless named — a `write` key scoped to nothing but its own agent could
+      // otherwise grant that agent any connector on the box. It would not even need
+      // to enumerate them first: ids are label slugs (`github`, `notion`) and the
+      // check below deliberately does not require the id to exist.
+      //
+      // Deliberately field-level rather than route-level: the rest of PATCH is a
+      // `write`-key operation on the caller's own agent (API.md's table) and must
+      // stay that way. Only the field that crosses into another owner's credential
+      // is raised.
+      if (!isAdmin((req as AuthedRequest).apiKey)) {
+        res.status(403).json({ error: 'Admin permission required to change connectors' });
+        return;
+      }
       if (typeof connectors !== 'object' || connectors === null || Array.isArray(connectors)) {
         res.status(400).json({ error: 'connectors must be an object' });
         return;
@@ -1942,18 +1955,32 @@ export function createApiRouter(
       const changed = [...ids].some((id) => before[id]?.enabled !== merged[id]?.enabled);
       cfg.connectors = merged;
       // Enablement is read at spawn — respawn live sessions so they pick it up.
+      // The runner's view of the map is updated either way; only the teardown is
+      // conditional, so a no-op patch costs nothing but still leaves the runner
+      // holding the same map that was just written to disk.
       const runner = agentRunners.get(agentId);
-      if (runner && changed) {
+      if (runner) {
         runner.updateAgentConfig(cfg);
         // Same options as AgentRunner.restartSessionsUsingConnector — a connector
         // enablement change is exactly the same kind of change, so it must not
         // SIGKILL an idle channel session either. Bare restartOrDefer() defaults
         // deferIdle to false, which stops idle sessions immediately.
-        await runner.restartOrDefer({ skipBusy: false, deferIdle: true });
-      } else if (runner) {
-        // Still persist the (identical) map to the runner's view, just without
-        // tearing down sessions for a change that isn't one.
-        runner.updateAgentConfig(cfg);
+        //
+        // Caught, because this call sits AFTER the handler's try/catch closes and
+        // restartOrDefer awaits proc.stop() unguarded: on Express 4 a rejection
+        // here escapes the handler entirely and lands in index.ts's
+        // `unhandledRejection` hook, which calls emergencyShutdown() — every agent
+        // on the box killed because one PATCH toggled a connector. The config is
+        // already written and the runner's map already updated at this point, so a
+        // failed teardown costs the caller nothing but a session that respawns on
+        // its own next natural restart. Every sibling call site guards this the
+        // same way (oauth-refresh-sweep.ts's .catch, connectors-router.ts's
+        // restartSessionsUsing).
+        if (changed) {
+          await runner.restartOrDefer({ skipBusy: false, deferIdle: true }).catch((err: Error) => {
+            console.error(`router: connector-enablement restart for agent=${agentId} failed: ${err.message}`);
+          });
+        }
       }
     }
 
