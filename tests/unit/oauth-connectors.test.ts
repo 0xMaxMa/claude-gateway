@@ -186,8 +186,9 @@ describe('connectors-router — oauth-kind connectors', () => {
     expect(res.status).toBe(200);
     // The entry was written to config.json a moment ago, and the config watcher
     // has not re-read it into any runner yet — so the runner is handed the new
-    // entry as an overlay. Without it `usesConnector` would consult a
-    // gatewayConfig that does not know about gmail yet and skip the restart.
+    // entry as an overlay. Without it the runner would resolve the connector
+    // against a gatewayConfig that does not know about gmail yet, get nothing
+    // back, and match the "spawned without it" fingerprint of every session.
     expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
       'gmail',
       expect.objectContaining({
@@ -196,6 +197,131 @@ describe('connectors-router — oauth-kind connectors', () => {
         }),
       }),
     );
+  });
+
+  /**
+   * A push onto an id the gateway was managing itself is a handover of ownership,
+   * and the entry it overwrites always ends up 'external'.
+   *
+   * That matters because both remaining ways to clear the sweep's internal keys are
+   * gated on `credentialOwner === 'gateway'`: the sweep refreshes only 'gateway'
+   * entries, and DELETE clears `internalSecretKeysOf` only for 'gateway' entries. Once
+   * the entry says 'external', neither guard holds again — so a refresh_token left
+   * behind by the push is a live credential no code path can ever remove, still
+   * sitting in mcp-token.env.
+   */
+  it('a push over a gateway-owned connector clears the sweep bookkeeping it can no longer reach', async () => {
+    const app = makeApp(tmpConfig());
+    const { setSecrets, getSecret } = require('../../src/connectors/token-env');
+    // Built from the sweep's own key helpers, not hardcoded strings: this test is
+    // about the handover clearing whatever the sweep stores, and a key added there
+    // later must be covered here automatically rather than silently escaping.
+    const { internalSecretKeysOf } = require('../../src/connectors/oauth-refresh-sweep');
+    const internalKeys: string[] = internalSecretKeysOf('gmail');
+
+    // A gateway-owned (OAuth sign-in) connector under the id the push will take over.
+    await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'Gmail',
+        oauth: true,
+        config: { type: 'http', url: 'https://gmailmcp.googleapis.com/mcp/v1', headers: { Authorization: 'Bearer {access_token}' } },
+      });
+    // What a completed sign-in plus a few sweep ticks would have left on it.
+    expect(internalKeys.length).toBeGreaterThan(0);
+    setSecrets(Object.fromEntries(internalKeys.map((k) => [k, 'sweep-owned-value'])));
+
+    const res = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload());
+    expect(res.status).toBe(200);
+
+    expect(getSecret('CUSTOM__gmail__access_token')).toBe('at-pushed-1');
+    for (const key of internalKeys) expect(getSecret(key)).toBeNull();
+  });
+
+  it('a repeat push over an already-external connector leaves nothing to clear', async () => {
+    // The common case — a control plane re-pushing a rotated token. Nothing was
+    // gateway-owned, so the removal list must stay empty rather than becoming a
+    // blanket delete that reaches keys this route has no business touching.
+    const app = makeApp(tmpConfig());
+    const { setSecrets, getSecret } = require('../../src/connectors/token-env');
+
+    await request(app).post('/api/v1/connectors/gmail/oauth/receive').set('X-Api-Key', adminKey).send(pushPayload());
+    setSecrets({ CUSTOM__unrelated__api_key: 'keep-me' });
+
+    const again = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload({ access_token: 'at-pushed-2' }));
+    expect(again.status).toBe(200);
+    expect(getSecret('CUSTOM__gmail__access_token')).toBe('at-pushed-2');
+    expect(getSecret('CUSTOM__unrelated__api_key')).toBe('keep-me');
+  });
+
+  /**
+   * Regression (round 10). The route overwrites `secretNames` with
+   * ['access_token'], so any secret the previous entry declared under a different
+   * name is orphaned: every path that can remove a custom secret enumerates the
+   * CURRENT secretNames (DELETE maps over them; /connect refuses an 'external'
+   * entry outright), so nothing left can name it again.
+   *
+   * The concrete case is a pasted-key connector — credentialOwner 'static', a
+   * `{api_key}` placeholder — that a control plane later pushes an OAuth token
+   * onto. The live third-party API key stays in the 0600 store forever, invisible
+   * to every route, with no supported operation that clears it.
+   */
+  it('a push over a connector with differently-named secrets clears the ones it orphans', async () => {
+    const app = makeApp(tmpConfig());
+    const { getSecret } = require('../../src/connectors/token-env');
+
+    // A pasted-key connector under the id the push will take over.
+    const add = await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'Gmail',
+        config: {
+          type: 'http',
+          url: 'https://gmailmcp.googleapis.com/mcp/v1',
+          headers: { Authorization: 'Bearer {api_key}', 'X-Org': '{org_id}' },
+        },
+        secrets: { api_key: 'live-third-party-key', org_id: 'org-42' },
+      });
+    expect(add.status).toBe(200);
+    expect(add.body.id).toBe('gmail');
+    expect(getSecret('CUSTOM__gmail__api_key')).toBe('live-third-party-key');
+
+    const res = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload());
+    expect(res.status).toBe(200);
+
+    // The pushed token is stored; the names the new entry does not declare are gone.
+    expect(getSecret('CUSTOM__gmail__access_token')).toBe('at-pushed-1');
+    expect(getSecret('CUSTOM__gmail__api_key')).toBeNull();
+    expect(getSecret('CUSTOM__gmail__org_id')).toBeNull();
+  });
+
+  it('a repeat push does not delete the access_token it is replacing', async () => {
+    // The stale-name removal is computed as "previous names minus new names", so
+    // a name carried across both entries must survive — otherwise the common case
+    // (a control plane re-pushing a rotated token) would write the new value and
+    // then remove it in the same call.
+    const app = makeApp(tmpConfig());
+    const { getSecret } = require('../../src/connectors/token-env');
+
+    await request(app).post('/api/v1/connectors/gmail/oauth/receive').set('X-Api-Key', adminKey).send(pushPayload());
+    const again = await request(app)
+      .post('/api/v1/connectors/gmail/oauth/receive')
+      .set('X-Api-Key', adminKey)
+      .send(pushPayload({ access_token: 'at-pushed-3' }));
+
+    expect(again.status).toBe(200);
+    expect(getSecret('CUSTOM__gmail__access_token')).toBe('at-pushed-3');
   });
 
   it('disconnect removes an externally-owned connector via the unified DELETE route', async () => {

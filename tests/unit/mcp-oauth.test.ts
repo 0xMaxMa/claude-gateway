@@ -13,11 +13,13 @@ import {
   discoverOAuthMetadata,
   registerClient,
   resolveClientId,
+  resolveScope,
   generatePkce,
   generateState,
   buildAuthorizeUrl,
   exchangeCode,
   refreshAccessToken,
+  OAuthTokenError,
   type OAuthMetadata,
 } from '../../src/connectors/mcp-oauth';
 
@@ -27,6 +29,7 @@ global.fetch = mockFetch as unknown as typeof fetch;
 beforeEach(() => {
   mockFetch.mockReset();
   delete process.env.MCP_OAUTH_CLIENT_ID__FIRECRAWL;
+  delete process.env.MCP_OAUTH_SCOPES__FIRECRAWL;
 });
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -201,6 +204,218 @@ describe('discoverOAuthMetadata refuses non-https URLs handed to it by the remot
       );
     const meta = await discoverOAuthMetadata(MCP_URL);
     expect(meta.tokenEndpoint).toBe('http://localhost:9000/token');
+  });
+
+  /**
+   * Regression (round 10). The http exemption used to be `isLocalHostname` from
+   * config/public-url — a predicate written for a different value with a different
+   * provenance (the admin's own `gateway.publicUrl`, where "is this a local
+   * address?" is a UI question), and it accepts any `.internal` or `.local`
+   * suffix.
+   *
+   * That is precisely the set of names the https requirement exists to refuse
+   * here: `metadata.google.internal` IS the GCE metadata service — the same
+   * endpoint the 169.254.169.254 test above guards, reachable under a name that
+   * sailed through. `.local` covers every mDNS name on the LAN. The hostname
+   * reaching this check was chosen three hops downstream by the remote MCP
+   * server; loopback is the only address it cannot use to reach anything.
+   */
+  it.each([
+    ['metadata.google.internal', 'http://metadata.google.internal/computeMetadata/v1/'],
+    ['metadata.internal', 'http://metadata.internal/token'],
+    ['an mDNS .local name on the LAN', 'http://nas.local:8080/'],
+  ])('rejects plain http to %s — a local-sounding name is not loopback', async (_label, url) => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${url}"` }),
+    );
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /resource_metadata URL the gateway will not call/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('still allows plain http on 127.0.0.1 and [::1]', async () => {
+    for (const host of ['127.0.0.1:9000', '[::1]:9000']) {
+      mockFetch.mockReset();
+      mockFetch
+        .mockResolvedValueOnce(
+          jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+        )
+        .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: [`http://${host}`] }))
+        .mockResolvedValueOnce(
+          jsonResponse(200, {
+            authorization_endpoint: `http://${host}/authorize`,
+            token_endpoint: `http://${host}/token`,
+          }),
+        );
+      const meta = await discoverOAuthMetadata(MCP_URL);
+      expect(meta.tokenEndpoint).toBe(`http://${host}/token`);
+    }
+  });
+});
+
+/**
+ * The hop the URL validator never used to see.
+ *
+ * `assertFetchableUrl` gates the URL the gateway ASKS for. Node's fetch then followed
+ * redirects by default, so the answering server picked where the request actually
+ * landed — a 302 to `http://169.254.169.254/` reached the cloud metadata service
+ * having passed every check in the file, and a 307 off the token endpoint re-POSTed
+ * the refresh_token, in cleartext, to a host of the provider's choosing.
+ *
+ * These drive a redirect at each fetch in the module and assert the gateway either
+ * re-validates the target or refuses to go at all.
+ */
+describe('redirects are validated per hop, not followed blindly', () => {
+  const MCP_URL = 'https://mcp.firecrawl.dev/v2/mcp-oauth';
+  const PRM_URL = 'https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth';
+
+  const redirect = (status: number, location: string) =>
+    jsonResponse(status, {}, { location });
+
+  it('refuses a probe redirect to a cloud metadata service instead of following it', async () => {
+    mockFetch.mockResolvedValueOnce(redirect(302, 'http://169.254.169.254/latest/meta-data/'));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /MCP server URL redirect target the gateway will not call/,
+    );
+    // Never went: one call (the redirect itself), not two.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a protected-resource-metadata redirect onto a plain-http LAN host', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(redirect(301, 'http://10.0.0.5:8080/prm'));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /protected-resource metadata redirect target the gateway will not call/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses an authorization-server-metadata redirect onto a plain-http LAN host', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['https://auth.example.com'] }))
+      // A LAN host, not 127.0.0.1: plain http on localhost stays deliberately
+      // allowed here exactly as it is for a directly-discovered endpoint (see the
+      // "self-hosted dev AS" test above). The redirect path must not be stricter
+      // than the direct one, or it becomes a second, inconsistent policy.
+      .mockResolvedValueOnce(redirect(302, 'http://10.0.0.5:9200/_cluster/health'));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /authorization-server metadata redirect target the gateway will not call/,
+    );
+  });
+
+  it('follows a redirect the validator accepts, and re-issues at the new URL', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      // The canonical-host hop a real provider serves.
+      .mockResolvedValueOnce(redirect(301, 'https://cdn.firecrawl.dev/prm.json'))
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['https://auth.example.com'] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://auth.example.com/authorize',
+          token_endpoint: 'https://auth.example.com/token',
+        }),
+      );
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.tokenEndpoint).toBe('https://auth.example.com/token');
+    expect(mockFetch.mock.calls[2][0]).toBe('https://cdn.firecrawl.dev/prm.json');
+  });
+
+  it('resolves a relative Location against the URL just requested, then validates it', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(redirect(302, '/moved/prm.json'))
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['https://auth.example.com'] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://auth.example.com/authorize',
+          token_endpoint: 'https://auth.example.com/token',
+        }),
+      );
+    await discoverOAuthMetadata(MCP_URL);
+    expect(mockFetch.mock.calls[2][0]).toBe('https://mcp.firecrawl.dev/moved/prm.json');
+  });
+
+  it('gives up on a redirect loop rather than spinning', async () => {
+    mockFetch.mockResolvedValue(redirect(302, 'https://mcp.firecrawl.dev/loop'));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(/exceeded 3 redirects/);
+    // The initial request plus MAX_REDIRECT_HOPS follow-ups, then it stops.
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('downgrades a redirected POST to a bodiless GET on 302, and preserves it on 307', async () => {
+    mockFetch
+      .mockResolvedValueOnce(redirect(302, 'https://mcp.firecrawl.dev/moved'))
+      .mockResolvedValueOnce(jsonResponse(200, {}));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(/Expected a 401/);
+    expect(mockFetch.mock.calls[1][1]).toMatchObject({ method: 'GET', body: undefined });
+
+    mockFetch.mockReset();
+    mockFetch
+      .mockResolvedValueOnce(redirect(307, 'https://mcp.firecrawl.dev/moved'))
+      .mockResolvedValueOnce(jsonResponse(200, {}));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(/Expected a 401/);
+    expect(mockFetch.mock.calls[1][1]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).method).toBe('initialize');
+  });
+
+  it('registerClient validates a DCR redirect target too', async () => {
+    mockFetch.mockResolvedValueOnce(redirect(307, 'http://169.254.169.254/register'));
+    await expect(
+      registerClient('https://as.example.com/register', 'https://x/callback', 'x'),
+    ).rejects.toThrow(/registration_endpoint redirect target the gateway will not call/);
+  });
+
+  it('never follows a redirect off the token endpoint — that body is the credential', async () => {
+    const metadata: OAuthMetadata = {
+      resource: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+      authorizationEndpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+      tokenEndpoint: 'https://www.firecrawl.dev/api/oauth/token',
+      scopesSupported: [],
+    };
+    // 307 is the dangerous one: it preserves the method AND the body, so a followed
+    // hop would re-POST `refresh_token=fcr_LIVE` to the attacker's host verbatim.
+    mockFetch.mockResolvedValueOnce(redirect(307, 'https://exfil.example.com/collect'));
+
+    const err = await refreshAccessToken({
+      metadata,
+      clientId: 'dyn_abc',
+      refreshToken: 'fcr_LIVE',
+    }).catch((e: Error) => e);
+
+    expect((err as Error).message).toMatch(/does not forward credentials across redirects/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Transient, not permanent — a misconfigured AS must not cost the user their
+    // grant three sweep ticks later.
+    expect((err as OAuthTokenError).isPermanent).toBe(false);
+  });
+
+  it('every outbound request disables fetch-level redirect following', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['https://auth.example.com'] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://auth.example.com/authorize',
+          token_endpoint: 'https://auth.example.com/token',
+        }),
+      );
+    await discoverOAuthMetadata(MCP_URL);
+    for (const [, init] of mockFetch.mock.calls) {
+      expect(init.redirect).toBe('manual');
+    }
   });
 });
 
@@ -401,5 +616,109 @@ describe('exchangeCode / refreshAccessToken', () => {
     expect(body.get('grant_type')).toBe('refresh_token');
     expect(body.get('refresh_token')).toBe('fcr_1');
     expect(body.get('resource')).toBe(metadata.resource);
+  });
+});
+
+/**
+ * What lands in the `scope` of the authorize URL the admin's own browser follows.
+ *
+ * Two documents publish a `scopes_supported`, and they do not mean the same thing:
+ * RFC 9728 §2's (protected-resource metadata) is what THIS MCP server needs, RFC
+ * 8414 §2's (authorization-server metadata) is every scope the AS issues for every
+ * resource behind it. Sending the second asks the admin to grant this gateway a
+ * whole provider's privileges, and on an AS whose global list holds scopes this
+ * client is not entitled to it is an `invalid_scope` that kills the sign-in.
+ */
+describe('scope selection', () => {
+  const MCP_URL = 'https://mcp.firecrawl.dev/v2/mcp-oauth';
+  const PRM_URL = 'https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth';
+
+  /** probe 401 -> protected-resource metadata -> authorization-server metadata. */
+  function mockDiscovery(prm: Record<string, unknown>, asMeta: Record<string, unknown>) {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorization_servers: ['https://www.firecrawl.dev'], ...prm }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+          token_endpoint: 'https://www.firecrawl.dev/api/oauth/token',
+          ...asMeta,
+        }),
+      );
+  }
+
+  it('prefers the resource’s own scopes over the authorization server’s global list', async () => {
+    mockDiscovery(
+      { scopes_supported: ['firecrawl:global', 'offline_access'] },
+      { scopes_supported: ['firecrawl:global', 'offline_access', 'admin:billing', 'org:delete'] },
+    );
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.scopesSupported).toEqual(['firecrawl:global', 'offline_access']);
+  });
+
+  // The control for the test above: a provider that publishes no per-resource
+  // scopes is a provider this gateway signs into today, and must keep doing so.
+  it('falls back to the authorization server’s list when the resource publishes none', async () => {
+    mockDiscovery({}, { scopes_supported: ['firecrawl:global', 'offline_access'] });
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.scopesSupported).toEqual(['firecrawl:global', 'offline_access']);
+  });
+
+  // Omitting the key defers to the next document; publishing `[]` is an answer.
+  it('treats an empty resource list as “no scopes”, not as “ask the AS”', async () => {
+    mockDiscovery({ scopes_supported: [] }, { scopes_supported: ['admin:billing'] });
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.scopesSupported).toEqual([]);
+  });
+
+  it('drops non-string entries instead of stringifying them into the scope', async () => {
+    mockDiscovery({}, { scopes_supported: ['read', 42, null, { a: 1 }, 'offline_access'] });
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.scopesSupported).toEqual(['read', 'offline_access']);
+    // The point of the filter: `[42, null, {a:1}].join(' ')` is
+    // `42 null [object Object]`, which the AS refuses as invalid_scope.
+    expect(resolveScope(meta, 'firecrawl')).toBe('read offline_access');
+  });
+
+  const metadata: OAuthMetadata = {
+    resource: MCP_URL,
+    authorizationEndpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+    tokenEndpoint: 'https://www.firecrawl.dev/api/oauth/token',
+    scopesSupported: ['firecrawl:global'],
+  };
+
+  it('resolveScope sends the discovered scopes when nothing is configured', () => {
+    expect(resolveScope(metadata, 'firecrawl')).toBe('firecrawl:global');
+  });
+
+  it('resolveScope falls back to offline_access when nothing was discovered', () => {
+    expect(resolveScope({ ...metadata, scopesSupported: [] }, 'firecrawl')).toBe('offline_access');
+  });
+
+  // The recovery path: discovery is the provider's story about itself, and when
+  // that story is wrong the operator's only other move is a code change.
+  it('resolveScope lets MCP_OAUTH_SCOPES__<ID> override the discovered scopes', () => {
+    process.env.MCP_OAUTH_SCOPES__FIRECRAWL = 'firecrawl:read offline_access';
+    expect(resolveScope(metadata, 'firecrawl')).toBe('firecrawl:read offline_access');
+  });
+
+  it('resolveScope ignores a blank override rather than sending an empty scope', () => {
+    process.env.MCP_OAUTH_SCOPES__FIRECRAWL = '   ';
+    expect(resolveScope(metadata, 'firecrawl')).toBe('firecrawl:global');
+  });
+
+  // Same id transform resolveClientId uses, so an operator who has set one env
+  // var can guess the other's name.
+  it('resolveScope derives the env var name from the connector id', () => {
+    process.env.MCP_OAUTH_SCOPES__MY_SERVER = 'a b';
+    try {
+      expect(resolveScope(metadata, 'my-server')).toBe('a b');
+    } finally {
+      delete process.env.MCP_OAUTH_SCOPES__MY_SERVER;
+    }
   });
 });

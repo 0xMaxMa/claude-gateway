@@ -20,7 +20,6 @@
  */
 
 import crypto from 'crypto';
-import { isLocalHostname } from '../config/public-url';
 
 /**
  * Every request here goes to a third-party server the gateway does not control, on
@@ -32,8 +31,65 @@ import { isLocalHostname } from '../config/public-url';
  */
 const REQUEST_TIMEOUT_MS = 15_000;
 
-function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+/**
+ * One request, timed out, with redirect-following DISABLED.
+ *
+ * Node's fetch defaults to `redirect: 'follow'`, and a followed redirect goes
+ * wherever the answering server names — without passing through
+ * `assertFetchableUrl`, which only ever sees the URL we ASK for. A single 302 to
+ * `http://169.254.169.254/` therefore lands past the guard the rest of this module
+ * is built around: the check has to run per hop, not once per call. Nothing here
+ * calls raw `fetch` any more; the two wrappers below are the only ways out.
+ */
+function fetchNoRedirect(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+}
+
+/**
+ * Enough hops for the redirects a real deployment actually serves — a bare host to
+ * its canonical one, a trailing-slash normalisation — and few enough that a
+ * redirect loop costs three round trips instead of twenty.
+ */
+const MAX_REDIRECT_HOPS = 3;
+
+/**
+ * `fetchNoRedirect`, following up to `MAX_REDIRECT_HOPS` redirects and re-running
+ * `assertFetchableUrl` on every `Location` before going there.
+ *
+ * Used for the discovery walk and the DCR registration POST — requests that carry no
+ * credential, where refusing all redirects outright would break providers that
+ * legitimately serve their well-known documents off a canonical host. The token
+ * endpoint does NOT use this; see `tokenRequest`.
+ */
+async function fetchFollowingCheckedRedirects(
+  url: string,
+  what: string,
+  init?: RequestInit,
+): Promise<Response> {
+  let target = url;
+  let nextInit = init;
+  for (let hop = 0; ; hop++) {
+    const resp = await fetchNoRedirect(target, nextInit);
+    if (resp.status < 300 || resp.status >= 400) return resp;
+    const location = resp.headers.get('location');
+    // A 3xx with no Location is a malformed response, not a redirect — hand it back
+    // and let the caller's own status check produce the error.
+    if (!location) return resp;
+    if (hop >= MAX_REDIRECT_HOPS) {
+      throw new Error(
+        `Fetching the ${what} exceeded ${MAX_REDIRECT_HOPS} redirects — giving up at ${target}.`,
+      );
+    }
+    // A relative Location is legal (RFC 9110 §10.2.2) and resolves against the URL
+    // just requested, so resolve first and validate the absolute result.
+    target = assertFetchableUrl(new URL(location, target).toString(), `${what} redirect target`);
+    // RFC 9110 §15.4: only 307/308 preserve the method and body. 301/302/303 on a
+    // POST become a bodiless GET, which is what every other client does too.
+    nextInit =
+      resp.status === 307 || resp.status === 308
+        ? init
+        : { ...init, method: 'GET', body: undefined };
+  }
 }
 
 /**
@@ -57,6 +113,24 @@ function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
  * This is a narrowing, not a boundary: an attacker-controlled https host on the LAN
  * still passes. The trust boundary is still the admin key that added the connector.
  */
+/**
+ * Loopback only — deliberately NOT config/public-url's `isLocalHostname`.
+ *
+ * That predicate answers a different question, for a value with a different
+ * provenance: whether the ADMIN's own `gateway.publicUrl` is a local address, so
+ * the UI can decide whether to show it as reachable. Widening it to `.internal`
+ * and `.local` is right there and wrong here — the hostname reaching this
+ * function was chosen three hops downstream by the remote MCP server, and
+ * `metadata.google.internal` (GCE), `metadata.internal`, and any mDNS `.local`
+ * name on the LAN are exactly the plain-http targets the https requirement above
+ * exists to refuse. Loopback is the only reason to relax it: a developer running
+ * an AS on 127.0.0.1 is talking to a socket no other host can reach.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' || /^127\./.test(host) || host === '::1' || host === '[::1]';
+}
+
 function assertFetchableUrl(raw: string, what: string): string {
   let url: URL;
   try {
@@ -65,7 +139,7 @@ function assertFetchableUrl(raw: string, what: string): string {
     throw new Error(`Discovery returned a ${what} that is not a valid URL: ${raw}`);
   }
   if (url.protocol === 'https:') return url.toString();
-  if (url.protocol === 'http:' && isLocalHostname(url.hostname)) return url.toString();
+  if (url.protocol === 'http:' && isLoopbackHostname(url.hostname)) return url.toString();
   throw new Error(
     `Discovery returned a ${what} the gateway will not call: ${url.protocol}//${url.host}` +
       ` — OAuth endpoints must use https (plain http is allowed only for localhost).`,
@@ -79,6 +153,11 @@ export interface OAuthMetadata {
   tokenEndpoint: string;
   /** Absent when the AS doesn't advertise RFC 7591 Dynamic Client Registration. */
   registrationEndpoint?: string;
+  /**
+   * Scopes to request for this resource: the protected-resource metadata's list
+   * when it publishes one, else the authorization server's. Empty when neither
+   * does — see `resolveScope` for what gets sent then.
+   */
   scopesSupported: string[];
 }
 
@@ -140,6 +219,26 @@ function parseResourceMetadataUrl(header: string | null): string | null {
 }
 
 /**
+ * A metadata document's string list, or undefined when it has no such list at all.
+ *
+ * Filtered element by element, not merely checked for being an array: these
+ * documents come from a host we do not control, and `scopesSupported` is
+ * `join(' ')`ed straight into the `scope` query parameter of a URL the admin's own
+ * browser is then sent to. A `scopes_supported: ["read", 42, null, {"a":1}]` —
+ * malformed, but served with a 200 — produced `read 42 null [object Object]`, which
+ * the AS rejects as invalid_scope with nothing to say where the garbage came from.
+ * Dropping the non-strings asks for the scopes it did understand.
+ *
+ * The undefined/[] distinction is load-bearing at the one call site: a document
+ * that OMITS the list has said nothing and defers to the next document, while one
+ * that publishes an empty list has said "none", and that is an answer.
+ */
+function stringsOf(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((s): s is string => typeof s === 'string');
+}
+
+/**
  * Discover OAuth metadata for an MCP server by probing it unauthenticated
  * (expects a 401 advertising `resource_metadata`, per RFC 9728), then walking
  * protected-resource metadata → authorization-server metadata (RFC 8414).
@@ -147,7 +246,7 @@ function parseResourceMetadataUrl(header: string | null): string | null {
  * to the admin as "can't set up OAuth for this URL", not a generic 500.
  */
 export async function discoverOAuthMetadata(mcpUrl: string): Promise<OAuthMetadata> {
-  const probe = await fetchWithTimeout(mcpUrl, {
+  const probe = await fetchFollowingCheckedRedirects(mcpUrl, 'MCP server URL', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
@@ -164,8 +263,9 @@ export async function discoverOAuthMetadata(mcpUrl: string): Promise<OAuthMetada
     );
   }
 
-  const prm = await fetchWithTimeout(
+  const prm = await fetchFollowingCheckedRedirects(
     assertFetchableUrl(resourceMetadataUrl, 'resource_metadata URL'),
+    'protected-resource metadata',
   ).then((r) => {
     if (!r.ok) throw new Error(`Protected-resource metadata fetch failed: ${r.status}`);
     return r.json() as Promise<Record<string, unknown>>;
@@ -182,7 +282,10 @@ export async function discoverOAuthMetadata(mcpUrl: string): Promise<OAuthMetada
     `/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`,
     issuer.origin,
   );
-  const asMeta = await fetchWithTimeout(asMetaUrl.toString()).then((r) => {
+  const asMeta = await fetchFollowingCheckedRedirects(
+    asMetaUrl.toString(),
+    'authorization-server metadata',
+  ).then((r) => {
     if (!r.ok) throw new Error(`Authorization-server metadata fetch failed: ${r.status}`);
     return r.json() as Promise<Record<string, unknown>>;
   });
@@ -203,7 +306,17 @@ export async function discoverOAuthMetadata(mcpUrl: string): Promise<OAuthMetada
       typeof asMeta.registration_endpoint === 'string'
         ? assertFetchableUrl(asMeta.registration_endpoint, 'registration_endpoint')
         : undefined,
-    scopesSupported: Array.isArray(asMeta.scopes_supported) ? asMeta.scopes_supported : [],
+    // The RESOURCE's list first, the authorization server's only as a fallback.
+    // These two documents answer different questions: RFC 9728 §2's
+    // `scopes_supported` is the scopes needed to reach THIS MCP server, while RFC
+    // 8414 §2's is every scope the AS issues for every resource behind it. Asking
+    // for the second is asking the admin to grant this gateway the union of an
+    // entire provider's privileges — and on an AS whose global list contains
+    // scopes this client may not have, it is also an `invalid_scope` refusal that
+    // fails the sign-in outright. The AS list stays as the fallback because a
+    // provider that publishes no per-resource scopes is a provider this gateway
+    // already signs into today.
+    scopesSupported: stringsOf(prm.scopes_supported) ?? stringsOf(asMeta.scopes_supported) ?? [],
   };
 }
 
@@ -297,7 +410,7 @@ export async function registerClient(
   redirectUri: string,
   clientName: string,
 ): Promise<string> {
-  const resp = await fetchWithTimeout(registrationEndpoint, {
+  const resp = await fetchFollowingCheckedRedirects(registrationEndpoint, 'registration_endpoint', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -336,6 +449,28 @@ export async function resolveClientId(
     );
   }
   return staticClientId;
+}
+
+/**
+ * The `scope` to send with an authorization request for `metadata`.
+ *
+ * An admin-set `MCP_OAUTH_SCOPES__<connectorId>` (space-separated) wins, for the
+ * same reason `MCP_OAUTH_CLIENT_ID__<connectorId>` exists above: discovery is the
+ * provider's story about itself, and when that story is wrong the sign-in fails at
+ * the provider with an `invalid_scope` the operator cannot otherwise do anything
+ * about. Some servers publish a scope the client is not entitled to; some grant a
+ * refresh_token only when `offline_access` is asked for and never advertise it.
+ * Both are one env var away from working, instead of a code change away.
+ *
+ * `offline_access` is the fallback when nothing is discovered or configured: the
+ * refresh sweep needs a refresh_token, and an authorization request carrying no
+ * scope at all gets whatever the provider's default happens to be.
+ */
+export function resolveScope(metadata: OAuthMetadata, connectorId: string): string {
+  const envKey = `MCP_OAUTH_SCOPES__${connectorId.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}`;
+  const override = process.env[envKey]?.trim();
+  if (override) return override;
+  return metadata.scopesSupported.length > 0 ? metadata.scopesSupported.join(' ') : 'offline_access';
 }
 
 export interface PkcePair {
@@ -406,11 +541,29 @@ function redactTokenResponse(parsed: Record<string, unknown>): string {
 }
 
 async function tokenRequest(tokenEndpoint: string, body: URLSearchParams): Promise<TokenResponse> {
-  const resp = await fetchWithTimeout(tokenEndpoint, {
+  const resp = await fetchNoRedirect(tokenEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
+  // Alone among the requests in this file, a redirect here is refused rather than
+  // re-validated and followed. This body carries the authorization code plus its PKCE
+  // verifier, or the refresh_token: a 307 re-POSTs that verbatim to wherever the
+  // authorization server names, which is how a token endpoint that passed
+  // `assertFetchableUrl` at discovery time hands the gateway's live credential to a
+  // host of its choosing. Validating the target would not help — there is no
+  // destination for which forwarding this body is the right answer.
+  //
+  // Classified as transient (status < 400, so `isPermanent` is false): an AS that has
+  // started answering 302 here is misconfigured or mid-migration, and the sweep must
+  // back off rather than delete a grant that is probably still good.
+  if (resp.status >= 300 && resp.status < 400) {
+    throw new OAuthTokenError(
+      `Token request to ${tokenEndpoint} was answered with a ${resp.status} redirect` +
+        ` — the gateway does not forward credentials across redirects.`,
+      resp.status,
+    );
+  }
   const parsed = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
   if (!resp.ok || typeof parsed.access_token !== 'string') {
     throw new OAuthTokenError(

@@ -763,6 +763,7 @@ export class GatewayRouter {
     // under /api, mirroring the /app/:name/:portName proxy below.
     this.app.use(
       createOauthCallbackRouter(
+        this.customConnectorsStore,
         undefined,
         typeof this.gatewayConfig?.gateway?.oauthReturnUrl === 'string'
           ? this.gatewayConfig.gateway.oauthReturnUrl

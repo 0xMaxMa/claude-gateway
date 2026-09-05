@@ -8,6 +8,7 @@ import { resolveGatewayPublicUrl } from '../config/public-url';
 import {
   discoverOAuthMetadata,
   resolveClientId,
+  resolveScope,
   generatePkce,
   buildAuthorizeUrl,
   exchangeCode,
@@ -77,7 +78,10 @@ function safeErrorCode(raw: string): string {
  *     (`GET /oauth/mcp/callback`), which has no API key to present. Its
  *     security rests on the single-use, TTL'd, unguessable `state` value
  *     (see pending-oauth-store.ts), the same posture cliPairingStore already
- *     uses for its own unauthenticated browser-facing routes.
+ *     uses for its own unauthenticated browser-facing routes — plus a re-read of
+ *     the connector before it commits anything, because `state` proves which
+ *     browser started the flow and nothing about what happened to the connector
+ *     while that browser sat on the provider's consent screen.
  */
 export function createOauthConnectorsRouter(
   apiKeys: ApiKey[] | undefined,
@@ -112,23 +116,40 @@ export function createOauthConnectorsRouter(
     if (!requireAdmin(req, res)) return;
     const id = req.params.id;
 
-    const entry = (await store.read())[id];
-    if (!entry) {
-      res.status(404).json({ error: `Unknown connector '${id}'` });
-      return;
-    }
-    if (entry.credentialOwner !== 'gateway') {
-      res.status(400).json({
-        error:
-          entry.credentialOwner === 'external'
-            ? `Connector '${id}' has its credential owned externally — its token is pushed in via POST /v1/connectors/${id}/oauth/receive, not signed in for here`
-            : `Connector '${id}' was not added with oauth: true`,
-      });
-      return;
-    }
-    const mcpUrl = entry.config.url;
-    if (typeof mcpUrl !== 'string') {
-      res.status(400).json({ error: `Connector '${id}'.config.url is missing` });
+    // Read and validate inside a try, for the reason connectors-router.ts's
+    // /connect route states at length: `store.read()` does no runtime shape
+    // validation — `config` is required by the TypeScript type and by nothing
+    // else — so an entry hand-written into config.json without it turns
+    // `entry.config.url` into a TypeError, and on Express 4 a rejected async
+    // handler escapes to index.ts's `unhandledRejection` hook, which calls
+    // emergencyShutdown(). A malformed entry must cost this caller a 500, not
+    // every agent on the box. Kept separate from the try below, which reports
+    // 502: that one covers the third-party AS, and a broken local entry is not
+    // an upstream failure.
+    let mcpUrl: string;
+    try {
+      const entry = (await store.read())[id];
+      if (!entry) {
+        res.status(404).json({ error: `Unknown connector '${id}'` });
+        return;
+      }
+      if (entry.credentialOwner !== 'gateway') {
+        res.status(400).json({
+          error:
+            entry.credentialOwner === 'external'
+              ? `Connector '${id}' has its credential owned externally — its token is pushed in via POST /v1/connectors/${id}/oauth/receive, not signed in for here`
+              : `Connector '${id}' was not added with oauth: true`,
+        });
+        return;
+      }
+      const url = entry.config?.url;
+      if (typeof url !== 'string') {
+        res.status(400).json({ error: `Connector '${id}'.config.url is missing` });
+        return;
+      }
+      mcpUrl = url;
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
       return;
     }
 
@@ -167,7 +188,7 @@ export function createOauthConnectorsRouter(
       }
       const { codeVerifier, codeChallenge } = generatePkce();
       const state = pendingStore.create({ connectorId: id, metadata, clientId, redirectUri, codeVerifier });
-      const scope = metadata.scopesSupported.length > 0 ? metadata.scopesSupported.join(' ') : 'offline_access';
+      const scope = resolveScope(metadata, id);
       const authorizeUrl = buildAuthorizeUrl({
         metadata,
         clientId,
@@ -212,6 +233,7 @@ const CALLBACK_PATHS = ['/oauth/mcp/callback', '/gateway/oauth/mcp/callback'];
  *  such tool — its MCP subprocess was spawned with no token and cannot be
  *  hot-patched (see session/process.ts's writeMcpConfig). */
 export function createOauthCallbackRouter(
+  store: CustomConnectorsStore,
   pendingStore: PendingOAuthStore = pendingOAuthStore,
   returnUrl?: string,
   agents?: Map<string, AgentRunner>,
@@ -227,7 +249,23 @@ export function createOauthCallbackRouter(
   let validReturnUrl: string | undefined;
   if (returnUrl) {
     try {
-      validReturnUrl = new URL(returnUrl).toString();
+      const parsed = new URL(returnUrl);
+      // Scheme-gated, not merely parseable. `new URL()` accepts every scheme
+      // there is — `javascript:`, `data:`, `file:`, `intent:` — and this value's
+      // whole purpose is to become the `Location` of a 302 sent to the end
+      // user's own browser, on a route that is PUBLIC and reachable by anyone
+      // who can hit the gateway. A `javascript:` return URL is a stored XSS
+      // primitive aimed at every user who ever finishes (or abandons) a sign-in,
+      // and `file:` points the browser at the operator's own disk. Nothing an
+      // OAuth flow needs to return to is anything but http(s), so requiring it
+      // costs no real deployment anything.
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        console.error(
+          `oauth-connectors-router: gateway.oauthReturnUrl "${returnUrl}" is not an http(s) URL — ignoring it`,
+        );
+      } else {
+        validReturnUrl = parsed.toString();
+      }
     } catch {
       console.error(`oauth-connectors-router: gateway.oauthReturnUrl "${returnUrl}" is not a valid URL — ignoring it`);
     }
@@ -253,6 +291,21 @@ export function createOauthCallbackRouter(
       return;
     }
     res.status(status).send(`<h1>${escapeHtml(message)}</h1>`);
+  }
+
+  /** Is this id still a connector whose credential THIS gateway owns? */
+  async function isGatewayOwned(connectorId: string): Promise<boolean> {
+    return (await store.read())[connectorId]?.credentialOwner === 'gateway';
+  }
+
+  /** Terminal response for a connector that went away (or changed owner) mid-flow. */
+  function failGone(res: Response): void {
+    fail(
+      res,
+      409,
+      'This connector was removed or handed to another owner while you were signing in — nothing was stored. Add it again and reconnect.',
+      'connector_gone',
+    );
   }
 
   router.get(CALLBACK_PATHS, async (req: Request, res: Response) => {
@@ -283,6 +336,29 @@ export function createOauthCallbackRouter(
     }
 
     try {
+      // The flow was authorised against the connector as it stood when
+      // /oauth/start ran, and `state` only proves this browser is the one that
+      // started it. It says nothing about the connector still existing, or the
+      // gateway still being the party that owns its credential — and the window
+      // is a full FLOW_TTL_MS (see pending-oauth-store.ts) of the user sitting
+      // on the provider's consent screen. Two things can land inside it:
+      //
+      //   - DELETE /v1/connectors/:id, which clears the credentials precisely so
+      //     a live refresh_token cannot resurrect a connector the admin just
+      //     disconnected. Writing this token set would do exactly that.
+      //   - POST /v1/connectors/:id/oauth/receive, which can hand the id over to
+      //     'external'. The sweep skips a non-'gateway' entry and DELETE only
+      //     clears internal keys for a 'gateway' one, so the CUSTOMINT__* keys
+      //     written here would be orphans nothing ever collects.
+      //
+      // Checked once here — before spending a code on a token nothing will
+      // keep — and again after the exchange, which is the check that actually
+      // closes the race. `store.read()` degrades to {} rather than throwing
+      // (see custom-connectors-store.ts), so an unreadable config fails closed.
+      if (!(await isGatewayOwned(flow.connectorId))) {
+        failGone(res);
+        return;
+      }
       const token = await exchangeCode({
         metadata: flow.metadata,
         clientId: flow.clientId,
@@ -290,6 +366,14 @@ export function createOauthCallbackRouter(
         code,
         codeVerifier: flow.codeVerifier,
       });
+      // Authoritative re-check: either of the two actions above could have landed
+      // during the exchange round trip, which is the race the pre-check cannot
+      // see. Discarding the token here loses nothing the caller can miss — it was
+      // never stored, and reconnecting mints a fresh one.
+      if (!(await isGatewayOwned(flow.connectorId))) {
+        failGone(res);
+        return;
+      }
       // One rewrite for the whole result — a crash between separate writes
       // could leave an access_token filed with no expiry, which the refresh
       // sweep then reads as "due now" on every tick.

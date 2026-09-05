@@ -14,6 +14,7 @@ import * as path from 'path';
 
 import { ApiKey } from '../../src/types';
 import { createCustomConnectorsStore } from '../../src/connectors/custom-connectors-store';
+import type { CustomConnectorsStore } from '../../src/connectors/custom-connectors-store';
 import { PendingOAuthStore } from '../../src/connectors/pending-oauth-store';
 import type { OAuthMetadata } from '../../src/connectors/mcp-oauth';
 
@@ -30,6 +31,7 @@ beforeEach(() => {
     /* ignore */
   }
   mockFetch.mockReset();
+  delete process.env.MCP_OAUTH_SCOPES__FIRECRAWL;
 });
 
 afterAll(() => {
@@ -189,6 +191,64 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     expect(pendingStore.size()).toBe(1);
   });
 
+  /**
+   * The `scope` in that URL is what the admin is asked to consent to, so where it
+   * comes from matters. These two drive it end-to-end rather than through
+   * resolveScope alone: the router is the only thing that decides which connector
+   * id the scope is resolved for.
+   */
+  function mockScopeDiscovery(prm: Record<string, unknown>, asScopes: unknown[]) {
+    const prmUrl = 'https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth';
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${prmUrl}"` }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorization_servers: ['https://www.firecrawl.dev'], ...prm }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+          token_endpoint: 'https://www.firecrawl.dev/api/oauth/token',
+          registration_endpoint: 'https://www.firecrawl.dev/api/oauth/register',
+          scopes_supported: asScopes,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(201, { client_id: 'dyn_abc123' }));
+  }
+
+  async function scopeOfAuthorizeUrl(): Promise<string | null> {
+    const app = makeApp(tmpConfig({ firecrawl: firecrawlEntry }), new PendingOAuthStore());
+    const res = await request(app)
+      .post('/api/v1/connectors/custom/firecrawl/oauth/start')
+      .set('X-Api-Key', adminKey);
+    expect(res.status).toBe(200);
+    return new URL(res.body.authorizeUrl).searchParams.get('scope');
+  }
+
+  // The AS's global list is every scope it issues for every resource behind it —
+  // consenting to it hands this gateway a whole provider's privileges, and on an
+  // AS holding scopes this client is not entitled to it is an invalid_scope that
+  // fails the sign-in outright.
+  it('asks only for the scopes the MCP server itself declares, not the AS’s whole catalogue', async () => {
+    mockScopeDiscovery({ scopes_supported: ['firecrawl:global', 'offline_access'] }, [
+      'firecrawl:global',
+      'offline_access',
+      'admin:billing',
+      'org:delete',
+    ]);
+    expect(await scopeOfAuthorizeUrl()).toBe('firecrawl:global offline_access');
+  });
+
+  // Discovery is the provider's story about itself. When that story is wrong the
+  // sign-in dies at the provider with an invalid_scope, and without this the
+  // operator's only remaining move is to patch the gateway.
+  it('lets MCP_OAUTH_SCOPES__<ID> override what discovery advertised', async () => {
+    process.env.MCP_OAUTH_SCOPES__FIRECRAWL = 'firecrawl:read offline_access';
+    mockScopeDiscovery({ scopes_supported: ['firecrawl:global'] }, ['firecrawl:global']);
+    expect(await scopeOfAuthorizeUrl()).toBe('firecrawl:read offline_access');
+  });
+
   it('502s with the discovery error when the MCP url does not look like an OAuth server', async () => {
     const app = makeApp(tmpConfig({ firecrawl: firecrawlEntry }), new PendingOAuthStore());
     mockFetch.mockResolvedValueOnce(jsonResponse(200, {}));
@@ -289,11 +349,37 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
   });
 });
 
+/**
+ * Minimal CustomConnectorsStore over an in-memory map. The callback router only
+ * reads, and it reads twice per request (before and after the token exchange),
+ * so a plain object is enough — and mutating that object between the two reads
+ * is exactly how the mid-flow race is reproduced below.
+ */
+function gatewayOwnedStore(
+  connectors: Record<string, { credentialOwner: string }> = {
+    firecrawl: { credentialOwner: 'gateway' },
+  },
+): CustomConnectorsStore {
+  return {
+    read: async () => connectors as never,
+    mutate: async (fn) => {
+      fn(connectors as never);
+    },
+    withEntry: async (id, fn) =>
+      fn({
+        entry: connectors[id] as never,
+        remove: () => {
+          delete connectors[id];
+        },
+      }),
+  };
+}
+
 describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
-  function makeApp(pendingStore: PendingOAuthStore, returnUrl?: string) {
+  function makeApp(pendingStore: PendingOAuthStore, returnUrl?: string, store = gatewayOwnedStore()) {
     const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
     const app = express();
-    app.use(createOauthCallbackRouter(pendingStore, returnUrl));
+    app.use(createOauthCallbackRouter(store, pendingStore, returnUrl));
     return app;
   }
 
@@ -430,6 +516,69 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     expect(res.text).toMatch(/close this tab/);
   });
 
+  /**
+   * `new URL()` accepts every scheme there is, and this value's only job is to
+   * become the `Location` of a 302 sent to the end user's own browser from a
+   * route that is public by design. A `javascript:` return URL is therefore a
+   * stored XSS primitive aimed at everyone who ever finishes — or abandons — a
+   * sign-in, and `file:` points that browser at the operator's own disk.
+   */
+  const BAD_SCHEMES = [
+    'javascript:alert(document.domain)',
+    'data:text/html,<script>alert(1)</script>',
+    'file:///etc/passwd',
+  ];
+
+  it.each(BAD_SCHEMES)('refuses a non-http(s) oauthReturnUrl (%s) on the success path', async (bad) => {
+    const pendingStore = new PendingOAuthStore();
+    const state = pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, { access_token: 'fco_1', token_type: 'bearer', expires_in: 3600 }),
+    );
+
+    const app = makeApp(pendingStore, bad);
+    const res = await request(app).get(`/oauth/mcp/callback?state=${state}&code=c1`);
+    expect(res.status).toBe(200);
+    expect(res.headers.location).toBeUndefined();
+    expect(res.text).toMatch(/close this tab/);
+  });
+
+  // fail() redirects too, so it needs the same gate — and this is the easier
+  // half to reach: a denial takes no valid pending flow and no token exchange.
+  it.each(BAD_SCHEMES)('refuses a non-http(s) oauthReturnUrl (%s) on the failure path', async (bad) => {
+    const app = makeApp(new PendingOAuthStore(), bad);
+    const res = await request(app).get('/oauth/mcp/callback?error=access_denied');
+    expect(res.headers.location).toBeUndefined();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+
+  // The control: http is not https, but it is a real deployment — a gateway and
+  // its app both on localhost during development. Only non-web schemes are out.
+  it('still redirects to a plain-http oauthReturnUrl', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, { access_token: 'fco_1', token_type: 'bearer', expires_in: 3600 }),
+    );
+
+    const app = makeApp(pendingStore, 'http://localhost:3000/connectors');
+    const res = await request(app).get(`/oauth/mcp/callback?state=${state}&code=c1`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe('http://localhost:3000/connectors');
+  });
+
   // The exact bug a real user hit: with oauthReturnUrl configured, denying
   // consent used to leave the browser stranded on a bare gateway page with
   // no way back — only the success path redirected. Every terminal outcome
@@ -536,7 +685,7 @@ describe('createOauthCallbackRouter — a completed sign-in is a fresh start', (
   function makeApp(pendingStore: PendingOAuthStore, returnUrl?: string) {
     const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
     const app = express();
-    app.use(createOauthCallbackRouter(pendingStore, returnUrl));
+    app.use(createOauthCallbackRouter(gatewayOwnedStore(), pendingStore, returnUrl));
     return app;
   }
 
@@ -714,7 +863,7 @@ describe('createOauthCallbackRouter — refresh_token and client_id are replaced
   function makeApp(pendingStore: PendingOAuthStore) {
     const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
     const app = express();
-    app.use(createOauthCallbackRouter(pendingStore));
+    app.use(createOauthCallbackRouter(gatewayOwnedStore(), pendingStore));
     return app;
   }
 
@@ -794,5 +943,158 @@ describe('createOauthCallbackRouter — refresh_token and client_id are replaced
     const env = readTokenEnv();
     expect(env[refreshTokenSecretKey('firecrawl')]).toBe('R2');
     expect(env[clientIdSecretKey('firecrawl')]).toBe('C2');
+  });
+});
+
+/**
+ * The callback is a public route whose only proof is `state`, and `state` proves
+ * one thing: this browser started this flow. It says nothing about the connector
+ * still being there, or this gateway still being the party that owns its
+ * credential — and the gap is a whole FLOW_TTL_MS of the user reading a consent
+ * screen. Two ordinary admin actions land inside it, and both used to be undone
+ * by the returning callback.
+ */
+describe('createOauthCallbackRouter — a connector that changed under the flow', () => {
+  const { readTokenEnv } = require('../../src/connectors/token-env');
+  const {
+    refreshTokenSecretKey,
+    clientIdSecretKey,
+  } = require('../../src/connectors/oauth-refresh-sweep');
+
+  const metadata: OAuthMetadata = {
+    resource: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+    authorizationEndpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+    tokenEndpoint: 'https://www.firecrawl.dev/api/oauth/token',
+    scopesSupported: [],
+  };
+
+  function makeApp(pendingStore: PendingOAuthStore, store: CustomConnectorsStore) {
+    const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
+    const app = express();
+    app.use(createOauthCallbackRouter(store, pendingStore));
+    return app;
+  }
+
+  function startFlow(pendingStore: PendingOAuthStore): string {
+    return pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+  }
+
+  function expectNothingStored(): void {
+    const env = readTokenEnv();
+    expect(env['CUSTOM__firecrawl__access_token']).toBeUndefined();
+    expect(env[refreshTokenSecretKey('firecrawl')]).toBeUndefined();
+    expect(env[clientIdSecretKey('firecrawl')]).toBeUndefined();
+    expect(env['CUSTOMINT__firecrawl____token_generation']).toBeUndefined();
+  }
+
+  // DELETE clears the credentials precisely so a live refresh_token cannot
+  // resurrect a connector the admin just disconnected. Writing a whole fresh
+  // token set here would do exactly that, one route over.
+  it('refuses to resurrect a connector deleted while the user was on the consent screen', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    const store = gatewayOwnedStore({}); // already deleted
+
+    const res = await request(makeApp(pendingStore, store)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+
+    expect(res.status).toBe(409);
+    // Caught before the exchange — no code is spent on a token nothing will keep.
+    expect(mockFetch).not.toHaveBeenCalled();
+    expectNothingStored();
+  });
+
+  // /oauth/receive can hand the id to an external control plane. The sweep skips
+  // a non-'gateway' entry and DELETE only clears CUSTOMINT__* for a 'gateway'
+  // one, so anything written here would be an orphan nothing ever collects.
+  it("refuses to write gateway-owned token state onto an entry now owned 'external'", async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    const store = gatewayOwnedStore({ firecrawl: { credentialOwner: 'external' } });
+
+    const res = await request(makeApp(pendingStore, store)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expectNothingStored();
+  });
+
+  // The pre-check is an optimisation; this is the one that closes the race. The
+  // entry is 'gateway' when the exchange starts and gone by the time it returns,
+  // which is what a DELETE landing during the token round trip looks like.
+  it('discards an already-exchanged token when the connector goes away DURING the exchange', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    const connectors: Record<string, { credentialOwner: string }> = {
+      firecrawl: { credentialOwner: 'gateway' },
+    };
+    const store = gatewayOwnedStore(connectors);
+
+    mockFetch.mockImplementationOnce(async () => {
+      delete connectors['firecrawl']; // the admin's DELETE, mid-flight
+      return jsonResponse(200, {
+        access_token: 'fco_new',
+        refresh_token: 'fcr_new',
+        token_type: 'bearer',
+        expires_in: 3600,
+      });
+    });
+
+    const res = await request(makeApp(pendingStore, store)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(mockFetch).toHaveBeenCalledTimes(1); // it DID exchange...
+    expectNothingStored(); // ...and kept nothing.
+  });
+
+  // An unreadable config.json degrades to {} rather than throwing (see
+  // custom-connectors-store.ts), which must read as "cannot vouch for this
+  // connector" — not as permission to write.
+  it('fails closed when the connector store cannot be read', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    const store: CustomConnectorsStore = {
+      read: async () => ({}), // what a degraded read returns
+      mutate: async () => {},
+      withEntry: async (_id, fn) => fn({ entry: undefined, remove: () => {} }),
+    };
+
+    const res = await request(makeApp(pendingStore, store)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+
+    expect(res.status).toBe(409);
+    expectNothingStored();
+  });
+
+  it('still completes normally when the connector is untouched', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        access_token: 'fco_new',
+        refresh_token: 'fcr_new',
+        token_type: 'bearer',
+        expires_in: 3600,
+      }),
+    );
+
+    const res = await request(
+      makeApp(pendingStore, gatewayOwnedStore({ firecrawl: { credentialOwner: 'gateway' } })),
+    ).get(`/oauth/mcp/callback?state=${state}&code=good`);
+
+    expect(res.status).toBe(200);
+    expect(readTokenEnv()['CUSTOM__firecrawl__access_token']).toBe('fco_new');
   });
 });
