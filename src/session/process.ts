@@ -21,6 +21,7 @@ import {
   truncateDetail,
 } from '../utils/tool-labels';
 import { resolveEnabledConnectors } from '../connectors/resolve';
+import { isReservedConnectorId } from '../connectors/custom';
 
 export const MAX_HISTORY_MESSAGES = 50;
 
@@ -617,23 +618,38 @@ export class SessionProcess extends EventEmitter {
     const mcpServerPath = path.resolve(__dirname, '..', '..', 'mcp', 'server.ts');
 
     // Merge stdio servers from Claude Code user + project configs (project overrides user).
-    // Skip "telegram" and "gateway" from both — gateway always generates its own config below.
+    // Skip the gateway's own server names from both — gateway always generates its own
+    // config below (RESERVED_CONNECTOR_IDS; connector ids can no longer land here at all).
     const userServers = this.readUserScopedMcp();
     const projectServers = this.readProjectScopedMcp();
     const extraServers: Record<string, unknown> = {};
     for (const [name, server] of Object.entries({ ...userServers, ...projectServers })) {
-      if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
+      if (!isReservedConnectorId(name)) extraServers[name] = server;
     }
 
-    // Connectors: catalog entries enabled for THIS agent AND connected (secret present
-    // in mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
+    // Connectors enabled for THIS agent AND connected (every secret present in
+    // mcp-token.env). Resolved fresh each spawn so a web "connect" is picked up
     // without a daemon restart. Secrets land only in this 0600 mcp-config.json.
     const connectorServers = resolveEnabledConnectors(
       this.agentConfig,
       this.gatewayConfig.gateway.customConnectors,
+      this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true,
     );
     for (const [name, server] of Object.entries(connectorServers)) {
-      if (name !== 'telegram' && name !== 'gateway') extraServers[name] = server;
+      // Defence in depth: slugify() and /oauth/receive both refuse these ids now,
+      // so this can only fire on an entry hand-written into config.json.
+      if (isReservedConnectorId(name)) continue;
+      // Connector wins over a same-named user/project server — it is the one the
+      // gateway can actually vouch for the credentials of. Worth a line, though:
+      // the user configured that other server in their own Claude Code config and
+      // gets no other signal that it stopped being the thing under this name.
+      if (name in extraServers) {
+        console.warn(
+          `session/process: connector '${name}' overrides the same-named MCP server from` +
+            ` the user/project Claude Code config for agent=${this.agentConfig.id}`,
+        );
+      }
+      extraServers[name] = server;
     }
 
     const mcpConfig = {

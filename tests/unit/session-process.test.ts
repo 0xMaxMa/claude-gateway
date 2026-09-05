@@ -355,11 +355,11 @@ describe('SessionProcess', () => {
   describe('connector injection', () => {
     const TOKEN_ENV = '/tmp/sp-connectors-mcp-token.env';
     beforeEach(() => {
-      process.env.GATEWAY_MCP_TOKEN_ENV = TOKEN_ENV;
+      process.env.GATEWAY_MCP_TOKEN_ENV_PATH = TOKEN_ENV;
       try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
     });
     afterEach(() => {
-      delete process.env.GATEWAY_MCP_TOKEN_ENV;
+      delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
       try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
     });
 
@@ -368,10 +368,9 @@ describe('SessionProcess', () => {
       return JSON.parse(fs.readFileSync(p, 'utf-8')).mcpServers;
     }
 
-    // github is an externally-managed custom connector now (CONNECTOR_CATALOG
-    // is empty by default — see catalog.ts), so these inject via
-    // gatewayConfig.gateway.customConnectors + the CUSTOM__<id>__<name> secret
-    // key, not a built-in catalog entry + a bare GITHUB_TOKEN.
+    // github here is a connector an external control plane pushed in, so it
+    // injects via gatewayConfig.gateway.customConnectors + the
+    // CUSTOM__<id>__<name> secret key, not a bare GITHUB_TOKEN.
     const githubCustomConnector = {
       label: 'GitHub',
       config: {
@@ -380,8 +379,7 @@ describe('SessionProcess', () => {
         headers: { Authorization: 'Bearer {access_token}' },
       },
       secretNames: ['access_token'],
-      authKind: 'oauth' as const,
-      managed: true,
+      credentialOwner: 'external' as const,
     };
 
     it('enabled + connected → github http entry injected with bearer header', async () => {
@@ -431,6 +429,93 @@ describe('SessionProcess', () => {
         url: 'https://api.githubcopilot.com/mcp/',
         headers: { Authorization: 'Bearer ghp_default' },
       });
+    });
+
+    // A connector id is a slug of a label the admin typed; nothing stops it
+    // matching a server the user already configured in their own Claude Code
+    // config. The connector deliberately wins — it is the one whose credentials
+    // the gateway can vouch for — but the substitution used to happen with no
+    // trace anywhere. The user's `github` tool would start hitting a different
+    // endpoint with different auth, and the only place that fact existed was a
+    // 0600 file inside a session directory.
+    it('warns when a connector takes over a name from the user Claude Code config', async () => {
+      const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-shadow-'));
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+        fs.writeFileSync(
+          path.join(fakeHome, '.claude', 'settings.json'),
+          JSON.stringify({ mcpServers: { github: { command: 'npx', args: ['user-github'] } } }),
+        );
+        mockHomeDir = fakeHome;
+
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        // The connector still wins — this is about visibility, not precedence.
+        expect(readMcpConfig().github).toMatchObject({ type: 'http' });
+
+        const warned = warnSpy.mock.calls.filter((c) =>
+          String(c[0]).includes("connector 'github' overrides"),
+        );
+        expect(warned).toHaveLength(1);
+        expect(String(warned[0][0])).toContain('agent=alfred');
+      } finally {
+        warnSpy.mockRestore();
+        mockHomeDir = null;
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
+
+    it('stays quiet when the connector name collides with nothing', async () => {
+      // The warning has to mean something. A gateway with connectors and no
+      // user-scoped MCP config at all is the overwhelmingly common case, and it
+      // must not print this line on every single spawn.
+      const bareHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-bare-'));
+      // Pointed at an empty home rather than left unset: the real one belongs to
+      // whoever runs the suite and may well have a `github` server in it.
+      mockHomeDir = bareHome;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        expect(readMcpConfig().github).toBeDefined();
+        expect(
+          warnSpy.mock.calls.filter((c) => String(c[0]).includes('overrides the same-named')),
+        ).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+        mockHomeDir = null;
+        fs.rmSync(bareHome, { recursive: true, force: true });
+      }
+    });
+
+    // Drift guard for RESERVED_CONNECTOR_IDS. This writer drops any injected
+    // connector whose key collides with a server it writes itself — silently, so
+    // the connector reports "Connected ✓" forever while never reaching a session.
+    // slugify() prevents that by refusing to mint those ids, which only works as
+    // long as the reserved set still covers every name this writer emits. Adding
+    // a third gateway-owned server without reserving its name reopens the hole,
+    // and this is what notices.
+    it('reserves every mcpServers name the gateway writes itself', async () => {
+      const { RESERVED_CONNECTOR_IDS } = require('../../src/connectors/custom');
+      agentConfig.connectors = {};
+      gatewayConfig.gateway.customConnectors = {};
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const ownNames = Object.keys(readMcpConfig());
+      expect(ownNames.length).toBeGreaterThan(0);
+      for (const name of ownNames) {
+        expect([...RESERVED_CONNECTOR_IDS]).toContain(name);
+      }
     });
   });
 

@@ -6,7 +6,8 @@ import * as http from 'http';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
+import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
+import { withConfigWriteLock } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
@@ -1000,23 +1001,30 @@ export class AgentRunner extends EventEmitter {
 
   /**
    * Persist the current model to config.json using atomic write (tmp + rename).
+   *
+   * Runs under the process-wide config write lock: the read and the rename below are
+   * synchronous and so cannot interleave with each other, but without the lock they
+   * can still land between an async writer's read and its own rename — dropping this
+   * model change, or being dropped by it. See config/config-write-lock.ts.
    */
-  private persistModelToConfig(newModel: string): void {
-    const raw = fs.readFileSync(this.configPath, 'utf-8');
-    const config = JSON.parse(raw);
-    const agent = config.agents?.find((a: { id: string }) => a.id === this.agentConfig.id);
-    if (agent) {
-      agent.claude.model = newModel;
-      const tmp = this.configPath + '.tmp';
-      // mode: 0o600 — rename() carries this file's mode onto config.json,
-      // silently downgrading an existing 0600 config to 0644 otherwise (#460).
-      // writeFileSync's mode option is IGNORED if a stale tmp file from a
-      // prior crashed write is already sitting at this fixed path, so chmod
-      // explicitly rather than relying on it.
-      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-      fs.chmodSync(tmp, 0o600);
-      fs.renameSync(tmp, this.configPath);
-    }
+  private persistModelToConfig(newModel: string): Promise<void> {
+    return withConfigWriteLock(this.configPath, () => {
+      const raw = fs.readFileSync(this.configPath, 'utf-8');
+      const config = JSON.parse(raw);
+      const agent = config.agents?.find((a: { id: string }) => a.id === this.agentConfig.id);
+      if (agent) {
+        agent.claude.model = newModel;
+        const tmp = this.configPath + '.tmp';
+        // mode: 0o600 — rename() carries this file's mode onto config.json,
+        // silently downgrading an existing 0600 config to 0644 otherwise (#460).
+        // writeFileSync's mode option is IGNORED if a stale tmp file from a
+        // prior crashed write is already sitting at this fixed path, so chmod
+        // explicitly rather than relying on it.
+        fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+        fs.chmodSync(tmp, 0o600);
+        fs.renameSync(tmp, this.configPath);
+      }
+    });
   }
 
   private static escapeXmlAttr(value: string): string {
@@ -2718,12 +2726,43 @@ export class AgentRunner extends EventEmitter {
   }
 
   /**
+   * True when this agent would actually resolve `connectorId` into a session's
+   * mcp-config right now — i.e. the connector is enabled for this agent AND all
+   * its secrets are present.
+   *
+   * `overlay` is merged over this runner's view of `gateway.customConnectors`
+   * before resolving. Callers that have just written a connector entry need it:
+   * config.json's watcher propagates asynchronously, so a route that creates a
+   * connector and immediately asks "does anyone use it?" would otherwise be
+   * answered from a config snapshot taken before its own write.
+   *
+   * Exposed separately from `restartSessionsUsingConnector` for the delete path,
+   * which has to ask the question BEFORE it removes the secrets — afterwards the
+   * connector no longer resolves and the answer is always false.
+   */
+  usesConnector(
+    connectorId: string,
+    overlay?: Record<string, CustomConnectorEntry>,
+  ): boolean {
+    const customConnectors = {
+      ...this.gatewayConfig?.gateway?.customConnectors,
+      ...overlay,
+    };
+    const resolved = resolveEnabledConnectors(
+      this.agentConfig,
+      customConnectors,
+      this.gatewayConfig?.gateway?.connectorsDefaultEnabled ?? true,
+    );
+    return connectorId in resolved;
+  }
+
+  /**
    * Called after a connector's secret changes: either an external control
-   * plane pushed a fresh access_token for a managed connector (POST
+   * plane pushed a fresh access_token for a connector it owns (POST
    * /oauth/receive), or the
    * background refresh sweep in oauth-refresh-sweep.ts (invoked from
-   * gateway-router.ts's 60s interval) rotated one for a user's own oauth:true
-   * custom connector. A no-op when this agent doesn't actually resolve that
+   * gateway-router.ts's 60s interval) rotated one for a gateway-owned
+   * connector. A no-op when this agent doesn't actually resolve that
    * connector — restarting a long-lived
    * session that never uses the connector would be pure disruption. Otherwise
    * reuses restartOrDefer's lossless defer-idle path: the stdio MCP subprocess
@@ -2731,13 +2770,18 @@ export class AgentRunner extends EventEmitter {
    * comment), so a session with the connector enabled genuinely needs a
    * respawn to pick up the new token — there's no way to hot-patch a running
    * child process's env.
+   *
+   * `force` skips the usesConnector check, for the delete path: by the time the
+   * secrets are gone the connector no longer resolves, so the caller decides
+   * (before deleting) and tells us.
    */
-  async restartSessionsUsingConnector(connectorId: string): Promise<{ restarted: boolean }> {
-    const resolved = resolveEnabledConnectors(
-      this.agentConfig,
-      this.gatewayConfig?.gateway?.customConnectors,
-    );
-    if (!(connectorId in resolved)) return { restarted: false };
+  async restartSessionsUsingConnector(
+    connectorId: string,
+    opts?: { overlay?: Record<string, CustomConnectorEntry>; force?: boolean },
+  ): Promise<{ restarted: boolean }> {
+    if (!opts?.force && !this.usesConnector(connectorId, opts?.overlay)) {
+      return { restarted: false };
+    }
     await this.restartOrDefer({ skipBusy: false, deferIdle: true });
     return { restarted: true };
   }
@@ -4266,7 +4310,7 @@ export class AgentRunner extends EventEmitter {
     // Allow any model string through — BYOK/third-party models (openrouter/* etc.)
     // are validated by the upstream provider, not the local config list.
     this.agentConfig.claude.model = newModel;
-    try { this.persistModelToConfig(newModel); } catch (err) {
+    try { await this.persistModelToConfig(newModel); } catch (err) {
       this.logger.error('Failed to persist model to config', { error: (err as Error).message });
     }
   }
