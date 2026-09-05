@@ -112,6 +112,10 @@ describe('config-watcher', () => {
     alfredDangerouslySkip?: boolean;
     publicUrl?: string;
     logs?: Record<string, unknown>;
+    alfredConnectors?: Record<string, { enabled: boolean }>;
+    customConnectors?: Record<string, unknown>;
+    connectorsDefaultEnabled?: boolean;
+    oauthReturnUrl?: string;
   }): Record<string, unknown> {
     return {
       gateway: {
@@ -119,6 +123,11 @@ describe('config-watcher', () => {
         timezone: 'Asia/Bangkok',
         ...(overrides?.publicUrl ? { publicUrl: overrides.publicUrl } : {}),
         ...(overrides?.logs ? { logs: overrides.logs } : {}),
+        ...(overrides?.customConnectors ? { customConnectors: overrides.customConnectors } : {}),
+        ...(overrides?.connectorsDefaultEnabled !== undefined
+          ? { connectorsDefaultEnabled: overrides.connectorsDefaultEnabled }
+          : {}),
+        ...(overrides?.oauthReturnUrl ? { oauthReturnUrl: overrides.oauthReturnUrl } : {}),
       },
       agents: [
         {
@@ -134,6 +143,7 @@ describe('config-watcher', () => {
             dangerouslySkipPermissions: overrides?.alfredDangerouslySkip ?? true,
             extraFlags: overrides?.alfredExtraFlags ?? [],
           },
+          ...(overrides?.alfredConnectors ? { connectors: overrides.alfredConnectors } : {}),
         },
         {
           id: 'baerbel',
@@ -212,6 +222,208 @@ describe('config-watcher', () => {
       // Turning the level up to chase a live problem is exactly when a restart
       // is unaffordable — it kills the sessions being investigated.
       hotReloadable: true,
+    });
+
+    watcher.stop();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Connector config (per-agent `connectors` + gateway-level `customConnectors`)
+  // must hot-reload too — previously missing from the field-diff list, which
+  // meant connecting/adding a connector required a full gateway restart before
+  // any session (new or existing) would see it, even though the file on disk
+  // was already correct. See connector_push.go / connectors-router.ts for the
+  // write side; this only covers the watcher detecting + flagging the change.
+  // ---------------------------------------------------------------------------
+  it('emits changes with hotReloadable=true when a per-agent connectors toggle changes', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig({ alfredConnectors: { gmail: { enabled: false } } }));
+
+    const initialConfig = loadConfig(configPath);
+    const watcher = new ConfigWatcher(configPath, initialConfig, logger);
+
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    writeConfigFile(configPath, rawConfig({ alfredConnectors: { gmail: { enabled: true } } }));
+    watcher.reload();
+
+    expect(changeSpy).toHaveBeenCalledTimes(1);
+    const changes: ConfigChange[] = changeSpy.mock.calls[0][0];
+    const connectorsChange = changes.find(c => c.field === 'connectors');
+    expect(connectorsChange).toMatchObject({
+      agentId: 'alfred',
+      field: 'connectors',
+      oldValue: { gmail: { enabled: false } },
+      newValue: { gmail: { enabled: true } },
+      hotReloadable: true,
+    });
+
+    watcher.stop();
+  });
+
+  it('emits changes with hotReloadable=true when gateway.customConnectors changes', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig());
+
+    const initialConfig = loadConfig(configPath);
+    const watcher = new ConfigWatcher(configPath, initialConfig, logger);
+
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    const gmailEntry = {
+      label: 'Gmail',
+      config: { type: 'stdio', command: 'npx', args: ['-y', 'gmail-mcp'], env: { GOOGLE_ACCESS_TOKEN: '{access_token}' } },
+      secretNames: ['access_token'],
+      credentialOwner: 'external',
+    };
+    writeConfigFile(configPath, rawConfig({ customConnectors: { gmail: gmailEntry } }));
+    watcher.reload();
+
+    expect(changeSpy).toHaveBeenCalledTimes(1);
+    const changes: ConfigChange[] = changeSpy.mock.calls[0][0];
+    const customConnectorsChange = changes.find(c => c.field === 'gateway.customConnectors');
+    expect(customConnectorsChange).toMatchObject({
+      agentId: '',
+      field: 'gateway.customConnectors',
+      oldValue: undefined,
+      newValue: { gmail: gmailEntry },
+      hotReloadable: true,
+    });
+
+    watcher.stop();
+  });
+
+  // Regression (round 10). Only `gateway.customConnectors` was watched, so the
+  // other two connector-shaped gateway fields were invisible: an edit to either
+  // produced no ConfigChange at all, and the watcher's "restart required" warning
+  // never fired either — the operator got silence and a file that read as applied.
+  //
+  // They differ in how they must be reported, and the difference is where the
+  // value is read, not how important it is:
+  //   - connectorsDefaultEnabled is taken off the live config object at spawn
+  //     (SessionProcess.writeMcpConfig, AgentRunner.restartSessionsUsingConnector),
+  //     so index.ts can install it in place → hot-reloadable. It is also the
+  //     switch that shuts every not-explicitly-enabled connector off on a shared
+  //     box, which is the worst possible thing to make wait for a restart.
+  //   - oauthReturnUrl is captured as a plain argument when the callback router is
+  //     mounted (gateway-router.ts), so nothing can reach it afterwards →
+  //     reported as restart-required, exactly like gateway.publicUrl.
+  it('reports gateway.connectorsDefaultEnabled as a hot-reloadable change', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig());
+
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    writeConfigFile(configPath, rawConfig({ connectorsDefaultEnabled: false }));
+    watcher.reload();
+
+    const changes: ConfigChange[] = changeSpy.mock.calls[0]?.[0] ?? [];
+    expect(changes.find((c) => c.field === 'gateway.connectorsDefaultEnabled')).toMatchObject({
+      agentId: '',
+      oldValue: undefined,
+      newValue: false,
+      hotReloadable: true,
+    });
+
+    watcher.stop();
+  });
+
+  // Regression (round 11). Hot-reload of a gateway-level field works by MUTATING
+  // the long-lived config object index.ts booted with — `config.gateway.x = ...`
+  // in its `changes` handler — because every agent's runner holds a reference to
+  // that one object and reads the field at spawn time. getConfig() returns
+  // something else: `currentConfig`, a structuredClone that the NEXT reload()
+  // replaces outright. So an agent handed getConfig() at hot-add time is handed a
+  // snapshot that goes stale the moment anything else changes, and it goes stale
+  // silently — connectors connected afterwards never reach that one agent, with
+  // no error and a gateway restart as the only cure.
+  //
+  // This replicates index.ts's two handlers (the same approach
+  // skills-hot-reload.test.ts takes to the watchSkills callback) so the choice
+  // between the two objects is the thing under test.
+  it('hands a hot-added agent the config object that hot-reload mutates, not a snapshot', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig());
+
+    // The boot config, exactly as index.ts holds it.
+    const config = loadConfig(configPath);
+    const watcher = new ConfigWatcher(configPath, config, logger);
+
+    // index.ts's `changes` handler, for the connector fields.
+    watcher.on('changes', (changes: ConfigChange[]) => {
+      for (const change of changes) {
+        if (!change.hotReloadable || change.agentId !== '') continue;
+        if (change.field === 'gateway.customConnectors') {
+          config.gateway.customConnectors = change.newValue as GatewayConfig['gateway']['customConnectors'];
+        }
+      }
+    });
+
+    // index.ts's `agent.added` handler: whatever it passes to startAgent is what
+    // that agent's runner keeps for its lifetime.
+    const handedToNewAgent: GatewayConfig[] = [];
+    watcher.on('agent.added', () => {
+      handedToNewAgent.push(config);
+    });
+
+    const gmailEntry = {
+      label: 'Gmail',
+      config: { type: 'stdio', command: 'npx', args: ['-y', 'gmail-mcp'], env: { GOOGLE_ACCESS_TOKEN: '{access_token}' } },
+      secretNames: ['access_token'],
+      credentialOwner: 'external',
+    };
+
+    // 1) An agent is hot-added.
+    const withNewAgent = rawConfig() as { agents: Record<string, unknown>[] };
+    withNewAgent.agents.push({
+      id: 'newcomer',
+      description: 'added while running',
+      workspace: '/tmp/newcomer/workspace',
+      env: '/tmp/newcomer/.env',
+      claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: true, extraFlags: [] },
+    });
+    writeConfigFile(configPath, withNewAgent);
+    // The snapshot getConfig() would have handed it, captured at that moment.
+    watcher.reload();
+    expect(handedToNewAgent).toHaveLength(1);
+    const snapshotItWouldHaveGot = watcher.getConfig();
+
+    // 2) A connector is connected afterwards.
+    const afterConnect = withNewAgent as unknown as { gateway: Record<string, unknown> };
+    afterConnect.gateway.customConnectors = { gmail: gmailEntry };
+    writeConfigFile(configPath, afterConnect);
+    watcher.reload();
+
+    // The object the new agent was handed sees it...
+    expect(handedToNewAgent[0]!.gateway.customConnectors).toEqual({ gmail: gmailEntry });
+    // ...and the snapshot never will: reload() replaced currentConfig rather
+    // than updating it, so the reference an agent captured is now orphaned.
+    expect(snapshotItWouldHaveGot.gateway.customConnectors).toBeUndefined();
+    expect(watcher.getConfig()).not.toBe(snapshotItWouldHaveGot);
+
+    watcher.stop();
+  });
+
+  it('reports gateway.oauthReturnUrl as restart-required', () => {
+    const configPath = path.join(tmpDir, 'config.json');
+    writeConfigFile(configPath, rawConfig());
+
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+    const changeSpy = jest.fn();
+    watcher.on('changes', changeSpy);
+
+    writeConfigFile(configPath, rawConfig({ oauthReturnUrl: 'https://panel.example.com/connectors' }));
+    watcher.reload();
+
+    const changes: ConfigChange[] = changeSpy.mock.calls[0]?.[0] ?? [];
+    expect(changes.find((c) => c.field === 'gateway.oauthReturnUrl')).toMatchObject({
+      agentId: '',
+      newValue: 'https://panel.example.com/connectors',
+      hotReloadable: false,
     });
 
     watcher.stop();

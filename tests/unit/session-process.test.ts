@@ -350,6 +350,266 @@ describe('SessionProcess', () => {
   });
 
   // --------------------------------------------------------------------------
+  // U-SP-CONN: connector injection into mcp-config.json
+  // --------------------------------------------------------------------------
+  describe('connector injection', () => {
+    const TOKEN_ENV = '/tmp/sp-connectors-mcp-token.env';
+    beforeEach(() => {
+      process.env.GATEWAY_MCP_TOKEN_ENV_PATH = TOKEN_ENV;
+      try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
+    });
+    afterEach(() => {
+      delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
+      try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
+    });
+
+    function readMcpConfig(): Record<string, unknown> {
+      const p = path.join(agentConfig.workspace, '.sessions', 'chat:111', 'mcp-config.json');
+      return JSON.parse(fs.readFileSync(p, 'utf-8')).mcpServers;
+    }
+
+    // github here is a connector an external control plane pushed in, so it
+    // injects via gatewayConfig.gateway.customConnectors + the
+    // CUSTOM__<id>__<name> secret key, not a bare GITHUB_TOKEN.
+    const githubCustomConnector = {
+      label: 'GitHub',
+      config: {
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer {access_token}' },
+      },
+      secretNames: ['access_token'],
+      credentialOwner: 'external' as const,
+    };
+
+    it('enabled + connected → github http entry injected with bearer header', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+      agentConfig.connectors = { github: { enabled: true } };
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const servers = readMcpConfig();
+      expect(servers.github).toEqual({
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_inject' },
+      });
+      // gateway server always still present
+      expect(servers.gateway).toBeDefined();
+    });
+
+    it('enabled but no token → github entry omitted', async () => {
+      agentConfig.connectors = { github: { enabled: true } };
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toBeUndefined();
+    });
+
+    it('explicitly disabled → github entry omitted even with token', async () => {
+      // Enablement is opt-out (default on) — an empty `connectors: {}` no
+      // longer means "nothing enabled"; it must be explicitly {enabled: false}.
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+      agentConfig.connectors = { github: { enabled: false } };
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toBeUndefined();
+    });
+
+    it('opt-out default: empty connectors config still injects a connected connector', async () => {
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_default\n', { mode: 0o600 });
+      agentConfig.connectors = {};
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+      expect(readMcpConfig().github).toEqual({
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_default' },
+      });
+    });
+
+    // A connector id is a slug of a label the admin typed; nothing stops it
+    // matching a server the user already configured in their own Claude Code
+    // config. The connector deliberately wins — it is the one whose credentials
+    // the gateway can vouch for — but the substitution used to happen with no
+    // trace anywhere. The user's `github` tool would start hitting a different
+    // endpoint with different auth, and the only place that fact existed was a
+    // 0600 file inside a session directory.
+    it('warns when a connector takes over a name from the user Claude Code config', async () => {
+      const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-shadow-'));
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.mkdirSync(path.join(fakeHome, '.claude'), { recursive: true });
+        fs.writeFileSync(
+          path.join(fakeHome, '.claude', 'settings.json'),
+          JSON.stringify({ mcpServers: { github: { command: 'npx', args: ['user-github'] } } }),
+        );
+        mockHomeDir = fakeHome;
+
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        // The connector still wins — this is about visibility, not precedence.
+        expect(readMcpConfig().github).toMatchObject({ type: 'http' });
+
+        const warned = warnSpy.mock.calls.filter((c) =>
+          String(c[0]).includes("connector 'github' overrides"),
+        );
+        expect(warned).toHaveLength(1);
+        expect(String(warned[0][0])).toContain('agent=alfred');
+      } finally {
+        warnSpy.mockRestore();
+        mockHomeDir = null;
+        fs.rmSync(fakeHome, { recursive: true, force: true });
+      }
+    });
+
+    it('stays quiet when the connector name collides with nothing', async () => {
+      // The warning has to mean something. A gateway with connectors and no
+      // user-scoped MCP config at all is the overwhelmingly common case, and it
+      // must not print this line on every single spawn.
+      const bareHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sp-home-bare-'));
+      // Pointed at an empty home rather than left unset: the real one belongs to
+      // whoever runs the suite and may well have a `github` server in it.
+      mockHomeDir = bareHome;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        expect(readMcpConfig().github).toBeDefined();
+        expect(
+          warnSpy.mock.calls.filter((c) => String(c[0]).includes('overrides the same-named')),
+        ).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+        mockHomeDir = null;
+        fs.rmSync(bareHome, { recursive: true, force: true });
+      }
+    });
+
+    // Drift guard for RESERVED_CONNECTOR_IDS. This writer drops any injected
+    // connector whose key collides with a server it writes itself — silently, so
+    // the connector reports "Connected ✓" forever while never reaching a session.
+    // slugify() prevents that by refusing to mint those ids, which only works as
+    // long as the reserved set still covers every name this writer emits. Adding
+    // a third gateway-owned server without reserving its name reopens the hole,
+    // and this is what notices.
+    it('reserves every mcpServers name the gateway writes itself', async () => {
+      const { RESERVED_CONNECTOR_IDS } = require('../../src/connectors/custom');
+      agentConfig.connectors = {};
+      gatewayConfig.gateway.customConnectors = {};
+      const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+      await sp.start();
+
+      const ownNames = Object.keys(readMcpConfig());
+      expect(ownNames.length).toBeGreaterThan(0);
+      for (const name of ownNames) {
+        expect([...RESERVED_CONNECTOR_IDS]).toContain(name);
+      }
+    });
+
+    // ------------------------------------------------------------------------
+    // connectorConfigChanged — the restart decision, asked per session
+    //
+    // Regression (round 10). This used to be an agent-level question answered by
+    // AgentRunner.usesConnector(id), which re-resolved the connector against the
+    // CURRENT mcp-token.env and reported whether it came out enabled. That is a
+    // question about the connector, not about the session, and it gave the wrong
+    // answer in both directions:
+    //
+    //   - After a delete or a give-up (oauth-refresh-sweep.ts's permanent-failure
+    //     branch), the secrets are gone by the time the restart is asked for, so
+    //     the connector resolves to nothing and the answer is "nobody uses it" —
+    //     for the very sessions still running with the revoked credential. The
+    //     API's DELETE route worked around it by asking first and passing
+    //     `force: true`; the sweep did not, so a give-up never withdrew anything.
+    //   - After a refresh, the answer is "yes" for every session of every agent
+    //     the connector is enabled for, including the ones that were spawned
+    //     before it was ever connected and hold no copy of it. The sweep runs on
+    //     a timer, so that cost a box-wide respawn about once per token lifetime.
+    //
+    // Comparing against what the session was actually spawned with answers both.
+    // ------------------------------------------------------------------------
+    describe('connectorConfigChanged', () => {
+      const resolvedGithub = {
+        type: 'http',
+        url: 'https://api.githubcopilot.com/mcp/',
+        headers: { Authorization: 'Bearer ghp_inject' },
+      };
+
+      async function spawnWithGithub(): Promise<InstanceType<typeof SessionProcess>> {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+        expect(readMcpConfig().github).toEqual(resolvedGithub);
+        return sp;
+      }
+
+      it('unchanged: the same resolved entry is not a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(sp.connectorConfigChanged('github', { ...resolvedGithub })).toBe(false);
+      });
+
+      it('deleted / given up on: resolving to nothing IS the change', async () => {
+        const sp = await spawnWithGithub();
+        // What the DELETE route and the sweep's give-up branch both produce: the
+        // secrets are already gone, so the connector resolves to undefined.
+        expect(sp.connectorConfigChanged('github', undefined)).toBe(true);
+      });
+
+      it('rotated: a new access_token in the same shape is a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(
+          sp.connectorConfigChanged('github', {
+            ...resolvedGithub,
+            headers: { Authorization: 'Bearer ghp_rotated' },
+          }),
+        ).toBe(true);
+      });
+
+      it('newly connected: absent at spawn, present now, is a change', async () => {
+        agentConfig.connectors = {};
+        gatewayConfig.gateway.customConnectors = {};
+        const sp = new SessionProcess('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+        expect(sp.connectorConfigChanged('github', resolvedGithub)).toBe(true);
+      });
+
+      it('a connector this session never had, still absent, is not a change', async () => {
+        const sp = await spawnWithGithub();
+        expect(sp.connectorConfigChanged('stripe', undefined)).toBe(false);
+      });
+
+      // An api session without allow_tools gets no mcp-config.json at all
+      // (writeMcpConfig early-returns null), so no connector can reach it. An
+      // empty spawn map would read as "spawned, holding nothing" and make every
+      // newly connected connector look like a change worth killing it over.
+      it('a session with no generated mcp config is never a candidate', async () => {
+        fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });
+        agentConfig.connectors = { github: { enabled: true } };
+        gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+        const sp = makeSp('api:uuid', 'api', agentConfig, gatewayConfig, sessionStore);
+        await sp.start();
+
+        expect(sp.connectorConfigChanged('github', resolvedGithub)).toBe(false);
+        expect(sp.connectorConfigChanged('github', undefined)).toBe(false);
+      });
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // U-SP-06: No MCP config for api source
   // --------------------------------------------------------------------------
   it('U-SP-06: No MCP config written for api source', async () => {
@@ -1003,6 +1263,10 @@ describe('SessionProcess', () => {
     try {
       // No settings.json, no .claude.json
       mockHomeDir = fakeHome;
+      // Enablement is opt-out (default on) — microsoft-365 needs no secret, so
+      // it would otherwise appear here regardless of this test's intent (a
+      // baseline session with no connectors configured).
+      agentConfig.connectors = { 'microsoft-365': { enabled: false } };
 
       const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
       await expect(sp.start()).resolves.not.toThrow();

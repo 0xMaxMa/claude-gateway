@@ -12,6 +12,12 @@ const HOT_RELOADABLE_AGENT_FIELDS: string[] = [
   'session.idleTimeoutMinutes',
   'session.maxConcurrent',
   'heartbeat.rateLimitMinutes',
+  // Per-agent connector enablement ({connectorId: {enabled}}) — only affects
+  // NEW session spawns (SessionProcess reads it fresh via AgentRunner's own
+  // live object reference, see index.ts's 'changes' handler); an
+  // already-running session's subprocess still needs an explicit restart
+  // (restartSessionsUsingConnector) to pick it up mid-conversation.
+  'connectors',
 ];
 
 // Gateway-level (non-agent) fields that can be hot-reloaded; agentId will be '' in ConfigChange
@@ -21,6 +27,25 @@ const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
   // call — and turning the level up to chase a live problem is precisely when a
   // restart is unaffordable, since it kills the sessions being investigated.
   'gateway.logs',
+  // Same "new spawns only" caveat as 'connectors' above — customConnectors is
+  // where every connector definition lives regardless of who owns its
+  // credential (see connectors/types.ts's CustomConnectorEntry).
+  'gateway.customConnectors',
+  // The default the per-agent `connectors` map is read against
+  // (resolveEnabledConnectors' third argument). Hot-reloadable for the same
+  // reason and with the same scope as the two above: both readers —
+  // SessionProcess.writeMcpConfig and AgentRunner.restartSessionsUsingConnector
+  // — take it off the live config object at call time, so replacing it here is
+  // enough for every subsequent spawn. Flipping it to `false` is how an operator
+  // shuts every not-explicitly-enabled connector off on a shared box; making
+  // that wait for a gateway restart would mean killing the sessions in order to
+  // narrow what they can reach.
+  //
+  // gateway.oauthReturnUrl is deliberately NOT here: createOauthCallbackRouter
+  // captures it as a plain argument at mount time (gateway-router.ts), so a live
+  // edit cannot reach the mounted router. It is listed in gatewayFieldPairs
+  // below so the change is still reported — as restart-required, like publicUrl.
+  'gateway.connectorsDefaultEnabled',
 ];
 
 export interface ConfigChange {
@@ -209,6 +234,7 @@ export class ConfigWatcher extends EventEmitter {
         { field: 'telegram.botToken', oldVal: oldAgent.telegram?.botToken, newVal: newAgent.telegram?.botToken },
         { field: 'discord.botToken', oldVal: oldAgent.discord?.botToken, newVal: newAgent.discord?.botToken },
         { field: 'description', oldVal: oldAgent.description, newVal: newAgent.description },
+        { field: 'connectors', oldVal: oldAgent.connectors, newVal: newAgent.connectors },
       ];
 
       for (const { field, oldVal, newVal } of fieldPairs) {
@@ -229,6 +255,9 @@ export class ConfigWatcher extends EventEmitter {
       { field: 'gateway.headless', oldVal: oldCfg.gateway.headless, newVal: newCfg.gateway.headless },
       { field: 'gateway.publicUrl', oldVal: oldCfg.gateway.publicUrl, newVal: newCfg.gateway.publicUrl },
       { field: 'gateway.logs', oldVal: oldCfg.gateway.logs, newVal: newCfg.gateway.logs },
+      { field: 'gateway.customConnectors', oldVal: oldCfg.gateway.customConnectors, newVal: newCfg.gateway.customConnectors },
+      { field: 'gateway.connectorsDefaultEnabled', oldVal: oldCfg.gateway.connectorsDefaultEnabled, newVal: newCfg.gateway.connectorsDefaultEnabled },
+      { field: 'gateway.oauthReturnUrl', oldVal: oldCfg.gateway.oauthReturnUrl, newVal: newCfg.gateway.oauthReturnUrl },
     ];
     for (const { field, oldVal, newVal } of gatewayFieldPairs) {
       if (!deepEqual(oldVal, newVal)) {

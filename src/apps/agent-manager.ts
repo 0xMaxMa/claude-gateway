@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
+import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,24 +32,19 @@ const DEFAULT_AGENTS_DIR = agentsDirForConfig(DEFAULT_CONFIG_PATH);
 // ─── AgentManager ────────────────────────────────────────────────────────────
 
 export class AgentManager {
-  /** Serialises concurrent config reads/writes within this process. */
-  private configLock: Promise<void> = Promise.resolve();
-
   constructor(
     private readonly configPath: string = DEFAULT_CONFIG_PATH,
     private readonly agentsDir: string = DEFAULT_AGENTS_DIR,
   ) {}
 
-  private async withConfigLock<T>(fn: () => T): Promise<T> {
-    let release!: () => void;
-    const prev = this.configLock;
-    this.configLock = new Promise<void>((r) => { release = r; });
-    await prev;
-    try {
-      return fn();
-    } finally {
-      release();
-    }
+  /**
+   * Serialises config reads/writes against every other writer of the same file —
+   * the agents API and the connectors store included, not just other AgentManager
+   * calls. See config/config-write-lock.ts for why an instance-private lock was
+   * not enough.
+   */
+  private withConfigLock<T>(fn: () => T): Promise<T> {
+    return withConfigWriteLock(this.configPath, fn);
   }
 
   // ─── Public API ────────────────────────────────────────────────────────────
@@ -439,11 +435,7 @@ export class AgentManager {
     // mkdirSync is usually a recursive no-op once that's already run, but
     // must not itself default to 0755 on any path that reaches here first.
     fs.mkdirSync(path.dirname(this.configPath), { recursive: true, mode: 0o700 });
-    const tmp = `${this.configPath}.tmp.${process.pid}`;
-    // mode: 0o600 — rename() carries this file's mode onto config.json,
-    // silently downgrading an existing 0600 config to 0644 otherwise (#460).
-    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(tmp, this.configPath);
+    writeConfigAtomicSync(this.configPath, config);
   }
 
   private async upsertConfigEntry(agentId: string, entry: Record<string, unknown>): Promise<void> {

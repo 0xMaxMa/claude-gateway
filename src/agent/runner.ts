@@ -6,7 +6,8 @@ import * as http from 'http';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { AgentConfig, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
+import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
+import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
 import { SessionStore, SessionNotInIndexError } from '../session/store';
@@ -43,6 +44,7 @@ import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
+import { resolveEnabledConnectors } from '../connectors/resolve';
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
 const DEFAULT_MAX_CONCURRENT = 20;
@@ -1000,23 +1002,22 @@ export class AgentRunner extends EventEmitter {
 
   /**
    * Persist the current model to config.json using atomic write (tmp + rename).
+   *
+   * Runs under the process-wide config write lock: the read and the rename below are
+   * synchronous and so cannot interleave with each other, but without the lock they
+   * can still land between an async writer's read and its own rename — dropping this
+   * model change, or being dropped by it. See config/config-write-lock.ts.
    */
-  private persistModelToConfig(newModel: string): void {
-    const raw = fs.readFileSync(this.configPath, 'utf-8');
-    const config = JSON.parse(raw);
-    const agent = config.agents?.find((a: { id: string }) => a.id === this.agentConfig.id);
-    if (agent) {
-      agent.claude.model = newModel;
-      const tmp = this.configPath + '.tmp';
-      // mode: 0o600 — rename() carries this file's mode onto config.json,
-      // silently downgrading an existing 0600 config to 0644 otherwise (#460).
-      // writeFileSync's mode option is IGNORED if a stale tmp file from a
-      // prior crashed write is already sitting at this fixed path, so chmod
-      // explicitly rather than relying on it.
-      fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-      fs.chmodSync(tmp, 0o600);
-      fs.renameSync(tmp, this.configPath);
-    }
+  private persistModelToConfig(newModel: string): Promise<void> {
+    return withConfigWriteLock(this.configPath, () => {
+      const raw = fs.readFileSync(this.configPath, 'utf-8');
+      const config = JSON.parse(raw);
+      const agent = config.agents?.find((a: { id: string }) => a.id === this.agentConfig.id);
+      if (agent) {
+        agent.claude.model = newModel;
+        writeConfigAtomicSync(this.configPath, config);
+      }
+    });
   }
 
   private static escapeXmlAttr(value: string): string {
@@ -2658,15 +2659,20 @@ export class AgentRunner extends EventEmitter {
    *   (armed to restart on next turn/message), `skipped` (left untouched).
    */
   async restartOrDefer(
-    opts?: { skipBusy?: boolean; deferIdle?: boolean },
+    opts?: { skipBusy?: boolean; deferIdle?: boolean; filter?: (proc: SessionProcess) => boolean },
   ): Promise<{ immediate: number; deferred: number; skipped: number }> {
     const skipBusy = opts?.skipBusy ?? false;
     const deferIdle = opts?.deferIdle ?? false;
+    const filter = opts?.filter;
     let immediate = 0;
     let deferred = 0;
     let skipped = 0;
     const toStopNow: string[] = [];
     for (const [id, proc] of this.sessions) {
+      // Not counted as `skipped`: that reports sessions this call declined to
+      // restart even though they needed one (the skipBusy case). A session the
+      // change does not reach at all was never a candidate.
+      if (filter && !filter(proc)) continue;
       if (proc.isProcessing) {
         if (skipBusy) {
           skipped++;
@@ -2715,6 +2721,93 @@ export class AgentRunner extends EventEmitter {
     }
     this.logger.info('restartOrDefer: sessions restarted', { immediate, deferred, skipped });
     return { immediate, deferred, skipped };
+  }
+
+  /**
+   * Called after a connector's secret or definition changes: a connector was
+   * connected, an external control plane pushed a fresh access_token for one it
+   * owns (POST /oauth/receive), the background refresh sweep in
+   * oauth-refresh-sweep.ts (invoked from gateway-router.ts's 60s interval)
+   * rotated one, or a connector was deleted / had its refresh given up on.
+   *
+   * Restarts exactly the sessions whose own mcp-config no longer matches what
+   * `connectorId` resolves to for this agent — see
+   * SessionProcess.connectorConfigChanged, which owns that comparison. The
+   * stdio MCP subprocess reads its env once at spawn (see writeMcpConfig), so
+   * there is no way to hot-patch a running child; a session that IS affected
+   * genuinely needs a respawn, and one that isn't must not be disrupted.
+   *
+   * `overlay` is merged over this runner's view of `gateway.customConnectors` —
+   * and adopted into it, so the sessions restarted below respawn from the new
+   * state rather than the one the watcher has not delivered yet (see the inline
+   * note). Callers that have just written a connector entry need it:
+   * config.json's watcher propagates asynchronously, so a route that creates a
+   * connector and immediately asks what it resolves to would otherwise be
+   * answered from a config snapshot taken before its own write. A `null` value
+   * expresses the other half of that write — the entry was REMOVED — which a
+   * merge alone cannot say. Deleting a connector whose owner is `'none'` has no
+   * secrets to clear, so without it the stale snapshot still resolves the entry
+   * to the identical fingerprint, nothing looks changed, and every live session
+   * keeps the deleted MCP server connected and callable while the API reports it
+   * gone.
+   *
+   * Deliberately takes no "the caller already decided" escape hatch. The delete
+   * and give-up paths needed one while this asked whether the connector still
+   * resolves — after `deleteSecrets` it never does, so the answer was always no
+   * and the restart silently did nothing. Per-session comparison answers those
+   * paths correctly on its own: resolving to nothing IS the change.
+   */
+  async restartSessionsUsingConnector(
+    connectorId: string,
+    opts?: { overlay?: Record<string, CustomConnectorEntry | null> },
+  ): Promise<{ restarted: boolean }> {
+    const overlay = opts?.overlay;
+    const customConnectors = {
+      ...this.gatewayConfig?.gateway?.customConnectors,
+      ...overlay,
+    };
+    for (const [id, entry] of Object.entries(overlay ?? {})) {
+      if (entry === null) delete customConnectors[id];
+    }
+    // Adopted into the config object, not just used for the comparison below.
+    //
+    // The overlay's whole purpose is that this runner's view of config.json is
+    // older than the write the caller just made — and the sessions this method
+    // restarts respawn from that same view: SessionProcess.writeMcpConfig reads
+    // `gatewayConfig.gateway.customConnectors` at spawn (this is the very object
+    // it was handed — see the constructor call above), so a session stopped
+    // because a connector changed came back up with the pre-change connector
+    // set. The watcher's 500ms debounce means that is the normal case, not a
+    // narrow race: connect a connector and the agent respawns still without the
+    // tool, delete one and it respawns still holding it.
+    //
+    // And it does not self-correct. The fresh spawn records the STALE resolution
+    // as its fingerprint, so when the watcher finally lands nothing compares it
+    // again — this method is the only caller of connectorConfigChanged, and it
+    // has already run. The wrong config sticks until something unrelated
+    // restarts the session.
+    //
+    // Mutating the config object is exactly what index.ts's `changes` handler
+    // does to this same long-lived object on every reload, so this is the
+    // established way to publish a config change to running runners rather than
+    // a new mechanism. Idempotent across runners: they share the object, and
+    // every one of them merges the same overlay onto it.
+    if (overlay) {
+      this.gatewayConfig.gateway.customConnectors =
+        customConnectors as Record<string, CustomConnectorEntry>;
+    }
+    const resolved = resolveEnabledConnectors(
+      this.agentConfig,
+      customConnectors as Record<string, CustomConnectorEntry>,
+      this.gatewayConfig?.gateway?.connectorsDefaultEnabled ?? true,
+    );
+    const target = resolved[connectorId];
+    const { immediate, deferred } = await this.restartOrDefer({
+      skipBusy: false,
+      deferIdle: true,
+      filter: (proc) => proc.connectorConfigChanged(connectorId, target),
+    });
+    return { restarted: immediate + deferred > 0 };
   }
 
   /**
@@ -4248,7 +4341,7 @@ export class AgentRunner extends EventEmitter {
     // Allow any model string through — BYOK/third-party models (openrouter/* etc.)
     // are validated by the upstream provider, not the local config list.
     this.agentConfig.claude.model = newModel;
-    try { this.persistModelToConfig(newModel); } catch (err) {
+    try { await this.persistModelToConfig(newModel); } catch (err) {
       this.logger.error('Failed to persist model to config', { error: (err as Error).message });
     }
   }
