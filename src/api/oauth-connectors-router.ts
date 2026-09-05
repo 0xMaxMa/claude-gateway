@@ -1,9 +1,9 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { ApiKey } from '../types';
 import { createApiAuthMiddleware, isAdmin } from './auth';
 import type { CustomConnectorsStore } from '../connectors/custom-connectors-store';
-import { customSecretKey } from '../connectors/custom';
-import { getSecret, setSecret } from '../connectors/token-env';
+import { customSecretKey, isValidConnectorId } from '../connectors/custom';
+import { getSecret, setSecret, updateSecrets } from '../connectors/token-env';
 import { resolveGatewayPublicUrl } from '../config/public-url';
 import {
   discoverOAuthMetadata,
@@ -13,21 +13,18 @@ import {
   exchangeCode,
 } from '../connectors/mcp-oauth';
 import { pendingOAuthStore, type PendingOAuthStore } from '../connectors/pending-oauth-store';
+import type { AgentRunner } from '../agent/runner';
 import {
   refreshTokenSecretKey,
   clientIdSecretKey,
   expiresAtSecretKey,
   tokenGenerationSecretKey,
+  refreshFailCountSecretKey,
+  refreshTransientCountSecretKey,
+  refreshBackoffUntilSecretKey,
+  dcrClientIdSecretKey,
+  clientRedirectUriSecretKey,
 } from '../connectors/oauth-refresh-sweep';
-
-/** Where a connector's registered redirect_uri is cached alongside its
- *  client_id (below) — only reuse the cached client_id when this still
- *  matches gateway.publicUrl's current callback URL; otherwise the cached
- *  client is registered against a redirect_uri the provider would now
- *  reject, so re-registering is the correct move, not an optimization to skip. */
-function clientRedirectUriSecretKey(id: string): string {
-  return customSecretKey(id, '__client_redirect_uri');
-}
 
 type AuthedRequest = Request & { apiKey: ApiKey };
 
@@ -48,11 +45,27 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * Generic OAuth 2.1 + PKCE flow for "custom" connectors marked
- * `oauth: true` (see CustomConnectorEntry) — e.g. Firecrawl's
+ * RFC 6749 §4.1.2.1 error codes are short ASCII tokens (`access_denied`,
+ * `invalid_scope`, …). `escapeHtml` covers this value on the way into our own
+ * fallback page, but `fail()` also forwards it OUT — as `connector_oauth_error` on
+ * the configured return URL — into a downstream app whose rendering is not ours to
+ * vouch for, and it arrives from the query string of an unauthenticated public
+ * route. URL-encoding makes it a well-formed parameter, not a safe one. Anything
+ * outside the token shape becomes a generic code before it leaves this process; the
+ * provider's own words still reach the operator, on the page and in the log.
+ */
+const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+function safeErrorCode(raw: string): string {
+  return OAUTH_ERROR_CODE_RE.test(raw) ? raw : 'provider_error';
+}
+
+/**
+ * Generic OAuth 2.1 + PKCE flow for connectors whose credential this gateway owns
+ * (`credentialOwner: 'gateway'` — see ConnectorCredentialOwner) — e.g. Firecrawl's
  * `https://mcp.firecrawl.dev/v2/mcp-oauth`. This is the gateway-owned
- * counterpart to an external control plane's own OAuth handlers (used for
- * managed connectors like Gmail/GitHub): the whole dance (discovery, DCR,
+ * counterpart to an external control plane's own OAuth handlers (which produce
+ * 'external' entries via /oauth/receive): the whole dance (discovery, DCR,
  * PKCE, token exchange, refresh) happens here, inside the user's own VM —
  * no external service ever sees the resulting token.
  *
@@ -84,6 +97,17 @@ export function createOauthConnectorsRouter(
     return true;
   }
 
+  // Same shape check as connectors-router.ts's — see its `router.param('id')` comment.
+  // Here the id is also looked up in `store`, so this is defence in depth rather than
+  // the only guard, but it keeps the 400-vs-404 distinction honest.
+  router.param('id', (req: Request, res: Response, next: NextFunction, id: string) => {
+    if (!isValidConnectorId(id)) {
+      res.status(400).json({ error: `Invalid connector id '${id}'` });
+      return;
+    }
+    next();
+  });
+
   router.post('/v1/connectors/custom/:id/oauth/start', async (req: Request, res: Response) => {
     if (!requireAdmin(req, res)) return;
     const id = req.params.id;
@@ -93,8 +117,13 @@ export function createOauthConnectorsRouter(
       res.status(404).json({ error: `Unknown connector '${id}'` });
       return;
     }
-    if (!entry.oauth) {
-      res.status(400).json({ error: `Connector '${id}' was not added with oauth: true` });
+    if (entry.credentialOwner !== 'gateway') {
+      res.status(400).json({
+        error:
+          entry.credentialOwner === 'external'
+            ? `Connector '${id}' has its credential owned externally — its token is pushed in via POST /v1/connectors/${id}/oauth/receive, not signed in for here`
+            : `Connector '${id}' was not added with oauth: true`,
+      });
       return;
     }
     const mcpUrl = entry.config.url;
@@ -120,14 +149,20 @@ export function createOauthConnectorsRouter(
       // every Connect click — including retries after an abandoned attempt.
       // Only valid while the redirect_uri it was registered with still
       // matches; a changed gateway.publicUrl invalidates the cache.
-      const cachedClientId = getSecret(clientIdSecretKey(id));
+      //
+      // Falls back to the live client_id so a connector that registered before
+      // the DCR cache had a key of its own keeps reusing it, instead of orphaning
+      // one more registration at the provider on the first Connect after upgrade.
+      // Both reads only — see dcrClientIdSecretKey for why start never WRITES the
+      // key the sweep refreshes with.
+      const cachedClientId = getSecret(dcrClientIdSecretKey(id)) ?? getSecret(clientIdSecretKey(id));
       const cachedRedirectUri = getSecret(clientRedirectUriSecretKey(id));
       let clientId: string;
       if (cachedClientId && cachedRedirectUri === redirectUri) {
         clientId = cachedClientId;
       } else {
         clientId = await resolveClientId(metadata, id, redirectUri);
-        setSecret(clientIdSecretKey(id), clientId);
+        setSecret(dcrClientIdSecretKey(id), clientId);
         setSecret(clientRedirectUriSecretKey(id), redirectUri);
       }
       const { codeVerifier, codeChallenge } = generatePkce();
@@ -150,11 +185,36 @@ export function createOauthConnectorsRouter(
   return router;
 }
 
+/**
+ * Both paths, for the same reason share-router.ts registers
+ * `['/shared/:token', '/gateway/shared/:token']`.
+ *
+ * `resolveGatewayPublicUrl` REQUIRES the configured publicUrl to end in `/gateway`,
+ * so the redirect_uri handed to the provider is always
+ * `<origin>/gateway/oauth/mcp/callback`. Behind Traefik that prefix is stripped
+ * before the request reaches Express and the bare path matches. In the direct-path
+ * deployment the same function explicitly permits (`http://localhost` / `127.*` /
+ * `*.internal` / `*.local` + `/gateway`) nothing strips it — there is no prefix
+ * middleware anywhere in this app — so the provider redirected the user's own
+ * browser to a path with no route. The result was a bare 404 and a pending flow
+ * left to expire silently: the sign-in fails, and the one page the user sees says
+ * nothing about why.
+ */
+const CALLBACK_PATHS = ['/oauth/mcp/callback', '/gateway/oauth/mcp/callback'];
+
 /** See this file's module doc comment — mounted directly on the Express app,
- *  NOT under any auth middleware, at `/oauth/mcp/callback`. */
+ *  NOT under any auth middleware, at `/oauth/mcp/callback`.
+ *
+ *  `agents` (all live AgentRunners) lets a completed sign-in restart the sessions
+ *  already using the connector, exactly as POST /v1/connectors/:id/oauth/receive
+ *  does for a pushed token. Without it the user finishes the OAuth dance, sees the
+ *  connector go green, and then finds the agent they are talking to still has no
+ *  such tool — its MCP subprocess was spawned with no token and cannot be
+ *  hot-patched (see session/process.ts's writeMcpConfig). */
 export function createOauthCallbackRouter(
   pendingStore: PendingOAuthStore = pendingOAuthStore,
   returnUrl?: string,
+  agents?: Map<string, AgentRunner>,
 ): Router {
   const router = Router();
   // This gateway is a generic, product-agnostic fork — it has no business
@@ -195,7 +255,7 @@ export function createOauthCallbackRouter(
     res.status(status).send(`<h1>${escapeHtml(message)}</h1>`);
   }
 
-  router.get('/oauth/mcp/callback', async (req: Request, res: Response) => {
+  router.get(CALLBACK_PATHS, async (req: Request, res: Response) => {
     const state = typeof req.query.state === 'string' ? req.query.state : '';
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     const providerError = typeof req.query.error === 'string' ? req.query.error : '';
@@ -211,7 +271,10 @@ export function createOauthCallbackRouter(
       return;
     }
     if (providerError) {
-      fail(res, 400, `Sign-in failed: ${providerError}`, providerError);
+      // The message keeps the provider's own words (escaped on the way into our
+      // HTML) — on a self-hosted install that page is the only diagnostic the admin
+      // gets. Only the code, which leaves for someone else's app, is clamped.
+      fail(res, 400, `Sign-in failed: ${providerError}`, safeErrorCode(providerError));
       return;
     }
     if (!code) {
@@ -227,18 +290,67 @@ export function createOauthCallbackRouter(
         code,
         codeVerifier: flow.codeVerifier,
       });
-      setSecret(customSecretKey(flow.connectorId, 'access_token'), token.access_token);
-      setSecret(clientIdSecretKey(flow.connectorId), flow.clientId);
-      if (token.refresh_token) setSecret(refreshTokenSecretKey(flow.connectorId), token.refresh_token);
-      setSecret(
-        expiresAtSecretKey(flow.connectorId),
-        String(Date.now() + (token.expires_in ?? 3600) * 1000),
+      // One rewrite for the whole result — a crash between separate writes
+      // could leave an access_token filed with no expiry, which the refresh
+      // sweep then reads as "due now" on every tick.
+      updateSecrets(
+        {
+          [customSecretKey(flow.connectorId, 'access_token')]: token.access_token,
+          [clientIdSecretKey(flow.connectorId)]: flow.clientId,
+          ...(token.refresh_token
+            ? { [refreshTokenSecretKey(flow.connectorId)]: token.refresh_token }
+            : {}),
+          [expiresAtSecretKey(flow.connectorId)]: String(
+            Date.now() + (token.expires_in ?? 3600) * 1000,
+          ),
+          // Bumped so the background refresh sweep (oauth-refresh-sweep.ts) can
+          // tell, after its own two-network-round-trip refresh, whether a fresher
+          // token landed here in the meantime — and if so, discard its own
+          // now-stale result instead of clobbering this one.
+          [tokenGenerationSecretKey(flow.connectorId)]: String(Date.now()),
+        },
+        // A completed sign-in is as much a fresh start as the sweep's own
+        // successful refresh, and has to clear the same bookkeeping. Leaving it
+        // behind meant a connector the user had just reconnected was still
+        // serving a backoff of up to six hours — so its brand-new one-hour token
+        // expired unrefreshed — while status reported the old failure streak
+        // against it. Worst of the three: a permanent count already sitting at 2
+        // turned the very next refusal into credential deletion, one tick after
+        // a successful sign-in.
+        [
+          refreshFailCountSecretKey(flow.connectorId),
+          refreshTransientCountSecretKey(flow.connectorId),
+          refreshBackoffUntilSecretKey(flow.connectorId),
+          // `client_id` above is written unconditionally; `refresh_token` only
+          // when this response carried one. An AS is entitled to omit it (RFC
+          // 6749 §6, and it happens routinely whenever the granted scopes don't
+          // include `offline_access`), and without this removal the old one
+          // survived — leaving refresh_token R1, issued to client C1, sitting
+          // beside the new client_id C2. The sweep then POSTs that mismatched
+          // pair, the AS answers `invalid_client`, which is classified permanent,
+          // and three ticks later it deletes the sign-in that just succeeded.
+          // The two values are one credential: they are replaced together or not
+          // at all.
+          ...(token.refresh_token ? [] : [refreshTokenSecretKey(flow.connectorId)]),
+        ],
       );
-      // Bumped so the background refresh sweep (oauth-refresh-sweep.ts) can
-      // tell, after its own two-network-round-trip refresh, whether a fresher
-      // token landed here in the meantime — and if so, discard its own
-      // now-stale result instead of clobbering this one.
-      setSecret(tokenGenerationSecretKey(flow.connectorId), String(Date.now()));
+
+      // The connector only just became resolvable; a session spawned before
+      // this holds an MCP config without it. Failure to restart must not turn a
+      // successful sign-in into an error page — the token IS stored — so this
+      // is logged, not surfaced.
+      if (agents) {
+        await Promise.all(
+          [...agents.values()].map((runner) =>
+            runner.restartSessionsUsingConnector(flow.connectorId).catch((e: Error) => {
+              console.error(
+                `oauth-connectors-router: restart for connector=${flow.connectorId} failed: ${e.message}`,
+              );
+            }),
+          ),
+        );
+      }
+
       if (validReturnUrl) {
         res.redirect(302, validReturnUrl);
         return;

@@ -1,6 +1,7 @@
 /**
  * Unit tests for api/oauth-connectors-router.ts — the two routers backing
- * generic OAuth sign-in for `oauth: true` custom connectors:
+ * generic OAuth sign-in for gateway-owned custom connectors
+ * (`credentialOwner: 'gateway'`):
  *   createOauthConnectorsRouter() — admin-gated POST .../oauth/start
  *   createOauthCallbackRouter()  — public GET /oauth/mcp/callback
  */
@@ -22,7 +23,7 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as unknown as typeof fetch;
 
 beforeEach(() => {
-  process.env.GATEWAY_MCP_TOKEN_ENV = TOKEN_ENV;
+  process.env.GATEWAY_MCP_TOKEN_ENV_PATH = TOKEN_ENV;
   try {
     fs.rmSync(TOKEN_ENV);
   } catch {
@@ -32,7 +33,7 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  delete process.env.GATEWAY_MCP_TOKEN_ENV;
+  delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
   try {
     fs.rmSync(TOKEN_ENV);
   } catch {
@@ -96,7 +97,7 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
     label: 'Firecrawl',
     config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth', headers: { Authorization: 'Bearer {access_token}' } },
     secretNames: ['access_token'],
-    oauth: true,
+    credentialOwner: 'gateway',
   };
 
   it('404s for an unknown connector id', async () => {
@@ -108,12 +109,30 @@ describe('createOauthConnectorsRouter — POST /v1/connectors/custom/:id/oauth/s
   });
 
   it("400s when the connector wasn't added with oauth: true", async () => {
-    const app = makeApp(tmpConfig({ plain: { ...firecrawlEntry, oauth: undefined } }), new PendingOAuthStore());
+    const app = makeApp(
+      tmpConfig({ plain: { ...firecrawlEntry, credentialOwner: 'static' } }),
+      new PendingOAuthStore(),
+    );
     const res = await request(app)
       .post('/api/v1/connectors/custom/plain/oauth/start')
       .set('X-Api-Key', adminKey);
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/oauth: true/);
+  });
+
+  // 'external' is not just "also not gateway-owned": its token arrives through a
+  // different endpoint, so the generic refusal above would send the caller to an
+  // oauth/start it must never use. It gets its own message, and its own test.
+  it('400s with the /oauth/receive route when the credential is owned externally', async () => {
+    const app = makeApp(
+      tmpConfig({ pushed: { ...firecrawlEntry, credentialOwner: 'external' } }),
+      new PendingOAuthStore(),
+    );
+    const res = await request(app)
+      .post('/api/v1/connectors/custom/pushed/oauth/start')
+      .set('X-Api-Key', adminKey);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/oauth\/receive/);
   });
 
   it('non-admin cannot start an OAuth flow', async () => {
@@ -357,13 +376,13 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     const { readTokenEnv } = require('../../src/connectors/token-env');
     const env = readTokenEnv();
     expect(env['CUSTOM__firecrawl__access_token']).toBe('fco_new');
-    expect(env['CUSTOM__firecrawl____refresh_token']).toBe('fcr_new');
-    expect(env['CUSTOM__firecrawl____client_id']).toBe('dyn_abc');
-    expect(Number(env['CUSTOM__firecrawl____token_expires_at'])).toBeGreaterThan(Date.now());
+    expect(env['CUSTOMINT__firecrawl____refresh_token']).toBe('fcr_new');
+    expect(env['CUSTOMINT__firecrawl____client_id']).toBe('dyn_abc');
+    expect(Number(env['CUSTOMINT__firecrawl____token_expires_at'])).toBeGreaterThan(Date.now());
     // Bumped so oauth-refresh-sweep.ts can detect a fresher token written
     // here while one of its own refreshes was still in flight, and discard
     // its own now-stale result instead of clobbering this one.
-    expect(env['CUSTOM__firecrawl____token_generation']).toBeTruthy();
+    expect(env['CUSTOMINT__firecrawl____token_generation']).toBeTruthy();
 
     // The token endpoint call itself used the stored PKCE verifier + resource.
     const [, init] = mockFetch.mock.calls[0];
@@ -434,6 +453,34 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  // The redirect param is the one place a provider-supplied value leaves this
+  // process for someone else's app, and `searchParams.set` only makes it a
+  // well-formed parameter — not a safe one. A provider (or anyone who got hold of a
+  // live state) answering with a novel-length `error` used to have all of it
+  // forwarded into the app's own error display.
+  it('clamps a non-conforming provider error to a generic code before forwarding it to the return URL', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+
+    const app = makeApp(pendingStore, 'https://app.example.com/connectors');
+    const payload = '<img src=x onerror=alert(1)>' + 'A'.repeat(500);
+    const res = await request(app).get(
+      `/oauth/mcp/callback?state=${state}&error=${encodeURIComponent(payload)}`,
+    );
+
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.location);
+    expect(location.searchParams.get('connector_oauth_error')).toBe('provider_error');
+    expect(res.headers.location).not.toContain('onerror');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('with a configured oauthReturnUrl, an expired/unknown state also redirects back instead of a bare 400 page', async () => {
     const app = makeApp(new PendingOAuthStore(), 'https://app.example.com/connectors');
     const res = await request(app).get('/oauth/mcp/callback?state=nope&code=abc');
@@ -478,5 +525,274 @@ describe('createOauthCallbackRouter — GET /oauth/mcp/callback', () => {
 
     const { hasSecret } = require('../../src/connectors/token-env');
     expect(hasSecret('CUSTOM__firecrawl__access_token')).toBe(false);
+  });
+});
+
+/**
+ * Regressions from the fourth independent review pass. Each of these describes a
+ * state a user can reach through ordinary use, not a hand-crafted one.
+ */
+describe('createOauthCallbackRouter — a completed sign-in is a fresh start', () => {
+  function makeApp(pendingStore: PendingOAuthStore, returnUrl?: string) {
+    const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
+    const app = express();
+    app.use(createOauthCallbackRouter(pendingStore, returnUrl));
+    return app;
+  }
+
+  const metadata: OAuthMetadata = {
+    resource: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+    authorizationEndpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+    tokenEndpoint: 'https://www.firecrawl.dev/api/oauth/token',
+    scopesSupported: [],
+  };
+
+  function startFlow(pendingStore: PendingOAuthStore): string {
+    return pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId: 'dyn_abc',
+      redirectUri: 'https://pod-abc.vm.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+  }
+
+  // The state after a provider outage: transientBackoffMs caps at 6h, and a
+  // permanent count of 2 is one refusal short of MAX_CONSECUTIVE_FAILURES. The
+  // user notices the connector is broken and signs in again — which used to
+  // leave all three values in place, so the sweep skipped the brand-new
+  // (one-hour) token for six hours and the next refusal deleted it outright.
+  it('clears the refresh backoff and BOTH failure counters', async () => {
+    const {
+      refreshFailCountSecretKey,
+      refreshTransientCountSecretKey,
+      refreshBackoffUntilSecretKey,
+    } = require('../../src/connectors/oauth-refresh-sweep');
+    const { setSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+    const sixHoursOut = Date.now() + 6 * 60 * 60 * 1000;
+    setSecrets({
+      [refreshTransientCountSecretKey('firecrawl')]: '8',
+      [refreshFailCountSecretKey('firecrawl')]: '2',
+      [refreshBackoffUntilSecretKey('firecrawl')]: String(sixHoursOut),
+    });
+
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        access_token: 'NEW',
+        token_type: 'bearer',
+        expires_in: 3600,
+        refresh_token: 'R2',
+      }),
+    );
+    const res = await request(makeApp(pendingStore)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+    expect(res.status).toBe(200);
+
+    const env = readTokenEnv();
+    expect(env['CUSTOM__firecrawl__access_token']).toBe('NEW');
+    expect(env[refreshTransientCountSecretKey('firecrawl')]).toBeUndefined();
+    expect(env[refreshFailCountSecretKey('firecrawl')]).toBeUndefined();
+    expect(env[refreshBackoffUntilSecretKey('firecrawl')]).toBeUndefined();
+  });
+
+  // resolveGatewayPublicUrl REQUIRES publicUrl to end in /gateway, so this is the
+  // path every provider is actually handed. Traefik strips the prefix in prod;
+  // the direct-path deployment that same function permits does not, and used to
+  // 404 with the pending flow left to expire silently.
+  it('answers on the /gateway-prefixed path the redirect_uri actually points at', async () => {
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlow(pendingStore);
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, { access_token: 'VIA_PREFIX', token_type: 'bearer', expires_in: 3600 }),
+    );
+    const res = await request(makeApp(pendingStore)).get(
+      `/gateway/oauth/mcp/callback?state=${state}&code=good`,
+    );
+    expect(res.status).toBe(200);
+
+    const { readTokenEnv } = require('../../src/connectors/token-env');
+    expect(readTokenEnv()['CUSTOM__firecrawl__access_token']).toBe('VIA_PREFIX');
+  });
+});
+
+describe('POST .../oauth/start — an abandoned flow must not touch the live client_id', () => {
+  function makeApp(configPath: string, pendingStore: PendingOAuthStore) {
+    const { createOauthConnectorsRouter } = require('../../src/api/oauth-connectors-router');
+    const store = createCustomConnectorsStore(configPath);
+    const app = express();
+    app.use(express.json());
+    app.use(
+      '/api',
+      createOauthConnectorsRouter(
+        apiKeys,
+        { gateway: { publicUrl: 'https://pod-abc.vm.example.com/gateway' } },
+        store,
+        pendingStore,
+      ),
+    );
+    return app;
+  }
+
+  // Reachable by editing gateway.publicUrl and then closing the Connect dialog:
+  // the cached redirect_uri no longer matches, so start DCR-registers a new
+  // client. Writing that into the key the sweep refreshes with left refresh_token
+  // R1 (issued to C1) paired with client_id C2 — the AS answers invalid_client,
+  // which is classified permanent, and three ticks later the working sign-in is
+  // deleted.
+  it('leaves the connector refreshable with the client its refresh_token was issued to', async () => {
+    const { clientIdSecretKey } = require('../../src/connectors/oauth-refresh-sweep');
+    const { setSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+    setSecrets({
+      [clientIdSecretKey('firecrawl')]: 'C1_LIVE',
+      'CUSTOMINT__firecrawl____client_redirect_uri': 'https://OLD.example.com/gateway/oauth/mcp/callback',
+      'CUSTOMINT__firecrawl____refresh_token': 'R1',
+    });
+
+    // discovery (probe 401 → PRM → AS metadata), then the DCR registration
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, {
+          'www-authenticate':
+            'Bearer resource_metadata="https://mcp.firecrawl.dev/.well-known/oauth-protected-resource"',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorization_servers: ['https://www.firecrawl.dev'] }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+          token_endpoint: 'https://www.firecrawl.dev/api/oauth/token',
+          registration_endpoint: 'https://www.firecrawl.dev/api/oauth/register',
+          scopes_supported: [],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { client_id: 'C2_NEW' }));
+
+    const app = makeApp(
+      tmpConfig({
+        firecrawl: {
+          label: 'Firecrawl',
+          config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth' },
+          secretNames: ['access_token'],
+          credentialOwner: 'gateway',
+        },
+      }),
+      new PendingOAuthStore(),
+    );
+    const res = await request(app)
+      .post('/api/v1/connectors/custom/firecrawl/oauth/start')
+      .set('X-Api-Key', adminKey);
+    expect(res.status).toBe(200);
+    expect(res.body.authorizeUrl).toContain('client_id=C2_NEW');
+
+    // The user then closes the tab. The live pairing must be untouched.
+    const env = readTokenEnv();
+    expect(env[clientIdSecretKey('firecrawl')]).toBe('C1_LIVE');
+    expect(env['CUSTOMINT__firecrawl____dcr_client_id']).toBe('C2_NEW');
+  });
+});
+
+/**
+ * Round-6 regression: `refresh_token` and the `client_id` it was issued to are
+ * one credential, and the callback has to replace them together or not at all.
+ *
+ * `client_id` is written unconditionally; `refresh_token` only when the response
+ * carried one — and an authorization server is entitled to omit it (RFC 6749 §6,
+ * and it happens routinely whenever the granted scopes don't include
+ * `offline_access`; see the scope fallback in oauth-connectors-router.ts). With
+ * no removal, the OLD refresh_token R1 — issued to the old client C1 — survived
+ * beside the NEW client_id C2. The sweep then POSTs that mismatched pair, the AS
+ * answers `invalid_client`, `OAuthTokenError.isPermanent` classifies it as
+ * permanent, and three ticks later the sweep deletes a sign-in that had just
+ * succeeded.
+ */
+describe('createOauthCallbackRouter — refresh_token and client_id are replaced together', () => {
+  function makeApp(pendingStore: PendingOAuthStore) {
+    const { createOauthCallbackRouter } = require('../../src/api/oauth-connectors-router');
+    const app = express();
+    app.use(createOauthCallbackRouter(pendingStore));
+    return app;
+  }
+
+  const metadata: OAuthMetadata = {
+    resource: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+    authorizationEndpoint: 'https://www.firecrawl.dev/api/oauth/authorize',
+    tokenEndpoint: 'https://www.firecrawl.dev/api/oauth/token',
+    scopesSupported: [],
+  };
+
+  function startFlowAs(pendingStore: PendingOAuthStore, clientId: string): string {
+    return pendingStore.create({
+      connectorId: 'firecrawl',
+      metadata,
+      clientId,
+      redirectUri: 'https://pod-abc.vm.example.com/gateway/oauth/mcp/callback',
+      codeVerifier: 'verifier',
+    });
+  }
+
+  it('removes the old refresh_token when the new token response carries none', async () => {
+    const {
+      refreshTokenSecretKey,
+      clientIdSecretKey,
+    } = require('../../src/connectors/oauth-refresh-sweep');
+    const { setSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+    setSecrets({
+      [refreshTokenSecretKey('firecrawl')]: 'R1',
+      [clientIdSecretKey('firecrawl')]: 'C1',
+    });
+
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlowAs(pendingStore, 'C2');
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, { access_token: 'NEW', token_type: 'bearer', expires_in: 3600 }),
+    );
+    const res = await request(makeApp(pendingStore)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+    expect(res.status).toBe(200);
+
+    const env = readTokenEnv();
+    expect(env['CUSTOM__firecrawl__access_token']).toBe('NEW');
+    expect(env[clientIdSecretKey('firecrawl')]).toBe('C2');
+    // Not R1 paired with C2 — nothing at all. `refreshStatusOf` reports the
+    // connector as `unrefreshable` once the token expires, which is the honest
+    // state, instead of the sweep destroying it three ticks from now.
+    expect(env[refreshTokenSecretKey('firecrawl')]).toBeUndefined();
+  });
+
+  it('replaces — not removes — the refresh_token when the response does carry one', async () => {
+    const {
+      refreshTokenSecretKey,
+      clientIdSecretKey,
+    } = require('../../src/connectors/oauth-refresh-sweep');
+    const { setSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+    setSecrets({
+      [refreshTokenSecretKey('firecrawl')]: 'R1',
+      [clientIdSecretKey('firecrawl')]: 'C1',
+    });
+
+    const pendingStore = new PendingOAuthStore();
+    const state = startFlowAs(pendingStore, 'C2');
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        access_token: 'NEW',
+        token_type: 'bearer',
+        expires_in: 3600,
+        refresh_token: 'R2',
+      }),
+    );
+    const res = await request(makeApp(pendingStore)).get(
+      `/oauth/mcp/callback?state=${state}&code=good`,
+    );
+    expect(res.status).toBe(200);
+
+    const env = readTokenEnv();
+    expect(env[refreshTokenSecretKey('firecrawl')]).toBe('R2');
+    expect(env[clientIdSecretKey('firecrawl')]).toBe('C2');
   });
 });

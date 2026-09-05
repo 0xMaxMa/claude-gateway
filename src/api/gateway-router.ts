@@ -737,7 +737,7 @@ export class GatewayRouter {
       this.app.use('/api', packagesRouter);
     }
 
-    // Mount connector management routes (catalog + secret store + config wiring)
+    // Mount connector management routes (connector definitions + secret store + config wiring)
     if (this.gatewayConfig?.gateway?.api?.keys?.length) {
       const connectorsRouter = createConnectorsRouter(
         this.gatewayConfig.gateway.api.keys,
@@ -747,7 +747,7 @@ export class GatewayRouter {
       );
       this.app.use('/api', connectorsRouter);
 
-      // Admin-gated "start an OAuth sign-in" endpoint for oauth:true custom
+      // Admin-gated "start an OAuth sign-in" endpoint for gateway-owned
       // connectors (Firecrawl etc.) — see oauth-connectors-router.ts's doc
       // comment for why this is split from the public callback route below.
       const oauthConnectorsRouter = createOauthConnectorsRouter(
@@ -767,6 +767,7 @@ export class GatewayRouter {
         typeof this.gatewayConfig?.gateway?.oauthReturnUrl === 'string'
           ? this.gatewayConfig.gateway.oauthReturnUrl
           : undefined,
+        this.agents,
       ),
     );
 

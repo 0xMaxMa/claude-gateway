@@ -8,7 +8,9 @@ import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
 import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-stream';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
+import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
+import { withConfigWriteLock } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
@@ -328,9 +330,6 @@ export function createApiRouter(
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
-  // Closure-scoped lock: serialises concurrent writes to config.json within this router instance.
-  let configWriteLock: Promise<void> = Promise.resolve();
-
   async function writeAgentsToConfigImpl(
     cfgPath: string,
     mutate: (agents: unknown[]) => void,
@@ -352,14 +351,16 @@ export function createApiRouter(
     await fsp.rename(tmp, cfgPath);
   }
 
+  // Process-wide, keyed by config path — NOT a lock private to this router. The
+  // connectors store and the app-agent manager rewrite the same file, and a lock
+  // scoped to this closure would serialise agent writes against each other while
+  // still letting one of those clobber them. See config/config-write-lock.ts.
   function writeAgentsToConfig(
     cfgPath: string,
     mutate: (agents: unknown[]) => void,
     newId?: string,
   ): Promise<void> {
-    const next = configWriteLock.catch(() => {}).then(() => writeAgentsToConfigImpl(cfgPath, mutate, newId));
-    configWriteLock = next.catch(() => {});
-    return next;
+    return withConfigWriteLock(cfgPath, () => writeAgentsToConfigImpl(cfgPath, mutate, newId));
   }
 
   /**
@@ -1634,6 +1635,16 @@ export function createApiRouter(
         return;
       }
       for (const [id, val] of Object.entries(connectors as Record<string, unknown>)) {
+        // Shape only, not existence: enablement is stored per agent and read back
+        // by id, so an id that can't be a connector id is an entry nothing will
+        // ever match — it just accumulates in config.json. Existence is
+        // deliberately NOT required; enablement defaults to opt-out, so
+        // pre-setting `{enabled: false}` for a connector nobody has added yet is a
+        // legitimate way to keep it off an agent from the moment it appears.
+        if (!isValidConnectorId(id)) {
+          res.status(400).json({ error: `Invalid connector id '${id}'` });
+          return;
+        }
         const enabled = (val as { enabled?: unknown })?.enabled;
         if (typeof enabled !== 'boolean') {
           res.status(400).json({ error: `connectors.${id}.enabled must be a boolean` });
@@ -1919,12 +1930,30 @@ export function createApiRouter(
       }
     }
     if (connectors !== undefined) {
-      cfg.connectors = { ...(cfg.connectors ?? {}), ...connectorPatch };
+      const before = cfg.connectors ?? {};
+      const merged = { ...before, ...connectorPatch };
+      // Only respawn when the merged map actually differs. An external panel
+      // that echoes the whole agent form back on every save sends `connectors`
+      // on edits that have nothing to do with connectors, and restarting every
+      // live session for a no-op patch is a visible interruption to whoever is
+      // talking to that agent. The entries are `{enabled: boolean}`, so
+      // comparing that one field per key is the whole comparison.
+      const ids = new Set([...Object.keys(before), ...Object.keys(merged)]);
+      const changed = [...ids].some((id) => before[id]?.enabled !== merged[id]?.enabled);
+      cfg.connectors = merged;
       // Enablement is read at spawn — respawn live sessions so they pick it up.
       const runner = agentRunners.get(agentId);
-      if (runner) {
+      if (runner && changed) {
         runner.updateAgentConfig(cfg);
-        await runner.restartOrDefer();
+        // Same options as AgentRunner.restartSessionsUsingConnector — a connector
+        // enablement change is exactly the same kind of change, so it must not
+        // SIGKILL an idle channel session either. Bare restartOrDefer() defaults
+        // deferIdle to false, which stops idle sessions immediately.
+        await runner.restartOrDefer({ skipBusy: false, deferIdle: true });
+      } else if (runner) {
+        // Still persist the (identical) map to the runner's view, just without
+        // tearing down sessions for a change that isn't one.
+        runner.updateAgentConfig(cfg);
       }
     }
 

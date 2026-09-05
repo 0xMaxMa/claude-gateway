@@ -1,6 +1,6 @@
 /**
  * Unit tests for connectors/mcp-oauth.ts — the generic OAuth 2.1 + PKCE (+ DCR)
- * helpers behind "custom" connectors marked `oauth: true` (Firecrawl etc.).
+ * helpers behind connectors whose credential this gateway owns (Firecrawl etc.).
  *
  * The `resource` (RFC 8707) assertions in the authorize/token tests are a
  * deliberate regression guard: a live PoC against production Firecrawl this
@@ -90,8 +90,14 @@ describe('discoverOAuthMetadata', () => {
       registrationEndpoint: 'https://www.firecrawl.dev/api/oauth/register',
       scopesSupported: ['firecrawl:global', 'offline_access'],
     });
-    expect(mockFetch).toHaveBeenNthCalledWith(2, PRM_URL);
-    expect(mockFetch).toHaveBeenNthCalledWith(3, 'https://www.firecrawl.dev/.well-known/oauth-authorization-server');
+    // URL-only: every outbound OAuth fetch now carries an AbortSignal.timeout,
+    // so the init object is no longer absent on the two GETs. The walk ORDER is
+    // what this asserts; the signal itself is asserted separately below.
+    expect(mockFetch.mock.calls[1][0]).toBe(PRM_URL);
+    expect(mockFetch.mock.calls[2][0]).toBe('https://www.firecrawl.dev/.well-known/oauth-authorization-server');
+    for (const [, init] of mockFetch.mock.calls) {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
   });
 
   it('throws a clear error when the probe does not return 401', async () => {
@@ -119,6 +125,82 @@ describe('discoverOAuthMetadata', () => {
     const meta = await discoverOAuthMetadata(MCP_URL);
     expect(meta.registrationEndpoint).toBeUndefined();
     expect(meta.scopesSupported).toEqual([]);
+  });
+});
+
+/**
+ * The admin chooses the MCP server URL. It does not choose what that server answers
+ * with — and every URL after the first probe is the remote side's choice: the
+ * `resource_metadata` URL comes from its WWW-Authenticate header, the issuer from the
+ * document that returns, and the three endpoints from the document after that.
+ *
+ * Unchecked, that is a request-forgery primitive aimed at whatever the gateway's VM
+ * can reach and the internet cannot, and a token endpoint on plain http would receive
+ * the refresh_token in cleartext. Each test below drives ONE hop to an http:// host
+ * and asserts the gateway refuses rather than fetches.
+ */
+describe('discoverOAuthMetadata refuses non-https URLs handed to it by the remote server', () => {
+  const MCP_URL = 'https://mcp.firecrawl.dev/v2/mcp-oauth';
+  const PRM_URL = 'https://mcp.firecrawl.dev/.well-known/oauth-protected-resource/v2/mcp-oauth';
+
+  it('rejects a resource_metadata URL pointing at a cloud metadata service', async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(
+        401,
+        {},
+        { 'www-authenticate': 'Bearer resource_metadata="http://169.254.169.254/latest/meta-data/"' },
+      ),
+    );
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /resource_metadata URL the gateway will not call/,
+    );
+    // The point is that it never went: one call (the probe), not two.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an authorization_servers issuer on plain http', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['http://10.0.0.5:8080'] }));
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /authorization server issuer the gateway will not call/,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a token_endpoint on plain http — that request carries the refresh_token', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['https://auth.example.com'] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'https://auth.example.com/authorize',
+          token_endpoint: 'http://auth.example.com/token',
+        }),
+      );
+    await expect(discoverOAuthMetadata(MCP_URL)).rejects.toThrow(
+      /token_endpoint the gateway will not call/,
+    );
+  });
+
+  it('still allows plain http on localhost, so a self-hosted dev AS keeps working', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        jsonResponse(401, {}, { 'www-authenticate': `Bearer resource_metadata="${PRM_URL}"` }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { authorization_servers: ['http://localhost:9000'] }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          authorization_endpoint: 'http://localhost:9000/authorize',
+          token_endpoint: 'http://localhost:9000/token',
+        }),
+      );
+    const meta = await discoverOAuthMetadata(MCP_URL);
+    expect(meta.tokenEndpoint).toBe('http://localhost:9000/token');
   });
 });
 
@@ -253,6 +335,54 @@ describe('exchangeCode / refreshAccessToken', () => {
         codeVerifier: 'v',
       }),
     ).rejects.toThrow(/invalid_grant/);
+  });
+
+  /**
+   * The throw condition has two halves. An RFC 6749 §5.2 error body is the harmless
+   * one — it carries no tokens. The other half is a 200 whose `access_token` is not a
+   * string, and THAT body can carry a live refresh_token beside it.
+   *
+   * The resulting message does not stay put: oauth-refresh-sweep.ts prints it on every
+   * failed refresh, and oauth-connectors-router.ts renders it into the callback page
+   * and the 502 an admin reads in their browser. A refresh_token in a log file is not
+   * a token this gateway can revoke.
+   */
+  it('redacts credentials out of the error body while keeping the shape diagnostic', async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        access_token: null,
+        refresh_token: 'fcr_LIVE_SECRET',
+        id_token: 'idt_LIVE_SECRET',
+        error_description: 'token issuance degraded',
+      }),
+    );
+    const err = await refreshAccessToken({
+      metadata,
+      clientId: 'dyn_abc',
+      refreshToken: 'fcr_1',
+    }).catch((e: Error) => e);
+
+    expect((err as Error).message).not.toContain('fcr_LIVE_SECRET');
+    expect((err as Error).message).not.toContain('idt_LIVE_SECRET');
+    // Still says what went wrong, and which keys were present — that is the
+    // diagnostic, and redacting the whole body would throw it away.
+    expect((err as Error).message).toContain('refresh_token');
+    expect((err as Error).message).toContain('[redacted]');
+    expect((err as Error).message).toContain('token issuance degraded');
+  });
+
+  it('leaves an absent credential key as null rather than reporting a redacted one', async () => {
+    // `[redacted]` has to mean "a value was here". Stamping it over a null would
+    // tell an admin a refresh_token was returned when the missing refresh_token is
+    // the very thing they are debugging.
+    mockFetch.mockResolvedValueOnce(jsonResponse(400, { error: 'invalid_grant', refresh_token: null }));
+    const err = await refreshAccessToken({
+      metadata,
+      clientId: 'dyn_abc',
+      refreshToken: 'fcr_1',
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toContain('"refresh_token":null');
+    expect((err as Error).message).not.toContain('[redacted]');
   });
 
   it('refreshAccessToken posts grant_type=refresh_token with the refresh token AND resource', async () => {
