@@ -15,23 +15,24 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { ApiKey } from '../../src/types';
+import type { AgentRunner } from '../../src/agent/runner';
 
 const TOKEN_ENV = '/tmp/connectors-test-mcp-token.env';
 
 beforeEach(() => {
-  process.env.GATEWAY_MCP_TOKEN_ENV = TOKEN_ENV;
+  process.env.GATEWAY_MCP_TOKEN_ENV_PATH = TOKEN_ENV;
   try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
   jest.resetModules();
 });
 
 afterAll(() => {
-  delete process.env.GATEWAY_MCP_TOKEN_ENV;
+  delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
   try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
 });
 
 describe('token-env', () => {
   it('set/get/has/delete round-trip and 0600 perms', () => {
-    const { setSecret, getSecret, hasSecret, deleteSecret, readTokenEnv } =
+    const { setSecret, getSecret, hasSecret, deleteSecrets, readTokenEnv } =
       require('../../src/connectors/token-env');
 
     expect(getSecret('GITHUB_TOKEN')).toBeNull();
@@ -50,15 +51,70 @@ describe('token-env', () => {
     setSecret('GITHUB_TOKEN', 'ghp_new');
     expect(readTokenEnv()).toEqual({ GITHUB_TOKEN: 'ghp_new', OTHER: 'x' });
 
-    deleteSecret('GITHUB_TOKEN');
+    deleteSecrets(['GITHUB_TOKEN']);
     expect(getSecret('GITHUB_TOKEN')).toBeNull();
     expect(readTokenEnv()).toEqual({ OTHER: 'x' });
+  });
+
+  // A connector's secrets used to be written one setSecret() at a time — each
+  // one a full read-modify-rewrite of mcp-token.env. A key the writer rejects
+  // (or a disk error) partway through therefore left the earlier keys on disk:
+  // a half-connected connector that resolves to a config with some real
+  // credentials and some empty strings. Validate the whole batch first, write
+  // once.
+  it('setSecrets is all-or-nothing — one bad key writes none of them', () => {
+    const { setSecret, setSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+
+    setSecret('EXISTING', 'keep-me');
+    expect(() =>
+      setSecrets({ CUSTOM__acme__a: 'v1', 'bad key': 'v2', CUSTOM__acme__b: 'v3' }),
+    ).toThrow(/Invalid secret key/);
+
+    // Neither the key before the bad one nor the one after it landed.
+    expect(readTokenEnv()).toEqual({ EXISTING: 'keep-me' });
+
+    // And a clean batch applies every key in a single rewrite.
+    setSecrets({ CUSTOM__acme__a: 'v1', CUSTOM__acme__b: 'v3' });
+    expect(readTokenEnv()).toEqual({ EXISTING: 'keep-me', CUSTOM__acme__a: 'v1', CUSTOM__acme__b: 'v3' });
+  });
+
+  it('deleteSecrets removes every named key in one rewrite and ignores absent ones', () => {
+    const { setSecrets, deleteSecrets, readTokenEnv } = require('../../src/connectors/token-env');
+
+    setSecrets({ A: '1', B: '2', C: '3' });
+    deleteSecrets(['A', 'C', 'NEVER_EXISTED']);
+    expect(readTokenEnv()).toEqual({ B: '2' });
   });
 
   it('missing file → empty, no throw', () => {
     const { readTokenEnv, getSecret } = require('../../src/connectors/token-env');
     expect(readTokenEnv()).toEqual({});
     expect(getSecret('NOPE')).toBeNull();
+  });
+
+  // ENOENT is the ONLY errno that may mean "empty". Every write here is a
+  // read-modify-write that rewrites the file whole from what readTokenEnv
+  // returned, so a read that fails for any other reason — EACCES, or the EMFILE
+  // a gateway spawning this many subprocesses can genuinely hit — and answers
+  // `{}` makes the following write erase every other connector's token with no
+  // error reaching the caller, the log, or the user. Failing the write loudly
+  // leaves the file on disk intact, which is strictly the better outcome.
+  it('an unreadable file fails the write instead of silently erasing every other secret', () => {
+    const { setSecrets, setSecret, readTokenEnv } = require('../../src/connectors/token-env');
+
+    setSecrets({ CUSTOM__acme__access_token: 'live-token', OTHER: 'keep-me' });
+    fs.chmodSync(TOKEN_ENV, 0o000);
+    try {
+      // Not "returns {} and carries on" — the whole operation aborts.
+      expect(() => setSecret('CUSTOM__new__access_token', 'v')).toThrow(
+        expect.objectContaining({ code: 'EACCES' }),
+      );
+    } finally {
+      fs.chmodSync(TOKEN_ENV, 0o600);
+    }
+
+    // The pre-existing secrets are all still there — this is the whole point.
+    expect(readTokenEnv()).toEqual({ CUSTOM__acme__access_token: 'live-token', OTHER: 'keep-me' });
   });
 
   it('reads fresh each call (no caching)', () => {
@@ -72,18 +128,17 @@ describe('token-env', () => {
 });
 
 describe('resolve', () => {
-  it('CONNECTOR_CATALOG is empty by default — nothing resolves from it, regardless of config', () => {
+  it('resolves nothing when there are no customConnectors, whatever the agent enables', () => {
     const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
     expect(resolveEnabledConnectors({})).toEqual({});
     expect(resolveEnabledConnectors({ connectors: { anything: { enabled: true } } })).toEqual({});
   });
 
-  // github/gmail/etc. are no longer built-in catalog entries — they're managed
-  // custom connectors pushed by an external control plane (see connectors-router.ts's
-  // /oauth/receive). This exercises the exact shape that route writes:
-  // authKind:'oauth' + managed:true, resolved through the generic
-  // customConnectors path like any other custom connector.
-  it('managed connector (github): enabled + connected → http entry with bearer; disabled/disconnected → omitted', () => {
+  // github/gmail/etc. are connectors an external control plane pushes in
+  // (see connectors-router.ts's /oauth/receive). This exercises the exact
+  // shape that route writes: credentialOwner:'external', resolved through the
+  // generic customConnectors path like any other connector.
+  it('externally-owned connector (github): enabled + connected → http entry with bearer; disabled/disconnected → omitted', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     const { resolveEnabledConnectors, listConnectorStatus } =
       require('../../src/connectors/resolve');
@@ -99,8 +154,7 @@ describe('resolve', () => {
         },
         secretNames: ['access_token'],
         sourceUrl: 'https://github.com/github/github-mcp-server',
-        authKind: 'oauth' as const,
-        managed: true,
+        credentialOwner: 'external' as const,
       },
     };
 
@@ -129,22 +183,21 @@ describe('resolve', () => {
       resolveEnabledConnectors({ connectors: { github: { enabled: false } } }, customConnectors),
     ).toEqual({});
 
-    // status reports it as built-in (not "Custom") and oauth-kind, no setup help
+    // status reports whose credential it is, no setup help
     const status = listConnectorStatus(customConnectors).find(
       (c: { id: string }) => c.id === 'github',
     );
     expect(status).toMatchObject({
       id: 'github',
-      authKind: 'oauth',
+      credentialOwner: 'external',
       connected: true,
-      source: 'built-in',
     });
     expect(status.setup).toBeUndefined();
   });
 
-  // Two independent managed connectors pushed by an external control plane must not share
-  // connected state, even though both are custom-connector entries.
-  it('two managed connectors: independent secret slots, each resolves its own entry', () => {
+  // Two independent connectors pushed by an external control plane must not share
+  // connected state, even though both are customConnectors entries.
+  it('two externally-owned connectors: independent secret slots, each resolves its own entry', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     const { resolveEnabledConnectors, listConnectorStatus } =
       require('../../src/connectors/resolve');
@@ -154,15 +207,13 @@ describe('resolve', () => {
         label: 'Gmail',
         config: { type: 'http', url: 'https://gmailmcp.googleapis.com/mcp/v1', headers: { Authorization: 'Bearer {access_token}' } },
         secretNames: ['access_token'],
-        authKind: 'oauth' as const,
-        managed: true,
+        credentialOwner: 'external' as const,
       },
       'google-drive': {
         label: 'Google Drive',
         config: { type: 'http', url: 'https://drivemcp.googleapis.com/mcp/v1', headers: { Authorization: 'Bearer {access_token}' } },
         secretNames: ['access_token'],
-        authKind: 'oauth' as const,
-        managed: true,
+        credentialOwner: 'external' as const,
       },
     };
     const enabled = { connectors: { gmail: { enabled: true }, 'google-drive': { enabled: true } } };
@@ -229,9 +280,8 @@ describe('resolve', () => {
     ).toEqual({});
 
     // Reset secrets to re-test the partial-connection path from a clean slate.
-    const { deleteSecret } = require('../../src/connectors/token-env');
-    deleteSecret('CUSTOM__calendar__smithery_api_key');
-    deleteSecret('CUSTOM__calendar__unset_var');
+    const { deleteSecrets } = require('../../src/connectors/token-env');
+    deleteSecrets(['CUSTOM__calendar__smithery_api_key', 'CUSTOM__calendar__unset_var']);
 
     // Enabled but only one of two required secrets present → still omitted.
     setSecret('CUSTOM__calendar__smithery_api_key', 'sk-abc');
@@ -248,68 +298,244 @@ describe('resolve', () => {
     });
   });
 
-  // A user-added generic-OAuth custom connector (oauth: true, added via
-  // POST /v1/connectors/custom, no explicit authKind — that field is only
-  // ever set by an external control plane's managed push, see CustomConnectorEntry's doc
-  // comment) must still report authKind: 'oauth', not fall through to
-  // 'secret' just because secretNames is non-empty — the web panel's Auth
-  // column and icon both key off this.
-  it("listConnectorStatus: a user-added oauth:true custom connector reports authKind 'oauth', not 'secret'", () => {
-    const { listConnectorStatus } = require('../../src/connectors/resolve');
+  // A gateway whose agents belong to different people cannot ship a connector
+  // that every one of them gets by default. `connectorsDefaultEnabled: false`
+  // flips the model to opt-in for that deployment without changing what a
+  // per-agent flag means.
+  it('gateway.connectorsDefaultEnabled=false flips enablement to opt-in — silence means off, an explicit flag still wins', () => {
+    const { setSecret } = require('../../src/connectors/token-env');
+    const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+
     const customConnectors = {
-      firecrawl: {
-        label: 'Firecrawl',
+      calendar: {
+        label: 'Calendar',
+        config: { type: 'streamable-http', url: 'https://server.smithery.ai/calendar/mcp', headers: { Authorization: 'Bearer {api_key}' } },
+        secretNames: ['api_key'],
+      },
+    };
+    setSecret('CUSTOM__calendar__api_key', 'sk-abc');
+    const resolved = { calendar: { type: 'streamable-http', url: 'https://server.smithery.ai/calendar/mcp', headers: { Authorization: 'Bearer sk-abc' } } };
+
+    // Default (opt-out): an agent that never mentions the connector still gets it.
+    expect(resolveEnabledConnectors({}, customConnectors, true)).toEqual(resolved);
+
+    // Opt-in: the same silent agent gets nothing...
+    expect(resolveEnabledConnectors({}, customConnectors, false)).toEqual({});
+    // ...until it opts in explicitly.
+    expect(
+      resolveEnabledConnectors({ connectors: { calendar: { enabled: true } } }, customConnectors, false),
+    ).toEqual(resolved);
+    // And an explicit `false` is still honoured under the opt-out default.
+    expect(
+      resolveEnabledConnectors({ connectors: { calendar: { enabled: false } } }, customConnectors, true),
+    ).toEqual({});
+  });
+
+  // Regression: the per-connector secrets map was a plain `{}`, so every
+  // Object.prototype member was already "present" in it. substitutePlaceholders
+  // does `secrets[name] ?? ''`, so a pasted config containing {constructor} or
+  // {toString} — perfectly ordinary placeholder names, not reserved — resolved
+  // to a stringified JS function spliced into the MCP server's URL or header
+  // instead of the empty string every other unset placeholder gets. A
+  // null-prototype map has no inherited members to find.
+  it('a placeholder named after an Object.prototype member resolves to empty, not to a JS function', () => {
+    const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+    const { setSecret } = require('../../src/connectors/token-env');
+
+    const customConnectors = {
+      acme: {
+        label: 'Acme',
         config: {
           type: 'http',
-          url: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
-          headers: { Authorization: 'Bearer {access_token}' },
+          url: 'https://acme.example/mcp',
+          headers: { Authorization: 'Bearer {api_key}', 'X-Odd': '{constructor}/{toString}/{hasOwnProperty}' },
         },
-        secretNames: ['access_token'],
-        oauth: true,
+        // Only api_key is a declared secret; the rest are unset placeholders.
+        secretNames: ['api_key'],
       },
     };
-    const status = listConnectorStatus(customConnectors).find(
-      (c: { id: string }) => c.id === 'firecrawl',
+    setSecret('CUSTOM__acme__api_key', 'sk-abc');
+
+    const resolved = resolveEnabledConnectors({}, customConnectors) as Record<string, { headers: Record<string, string> }>;
+    expect(resolved.acme.headers['X-Odd']).toBe('//');
+    expect(resolved.acme.headers.Authorization).toBe('Bearer sk-abc');
+  });
+
+  // credentialOwner is reported exactly as stored, never re-derived. The shape
+  // this replaced inferred the reported kind from `secretNames.length` on every
+  // status call while ALSO storing overrides for the cases that inference got
+  // wrong — so a gateway-owned connector, which has a non-empty secretNames just
+  // like a pasted one, reported as a paste-a-token connector whenever the
+  // override was missed. All three of these carry ['access_token']; only the
+  // stored owner tells them apart.
+  it('listConnectorStatus: reports the stored credentialOwner verbatim, never inferred from secretNames', () => {
+    const { listConnectorStatus } = require('../../src/connectors/resolve');
+    const config = {
+      type: 'http',
+      url: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+      headers: { Authorization: 'Bearer {access_token}' },
+    };
+    const customConnectors = {
+      firecrawl: { label: 'Firecrawl', config, secretNames: ['access_token'], credentialOwner: 'gateway' as const },
+      pasted: { label: 'Pasted', config, secretNames: ['access_token'], credentialOwner: 'static' as const },
+      pushed: { label: 'Pushed', config, secretNames: ['access_token'], credentialOwner: 'external' as const },
+      open: { label: 'Open', config: { type: 'http', url: 'https://open.example/mcp' }, secretNames: [], credentialOwner: 'none' as const },
+    };
+    const byId = Object.fromEntries(
+      listConnectorStatus(customConnectors).map((c: { id: string }) => [c.id, c]),
     );
-    expect(status).toMatchObject({
-      id: 'firecrawl',
-      authKind: 'oauth',
-      source: 'custom',
-      oauth: true,
-    });
+    expect(byId.firecrawl.credentialOwner).toBe('gateway');
+    expect(byId.pasted.credentialOwner).toBe('static');
+    expect(byId.pushed.credentialOwner).toBe('external');
+    expect(byId.open.credentialOwner).toBe('none');
+    // The collapsed flags are gone from the wire, not merely unused.
+    for (const c of Object.values(byId) as Record<string, unknown>[]) {
+      expect(c).not.toHaveProperty('authKind');
+      expect(c).not.toHaveProperty('managed');
+      expect(c).not.toHaveProperty('oauth');
+      expect(c).not.toHaveProperty('source');
+    }
   });
 
-  // Regression: a deployer-defined CONNECTOR_CATALOG entry's build() throwing
-  // used to propagate straight out of resolveEnabledConnectors — called
-  // unguarded inside session spawn (session/process.ts's writeMcpConfig), so
-  // one bad catalog entry aborted the ENTIRE session for every user of the
-  // agent, not just the resolution of that one connector.
-  it('a built-in catalog entry whose build() throws is skipped, not fatal to the whole resolution', () => {
-    const throwingSpec = {
-      id: 'flaky',
-      label: 'Flaky',
-      transport: 'http',
-      auth: { kind: 'none' },
-      build: () => {
-        throw new Error('boom');
+  // Regression: transient refresh failures deliberately keep the access_token
+  // (see oauth-refresh-sweep.ts), and `connected` is computed purely from that
+  // token's presence — so a connector whose provider went away hours ago, whose
+  // token expired, and whose every call now 401s, still rendered as a green
+  // "Connected ✓" with nothing anywhere saying otherwise. The sweep's own
+  // failure bookkeeping is surfaced so the panel can say "connected, but
+  // refresh is failing, next try at ...".
+  describe('listConnectorStatus: failing background refresh', () => {
+    const firecrawl = {
+      label: 'Firecrawl',
+      config: {
+        type: 'http',
+        url: 'https://mcp.firecrawl.dev/v2/mcp-oauth',
+        headers: { Authorization: 'Bearer {access_token}' },
       },
+      secretNames: ['access_token'],
+      credentialOwner: 'gateway' as const,
     };
-    let result!: Record<string, unknown>;
-    jest.isolateModules(() => {
-      jest.doMock('../../src/connectors/catalog', () => ({
-        CONNECTOR_CATALOG: [throwingSpec],
-        getConnectorSpec: () => undefined,
-      }));
-      const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
-      result = resolveEnabledConnectors({});
+
+    function statusOfFirecrawl() {
+      const { listConnectorStatus } = require('../../src/connectors/resolve');
+      return listConnectorStatus({ firecrawl }).find((c: { id: string }) => c.id === 'firecrawl');
+    }
+
+    it('reports the consecutive-failure count and next attempt time', () => {
+      const { setSecret } = require('../../src/connectors/token-env');
+      const { customSecretKey } = require('../../src/connectors/custom');
+      const {
+        refreshTransientCountSecretKey,
+        refreshBackoffUntilSecretKey,
+      } = require('../../src/connectors/oauth-refresh-sweep');
+
+      setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_stale');
+      setSecret(refreshTransientCountSecretKey('firecrawl'), '4');
+      setSecret(refreshBackoffUntilSecretKey('firecrawl'), '1893456000000');
+
+      expect(statusOfFirecrawl()).toMatchObject({
+        connected: true, // the token is still there — that part is unchanged
+        refresh: { consecutiveFailures: 4, permanentFailures: 0, nextAttemptAt: 1893456000000 },
+      });
     });
-    jest.dontMock('../../src/connectors/catalog');
-    expect(result).toEqual({});
+
+    // The transient streak is the *less* urgent of the two. A connector partway
+    // through the three-strike permanent count is about to have its credentials
+    // deleted by the sweep, and that state used to be invisible here: the block
+    // read only the transient counter, so two refusals in a row still rendered
+    // as a plain green checkmark with no refresh block at all.
+    it('reports the permanent-refusal streak, the one that ends in deletion', () => {
+      const { setSecret } = require('../../src/connectors/token-env');
+      const { customSecretKey } = require('../../src/connectors/custom');
+      const {
+        refreshFailCountSecretKey,
+        refreshBackoffUntilSecretKey,
+      } = require('../../src/connectors/oauth-refresh-sweep');
+
+      setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_stale');
+      setSecret(refreshFailCountSecretKey('firecrawl'), '2'); // one tick from give-up
+      setSecret(refreshBackoffUntilSecretKey('firecrawl'), '1893456000000');
+
+      expect(statusOfFirecrawl()).toMatchObject({
+        connected: true,
+        refresh: { consecutiveFailures: 0, permanentFailures: 2, nextAttemptAt: 1893456000000 },
+      });
+    });
+
+    it('omits the refresh block entirely when the sweep is healthy', () => {
+      const { setSecret } = require('../../src/connectors/token-env');
+      const { customSecretKey } = require('../../src/connectors/custom');
+
+      setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_ok');
+      expect(statusOfFirecrawl().refresh).toBeUndefined();
+      // Absent, not present-and-undefined: the single-status route omits the key,
+      // and an in-process caller testing `'refresh' in status` (or counting keys)
+      // must get the same answer from the list route.
+      expect('refresh' in statusOfFirecrawl()).toBe(false);
+    });
+
+    // Reachable through ordinary configuration, not a hand-edited file: the scope
+    // sent to the AS is `metadata.scopesSupported.join(' ')` whenever it advertises
+    // any scopes at all, falling back to 'offline_access' only when the list is
+    // empty — so an AS advertising scopes that don't include it issues a token
+    // response with no refresh_token. The sweep then has nothing to refresh with
+    // and skips the connector forever without recording a failure, which left a
+    // green checkmark standing over a token that expired an hour in.
+    it('flags a connector that can never refresh once its token has actually expired', () => {
+      const { setSecret } = require('../../src/connectors/token-env');
+      const { customSecretKey } = require('../../src/connectors/custom');
+      const { expiresAtSecretKey } = require('../../src/connectors/oauth-refresh-sweep');
+
+      setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_dead');
+      setSecret(expiresAtSecretKey('firecrawl'), String(Date.now() - 60 * 60 * 1000));
+
+      expect(statusOfFirecrawl()).toMatchObject({
+        connected: true, // secret presence is unchanged — that is the whole problem
+        refresh: { consecutiveFailures: 0, permanentFailures: 0, unrefreshable: true },
+      });
+    });
+
+    it('stays quiet while that same token is still valid', () => {
+      const { setSecret } = require('../../src/connectors/token-env');
+      const { customSecretKey } = require('../../src/connectors/custom');
+      const { expiresAtSecretKey } = require('../../src/connectors/oauth-refresh-sweep');
+
+      setSecret(customSecretKey('firecrawl', 'access_token'), 'fco_ok');
+      setSecret(expiresAtSecretKey('firecrawl'), String(Date.now() + 60 * 60 * 1000));
+
+      expect('refresh' in statusOfFirecrawl()).toBe(false);
+    });
+
+    // `secretNames` is declared on CustomConnectorEntry but never validated when
+    // config.json is read, so an entry written by hand (or by an older build) can
+    // reach here without it. This runs inside an `async` Express 4 handler, which
+    // does not catch rejections — so the throw used to leave the request with no
+    // response at all, hanging the whole connector panel rather than one row.
+    it('degrades one malformed entry instead of throwing out of the whole list', () => {
+      const { listConnectorStatus } = require('../../src/connectors/resolve');
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const all = listConnectorStatus({
+          broken: { label: 'Broken' }, // no secretNames
+          firecrawl,
+        });
+        expect(all.find((c: { id: string }) => c.id === 'broken')).toMatchObject({
+          id: 'broken',
+          connected: false,
+        });
+        // The healthy entry beside it is unaffected.
+        expect(all.find((c: { id: string }) => c.id === 'firecrawl')).toBeDefined();
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
   });
 
-  // Same isolation for the customConnectors path — a malformed pasted config
-  // (admin-trusted, not code-reviewed) must not take down every OTHER
-  // connector's resolution for this session.
+  // Regression: a resolve failure used to propagate straight out of
+  // resolveEnabledConnectors — called unguarded inside session spawn
+  // (session/process.ts's writeMcpConfig), so one malformed pasted config
+  // (admin-trusted, not code-reviewed) aborted the ENTIRE session for every
+  // user of the agent, not just the resolution of that one connector.
   it('a custom connector whose substitution throws is skipped, not fatal to the whole resolution', () => {
     const { setSecret } = require('../../src/connectors/token-env');
     setSecret('CUSTOM__broken__api_key', 'sk-abc');
@@ -398,7 +624,7 @@ describe('connectors-router', () => {
     return cfgPath;
   }
 
-  it('GET /v1/connectors returns an empty catalog by default (CONNECTOR_CATALOG is empty)', async () => {
+  it('GET /v1/connectors returns an empty list when no connectors are configured', async () => {
     const res = await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(res.status).toBe(200);
     expect(res.body.connectors).toEqual([]);
@@ -409,111 +635,38 @@ describe('connectors-router', () => {
     expect((await request(makeApp()).get('/api/v1/connectors').set('X-Api-Key', 'nope')).status).toBe(403);
   });
 
-  // CONNECTOR_CATALOG is empty by default now, so /connect 404s for every id
-  // before ever reaching requireAdmin — mock one synthetic 'secret'-kind
-  // built-in entry (the shape a deployer's own fork might hardcode) so this
-  // still exercises the route's actual admin gate, not just its 404 path.
-  // jest.isolateModules scopes the mock to this test only — it does NOT leak
-  // into later tests the way a bare jest.doMock would (doMock registrations
-  // survive jest.resetModules(), which only clears cached instances).
+  // requireAdmin runs before the connector lookup, so a non-admin gets 403 rather
+  // than the 404 an unknown id would otherwise produce — asserted with a real
+  // configured connector so the test cannot pass for the wrong reason.
   it('non-admin cannot connect', async () => {
-    const stubSpec = {
-      id: 'stub-secret',
-      label: 'Stub',
-      transport: 'http',
-      auth: { kind: 'secret', secretEnv: 'STUB_TOKEN' },
-      build: () => ({}),
-    };
-    let res!: request.Response;
-    await jest.isolateModulesAsync(async () => {
-      jest.doMock('../../src/connectors/catalog', () => ({
-        CONNECTOR_CATALOG: [stubSpec],
-        getConnectorSpec: (id: string) => (id === 'stub-secret' ? stubSpec : undefined),
-      }));
-      const { createConnectorsRouter } = require('../../src/api/connectors-router');
-      const app = express();
-      app.use(express.json());
-      app.use('/api', createConnectorsRouter(apiKeys));
-      res = await request(app)
-        .post('/api/v1/connectors/stub-secret/connect')
-        .set('X-Api-Key', scopedKey)
-        .send({ token: 'ghp_x' });
+    const cfgPath = tmpConfig({
+      stripe: {
+        label: 'Stripe',
+        config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+        secretNames: ['api_key'],
+      },
     });
-    // jest.doMock registrations outlive isolateModulesAsync's registry scope
-    // (it only isolates the module cache, not the mock registry) — undo it
-    // explicitly so later tests' fresh `require`s get the real catalog again.
-    jest.dontMock('../../src/connectors/catalog');
+    const res = await request(makeApp(cfgPath))
+      .post('/api/v1/connectors/stripe/connect')
+      .set('X-Api-Key', scopedKey)
+      .send({ token: 'sk_test_x' });
     expect(res.status).toBe(403);
   });
 
-  // Regression: connect/delete for a built-in catalog entry used to also
-  // read-modify-write config.json's gateway.connectors subtree via a
-  // dedicated function+lock (mutateGatewayConnectors) that nothing ever read
-  // back — dead state with its own uncoordinated lock racing
-  // custom-connectors-store.ts's lock on the same file. That write path was
-  // removed; this proves the actually-meaningful behavior (the secret itself,
-  // and connected status derived from it) still works end-to-end with no
-  // config.json at all.
-  it('catalog secret-kind connect/delete round-trip works with no config.json (no dead file write to break)', async () => {
-    const stubSpec = {
-      id: 'stub-secret',
-      label: 'Stub',
-      transport: 'http',
-      auth: { kind: 'secret', secretEnv: 'STUB_TOKEN' },
-      build: () => ({}),
-    };
-    let connectRes!: request.Response;
-    let statusAfterConnect!: request.Response;
-    let deleteRes!: request.Response;
-    let statusAfterDelete!: request.Response;
-    await jest.isolateModulesAsync(async () => {
-      jest.doMock('../../src/connectors/catalog', () => ({
-        CONNECTOR_CATALOG: [stubSpec],
-        getConnectorSpec: (id: string) => (id === 'stub-secret' ? stubSpec : undefined),
-      }));
-      const { createConnectorsRouter } = require('../../src/api/connectors-router');
-      const app = express();
-      app.use(express.json());
-      app.use('/api', createConnectorsRouter(apiKeys)); // no configPath at all
-      connectRes = await request(app)
-        .post('/api/v1/connectors/stub-secret/connect')
-        .set('X-Api-Key', adminKey)
-        .send({ token: 'stub-token-value' });
-      statusAfterConnect = await request(app)
-        .get('/api/v1/connectors/stub-secret/status')
-        .set('X-Api-Key', adminKey);
-      deleteRes = await request(app)
-        .delete('/api/v1/connectors/stub-secret')
-        .set('X-Api-Key', adminKey);
-      statusAfterDelete = await request(app)
-        .get('/api/v1/connectors/stub-secret/status')
-        .set('X-Api-Key', adminKey);
-    });
-    jest.dontMock('../../src/connectors/catalog');
-
-    expect(connectRes.status).toBe(200);
-    expect(connectRes.body).toEqual({ id: 'stub-secret', connected: true });
-    expect(statusAfterConnect.body).toEqual({ id: 'stub-secret', connected: true });
-    expect(deleteRes.status).toBe(200);
-    expect(deleteRes.body).toEqual({ id: 'stub-secret', connected: false });
-    expect(statusAfterDelete.body).toEqual({ id: 'stub-secret', connected: false });
-  });
-
-  // Regression: a managed connector (github/gmail/etc., pushed via
-  // /oauth/receive) has authKind:'oauth' + managed:true but — unlike a
-  // user's own oauth:true custom connector — never sets `oauth: true` itself.
-  // /connect's guard used to check only `entry.oauth`, so a managed entry
-  // slipped through it and could be overwritten with an arbitrary string via
-  // this route, bypassing the real OAuth flow and skipping the session
-  // restart /oauth/receive does.
-  it('/connect rejects a managed connector — cannot overwrite its real OAuth token with an arbitrary string', async () => {
+  // Regression: an externally-owned connector (github/gmail/etc., pushed via
+  // /oauth/receive) held a real OAuth token, but the flags saying so were not
+  // the ones /connect's guard checked — it looked at `entry.oauth`, which only
+  // a user's own gateway-owned connector ever set. A pushed entry slipped
+  // through and could be overwritten with an arbitrary string via this route,
+  // bypassing the real OAuth flow and skipping the session restart
+  // /oauth/receive does. One field means there is no second flag to miss.
+  it('/connect rejects an externally-owned connector — cannot overwrite its real OAuth token with an arbitrary string', async () => {
     const cfgPath = tmpConfig({
       github: {
         label: 'GitHub',
         config: { type: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: 'Bearer {access_token}' } },
         secretNames: ['access_token'],
-        authKind: 'oauth',
-        managed: true,
+        credentialOwner: 'external',
       },
     });
     const { setSecret, getSecret } = require('../../src/connectors/token-env');
@@ -526,16 +679,16 @@ describe('connectors-router', () => {
       .send({ token: 'anything-an-attacker-or-mistake-typed' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/managed externally/i);
+    expect(res.body.error).toMatch(/owned externally/i);
     expect(getSecret(customSecretKey('github', 'access_token'))).toBe('ghu_real_oauth_token'); // untouched
   });
 
-  // github is an externally-managed custom connector now (pushed via
-  // /oauth/receive with a full config shape, not just a token — same as
+  // github is pushed in by an external control plane now (via /oauth/receive
+  // with a full config shape, not just a token — same as
   // gmail/drive/calendar; see tests/unit/oauth-connectors.test.ts for that
   // route's dedicated payload-shape coverage). This test keeps the
   // router-level push→status→delete round trip exercised end-to-end.
-  it('oauth/receive stores the full managed shape + secret; delete clears both', async () => {
+  it('oauth/receive stores the full pushed shape + secret; delete clears both', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
     const cfgPath = path.join(dir, 'config.json');
     fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
@@ -572,19 +725,17 @@ describe('connectors-router', () => {
     expect(written.gateway.customConnectors.github).toMatchObject({
       label: 'GitHub',
       secretNames: ['access_token'],
-      authKind: 'oauth',
-      managed: true,
+      credentialOwner: 'external',
     });
 
-    // GET /v1/connectors reports it as built-in (not "Custom") and oauth-kind
+    // GET /v1/connectors reports whose credential it is
     const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(list.body.connectors).toEqual([
       expect.objectContaining({
         id: 'github',
         label: 'GitHub',
-        authKind: 'oauth',
+        credentialOwner: 'external',
         connected: true,
-        source: 'built-in',
         repoUrl: pushPayload.sourceUrl,
       }),
     ]);
@@ -593,16 +744,16 @@ describe('connectors-router', () => {
     const status = await request(app).get('/api/v1/connectors/github/status').set('X-Api-Key', adminKey);
     expect(status.body).toEqual({ id: 'github', connected: true });
 
-    // delete — via the unified route (github has no catalog entry, falls back to customConnectors)
+    // delete — via the unified route
     const del = await request(app).delete('/api/v1/connectors/github').set('X-Api-Key', adminKey);
     expect(del.status).toBe(200);
     expect(getSecret('CUSTOM__github__access_token')).toBeNull();
     expect(JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors).toEqual({});
   });
 
-  // A genuinely user-added custom connector (no entry.managed — nothing pushed
-  // it, the user pasted it themselves) has no catalog to fall back on for its
-  // config/label/description, unlike github/gmail/etc. above. Disconnecting it
+  // A pasted connector (credentialOwner: 'static' — the user typed it in
+  // themselves) has nothing to fall back on for its config/label/description,
+  // unlike the pushed github/gmail/etc. above. Disconnecting it
   // must not discard that config — only the secret — so the row survives and
   // can be reconnected without retyping everything.
   it("DELETE on a genuinely user-added custom connector clears the secret but keeps the entry (soft disconnect)", async () => {
@@ -650,7 +801,7 @@ describe('connectors-router', () => {
 
     const list = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(list.body.connectors).toEqual([
-      expect.objectContaining({ id, label: 'Smithery Calendar', source: 'custom', connected: false }),
+      expect.objectContaining({ id, label: 'Smithery Calendar', credentialOwner: 'static', connected: false }),
     ]);
   });
 
@@ -679,7 +830,7 @@ describe('connectors-router', () => {
     // Reported connected — and always would be, per the vacuous every([]).
     const before = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     expect(before.body.connectors).toEqual([
-      expect.objectContaining({ id, label: 'sdfasdfasf', authKind: 'none', connected: true }),
+      expect.objectContaining({ id, label: 'sdfasdfasf', credentialOwner: 'none', connected: true }),
     ]);
 
     const del = await request(app).delete(`/api/v1/connectors/${id}`).set('X-Api-Key', adminKey);
@@ -694,19 +845,19 @@ describe('connectors-router', () => {
     expect(after.body.connectors).toEqual([]);
   });
 
-  // Regression: disconnecting an oauth:true custom connector used to only
+  // Regression: disconnecting a gateway-owned connector used to only
   // clear its secretNames (just 'access_token') — the refresh sweep's own
   // bookkeeping (__refresh_token/__client_id/__token_expires_at) lived
   // outside secretNames and survived, so oauth-refresh-sweep.ts would
   // silently mint a fresh access_token and resurrect a connector the user
   // just disconnected the next time its (unaffected) expiry came due.
-  it('DELETE on an oauth:true custom connector also clears the refresh sweep\'s own secrets', async () => {
+  it('DELETE on a gateway-owned connector also clears the refresh sweep\'s own secrets', async () => {
     const cfgPath = tmpConfig({
       firecrawl: {
         label: 'Firecrawl',
         config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth', headers: { Authorization: 'Bearer {access_token}' } },
         secretNames: ['access_token'],
-        oauth: true,
+        credentialOwner: 'gateway' as const,
       },
     });
     const { setSecret, getSecret } = require('../../src/connectors/token-env');
@@ -739,8 +890,7 @@ describe('connectors-router', () => {
 
   // The exact bug the soft-disconnect fix above exposed: once DELETE keeps a
   // custom connector's entry alive, POST .../connect must actually be able to
-  // reconnect it — before this fallback existed, this route only ever looked
-  // in the built-in CONNECTOR_CATALOG and 404'd for any customConnectors id.
+  // reconnect it — this route used to 404 for any customConnectors id.
   it('POST .../connect reconnects a single-secret custom connector after DELETE soft-disconnected it', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
     const cfgPath = path.join(dir, 'config.json');
@@ -773,13 +923,13 @@ describe('connectors-router', () => {
     expect(status.body).toEqual({ id, connected: true });
   });
 
-  it('POST .../connect on an oauth:true custom connector rejects with a clear message instead of trying to store a plain token', async () => {
+  it('POST .../connect on a gateway-owned connector rejects with a clear message instead of trying to store a plain token', async () => {
     const app = makeApp(tmpConfig({
       firecrawl: {
         label: 'Firecrawl',
         config: { type: 'http', url: 'https://mcp.firecrawl.dev/v2/mcp-oauth', headers: { Authorization: 'Bearer {access_token}' } },
         secretNames: ['access_token'],
-        oauth: true,
+        credentialOwner: 'gateway' as const,
       },
     }));
     const res = await request(app)
@@ -828,5 +978,260 @@ describe('connectors-router', () => {
   it('unknown connector → 404', async () => {
     const res = await request(makeApp()).post('/api/v1/connectors/nope/connect').set('X-Api-Key', adminKey).send({ token: 'x' });
     expect(res.status).toBe(404);
+  });
+
+  // A session's MCP subprocess reads its generated config once, at spawn — it
+  // cannot be hot-patched. Every route that changes a connector's secrets must
+  // therefore restart the sessions using it, or the web panel says
+  // "Connected ✓" while the agent the user is talking to right now still has no
+  // such tool (and, on disconnect, still holds the revoked one). Only
+  // /oauth/receive and the refresh sweep used to do this.
+  describe('routes that change a connector restart the sessions using it', () => {
+    /** A stand-in AgentRunner that records the restarts asked of it. */
+    function fakeAgents() {
+      const restartSessionsUsingConnector = jest.fn().mockResolvedValue({ restarted: true });
+      const usesConnector = jest.fn().mockReturnValue(true);
+      const runner = { restartSessionsUsingConnector, usesConnector } as unknown as AgentRunner;
+      return { restartSessionsUsingConnector, usesConnector, agents: new Map([['a1', runner]]) };
+    }
+
+    function makeAppWithAgents(configPath: string | undefined, agents: Map<string, AgentRunner>) {
+      const { createConnectorsRouter } = require('../../src/api/connectors-router');
+      const app = express();
+      app.use(express.json());
+      app.use('/api', createConnectorsRouter(apiKeys, configPath, agents));
+      return app;
+    }
+
+    function calendarConfig() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+      const cfgPath = path.join(dir, 'config.json');
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [{ id: 'a1' }] }, null, 2),
+      );
+      return cfgPath;
+    }
+
+    it('POST /v1/connectors/custom restarts once the new connector is actually connected', async () => {
+      const { restartSessionsUsingConnector, agents } = fakeAgents();
+      const app = makeAppWithAgents(calendarConfig(), agents);
+
+      const add = await request(app)
+        .post('/api/v1/connectors/custom')
+        .set('X-Api-Key', adminKey)
+        .send({
+          label: 'Smithery Calendar',
+          config: { type: 'streamable-http', url: 'https://server.smithery.ai/calendar/mcp', headers: { Authorization: 'Bearer {api_key}' } },
+          secrets: { api_key: 'sk-abc' },
+        });
+
+      expect(add.status).toBe(200);
+      expect(add.body.connected).toBe(true);
+      // The overlay carries the just-written entry: the config watcher has not
+      // told the runner about it yet, so without it usesConnector says no.
+      expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
+        add.body.id,
+        expect.objectContaining({
+          overlay: expect.objectContaining({ [add.body.id]: expect.objectContaining({ secretNames: ['api_key'] }) }),
+        }),
+      );
+    });
+
+    it('POST /v1/connectors/custom does NOT restart when the connector is added still-unconnected', async () => {
+      const { restartSessionsUsingConnector, agents } = fakeAgents();
+      const app = makeAppWithAgents(calendarConfig(), agents);
+
+      // A placeholder with no secret supplied — the entry exists but resolves
+      // to nothing, so there is no reason to disturb a live session.
+      const add = await request(app)
+        .post('/api/v1/connectors/custom')
+        .set('X-Api-Key', adminKey)
+        .send({
+          label: 'Smithery Calendar',
+          config: { type: 'streamable-http', url: 'https://server.smithery.ai/calendar/mcp', headers: { Authorization: 'Bearer {api_key}' } },
+        });
+
+      expect(add.status).toBe(200);
+      expect(add.body.connected).toBe(false);
+      expect(restartSessionsUsingConnector).not.toHaveBeenCalled();
+    });
+
+    it('POST /:id/connect restarts after storing the pasted token', async () => {
+      const { restartSessionsUsingConnector, agents } = fakeAgents();
+      const cfgPath = tmpConfig({
+        stripe: {
+          label: 'Stripe',
+          config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+          secretNames: ['api_key'],
+        },
+      });
+      const app = makeAppWithAgents(cfgPath, agents);
+
+      const res = await request(app)
+        .post('/api/v1/connectors/stripe/connect')
+        .set('X-Api-Key', adminKey)
+        .send({ token: 'sk-live-placeholder' });
+
+      expect(res.status).toBe(200);
+      expect(restartSessionsUsingConnector).toHaveBeenCalledWith('stripe', expect.anything());
+    });
+
+    it('DELETE asks who uses the connector BEFORE the secrets go away, then restarts them', async () => {
+      const { restartSessionsUsingConnector, usesConnector, agents } = fakeAgents();
+      const { getSecret } = require('../../src/connectors/token-env');
+      const cfgPath = tmpConfig({
+        stripe: {
+          label: 'Stripe',
+          config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+          secretNames: ['api_key'],
+        },
+      });
+      const app = makeAppWithAgents(cfgPath, agents);
+
+      // usesConnector must be consulted while the secret still exists —
+      // afterwards nothing resolves and the honest answer is always "nobody".
+      usesConnector.mockImplementation(() => {
+        expect(getSecret('CUSTOM__stripe__api_key')).toBe('sk-live-placeholder');
+        return true;
+      });
+      await request(app)
+        .post('/api/v1/connectors/stripe/connect')
+        .set('X-Api-Key', adminKey)
+        .send({ token: 'sk-live-placeholder' });
+      restartSessionsUsingConnector.mockClear();
+
+      const del = await request(app).delete('/api/v1/connectors/stripe').set('X-Api-Key', adminKey);
+      expect(del.status).toBe(200);
+      expect(usesConnector).toHaveBeenCalled();
+      // force: the runner must not re-check — by now the secret is gone.
+      expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
+        'stripe',
+        expect.objectContaining({ force: true }),
+      );
+    });
+
+    it('a failing restart does not turn a successful connect into a 500', async () => {
+      const { restartSessionsUsingConnector, agents } = fakeAgents();
+      restartSessionsUsingConnector.mockRejectedValue(new Error('runner is wedged'));
+      const cfgPath = tmpConfig({
+        stripe: {
+          label: 'Stripe',
+          config: { type: 'http', url: 'https://mcp.stripe.com', headers: { Authorization: 'Bearer {api_key}' } },
+          secretNames: ['api_key'],
+        },
+      });
+      const app = makeAppWithAgents(cfgPath, agents);
+
+      const res = await request(app)
+        .post('/api/v1/connectors/stripe/connect')
+        .set('X-Api-Key', adminKey)
+        .send({ token: 'sk-live-placeholder' });
+
+      // The secret IS stored; only the convenience restart failed.
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ id: 'stripe', connected: true });
+    });
+  });
+
+  // Regression: `secrets` was written to the token store by name without
+  // checking it against the placeholders actually present in the pasted config.
+  // A typo ({apiKey} in the config, "api_key" in secrets) produced a connector
+  // reported as not-connected with the value silently sitting in
+  // mcp-token.env under a name nothing reads — a stray credential on disk and
+  // no error to explain it.
+  it('POST /v1/connectors/custom 400s on a `secrets` key that is not a {placeholder} in the config', async () => {
+    const app = makeApp();
+    const res = await request(app)
+      .post('/api/v1/connectors/custom')
+      .set('X-Api-Key', adminKey)
+      .send({
+        label: 'Typo',
+        config: { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer {apiKey}' } },
+        secrets: { api_key: 'sk-abc', other: 'x' },
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('api_key');
+    expect(res.body.error).toContain('other');
+    expect(res.body.error).toContain('apiKey'); // tells the user the name it expected
+    // Nothing was stored under the wrong name.
+    const { getSecret } = require('../../src/connectors/token-env');
+    expect(getSecret('CUSTOM__typo__api_key')).toBeNull();
+  });
+
+  // Regression: the id was slugged from a `read()` taken *before* the write
+  // lock. Two concurrent adds of the same label both saw the slug as free, so
+  // the second overwrote the first's entry — and, because the secrets are keyed
+  // by id, pointed the survivor at the loser's credentials. Slugging inside
+  // store.mutate makes the collision check see the map actually being written.
+  it('two concurrent adds of the same label get distinct ids — neither overwrites the other', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(cfgPath, JSON.stringify({ gateway: { logDir: '/tmp', timezone: 'UTC' }, agents: [] }, null, 2));
+    const app = makeApp(cfgPath);
+    const { getSecret } = require('../../src/connectors/token-env');
+
+    const add = (secret: string) =>
+      request(app)
+        .post('/api/v1/connectors/custom')
+        .set('X-Api-Key', adminKey)
+        .send({
+          label: 'Smithery Calendar',
+          config: { type: 'streamable-http', url: 'https://server.smithery.ai/calendar/mcp', headers: { Authorization: 'Bearer {api_key}' } },
+          secrets: { api_key: secret },
+        });
+
+    const [a, b] = await Promise.all([add('sk-first'), add('sk-second')]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(a.body.id).not.toBe(b.body.id);
+
+    // Both entries survive, and each holds its own secret.
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).gateway.customConnectors;
+    expect(Object.keys(written).sort()).toEqual([a.body.id, b.body.id].sort());
+    expect(getSecret(`CUSTOM__${a.body.id}__api_key`)).toBe('sk-first');
+    expect(getSecret(`CUSTOM__${b.body.id}__api_key`)).toBe('sk-second');
+  });
+
+  // Regression: a hard delete removed the customConnectors entry but left every
+  // agent's `connectors: { <id>: { enabled } }` flag behind. Those orphans are
+  // invisible in the panel, and a later connector whose label slugs to the same
+  // id silently inherits them — an agent the user never enabled it for gets it,
+  // or one they want it for does not.
+  it('DELETE removes the per-agent enablement flags along with the entry', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cgw-router-'));
+    const cfgPath = path.join(dir, 'config.json');
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        {
+          gateway: {
+            logDir: '/tmp',
+            timezone: 'UTC',
+            customConnectors: {
+              // secretNames: [] → a "No auth" entry, which DELETE hard-removes.
+              wiki: { label: 'Wiki', config: { type: 'http', url: 'https://wiki.example/mcp' }, secretNames: [] },
+            },
+          },
+          agents: [
+            { id: 'a1', connectors: { wiki: { enabled: true }, other: { enabled: false } } },
+            { id: 'a2', connectors: { wiki: { enabled: false } } },
+            { id: 'a3' },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const del = await request(makeApp(cfgPath)).delete('/api/v1/connectors/wiki').set('X-Api-Key', adminKey);
+    expect(del.status).toBe(200);
+
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    expect(written.gateway.customConnectors).toEqual({});
+    expect(written.agents[0].connectors).toEqual({ other: { enabled: false } }); // untouched neighbour
+    expect(written.agents[1].connectors).toEqual({});
+    expect(written.agents[2].connectors).toBeUndefined(); // no flags → nothing invented
   });
 });

@@ -1,12 +1,11 @@
 /**
- * Managed OAuth connectors (github/Gmail/Drive/Calendar) — the gateway never
- * does the OAuth dance itself (client_secret lives in an external control
- * plane, which runs infra the user never gets shell access to) and has no
- * catalog entry for any of them (CONNECTOR_CATALOG is empty by default — see
- * catalog.ts). This covers the receiving end: POST /oauth/receive stores a
- * pushed access_token + full connector shape as a managed custom connector
- * (authKind:'oauth', managed:true), reported as source:'built-in' so the web
- * panel doesn't show a "Custom" badge on something that control plane pushed in.
+ * Externally-owned OAuth connectors (github/Gmail/Drive/Calendar) — the gateway
+ * never does the OAuth dance itself (client_secret lives in an external control
+ * plane, which runs infra the user never gets shell access to). This covers
+ * the receiving end: POST /oauth/receive stores a
+ * pushed access_token + full connector shape as a custom connector with
+ * credentialOwner:'external', so nothing here offers to sign in for it or tries
+ * to refresh a token this gateway holds no refresh_token for.
  */
 
 import express from 'express';
@@ -19,13 +18,13 @@ import { ApiKey } from '../../src/types';
 const TOKEN_ENV = '/tmp/oauth-connectors-test-mcp-token.env';
 
 beforeEach(() => {
-  process.env.GATEWAY_MCP_TOKEN_ENV = TOKEN_ENV;
+  process.env.GATEWAY_MCP_TOKEN_ENV_PATH = TOKEN_ENV;
   try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
   jest.resetModules();
 });
 
 afterAll(() => {
-  delete process.env.GATEWAY_MCP_TOKEN_ENV;
+  delete process.env.GATEWAY_MCP_TOKEN_ENV_PATH;
   try { fs.rmSync(TOKEN_ENV); } catch { /* ignore */ }
 });
 
@@ -71,16 +70,16 @@ describe('connectors-router — oauth-kind connectors', () => {
     };
   }
 
-  it('GET /v1/connectors reports a pushed connector as authKind "oauth", source "built-in"', async () => {
+  it('GET /v1/connectors reports a pushed connector as credentialOwner "external"', async () => {
     const app = makeApp(tmpConfig());
     await request(app).post('/api/v1/connectors/gmail/oauth/receive').set('X-Api-Key', adminKey).send(pushPayload());
 
     const res = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
     const gmail = res.body.connectors.find((c: { id: string }) => c.id === 'gmail');
-    expect(gmail).toMatchObject({ id: 'gmail', authKind: 'oauth', source: 'built-in', connected: true });
+    expect(gmail).toMatchObject({ id: 'gmail', credentialOwner: 'external', connected: true });
   });
 
-  it('POST /connect 404s for an id with no built-in catalog entry (CONNECTOR_CATALOG is empty by default)', async () => {
+  it('POST /connect 404s for an id that is not a configured connector', async () => {
     const res = await request(makeApp(tmpConfig()))
       .post('/api/v1/connectors/gmail/connect')
       .set('X-Api-Key', adminKey)
@@ -169,8 +168,7 @@ describe('connectors-router — oauth-kind connectors', () => {
     expect(written.gateway.customConnectors.gmail).toMatchObject({
       label: 'Gmail',
       secretNames: ['access_token'],
-      authKind: 'oauth',
-      managed: true,
+      credentialOwner: 'external',
     });
   });
 
@@ -186,10 +184,21 @@ describe('connectors-router — oauth-kind connectors', () => {
       .send(pushPayload());
 
     expect(res.status).toBe(200);
-    expect(restartSessionsUsingConnector).toHaveBeenCalledWith('gmail');
+    // The entry was written to config.json a moment ago, and the config watcher
+    // has not re-read it into any runner yet — so the runner is handed the new
+    // entry as an overlay. Without it `usesConnector` would consult a
+    // gatewayConfig that does not know about gmail yet and skip the restart.
+    expect(restartSessionsUsingConnector).toHaveBeenCalledWith(
+      'gmail',
+      expect.objectContaining({
+        overlay: expect.objectContaining({
+          gmail: expect.objectContaining({ label: 'Gmail', secretNames: ['access_token'] }),
+        }),
+      }),
+    );
   });
 
-  it('disconnect clears the secret for a managed oauth connector via the unified DELETE route', async () => {
+  it('disconnect removes an externally-owned connector via the unified DELETE route', async () => {
     const app = makeApp(tmpConfig());
     await request(app)
       .post('/api/v1/connectors/gmail/oauth/receive')

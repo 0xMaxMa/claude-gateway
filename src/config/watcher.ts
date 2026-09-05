@@ -28,8 +28,8 @@ const HOT_RELOADABLE_GATEWAY_FIELDS: string[] = [
   // restart is unaffordable, since it kills the sessions being investigated.
   'gateway.logs',
   // Same "new spawns only" caveat as 'connectors' above — customConnectors is
-  // where built-in oauth-managed AND user-pasted connector definitions both
-  // live (see connectors/types.ts's CustomConnectorEntry).
+  // where every connector definition lives regardless of who owns its
+  // credential (see connectors/types.ts's CustomConnectorEntry).
   'gateway.customConnectors',
 ];
 

@@ -270,8 +270,7 @@ describe('config-watcher', () => {
       label: 'Gmail',
       config: { type: 'stdio', command: 'npx', args: ['-y', 'gmail-mcp'], env: { GOOGLE_ACCESS_TOKEN: '{access_token}' } },
       secretNames: ['access_token'],
-      authKind: 'oauth',
-      managed: true,
+      credentialOwner: 'external',
     };
     writeConfigFile(configPath, rawConfig({ customConnectors: { gmail: gmailEntry } }));
     watcher.reload();

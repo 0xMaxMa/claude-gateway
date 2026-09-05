@@ -465,17 +465,29 @@ export interface GatewayConfig {
       };
     };
     /**
-     * Connector wiring/state (non-secret). Keyed by connector id; records which
-     * env-var name (in mcp-token.env) holds each connector's secret. Written by the
-     * connectors connect/disconnect routes. The secret VALUE never lives here.
-     */
-    connectors?: Record<string, { secretEnv: string }>;
-    /**
-     * User-pasted (not code-reviewed) connectors — second tier alongside the
-     * built-in CONNECTOR_CATALOG. Keyed by slugified id. See
-     * connectors/types.ts's CustomConnectorEntry doc for the security tradeoff.
+     * Every connector the gateway knows about, keyed by slugified id — user-pasted
+     * (not code-reviewed) configs, plus the entries an external control plane
+     * pushes in (`credentialOwner: 'external'`). See connectors/types.ts's
+     * CustomConnectorEntry doc for the security tradeoff.
+     *
+     * Whether a connector is CONNECTED is not stored here — mcp-token.env alone
+     * answers that. Per-AGENT enablement lives on AgentConfig.connectors, which is
+     * a different thing again.
      */
     customConnectors?: Record<string, CustomConnectorEntry>;
+    /**
+     * Whether a connected connector is available to an agent that has no explicit
+     * entry in `AgentConfig.connectors`. Default `true` (opt-out): connecting a
+     * connector makes it available everywhere, and an agent only misses it if
+     * explicitly disabled.
+     *
+     * Set `false` on a gateway that hosts agents for more than one person. There,
+     * the default hands a credential connected by one operator to every agent on
+     * the box, including agents whose chat users are not that operator; opt-in
+     * per agent is the safer posture. Kept as a switch rather than a change of
+     * default so no existing install silently loses its connectors on upgrade.
+     */
+    connectorsDefaultEnabled?: boolean;
   };
   agents: AgentConfig[];
 }
