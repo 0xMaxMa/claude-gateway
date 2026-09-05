@@ -357,8 +357,12 @@ product-agnostic and never hardcodes a downstream app's domain, so this is opt-i
 Set, the callback issues a real `302` to it on **every** terminal outcome — success, and
 also a denied, expired or failed sign-in, which carries `?connector_oauth_error=<code>`.
 Unset, the callback renders a plain "Connected — you can close this tab" page instead.
-The value is validated once at startup: a malformed URL is logged and ignored rather than
-injecting a broken redirect into every future callback.
+The value is validated once at startup: anything that isn't a well-formed `http(s)` URL
+is logged and ignored rather than injecting a broken redirect into every future callback.
+The scheme is part of that check — this value becomes the `Location` of a redirect sent
+to the end user's own browser from a public route, so a `javascript:` or `data:` URL
+here would be script running on every sign-in, and is refused like any other malformed
+value.
 
 ### `gateway.customConnectors` (optional)
 

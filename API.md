@@ -71,7 +71,7 @@ browser to open a link owns it (a link opened in a second browser is rejected), 
 |--------|------|------|-------------|
 | `GET` | `/api/v1/agents` | Key | List agents accessible by the provided key |
 | `POST` | `/api/v1/agents` | Admin | Create a new agent |
-| `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent name, description, model, or allow_tools |
+| `PATCH` | `/api/v1/agents/:agentId` | Write | Update agent name, description, model, or allow_tools (`connectors` needs **Admin**) |
 | `DELETE` | `/api/v1/agents/:agentId` | Admin | Delete an agent |
 | `POST` | `/api/v1/agents/:agentId/messages` | Key | Send a message — sync JSON or SSE stream; supports slash commands |
 | `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
@@ -188,7 +188,7 @@ Boot restore (`gateway.appRestore`): at startup every app stored as `running` is
 | `GET` | `/api/v1/connectors/:id/status` | Key | Connected boolean for a single connector (for polling) |
 | `POST` | `/api/v1/connectors/:id/connect` | Admin | Store a pasted token |
 | `POST` | `/api/v1/connectors/:id/oauth/receive` | Admin | Accept an `access_token` + connector shape pushed by an external control plane |
-| `DELETE` | `/api/v1/connectors/:id` | Admin | Disconnect — clears the secrets; removes the whole entry for `none`/`external` connectors |
+| `DELETE` | `/api/v1/connectors/:id` | Admin | Disconnect — clears the credential; removes the whole entry for `none`/`external` connectors |
 | `POST` | `/api/v1/connectors/custom` | Admin | Add a user-pasted connector |
 | `POST` | `/api/v1/connectors/custom/:id/oauth/start` | Admin | Begin the gateway-owned OAuth 2.1 + PKCE sign-in → `authorizeUrl` |
 | `GET` | `/oauth/mcp/callback` | None (single-use `state`) | OAuth redirect target — the provider sends the end user's own browser here |
@@ -578,7 +578,7 @@ curl -X POST \
 
 ### PATCH /api/v1/agents/:agentId
 
-Update an agent's display name, description, model, allow_tools flag, or connector enablement. Requires write access to the agent. Only fields provided are updated.
+Update an agent's display name, description, model, allow_tools flag, or connector enablement. Requires write access to the agent; the `connectors` field additionally requires **admin** (see below). Only fields provided are updated.
 
 **Request body (all optional):**
 
@@ -588,7 +588,9 @@ Update an agent's display name, description, model, allow_tools flag, or connect
 | `description` | string | New description |
 | `model` | string | New Claude model ID |
 | `allow_tools` | boolean | Override tool access for this agent |
-| `connectors` | object | Per-connector enablement, `{ "<connectorId>": { "enabled": boolean } }`. **Merged** into the agent's existing map, not replacing it — send only the ids you are changing. `enabled` must be a boolean, and each key must be a valid connector id (`^[a-z0-9][a-z0-9-]*$`, max 64 chars), or the request is `400` |
+| `connectors` | object | **Admin only** — a non-admin key gets `403`. Per-connector enablement, `{ "<connectorId>": { "enabled": boolean } }`. **Merged** into the agent's existing map, not replacing it — send only the ids you are changing. `enabled` must be a boolean, and each key must be a valid connector id (`^[a-z0-9][a-z0-9-]*$`, max 64 chars), or the request is `400` |
+
+`connectors` is the one field on this route that is admin-gated, because it is the only one that reaches a credential somebody else owns: every route under [Connectors API](#connectors-api) is admin-only, and enabling a connector here resolves that connector's secret into the agent's MCP config at spawn. Under [`gateway.connectorsDefaultEnabled: false`](README.md#gatewayconnectorsdefaultenabled-optional) a `write` key scoped to a single agent could otherwise hand that agent any token an admin had connected.
 
 Enablement is **opt-out**: a connected connector is available to every agent unless that agent explicitly sets `{"enabled": false}`. Connecting the connector at all is the security gate — see [Connectors API](#connectors-api). A multi-owner deployment can flip this to opt-in with [`gateway.connectorsDefaultEnabled: false`](README.md#gatewayconnectorsdefaultenabled-optional).
 
@@ -3951,7 +3953,7 @@ indefinite green checkmark:
 | `refresh.consecutiveFailures` | Transient failures in a row; resets to `0` on the first success, and on any answer from the authorization server (including a refusal — that proves the host is reachable) |
 | `refresh.permanentFailures` | Refusals from the authorization server in a row (`invalid_grant` and friends). At `3` the sweep gives up and deletes the connector's credentials, so `2` means one tick away from being disconnected — the most actionable value this block can carry. Resets to `0` on the first success. |
 | `refresh.nextAttemptAt` | Epoch ms. The sweep skips this connector until then |
-| `refresh.unrefreshable` | Present and `true` only when this connector can never refresh: its access_token has expired and no refresh_token was ever stored. Both counters read `0` — nothing failed, there is simply nothing to refresh with. Reconnecting is the only fix. |
+| `refresh.unrefreshable` | Present and `true` only when this connector can never refresh: it has an access_token, no refresh_token was ever stored, and the token is either expired or has no recorded expiry at all. Both counters read `0` — nothing failed, there is simply nothing to refresh with. Reconnecting is the only fix. |
 
 The two counters are mutually exclusive: a refusal ends the transient streak and a
 network failure ends the permanent one, so exactly one of them is non-zero at a
@@ -3963,6 +3965,12 @@ file: an authorization server that advertises scopes not including `offline_acce
 issues a token response with no refresh_token at all. The sweep then skips that
 connector on every tick, silently and forever, and without this flag `connected`
 would stay `true` over a token that expired an hour in.
+
+The missing-expiry case covers tokens this gateway never minted — every path that
+stores one records an expiry beside it, defaulting to an hour when the server omits
+`expires_in`. An `oauth: true` connector holding a pasted `access_token` is the way
+to get there; `POST /v1/connectors/custom` now rejects that combination, so this
+reports the rows that predate the check.
 
 The retry interval doubles with each consecutive transient failure — 5m, 10m, 20m,
 … capped at 6 hours — so a permanently dead MCP URL costs a handful of attempts a
@@ -4114,7 +4122,8 @@ What it removes depends on the entry:
 
 | `credentialOwner` | Effect |
 |-------------------|--------|
-| `static` / `gateway` | Clears the secrets only — the entry (label, config, `sourceUrl`) survives so it can be reconnected without retyping. The definition exists nowhere else |
+| `static` | Clears the secrets only — the entry (label, config, `sourceUrl`) survives so it can be reconnected without retyping. The definition exists nowhere else |
+| `gateway` | Clears the OAuth `access_token` only (plus the internal bookkeeping below); the entry survives, and so does any *other* `{placeholder}` value that was pasted when the connector was added. Only `access_token` is the gateway's to re-mint at sign-in — a `{workspace_id}` alongside it can be re-supplied by no route at all (`/connect` is closed to `gateway` owners), so clearing it would make one Disconnect permanent |
 | `none` | Removes the entry. There is no secret to clear, so a soft disconnect would leave the row reporting "connected" forever |
 | `external` | Removes the entry — its definition lives in the control plane, and reconnecting re-pushes a full entry via `/oauth/receive` |
 
@@ -4126,8 +4135,10 @@ connector the user just disconnected, and a stale cached registration would make
 next `/oauth/start` reuse a `client_id` the provider may no longer recognise.
 
 Sessions already using the connector are restarted so they stop offering a tool whose
-credential is gone (whether a session uses it is decided *before* the secrets are
-removed — afterwards nothing resolves it). When the whole entry is removed, the
+credential is gone. Which sessions those are is decided by comparing each running
+session's spawn-time connector fingerprint against what the connector resolves to *now* —
+so a cleared secret, an edited config, or a removed entry all count, and a session
+spawned before the connector existed is left alone. When the whole entry is removed, the
 connector's per-agent enablement flags in `config.json` are removed with it, so a later
 connector that slugs to the same id does not inherit them.
 
@@ -4150,7 +4161,7 @@ Add a user-pasted connector. **Admin.**
 | `secrets` | object | Optional `{ "<placeholderName>": "<value>" }`. All values must be strings; blank ones are skipped, leaving the connector "not connected" until filled in later via `/connect` |
 | `description` | string | Optional |
 | `sourceUrl` | string | Optional — where the admin says the config came from. Unverified |
-| `oauth` | boolean | Optional. Asks the gateway to run the sign-in itself — stores `credentialOwner: "gateway"`. Requires `config.url` and an `{access_token}` placeholder. Without it the entry is `static` (it declares `{placeholder}`s) or `none` (it declares none) |
+| `oauth` | boolean | Optional. Asks the gateway to run the sign-in itself — stores `credentialOwner: "gateway"`. Requires `config.url` and an `{access_token}` placeholder, and refuses an `access_token` in `secrets` (the gateway mints that one at `/oauth/start`). Without it the entry is `static` (it declares `{placeholder}`s) or `none` (it declares none) |
 
 ```bash
 curl -X POST \
@@ -4174,11 +4185,21 @@ curl -X POST \
 
 | Status | When |
 |--------|------|
-| `400` | `label`/`config` missing or the wrong type; `secrets` not an object of strings; **a `secrets` key that is not a `{placeholder}` in `config`** (nothing would ever read it back, so it is reported instead of silently stored); `oauth` not a boolean; `oauth: true` without `config.url` or without an `{access_token}` placeholder; **or a placeholder name starting with `__`, which the gateway reserves for itself** |
+| `400` | `label`/`config` missing or the wrong type; `secrets` not an object of strings; **a `secrets` key that is not a `{placeholder}` in `config`** (nothing would ever read it back, so it is reported instead of silently stored); `oauth` not a boolean; `oauth: true` without `config.url` or without an `{access_token}` placeholder; **`oauth: true` with an `access_token` in `secrets`** (see below); **or a placeholder name starting with `__`, which the gateway reserves for itself** |
 
 The id is chosen inside the config write lock, so two concurrent adds of the same label
 get distinct ids rather than the second overwriting the first. If every secret is present
 the connector is immediately connected, and sessions that resolve it are restarted.
+
+**`oauth: true` will not take a pasted `access_token`.** That combination asks for a
+`gateway`-owned entry — one the refresh sweep renews from the `refresh_token` the
+sign-in stores — and a pasted token arrives without one, because the gateway never saw
+the exchange it came out of. It would read `connected: true` and then simply stop
+working when it aged out, with nothing to renew it and no failure recorded (the sweep
+skips a connector it cannot refresh). Sign in via `/oauth/start`, or omit `oauth` to
+store the token as a `static` connector, which is what a hand-held token is. The
+connector's *other* placeholders are unaffected — a `{workspace_id}` on an OAuth
+connector is configuration the sign-in neither writes nor can supply.
 
 Removal is the unified `DELETE /v1/connectors/:id` above — there is no separate
 `/custom/:id` delete route.
@@ -4217,6 +4238,18 @@ upper-cased, every non-alphanumeric run replaced with `_` — connector `google-
 reads `MCP_OAUTH_CLIENT_ID__GOOGLE_CALENDAR`). Without either, `/oauth/start` returns
 `502` naming the env var it looked for.
 
+The `scope` requested is the MCP server's own `scopes_supported` (RFC 9728
+protected-resource metadata) when it publishes one, falling back to the authorization
+server's list (RFC 8414) and then to `offline_access`. The resource's list comes first
+deliberately: the AS's is every scope it issues for every resource behind it, so
+consenting to it would grant this gateway a whole provider's privileges — and on an AS
+whose catalogue includes scopes this client is not entitled to, it is an
+`invalid_scope` refusal that kills the sign-in. Set
+`MCP_OAUTH_SCOPES__<CONNECTOR_ID>` (space-separated, same id transform as
+`MCP_OAUTH_CLIENT_ID__`) to override both — that is the way out of an `invalid_scope`,
+or of a provider that only issues a refresh token when `offline_access` is asked for
+and never advertises it, without patching the gateway.
+
 | Status | When |
 |--------|------|
 | `400` | The connector is not `credentialOwner: "gateway"` (an `external` one is told to use `/oauth/receive` instead), or its `config.url` is missing |
@@ -4242,9 +4275,17 @@ flow started against one and returning to the other completes normally.
 Query params are the standard `code` / `state` / `error`. On success the gateway
 exchanges the code, stores the access token (plus refresh token and expiry, internally)
 in a single write, and restarts sessions that use the connector so the sign-in reaches
-the agent the user is actually talking to — without that, the panel would show
+the agent the user is actually talking to — without that, status would report
 "connected" while a running session still had no such tool. A restart failure is logged,
 not surfaced: the token is stored either way.
+
+The connector is re-read before the exchange and again immediately before the write. If
+it was deleted, or handed to another owner via
+[`/oauth/receive`](#post-apiv1connectorsidoauthreceive), while the user sat on the
+provider's consent screen, the token is discarded and the callback answers
+`connector_gone` — nothing is stored. Without that re-check a returning callback could
+resurrect a connector the admin had just disconnected, or leave internal refresh state
+behind on an entry the gateway no longer owns, which nothing would ever collect.
 
 Where the browser lands depends on
 [`gateway.oauthReturnUrl`](README.md#gatewayoauthreturnurl-optional):
@@ -4252,10 +4293,16 @@ Where the browser lands depends on
 | `oauthReturnUrl` | Success | Failure |
 |------------------|---------|---------|
 | Set | `302` to that URL | `302` to that URL with `?connector_oauth_error=<code>` |
-| Unset | A plain "Connected — you can close this tab" page | A plain error page (`400`/`502`) |
+| Unset | A plain "Connected — you can close this tab" page | A plain error page (`400`/`409`/`502`) |
+
+"Set" means set to a well-formed `http(s)` URL — anything else (including a
+`javascript:` or `data:` URL, which `new URL()` parses happily) is logged at startup and
+treated as unset, so it can never become the `Location` of a redirect on this public
+route.
 
 Error codes are `expired_link` (unknown, expired or already-used `state`),
-`missing_code`, `exchange_failed`, or the provider's own `error` value passed through.
+`missing_code`, `connector_gone`, `exchange_failed`, or the provider's own `error` value
+passed through.
 
 There is deliberately no interstitial "Connected!" page with a timed meta-refresh — when
 the deployer has told the gateway where "back" is, a real redirect goes straight there.
