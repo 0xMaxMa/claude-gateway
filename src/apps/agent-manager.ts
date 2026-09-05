@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import { AppsRegistry, AppEntry } from './registry';
 import { pathWithNativeBin } from '../session/claude-bin';
 import { agentsDirForConfig } from '../config/agent-env';
+import { withConfigWriteLock } from '../config/config-write-lock';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,24 +32,19 @@ const DEFAULT_AGENTS_DIR = agentsDirForConfig(DEFAULT_CONFIG_PATH);
 // ─── AgentManager ────────────────────────────────────────────────────────────
 
 export class AgentManager {
-  /** Serialises concurrent config reads/writes within this process. */
-  private configLock: Promise<void> = Promise.resolve();
-
   constructor(
     private readonly configPath: string = DEFAULT_CONFIG_PATH,
     private readonly agentsDir: string = DEFAULT_AGENTS_DIR,
   ) {}
 
-  private async withConfigLock<T>(fn: () => T): Promise<T> {
-    let release!: () => void;
-    const prev = this.configLock;
-    this.configLock = new Promise<void>((r) => { release = r; });
-    await prev;
-    try {
-      return fn();
-    } finally {
-      release();
-    }
+  /**
+   * Serialises config reads/writes against every other writer of the same file —
+   * the agents API and the connectors store included, not just other AgentManager
+   * calls. See config/config-write-lock.ts for why an instance-private lock was
+   * not enough.
+   */
+  private withConfigLock<T>(fn: () => T): Promise<T> {
+    return withConfigWriteLock(this.configPath, fn);
   }
 
   // ─── Public API ────────────────────────────────────────────────────────────
