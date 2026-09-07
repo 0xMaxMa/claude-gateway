@@ -979,6 +979,7 @@ export function createApiRouter(
         whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
         whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
         whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
+        whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
       }));
     res.json({ agents });
   });
@@ -1692,8 +1693,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_account_id?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_account_id, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_account_id?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown; whatsapp_cloud_templates_enabled?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_account_id, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing, whatsapp_cloud_templates_enabled } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -2008,8 +2009,17 @@ export function createApiRouter(
       res.status(400).json({ error: 'whatsapp_cloud_pairing must be a boolean or null' });
       return;
     }
+    // Template opt-in (Phase 3). Not an ACCESS field, but validated and
+    // persisted through the identical "merge into the existing whatsapp_cloud
+    // block" path as whatsapp_cloud_pairing above, so it rides the same flag
+    // rather than growing a second one-field branch.
+    if (whatsapp_cloud_templates_enabled !== undefined && whatsapp_cloud_templates_enabled !== null &&
+        typeof whatsapp_cloud_templates_enabled !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_cloud_templates_enabled must be a boolean or null' });
+      return;
+    }
     const whatsappCloudAccessTouched = whatsapp_cloud_dm_policy !== undefined || whatsapp_cloud_dm_allowlist !== undefined ||
-      whatsapp_cloud_pairing !== undefined;
+      whatsapp_cloud_pairing !== undefined || whatsapp_cloud_templates_enabled !== undefined;
 
     try {
       await writeAgentsToConfig(configPath, (agents) => {
@@ -2179,6 +2189,10 @@ export function createApiRouter(
             if (whatsapp_cloud_pairing !== undefined) {
               if (whatsapp_cloud_pairing === null) delete existing.pairing;
               else existing.pairing = whatsapp_cloud_pairing;
+            }
+            if (whatsapp_cloud_templates_enabled !== undefined) {
+              if (whatsapp_cloud_templates_enabled === null) delete existing.templatesEnabled;
+              else existing.templatesEnabled = whatsapp_cloud_templates_enabled;
             }
           }
         }
@@ -2428,6 +2442,10 @@ export function createApiRouter(
         if (whatsapp_cloud_pairing === null) delete cfg.whatsapp_cloud.pairing;
         else cfg.whatsapp_cloud.pairing = whatsapp_cloud_pairing as boolean;
       }
+      if (whatsapp_cloud_templates_enabled !== undefined) {
+        if (whatsapp_cloud_templates_enabled === null) delete cfg.whatsapp_cloud.templatesEnabled;
+        else cfg.whatsapp_cloud.templatesEnabled = whatsapp_cloud_templates_enabled as boolean;
+      }
       agentRunners.get(agentId)?.updateAgentConfig(cfg);
       // Anyone just added to the allowlist is now allowed — drop them from
       // the in-memory knock list so the discovery UI stops surfacing them.
@@ -2489,6 +2507,7 @@ export function createApiRouter(
         whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
         whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
         whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
+        whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
       },
     });
   });

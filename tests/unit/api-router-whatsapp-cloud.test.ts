@@ -227,4 +227,79 @@ describe('WhatsApp Cloud channel management API', () => {
     expect(onDisk.agents[0].whatsapp_cloud.dmPolicy).toBe('allowlist');
     expect(onDisk.agents[0].whatsapp_cloud.dmAllowlist).toEqual(['66812345678']);
   });
+
+  // Phase 3 — the message-template opt-in. Validated and persisted through the
+  // same merge path as whatsapp_cloud_pairing, but unlike pairing it defaults
+  // to FALSE: templates are what reach a user outside the 24h reply window, so
+  // the capability must never appear just because the gateway was upgraded.
+  describe('whatsapp_cloud_templates_enabled (Phase 3)', () => {
+    it('defaults to false on a freshly connected channel', async () => {
+      const res = await patch(CONNECT_BODY);
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBe(false);
+
+      const list = await supertest.default(app).get('/api/v1/agents').set(ADMIN);
+      const agent = list.body.agents.find((a: { id: string }) => a.id === AGENT_ID);
+      expect(agent.whatsapp_cloud_templates_enabled).toBe(false);
+    });
+
+    it('persists true to disk and to the in-memory config', async () => {
+      await patch(CONNECT_BODY);
+      const res = await patch({ whatsapp_cloud_templates_enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBe(true);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      expect(onDisk.agents[0].whatsapp_cloud.templatesEnabled).toBe(true);
+      expect(configs.get(AGENT_ID)!.whatsapp_cloud!.templatesEnabled).toBe(true);
+    });
+
+    it('turning it back off persists false rather than dropping the field silently', async () => {
+      await patch(CONNECT_BODY);
+      await patch({ whatsapp_cloud_templates_enabled: true });
+      const res = await patch({ whatsapp_cloud_templates_enabled: false });
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBe(false);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      expect(onDisk.agents[0].whatsapp_cloud.templatesEnabled).toBe(false);
+    });
+
+    it('null clears the field, falling back to the off-by-default', async () => {
+      await patch(CONNECT_BODY);
+      await patch({ whatsapp_cloud_templates_enabled: true });
+      const res = await patch({ whatsapp_cloud_templates_enabled: null });
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBe(false);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      expect(onDisk.agents[0].whatsapp_cloud.templatesEnabled).toBeUndefined();
+    });
+
+    it('rejects a non-boolean with 400 and persists nothing', async () => {
+      await patch(CONNECT_BODY);
+      const res = await patch({ whatsapp_cloud_templates_enabled: 'yes' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/whatsapp_cloud_templates_enabled must be a boolean/);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      expect(onDisk.agents[0].whatsapp_cloud.templatesEnabled).toBeUndefined();
+    });
+
+    // Same "policy without credentials is meaningless" rule the access fields
+    // follow — no credential block means nothing to merge into.
+    it('is a silent no-op with no existing credential block', async () => {
+      const res = await patch({ whatsapp_cloud_templates_enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBeNull();
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      expect(onDisk.agents[0].whatsapp_cloud).toBeUndefined();
+    });
+
+    // The credential merge must not wipe an opt-in that was already granted.
+    it('survives a later credential re-save', async () => {
+      await patch(CONNECT_BODY);
+      await patch({ whatsapp_cloud_templates_enabled: true });
+      const res = await patch(CONNECT_BODY);
+      expect(res.body.agent.whatsapp_cloud_templates_enabled).toBe(true);
+    });
+  });
 });

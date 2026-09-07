@@ -12,6 +12,12 @@
  * that v1 deliberately skipped (`markAsRead`, `sendReaction`,
  * `removeReaction`) — ported from `slack-client.ts`'s addReaction/
  * removeReaction shape, same best-effort posture (log, never throw).
+ *
+ * Phase 3 adds the two Cloud-ONLY message kinds that have no Baileys analogue
+ * at all (`sendInteractiveButtons`/`sendInteractiveList`) and the 24h-window
+ * escape hatch (`sendTemplate`). These are net-new here — no other channel in
+ * this gateway sends interactive blocks, so there was no in-repo pattern to
+ * port; the payload shapes come straight from Meta's Cloud API reference.
  */
 import * as fs from 'fs';
 import { createLogger } from '../logger';
@@ -26,6 +32,33 @@ const WHATSAPP_CLOUD_API_BASE = 'https://graph.facebook.com/v20.0';
  * or silently truncated.
  */
 export const WHATSAPP_CLOUD_MAX_TEXT_CHARS = 4096;
+
+/**
+ * Meta's hard cap on reply buttons in an `interactive: {type: 'button'}`
+ * message. Not a soft/UX limit — the Graph API rejects a 4th button outright,
+ * so `sendInteractiveButtons` refuses locally with a readable message rather
+ * than letting the agent see an opaque Meta error code.
+ */
+export const WHATSAPP_CLOUD_MAX_BUTTONS = 3;
+
+/** A single reply button: `id` is what comes back on tap, `title` is what the user sees. */
+export interface WhatsAppCloudButton {
+  id: string;
+  title: string;
+}
+
+/** One row of a list message. `description` is the optional grey sub-line. */
+export interface WhatsAppCloudListRow {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+/** A list message's section — a titled group of rows. */
+export interface WhatsAppCloudListSection {
+  title: string;
+  rows: WhatsAppCloudListRow[];
+}
 
 // Re-exported so `mcp/tools/whatsapp-cloud/module.ts` — which may only import
 // the compiled dist/ artifact of THIS file, never src/ directly — can reach
@@ -125,6 +158,101 @@ export class WhatsAppCloudClient {
       if (last.error) return last;
     }
     return last;
+  }
+
+  /**
+   * Send up to 3 tappable reply buttons under a body of text (Phase 3).
+   *
+   * A tap comes back through the webhook as `type: 'interactive'` with a
+   * `button_reply` — the inbound normalizer turns that into plain text
+   * (the button's title), so the agent reads a tap exactly as if the user had
+   * typed the label. See normalizeWhatsAppCloudMessage's interactive branch.
+   *
+   * THROWS (rather than returning an `{error}` response) when more than
+   * WHATSAPP_CLOUD_MAX_BUTTONS are passed or the list is empty: both are
+   * caller bugs that Meta would reject anyway, and a thrown, readable message
+   * reaches the agent through the MCP tool's catch as actionable text.
+   */
+  async sendInteractiveButtons(
+    to: string,
+    bodyText: string,
+    buttons: WhatsAppCloudButton[],
+  ): Promise<WhatsAppCloudApiResponse> {
+    if (buttons.length === 0) {
+      throw new Error('sendInteractiveButtons: at least 1 button is required');
+    }
+    if (buttons.length > WHATSAPP_CLOUD_MAX_BUTTONS) {
+      throw new Error(
+        `sendInteractiveButtons: WhatsApp allows at most ${WHATSAPP_CLOUD_MAX_BUTTONS} buttons, got ${buttons.length}. ` +
+          'Use a list message (sendInteractiveList) for more options.',
+      );
+    }
+    return this.call('POST', `/${this.phoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: bodyText },
+        action: {
+          buttons: buttons.map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title } })),
+        },
+      },
+    });
+  }
+
+  /**
+   * Send a list message — a single button that opens a picker of grouped rows
+   * (Phase 3). The way past the 3-button ceiling above.
+   *
+   * A pick comes back as `type: 'interactive'` with a `list_reply`, handled by
+   * the same normalizer branch as button taps.
+   */
+  async sendInteractiveList(
+    to: string,
+    bodyText: string,
+    buttonLabel: string,
+    sections: WhatsAppCloudListSection[],
+  ): Promise<WhatsAppCloudApiResponse> {
+    return this.call('POST', `/${this.phoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: bodyText },
+        action: { button: buttonLabel, sections },
+      },
+    });
+  }
+
+  /**
+   * Send a pre-approved message template (Phase 3) — the ONLY way to open a
+   * conversation outside WhatsApp's 24h customer-service window, which is why
+   * the caller must be gated on `whatsapp_cloud.templatesEnabled` (see
+   * mcp/tools/whatsapp-cloud/module.ts; this method itself does not gate).
+   *
+   * `components` is Meta's variable-substitution array. It is passed through
+   * VERBATIM and deliberately NOT validated or typed beyond `unknown[]`: its
+   * required shape depends on the individual template's definition in Meta's
+   * Business Manager, which this gateway has no visibility into.
+   */
+  async sendTemplate(
+    to: string,
+    templateName: string,
+    languageCode: string,
+    components?: unknown[],
+  ): Promise<WhatsAppCloudApiResponse> {
+    return this.call('POST', `/${this.phoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(components ? { components } : {}),
+      },
+    });
   }
 
   /**

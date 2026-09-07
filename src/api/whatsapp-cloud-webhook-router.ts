@@ -111,6 +111,17 @@ export interface WhatsAppCloudMessage {
   contacts?: WhatsAppCloudContactCard[];
   /** Stickers are `image/webp` media, downloaded through the same path as images. */
   sticker?: WhatsAppCloudMediaObject;
+  /**
+   * A tap on a reply button / a pick from a list message that WE sent (Phase 3
+   * — see WhatsAppCloudClient.sendInteractiveButtons/sendInteractiveList).
+   * Exactly one of `button_reply`/`list_reply` is present, matching the
+   * interactive type that was sent.
+   */
+  interactive?: {
+    type?: string;
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string; description?: string };
+  };
   [key: string]: unknown;
 }
 
@@ -173,8 +184,9 @@ export function synthesizeVCard(contact: WhatsAppCloudContactCard | undefined): 
  * intake shape. Returns null when `from` is missing/empty (no reply target).
  * `content` is the text body for `type: 'text'`, the caption (possibly
  * empty) for `type: 'image'`/`'document'`, or a short human summary for
- * `type: 'location'` — remaining types (audio, video, ...) are still out of
- * scope and forward with empty content rather than being dropped, same
+ * `type: 'location'`, or the selected option's title for `type: 'interactive'`
+ * (a button tap / list pick) — remaining types (audio, video, ...) are still
+ * out of scope and forward with empty content rather than being dropped, same
  * posture as Slack's "no text → empty content, not null".
  *
  * Stays synchronous and pure: an attached image/document/sticker's bytes are
@@ -221,6 +233,18 @@ export function normalizeWhatsAppCloudMessage(
   } else if (msg.type === 'contacts') {
     const vcard = synthesizeVCard(msg.contacts?.[0]);
     if (vcard) meta.vcard = vcard;
+  } else if (msg.type === 'interactive') {
+    // A button tap / list pick (Phase 3). `content` becomes the DISPLAY TITLE
+    // of whatever the user selected, so the turn reads to the agent exactly as
+    // if they had typed that label — no interactive-aware agent-side handling
+    // is needed for the common case. The machine-readable `id` rides along in
+    // meta.interactive_id for agents whose logic branches on the id instead
+    // (ids are stable; titles are what the user reads and may be localized).
+    const selected = msg.interactive?.button_reply ?? msg.interactive?.list_reply;
+    if (selected) {
+      content = selected.title ?? '';
+      if (selected.id) meta.interactive_id = selected.id;
+    }
   }
 
   return { content, meta };

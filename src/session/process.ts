@@ -765,6 +765,11 @@ export class SessionProcess extends EventEmitter {
             // effective level is forwarded — 'off' means don't try to clear a
             // reaction that was never added.
             WHATSAPP_CLOUD_REACTION_LEVEL: this.agentConfig.whatsapp_cloud?.reactionLevel ?? 'ack',
+            // Template opt-in (Phase 3). Same reason as the reaction level
+            // above — the subprocess can't read agent config, so the gate has
+            // to be forwarded. Absent/false both arrive as '', which
+            // whatsapp_cloud_reply treats as "templates off".
+            WHATSAPP_CLOUD_TEMPLATES_ENABLED: this.agentConfig.whatsapp_cloud?.templatesEnabled ? '1' : '',
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.

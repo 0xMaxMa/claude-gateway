@@ -109,6 +109,17 @@ const PROTECTED_WORKSPACE_FILES = [
   'IDENTITY.md', 'USER.md', 'HEARTBEAT.md',
 ];
 
+/**
+ * One-line reminder injected into every `whatsapp_cloud` turn's <channel>
+ * block (see buildChannelXml) — the 24h customer-service window is a
+ * WhatsApp-Business-only rule the agent cannot infer from the turn itself.
+ *
+ * Must stay free of `--` so it remains a well-formed XML comment.
+ */
+export const WHATSAPP_CLOUD_WINDOW_NOTE =
+  '[WhatsApp Business: free-form replies only work within 24h of the user\'s last message. ' +
+  'Outside that window, whatsapp_cloud_reply requires template_name + template_language (see templatesEnabled).]';
+
 const MAX_API_IMAGES = 5;
 /** Extra time an api turn may keep running AFTER its soft timeout already
  *  answered the caller (#75). The soft timeout only abandons the WAIT — the
@@ -1458,6 +1469,7 @@ export class AgentRunner extends EventEmitter {
       'reply_token', // LINE: single-use reply token (push is preferred; surfaced for completeness)
       'thread_ts',   // Slack: set when the inbound message is inside a thread — pass back as thread_id to slack_reply to reply in-thread
       'account_id',  // WhatsApp: which linked number this arrived on — pass back to whatsapp_reply to answer on the same one
+      'interactive_id', // WhatsApp Cloud: the id of the tapped button / picked list row (content already carries its title)
       // NOTE: message_id is NOT listed here — the base <channel> template below
       // already unconditionally emits it; adding it here would duplicate the
       // attribute in the XML whenever meta.message_id is set (any channel).
@@ -1487,10 +1499,22 @@ export class AgentRunner extends EventEmitter {
     }
 
     const source = meta['source'] ?? 'telegram';
+
+    // Per-turn channel note (Phase 3). WhatsApp Business enforces a 24h
+    // customer-service window that no other channel here has, and the agent
+    // cannot discover it from the turn itself — it only shows up as an opaque
+    // Meta error at send time. Emitted as an XML COMMENT so it can never be
+    // mistaken for part of the user's message, and kept to ONE short line
+    // because it repeats on every single whatsapp_cloud turn. (A frozen,
+    // system-prompt-level injection would be new infra for one warning; the
+    // per-turn wrapper is the existing seam.)
+    const channelNote =
+      source === 'whatsapp_cloud' ? `<!-- ${WHATSAPP_CLOUD_WINDOW_NOTE} -->` : '';
+
     return (
       `<channel source="${source}" chat_id="${meta['chat_id'] ?? ''}" ` +
       `message_id="${meta['message_id'] ?? ''}" user="${AgentRunner.escapeXmlAttr(meta['user'] ?? '')}" ` +
-      `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${repliedBlock}${params.content ?? ''}</channel>`
+      `ts="${meta['ts'] ?? new Date().toISOString()}"${optionalAttrs}>${channelNote}${repliedBlock}${params.content ?? ''}</channel>`
     );
   }
 

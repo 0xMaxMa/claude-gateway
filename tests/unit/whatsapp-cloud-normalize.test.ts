@@ -170,6 +170,91 @@ describe('normalizeWhatsAppCloudMessage()', () => {
     expect(out?.meta.image_path).toBeUndefined();
   });
 
+  // Phase 3 — a tap on a button / a pick from a list we sent. The whole point
+  // is that it reads to the agent like typed text, so `content` is the DISPLAY
+  // TITLE, with the machine-readable id alongside it in meta.
+  describe('interactive replies (Phase 3)', () => {
+    test('button tap → content is the button title, id lands in meta.interactive_id', () => {
+      const out = normalizeWhatsAppCloudMessage({
+        from: FROM,
+        id: 'wamid.300',
+        type: 'interactive',
+        interactive: { type: 'button_reply', button_reply: { id: 'confirm_booking', title: 'Yes, confirm' } },
+      });
+      expect(out).toEqual({
+        content: 'Yes, confirm',
+        meta: {
+          source: 'whatsapp_cloud',
+          chat_id: FROM,
+          user_id: FROM,
+          user: FROM,
+          message_id: 'wamid.300',
+          interactive_id: 'confirm_booking',
+        },
+      });
+    });
+
+    test('list pick → content is the row title, id lands in meta.interactive_id', () => {
+      const out = normalizeWhatsAppCloudMessage({
+        from: FROM,
+        id: 'wamid.301',
+        type: 'interactive',
+        interactive: {
+          type: 'list_reply',
+          list_reply: { id: 'slot-1400', title: '14:00', description: 'with Dr. A' },
+        },
+      });
+      expect(out?.content).toBe('14:00');
+      expect(out?.meta.interactive_id).toBe('slot-1400');
+    });
+
+    // The row description is picker-only chrome (a grey sub-line in the list
+    // UI); the agent gets the title the user actually chose, not the blurb.
+    test("a list row's description is not folded into content", () => {
+      const out = normalizeWhatsAppCloudMessage({
+        from: FROM,
+        id: 'wamid.302',
+        type: 'interactive',
+        interactive: { list_reply: { id: 'r1', title: 'Standard', description: 'ships in 5 days' } },
+      });
+      expect(out?.content).toBe('Standard');
+    });
+
+    test('button_reply wins when both shapes are somehow present', () => {
+      const out = normalizeWhatsAppCloudMessage({
+        from: FROM,
+        id: 'wamid.303',
+        type: 'interactive',
+        interactive: {
+          button_reply: { id: 'btn', title: 'From button' },
+          list_reply: { id: 'row', title: 'From list' },
+        },
+      });
+      expect(out?.content).toBe('From button');
+      expect(out?.meta.interactive_id).toBe('btn');
+    });
+
+    // An unknown future interactive sub-type (nfm_reply, flows, ...) must
+    // still forward the turn rather than drop it — same posture as the
+    // audio/video types.
+    test('an interactive payload with no recognized reply → forwarded with empty content, no id', () => {
+      const out = normalizeWhatsAppCloudMessage({
+        from: FROM,
+        id: 'wamid.304',
+        type: 'interactive',
+        interactive: { type: 'nfm_reply' },
+      });
+      expect(out).not.toBeNull();
+      expect(out?.content).toBe('');
+      expect(out?.meta.interactive_id).toBeUndefined();
+    });
+
+    test('a plain text message never gets an interactive_id', () => {
+      const out = normalizeWhatsAppCloudMessage({ from: FROM, id: 'wamid.305', type: 'text', text: { body: 'hi' } });
+      expect(out?.meta.interactive_id).toBeUndefined();
+    });
+  });
+
   test('missing `from` → rejected (null)', () => {
     expect(normalizeWhatsAppCloudMessage({ id: 'wamid.105', type: 'text', text: { body: 'hi' } })).toBeNull();
   });

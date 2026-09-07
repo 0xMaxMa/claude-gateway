@@ -279,6 +279,16 @@ export interface AgentConfig {
      * once `whatsapp_cloud_reply` lands; `'off'` skips both. Phase 2.
      */
     reactionLevel?: 'off' | 'ack';
+    /**
+     * Allow `whatsapp_cloud_reply` to send pre-approved message TEMPLATES
+     * (Phase 3). Default false — opt-in on purpose, unlike the other Phase 2/3
+     * booleans here which default on: a template is the one send that reaches
+     * a user OUTSIDE WhatsApp's 24h customer-service window, so an agent must
+     * never gain that reach silently just by upgrading the gateway. With this
+     * unset, a template send is refused with an explanatory error rather than
+     * being dropped.
+     */
+    templatesEnabled?: boolean;
   };
   claude: {
     model: string;

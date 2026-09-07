@@ -48,7 +48,7 @@ jest.mock('child_process', () => ({
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { AgentRunner, MAX_IMAGE_SIZE_BYTES } from '../../src/agent/runner';
+import { AgentRunner, MAX_IMAGE_SIZE_BYTES, WHATSAPP_CLOUD_WINDOW_NOTE } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, StreamEvent } from '../../src/types';
 import { SessionProcess } from '../../src/session/process';
 import * as historyCleanup from '../../src/history/cleanup';
@@ -5961,4 +5961,81 @@ describe('AgentRunner — channelSource / replyToolName (whatsapp_cloud)', () =>
     expect(assistantRows).toHaveLength(1);
     expect(assistantRows[0]!.content).toBe('hi back');
   }, 15000);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildChannelXml — per-turn channel notes (Phase 3, WhatsApp feature parity)
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * buildChannelXml is a pure private static, so it is exercised directly rather
+ * than through a spawned session: what matters is the exact string the agent
+ * sees, and every other assertion in this file about it would be second-hand.
+ */
+describe('AgentRunner.buildChannelXml — WhatsApp Cloud 24h-window note', () => {
+  const build = (meta: Record<string, string>, content = 'hello'): string =>
+    (AgentRunner as unknown as {
+      buildChannelXml: (p: { content?: string; meta?: Record<string, string> }) => string;
+    }).buildChannelXml({ content, meta });
+
+  test('a whatsapp_cloud turn carries the note, as a well-formed XML comment', () => {
+    const xml = build({ source: 'whatsapp_cloud', chat_id: '66812345678', message_id: 'wamid.1' });
+    expect(xml).toContain(`<!-- ${WHATSAPP_CLOUD_WINDOW_NOTE} -->`);
+    // The note precedes the user's own content, never swallows it.
+    expect(xml).toMatch(/<!--.*-->hello<\/channel>$/);
+  });
+
+  test('the note names the escape hatch the agent would otherwise have to guess', () => {
+    const xml = build({ source: 'whatsapp_cloud', chat_id: '66812345678' });
+    expect(xml).toMatch(/24h/);
+    expect(xml).toMatch(/template_name/);
+    expect(xml).toMatch(/template_language/);
+  });
+
+  // It repeats on every single whatsapp_cloud turn, so length is a real cost.
+  test('the note stays one short line with no comment-breaking dashes', () => {
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE).not.toContain('\n');
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE).not.toContain('--');
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE.length).toBeLessThan(260);
+  });
+
+  test.each(['whatsapp', 'slack', 'line', 'telegram', 'discord'])(
+    'a %s turn gets no note — this is a WhatsApp Business rule only',
+    (source) => {
+      const xml = build({ source, chat_id: 'c1', message_id: 'm1' });
+      expect(xml).not.toContain('<!--');
+      expect(xml).toContain('>hello</channel>');
+    },
+  );
+
+  test('a turn with no source at all (telegram default) gets no note', () => {
+    expect(build({ chat_id: 'c1' })).not.toContain('<!--');
+  });
+
+  // The note is prepended ahead of the <replied> block, so a quoted WhatsApp
+  // Cloud reply keeps both, in that order, and stays well-formed.
+  test('the note coexists with a <replied> block, note first', () => {
+    const xml = build({
+      source: 'whatsapp_cloud',
+      chat_id: '66812345678',
+      replied_message_id: 'wamid.0',
+    });
+    expect(xml.indexOf('<!--')).toBeLessThan(xml.indexOf('<replied'));
+    expect(xml).toContain('<replied message_id="wamid.0"');
+  });
+
+  // Phase 3 also surfaces the tapped button/list-row id, which is useless to
+  // the agent unless buildChannelXml actually emits it.
+  test('interactive_id from a button tap is emitted as a <channel> attribute', () => {
+    const xml = build(
+      { source: 'whatsapp_cloud', chat_id: '66812345678', interactive_id: 'confirm_booking' },
+      'Yes, confirm',
+    );
+    expect(xml).toContain('interactive_id="confirm_booking"');
+    // The title still arrives as ordinary content — the tap reads like typing.
+    expect(xml).toContain('>Yes, confirm</channel>');
+  });
+
+  test('no interactive_id attribute when the turn was not a tap', () => {
+    expect(build({ source: 'whatsapp_cloud', chat_id: '66812345678' })).not.toContain('interactive_id=');
+  });
 });
