@@ -32,6 +32,9 @@ export class WhatsAppModule implements ToolModule {
         description:
           'Send a reply to the current WhatsApp conversation. ' +
           'Pass chat_id (the JID shown in the <channel> tag) and text. ' +
+          'If the <channel> tag carries an account_id, pass it too — the agent ' +
+          'may have several linked WhatsApp numbers, and account_id is the one ' +
+          'the incoming message arrived on. ' +
           'Optionally pass image_path (an absolute path) to attach an image — ' +
           'text then becomes the caption. WhatsApp has its own lightweight ' +
           'formatting (*bold*, _italic_, ~strikethrough~), not HTML or standard markdown.',
@@ -50,6 +53,13 @@ export class WhatsAppModule implements ToolModule {
               type: 'string',
               description: 'Optional absolute path to an image file to attach.',
             },
+            account_id: {
+              type: 'string',
+              description:
+                'Which linked WhatsApp number to send from — copy account_id from ' +
+                'the <channel> tag so the reply comes from the number the message ' +
+                'arrived on. Omit only if the tag has none.',
+            },
           },
           required: ['chat_id'],
         },
@@ -66,6 +76,7 @@ export class WhatsAppModule implements ToolModule {
     const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
     const text = typeof args.text === 'string' ? args.text : '';
     const imagePath = typeof args.image_path === 'string' ? args.image_path : undefined;
+    const accountId = typeof args.account_id === 'string' && args.account_id ? args.account_id : undefined;
     const agentId = process.env.GATEWAY_AGENT_ID ?? '';
     const apiUrl = process.env.GATEWAY_API_URL ?? '';
     const apiKey = process.env.GATEWAY_API_KEY ?? '';
@@ -93,7 +104,7 @@ export class WhatsAppModule implements ToolModule {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ jid: chatId, text, image_path: imagePath }),
+        body: JSON.stringify({ jid: chatId, text, image_path: imagePath, account_id: accountId }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };

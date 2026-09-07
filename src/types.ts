@@ -14,6 +14,63 @@ export interface HistoryConfig {
   maxHistoryMessages?: number;
 }
 
+/**
+ * One linked WhatsApp number (Baileys device-link) belonging to an agent.
+ *
+ * Multi-account (Phase 1 of the WhatsApp feature-parity plan): an agent used
+ * to have exactly ONE flat `whatsapp` block; it now has an array of these.
+ * Every access-control field below is per-account — two numbers on the same
+ * agent can run completely different DM/group policies.
+ *
+ * There is still NO credential field here: the "credential" remains the
+ * linked device session on disk. Its location is derived from `id` —
+ * `'default'` keeps the historical bare `<workspace>/.whatsapp-state/`
+ * directory (so upgrading a live gateway never has to move a linked
+ * session), every other account gets `<workspace>/.whatsapp-state/<id>/`.
+ */
+export interface WhatsAppAccountConfig {
+  /**
+   * Stable slug identifying this account. Doubles as the on-disk state
+   * directory suffix and as the `account_id` the `whatsapp_reply` MCP tool
+   * passes back, so it must be filesystem-safe and must never be reused for
+   * a different number. `'default'` is reserved for the pre-multi-account
+   * session (see the class doc above).
+   */
+  id: string;
+  /** Display name shown in the Settings UI (e.g. "Sales line"). Falls back to `id`. */
+  label?: string;
+  /**
+   * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
+   * Gates 1:1 conversations (JIDs ending `@s.whatsapp.net`). Necessary
+   * even though the number itself is authenticated via QR/pairing-code
+   * linking: unlike a fresh bot token, a WhatsApp number is typically the
+   * owner's real number that other people already have — without this,
+   * anyone who knows the number could reach the agent once linked.
+   */
+  dmPolicy?: 'open' | 'allowlist' | 'disabled';
+  /** Allowed sender JIDs/numbers (E.164 or bare digits — normalized at the access-gate boundary). */
+  dmAllowlist?: string[];
+  /**
+   * Group access policy (mirrors `slack.groupPolicy`/`line.groupPolicy`).
+   * Gates group JIDs (ending `@g.us`) the linked number is a member of.
+   */
+  groupPolicy?: 'open' | 'allowlist' | 'disabled';
+  /** Allowed group JIDs. */
+  groupAllowlist?: string[];
+  /**
+   * In groups, only respond when the bot is @mentioned (mirrors
+   * `slack.requireMention`/`line.requireMention`). Default true. No
+   * effect on DMs.
+   */
+  requireMention?: boolean;
+  /**
+   * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
+   * exactly). Default true (absent ⇒ on). Only has an effect under
+   * `allowlist` (closed-default) for either tier.
+   */
+  pairing?: boolean;
+}
+
 export interface AgentConfig {
   id: string;
   description: string;
@@ -149,35 +206,18 @@ export interface AgentConfig {
    */
   whatsapp?: {
     /**
-     * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
-     * Gates 1:1 conversations (JIDs ending `@s.whatsapp.net`). Necessary
-     * even though the number itself is authenticated via QR/pairing-code
-     * linking: unlike a fresh bot token, a WhatsApp number is typically the
-     * owner's real number that other people already have — without this,
-     * anyone who knows the number could reach the agent once linked.
+     * The linked numbers for this agent — one entry per WhatsApp account
+     * (Phase 1 of the WhatsApp feature-parity plan replaced the single flat
+     * block that used to live here with this array). Order is meaningful
+     * only for back-compat: `accounts[0]` is what the legacy flat
+     * `whatsapp_*` API response fields are derived from.
+     *
+     * An absent or empty array is treated as `[{ id: 'default' }]` at
+     * runtime (see `resolveWhatsAppAccounts` in src/config/whatsapp-accounts.ts),
+     * so an agent that has never been configured still gets a linkable
+     * 'default' account exactly like it did before multi-account.
      */
-    dmPolicy?: 'open' | 'allowlist' | 'disabled';
-    /** Allowed sender JIDs/numbers (E.164 or bare digits — normalized at the access-gate boundary). */
-    dmAllowlist?: string[];
-    /**
-     * Group access policy (mirrors `slack.groupPolicy`/`line.groupPolicy`).
-     * Gates group JIDs (ending `@g.us`) the linked number is a member of.
-     */
-    groupPolicy?: 'open' | 'allowlist' | 'disabled';
-    /** Allowed group JIDs. */
-    groupAllowlist?: string[];
-    /**
-     * In groups, only respond when the bot is @mentioned (mirrors
-     * `slack.requireMention`/`line.requireMention`). Default true. No
-     * effect on DMs.
-     */
-    requireMention?: boolean;
-    /**
-     * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
-     * exactly). Default true (absent ⇒ on). Only has an effect under
-     * `allowlist` (closed-default) for either tier.
-     */
-    pairing?: boolean;
+    accounts: WhatsAppAccountConfig[];
   };
   /**
    * WhatsApp — via the official Meta WhatsApp Business Cloud API (webhook +

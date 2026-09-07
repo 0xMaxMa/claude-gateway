@@ -100,7 +100,7 @@ describe('WhatsAppManager', () => {
       fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
       return { ok: true } as Response;
     }) as typeof fetch;
-    manager = new WhatsAppManager(agentConfig, 12345, tmpDir);
+    manager = new WhatsAppManager(agentConfig, 'default', 12345, tmpDir);
   });
 
   afterEach(() => {
@@ -191,10 +191,16 @@ describe('WhatsAppManager', () => {
   });
 
   describe('disconnect handling', () => {
-    it('loggedOut → unlinked, no reconnect, wipes the state dir', async () => {
+    it("loggedOut → unlinked, no reconnect, wipes the 'default' account's creds", async () => {
+      // The 'default' account shares the BARE .whatsapp-state/ dir with the
+      // channel's message-turn state and with every other account's
+      // subdirectory (see src/config/whatsapp-accounts.ts), so its wipe clears
+      // the credential FILES rather than removing the directory.
       const stateDir = path.join(tmpDir, '.whatsapp-state');
-      fs.mkdirSync(stateDir, { recursive: true });
+      const siblingDir = path.join(stateDir, 'work');
+      fs.mkdirSync(siblingDir, { recursive: true });
       fs.writeFileSync(path.join(stateDir, 'creds.json'), '{}');
+      fs.writeFileSync(path.join(siblingDir, 'creds.json'), '{}');
 
       await manager.startLinking();
       const onConnectionUpdate = listenerFor('connection.update');
@@ -202,14 +208,34 @@ describe('WhatsAppManager', () => {
         connection: 'close',
         lastDisconnect: { error: { output: { statusCode: 401 } } },
       });
-      // fsp.rm() of the state dir is a real fs promise fired from the same
-      // fire-and-forget handler — poll rather than guess a fixed delay.
-      await waitUntil(() => !fs.existsSync(stateDir));
+      // The wipe is a real fs promise fired from the same fire-and-forget
+      // handler — poll rather than guess a fixed delay.
+      await waitUntil(() => !fs.existsSync(path.join(stateDir, 'creds.json')));
 
       const status = manager.getStatus();
       expect(status.status).toBe('unlinked');
       expect(status.loggedOut).toBe(true);
-      expect(fs.existsSync(stateDir)).toBe(false);
+      // A second linked number must survive this account being logged out.
+      expect(fs.existsSync(path.join(siblingDir, 'creds.json'))).toBe(true);
+    });
+
+    it("loggedOut on a NON-default account removes only that account's directory", async () => {
+      const work = new WhatsAppManager(agentConfig, 'work', 12345, tmpDir);
+      const stateDir = path.join(tmpDir, '.whatsapp-state');
+      const workDir = path.join(stateDir, 'work');
+      fs.mkdirSync(workDir, { recursive: true });
+      fs.writeFileSync(path.join(stateDir, 'creds.json'), '{}');
+      fs.writeFileSync(path.join(workDir, 'creds.json'), '{}');
+
+      await work.startLinking();
+      listenerFor('connection.update')({
+        connection: 'close',
+        lastDisconnect: { error: { output: { statusCode: 401 } } },
+      });
+      await waitUntil(() => !fs.existsSync(workDir));
+
+      // 'default' is untouched: nested accounts get a whole-directory remove.
+      expect(fs.existsSync(path.join(stateDir, 'creds.json'))).toBe(true);
     });
 
     it('a non-loggedOut close → reconnecting, does NOT wipe state', async () => {
@@ -257,7 +283,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('an allowed DM (open dmPolicy) forwards content+meta to the callback port', async () => {
-      agentConfig.whatsapp = { dmPolicy: 'open' };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -273,7 +299,7 @@ describe('WhatsAppManager', () => {
       expect(fetchCalls[0].url).toBe('http://127.0.0.1:12345/channel');
       expect(fetchCalls[0].body).toMatchObject({
         content: 'hello',
-        meta: { source: 'whatsapp', chat_id: '66811110000@s.whatsapp.net', whatsapp_chat_type: 'user' },
+        meta: { source: 'whatsapp', chat_id: '66811110000@s.whatsapp.net', whatsapp_chat_type: 'user', account_id: 'default' },
       });
     });
 
@@ -293,7 +319,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('pairing:false suppresses the pairing-code auto-reply, still records the pending sender', async () => {
-      agentConfig.whatsapp = { pairing: false };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', pairing: false }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -305,7 +331,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('a group message requires @mention by default even under groupPolicy open', async () => {
-      agentConfig.whatsapp = { groupPolicy: 'open' };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', groupPolicy: 'open' }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -321,7 +347,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('a group message WITH @mention of the bot forwards to the callback', async () => {
-      agentConfig.whatsapp = { groupPolicy: 'open' };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', groupPolicy: 'open' }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -343,7 +369,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('requireMention:false answers every allowed group message, mentioned or not', async () => {
-      agentConfig.whatsapp = { groupPolicy: 'open', requireMention: false };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', groupPolicy: 'open', requireMention: false }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -359,7 +385,7 @@ describe('WhatsAppManager', () => {
     });
 
     it('an inbound image is downloaded, sniffed, and set as meta.image_path', async () => {
-      agentConfig.whatsapp = { dmPolicy: 'open' };
+      agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
       await open();
       listenerFor('messages.upsert')({
         type: 'notify',
@@ -410,16 +436,29 @@ describe('WhatsAppManager', () => {
   });
 
   describe('unlink()', () => {
-    it('logs out, resets status, and wipes the state dir', async () => {
+    it("logs out, resets status, and wipes the 'default' account's creds", async () => {
       const stateDir = path.join(tmpDir, '.whatsapp-state');
       await manager.startLinking();
       listenerFor('connection.update')({ connection: 'open' });
       expect(fs.existsSync(stateDir)).toBe(true);
+      fs.writeFileSync(path.join(stateDir, 'creds.json'), '{}');
 
       await manager.unlink();
       expect(mockSock.logout).toHaveBeenCalledTimes(1);
       expect(manager.getStatus().status).toBe('unlinked');
-      expect(fs.existsSync(stateDir)).toBe(false);
+      // Files gone, directory kept — it is shared (see the loggedOut test).
+      expect(fs.existsSync(path.join(stateDir, 'creds.json'))).toBe(false);
+      expect(fs.existsSync(stateDir)).toBe(true);
+    });
+
+    it('a non-default account gets its own nested state directory', async () => {
+      const work = new WhatsAppManager(agentConfig, 'work', 12345, tmpDir);
+      await work.startLinking();
+      expect(mockUseMultiFileAuthState).toHaveBeenLastCalledWith(
+        path.join(tmpDir, '.whatsapp-state', 'work'),
+      );
+      await work.unlink();
+      expect(fs.existsSync(path.join(tmpDir, '.whatsapp-state', 'work'))).toBe(false);
     });
   });
 });

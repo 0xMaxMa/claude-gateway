@@ -18,6 +18,7 @@ import { LineReplyManager } from './line-reply-manager';
 import { SlackClient } from '../api/slack-client';
 import { WhatsAppCloudClient } from '../api/whatsapp-cloud-client';
 import { WhatsAppManager, type WhatsAppStatus } from '../whatsapp/manager';
+import { DEFAULT_WHATSAPP_ACCOUNT_ID, resolveWhatsAppAccounts } from '../config/whatsapp-accounts';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -245,15 +246,28 @@ export class AgentRunner extends EventEmitter {
   // fallback/command-reply path has somewhere to deliver messages instead of
   // silently dropping them (see the Slack comment just above).
   private whatsAppCloudOutbound: WhatsAppCloudClient | null = null;
-  // Constructed once in start() (needs this.callbackPort, only resolved once
-  // startCallbackServer() runs — same reason DiscordReceiver/TelegramReceiver
-  // are built there too, not in the constructor) and then kept for the
-  // runner's lifetime — unlike SlackClient/DiscordReceiver, there's no
-  // "config changed" event to rebuild it on, since the credential IS the
-  // on-disk session, not a config.json field (see AgentConfig.whatsapp's doc
-  // comment). WhatsAppManager itself decides whether there's anything to do
-  // on start (resumeIfLinked() no-ops if never linked).
-  private whatsapp: WhatsAppManager | null = null;
+  // One live Baileys socket per linked WhatsApp account, keyed by account id
+  // (Phase 1 of the WhatsApp feature-parity plan — this used to be a single
+  // `whatsapp: WhatsAppManager | null`). Populated in start() (needs
+  // this.callbackPort, only resolved once startCallbackServer() runs — same
+  // reason DiscordReceiver/TelegramReceiver are built there too) and then
+  // DIFFED, never rebuilt wholesale, by syncWhatsAppAccounts(): unlike
+  // SlackClient/DiscordReceiver there is no credential to re-read on a config
+  // change, since the credential IS the on-disk session (see
+  // WhatsAppAccountConfig's doc comment), so tearing a linked socket down on
+  // an unrelated config edit would be pure downtime. Each manager decides for
+  // itself whether there's anything to do on start (resumeIfLinked() no-ops
+  // if that account was never linked).
+  private readonly whatsappAccounts = new Map<string, WhatsAppManager>();
+  // Serialized `agentConfig.whatsapp` as of the last sync — lets
+  // updateAgentConfig() re-diff the account set ONLY when the WhatsApp block
+  // itself changed, not on every unrelated config edit.
+  private whatsappConfigSnapshot: string | undefined;
+  // chatId → the account id its last inbound message arrived on. Mirrors
+  // slackThreadTs above: it lets writeAutoForward (and a whatsapp_reply call
+  // that omits account_id) answer on the SAME number the user wrote to
+  // instead of guessing 'default' and replying from the wrong line.
+  private readonly whatsappAccountForChat = new Map<string, string>();
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -500,6 +514,15 @@ export class AgentRunner extends EventEmitter {
             const threadTs = meta['thread_ts'];
             if (threadTs) this.slackThreadTs.set(chatId, threadTs);
             else this.slackThreadTs.delete(chatId);
+          }
+
+          // WhatsApp: remember which linked number this chat last came in on,
+          // so a reply that doesn't name an account_id (the auto-forward
+          // fallback, or a whatsapp_reply call that omitted it) still goes out
+          // on the number the user actually wrote to. Same shape as the Slack
+          // thread-context stash just above.
+          if (channelSource === 'whatsapp' && meta['account_id']) {
+            this.whatsappAccountForChat.set(chatId, meta['account_id']);
           }
 
           // LINE slow-LLM postback: stash this turn's reply token + arm the
@@ -1418,6 +1441,7 @@ export class AgentRunner extends EventEmitter {
       'user_id',     // LINE: the userId the session passes back to line_reply
       'reply_token', // LINE: single-use reply token (push is preferred; surfaced for completeness)
       'thread_ts',   // Slack: set when the inbound message is inside a thread — pass back as thread_id to slack_reply to reply in-thread
+      'account_id',  // WhatsApp: which linked number this arrived on — pass back to whatsapp_reply to answer on the same one
       // NOTE: message_id is NOT listed here — the base <channel> template below
       // already unconditionally emits it; adding it here would duplicate the
       // attribute in the XML whenever meta.message_id is set (any channel).
@@ -2986,7 +3010,10 @@ export class AgentRunner extends EventEmitter {
     // (see WhatsAppManager's doc comment): reach the live socket this
     // process already holds directly.
     if (this.channelFor(chatId) === 'whatsapp') {
-      void this.whatsapp?.sendMessage(chatId, text).catch((err: unknown) => {
+      // No account_id to go on here (this is the fallback path, not a tool
+      // call), so whatsAppManagerFor falls back to the account this chat's
+      // last inbound message arrived on — the number the user wrote to.
+      void this.sendWhatsAppMessage(chatId, text).catch((err: unknown) => {
         this.logger.warn('WhatsApp auto-forward failed', {
           chatId,
           error: err instanceof Error ? err.message : String(err),
@@ -3114,13 +3141,14 @@ export class AgentRunner extends EventEmitter {
     this.startLineReply();
     this.startSlackOutbound();
     this.startWhatsAppCloudOutbound();
-    // Unconditional construction (unlike every credential-gated channel
-    // above) — WhatsAppManager checks disk for a previously-linked session
-    // itself; there's no config field to gate on. A brand-new agent that's
-    // never linked just no-ops here and stays 'unlinked' until the user
-    // starts a QR/pairing flow via the API.
-    this.whatsapp = new WhatsAppManager(this.agentConfig, this.callbackPort, this.gatewayConfig.gateway.logDir);
-    void this.whatsapp.resumeIfLinked();
+    // Unconditional (unlike every credential-gated channel above) — each
+    // WhatsAppManager checks disk for a previously-linked session itself;
+    // there's no config field to gate on, and an agent with no `whatsapp`
+    // block still gets the implicit 'default' account (see
+    // resolveWhatsAppAccounts). A brand-new agent that's never linked just
+    // no-ops here and stays 'unlinked' until the user starts a QR/pairing
+    // flow via the API.
+    this.syncWhatsAppAccounts();
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
@@ -3177,33 +3205,126 @@ export class AgentRunner extends EventEmitter {
     // to pick it up, same reasoning as Slack above.
     this.stopWhatsAppCloudOutbound();
     this.startWhatsAppCloudOutbound();
-    // WhatsApp has no credential to rebuild on — just push the new config
-    // (access-control fields) into the already-running manager.
-    this.whatsapp?.updateAgentConfig(newConfig);
+    // WhatsApp has no credential to rebuild on — push the new config
+    // (access-control fields) into every already-running manager, and
+    // add/remove managers only if the set of configured accounts changed.
+    this.syncWhatsAppAccounts();
   }
 
-  getWhatsAppStatus(): WhatsAppStatus | undefined {
-    return this.whatsapp?.getStatus();
+  /**
+   * Reconcile `this.whatsappAccounts` with `agentConfig.whatsapp.accounts`.
+   *
+   * Diffing (rather than teardown+recreate) is load-bearing here: a manager
+   * holds a live, authenticated Baileys socket that can take tens of seconds
+   * to re-establish, so an edit to account "sales" must not drop account
+   * "default"'s connection. Accounts that survive the diff only get the new
+   * AgentConfig pushed into them — their socket is untouched.
+   *
+   * Removal uses stop() (socket teardown), never unlink(): dropping an
+   * account from config must not silently wipe its on-disk session. The
+   * DELETE .../whatsapp/accounts/:id route unlinks explicitly before it
+   * rewrites config.
+   */
+  private syncWhatsAppAccounts(): void {
+    const snapshot = JSON.stringify(this.agentConfig.whatsapp ?? null);
+    const accounts = resolveWhatsAppAccounts(this.agentConfig.whatsapp);
+
+    // Always push the fresh config into live managers — access-control fields
+    // are read live off it on every inbound message.
+    for (const manager of this.whatsappAccounts.values()) {
+      manager.updateAgentConfig(this.agentConfig);
+    }
+
+    // Nothing about the WhatsApp block moved ⇒ the account SET can't have
+    // changed either, so skip the diff entirely.
+    if (this.whatsappConfigSnapshot === snapshot && this.whatsappAccounts.size > 0) return;
+    this.whatsappConfigSnapshot = snapshot;
+
+    const wanted = new Set(accounts.map((a) => a.id));
+
+    for (const [accountId, manager] of [...this.whatsappAccounts]) {
+      if (wanted.has(accountId)) continue;
+      manager.stop();
+      this.whatsappAccounts.delete(accountId);
+      this.logger.info('WhatsApp account removed', { agentId: this.agentConfig.id, accountId });
+    }
+
+    for (const account of accounts) {
+      if (this.whatsappAccounts.has(account.id)) continue;
+      const manager = new WhatsAppManager(
+        this.agentConfig,
+        account.id,
+        this.callbackPort,
+        this.gatewayConfig.gateway.logDir,
+      );
+      this.whatsappAccounts.set(account.id, manager);
+      void manager.resumeIfLinked();
+      this.logger.info('WhatsApp account started', { agentId: this.agentConfig.id, accountId: account.id });
+    }
   }
 
-  async startWhatsAppLinking(): Promise<void> {
-    if (!this.whatsapp) throw new Error('Agent not started');
-    await this.whatsapp.startLinking();
+  /** Live managers, in configured order. */
+  private whatsAppManagers(): WhatsAppManager[] {
+    return resolveWhatsAppAccounts(this.agentConfig.whatsapp)
+      .map((a) => this.whatsappAccounts.get(a.id))
+      .filter((m): m is WhatsAppManager => !!m);
   }
 
-  async requestWhatsAppPairingCode(phoneNumber: string): Promise<string> {
-    if (!this.whatsapp) throw new Error('Agent not started');
-    return this.whatsapp.requestPairingCode(phoneNumber);
+  /**
+   * Pick the manager a call should use.
+   *
+   * An EXPLICIT accountId must exist — silently falling back would send a
+   * reply from the wrong number, which on WhatsApp is visible to the
+   * recipient and unrecoverable. Without one, prefer the account the chat's
+   * last inbound message arrived on (so a reply leaves on the number the user
+   * actually wrote to), then 'default', then — for an agent whose only
+   * account is named something else — its single account.
+   */
+  private whatsAppManagerFor(chatId: string | undefined, accountId?: string): WhatsAppManager {
+    if (accountId) {
+      const explicit = this.whatsappAccounts.get(accountId);
+      if (!explicit) throw new Error(`Unknown WhatsApp account '${accountId}'`);
+      return explicit;
+    }
+    const remembered = chatId ? this.whatsappAccountForChat.get(chatId) : undefined;
+    const managers = this.whatsAppManagers();
+    const picked =
+      (remembered ? this.whatsappAccounts.get(remembered) : undefined) ??
+      this.whatsappAccounts.get(DEFAULT_WHATSAPP_ACCOUNT_ID) ??
+      managers[0];
+    if (!picked) throw new Error('Agent not started');
+    return picked;
   }
 
-  async unlinkWhatsApp(): Promise<void> {
-    if (!this.whatsapp) throw new Error('Agent not started');
-    await this.whatsapp.unlink();
+  /** Live link status for one account (defaults to 'default'). */
+  getWhatsAppStatus(accountId: string = DEFAULT_WHATSAPP_ACCOUNT_ID): WhatsAppStatus | undefined {
+    return this.whatsappAccounts.get(accountId)?.getStatus();
   }
 
-  async sendWhatsAppMessage(jid: string, text: string, imagePath?: string): Promise<void> {
-    if (!this.whatsapp) throw new Error('Agent not started');
-    await this.whatsapp.sendMessage(jid, text, imagePath);
+  /** Configured account ids that currently have a live manager. */
+  getWhatsAppAccountIds(): string[] {
+    return this.whatsAppManagers().map((m) => m.accountId);
+  }
+
+  async startWhatsAppLinking(accountId?: string): Promise<void> {
+    await this.whatsAppManagerFor(undefined, accountId).startLinking();
+  }
+
+  async requestWhatsAppPairingCode(phoneNumber: string, accountId?: string): Promise<string> {
+    return this.whatsAppManagerFor(undefined, accountId).requestPairingCode(phoneNumber);
+  }
+
+  async unlinkWhatsApp(accountId?: string): Promise<void> {
+    await this.whatsAppManagerFor(undefined, accountId).unlink();
+  }
+
+  async sendWhatsAppMessage(
+    jid: string,
+    text: string,
+    imagePath?: string,
+    accountId?: string,
+  ): Promise<void> {
+    await this.whatsAppManagerFor(jid, accountId).sendMessage(jid, text, imagePath);
   }
 
   startSlackOutbound(): void {
@@ -3338,9 +3459,14 @@ export class AgentRunner extends EventEmitter {
     // other, and shutdown latency is user-visible.
     const receiversStopped = [this.receiver?.stop(), this.discordReceiver?.stop()];
     // stop(), not unlink() — gateway shutdown should NOT wipe a linked
-    // session; resumeIfLinked() picks it back up on next boot. Synchronous
-    // (no socket-close promise to await), unlike the receivers above.
-    this.whatsapp?.stop();
+    // session; resumeIfLinked() picks each account back up on next boot.
+    // Synchronous (no socket-close promise to await), unlike the receivers above.
+    for (const manager of this.whatsappAccounts.values()) manager.stop();
+    this.whatsappAccounts.clear();
+    this.whatsappAccountForChat.clear();
+    // Force syncWhatsAppAccounts() to rebuild from scratch if this runner is
+    // started again, rather than short-circuiting on a stale snapshot.
+    this.whatsappConfigSnapshot = undefined;
     this.stopLineReply();
     await Promise.all([
       ...receiversStopped,

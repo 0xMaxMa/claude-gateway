@@ -198,7 +198,12 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
   slack: '.slack-state',
   // Dual-purpose for WhatsApp: this is ALSO where WhatsAppManager's
   // useMultiFileAuthState() persists Baileys' creds.json — not just
-  // message-turn state like the other channels' subdirs.
+  // message-turn state like the other channels' subdirs. Since the
+  // multi-account change (see src/config/whatsapp-accounts.ts) only the
+  // 'default' account's creds sit here directly; every other account nests
+  // under `<accountId>/`. Message-turn state (typing, restart signals) stays
+  // at this bare path for ALL accounts — it's keyed by sessionId/chatId, and a
+  // chat only ever belongs to one account, so nothing collides.
   whatsapp: '.whatsapp-state',
   // WhatsApp Cloud has no on-disk session (real Meta-issued credentials live
   // in config.json, not here — see AgentConfig.whatsapp_cloud's doc comment),

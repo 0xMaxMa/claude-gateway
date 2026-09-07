@@ -100,6 +100,16 @@ describe('WhatsAppModule', () => {
       });
     });
 
+    test('forwards account_id so the reply goes out from the number it arrived on', async () => {
+      const mod = new WhatsAppModule();
+      await mod.handleTool('whatsapp_reply', {
+        chat_id: '66812345678@s.whatsapp.net',
+        text: 'hi',
+        account_id: 'work',
+      });
+      expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ account_id: 'work' });
+    });
+
     test('a non-ok response surfaces the server error message', async () => {
       global.fetch = (async () =>
         ({ ok: false, status: 502, json: async () => ({ error: 'WhatsApp is not linked' }) }) as Response) as typeof fetch;

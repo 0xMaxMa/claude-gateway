@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { GatewayConfig, Logger } from '../types';
 import { resolveGatewayPublicUrl } from './public-url';
+import { upgradeAgentWhatsAppAccounts } from './whatsapp-accounts';
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -236,6 +237,12 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       skipAgent(String((agent as Record<string, unknown>).id || `index ${i}`), error);
       continue;
     }
+    // Normalize a legacy flat `whatsapp` block into the multi-account
+    // `{ accounts: [...] }` shape BEFORE anything downstream reads it, so
+    // runtime is always correct even when the write-back at boot
+    // (upgradeWhatsAppAccountsFile) couldn't persist — e.g. a read-only
+    // config volume. Idempotent: an already-upgraded agent is untouched.
+    upgradeAgentWhatsAppAccounts(agent as Record<string, unknown>);
     validAgents.push(agent as Record<string, unknown>);
   }
 

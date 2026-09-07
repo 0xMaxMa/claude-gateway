@@ -10,11 +10,16 @@
  * src/api/router.ts's internal /whatsapp/send route), not something an MCP
  * subprocess can independently reconnect for every reply.
  *
- * One WhatsAppManager per agent, created once by AgentRunner and kept for
- * the runner's lifetime (unlike SlackClient/DiscordReceiver, which are
- * torn down and rebuilt on every config change — there is no "config
- * change" for WhatsApp to react to, since the credential IS the on-disk
- * session, not a config.json field).
+ * One WhatsAppManager per LINKED ACCOUNT (Phase 1 of the WhatsApp
+ * feature-parity plan made this multi-account; it used to be one per agent).
+ * AgentRunner keeps a Map<accountId, WhatsAppManager> and only adds/removes
+ * entries as `agentConfig.whatsapp.accounts` changes — an existing account's
+ * live socket is never torn down just because a sibling account's config
+ * moved, since the credential IS the on-disk session, not a config.json field.
+ *
+ * The account's id selects its session directory: 'default' keeps the
+ * historical bare `<workspace>/.whatsapp-state/`, anything else nests under
+ * it (see whatsAppStateDir in src/config/whatsapp-accounts.ts).
  */
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -52,7 +57,12 @@ async function loadBaileys(): Promise<BaileysModule> {
 import type { Boom } from '@hapi/boom';
 import * as QRCode from 'qrcode';
 import pino from 'pino';
-import { AgentConfig } from '../types';
+import { AgentConfig, WhatsAppAccountConfig } from '../types';
+import {
+  DEFAULT_WHATSAPP_ACCOUNT_ID,
+  findWhatsAppAccount,
+  whatsAppStateDir,
+} from '../config/whatsapp-accounts';
 import { createLogger } from '../logger';
 import { MediaStore } from '../history/media-store';
 import { sniffImageExt } from '../shared/image-sniff';
@@ -121,18 +131,62 @@ export class WhatsAppManager {
 
   constructor(
     private agentConfig: AgentConfig,
+    /**
+     * Which of the agent's WhatsApp accounts this instance owns. Selects the
+     * on-disk session directory, tags every event forwarded to the runner,
+     * and picks the access-control block read on each inbound message.
+     */
+    readonly accountId: string,
     private readonly callbackPort: number,
     private readonly logDir: string,
   ) {
-    this.stateDir = path.join(agentConfig.workspace, '.whatsapp-state');
-    this.logger = createLogger(`${agentConfig.id}:whatsapp`, logDir);
+    this.stateDir = whatsAppStateDir(agentConfig.workspace, accountId);
+    this.logger = createLogger(
+      accountId === DEFAULT_WHATSAPP_ACCOUNT_ID
+        ? `${agentConfig.id}:whatsapp`
+        : `${agentConfig.id}:whatsapp:${accountId}`,
+      logDir,
+    );
   }
 
   updateAgentConfig(newConfig: AgentConfig): void {
     this.agentConfig = newConfig;
     // No credential to react to (see class doc comment) — access-control
-    // fields (dmPolicy etc.) are read live off this.agentConfig on every
+    // fields (dmPolicy etc.) are read live off this.accountConfig() on every
     // inbound message, so nothing else needs to happen here.
+  }
+
+  /**
+   * This account's access-control block. Undefined when the account isn't in
+   * config at all (an unconfigured agent's implicit 'default'), which the
+   * gate treats exactly like an empty block — closed by default.
+   */
+  private accountConfig(): WhatsAppAccountConfig | undefined {
+    return findWhatsAppAccount(this.agentConfig.whatsapp, this.accountId);
+  }
+
+  /**
+   * Wipe this account's linked session.
+   *
+   * The 'default' account shares the bare `.whatsapp-state/` directory with
+   * BOTH the channel's message-turn state and every other account's
+   * subdirectory (see whatsAppStateDir), so a blind `rm -rf` of it would
+   * unlink sibling accounts as collateral. Delete only the files at the top
+   * level there — Baileys' `creds.json` and key files — and leave
+   * subdirectories alone. Non-default accounts own their directory outright,
+   * so those are removed wholesale.
+   */
+  private async wipeStateDir(): Promise<void> {
+    if (this.accountId !== DEFAULT_WHATSAPP_ACCOUNT_ID) {
+      await fsp.rm(this.stateDir, { recursive: true, force: true }).catch(() => {});
+      return;
+    }
+    const entries = await fsp.readdir(this.stateDir, { withFileTypes: true }).catch(() => []);
+    await Promise.all(
+      entries
+        .filter((e) => e.isFile())
+        .map((e) => fsp.rm(path.join(this.stateDir, e.name), { force: true }).catch(() => {})),
+    );
   }
 
   getStatus(): WhatsAppStatus {
@@ -148,7 +202,10 @@ export class WhatsAppManager {
   /** Resume a previously-linked session on gateway boot — no-op if never linked. */
   async resumeIfLinked(): Promise<void> {
     if (!fs.existsSync(path.join(this.stateDir, 'creds.json'))) return;
-    this.logger.info('Resuming previously-linked WhatsApp session', { agentId: this.agentConfig.id });
+    this.logger.info('Resuming previously-linked WhatsApp session', {
+      agentId: this.agentConfig.id,
+      accountId: this.accountId,
+    });
     await this.connect();
   }
 
@@ -264,7 +321,7 @@ export class WhatsAppManager {
         });
         // The old session is dead; wipe it so a fresh link doesn't try to
         // resume invalid creds.
-        await fsp.rm(this.stateDir, { recursive: true, force: true }).catch(() => {});
+        await this.wipeStateDir();
         return;
       }
       this.status = 'reconnecting';
@@ -296,12 +353,13 @@ export class WhatsAppManager {
       const resolved = resolveWhatsAppSource(msg as WhatsAppMessageLike);
       if (resolved.kind === 'other' || !resolved.conversationId) continue;
 
-      const cfg = this.agentConfig.whatsapp;
+      const cfg = this.accountConfig();
       const deniedAgentId = this.agentConfig.id;
 
       if (!isResolvedSourceAllowed(cfg, resolved)) {
         this.logger.debug('WhatsApp message denied', {
           agentId: deniedAgentId,
+          accountId: this.accountId,
           kind: resolved.kind,
           conversationId: resolved.conversationId,
         });
@@ -341,6 +399,12 @@ export class WhatsAppManager {
         user: resolved.senderId,
         message_id: msg.key?.id ?? '',
         whatsapp_chat_type: resolved.kind,
+        // Which linked number this arrived on. Round-trips through the
+        // <channel> tag (AgentRunner.buildChannelXml's optionalAttrs) so the
+        // session can hand it straight back to whatsapp_reply, and is also
+        // stashed runner-side per chat so an auto-forward reply without an
+        // explicit account_id still leaves on the same number.
+        account_id: this.accountId,
       };
 
       // Inbound image — best-effort, same posture as Slack's downloadSlackImage:
@@ -423,7 +487,7 @@ export class WhatsAppManager {
     this.pairingCode = undefined;
     this.phoneNumber = undefined;
     this.loggedOut = false;
-    await fsp.rm(this.stateDir, { recursive: true, force: true }).catch(() => {});
+    await this.wipeStateDir();
   }
 
   /** Tear down without wiping state (gateway shutdown — a reconnect on next boot should resume). */
