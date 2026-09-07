@@ -145,14 +145,20 @@ describe('image_params.image_refs validation (#73)', () => {
 });
 
 describe('buildImageParamsNote with image_refs (#73)', () => {
+  const MODEL_NOTE =
+    'The user explicitly SELECTED model="gpt-image" in the composer. ' +
+    'Call generate_image with that exact model — do NOT call action="list" to second-guess an ' +
+    'explicit selection or substitute a different model.\n';
+
   const LEGACY_NOTE =
     '<image-params model="gpt-image" quality="high" />\n' +
     'The user selected the image-generation options above in the composer. When the request ' +
     'involves creating or editing an image, call the generate_image tool (action="generate") ' +
     'using these values (pass image_ref as the "image" argument for image-to-image), then ' +
-    'deliver the returned image with your reply tool.\n';
+    'deliver the returned image with your reply tool.\n' +
+    MODEL_NOTE;
 
-  it('0 refs → legacy self-closing output is unchanged', () => {
+  it('0 refs → legacy self-closing output, plus the authoritative model note', () => {
     expect(buildNote({ model: 'gpt-image', quality: 'high' })).toBe(LEGACY_NOTE);
     expect(buildNote({ model: 'gpt-image', quality: 'high', image_refs: [] })).toBe(LEGACY_NOTE);
   });
@@ -164,8 +170,16 @@ describe('buildImageParamsNote with image_refs (#73)', () => {
         'The user selected the image-generation options above in the composer. When the request ' +
         'involves creating or editing an image, call the generate_image tool (action="generate") ' +
         'using these values (pass image_ref as the "image" argument for image-to-image), then ' +
-        'deliver the returned image with your reply tool.\n',
+        'deliver the returned image with your reply tool.\n' +
+        MODEL_NOTE,
     );
+  });
+
+  it('no model → no authoritative model note (only refs/values wording)', () => {
+    // The model note is gated on p.model; a refs-only send must not fabricate one.
+    const note = buildNote({ quality: 'high' });
+    expect(note).not.toContain('explicitly SELECTED model=');
+    expect(note).not.toContain('substitute a different model');
   });
 
   it('returns empty string when nothing usable is present', () => {
@@ -200,6 +214,7 @@ describe('buildImageParamsNote with image_refs (#73)', () => {
         'The user selected the image-generation options above in the composer. When the request ' +
         'involves creating or editing an image, call the generate_image tool (action="generate") ' +
         'using these values, then deliver the returned image with your reply tool.\n' +
+        MODEL_NOTE +
         'The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ' +
         'Pass all 3 refs as the "images" argument of generate_image, in the same order. ' +
         'Do NOT reinterpret which images they are, do NOT call list_refs to ' +
