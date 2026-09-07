@@ -1284,13 +1284,24 @@ export class AgentRunner extends EventEmitter {
     ].filter(Boolean);
     const refs = (p.image_refs ?? []).filter((r) => typeof r === 'string' && r.trim().length > 0);
     if (!attrs.length && !refs.length) return '';
+    // Make the model authoritative, mirroring the explicit-selection wording used
+    // for reference images below. The composer dropdown is the user's explicit
+    // choice, but the generate_image schema lets the agent pick its own model; when
+    // the model isn't nailed down the agent falls back to action="list" and
+    // self-selects a different one (the composer selection is then silently ignored).
+    const modelNote = p.model
+      ? `The user explicitly SELECTED model="${AgentRunner.escapeXmlAttr(p.model)}" in the composer. ` +
+        `Call generate_image with that exact model — do NOT call action="list" to second-guess an ` +
+        `explicit selection or substitute a different model.\n`
+      : '';
     if (!refs.length) {
       return (
         `<image-params ${attrs.join(' ')} />\n` +
         `The user selected the image-generation options above in the composer. When the request ` +
         `involves creating or editing an image, call the generate_image tool (action="generate") ` +
         `using these values (pass image_ref as the "image" argument for image-to-image), then ` +
-        `deliver the returned image with your reply tool.\n`
+        `deliver the returned image with your reply tool.\n` +
+        modelNote
       );
     }
     // Explicitly selected reference images (#73). Rendered as nested elements so a
@@ -1308,6 +1319,7 @@ export class AgentRunner extends EventEmitter {
       `The user selected the image-generation options above in the composer. When the request ` +
       `involves creating or editing an image, call the generate_image tool (action="generate") ` +
       `using these values, then deliver the returned image with your reply tool.\n` +
+      modelNote +
       `The user explicitly SELECTED the reference image(s) listed above in the composer, in this order. ` +
       `${passInstruction} Do NOT reinterpret which images they are, do NOT call list_refs to ` +
       `second-guess an explicit selection, and do not drop any of them. ` +
