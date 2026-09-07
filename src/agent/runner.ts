@@ -1245,6 +1245,14 @@ export class AgentRunner extends EventEmitter {
             senderId: meta['user_id'] ?? meta['chat_id'] ?? undefined,
             platformMessageId: meta['message_id'] ?? undefined,
             mediaFiles: mediaFiles.length > 0 ? mediaFiles : undefined,
+            // Reply context (WhatsApp Phase 2) — the same meta keys buildChannelXml
+            // renders into <replied> for the agent, persisted so the web dashboard
+            // can show "in reply to X" instead of losing it after the turn.
+            // whatsapp_cloud only ever sets replied_message_id (its webhook reports
+            // the quoted id and nothing else), so the other two stay undefined there.
+            repliedToMessageId: meta['replied_message_id'] ?? undefined,
+            repliedToText: meta['replied_text'] ?? undefined,
+            repliedToUser: meta['replied_user'] ?? undefined,
             ts: userTs,
           });
         }

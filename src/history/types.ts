@@ -51,6 +51,23 @@ export interface HistoryMessage {
    *  the UI joins them against the session image catalog to show which earlier
    *  images the message pointed at. Never used for generation replay. */
   imageRefs?: string[];
+  /** Reply context of an inbound message that quoted an earlier one (WhatsApp
+   *  Phase 2). Sourced from the `replied_*` meta keys both WhatsApp channels
+   *  populate — the same ones buildChannelXml renders into `<replied>` for the
+   *  agent — persisted here so the web dashboard can show "in reply to X".
+   *
+   *  Named repliedTo* rather than mirroring the raw meta keys, to stay with this
+   *  interface's camelCase convention (senderId / platformMessageId).
+   *
+   *  Display-only. Never used to compose or send a reply.
+   *
+   *  Availability differs per channel: Baileys (`whatsapp`) inlines the quoted
+   *  message so all three are set; the Cloud API (`whatsapp_cloud`) webhook
+   *  reports only the quoted message's id, so repliedToText/repliedToUser stay
+   *  undefined there. */
+  repliedToMessageId?: string;
+  repliedToText?: string;
+  repliedToUser?: string;
   ts: number;
 }
 
