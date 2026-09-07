@@ -74,6 +74,7 @@ import {
   type WhatsAppMessageLike,
 } from '../api/whatsapp-access';
 import { chunkText } from '../shared/text-chunk';
+import { optimizeImageFile } from '../shared/image-optimize';
 import { WHATSAPP_ACK_EMOJI } from '../shared/whatsapp-ack';
 import {
   recordDeniedSender,
@@ -757,7 +758,31 @@ export class WhatsAppManager {
     if (imagePath) {
       const stat = await fsp.stat(imagePath).catch(() => null);
       if (!stat) throw new Error(`image not found: ${imagePath}`);
-      if (stat.size > MAX_IMAGE_BYTES) {
+
+      // Auto-optimize an over-cap PHOTO instead of refusing the whole reply.
+      // Deliberately skipped when asDocument is set: that mode exists to
+      // deliver the exact bytes (see the forceDocument note below), so
+      // recompressing there would defeat the only reason to choose it — an
+      // over-cap document still throws, exactly as before.
+      //
+      // The throw below is kept as a backstop rather than removed: optimizeImage
+      // is best-effort and can hand back something still over the cap (a
+      // non-image file, sharp unavailable), and silently handing WhatsApp bytes
+      // it will reject is worse than a readable error the agent can act on.
+      let sendPath = imagePath;
+      let sendBytes = stat.size;
+      if (sendBytes > MAX_IMAGE_BYTES && !opts.asDocument) {
+        sendPath = await optimizeImageFile(imagePath, MAX_IMAGE_BYTES).catch(() => imagePath);
+        if (sendPath !== imagePath) {
+          sendBytes = (await fsp.stat(sendPath).catch(() => null))?.size ?? sendBytes;
+          this.logger.info('Outbound WhatsApp image optimized to fit the size cap', {
+            agentId: this.agentConfig.id,
+            originalBytes: stat.size,
+            optimizedBytes: sendBytes,
+          });
+        }
+      }
+      if (sendBytes > MAX_IMAGE_BYTES) {
         throw new Error(`image exceeds ${MAX_IMAGE_BYTES} byte cap`);
       }
       const caption = parts[0] || undefined;
@@ -772,7 +797,7 @@ export class WhatsAppManager {
             caption,
             ...mentionField,
           }
-        : { image: { url: imagePath }, caption, ...mentionField };
+        : { image: { url: sendPath }, caption, ...mentionField };
       await send(content, firstOpts);
       for (const chunk of parts.slice(1)) {
         await send({ text: chunk, ...mentionField });

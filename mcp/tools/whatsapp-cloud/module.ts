@@ -27,6 +27,11 @@ import type { ToolModule, McpToolDefinition, McpToolResult, ToolVisibility } fro
 // never src/ directly (see tests/unit/mcp-no-src-imports.test.ts). `npm run
 // build` must have run at least once for this import to resolve locally.
 import { WhatsAppCloudClient } from '../../../dist/api/whatsapp-cloud-client.js';
+// Same dist-only rule as the client import above. MediaStore is reached for
+// its image size cap alone — the Baileys channel's outbound path already
+// measures against that exact value, and a second literal here would drift.
+import { MediaStore } from '../../../dist/history/media-store.js';
+import { optimizeImageFile } from '../../../dist/shared/image-optimize.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
 
 /**
@@ -159,7 +164,9 @@ export class WhatsAppCloudModule implements ToolModule {
               items: { type: 'string' },
               description:
                 'Absolute file paths to attach (images or PDF documents). Optional — text can be ' +
-                'sent alone, files can be sent alone, or both together (text becomes the first file\'s caption).',
+                'sent alone, files can be sent alone, or both together (text becomes the first file\'s caption). ' +
+                'An oversized image is downscaled automatically, so a large screenshot or chart does not ' +
+                'need to be resized before calling this.',
             },
             buttons: {
               type: 'array',
@@ -369,12 +376,31 @@ export class WhatsAppCloudModule implements ToolModule {
         for (let i = 0; i < files.length; i++) {
           const f = files[i]!;
           const mime = guessMimeType(f);
-          const uploaded = await client.uploadMedia(f, mime);
+          const isImage = mime.startsWith('image/');
+
+          // Auto-optimize an over-cap PHOTO rather than letting Meta reject the
+          // upload. Only on the image branch: the extension-based image-vs-
+          // document decision below IS this channel's equivalent of Baileys'
+          // asDocument flag (the Cloud API has no single force-document
+          // toggle), and a document send must deliver its exact bytes.
+          let uploadPath = f;
+          let uploadMime = mime;
+          if (isImage) {
+            const size = fs.statSync(f).size;
+            if (size > MediaStore.maxUploadBytes) {
+              uploadPath = await optimizeImageFile(f, MediaStore.maxUploadBytes).catch(() => f);
+              // optimizeImageFile always emits JPEG; keep the declared mime in
+              // step with the bytes actually being uploaded.
+              if (uploadPath !== f) uploadMime = 'image/jpeg';
+            }
+          }
+
+          const uploaded = await client.uploadMedia(uploadPath, uploadMime);
           if ('error' in uploaded) {
             throw new Error(uploaded.error);
           }
           const caption = i === 0 ? (text || undefined) : undefined;
-          const sent = mime.startsWith('image/')
+          const sent = isImage
             ? await client.sendImage(chatId, uploaded.mediaId, caption)
             : await client.sendDocument(chatId, uploaded.mediaId, path.basename(f), caption);
           if (sent.error) {

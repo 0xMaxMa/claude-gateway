@@ -17,6 +17,13 @@ const sendInteractiveButtons = jest.fn(async () => ({ messages: [{ id: 'wamid.ou
 const sendInteractiveList = jest.fn(async () => ({ messages: [{ id: 'wamid.out' }] }) as Record<string, unknown>);
 const sendTemplate = jest.fn(async () => ({ messages: [{ id: 'wamid.out' }] }) as Record<string, unknown>);
 
+// Media send path — hoisted to module level (rather than the per-instance
+// jest.fn()s these used to be) so the auto-optimize suite below can assert
+// exactly which path and mime got uploaded.
+const uploadMedia = jest.fn(async () => ({ mediaId: 'media-1' }) as Record<string, unknown>);
+const sendImage = jest.fn(async () => ({ messages: [{ id: 'wamid.out' }] }) as Record<string, unknown>);
+const sendDocument = jest.fn(async () => ({ messages: [{ id: 'wamid.out' }] }) as Record<string, unknown>);
+
 jest.mock(
   '../../dist/api/whatsapp-cloud-client.js',
   () => ({
@@ -26,14 +33,38 @@ jest.mock(
       sendInteractiveButtons,
       sendInteractiveList,
       sendTemplate,
-      uploadMedia: jest.fn(),
-      sendImage: jest.fn(),
-      sendDocument: jest.fn(),
+      uploadMedia,
+      sendImage,
+      sendDocument,
     })),
   }),
   { virtual: true },
 );
 
+/**
+ * The outbound image cap, faked small so these tests can use byte-sized
+ * fixtures instead of writing 20MB files. The module reads it off MediaStore
+ * — the same value the Baileys channel measures against — through dist/, the
+ * only path mcp/** may import from.
+ */
+const FAKE_IMAGE_CAP = 1000;
+jest.mock(
+  '../../dist/history/media-store.js',
+  () => ({ MediaStore: { maxUploadBytes: 1000 } }),
+  { virtual: true },
+);
+
+/** Passthrough by default — "nothing could be gained", same as the real contract. */
+const optimizeImageFile = jest.fn(async (p: string, _maxBytes: number) => p);
+jest.mock(
+  '../../dist/shared/image-optimize.js',
+  () => ({ optimizeImageFile: (...a: unknown[]) => optimizeImageFile(...(a as [string, number])) }),
+  { virtual: true },
+);
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { WhatsAppCloudModule, buildTemplateComponents } from '../../mcp/tools/whatsapp-cloud/module';
 
 /** `sendText` declares no parameters on the mock, so read args loosely. */
@@ -458,5 +489,109 @@ describe('WhatsAppCloudModule — Phase 3 interactive + templates', () => {
         },
       ]);
     });
+  });
+});
+
+/**
+ * Outbound image auto-optimize.
+ *
+ * An over-cap photo used to reach Meta as-is and get rejected, losing the whole
+ * reply. It is now downscaled first. The line that matters most here is the one
+ * these tests draw around it: a DOCUMENT send must still deliver its exact
+ * bytes. The Cloud API has no single force-document toggle — the extension-based
+ * image-vs-document routing IS this channel's version of Baileys' `asDocument`,
+ * so "not an image/*" is exactly the condition that must skip optimization.
+ */
+describe('WhatsAppCloudModule — outbound image auto-optimize', () => {
+  const restore: Record<string, string | undefined> = {};
+  const ENV_KEYS = ['WHATSAPP_CLOUD_ACCESS_TOKEN', 'WHATSAPP_CLOUD_PHONE_NUMBER_ID'];
+  let tmpDir: string;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) restore[k] = process.env[k];
+    process.env.WHATSAPP_CLOUD_ACCESS_TOKEN = 'test-token';
+    process.env.WHATSAPP_CLOUD_PHONE_NUMBER_ID = '1234567890';
+    for (const fn of [sendText, uploadMedia, sendImage, sendDocument, optimizeImageFile]) fn.mockClear();
+    optimizeImageFile.mockImplementation(async (p: string, _maxBytes: number) => p);
+    uploadMedia.mockResolvedValue({ mediaId: 'media-1' });
+    sendImage.mockResolvedValue({ messages: [{ id: 'wamid.out' }] });
+    sendDocument.mockResolvedValue({ messages: [{ id: 'wamid.out' }] });
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-cloud-optimize-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const k of ENV_KEYS) {
+      if (restore[k] === undefined) delete process.env[k];
+      else process.env[k] = restore[k];
+    }
+  });
+
+  /** Writes a fixture of an exact byte size — contents are never decoded here. */
+  function fixture(name: string, bytes: number): string {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, Buffer.alloc(bytes, 0xab));
+    return p;
+  }
+
+  const reply = (args: Record<string, unknown>) =>
+    new WhatsAppCloudModule().handleTool('whatsapp_cloud_reply', args);
+
+  test('an over-cap photo is optimized first, and the OPTIMIZED path is what gets uploaded', async () => {
+    const src = fixture('huge.png', FAKE_IMAGE_CAP + 500);
+    const shrunk = fixture('huge-optimized.jpg', 200);
+    optimizeImageFile.mockImplementation(async () => shrunk);
+
+    const res = await reply({ chat_id: '66812345678', text: 'chart', files: [src] });
+
+    expect(res.isError).toBeFalsy();
+    expect(callsOf(optimizeImageFile)[0]).toEqual([src, FAKE_IMAGE_CAP]);
+    // The mime must follow the bytes: optimizeImageFile always emits JPEG.
+    expect(callsOf(uploadMedia)[0]).toEqual([shrunk, 'image/jpeg']);
+    expect(callsOf(sendImage)[0]).toEqual(['66812345678', 'media-1', 'chart']);
+  });
+
+  test('a photo already under the cap is uploaded untouched — optimization never runs', async () => {
+    const src = fixture('small.png', FAKE_IMAGE_CAP - 1);
+
+    await reply({ chat_id: '66812345678', text: 'ok', files: [src] });
+
+    expect(optimizeImageFile).not.toHaveBeenCalled();
+    expect(callsOf(uploadMedia)[0]).toEqual([src, 'image/png']);
+  });
+
+  test('an over-cap DOCUMENT is never optimized — exact bytes, original mime', async () => {
+    const src = fixture('report.pdf', FAKE_IMAGE_CAP + 500);
+
+    await reply({ chat_id: '66812345678', text: 'the report', files: [src] });
+
+    expect(optimizeImageFile).not.toHaveBeenCalled();
+    expect(callsOf(uploadMedia)[0]).toEqual([src, 'application/pdf']);
+    expect(sendImage).not.toHaveBeenCalled();
+    expect(callsOf(sendDocument)[0]).toEqual(['66812345678', 'media-1', 'report.pdf', 'the report']);
+  });
+
+  test('when optimization gains nothing it returns the source path — original mime is kept', async () => {
+    const src = fixture('incompressible.png', FAKE_IMAGE_CAP + 500);
+    // The real contract: no gain → the SAME path back, not a JPEG copy.
+    optimizeImageFile.mockImplementation(async (p: string) => p);
+
+    await reply({ chat_id: '66812345678', text: 'hm', files: [src] });
+
+    expect(optimizeImageFile).toHaveBeenCalled();
+    expect(callsOf(uploadMedia)[0]).toEqual([src, 'image/png']);
+  });
+
+  test('a rejected optimizeImageFile falls back to the original bytes instead of losing the reply', async () => {
+    const src = fixture('boom.png', FAKE_IMAGE_CAP + 500);
+    optimizeImageFile.mockImplementation(async () => {
+      throw new Error('sharp exploded');
+    });
+
+    const res = await reply({ chat_id: '66812345678', text: 'still try', files: [src] });
+
+    expect(res.isError).toBeFalsy();
+    expect(callsOf(uploadMedia)[0]).toEqual([src, 'image/png']);
+    expect(sendImage).toHaveBeenCalled();
   });
 });

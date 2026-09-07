@@ -44,8 +44,22 @@ jest.mock('@whiskeysockets/baileys', () => ({
   downloadMediaMessage: (...args: unknown[]) => mockDownloadMediaMessage(...(args as [])),
 }));
 
+/**
+ * Outbound image auto-optimize. Mocked at the module boundary so these tests
+ * assert the WIRING (is it called, with what cap, is its result the path that
+ * actually gets sent, is it skipped for a document) — the shrinking itself is
+ * covered by tests/unit/image-optimize*.test.ts. Default passthrough: returns
+ * the path it was given, i.e. "nothing could be gained".
+ */
+const mockOptimizeImageFile = jest.fn(async (p: string, _maxBytes: number) => p);
+jest.mock('../../src/shared/image-optimize', () => ({
+  optimizeImageFile: (...args: unknown[]) => mockOptimizeImageFile(...(args as [string, number])),
+  optimizeImage: jest.fn(async (b: Buffer) => b),
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import { WhatsAppManager } from '../../src/whatsapp/manager';
+import { MediaStore } from '../../src/history/media-store';
 
 /** Find the listener registered for `event` via mockSock.ev.on(event, listener). */
 function listenerFor(event: string): (payload: unknown) => void {
@@ -117,6 +131,8 @@ describe('WhatsAppManager', () => {
     mockMakeWASocket.mockClear();
     mockUseMultiFileAuthState.mockClear();
     mockSaveCreds.mockClear();
+    mockOptimizeImageFile.mockClear();
+    mockOptimizeImageFile.mockImplementation(async (p: string) => p);
     fetchCalls = [];
     global.fetch = (async (url: string, init?: RequestInit) => {
       fetchCalls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
@@ -764,6 +780,91 @@ describe('WhatsAppManager', () => {
         mimetype: 'image/png',
         fileName: 'chart.png',
         caption: 'the chart',
+      });
+    });
+
+    /**
+     * Outbound image auto-optimize. Before this, an over-cap photo threw and
+     * the agent's whole reply vanished; now it is shrunk and sent. The cap
+     * itself is unchanged (MediaStore's flat value) — only what happens on the
+     * way past it.
+     */
+    describe('oversized outbound image auto-optimize', () => {
+      const CAP = MediaStore.maxUploadBytes;
+
+      /** Write a file that is genuinely over the cap, so the real stat drives the branch. */
+      function writeOversized(name: string): string {
+        const p = path.join(tmpDir, name);
+        fs.writeFileSync(p, Buffer.alloc(CAP + 1024));
+        return p;
+      }
+
+      async function linked(): Promise<void> {
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+      }
+
+      it('shrinks an over-cap photo and sends the OPTIMIZED path instead of failing', async () => {
+        const big = writeOversized('huge.png');
+        const shrunk = path.join(tmpDir, 'huge-optimized.jpg');
+        fs.writeFileSync(shrunk, Buffer.alloc(1024));
+        mockOptimizeImageFile.mockImplementation(async () => shrunk);
+
+        await linked();
+        await expect(manager.sendMessage(DM, 'here', big)).resolves.toBeUndefined();
+
+        expect(mockOptimizeImageFile).toHaveBeenCalledWith(big, CAP);
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, {
+          image: { url: shrunk },
+          caption: 'here',
+        });
+      });
+
+      it('leaves an under-cap photo alone — optimize is never invoked', async () => {
+        const small = path.join(tmpDir, 'small.png');
+        fs.writeFileSync(small, Buffer.from('tiny'));
+
+        await linked();
+        await manager.sendMessage(DM, 'here', small);
+
+        expect(mockOptimizeImageFile).not.toHaveBeenCalled();
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, {
+          image: { url: small },
+          caption: 'here',
+        });
+      });
+
+      it('does NOT optimize an asDocument send — that mode exists to deliver exact bytes', async () => {
+        const big = writeOversized('exact.png');
+        await linked();
+
+        await expect(manager.sendMessage(DM, 'chart', big, { asDocument: true })).rejects.toThrow(
+          /exceeds .* byte cap/,
+        );
+        expect(mockOptimizeImageFile).not.toHaveBeenCalled();
+      });
+
+      it('still throws when optimization could not get the photo under the cap', async () => {
+        const big = writeOversized('stubborn.png');
+        // Best-effort by contract: optimizeImageFile hands back the source path
+        // when nothing was gained.
+        mockOptimizeImageFile.mockImplementation(async (p: string) => p);
+
+        await linked();
+        await expect(manager.sendMessage(DM, 'here', big)).rejects.toThrow(/exceeds .* byte cap/);
+        expect(mockOptimizeImageFile).toHaveBeenCalledWith(big, CAP);
+      });
+
+      it('survives optimizeImageFile itself rejecting, falling back to the original', async () => {
+        const big = writeOversized('boom.png');
+        mockOptimizeImageFile.mockImplementation(async () => {
+          throw new Error('sharp exploded');
+        });
+
+        await linked();
+        // The optimize failure is swallowed; the pre-existing cap error is what
+        // reaches the caller, never "sharp exploded".
+        await expect(manager.sendMessage(DM, 'here', big)).rejects.toThrow(/exceeds .* byte cap/);
       });
     });
 
