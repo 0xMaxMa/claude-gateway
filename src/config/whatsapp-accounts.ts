@@ -48,6 +48,13 @@ const LEGACY_ACCESS_FIELDS = [
   'groupAllowlist',
   'requireMention',
   'pairing',
+  // Phase 2 behaviour flags. They postdate the flat shape, so a genuine
+  // pre-Phase-1 config never carries them — but a hand-edited config.json can
+  // still have them sitting in a flat block, and lifting them costs nothing
+  // (absent fields stay absent, so an untouched config still upgrades to the
+  // exact same JSON it did before).
+  'sendReadReceipts',
+  'reactionLevel',
 ] as const;
 
 /**

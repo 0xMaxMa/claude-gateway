@@ -21,6 +21,13 @@ const META_URL = `https://graph.facebook.com/v20.0/media-1?access_token=${ACCESS
 const ALLOWED_CDN_URL = 'https://lookaside.fbsbx.com/whatsapp_business/attachments/media-1';
 const IMG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x11, 0x22]);
 
+/**
+ * Per-test overrides on the agent's whatsapp_cloud config — read lazily inside
+ * getAgentConfig, so a test can flip the Phase-2 receipt switches after the
+ * handler was built (the real handler re-reads the config per message too).
+ */
+let configExtra: Record<string, unknown> = {};
+
 function fakeRunner(): AgentRunner {
   return {
     getAgentConfig: () => ({
@@ -31,6 +38,7 @@ function fakeRunner(): AgentRunner {
         appSecret: APP_SECRET,
         verifyToken: VERIFY_TOKEN,
         dmPolicy: 'open',
+        ...configExtra,
       },
     }),
     getCallbackPort: () => 0,
@@ -50,6 +58,8 @@ describe('WhatsApp Cloud inbound media download', () => {
   let handler: ReturnType<typeof createWhatsAppCloudWebhookHandler>;
   let forwarded: Array<{ content: string; meta: Record<string, string> }>;
   let fetchedUrls: string[];
+  /** Bodies POSTed to /{phoneNumberId}/messages — the Phase-2 receipt signals. */
+  let graphPosts: Array<Record<string, unknown>>;
   let mediaMetaResponse: () => { url?: string; mime_type?: string };
   let mediaBytesResponse: () => Response | Promise<Response>;
   const written: string[] = [];
@@ -80,6 +90,8 @@ describe('WhatsApp Cloud inbound media download', () => {
   beforeEach(() => {
     forwarded = [];
     fetchedUrls = [];
+    graphPosts = [];
+    configExtra = {};
     mediaMetaResponse = () => ({ url: ALLOWED_CDN_URL, mime_type: 'image/jpeg' });
     mediaBytesResponse = () => new Response(IMG);
     handler = createWhatsAppCloudWebhookHandler(new Map([[AGENT, fakeRunner()]]), '/tmp');
@@ -95,6 +107,11 @@ describe('WhatsApp Cloud inbound media download', () => {
       }
       if (url.endsWith('/channel')) {
         forwarded.push(JSON.parse(String(init?.body)));
+        return { ok: true, json: async () => ({}) } as Response;
+      }
+      // Outbound Graph calls — read receipts and ack reactions land here.
+      if (url.endsWith(`/${PHONE_NUMBER_ID}/messages`)) {
+        graphPosts.push(JSON.parse(String(init?.body ?? '{}')));
         return { ok: true, json: async () => ({}) } as Response;
       }
       return { ok: true, json: async () => ({}) } as Response;
@@ -201,5 +218,90 @@ describe('WhatsApp Cloud inbound media download', () => {
     written.push(docPath);
     expect(fs.readFileSync(docPath)).toEqual(PDF);
     expect(docPath).toMatch(/\.pdf$/);
+  });
+
+  // ---- Phase 2 ------------------------------------------------------------
+
+  test('sticker → downloaded onto meta.sticker_path, NEVER image_path', async () => {
+    const WEBP = Buffer.concat([
+      Buffer.from('RIFF'),
+      Buffer.from([0, 0, 0, 0]),
+      Buffer.from('WEBP'),
+      Buffer.from('fake-sticker'),
+    ]);
+    mediaMetaResponse = () => ({ url: ALLOWED_CDN_URL, mime_type: 'image/webp' });
+    mediaBytesResponse = () => new Response(WEBP);
+
+    await post([{ from: FROM, id: 'wamid.7', type: 'sticker', sticker: { id: 'media-1', mime_type: 'image/webp' } }]);
+
+    expect(forwarded).toHaveLength(1);
+    const stickerPath = forwarded[0].meta.sticker_path;
+    expect(stickerPath).toBeTruthy();
+    written.push(stickerPath);
+    // image/webp passes MediaStore.isAllowedMime (image/ prefix) and the
+    // RIFF/WEBP magic bytes are already recognized by the ext sniffer.
+    expect(stickerPath).toMatch(/\.webp$/);
+    expect(fs.readFileSync(stickerPath)).toEqual(WEBP);
+    // Kept off image_path on purpose, so the agent can tell a sticker from a photo.
+    expect(forwarded[0].meta.image_path).toBeUndefined();
+  });
+
+  describe('receipt signals', () => {
+    const textMsg = [{ from: FROM, id: 'wamid.10', type: 'text', text: { body: 'hi' } }];
+
+    /**
+     * Both signals are fired-and-forgotten (`void client.markAsRead(...)`), so
+     * give the microtask queue a turn before asserting rather than relying on
+     * the handler's own awaits happening to drain them.
+     */
+    async function postAndSettle(msgs: Record<string, unknown>[]): Promise<void> {
+      await post(msgs);
+      await new Promise((r) => setImmediate(r));
+    }
+
+    test('an accepted message is marked read and gets the ⏳ ack', async () => {
+      await postAndSettle(textMsg);
+      expect(graphPosts).toEqual(
+        expect.arrayContaining([
+          { messaging_product: 'whatsapp', status: 'read', message_id: 'wamid.10' },
+          {
+            messaging_product: 'whatsapp',
+            to: FROM,
+            type: 'reaction',
+            reaction: { message_id: 'wamid.10', emoji: '⏳' },
+          },
+        ]),
+      );
+      // Neither may block the turn — the forward still happened.
+      expect(forwarded).toHaveLength(1);
+    });
+
+    test('sendReadReceipts:false drops the read receipt, keeps the ack', async () => {
+      configExtra = { sendReadReceipts: false };
+      await postAndSettle(textMsg);
+      expect(graphPosts.some((b) => b.status === 'read')).toBe(false);
+      expect(graphPosts.some((b) => b.type === 'reaction')).toBe(true);
+    });
+
+    test("reactionLevel:'off' drops the ack, keeps the read receipt", async () => {
+      configExtra = { reactionLevel: 'off' };
+      await postAndSettle(textMsg);
+      expect(graphPosts.some((b) => b.status === 'read')).toBe(true);
+      expect(graphPosts.some((b) => b.type === 'reaction')).toBe(false);
+    });
+
+    test('best-effort: a Graph API error on both signals never fails the turn', async () => {
+      const failingFetch = global.fetch;
+      global.fetch = (async (input: string, init?: RequestInit) => {
+        if (String(input).endsWith(`/${PHONE_NUMBER_ID}/messages`)) {
+          return { ok: true, json: async () => ({ error: { message: 'nope', code: 100 } }) } as Response;
+        }
+        return failingFetch(input as never, init);
+      }) as typeof fetch;
+
+      await postAndSettle(textMsg);
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0].content).toBe('hi');
+    });
   });
 });

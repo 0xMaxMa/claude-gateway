@@ -22,6 +22,9 @@ const mockSock = {
   requestPairingCode: jest.fn(async () => 'ABCD-1234'),
   logout: jest.fn(async () => undefined),
   end: jest.fn(),
+  // Phase 2: read receipts and outbound native @mentions.
+  readMessages: jest.fn(async () => undefined),
+  groupMetadata: jest.fn(async () => ({ participants: [] as unknown[] })),
 };
 const mockSaveCreds = jest.fn(async () => undefined);
 let mockRegistered = false;
@@ -49,6 +52,22 @@ function listenerFor(event: string): (payload: unknown) => void {
   const call = mockSock.ev.on.mock.calls.find((c) => c[0] === event);
   if (!call) throw new Error(`no listener registered for ${event}`);
   return call[1] as (payload: unknown) => void;
+}
+
+/**
+ * mockSock.sendMessage is declared with no parameters (jest infers a `[]`
+ * tuple), so reading back what it was CALLED with needs a loose view of the
+ * argument list. `toHaveBeenCalledWith` doesn't — only inspection does.
+ */
+function sendCalls(): unknown[][] {
+  return mockSock.sendMessage.mock.calls as unknown as unknown[][];
+}
+
+/** The reaction payloads among those sends (ack add / ack clear). */
+function reactionSends(): Array<{ text: string; key: { id?: string } }> {
+  return sendCalls()
+    .map((c) => (c[1] as { react?: { text: string; key: { id?: string } } } | undefined)?.react)
+    .filter((r): r is { text: string; key: { id?: string } } => !!r);
 }
 
 /**
@@ -92,6 +111,9 @@ describe('WhatsAppManager', () => {
     mockSock.sendMessage.mockClear();
     mockSock.requestPairingCode.mockClear();
     mockSock.logout.mockClear();
+    mockSock.readMessages.mockClear();
+    mockSock.groupMetadata.mockClear();
+    mockSock.groupMetadata.mockImplementation(async () => ({ participants: [] as unknown[] }));
     mockMakeWASocket.mockClear();
     mockUseMultiFileAuthState.mockClear();
     mockSaveCreds.mockClear();
@@ -400,6 +422,247 @@ describe('WhatsAppManager', () => {
       expect(mockDownloadMediaMessage).toHaveBeenCalled();
       expect(fetchCalls[0].body).toMatchObject({ meta: expect.objectContaining({ image_path: expect.stringContaining('whatsapp-img-') }) });
     });
+
+    // ---- Phase 2 ---------------------------------------------------------
+
+    describe('reply context', () => {
+      /** Baileys inlines the whole quoted message, unlike Meta's Cloud webhook. */
+      function quoteUpsert(contextInfo: Record<string, unknown>) {
+        return {
+          type: 'notify',
+          messages: [
+            {
+              key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG2' },
+              message: { extendedTextMessage: { text: 'yes, that one', contextInfo } },
+            },
+          ],
+        };
+      }
+
+      it('populates ALL THREE replied_* keys from contextInfo', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')(
+          quoteUpsert({
+            stanzaId: 'MSG1',
+            participant: '66811110000@s.whatsapp.net',
+            quotedMessage: { conversation: 'the original question' },
+          }),
+        );
+        await new Promise((r) => setImmediate(r));
+        expect(fetchCalls[0].body).toMatchObject({
+          meta: {
+            replied_message_id: 'MSG1',
+            replied_user: '66811110000@s.whatsapp.net',
+            replied_text: 'the original question',
+          },
+        });
+      });
+
+      it('falls back to a quoted image/video caption for replied_text', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')(
+          quoteUpsert({
+            stanzaId: 'MSG1',
+            participant: '66811110000@s.whatsapp.net',
+            quotedMessage: { imageMessage: { caption: 'the chart' } },
+          }),
+        );
+        await new Promise((r) => setImmediate(r));
+        expect((fetchCalls[0].body as { meta: Record<string, string> }).meta.replied_text).toBe('the chart');
+      });
+
+      it('an ordinary message carries no replied_* keys at all', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [{ key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' }, message: { conversation: 'hi' } }],
+        });
+        await new Promise((r) => setImmediate(r));
+        const meta = (fetchCalls[0].body as { meta: Record<string, string> }).meta;
+        expect(Object.keys(meta).filter((k) => k.startsWith('replied_'))).toEqual([]);
+      });
+    });
+
+    describe('receipt signals', () => {
+      const upsert = {
+        type: 'notify',
+        messages: [{ key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' }, message: { conversation: 'hi' } }],
+      };
+
+      it('marks the message read and adds the ⏳ ack by default', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')(upsert);
+        await waitUntil(() => mockSock.readMessages.mock.calls.length > 0);
+        expect(mockSock.readMessages).toHaveBeenCalledWith([
+          { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' },
+        ]);
+        await waitUntil(() =>
+          reactionSends().length > 0,
+        );
+        expect(mockSock.sendMessage).toHaveBeenCalledWith('66811110000@s.whatsapp.net', {
+          react: { text: '⏳', key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' } },
+        });
+      });
+
+      it('sendReadReceipts:false suppresses the read receipt but keeps the ack', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open', sendReadReceipts: false }] };
+        await open();
+        listenerFor('messages.upsert')(upsert);
+        await waitUntil(() =>
+          reactionSends().length > 0,
+        );
+        expect(mockSock.readMessages).not.toHaveBeenCalled();
+      });
+
+      it("reactionLevel:'off' suppresses the ack but keeps the read receipt", async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open', reactionLevel: 'off' }] };
+        await open();
+        listenerFor('messages.upsert')(upsert);
+        await waitUntil(() => mockSock.readMessages.mock.calls.length > 0);
+        await new Promise((r) => setImmediate(r));
+        expect(reactionSends().length > 0).toBe(false);
+      });
+
+      it('both are best-effort: a socket that rejects them still forwards the turn', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        mockSock.readMessages.mockRejectedValueOnce(new Error('socket busy') as never);
+        mockSock.sendMessage.mockRejectedValueOnce(new Error('socket busy') as never);
+        await open();
+        listenerFor('messages.upsert')(upsert);
+        await waitUntil(() => fetchCalls.length > 0);
+        expect(fetchCalls[0].body).toMatchObject({ content: 'hi' });
+      });
+
+      it('a DENIED sender gets neither signal (the gate runs first)', async () => {
+        await open(); // no config → closed default
+        listenerFor('messages.upsert')(upsert);
+        await new Promise((r) => setImmediate(r));
+        expect(mockSock.readMessages).not.toHaveBeenCalled();
+        expect(reactionSends().length > 0).toBe(false);
+      });
+    });
+
+    describe('location / contact / sticker', () => {
+      it('a location pin → location_lat/lng meta plus a summary as content', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            {
+              key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' },
+              message: {
+                locationMessage: {
+                  degreesLatitude: 13.7563,
+                  degreesLongitude: 100.5018,
+                  name: 'Grand Palace',
+                  address: 'Phra Nakhon, Bangkok',
+                },
+              },
+            },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        // Same key names the Cloud channel writes, so runner.ts needs no
+        // per-channel attribute handling.
+        expect(fetchCalls[0].body).toMatchObject({
+          content: 'Grand Palace, Phra Nakhon, Bangkok',
+          meta: { location_lat: '13.7563', location_lng: '100.5018' },
+        });
+      });
+
+      it('a bare dropped pin → generic content, coordinates still in meta', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            {
+              key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' },
+              message: { locationMessage: { degreesLatitude: 1.5, degreesLongitude: -2.25 } },
+            },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(fetchCalls[0].body).toMatchObject({
+          content: '[Location shared]',
+          meta: { location_lat: '1.5', location_lng: '-2.25' },
+        });
+      });
+
+      it('a contact card → the RAW vCard Baileys already provides, verbatim', async () => {
+        const VCARD = 'BEGIN:VCARD\nVERSION:3.0\nFN:Ada Lovelace\nTEL:+66812345678\nEND:VCARD';
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            {
+              key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' },
+              message: { contactMessage: { displayName: 'Ada', vcard: VCARD } },
+            },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        expect((fetchCalls[0].body as { meta: Record<string, string> }).meta.vcard).toBe(VCARD);
+      });
+
+      it('a multi-contact array → the first card that actually has a vCard', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            {
+              key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' },
+              message: {
+                contactsArrayMessage: {
+                  contacts: [{ displayName: 'no card' }, { vcard: 'BEGIN:VCARD\nFN:Second\nEND:VCARD' }],
+                },
+              },
+            },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        expect((fetchCalls[0].body as { meta: Record<string, string> }).meta.vcard).toContain('FN:Second');
+      });
+
+      it('a sticker → downloaded onto meta.sticker_path, NEVER image_path', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            { key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' }, message: { stickerMessage: {} } },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(mockDownloadMediaMessage).toHaveBeenCalled();
+        const meta = (fetchCalls[0].body as { meta: Record<string, string> }).meta;
+        expect(meta.sticker_path).toContain('whatsapp-sticker-');
+        expect(meta.image_path).toBeUndefined();
+        fs.rmSync(meta.sticker_path, { force: true });
+      });
+
+      it('a failed sticker download still forwards the turn', async () => {
+        agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+        mockDownloadMediaMessage.mockRejectedValueOnce(new Error('media gone') as never);
+        await open();
+        listenerFor('messages.upsert')({
+          type: 'notify',
+          messages: [
+            { key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1' }, message: { stickerMessage: {} } },
+          ],
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(fetchCalls).toHaveLength(1);
+        expect((fetchCalls[0].body as { meta: Record<string, string> }).meta.sticker_path).toBeUndefined();
+      });
+    });
   });
 
   describe('sendMessage()', () => {
@@ -432,6 +695,152 @@ describe('WhatsAppManager', () => {
       await expect(
         manager.sendMessage('66811110000@s.whatsapp.net', '', path.join(tmpDir, 'nope.jpg')),
       ).rejects.toThrow('not found');
+    });
+
+    // ---- Phase 2 ---------------------------------------------------------
+
+    const DM = '66811110000@s.whatsapp.net';
+    const GROUP = '123-456@g.us';
+
+    /** Link the socket and deliver one inbound message so it is quotable. */
+    async function linkedWithInbound(id = 'MSG1', jid = DM): Promise<void> {
+      agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open', groupPolicy: 'open', requireMention: false }] };
+      await manager.startLinking();
+      listenerFor('connection.update')({ connection: 'open' });
+      listenerFor('messages.upsert')({
+        type: 'notify',
+        messages: [
+          {
+            key: { remoteJid: jid, ...(jid.endsWith('@g.us') ? { participant: DM } : {}), id },
+            message: { conversation: 'the original' },
+          },
+        ],
+      });
+      await waitUntil(() => fetchCalls.length > 0);
+      mockSock.sendMessage.mockClear(); // drop the inbound ack reaction
+    }
+
+    it('splits a reply over the 4000-char cap into several sends', async () => {
+      await manager.startLinking();
+      listenerFor('connection.update')({ connection: 'open' });
+      const long = Array.from({ length: 2000 }, (_, i) => `word${i}`).join(' ');
+      await manager.sendMessage(DM, long);
+
+      const texts = sendCalls().map((c) => (c[1] as { text: string }).text);
+      expect(texts.length).toBeGreaterThan(1);
+      for (const t of texts) expect(t.length).toBeLessThanOrEqual(4000);
+      expect(texts.join(' ')).toBe(long);
+    });
+
+    it('quotes the inbound message on the FIRST send only', async () => {
+      await linkedWithInbound('MSG1');
+      const long = Array.from({ length: 2000 }, (_, i) => `word${i}`).join(' ');
+      await manager.sendMessage(DM, long, undefined, { quotedMessageId: 'MSG1' });
+
+      const calls = sendCalls().filter((c) => (c[1] as { text?: string }).text);
+      expect(calls.length).toBeGreaterThan(1);
+      expect((calls[0]![2] as { quoted?: { key?: { id?: string } } })?.quoted?.key?.id).toBe('MSG1');
+      // Follow-up chunks get no third argument at all — repeating the quote
+      // block on every bubble is visual noise.
+      expect(calls[1]![2]).toBeUndefined();
+    });
+
+    it('an unknown quotedMessageId degrades to an ordinary unquoted send', async () => {
+      await manager.startLinking();
+      listenerFor('connection.update')({ connection: 'open' });
+      await manager.sendMessage(DM, 'hi', undefined, { quotedMessageId: 'NEVER-SEEN' });
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, { text: 'hi' });
+    });
+
+    it('asDocument sends the file as a document (exact pixels) instead of a photo', async () => {
+      const imgPath = path.join(tmpDir, 'chart.png');
+      fs.writeFileSync(imgPath, Buffer.from('x'));
+      await manager.startLinking();
+      listenerFor('connection.update')({ connection: 'open' });
+      await manager.sendMessage(DM, 'the chart', imgPath, { asDocument: true });
+
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, {
+        document: { url: imgPath },
+        mimetype: 'image/png',
+        fileName: 'chart.png',
+        caption: 'the chart',
+      });
+    });
+
+    it('clears the ⏳ ack once the reply lands (the MCP tool cannot do it itself)', async () => {
+      await linkedWithInbound('MSG1');
+      await manager.sendMessage(DM, 'answer', undefined, { ackMessageId: 'MSG1' });
+      expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, {
+        react: { text: '', key: { remoteJid: DM, id: 'MSG1' } },
+      });
+    });
+
+    it("reactionLevel:'off' means nothing is cleared either (no ack was ever added)", async () => {
+      await linkedWithInbound('MSG1');
+      manager.updateAgentConfig({
+        ...agentConfig,
+        whatsapp: { accounts: [{ id: 'default', dmPolicy: 'open', reactionLevel: 'off' }] },
+      });
+      await manager.sendMessage(DM, 'answer', undefined, { ackMessageId: 'MSG1' });
+      expect(reactionSends().length > 0).toBe(false);
+    });
+
+    describe('outbound native @mentions', () => {
+      it('attaches the participant JIDs behind @<digits> tokens in a group', async () => {
+        mockSock.groupMetadata.mockImplementation(async () => ({
+          participants: [{ id: '66811110000@s.whatsapp.net' }, { id: '66822220000@s.whatsapp.net' }],
+        }));
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+        await manager.sendMessage(GROUP, '@66811110000 please take a look');
+
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(GROUP, {
+          text: '@66811110000 please take a look',
+          mentions: ['66811110000@s.whatsapp.net'],
+        });
+      });
+
+      it('matches a LID-privacy participant on its phoneNumber, sending the @lid id', async () => {
+        // In a LID group the participant id is opaque while the human still
+        // types the phone number — the same normalization the inbound mention
+        // gate uses (whatsAppJidUser) has to bridge the two.
+        mockSock.groupMetadata.mockImplementation(async () => ({
+          participants: [{ id: '99887766@lid', phoneNumber: '66811110000:3@s.whatsapp.net' }],
+        }));
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+        await manager.sendMessage(GROUP, 'ping @66811110000');
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(GROUP, {
+          text: 'ping @66811110000',
+          mentions: ['99887766@lid'],
+        });
+      });
+
+      it('a DM is never given a mentions array, even with an @number in the text', async () => {
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+        await manager.sendMessage(DM, 'call @66811110000 later');
+        expect(mockSock.groupMetadata).not.toHaveBeenCalled();
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(DM, { text: 'call @66811110000 later' });
+      });
+
+      it('an @number nobody in the group matches → plain text, no mentions', async () => {
+        mockSock.groupMetadata.mockImplementation(async () => ({
+          participants: [{ id: '66899998888@s.whatsapp.net' }],
+        }));
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+        await manager.sendMessage(GROUP, 'hi @66811110000');
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(GROUP, { text: 'hi @66811110000' });
+      });
+
+      it('a failed groupMetadata lookup sends the reply anyway (best-effort)', async () => {
+        mockSock.groupMetadata.mockRejectedValueOnce(new Error('not a participant') as never);
+        await manager.startLinking();
+        listenerFor('connection.update')({ connection: 'open' });
+        await manager.sendMessage(GROUP, 'hi @66811110000');
+        expect(mockSock.sendMessage).toHaveBeenCalledWith(GROUP, { text: 'hi @66811110000' });
+      });
     });
   });
 

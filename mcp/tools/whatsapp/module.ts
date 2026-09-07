@@ -37,7 +37,9 @@ export class WhatsAppModule implements ToolModule {
           'the incoming message arrived on. ' +
           'Optionally pass image_path (an absolute path) to attach an image — ' +
           'text then becomes the caption. WhatsApp has its own lightweight ' +
-          'formatting (*bold*, _italic_, ~strikethrough~), not HTML or standard markdown.',
+          'formatting (*bold*, _italic_, ~strikethrough~), not HTML or standard markdown. ' +
+          'Also pass message_id from the <channel> tag when present — it clears the ' +
+          '⏳ "seen" reaction the gateway left on the inbound message.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -52,6 +54,24 @@ export class WhatsAppModule implements ToolModule {
             image_path: {
               type: 'string',
               description: 'Optional absolute path to an image file to attach.',
+            },
+            as_document: {
+              type: 'boolean',
+              description:
+                'Send image_path as a file/document instead of a photo. WhatsApp re-compresses ' +
+                'photos; use this when the exact pixels matter (screenshots, diagrams, charts).',
+            },
+            reply_to_message_id: {
+              type: 'string',
+              description:
+                'Optional inbound message id to quote — the reply appears attached to that ' +
+                'message. Use the message_id of the turn being answered, especially in a busy group.',
+            },
+            message_id: {
+              type: 'string',
+              description:
+                'Optional inbound message id from the <channel> tag — clears the ⏳ ack ' +
+                'reaction the gateway left on it.',
             },
             account_id: {
               type: 'string',
@@ -77,6 +97,12 @@ export class WhatsAppModule implements ToolModule {
     const text = typeof args.text === 'string' ? args.text : '';
     const imagePath = typeof args.image_path === 'string' ? args.image_path : undefined;
     const accountId = typeof args.account_id === 'string' && args.account_id ? args.account_id : undefined;
+    const replyTo =
+      typeof args.reply_to_message_id === 'string' && args.reply_to_message_id
+        ? args.reply_to_message_id
+        : undefined;
+    const messageId = typeof args.message_id === 'string' && args.message_id ? args.message_id : undefined;
+    const asDocument = args.as_document === true;
     const agentId = process.env.GATEWAY_AGENT_ID ?? '';
     const apiUrl = process.env.GATEWAY_API_URL ?? '';
     const apiKey = process.env.GATEWAY_API_KEY ?? '';
@@ -104,7 +130,19 @@ export class WhatsAppModule implements ToolModule {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ jid: chatId, text, image_path: imagePath, account_id: accountId }),
+        // reply_to_message_id (quote) and message_id (ack-clear) are handled
+        // gateway-side: Baileys has no stateless send path, so unlike Slack's
+        // module this one can't call the platform API itself — the route
+        // forwards both to the live WhatsAppManager.
+        body: JSON.stringify({
+          jid: chatId,
+          text,
+          image_path: imagePath,
+          account_id: accountId,
+          reply_to_message_id: replyTo,
+          message_id: messageId,
+          as_document: asDocument || undefined,
+        }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };

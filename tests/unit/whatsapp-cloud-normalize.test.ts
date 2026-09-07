@@ -91,6 +91,85 @@ describe('normalizeWhatsAppCloudMessage()', () => {
     expect(out?.meta.message_id).toBe('wamid.104');
   });
 
+  // ---- Phase 2: reply context, location, contacts, sticker ----------------
+
+  test('quoted message → replied_message_id ONLY (Meta does not inline the quote)', () => {
+    const out = normalizeWhatsAppCloudMessage({
+      from: FROM,
+      id: 'wamid.200',
+      type: 'text',
+      text: { body: 'yes, that one' },
+      context: { id: 'wamid.original' },
+    });
+    expect(out?.meta.replied_message_id).toBe('wamid.original');
+    // A real Cloud API limitation, not a gap in the parser: the webhook payload
+    // carries no quoted text and no quoted sender, so these stay unset (Baileys
+    // fills all three — see whatsapp-manager.test.ts).
+    expect(out?.meta.replied_text).toBeUndefined();
+    expect(out?.meta.replied_user).toBeUndefined();
+  });
+
+  test('no context → no replied_* keys at all (meta shape unchanged for ordinary messages)', () => {
+    const out = normalizeWhatsAppCloudMessage({ from: FROM, id: 'wamid.201', type: 'text', text: { body: 'hi' } });
+    expect(Object.keys(out!.meta)).not.toContain('replied_message_id');
+  });
+
+  test('location → lat/lng meta plus a human summary as the content', () => {
+    const out = normalizeWhatsAppCloudMessage({
+      from: FROM,
+      id: 'wamid.202',
+      type: 'location',
+      location: { latitude: 13.7563, longitude: 100.5018, name: 'Grand Palace', address: 'Phra Nakhon, Bangkok' },
+    });
+    expect(out?.meta.location_lat).toBe('13.7563');
+    expect(out?.meta.location_lng).toBe('100.5018');
+    expect(out?.content).toBe('Grand Palace, Phra Nakhon, Bangkok');
+  });
+
+  test('a bare dropped pin (coords only) → generic summary, coords still in meta', () => {
+    const out = normalizeWhatsAppCloudMessage({
+      from: FROM,
+      id: 'wamid.203',
+      type: 'location',
+      location: { latitude: 1.5, longitude: -2.25 },
+    });
+    expect(out?.content).toBe('[Location shared]');
+    expect(out?.meta.location_lat).toBe('1.5');
+    expect(out?.meta.location_lng).toBe('-2.25');
+  });
+
+  test('contact card → a vCard synthesized from Meta’s structured payload', () => {
+    const out = normalizeWhatsAppCloudMessage({
+      from: FROM,
+      id: 'wamid.204',
+      type: 'contacts',
+      contacts: [
+        { name: { formatted_name: 'Ada Lovelace' }, phones: [{ phone: '+66812345678' }] },
+      ],
+    });
+    // Same meta.vcard key Baileys fills with its (already raw) vCard, so the
+    // agent never needs channel-specific handling.
+    expect(out?.meta.vcard).toBe('BEGIN:VCARD\nVERSION:3.0\nFN:Ada Lovelace\nTEL:+66812345678\nEND:VCARD');
+  });
+
+  test('contact card with neither name nor phone → no vcard key rather than an empty card', () => {
+    const out = normalizeWhatsAppCloudMessage({ from: FROM, id: 'wamid.205', type: 'contacts', contacts: [{}] });
+    expect(out).not.toBeNull();
+    expect(out?.meta.vcard).toBeUndefined();
+  });
+
+  test('sticker → forwarded with empty content (the bytes land on meta.sticker_path in the handler)', () => {
+    const out = normalizeWhatsAppCloudMessage({
+      from: FROM,
+      id: 'wamid.206',
+      type: 'sticker',
+      sticker: { id: 'media-9', mime_type: 'image/webp' },
+    });
+    expect(out).not.toBeNull();
+    expect(out?.content).toBe('');
+    expect(out?.meta.image_path).toBeUndefined();
+  });
+
   test('missing `from` → rejected (null)', () => {
     expect(normalizeWhatsAppCloudMessage({ id: 'wamid.105', type: 'text', text: { body: 'hi' } })).toBeNull();
   });

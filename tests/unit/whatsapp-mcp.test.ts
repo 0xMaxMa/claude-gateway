@@ -110,6 +110,58 @@ describe('WhatsAppModule', () => {
       expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ account_id: 'work' });
     });
 
+    // ---- Phase 2 ----------------------------------------------------------
+
+    test('quote / ack-clear / document flags are forwarded for the route to act on', async () => {
+      const mod = new WhatsAppModule();
+      await mod.handleTool('whatsapp_reply', {
+        chat_id: '66812345678@s.whatsapp.net',
+        text: 'answering that',
+        image_path: '/tmp/chart.png',
+        reply_to_message_id: 'IN-1',
+        message_id: 'IN-1',
+        as_document: true,
+      });
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        jid: '66812345678@s.whatsapp.net',
+        text: 'answering that',
+        image_path: '/tmp/chart.png',
+        reply_to_message_id: 'IN-1',
+        message_id: 'IN-1',
+        as_document: true,
+      });
+    });
+
+    test('as_document:false is omitted entirely, so the body keeps its v1 shape', async () => {
+      const mod = new WhatsAppModule();
+      await mod.handleTool('whatsapp_reply', {
+        chat_id: '66812345678@s.whatsapp.net',
+        text: 'hi',
+        as_document: false,
+      });
+      // JSON.stringify drops undefined values — an unused Phase-2 field never
+      // reaches the wire at all.
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        jid: '66812345678@s.whatsapp.net',
+        text: 'hi',
+      });
+    });
+
+    test('non-string / empty Phase-2 ids are dropped rather than forwarded as junk', async () => {
+      const mod = new WhatsAppModule();
+      await mod.handleTool('whatsapp_reply', {
+        chat_id: '66812345678@s.whatsapp.net',
+        text: 'hi',
+        reply_to_message_id: 42,
+        message_id: '',
+        as_document: 'yes',
+      });
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        jid: '66812345678@s.whatsapp.net',
+        text: 'hi',
+      });
+    });
+
     test('a non-ok response surfaces the server error message', async () => {
       global.fetch = (async () =>
         ({ ok: false, status: 502, json: async () => ({ error: 'WhatsApp is not linked' }) }) as Response) as typeof fetch;

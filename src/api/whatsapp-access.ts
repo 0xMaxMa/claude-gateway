@@ -163,15 +163,32 @@ export function wasBotMentioned(
   botLid?: string | null,
 ): boolean {
   if (!botJid && !botLid) return false;
-  // WhatsApp JIDs occasionally carry a ":<device>" suffix on the *user* part
-  // (multi-device, e.g. "66811112222:5@s.whatsapp.net") — strip only that
-  // segment, not everything after the first colon, or the "@server" half
-  // gets dropped too and a same-user-different-device JID never matches at
-  // all (splitting on ':' before splitting on '@' would do exactly that).
-  const normalize = (jid: string) => {
-    const [userPart, server] = jid.split('@');
-    return server ? `${userPart.split(':')[0]}@${server}` : userPart.split(':')[0];
-  };
-  const botIdentities = [botJid, botLid].filter((v): v is string => !!v).map(normalize);
-  return mentionedJids.some((jid) => botIdentities.includes(normalize(jid)));
+  const botIdentities = [botJid, botLid].filter((v): v is string => !!v).map(normalizeWhatsAppJid);
+  return mentionedJids.some((jid) => botIdentities.includes(normalizeWhatsAppJid(jid)));
+}
+
+/**
+ * Canonical form of a WhatsApp JID for equality checks.
+ *
+ * WhatsApp JIDs occasionally carry a ":<device>" suffix on the *user* part
+ * (multi-device, e.g. "66811112222:5@s.whatsapp.net") — strip only that
+ * segment, not everything after the first colon, or the "@server" half gets
+ * dropped too and a same-user-different-device JID never matches at all
+ * (splitting on ':' before splitting on '@' would do exactly that). The
+ * `@lid` vs `@s.whatsapp.net` distinction is preserved: those are genuinely
+ * different addresses, and callers that must accept either (wasBotMentioned)
+ * normalize both forms and compare against the set.
+ *
+ * Shared by the INBOUND mention gate (wasBotMentioned above) and the OUTBOUND
+ * `@digits` → `mentions:[jid]` matcher in WhatsAppManager, so both sides agree
+ * on what "the same participant" means.
+ */
+export function normalizeWhatsAppJid(jid: string): string {
+  const [userPart, server] = jid.split('@');
+  return server ? `${userPart.split(':')[0]}@${server}` : userPart.split(':')[0];
+}
+
+/** The user half of a normalized JID — "66811112222" from "66811112222:5@s.whatsapp.net". */
+export function whatsAppJidUser(jid: string): string {
+  return normalizeWhatsAppJid(jid).split('@')[0] ?? '';
 }

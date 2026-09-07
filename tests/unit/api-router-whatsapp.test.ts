@@ -217,7 +217,40 @@ describe('WhatsApp channel management API', () => {
     expect(res.status).toBe(200);
     // account_id is undefined here — the runner then falls back to whichever
     // account the inbound turn for this chat arrived on.
-    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'hello', '/tmp/x.jpg', undefined);
+    // The trailing bag is empty: a body with none of the Phase-2 fields must
+    // produce exactly the pre-Phase-2 send (no quote, no document, no ack-clear).
+    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'hello', '/tmp/x.jpg', undefined, {});
+  });
+
+  it('POST .../whatsapp/send forwards the Phase-2 reply/document/ack fields', async () => {
+    const res = await supertest
+      .default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
+      .set(ADMIN)
+      .send({
+        jid: USER,
+        text: 'quoted answer',
+        image_path: '/tmp/x.jpg',
+        reply_to_message_id: 'IN-1',
+        message_id: 'IN-1',
+        as_document: true,
+      });
+    expect(res.status).toBe(200);
+    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'quoted answer', '/tmp/x.jpg', undefined, {
+      quotedMessageId: 'IN-1',
+      ackMessageId: 'IN-1',
+      asDocument: true,
+    });
+  });
+
+  it('POST .../whatsapp/send ignores wrongly-typed Phase-2 fields instead of failing the send', async () => {
+    const res = await supertest
+      .default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
+      .set(ADMIN)
+      .send({ jid: USER, text: 'hi', reply_to_message_id: 42, message_id: '', as_document: 'yes' });
+    expect(res.status).toBe(200);
+    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'hi', undefined, undefined, {});
   });
 
   it('POST .../whatsapp/send surfaces a send failure (e.g. not linked) as 502', async () => {
@@ -311,7 +344,7 @@ describe('WhatsApp channel management API', () => {
 
       await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`).set(ADMIN)
         .send({ jid: USER, text: 'hi', account_id: 'work' });
-      expect(runner.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'hi', undefined, 'work');
+      expect(runner.sendWhatsAppMessage).toHaveBeenCalledWith(USER, 'hi', undefined, 'work', {});
     });
 
     it('an account the agent does not have is a 404, on both the routes and PATCH', async () => {

@@ -69,6 +69,19 @@ export interface WhatsAppAccountConfig {
    * `allowlist` (closed-default) for either tier.
    */
   pairing?: boolean;
+  /**
+   * Mark inbound messages as read (blue double-ticks) once they pass the
+   * access gate. Default true (absent ⇒ on) — the agent HAS received the
+   * message at that point, so the receipt is honest. Set false for a number
+   * whose owner would rather not advertise that. Phase 2.
+   */
+  sendReadReceipts?: boolean;
+  /**
+   * Ack-reaction level (ported from Slack's ack reaction). `'ack'` (default
+   * when absent) reacts ⏳ on the inbound message at receipt and clears it
+   * once the reply lands; `'off'` skips BOTH the add and the clear. Phase 2.
+   */
+  reactionLevel?: 'off' | 'ack';
 }
 
 export interface AgentConfig {
@@ -254,6 +267,18 @@ export interface AgentConfig {
      * `allowlist` (closed-default).
      */
     pairing?: boolean;
+    /**
+     * Mark inbound messages as read (blue double-ticks) once they pass the
+     * access gate. Default true (absent ⇒ on). Same field/semantics as the
+     * per-account Baileys `WhatsAppAccountConfig.sendReadReceipts`. Phase 2.
+     */
+    sendReadReceipts?: boolean;
+    /**
+     * Ack-reaction level (ported from Slack's ack reaction). `'ack'` (default
+     * when absent) reacts ⏳ on the inbound message at receipt and clears it
+     * once `whatsapp_cloud_reply` lands; `'off'` skips both. Phase 2.
+     */
+    reactionLevel?: 'off' | 'ack';
   };
   claude: {
     model: string;

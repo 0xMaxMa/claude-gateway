@@ -8,9 +8,9 @@
  *
  * Mirrors `mcp/tools/slack/module.ts` directly — real, Meta-issued
  * credentials with no reply-token TTL to work around, so this module always
- * sends directly from the subprocess, same as Slack. Unlike Slack there are
- * no `thread_id`/`message_id` params: the Cloud API has no threads, and this
- * channel doesn't carry Slack's ack-reaction to clear.
+ * sends directly from the subprocess, same as Slack. The one Slack param it
+ * still has no analogue for is `thread_id`: the Cloud API has no threads, only
+ * per-message quoting (`reply_to_message_id`).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -64,7 +64,9 @@ export class WhatsAppCloudModule implements ToolModule {
           'Send a reply to the current WhatsApp conversation (WhatsApp Business Cloud API). ' +
           'Pass chat_id (the phone number shown in the <channel> tag) and text. ' +
           'Optionally pass files (absolute paths) to attach images or PDF documents — ' +
-          'each file is sent as its own message; a caption (from text) rides on the first one.',
+          'each file is sent as its own message; a caption (from text) rides on the first one. ' +
+          'Also pass message_id from the <channel> tag when present — it clears the ' +
+          '⏳ "seen" reaction the gateway left on the inbound message.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -75,6 +77,18 @@ export class WhatsAppCloudModule implements ToolModule {
             text: {
               type: 'string',
               description: 'Message text.',
+            },
+            reply_to_message_id: {
+              type: 'string',
+              description:
+                'Optional inbound message id to quote — the reply appears attached to that ' +
+                'message in the conversation.',
+            },
+            message_id: {
+              type: 'string',
+              description:
+                'Optional inbound message id from the <channel> tag — clears the ⏳ ack ' +
+                'reaction the gateway left on it.',
             },
             files: {
               type: 'array',
@@ -101,6 +115,11 @@ export class WhatsAppCloudModule implements ToolModule {
     const chatId = typeof args.chat_id === 'string' ? args.chat_id : '';
     const text = typeof args.text === 'string' ? args.text : '';
     const requested = Array.isArray(args.files) ? (args.files as unknown[]) : [];
+    const replyTo =
+      typeof args.reply_to_message_id === 'string' && args.reply_to_message_id
+        ? args.reply_to_message_id
+        : undefined;
+    const messageId = typeof args.message_id === 'string' && args.message_id ? args.message_id : '';
     const accessToken = process.env.WHATSAPP_CLOUD_ACCESS_TOKEN ?? '';
     const phoneNumberId = process.env.WHATSAPP_CLOUD_PHONE_NUMBER_ID ?? '';
 
@@ -163,7 +182,7 @@ export class WhatsAppCloudModule implements ToolModule {
           }
         }
       } else {
-        const sent = await client.sendText(chatId, text);
+        const sent = await client.sendText(chatId, text, replyTo);
         if (sent.error) {
           throw new Error(sent.error.message ?? 'send failed');
         }
@@ -172,6 +191,14 @@ export class WhatsAppCloudModule implements ToolModule {
       // Mark as sent only AFTER the send succeeds — a genuine failure leaves
       // them eligible for a retry rather than silently dropped.
       for (const f of files) this.sentFiles.add(f);
+      // Best-effort: clear the ack-reaction the webhook left on the inbound
+      // message (mirrors slack_reply's removeReaction call site). Never blocks
+      // or fails the reply itself. Skipped when the gateway has reactions
+      // turned off for this channel, so nothing tries to clear a reaction that
+      // was never added.
+      if (messageId && (process.env.WHATSAPP_CLOUD_REACTION_LEVEL ?? 'ack') === 'ack') {
+        void client.removeReaction(chatId, messageId).catch(() => {});
+      }
       return {
         content: [
           {

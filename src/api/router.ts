@@ -2849,7 +2849,15 @@ export function createApiRouter(
     if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: 'Access required' }); return; }
     const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    const { jid, text, image_path, account_id } = req.body as { jid?: unknown; text?: unknown; image_path?: unknown; account_id?: unknown };
+    const { jid, text, image_path, account_id, reply_to_message_id, as_document, message_id } = req.body as {
+      jid?: unknown;
+      text?: unknown;
+      image_path?: unknown;
+      account_id?: unknown;
+      reply_to_message_id?: unknown;
+      as_document?: unknown;
+      message_id?: unknown;
+    };
     if (typeof jid !== 'string' || !jid) { res.status(400).json({ error: 'jid is required' }); return; }
     if (typeof text !== 'string' && typeof image_path !== 'string') {
       res.status(400).json({ error: 'text or image_path is required' });
@@ -2863,12 +2871,25 @@ export function createApiRouter(
       res.status(400).json({ error: 'account_id must be a string' });
       return;
     }
+    // Phase 2 extras — each is only carried through when actually present and
+    // well-typed, so an older MCP build's three-field body produces an empty
+    // options object and the exact pre-Phase-2 send behaviour.
+    const sendOpts: { quotedMessageId?: string; asDocument?: boolean; ackMessageId?: string } = {};
+    if (typeof reply_to_message_id === 'string' && reply_to_message_id) {
+      sendOpts.quotedMessageId = reply_to_message_id;
+    }
+    if (as_document === true) sendOpts.asDocument = true;
+    // The inbound message whose ⏳ ack should be cleared once this send lands.
+    // Baileys' MCP tool can't clear it itself (it has no socket of its own) —
+    // see WhatsAppManager.clearAckReaction.
+    if (typeof message_id === 'string' && message_id) sendOpts.ackMessageId = message_id;
     try {
       await runner.sendWhatsAppMessage(
         jid,
         typeof text === 'string' ? text : '',
         typeof image_path === 'string' ? image_path : undefined,
         account_id,
+        sendOpts,
       );
       res.json({ ok: true });
     } catch (err) {

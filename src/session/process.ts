@@ -760,6 +760,11 @@ export class SessionProcess extends EventEmitter {
             // be forwarded explicitly.
             WHATSAPP_CLOUD_ACCESS_TOKEN: this.agentConfig.whatsapp_cloud?.accessToken ?? '',
             WHATSAPP_CLOUD_PHONE_NUMBER_ID: this.agentConfig.whatsapp_cloud?.phoneNumberId ?? '',
+            // Whether the webhook left an ⏳ ack reaction to clear after the
+            // reply (Phase 2). The subprocess can't read agent config, so the
+            // effective level is forwarded — 'off' means don't try to clear a
+            // reaction that was never added.
+            WHATSAPP_CLOUD_REACTION_LEVEL: this.agentConfig.whatsapp_cloud?.reactionLevel ?? 'ack',
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.

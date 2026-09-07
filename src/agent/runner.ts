@@ -1169,7 +1169,7 @@ export class AgentRunner extends EventEmitter {
         for (const entry of entries) {
           const meta = entry.meta ?? {};
           const content = entry.content ?? '';
-          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : meta['document_path'] ? '(document)' : '');
+          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : meta['document_path'] ? '(document)' : meta['sticker_path'] ? '(sticker)' : '');
           const userTs = Date.now();
           await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
             role: 'user',
@@ -1208,6 +1208,18 @@ export class AgentRunner extends EventEmitter {
               const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['document_path']);
               mediaFiles.push(rel);
               meta['document_path'] = MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, rel);
+            } catch {
+              // Non-fatal — leave the original path so host agents still read it
+            }
+          }
+          // WhatsApp stickers (both channels — image/webp): same MediaStore
+          // copy + path-rewrite as image_path above, on its own key so an
+          // inbound sticker never masquerades as a photo.
+          if (meta['sticker_path']) {
+            try {
+              const rel = MediaStore.copyToMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta['sticker_path']);
+              mediaFiles.push(rel);
+              meta['sticker_path'] = MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, rel);
             } catch {
               // Non-fatal — leave the original path so host agents still read it
             }
@@ -1434,6 +1446,10 @@ export class AgentRunner extends EventEmitter {
     const optionalAttrs = [
       'image_path',
       'document_path', // WhatsApp Cloud: inbound PDF document (see MediaStore.isAllowedMime)
+      'sticker_path',  // WhatsApp (both channels): inbound sticker — kept distinct from image_path so the agent can tell a sticker from a photo
+      'location_lat',  // WhatsApp (both channels): inbound location pin
+      'location_lng',
+      'vcard',         // WhatsApp: inbound contact card — raw vCard on Baileys, synthesized from Meta's structured payload on Cloud
       'attachment_file_id',
       'attachment_kind',
       'attachment_mime',
@@ -3323,8 +3339,15 @@ export class AgentRunner extends EventEmitter {
     text: string,
     imagePath?: string,
     accountId?: string,
+    /**
+     * Phase 2 extras, all optional so existing callers (auto-forward, older
+     * MCP builds) are unaffected: quote an inbound message, send the image
+     * uncompressed as a document, and clear the ⏳ ack left on the inbound
+     * message once the send lands.
+     */
+    opts?: { quotedMessageId?: string; asDocument?: boolean; ackMessageId?: string },
   ): Promise<void> {
-    await this.whatsAppManagerFor(jid, accountId).sendMessage(jid, text, imagePath);
+    await this.whatsAppManagerFor(jid, accountId).sendMessage(jid, text, imagePath, opts);
   }
 
   startSlackOutbound(): void {

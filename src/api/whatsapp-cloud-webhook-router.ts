@@ -82,6 +82,17 @@ interface WhatsAppCloudMediaObject {
   filename?: string;
 }
 
+/**
+ * Meta's structured contact payload. NOT a vCard — unlike Baileys (which
+ * hands over the raw vCard string the sender's phone produced), the Cloud API
+ * decomposes it into JSON, so a vCard has to be synthesized from these fields
+ * if the agent is to see one (see `synthesizeVCard`).
+ */
+interface WhatsAppCloudContactCard {
+  name?: { formatted_name?: string };
+  phones?: Array<{ phone?: string }>;
+}
+
 export interface WhatsAppCloudMessage {
   from?: string;
   id?: string;
@@ -90,6 +101,16 @@ export interface WhatsAppCloudMessage {
   text?: { body?: string };
   image?: WhatsAppCloudMediaObject;
   document?: WhatsAppCloudMediaObject;
+  /**
+   * Present when the user replied to a specific earlier message; `id` is that
+   * message's id. Meta does NOT inline the quoted message's text or sender
+   * here — see normalizeWhatsAppCloudMessage's reply-context branch.
+   */
+  context?: { id?: string };
+  location?: { latitude?: number; longitude?: number; name?: string; address?: string };
+  contacts?: WhatsAppCloudContactCard[];
+  /** Stickers are `image/webp` media, downloaded through the same path as images. */
+  sticker?: WhatsAppCloudMediaObject;
   [key: string]: unknown;
 }
 
@@ -127,17 +148,39 @@ export function extractInboundMessages(value: WhatsAppCloudValue | undefined): W
 }
 
 /**
+ * Build a minimal vCard from Meta's structured contact payload.
+ *
+ * The Cloud API does NOT hand over a vCard string (Baileys does — see
+ * manager.ts's contactMessage branch, which uses `contactMessage.vcard`
+ * verbatim), it hands over decomposed JSON. Synthesizing a 3.0 vCard here
+ * means BOTH WhatsApp channels put the same kind of value in the same
+ * `meta.vcard` key, so the agent never needs channel-specific handling.
+ * Returns undefined when there is neither a name nor a phone to put in it.
+ */
+export function synthesizeVCard(contact: WhatsAppCloudContactCard | undefined): string | undefined {
+  const name = contact?.name?.formatted_name?.trim();
+  const phone = contact?.phones?.find((p) => p.phone)?.phone?.trim();
+  if (!name && !phone) return undefined;
+  const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+  if (name) lines.push(`FN:${name}`);
+  if (phone) lines.push(`TEL:${phone}`);
+  lines.push('END:VCARD');
+  return lines.join('\n');
+}
+
+/**
  * Normalize an inbound Cloud API message into the gateway's {content, meta}
  * intake shape. Returns null when `from` is missing/empty (no reply target).
- * `content` is the text body for `type: 'text'`, or the caption (possibly
- * empty) for `type: 'image'`/`'document'` — other message types (audio,
- * video, sticker, location, ...) are out of v1 scope and forward with empty
- * content rather than being dropped, same posture as Slack's "no text →
- * empty content, not null".
+ * `content` is the text body for `type: 'text'`, the caption (possibly
+ * empty) for `type: 'image'`/`'document'`, or a short human summary for
+ * `type: 'location'` — remaining types (audio, video, ...) are still out of
+ * scope and forward with empty content rather than being dropped, same
+ * posture as Slack's "no text → empty content, not null".
  *
- * Stays synchronous and pure: an attached image/document's bytes are
+ * Stays synchronous and pure: an attached image/document/sticker's bytes are
  * fetched by the async handler AFTER this returns, which sets
- * `meta.image_path`/`meta.document_path` on the object built here.
+ * `meta.image_path`/`meta.document_path`/`meta.sticker_path` on the object
+ * built here.
  */
 export function normalizeWhatsAppCloudMessage(
   msg: WhatsAppCloudMessage,
@@ -154,10 +197,31 @@ export function normalizeWhatsAppCloudMessage(
     message_id: msg.id ?? '',
   };
 
+  // Reply context. Meta's webhook carries ONLY the quoted message's id — the
+  // quoted text and its sender are NOT inlined (a real Cloud API limitation,
+  // not a gap here; retrieving them would need our own store of previously
+  // seen messages). So `replied_user`/`replied_text` are deliberately left
+  // unset for this channel, and buildChannelXml emits `<replied
+  // message_id=… user="">` with an empty body. Baileys, by contrast, does
+  // inline the quote and populates all three.
+  if (msg.context?.id) meta.replied_message_id = msg.context.id;
+
   let content = '';
   if (msg.type === 'text') content = msg.text?.body ?? '';
   else if (msg.type === 'image') content = msg.image?.caption ?? '';
   else if (msg.type === 'document') content = msg.document?.caption ?? '';
+  else if (msg.type === 'location' && msg.location) {
+    const { latitude, longitude, name, address } = msg.location;
+    if (typeof latitude === 'number') meta.location_lat = String(latitude);
+    if (typeof longitude === 'number') meta.location_lng = String(longitude);
+    // A pinned place carries a name/address; a raw dropped pin carries only
+    // coordinates, which already ride along in meta — hence the generic
+    // fallback rather than repeating the numbers in the text.
+    content = [name, address].filter(Boolean).join(', ') || '[Location shared]';
+  } else if (msg.type === 'contacts') {
+    const vcard = synthesizeVCard(msg.contacts?.[0]);
+    if (vcard) meta.vcard = vcard;
+  }
 
   return { content, meta };
 }
@@ -415,6 +479,27 @@ export function createWhatsAppCloudWebhookHandler(
           const norm = normalizeWhatsAppCloudMessage(msg, resolved);
           if (!norm) continue;
 
+          // Receipt signals (Phase 2), both strictly best-effort and both
+          // gated on config — mirrors slack-webhook-router.ts's
+          // `void client.addReaction(...).catch(() => {})` call site: fired
+          // right after the access gate, never awaited, never able to fail
+          // the turn. The ack reaction is cleared by the
+          // `whatsapp_cloud_reply` MCP tool once the agent's reply lands.
+          if (msg.id && cfg?.accessToken && cfg?.phoneNumberId) {
+            const receiptClient = new WhatsAppCloudClient({
+              accessToken: cfg.accessToken,
+              phoneNumberId: cfg.phoneNumberId,
+              logDir,
+              apiBase: opts.apiBase,
+            });
+            if (cfg.sendReadReceipts !== false) {
+              void receiptClient.markAsRead(msg.id).catch(() => {});
+            }
+            if ((cfg.reactionLevel ?? 'ack') === 'ack') {
+              void receiptClient.sendReaction(resolved.conversationId, msg.id).catch(() => {});
+            }
+          }
+
           // Inbound media (image AND document, both eager at receipt time):
           // fetch the bytes with the access token and hand the agent an
           // absolute path. Images use the existing meta.image_path contract;
@@ -422,14 +507,30 @@ export function createWhatsAppCloudWebhookHandler(
           // mime type passes MediaStore.isAllowedMime() (PDF only in
           // practice today) — an unsupported document type is logged and
           // skipped, but the turn still forwards with whatever caption it has.
-          if (cfg?.accessToken && (msg.type === 'image' || msg.type === 'document')) {
-            const mediaObj = msg.type === 'image' ? msg.image : msg.document;
+          //
+          // Stickers (Phase 2) ride the SAME download path — they are
+          // `image/webp` media, which MediaStore.isAllowedMime already
+          // permits (`image/` prefix) and sniffImageExt already recognizes
+          // (RIFF/WEBP magic bytes) — but land on their own
+          // meta.sticker_path key, never image_path, so the agent can tell a
+          // sticker apart from a photo.
+          if (cfg?.accessToken && (msg.type === 'image' || msg.type === 'document' || msg.type === 'sticker')) {
+            const mediaObj =
+              msg.type === 'image' ? msg.image : msg.type === 'sticker' ? msg.sticker : msg.document;
             if (mediaObj?.id) {
               try {
                 const downloaded = await downloadWhatsAppCloudMedia(cfg.accessToken, mediaObj.id, apiBase);
                 if (downloaded) {
                   if (msg.type === 'image') {
                     norm.meta.image_path = writeTempImage(downloaded.buf, msg.id);
+                  } else if (msg.type === 'sticker') {
+                    if (MediaStore.isAllowedMime(downloaded.mimeType)) {
+                      norm.meta.sticker_path = writeTempImage(downloaded.buf, msg.id);
+                    } else {
+                      logger.warn('WhatsApp Cloud webhook: sticker mime type not allowed, skipping download', {
+                        mimeType: downloaded.mimeType,
+                      });
+                    }
                   } else if (MediaStore.isAllowedMime(downloaded.mimeType)) {
                     norm.meta.document_path = writeTempDocument(downloaded.buf, downloaded.mimeType, mediaObj.filename, msg.id);
                   } else {

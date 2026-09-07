@@ -180,7 +180,9 @@ describe('AgentRunner — WhatsApp account map', () => {
     expect(work.startLinking).toHaveBeenCalledTimes(1);
     expect(work.requestPairingCode).toHaveBeenCalledWith('+15551234567');
     expect(work.unlink).toHaveBeenCalledTimes(1);
-    expect(work.sendMessage).toHaveBeenCalledWith('66811110000@s.whatsapp.net', 'hi', undefined);
+    // The trailing argument is the Phase-2 send-options bag (quote / send as
+    // document / ack-clear) — undefined here because this caller passes none.
+    expect(work.sendMessage).toHaveBeenCalledWith('66811110000@s.whatsapp.net', 'hi', undefined, undefined);
     expect(def.startLinking).not.toHaveBeenCalled();
     expect(def.sendMessage).not.toHaveBeenCalled();
   });
@@ -237,7 +239,7 @@ describe('AgentRunner — WhatsApp account map', () => {
     });
 
     await runner.sendWhatsAppMessage(chatId, 'reply');
-    expect(managers(runner).get('work')!.sendMessage).toHaveBeenCalledWith(chatId, 'reply', undefined);
+    expect(managers(runner).get('work')!.sendMessage).toHaveBeenCalledWith(chatId, 'reply', undefined, undefined);
     expect(managers(runner).get('default')!.sendMessage).not.toHaveBeenCalled();
   });
 
