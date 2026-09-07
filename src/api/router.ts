@@ -8,7 +8,9 @@ import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
 import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-stream';
 import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
+import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
+import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
 import { createApiAuthMiddleware, canAccessAgent, canWriteAgent, isAdmin } from './auth';
 import { MediaStore } from '../history/media-store';
 import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
@@ -328,9 +330,6 @@ export function createApiRouter(
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
 
-  // Closure-scoped lock: serialises concurrent writes to config.json within this router instance.
-  let configWriteLock: Promise<void> = Promise.resolve();
-
   async function writeAgentsToConfigImpl(
     cfgPath: string,
     mutate: (agents: unknown[]) => void,
@@ -343,23 +342,19 @@ export function createApiRouter(
       if (exists) throw Object.assign(new Error(`Agent '${newId}' already exists in config`), { code: 'DUPLICATE' });
     }
     mutate(config.agents);
-    const tmp = cfgPath + '.tmp.' + randomUUID();
-    // mode: 0o600 — config.json carries the admin API key and every agent's
-    // channel bot tokens; rename() onto cfgPath carries this file's mode
-    // with it, so an unmoded tmp file silently downgrades an existing 0600
-    // config to 0644 on its very first edit (issue #460).
-    await fsp.writeFile(tmp, JSON.stringify(config, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    await fsp.rename(tmp, cfgPath);
+    await writeConfigAtomic(cfgPath, config);
   }
 
+  // Process-wide, keyed by config path — NOT a lock private to this router. The
+  // connectors store and the app-agent manager rewrite the same file, and a lock
+  // scoped to this closure would serialise agent writes against each other while
+  // still letting one of those clobber them. See config/config-write-lock.ts.
   function writeAgentsToConfig(
     cfgPath: string,
     mutate: (agents: unknown[]) => void,
     newId?: string,
   ): Promise<void> {
-    const next = configWriteLock.catch(() => {}).then(() => writeAgentsToConfigImpl(cfgPath, mutate, newId));
-    configWriteLock = next.catch(() => {});
-    return next;
+    return withConfigWriteLock(cfgPath, () => writeAgentsToConfigImpl(cfgPath, mutate, newId));
   }
 
   /**
@@ -709,6 +704,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
+        connectors: cfg.connectors ?? {},
         avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
         telegram_connected: !!cfg.telegram?.botToken,
         discord_connected: !!cfg.discord?.botToken,
@@ -1470,8 +1466,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1625,6 +1621,52 @@ export function createApiRouter(
       slack_group_policy !== undefined || slack_group_allowlist !== undefined || slack_require_mention !== undefined ||
       slack_pairing !== undefined;
 
+    // connectors: a partial map of { [connectorId]: { enabled: boolean } } to merge.
+    const connectorPatch: Record<string, { enabled: boolean }> = {};
+    if (connectors !== undefined) {
+      // Admin, unlike the rest of this route. Every connector route is admin-only
+      // (see connectors-router.ts's requireAdmin), and enabling one here reaches the
+      // same credential those routes guard: a connector's secret is resolved into
+      // the agent's mcp-config at spawn, so flipping this flag is what actually
+      // hands an agent the token an admin connected. Under the multi-owner posture
+      // README documents — `gateway.connectorsDefaultEnabled: false`, connectors off
+      // unless named — a `write` key scoped to nothing but its own agent could
+      // otherwise grant that agent any connector on the box. It would not even need
+      // to enumerate them first: ids are label slugs (`github`, `notion`) and the
+      // check below deliberately does not require the id to exist.
+      //
+      // Deliberately field-level rather than route-level: the rest of PATCH is a
+      // `write`-key operation on the caller's own agent (API.md's table) and must
+      // stay that way. Only the field that crosses into another owner's credential
+      // is raised.
+      if (!isAdmin((req as AuthedRequest).apiKey)) {
+        res.status(403).json({ error: 'Admin permission required to change connectors' });
+        return;
+      }
+      if (typeof connectors !== 'object' || connectors === null || Array.isArray(connectors)) {
+        res.status(400).json({ error: 'connectors must be an object' });
+        return;
+      }
+      for (const [id, val] of Object.entries(connectors as Record<string, unknown>)) {
+        // Shape only, not existence: enablement is stored per agent and read back
+        // by id, so an id that can't be a connector id is an entry nothing will
+        // ever match — it just accumulates in config.json. Existence is
+        // deliberately NOT required; enablement defaults to opt-out, so
+        // pre-setting `{enabled: false}` for a connector nobody has added yet is a
+        // legitimate way to keep it off an agent from the moment it appears.
+        if (!isValidConnectorId(id)) {
+          res.status(400).json({ error: `Invalid connector id '${id}'` });
+          return;
+        }
+        const enabled = (val as { enabled?: unknown })?.enabled;
+        if (typeof enabled !== 'boolean') {
+          res.status(400).json({ error: `connectors.${id}.enabled must be a boolean` });
+          return;
+        }
+        connectorPatch[id] = { enabled };
+      }
+    }
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1739,6 +1781,10 @@ export function createApiRouter(
               else existing.pairing = slack_pairing;
             }
           }
+        }
+        if (connectors !== undefined) {
+          const existing = (agent.connectors as Record<string, { enabled: boolean }>) ?? {};
+          agent.connectors = { ...existing, ...connectorPatch };
         }
       });
     } catch (err) {
@@ -1896,6 +1942,47 @@ export function createApiRouter(
         for (const id of slack_group_allowlist) clearPendingSender('slack', agentId, id);
       }
     }
+    if (connectors !== undefined) {
+      const before = cfg.connectors ?? {};
+      const merged = { ...before, ...connectorPatch };
+      // Only respawn when the merged map actually differs. An external panel
+      // that echoes the whole agent form back on every save sends `connectors`
+      // on edits that have nothing to do with connectors, and restarting every
+      // live session for a no-op patch is a visible interruption to whoever is
+      // talking to that agent. The entries are `{enabled: boolean}`, so
+      // comparing that one field per key is the whole comparison.
+      const ids = new Set([...Object.keys(before), ...Object.keys(merged)]);
+      const changed = [...ids].some((id) => before[id]?.enabled !== merged[id]?.enabled);
+      cfg.connectors = merged;
+      // Enablement is read at spawn — respawn live sessions so they pick it up.
+      // The runner's view of the map is updated either way; only the teardown is
+      // conditional, so a no-op patch costs nothing but still leaves the runner
+      // holding the same map that was just written to disk.
+      const runner = agentRunners.get(agentId);
+      if (runner) {
+        runner.updateAgentConfig(cfg);
+        // Same options as AgentRunner.restartSessionsUsingConnector — a connector
+        // enablement change is exactly the same kind of change, so it must not
+        // SIGKILL an idle channel session either. Bare restartOrDefer() defaults
+        // deferIdle to false, which stops idle sessions immediately.
+        //
+        // Caught, because this call sits AFTER the handler's try/catch closes and
+        // restartOrDefer awaits proc.stop() unguarded: on Express 4 a rejection
+        // here escapes the handler entirely and lands in index.ts's
+        // `unhandledRejection` hook, which calls emergencyShutdown() — every agent
+        // on the box killed because one PATCH toggled a connector. The config is
+        // already written and the runner's map already updated at this point, so a
+        // failed teardown costs the caller nothing but a session that respawns on
+        // its own next natural restart. Every sibling call site guards this the
+        // same way (oauth-refresh-sweep.ts's .catch, connectors-router.ts's
+        // restartSessionsUsing).
+        if (changed) {
+          await runner.restartOrDefer({ skipBusy: false, deferIdle: true }).catch((err: Error) => {
+            console.error(`router: connector-enablement restart for agent=${agentId} failed: ${err.message}`);
+          });
+        }
+      }
+    }
 
     res.json({
       agent: {
@@ -1904,6 +1991,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model,
         allow_tools: cfg.allow_tools ?? false,
+        connectors: cfg.connectors ?? {},
         telegram_connected: !!cfg.telegram?.botToken,
         discord_connected: !!cfg.discord?.botToken,
         telegram_token_preview: cfg.telegram?.botToken ? maskToken(cfg.telegram.botToken) : null,

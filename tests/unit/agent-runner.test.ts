@@ -992,6 +992,212 @@ describe('AgentRunner — restartOrDefer', () => {
     expect(getSessions(runner).has('chat:resolved')).toBe(false);
     expect(counts).toEqual({ immediate: 1, deferred: 0, skipped: 0 });
   }, 15000);
+
+  // --------------------------------------------------------------------------
+  // RS14: `filter` only narrows the candidate set — it must not change what
+  //       happens to a session it does select, and a session it does not select
+  //       must not be counted as `skipped` (that number means "needed a restart,
+  //       did not get one", which is a different and reportable thing).
+  // --------------------------------------------------------------------------
+  it('RS14: filter narrows which sessions are restarted, and a filtered-out one is not "skipped"', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:yes', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:no', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const yes = getSessions(runner).get('chat:yes')!;
+    const no = getSessions(runner).get('chat:no')!;
+    yes.setProcessing(false);
+    no.setProcessing(false);
+    const noStop = jest.spyOn(no, 'stop');
+
+    const counts = await runner.restartOrDefer({ filter: (p) => p === yes });
+
+    expect(getSessions(runner).has('chat:yes')).toBe(false);
+    expect(getSessions(runner).has('chat:no')).toBe(true);
+    expect(noStop).not.toHaveBeenCalled();
+    expect(counts).toEqual({ immediate: 1, deferred: 0, skipped: 0 });
+  }, 15000);
+});
+
+// ── restartSessionsUsingConnector ─────────────────────────────────────────────
+//
+// Regression (round 10). This used to ask an agent-level question —
+// `usesConnector(id)`, i.e. "does this connector resolve to something for this
+// agent right now?" — and then restart either every session of the agent or none.
+//
+// The failure that mattered is the delete/give-up path. oauth-refresh-sweep.ts
+// gives up on a connector by deleting its secrets and THEN calling this; the API's
+// DELETE route does the same. By then the connector resolves to nothing, so the
+// old code answered "nobody uses it" and restarted nothing — leaving every live
+// session running with the credential that had just been revoked. (DELETE papered
+// over it with a `force: true` computed before the delete; the sweep passed no
+// options at all, so a give-up never withdrew anything from anybody.)
+//
+// The mirror-image failure is the refresh path: the answer was "yes" for every
+// session of the agent, including ones spawned before the connector was ever
+// connected, so a timer-driven token refresh respawned sessions holding no copy
+// of the token that rotated.
+//
+// The decision is now per session, against what that session was actually spawned
+// with, so these tests drive the real shape: a connector that resolves to nothing.
+
+describe('AgentRunner — restartSessionsUsingConnector', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-restart-connector-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'));
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+    allProcesses.length = 0;
+    (require('child_process').spawn as jest.Mock).mockClear();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    jest.clearAllMocks();
+  });
+
+  /** Two live idle sessions; only `holder` was spawned with connector `id`. */
+  async function twoSessions(id: string) {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:holder', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    await sendChannelPost(port, 'chat:bystander', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+
+    const holder = getSessions(runner).get('chat:holder')!;
+    const bystander = getSessions(runner).get('chat:bystander')!;
+    holder.setProcessing(false);
+    bystander.setProcessing(false);
+    // Stands in for writeMcpConfig having written this connector into `holder`'s
+    // mcp-config.json and not into `bystander`'s. Spying rather than staging a
+    // real mcp-token.env keeps this test about the runner's dispatch; the
+    // fingerprint comparison itself is covered in session-process.test.ts.
+    jest.spyOn(holder, 'connectorConfigChanged').mockImplementation((c: string) => c === id);
+    jest.spyOn(bystander, 'connectorConfigChanged').mockReturnValue(false);
+    return { holder, bystander };
+  }
+
+  it('restarts a session spawned with the connector even though it now resolves to nothing', async () => {
+    const { holder } = await twoSessions('firecrawl');
+    // No entry in customConnectors and no secret anywhere — exactly the state the
+    // sweep's give-up branch and the DELETE route leave behind before calling.
+    expect(gatewayConfig.gateway.customConnectors?.firecrawl).toBeUndefined();
+
+    const res = await runner.restartSessionsUsingConnector('firecrawl');
+
+    expect(res.restarted).toBe(true);
+    expect(holder.connectorConfigChanged).toHaveBeenCalledWith('firecrawl', undefined);
+  }, 15000);
+
+  it('leaves a session the connector never reached alone', async () => {
+    const { bystander } = await twoSessions('firecrawl');
+    const bystanderStop = jest.spyOn(bystander, 'stop');
+    const pending = (runner as unknown as { pendingRestarts: Set<string> }).pendingRestarts;
+
+    await runner.restartSessionsUsingConnector('firecrawl');
+
+    expect(bystanderStop).not.toHaveBeenCalled();
+    expect(pending.has('chat:bystander')).toBe(false);
+  }, 15000);
+
+  it('reports restarted:false when the change reaches no session', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:other', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    const sess = getSessions(runner).get('chat:other')!;
+    sess.setProcessing(false);
+    jest.spyOn(sess, 'connectorConfigChanged').mockReturnValue(false);
+
+    await expect(runner.restartSessionsUsingConnector('firecrawl')).resolves.toEqual({
+      restarted: false,
+    });
+  }, 15000);
+
+  // The caller is an API route that just wrote config.json; the config watcher has
+  // not re-read it into this runner yet, so without the overlay the connector
+  // resolves to nothing and a just-connected connector reads as a deletion.
+  it('resolves the connector through the caller-supplied overlay', async () => {
+    const { holder } = await twoSessions('gmail');
+    const entry = {
+      label: 'Gmail',
+      config: { type: 'http', url: 'https://gmail.example/mcp', headers: {} },
+      secretNames: [],
+      credentialOwner: 'none' as const,
+    };
+
+    await runner.restartSessionsUsingConnector('gmail', { overlay: { gmail: entry } });
+
+    expect(holder.connectorConfigChanged).toHaveBeenCalledWith(
+      'gmail',
+      expect.objectContaining({ url: 'https://gmail.example/mcp' }),
+    );
+  }, 15000);
+
+  // Round 12, finding 2. The overlay was used for the comparison and then thrown
+  // away, so the sessions this method restarts came back up from the runner's
+  // pre-write view of config.json — the very staleness the overlay exists to
+  // work around. Asserted through a real respawn rather than the config object,
+  // because mcp-config.json is where the bug is visible to a user.
+  //
+  // Not a narrow race: the config watcher debounces 500ms, so the respawn beats
+  // it every time. And it does not self-heal — the fresh spawn records the stale
+  // resolution as its fingerprint, and this method is the only thing that ever
+  // compares it again.
+  function mcpServersOf(chatId: string): Record<string, unknown> {
+    // Via the session, not the chat id: a channel session's directory is named
+    // by the uuid the runner minted for it, not by the chat it belongs to.
+    const proc = getSessions(runner).get(chatId)!;
+    const file = path.join(agentConfig.workspace, '.sessions', proc.sessionId, 'mcp-config.json');
+    return JSON.parse(fs.readFileSync(file, 'utf-8')).mcpServers;
+  }
+
+  const gmailEntry = {
+    label: 'Gmail',
+    config: { type: 'http', url: 'https://gmail.example/mcp', headers: {} },
+    secretNames: [],
+    credentialOwner: 'none' as const,
+  };
+
+  it('a session spawned after the restart gets the connector the overlay added', async () => {
+    await twoSessions('gmail');
+
+    await runner.restartSessionsUsingConnector('gmail', { overlay: { gmail: gmailEntry } });
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:after', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    expect(mcpServersOf('chat:after')).toHaveProperty('gmail');
+  }, 15000);
+
+  it('a session spawned after the restart does not get the connector the overlay removed', async () => {
+    gatewayConfig.gateway.customConnectors = { gmail: gmailEntry };
+    await twoSessions('gmail');
+    // The pre-write view really does still carry it — otherwise the assertion
+    // below would pass for the wrong reason.
+    expect(mcpServersOf('chat:holder')).toHaveProperty('gmail');
+
+    await runner.restartSessionsUsingConnector('gmail', { overlay: { gmail: null } });
+
+    const port = getCallbackPort(runner);
+    await sendChannelPost(port, 'chat:after', 'hi');
+    await new Promise(r => setTimeout(r, 100));
+    expect(mcpServersOf('chat:after')).not.toHaveProperty('gmail');
+  }, 15000);
 });
 
 // ── Typing error notification tests ───────────────────────────────────────────

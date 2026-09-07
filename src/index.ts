@@ -925,6 +925,18 @@ async function main(): Promise<void> {
         if (change.field === 'gateway.headless') {
           // Applies to sessions spawned after the change; running sessions keep their backend.
           config.gateway.headless = change.newValue as boolean | undefined;
+        } else if (change.field === 'gateway.customConnectors') {
+          // Same "new spawns only" scope as the agent-level 'connectors' case
+          // below — an already-running session's subprocess isn't hot-patched
+          // (see restartSessionsUsingConnector for that case), but every
+          // subsequent chat/spawn now sees connect/disconnect/add-custom
+          // changes without a gateway restart.
+          config.gateway.customConnectors = change.newValue as GatewayConfig['gateway']['customConnectors'];
+        } else if (change.field === 'gateway.connectorsDefaultEnabled') {
+          // Same "new spawns only" scope as customConnectors: both readers take
+          // this off the live config object at call time, so replacing it is the
+          // whole reload.
+          config.gateway.connectorsDefaultEnabled = change.newValue as boolean | undefined;
         }
         if (change.field === 'gateway.logs') {
           // Re-installing the policy is enough: every logger reads it per call,
@@ -961,6 +973,11 @@ async function main(): Promise<void> {
           if (!agentConfig.heartbeat) agentConfig.heartbeat = {};
           agentConfig.heartbeat.rateLimitMinutes = change.newValue as number;
           break;
+        case 'connectors':
+          // Per-agent connector enablement toggles — same scope note as
+          // gateway.customConnectors above.
+          agentConfig.connectors = change.newValue as AgentConfig['connectors'];
+          break;
       }
     }
   });
@@ -972,7 +989,19 @@ async function main(): Promise<void> {
     // agents/<id>/.env in before interpolating, which is the only reason this
     // event can fire for a ${VAR}-token agent at all (#427).
     newAgentConfig.workspace = expandTilde(newAgentConfig.workspace);
-    await startAgent(newAgentConfig, configWatcher.getConfig(), ctx);
+    // `config`, not `configWatcher.getConfig()`. Every hot-reloadable
+    // gateway-level field is applied by mutating this long-lived object in
+    // place (the `changes` handler above), while getConfig() returns
+    // `currentConfig` — a structuredClone that the NEXT reload() replaces
+    // outright. An agent handed that clone therefore holds a snapshot frozen at
+    // the moment it was added: AgentRunner keeps the reference for its lifetime
+    // and reads `gateway.customConnectors` and `gateway.connectorsDefaultEnabled`
+    // off it at spawn time, so connecting, disconnecting or adding a connector
+    // afterwards would never reach the one agent that was hot-added — with no
+    // error and nothing in the log, and a gateway restart as the only cure.
+    // (`gateway.headless` has the same shape, which is how this got missed.)
+    // Boot-path agents already get exactly this object; see startAgent above.
+    await startAgent(newAgentConfig, config, ctx);
     globalLogger.info('Agent hot-added successfully', { id: newAgentConfig.id });
   });
 

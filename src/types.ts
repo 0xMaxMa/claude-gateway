@@ -1,3 +1,6 @@
+export type { CustomConnectorEntry } from './connectors/types';
+import type { CustomConnectorEntry } from './connectors/types';
+
 export interface SessionConfig {
   idleTimeoutMinutes?: number; // default 30
   maxConcurrent?: number; // default 20
@@ -156,6 +159,8 @@ export interface AgentConfig {
   knowledge?: GatewayConfig['gateway']['knowledge'];
   /** Avatar filename relative to agent dir, e.g. "avatar.png". null = no avatar. */
   avatar?: string;
+  /** Per-agent connector enablement, keyed by connector id (e.g. "github"). */
+  connectors?: Record<string, { enabled: boolean }>;
 }
 
 export interface AgentStats {
@@ -233,6 +238,14 @@ export interface GatewayConfig {
      * disabled. A trailing slash is trimmed when building links.
      */
     publicUrl?: string;
+    /**
+     * Optional "come back here after signing in" URL for the generic MCP
+     * OAuth callback (oauth-connectors-router.ts) — e.g. a downstream
+     * product's own connectors page. This gateway is product-agnostic, so
+     * it never hardcodes one; unset = the callback just shows a plain
+     * "Connected, close this tab" page instead of auto-redirecting anywhere.
+     */
+    oauthReturnUrl?: string;
     models?: ModelConfig[];
     api?: {
       keys: ApiKey[];
@@ -260,7 +273,6 @@ export interface GatewayConfig {
       cleanupHour?: number;      // 0-23, default 0
       cleanupTimezone?: string;  // IANA timezone, default "UTC"
     };
-    /**
     /**
      * App-store Docker housekeeping (issue #302). Best-effort reclaim of the
      * build cache and dangling `<none>` images left behind by every app
@@ -452,6 +464,38 @@ export interface GatewayConfig {
         reviewModel?: string;      // default matches the dreaming reviewer's default
       };
     };
+    /**
+     * Every connector the gateway knows about, keyed by slugified id — user-pasted
+     * (not code-reviewed) configs, plus the entries an external control plane
+     * pushes in (`credentialOwner: 'external'`). See connectors/types.ts's
+     * CustomConnectorEntry doc for the security tradeoff.
+     *
+     * Whether a connector is CONNECTED is not stored here — mcp-token.env alone
+     * answers that. Per-AGENT enablement lives on AgentConfig.connectors, which is
+     * a different thing again.
+     */
+    customConnectors?: Record<string, CustomConnectorEntry>;
+    /**
+     * Whether a connected connector is available to an agent that has no explicit
+     * entry in `AgentConfig.connectors`. Default `true` (opt-out): connecting a
+     * connector makes it available everywhere, and an agent only misses it if
+     * explicitly disabled.
+     *
+     * Set `false` on a gateway that hosts agents for more than one person. There,
+     * the default hands a credential connected by one operator to every agent on
+     * the box, including agents whose chat users are not that operator; opt-in
+     * per agent is the safer posture.
+     *
+     * A switch rather than a safer default, because the common deployment is one
+     * operator's own VM running their own agents — there, opt-in would mean
+     * connecting a connector and then enabling it again on every agent before it
+     * did anything, and the second step is easy to forget and hard to diagnose
+     * ("it says Connected, why has the agent no tools?"). Nothing about upgrades
+     * is at stake either way: connectors ship for the first time in this change,
+     * so there is no install that already has one (see connectors/types.ts's note
+     * on `credentialOwner` for the same reasoning applied to on-disk shape).
+     */
+    connectorsDefaultEnabled?: boolean;
   };
   agents: AgentConfig[];
 }
