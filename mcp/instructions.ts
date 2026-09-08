@@ -19,7 +19,16 @@ const IMAGE_INSTRUCTION = [
   '• NEVER tell the user to install an app or set up an MCP server for images.',
 ].join('\n');
 
-export function buildChannelInstructions(imageEnabled: boolean): string {
+const VIDEO_INSTRUCTION = [
+  'VIDEO GENERATION IS BUILT IN — you can create short video clips yourself; no app install or API-key setup is needed.',
+  '• To make ANY video you MUST use the generate_video tool. When the user asks to create / generate / make / animate a video or clip, call generate_video with action="list" to see the models, then action="generate".',
+  '• Video generation legitimately takes MINUTES. A "running" status (including the "still generating, call again with action=status" note) is normal, not stuck — keep polling with action="status" and the SAME task_id until it resolves to done/failed. Do NOT start a second generate for the same request while one is still running (you would pay for two clips).',
+  '• ONE clip, sent ONCE, then STOP: as soon as a generate SUCCEEDS, deliver that single mp4 with your reply tool exactly ONE time (files: ["/abs/path.mp4"]) and briefly mention the model. Do NOT re-generate or resend.',
+  '• IMAGE-TO-VIDEO: to animate an existing image, pass it in "image". If the user points at an earlier image ("animate image 2"), call action="list_refs" FIRST and use that item\'s "ref" — never count images from your own memory.',
+  '• If generation fails or no video model is available, tell the user PLAINLY — do NOT invent app-install / MCP-setup steps, and do NOT pretend a video was created.',
+].join('\n');
+
+export function buildChannelInstructions(imageEnabled: boolean, videoEnabled = false): string {
   const lines = [
     'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
     '',
@@ -36,6 +45,10 @@ export function buildChannelInstructions(imageEnabled: boolean): string {
 
   if (imageEnabled) {
     lines.push('', IMAGE_INSTRUCTION);
+  }
+
+  if (videoEnabled) {
+    lines.push('', VIDEO_INSTRUCTION);
   }
 
   return lines.join('\n');

@@ -14,6 +14,7 @@ import {
   type ShareRef,
   type ShareItem,
 } from '../shared/share-client';
+import { sleep, sanitize, readCapped, baseUrlIsSecure } from '../shared/media';
 
 /**
  * Image-generation tool module (#184, Track B).
@@ -661,7 +662,7 @@ export class ImageModule implements ToolModule {
           await assertSafeImageUrl(item);
           const res = await fetch(item, { signal: AbortSignal.timeout(30_000), redirect: 'error' });
           if (!res.ok) throw new Error(`download image failed: HTTP ${res.status}`);
-          buf = await readCapped(res, DOWNLOAD_MAX_BYTES);
+          buf = await readCapped(res, DOWNLOAD_MAX_BYTES, 'image');
         } else {
           // Base64 bytes (openai / gemini / stability / hf) — tolerate a data: URI
           // wrapper as well as raw base64.
@@ -791,25 +792,6 @@ export class ImageModule implements ToolModule {
   }
 }
 
-// Resolves early (without rejecting) on abort — the poll loop re-checks
-// signal.aborted itself right after, so this only needs to shorten the wait.
-// The abort listener is removed when the timer fires normally: sleep() is called
-// once per poll iteration against the SAME long-lived signal (up to ~75 times for
-// the default 150s/2s budget), so leaving { once: true } listeners around on the
-// non-abort path would pile them onto that one signal and trip Node's
-// MaxListenersExceededWarning.
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((r) => {
-    const onAbort = () => { clearTimeout(t); r(); };
-    const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); r(); }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-function sanitize(s: string): string {
-  return s.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'default';
-}
-
 // SSRF guard for provider image URLs. Require https, then resolve the host and
 // reject if ANY resolved address is private / loopback / link-local / metadata —
 // so a compromised provider response can't make the gateway fetch internal or
@@ -873,29 +855,6 @@ function isBlockedAddress(ip: string): boolean {
   return true; // not a valid IP → block
 }
 
-// Read a response body into a Buffer with a hard byte ceiling: reject early on a
-// too-large Content-Length, and stream-count actual bytes so a chunked response
-// without Content-Length can't blow past the cap (OOM guard).
-async function readCapped(res: Response, cap: number): Promise<Buffer> {
-  const declared = Number(res.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > cap) {
-    throw new Error(`download image too large: ${declared} bytes (max ${cap})`);
-  }
-  if (!res.body) {
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > cap) throw new Error(`download image too large (max ${cap} bytes)`);
-    return Buffer.from(ab);
-  }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    total += chunk.length;
-    if (total > cap) throw new Error(`download image exceeded ${cap} bytes`);
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
 function defaultCodeForStatus(status: number): string {
   switch (status) {
     case 400: return 'invalid_model';
@@ -921,33 +880,6 @@ function detectImageExt(buf: Buffer): string | null {
   if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
       buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return 'webp';
   return null;
-}
-
-// https is required for a PUBLIC image endpoint (the Bearer proxy_secret is sent on
-// every call); http is tolerated only for a local/internal host — a trusted hop such
-// as host.docker.internal in dev, where cleartext never leaves the machine/network.
-function baseUrlIsSecure(raw: string): boolean {
-  if (!raw) return false;
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (u.protocol === 'https:') return true;
-  if (u.protocol !== 'http:') return false;
-  const h = u.hostname.toLowerCase();
-  return (
-    h === 'localhost' ||
-    h === 'host.docker.internal' ||
-    h.endsWith('.internal') ||
-    h.endsWith('.local') ||
-    /^127\./.test(h) ||
-    h === '::1' ||
-    /^10\./.test(h) ||
-    /^192\.168\./.test(h) ||
-    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
-  );
 }
 
 const imageToolDefs: McpToolDefinition[] = [
