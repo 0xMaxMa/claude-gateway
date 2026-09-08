@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { unknownFlagNames } from '../args';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
-import { createRl, ask, printFilePreview } from '../prompt';
+import { confirmAction, printFilePreview } from '../prompt';
 import { probeHealth } from '../health';
 import { printJson } from '../output';
 import { writeCommandHelp } from '../output';
@@ -356,30 +356,6 @@ function isMissingBinary(err: unknown): boolean {
   return (err as NodeJS.ErrnoException)?.code === 'ENOENT';
 }
 
-/**
- * Ask before changing service state — installing one, or stopping and removing
- * one. `--yes` skips the prompt; a non-interactive stdin without `--yes`
- * refuses rather than blocking forever, so this is safe in scripts and CI.
- */
-async function confirm(
-  flags: Record<string, string | boolean>,
-  action: ServiceAction,
-  question: string,
-): Promise<boolean> {
-  if (flags.yes === true) return true;
-  if (!process.stdin.isTTY) {
-    process.stderr.write(`Refusing to ${action} non-interactively without --yes.\n`);
-    return false;
-  }
-  const rl = createRl();
-  try {
-    const answer = (await ask(rl, `${question} (y/N): `)).trim().toLowerCase();
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    rl.close();
-  }
-}
-
 /** Poll /health so `service install` reports whether the service actually came
  *  up, instead of only whether the manager accepted the unit.
  *
@@ -705,7 +681,7 @@ async function systemdInstall(
     scope === 'system'
       ? `Install and start ${UNIT_NAME} at system scope, running as ${unitOpts.runAs}?`
       : `Install and start ${UNIT_NAME} for user ${os.userInfo().username}?`;
-  if (!(await confirm(flags, 'install', confirmQuestion))) {
+  if (!(await confirmAction(flags, 'install', confirmQuestion))) {
     process.stderr.write('Aborted — nothing was written.\n');
     return 1;
   }
@@ -817,7 +793,7 @@ async function systemdUninstall(flags: Record<string, string | boolean>, scope: 
     return 0;
   }
   // `disable --now` stops a running gateway, so this asks like install does.
-  if (!(await confirm(flags, 'uninstall', `Stop and remove ${UNIT_NAME}?`))) {
+  if (!(await confirmAction(flags, 'uninstall', `Stop and remove ${UNIT_NAME}?`))) {
     process.stderr.write('Aborted — the service was left in place.\n');
     return 1;
   }
@@ -1045,7 +1021,7 @@ async function pm2Install(
 
   process.stderr.write(`\nWould run:\n  pm2 ${args.join(' ')}\n  pm2 save\n`);
   if (flags.print === true) return 0;
-  if (!(await confirm(flags, 'install', `Register and start the PM2 process "${PM2_NAME}"?`))) {
+  if (!(await confirmAction(flags, 'install', `Register and start the PM2 process "${PM2_NAME}"?`))) {
     process.stderr.write('Aborted — nothing was registered.\n');
     return 1;
   }
@@ -1097,7 +1073,7 @@ async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<nu
     return 0;
   }
   // `pm2 delete` stops a running gateway, so this asks like install does.
-  if (!(await confirm(flags, 'uninstall', `Stop and remove the PM2 process "${PM2_NAME}"?`))) {
+  if (!(await confirmAction(flags, 'uninstall', `Stop and remove the PM2 process "${PM2_NAME}"?`))) {
     process.stderr.write('Aborted — the process was left in place.\n');
     return 1;
   }

@@ -2,7 +2,7 @@ import * as path from 'path';
 import { unknownFlagNames } from '../args';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
-import { createRl, ask } from '../prompt';
+import { confirmAction } from '../prompt';
 import { redactLine, redactLines } from '../redact';
 import type { JobState } from '../../apps/installer';
 
@@ -160,26 +160,6 @@ export function parseInstallSource(source: string): InstallSourceBody {
 
 function strFlag(v: string | boolean | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
-}
-
-/** Same non-interactive-refusal convention as `service install|uninstall`
- *  (src/cli/commands/service.ts): `--yes` skips the prompt; a non-TTY stdin
- *  without it refuses rather than hanging forever, so this is safe in scripts
- *  and CI. Only `uninstall` uses this — start/stop/restart/install are not
- *  "delete this app's containers and installed files" actions. */
-async function confirm(flags: Record<string, string | boolean>, question: string): Promise<boolean> {
-  if (flags.yes === true) return true;
-  if (!process.stdin.isTTY) {
-    process.stderr.write('Refusing to uninstall non-interactively without --yes.\n');
-    return false;
-  }
-  const rl = createRl();
-  try {
-    const answer = (await ask(rl, `${question} (y/N): `)).trim().toLowerCase();
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    rl.close();
-  }
 }
 
 /** The job as it goes to stdout: the same object, with its log lines redacted
@@ -346,8 +326,9 @@ export async function runApps(
     // No new implicit data deletion beyond what the API already does: this
     // removes the app's containers and installed files, but never its backups
     // (see DELETE /v1/apps/:name in apps-router.ts) — the confirmation prompt
-    // says exactly that, not a vaguer "delete everything".
-    if (!(await confirm(flags, `Uninstall app "${name}"? This removes its containers and installed files (backups are kept).`))) {
+    // says exactly that, not a vaguer "delete everything". Only `uninstall`
+    // asks; start/stop/restart/install destroy nothing.
+    if (!(await confirmAction(flags, 'uninstall', `Uninstall app "${name}"? This removes its containers and installed files (backups are kept).`))) {
       process.stderr.write('Aborted — the app was left in place.\n');
       return 1;
     }
