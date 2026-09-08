@@ -11,6 +11,7 @@ import {
   type ShareRef,
   type ShareItem,
 } from '../shared/share-client';
+import { sleep, sanitize, readCapped, baseUrlIsSecure } from '../shared/media';
 
 /**
  * Video-generation tool module — the moving-picture parallel of the image module
@@ -523,7 +524,7 @@ export class VideoModule implements ToolModule {
         const body = await res.text().catch(() => '');
         return this.mapHttpError(res.status, body);
       }
-      const buf = await readCapped(res, DOWNLOAD_MAX_BYTES);
+      const buf = await readCapped(res, DOWNLOAD_MAX_BYTES, 'video');
       if (!isMp4(buf)) {
         // Not a recognized mp4 — reject instead of saving garbage (e.g. an api
         // error page that slipped through with a 200).
@@ -606,43 +607,6 @@ export class VideoModule implements ToolModule {
   }
 }
 
-// Resolves early (without rejecting) on abort — the poll loop re-checks
-// signal.aborted itself right after, so this only needs to shorten the wait.
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((r) => {
-    const onAbort = () => { clearTimeout(t); r(); };
-    const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); r(); }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-function sanitize(s: string): string {
-  return s.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48) || 'default';
-}
-
-// Read a response body into a Buffer with a hard byte ceiling: reject early on a
-// too-large Content-Length, and stream-count actual bytes so a chunked response
-// without Content-Length can't blow past the cap (OOM guard).
-async function readCapped(res: Response, cap: number): Promise<Buffer> {
-  const declared = Number(res.headers.get('content-length'));
-  if (Number.isFinite(declared) && declared > cap) {
-    throw new Error(`download video too large: ${declared} bytes (max ${cap})`);
-  }
-  if (!res.body) {
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > cap) throw new Error(`download video too large (max ${cap} bytes)`);
-    return Buffer.from(ab);
-  }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    total += chunk.length;
-    if (total > cap) throw new Error(`download video exceeded ${cap} bytes`);
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
 function defaultCodeForStatus(status: number): string {
   switch (status) {
     case 400: return 'invalid_model';
@@ -665,29 +629,6 @@ function isMp4(buf: Buffer): boolean {
 // https is required for a PUBLIC api endpoint (the Bearer proxy_secret is sent on
 // every call); http is tolerated only for a local/internal host — a trusted hop
 // such as host.docker.internal in dev, where cleartext never leaves the network.
-function baseUrlIsSecure(raw: string): boolean {
-  if (!raw) return false;
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (u.protocol === 'https:') return true;
-  if (u.protocol !== 'http:') return false;
-  const h = u.hostname.toLowerCase();
-  return (
-    h === 'localhost' ||
-    h === 'host.docker.internal' ||
-    h.endsWith('.internal') ||
-    h.endsWith('.local') ||
-    /^127\./.test(h) ||
-    h === '::1' ||
-    /^10\./.test(h) ||
-    /^192\.168\./.test(h) ||
-    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
-  );
-}
 
 const videoToolDefs: McpToolDefinition[] = [
   {
@@ -709,8 +650,7 @@ const videoToolDefs: McpToolDefinition[] = [
       'SOURCE IMAGE (image-to-video): to animate an existing image, pass its media path in "image" (a media path, an "artifact:<id>" ref, ' +
       'or an https URL). When the user points at an image from earlier in the chat ("animate image 2", "the first picture"), call ' +
       'action="list_refs" FIRST and pass the chosen item\'s "ref" — never count images from your own memory of the conversation. ' +
-      'Omit "image" for pure text-to-video (the service generates its own source frame from the prompt). ' +
-      'When the user selected options in the composer (a <video-params .../> tag in the turn), honor those values.',
+      'Omit "image" for pure text-to-video (the service generates its own source frame from the prompt).',
     inputSchema: {
       type: 'object',
       properties: {

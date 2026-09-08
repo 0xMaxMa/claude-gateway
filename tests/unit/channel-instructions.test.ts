@@ -10,6 +10,13 @@ describe('buildChannelInstructions', () => {
     'NEVER hand-draw the image yourself', // must use the tool, no SVG/ASCII fallback
   ];
 
+  const VIDEO_SUBSTRINGS = [
+    'VIDEO GENERATION IS BUILT IN',
+    'generate_video',
+    'legitimately takes MINUTES',
+    'IMAGE-TO-VIDEO',
+  ];
+
   it('includes image guidance when imageEnabled=true', () => {
     const out = buildChannelInstructions(true);
     for (const sub of IMAGE_SUBSTRINGS) {
@@ -21,6 +28,37 @@ describe('buildChannelInstructions', () => {
     const out = buildChannelInstructions(false);
     for (const sub of IMAGE_SUBSTRINGS) {
       expect(out).not.toContain(sub);
+    }
+  });
+
+  it('omits video guidance by default (videoEnabled defaults to false)', () => {
+    const out = buildChannelInstructions(true);
+    for (const sub of VIDEO_SUBSTRINGS) {
+      expect(out).not.toContain(sub);
+    }
+  });
+
+  it('includes video guidance when videoEnabled=true', () => {
+    const out = buildChannelInstructions(true, true);
+    for (const sub of VIDEO_SUBSTRINGS) {
+      expect(out).toContain(sub);
+    }
+  });
+
+  it('omits video guidance when videoEnabled=false explicitly', () => {
+    const out = buildChannelInstructions(true, false);
+    for (const sub of VIDEO_SUBSTRINGS) {
+      expect(out).not.toContain(sub);
+    }
+  });
+
+  it('video guidance is independent of image guidance (videoEnabled=true, imageEnabled=false)', () => {
+    const out = buildChannelInstructions(false, true);
+    for (const sub of IMAGE_SUBSTRINGS) {
+      expect(out).not.toContain(sub);
+    }
+    for (const sub of VIDEO_SUBSTRINGS) {
+      expect(out).toContain(sub);
     }
   });
 
