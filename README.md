@@ -119,6 +119,9 @@ claude-gateway service install              # systemd *user* unit — no sudo
 claude-gateway service install --print      # just show what it would install
 claude-gateway service status
 claude-gateway service uninstall            # asks first — this stops a running gateway
+claude-gateway service start                # start the installed service (found even if inactive)
+claude-gateway service restart
+claude-gateway service stop
 ```
 
 Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
@@ -193,6 +196,11 @@ claude-gateway gateway restart
 claude-gateway gateway stop
 claude-gateway gateway logs     # tail the gateway's own log (works even when it is dead)
 ```
+
+`gateway restart`/`stop` only drive whatever manager is currently reported *active*. To start an
+installed service that is currently stopped — or to act on a specific `--manager`/`--scope`
+regardless of what else might be running — use `service start`/`stop`/`restart` instead; they
+discover the installed unit from disk the same way `service status`/`uninstall` do.
 
 Managing PM2 directly still works too:
 
@@ -904,6 +912,10 @@ claude-gateway gateway start               # run the gateway in the foreground
 claude-gateway gateway status              # is it running? which manager owns it?
 claude-gateway gateway logs --follow       # stream the gateway log (reads files, needs no server)
 claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
+claude-gateway service start|stop|restart  # drive the installed service (found even if inactive)
+claude-gateway app list                    # installed Docker-compose apps and their status
+claude-gateway app install agent-note      # install from the community registry
+claude-gateway app start|stop|restart <name>
 claude-gateway update check                # newer claude-gateway published?
 claude-gateway claude update               # update Claude Code via its own updater
 claude-gateway doctor                      # check config / key / connectivity
@@ -1038,6 +1050,15 @@ curl -X POST http://localhost:10850/api/v1/apps/install \
 
 ```bash
 curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq .status
+```
+
+**Or use the CLI**, which wraps the same endpoints (see [CLI.md](./CLI.md) for the full reference):
+
+```bash
+claude-gateway app install agent-note --env API_KEY=<secret> --wait   # follow the job to completion
+claude-gateway app list                                               # installed apps + status
+claude-gateway app stop agent-note
+claude-gateway app uninstall agent-note --yes
 ```
 
 **App is then live at** `/app/getpod-manager/<portName>/`.

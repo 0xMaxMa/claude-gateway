@@ -167,6 +167,9 @@ never mistaken for one.
 | \`claude-gateway service install [--manager systemd\\|pm2] [--scope user\\|system] [--run-as <user>] [--after <target,...>] [--env-file <path>] [--env KEY=VALUE,...] [--config <path>] [--yes] [--print] [--force]\` | Generate and start a service |
 | \`claude-gateway service status [--manager systemd\\|pm2] [--scope user\\|system]\` | Report installed/enabled/active state as JSON |
 | \`claude-gateway service uninstall [--manager systemd\\|pm2] [--scope user\\|system] [--yes]\` | Stop and remove the service |
+| \`claude-gateway service start [--manager systemd\\|pm2] [--scope user\\|system]\` | Start the installed service (found even when inactive) |
+| \`claude-gateway service stop [--manager systemd\\|pm2] [--scope user\\|system]\` | Stop the installed service |
+| \`claude-gateway service restart [--manager systemd\\|pm2] [--scope user\\|system]\` | Restart the installed service (starts it if it was stopped) |
 
 - \`systemd\` (the default) installs a **user** unit at \`~/.config/systemd/user/claude-gateway.service\` —
   no \`sudo\`, and it runs as the user that owns \`~/.claude-gateway\`. Run
@@ -201,6 +204,42 @@ never mistaken for one.
 - Re-running \`install\` against an already-active unit whose rendered content changed restarts it
   automatically; unchanged content leaves the running unit alone.
 - After installing, \`gateway restart\`/\`stop\` detect and drive that same service.
+- \`service start\\|stop\\|restart\` act on the unit selected by \`--manager\`/\`--scope\`, the same way
+  \`status\`/\`uninstall\` do — discovered from disk, so they find an installed-but-inactive service too.
+  This is different from \`gateway restart\`/\`stop\`, which only drive whatever manager is currently
+  reported *active*, and can never start a stopped service. \`stop\` on an already-stopped (or never
+  installed) service is a no-op success, matching \`uninstall\`'s idempotence; \`start\`/\`restart\` on a
+  service that was never installed is an error telling you to run \`service install\` first.
+
+## App Store (Docker-compose apps)
+
+| Command | Description |
+|---------|-------------|
+| \`claude-gateway app list\` | List installed apps and their status |
+| \`claude-gateway app start <name>\` | Start a stopped app |
+| \`claude-gateway app stop <name>\` | Stop a running app |
+| \`claude-gateway app restart <name>\` | Restart an app |
+| \`claude-gateway app uninstall <name> [--yes]\` | Remove an app's containers and installed files (keeps backups) |
+| \`claude-gateway app install <source> [--version <v>] [--commit <sha>] [--env KEY=VALUE,...] [--ports NAME=PORT,...] [--wait]\` | Install an app |
+
+A thin client over \`/v1/apps\` (see API.md's App Store section for the full HTTP reference) — every
+action is the same admin-gated call the dashboard's App Store UI makes, so there is only one
+authorization/behavior path to keep correct.
+
+\`<source>\` is classified by shape, so there is no separate \`--registry-app\`/\`--github-url\`/
+\`--local-path\` flag for the common case: an \`http(s)://\` URL is a GitHub source, a path starting
+with \`/\`, \`./\`, \`../\`, or \`~\` is a local (symlinked, dev-mode) source, and anything else is a
+registry app name. \`--version\` only applies to a registry source; \`--commit\` only to a GitHub
+source (both optional — a GitHub install with no \`--commit\` resolves \`HEAD\`).
+
+\`install\` is asynchronous: the server returns a \`jobId\` immediately and this command never reports
+"installed" on its own — only that the job was **accepted**. Poll it with
+\`claude-gateway api GET /v1/apps/jobs/<jobId>\`, or pass \`--wait\` to have this command poll here and
+print the real outcome (streaming the job's log lines to stderr as they arrive).
+
+\`uninstall\` asks for confirmation unless \`--yes\` is given, and refuses to run non-interactively
+without it — same convention as \`service install\`/\`uninstall\`. It removes the app's containers and
+installed files, but never its backups.
 
 ## Versions & updates
 

@@ -43,7 +43,7 @@ const RESERVED_ENV_KEYS = new Set(['HOME', 'PATH', 'GATEWAY_CONFIG']);
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type ServiceManager = 'systemd' | 'pm2';
-type ServiceAction = 'install' | 'status' | 'uninstall';
+type ServiceAction = 'install' | 'status' | 'uninstall' | 'start' | 'stop' | 'restart';
 /** systemd install scope. `user` (default) needs no privileges; `system`
  *  targets /etc/systemd/system and is for root-driven provisioning. */
 export type ServiceScope = 'user' | 'system';
@@ -823,6 +823,141 @@ async function systemdUninstall(flags: Record<string, string | boolean>, scope: 
   return 0;
 }
 
+/**
+ * `service start|stop|restart` act on the unit selected by `--manager`/`--scope`
+ * exactly like `install`/`status`/`uninstall` do — discovered from disk
+ * (`systemdState().installed`), not from whether it is currently active. That
+ * distinction is the whole point of these commands: `gateway restart`/`stop`
+ * (src/cli/commands/gateway.ts) only find a manager that `detectManager()`
+ * sees as ACTIVE right now, so they can never start an installed-but-stopped
+ * unit, and could otherwise be fooled by an unrelated foreground process. These
+ * act on the specific installed service the caller named (or the one auto-
+ * detected the same way `status`/`uninstall` already do), never a foreground
+ * process.
+ */
+async function systemdStart(
+  flags: Record<string, string | boolean>,
+  config: CliConfigView,
+  scope: ServiceScope,
+): Promise<number> {
+  if (scope === 'system' && !isRoot()) {
+    process.stderr.write(`--scope system must be run as root — it starts ${unitPath('system')}.\n`);
+    return 1;
+  }
+  const scopeArgs = scopeCliArgs(scope);
+  const before = systemdState(scope);
+  if (!before.installed) {
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is not installed at ${scope} scope — run \`service install\` first.\n`);
+    return 1;
+  }
+  if (before.active) {
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is already active.\n`);
+    return 0;
+  }
+  try {
+    run('systemctl', [...scopeArgs, 'start', UNIT_NAME]);
+  } catch (err) {
+    process.stderr.write(
+      `Could not start ${UNIT_NAME}: ${(err as Error).message}\n` +
+        `Check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`,
+    );
+    return 1;
+  }
+  const healthy = await waitForHealth(config, flags);
+  const state = systemdState(scope);
+  printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...state, health: healthy ? 'up' : 'down' }, flags);
+  if (!state.active) {
+    process.stderr.write(`${UNIT_NAME} did not become active — check: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`);
+    return 1;
+  }
+  if (!healthy) {
+    process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`);
+    return EXIT_HEALTH_TIMEOUT;
+  }
+  return 0;
+}
+
+/** Stopping an already-absent or already-inactive unit is treated as success —
+ *  same idempotence convention as `uninstall` ("nothing to remove" → 0) —
+ *  because the caller's goal (the service is not running) is already true. */
+async function systemdStop(flags: Record<string, string | boolean>, scope: ServiceScope): Promise<number> {
+  if (scope === 'system' && !isRoot()) {
+    process.stderr.write(`--scope system must be run as root — it stops ${unitPath('system')}.\n`);
+    return 1;
+  }
+  const scopeArgs = scopeCliArgs(scope);
+  const before = systemdState(scope);
+  if (!before.installed) {
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is not installed at ${scope} scope — nothing to stop.\n`);
+    return 0;
+  }
+  if (!before.active) {
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is already inactive.\n`);
+    return 0;
+  }
+  try {
+    run('systemctl', [...scopeArgs, 'stop', UNIT_NAME]);
+  } catch (err) {
+    process.stderr.write(
+      `Could not stop ${UNIT_NAME}: ${(err as Error).message}\n` +
+        `Check: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`,
+    );
+    return 1;
+  }
+  const state = systemdState(scope);
+  printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...state }, flags);
+  if (state.active) {
+    process.stderr.write(`${UNIT_NAME} is still active — check: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`);
+    return 1;
+  }
+  return 0;
+}
+
+async function systemdRestart(
+  flags: Record<string, string | boolean>,
+  config: CliConfigView,
+  scope: ServiceScope,
+): Promise<number> {
+  if (scope === 'system' && !isRoot()) {
+    process.stderr.write(`--scope system must be run as root — it restarts ${unitPath('system')}.\n`);
+    return 1;
+  }
+  const scopeArgs = scopeCliArgs(scope);
+  const before = systemdState(scope);
+  if (!before.installed) {
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    process.stderr.write(`${UNIT_NAME} is not installed at ${scope} scope — run \`service install\` first.\n`);
+    return 1;
+  }
+  try {
+    // `systemctl restart` on an inactive unit starts it — same as `start` —
+    // so this covers "restart a stopped service" too, with no separate branch.
+    run('systemctl', [...scopeArgs, 'restart', UNIT_NAME]);
+  } catch (err) {
+    process.stderr.write(
+      `Could not restart ${UNIT_NAME}: ${(err as Error).message}\n` +
+        `Check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`,
+    );
+    return 1;
+  }
+  const healthy = await waitForHealth(config, flags);
+  const state = systemdState(scope);
+  printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...state, health: healthy ? 'up' : 'down' }, flags);
+  if (!state.active) {
+    process.stderr.write(`${UNIT_NAME} did not become active — check: systemctl ${scopeHintPrefix(scope)}status ${UNIT_NAME} --no-pager\n`);
+    return 1;
+  }
+  if (!healthy) {
+    process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`);
+    return EXIT_HEALTH_TIMEOUT;
+  }
+  return 0;
+}
+
 // ─── PM2 ──────────────────────────────────────────────────────────────────────
 
 interface Pm2Entry {
@@ -944,15 +1079,138 @@ async function pm2Uninstall(flags: Record<string, string | boolean>): Promise<nu
   return entry ? 1 : 0;
 }
 
+async function pm2Start(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
+  let entry: Pm2Entry | undefined;
+  try {
+    entry = pm2Entry();
+  } catch (err) {
+    process.stderr.write(
+      isMissingBinary(err)
+        ? 'PM2 is not installed or not on PATH.\n'
+        : 'Could not read the PM2 process list. Is PM2 running?\n',
+    );
+    return 1;
+  }
+  if (!entry) {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: false, active: false }, flags);
+    process.stderr.write(`No PM2 process named "${PM2_NAME}" — run \`service install --manager pm2\` first.\n`);
+    return 1;
+  }
+  if (entry.pm2_env?.status === 'online') {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: true, active: true, status: entry.pm2_env.status }, flags);
+    process.stderr.write(`${PM2_NAME} is already online.\n`);
+    return 0;
+  }
+  try {
+    run('pm2', ['start', PM2_NAME]);
+  } catch (err) {
+    process.stderr.write(`Could not start the PM2 process "${PM2_NAME}": ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  const healthy = await waitForHealth(config, flags);
+  entry = pm2Entry();
+  const status = entry?.pm2_env?.status ?? 'absent';
+  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status, health: healthy ? 'up' : 'down' }, flags);
+  if (status !== 'online') {
+    process.stderr.write(`${PM2_NAME} did not come online — check: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  if (!healthy) {
+    process.stderr.write(`Service did not answer /health yet — check: pm2 logs ${PM2_NAME}\n`);
+    return EXIT_HEALTH_TIMEOUT;
+  }
+  return 0;
+}
+
+/** Same idempotence convention as `systemdStop()` — an absent or already-
+ *  stopped process is success, not an error, because the goal is already true. */
+async function pm2Stop(flags: Record<string, string | boolean>): Promise<number> {
+  let entry: Pm2Entry | undefined;
+  try {
+    entry = pm2Entry();
+  } catch (err) {
+    if (isMissingBinary(err)) {
+      process.stderr.write('PM2 is not installed — nothing to stop.\n');
+      return 0;
+    }
+    process.stderr.write('Could not read the PM2 process list. Is PM2 running?\n');
+    return 1;
+  }
+  if (!entry) {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: false, active: false }, flags);
+    process.stderr.write(`No PM2 process named "${PM2_NAME}" — nothing to stop.\n`);
+    return 0;
+  }
+  if (entry.pm2_env?.status !== 'online') {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: true, active: false, status: entry.pm2_env?.status }, flags);
+    process.stderr.write(`${PM2_NAME} is already stopped.\n`);
+    return 0;
+  }
+  try {
+    run('pm2', ['stop', PM2_NAME]);
+  } catch (err) {
+    process.stderr.write(`Could not stop the PM2 process "${PM2_NAME}": ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  entry = pm2Entry();
+  const status = entry?.pm2_env?.status ?? 'absent';
+  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status }, flags);
+  if (status === 'online') {
+    process.stderr.write(`${PM2_NAME} is still online — check: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  return 0;
+}
+
+async function pm2Restart(flags: Record<string, string | boolean>, config: CliConfigView): Promise<number> {
+  let entry: Pm2Entry | undefined;
+  try {
+    entry = pm2Entry();
+  } catch (err) {
+    process.stderr.write(
+      isMissingBinary(err)
+        ? 'PM2 is not installed or not on PATH.\n'
+        : 'Could not read the PM2 process list. Is PM2 running?\n',
+    );
+    return 1;
+  }
+  if (!entry) {
+    printJson({ manager: 'pm2', name: PM2_NAME, installed: false, active: false }, flags);
+    process.stderr.write(`No PM2 process named "${PM2_NAME}" — run \`service install --manager pm2\` first.\n`);
+    return 1;
+  }
+  try {
+    // `pm2 restart` starts an already-stopped process too, same as systemd.
+    run('pm2', ['restart', PM2_NAME]);
+  } catch (err) {
+    process.stderr.write(`Could not restart the PM2 process "${PM2_NAME}": ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  const healthy = await waitForHealth(config, flags);
+  entry = pm2Entry();
+  const status = entry?.pm2_env?.status ?? 'absent';
+  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status, health: healthy ? 'up' : 'down' }, flags);
+  if (status !== 'online') {
+    process.stderr.write(`${PM2_NAME} did not come online — check: pm2 logs ${PM2_NAME}\n`);
+    return 1;
+  }
+  if (!healthy) {
+    process.stderr.write(`Service did not answer /health yet — check: pm2 logs ${PM2_NAME}\n`);
+    return EXIT_HEALTH_TIMEOUT;
+  }
+  return 0;
+}
+
 // ─── entry point ──────────────────────────────────────────────────────────────
 
 const USAGE_LINE =
-  'claude-gateway service <install|status|uninstall> [--manager systemd|pm2] [--scope user|system] [--run-as <user>] ' +
+  'claude-gateway service <install|status|uninstall|start|stop|restart> [--manager systemd|pm2] [--scope user|system] [--run-as <user>] ' +
   '[--after <target,...>] [--env-file <path>] [--env KEY=VALUE,...] [--config <path>] [--yes] [--print] [--force]';
 
-/** Pick the manager to act on when `--manager` is omitted. `status`/`uninstall`
- *  act on whatever is actually installed; `install` always defaults to systemd
- *  so it can't silently pick a different manager than the one documented. */
+/** Pick the manager to act on when `--manager` is omitted. `status`/`uninstall`/
+ *  `start`/`stop`/`restart` act on whatever is actually installed; `install`
+ *  always defaults to systemd so it can't silently pick a different manager
+ *  than the one documented. */
 function detectServiceManager(action: ServiceAction, scope: ServiceScope): ServiceManager {
   if (action === 'install') return 'systemd';
   if (fs.existsSync(unitPath(scope))) return 'systemd';
@@ -1040,12 +1298,22 @@ export async function runService(
         '  --scope system installs a root-owned unit in /etc/systemd/system instead —',
         '  requires running as root already (never escalates via sudo) and --run-as <user>.',
         '  --after, --env-file, and --env customize the generated unit further (systemd only).',
+        '  start/stop/restart act on the installed service for the selected --manager/--scope,',
+        '  discovering it even when inactive — unlike `gateway restart|stop`, which only drive',
+        '  a manager currently reported as active.',
       ],
     );
     return flags.help === true ? 0 : 1;
   }
-  if (action !== 'install' && action !== 'status' && action !== 'uninstall') {
-    process.stderr.write(`Unknown: service ${action} (expected install|status|uninstall)\n`);
+  if (
+    action !== 'install' &&
+    action !== 'status' &&
+    action !== 'uninstall' &&
+    action !== 'start' &&
+    action !== 'stop' &&
+    action !== 'restart'
+  ) {
+    process.stderr.write(`Unknown: service ${action} (expected install|status|uninstall|start|stop|restart)\n`);
     return 1;
   }
   if (flags.print === true && action !== 'install') {
@@ -1078,8 +1346,16 @@ export async function runService(
 
   if (manager === 'systemd') {
     if (action === 'install') return systemdInstall(flags, config, scope);
-    return action === 'status' ? systemdStatus(flags, scope) : await systemdUninstall(flags, scope);
+    if (action === 'status') return systemdStatus(flags, scope);
+    if (action === 'uninstall') return await systemdUninstall(flags, scope);
+    if (action === 'start') return await systemdStart(flags, config, scope);
+    if (action === 'stop') return await systemdStop(flags, scope);
+    return await systemdRestart(flags, config, scope);
   }
   if (action === 'install') return pm2Install(flags, config);
-  return action === 'status' ? pm2Status(flags) : await pm2Uninstall(flags);
+  if (action === 'status') return pm2Status(flags);
+  if (action === 'uninstall') return await pm2Uninstall(flags);
+  if (action === 'start') return await pm2Start(flags, config);
+  if (action === 'stop') return await pm2Stop(flags);
+  return await pm2Restart(flags, config);
 }
