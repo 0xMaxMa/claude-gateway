@@ -56,6 +56,13 @@ const WAIT_TIMEOUT_MS = 30 * 60 * 1000;
 const WAIT_POLL_INTERVAL_MS = 1500;
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** A port as an operator writes one: decimal digits, nothing else. Deliberately
+ *  stricter than `Number()`, which happily accepts `0x1F90`, `1e3`, `+8080` and
+ *  ` 8080 ` — all integers by `Number.isInteger`, none of them a form the
+ *  server, a compose file, or the person reading `docker ps` would recognise.
+ *  `0x1F90` silently becoming 8080 is the worst of them: it binds a port the
+ *  caller never named. Leading zeros are left to the server's range check. */
+const PORT_RE = /^\d+$/;
 
 /** `--env KEY=VALUE[,KEY=VALUE...]` → the `env_vars` object the install body
  *  expects. Shares its list parsing with `service --env` (see
@@ -79,25 +86,24 @@ function parseEnvFlag(raw: string | boolean | undefined): Record<string, string>
 }
 
 /** `--ports NAME=PORT[,NAME=PORT...]` → the `ports` host-port-override object.
- *  Only the shape (integer values) is checked here; the port-number floor/ban
- *  list and "is this a port the app declares" are enforced server-side (see
- *  parsePortsField in apps-router.ts), since this command has no access to the
- *  app's app.yaml to check port names against. */
+ *  Only the shape (decimal port numbers) is checked here; the port-number
+ *  floor/ban list and "is this a port the app declares" are enforced
+ *  server-side (see parsePortsField in apps-router.ts), since this command has
+ *  no access to the app's app.yaml to check port names against. */
 function parsePortsFlag(raw: string | boolean | undefined): Record<string, number> | null {
   const pairs = parseKeyValueList('ports', raw, 'NAME=PORT');
   if (pairs === null) return null;
   const out: Record<string, number> = {};
   for (const { key, value } of pairs) {
-    // `Number('')` is 0, not NaN — checked separately so a trailing "NAME="
-    // with nothing after it is reported as the malformed input it is, rather
-    // than silently becoming port 0 (which the server would reject anyway,
-    // but with a more confusing "must be at least 1024" instead of this).
-    const port = value.trim() === '' ? NaN : Number(value);
-    if (!Number.isInteger(port)) {
-      process.stderr.write(`Invalid --ports value for "${key}" — "${value}" is not an integer.\n`);
+    // Note this rejects an empty value too: `Number('')` is 0, not NaN, so a
+    // bare "web=" (a typo dropping the port number) would otherwise become
+    // port 0 — which the server rejects, but with a confusing "must be at
+    // least 1024" instead of the malformed input it actually is.
+    if (!PORT_RE.test(value.trim())) {
+      process.stderr.write(`Invalid --ports value for "${key}" — "${value}" is not a decimal port number.\n`);
       return null;
     }
-    out[key] = port;
+    out[key] = Number(value.trim());
   }
   return out;
 }

@@ -349,6 +349,32 @@ describe('app', () => {
       expect(mockRequest).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['a hex literal', '0x1F90'],
+      ['an exponent form', '1e3'],
+      ['a signed value', '+8080'],
+      ['a negative value', '-1'],
+      ['a fractional value', '80.80'],
+      ['Infinity', 'Infinity'],
+    ])('rejects %s as a --ports value instead of coercing it (code-review round)', async (_label, value) => {
+      // `Number()` accepts all of these and `Number.isInteger` calls the first
+      // four an integer, so `--ports web=0x1F90` used to be sent as port 8080 —
+      // binding a port the caller never named. Only decimal digits are a port.
+      const code = await runCli(['app', 'install', 'agent-note', '--ports', `web=${value}`]);
+      expect(code).toBe(1);
+      expect(stderr.join('')).toContain(`Invalid --ports value for "web"`);
+      expect(mockRequest).not.toHaveBeenCalled();
+    });
+
+    it('still accepts a plain decimal port', async () => {
+      mockRequest.mockResolvedValue({ status: 202, ok: true, data: { jobId: 'job-11' } });
+      expect(await runCli(['app', 'install', 'agent-note', '--ports', 'web=8080,api=9090'])).toBe(0);
+      expect((mockRequest.mock.calls[0][0] as Sent).body).toEqual({
+        registry_app: 'agent-note',
+        ports: { web: 8080, api: 9090 },
+      });
+    });
+
     it('--wait polls the job and reports success once it completes', async () => {
       mockRequest
         .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-4' } })
