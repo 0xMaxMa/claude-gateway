@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { unknownFlagNames } from '../args';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
 import { createRl, ask } from '../prompt';
@@ -23,6 +24,25 @@ import type { JobState } from '../../apps/installer';
 
 const VERBS = ['list', 'start', 'stop', 'restart', 'uninstall', 'install'] as const;
 type Verb = (typeof VERBS)[number];
+
+/** Every flag `app` accepts, in any verb — the six every command takes plus
+ *  `install`'s own. Anything else is a typo and is reported: this command
+ *  builds its request body from named flags, so a dropped `--evn` would install
+ *  an app with none of the environment the caller meant to give it, and exit 0.
+ *  Same rule (and same reasoning) as `runResourceCommand` in ../index.ts. */
+const APP_FLAG_NAMES: ReadonlySet<string> = new Set([
+  'help',
+  'json',
+  'yes',
+  'url',
+  'key',
+  'config',
+  'version',
+  'commit',
+  'env',
+  'ports',
+  'wait',
+]);
 
 function isVerb(v: string | undefined): v is Verb {
   return !!v && (VERBS as readonly string[]).includes(v);
@@ -282,6 +302,12 @@ export async function runApps(
   }
   if (!isVerb(verb)) {
     process.stderr.write(`Unknown: app ${verb} (expected ${VERBS.join('|')})\n\n`);
+    printHelp(false);
+    return 1;
+  }
+  const unknown = unknownFlagNames(flags, APP_FLAG_NAMES);
+  if (unknown.length) {
+    process.stderr.write(`Unknown flag(s): ${unknown.map((f) => `--${f}`).join(' ')}\n\n`);
     printHelp(false);
     return 1;
   }

@@ -1057,6 +1057,60 @@ describe('service install — systemd-only flags rejected under --manager pm2 (i
   });
 });
 
+describe('service — an unknown flag is rejected, never silently dropped (code-review round)', () => {
+  // The parser has no schema: `--env-fil secrets.env` parses fine and is then
+  // ignored, so the unit was written with no EnvironmentFile= at all, installed,
+  // started, and reported success — the service comes up missing exactly the
+  // secrets the caller passed. Refuse instead, before anything is written.
+  it.each([
+    ['a misspelt --env-file', 'env-fil'],
+    ['a misspelt --run-as', 'run-was'],
+    ['a misspelt --manager', 'managr'],
+    ['a flag that belongs to another command', 'key'],
+  ])('%s aborts `service install` before writing the unit', async (_label, flagName) => {
+    const code = await runService(['install'], { yes: true, [flagName]: 'x' });
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain(`Unknown flag(s): --${flagName}`);
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expectNoStateChange();
+  });
+
+  it('rejects a misspelt boolean flag on an action that would otherwise have run', async () => {
+    const code = await runService(['status'], { jsno: true });
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Unknown flag(s): --jsno');
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('lists every unknown flag at once rather than only the first', async () => {
+    const code = await runService(['install'], { yes: true, foo: 'a', bar: 'b' });
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('Unknown flag(s): --foo --bar');
+  });
+
+  it('still accepts every flag `service` really does take', async () => {
+    // The guard must not reject a valid invocation: this one carries the whole
+    // documented flag set, and fails (exit 1) only on the systemd-only-under-pm2
+    // rule further down — proving it got past the unknown-flag check.
+    const code = await runService(['install'], {
+      yes: true,
+      json: true,
+      print: true,
+      force: true,
+      manager: 'pm2',
+      scope: 'user',
+      after: 'docker.service',
+      env: 'FOO=bar',
+      'env-file': '/tmp/x.env',
+      'run-as': 'gwuser',
+      url: 'http://127.0.0.1:10850',
+      config: '/tmp/cg.json',
+    });
+    expect(stderr.join('')).not.toMatch(/Unknown flag/);
+    expect(code).toBe(1);
+  });
+});
+
 describe('service install — a non-ENOENT read error on the existing unit is surfaced, not swallowed (issue #457 review round 2)', () => {
   it('aborts and reports the read failure instead of silently treating it as a fresh install', async () => {
     mockReadFileSync.mockImplementation(() => {

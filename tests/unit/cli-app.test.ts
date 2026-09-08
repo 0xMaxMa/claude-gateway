@@ -145,6 +145,56 @@ describe('app', () => {
     });
   });
 
+  describe('an unknown flag is rejected, never silently dropped (code-review round)', () => {
+    // `install`'s request body is built from named flags, so a mistyped one is
+    // parsed, ignored, and the install proceeds *without* it: `--evn K=V`
+    // installed the app with none of the environment the caller passed, and
+    // exited 0 as though it had worked.
+    it.each([
+      ['a misspelt --env', ['install', 'agent-note', '--evn', 'API_KEY=v']],
+      ['a misspelt --ports', ['install', 'agent-note', '--port', 'web=4000']],
+      ['a misspelt --version', ['install', 'agent-note', '--verison', '1.0.0']],
+      ['a misspelt --wait', ['install', 'agent-note', '--waitt']],
+      ['a flag that belongs to another command', ['list', '--manager', 'pm2']],
+    ])('%s exits 1 and makes no request', async (_label, argv) => {
+      const code = await runCli(['app', ...(argv as string[])]);
+      expect(code).toBe(1);
+      expect(stderr.join('')).toMatch(/^Unknown flag\(s\): --/);
+      expect(mockRequest).not.toHaveBeenCalled();
+    });
+
+    it('lists every unknown flag at once rather than only the first', async () => {
+      expect(await runCli(['app', 'list', '--foo', 'a', '--bar', 'b'])).toBe(1);
+      expect(stderr.join('')).toContain('Unknown flag(s): --foo --bar');
+    });
+
+    it('still accepts every flag `app` really does take', async () => {
+      mockRequest.mockResolvedValue({ status: 202, ok: true, data: { jobId: 'job-10' } });
+      const code = await runCli([
+        'app',
+        'install',
+        'agent-note',
+        '--version',
+        '1.0.0',
+        '--env',
+        'FOO=bar',
+        '--ports',
+        'web=4000',
+        '--json',
+        '--yes',
+        '--url',
+        'http://127.0.0.1:10850',
+        '--key',
+        'sk-admin-test',
+        '--config',
+        '/tmp/cg.json',
+      ]);
+      expect(stderr.join('')).not.toMatch(/Unknown flag/);
+      expect(code).toBe(0);
+      expect(mockRequest).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('a bare `app` prints its verbs and exits 1; `--help` exits 0 on stdout', async () => {
     expect(await runCli(['app'])).toBe(1);
     expect(stderr.join('')).toContain('list|start|stop|restart|uninstall|install');

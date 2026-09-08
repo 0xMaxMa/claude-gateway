@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { parseCliArgs } from './args';
+import { parseCliArgs, unknownFlagNames } from './args';
 import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrlPlan, resolveKey, request, CliConfigView } from './http-client';
@@ -180,8 +180,7 @@ async function runResourceCommand(
     }
     body = parsed as Record<string, unknown>;
   }
-  const known = new Set([...GLOBAL_FLAG_NAMES, ...cmd.flags.map((f) => f.name)]);
-  const unknown = Object.keys(flags).filter((name) => !known.has(name));
+  const unknown = unknownFlagNames(flags, new Set([...GLOBAL_FLAG_NAMES, ...cmd.flags.map((f) => f.name)]));
   if (unknown.length) {
     // Same treatment as an unknown verb: refuse and show what is accepted. A
     // mistyped flag used to reach the API as a missing field (`crons create

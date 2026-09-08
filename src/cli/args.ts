@@ -24,6 +24,20 @@ function looksLikeFlag(token: string): boolean {
 }
 
 /**
+ * Names in `flags` that `known` does not declare.
+ *
+ * The parser has no schema, so an unrecognised flag parses fine and is then
+ * simply ignored — `app install foo --evn KEY=V` sent no env vars at all and
+ * exited 0, as though it had worked. Every command that builds its request or
+ * its behaviour from named flags therefore has to reject what it does not know
+ * rather than drop it; this is the one place that decides what "does not know"
+ * means, so the answer cannot drift between commands.
+ */
+export function unknownFlagNames(flags: Record<string, string | boolean>, known: ReadonlySet<string>): string[] {
+  return Object.keys(flags).filter((name) => !known.has(name));
+}
+
+/**
  * `booleanFlags` names flags that must never consume the next token as a value
  * (e.g. `--force <positional>` should leave `<positional>` alone). Without this,
  * a boolean flag placed right before a positional silently swallows it — the

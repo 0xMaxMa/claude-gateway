@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { unknownFlagNames } from '../args';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { createRl, ask, printFilePreview } from '../prompt';
 import { probeHealth } from '../health';
@@ -42,6 +43,32 @@ const EXIT_HEALTH_TIMEOUT = 2;
 /** Env var names the installer itself sets — `--env` may not override these. */
 const RESERVED_ENV_KEYS = new Set(['HOME', 'PATH', 'GATEWAY_CONFIG']);
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Every flag `service` accepts, across all six actions. Anything else is a
+ *  typo and is reported rather than dropped: this command generates a unit
+ *  file out of named flags, so a mistyped `--env-fil secrets.env` would write
+ *  a unit with no EnvironmentFile= at all, install it, and exit 0 — the
+ *  service then starts without the secrets it was meant to have. Same rule
+ *  (and same reasoning) as `runResourceCommand` in ../index.ts.
+ *
+ *  Action-specific flags are validated for *applicability* further down
+ *  (`--print` outside `install`, the systemd-only set under `--manager pm2`);
+ *  this set only answers "is this a flag `service` knows at all". */
+const SERVICE_FLAG_NAMES: ReadonlySet<string> = new Set([
+  'help',
+  'json',
+  'yes',
+  'print',
+  'force',
+  'url',
+  'config',
+  'manager',
+  'scope',
+  'after',
+  'env',
+  'env-file',
+  'run-as',
+]);
 
 export type ServiceManager = 'systemd' | 'pm2';
 type ServiceAction = 'install' | 'status' | 'uninstall' | 'start' | 'stop' | 'restart';
@@ -1353,6 +1380,11 @@ export async function runService(
     action !== 'restart'
   ) {
     process.stderr.write(`Unknown: service ${action} (expected install|status|uninstall|start|stop|restart)\n`);
+    return 1;
+  }
+  const unknownFlags = unknownFlagNames(flags, SERVICE_FLAG_NAMES);
+  if (unknownFlags.length) {
+    process.stderr.write(`Unknown flag(s): ${unknownFlags.map((f) => `--${f}`).join(' ')}\n`);
     return 1;
   }
   if (flags.print === true && action !== 'install') {
