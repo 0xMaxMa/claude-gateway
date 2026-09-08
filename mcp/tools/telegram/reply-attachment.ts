@@ -12,7 +12,10 @@ export type RepliedAttachment = {
   name?: string
 }
 
-function safeName(s: string | undefined): string | undefined {
+// Filenames and titles are uploader-controlled. They land inside the <channel>
+// notification — delimiter chars would let the uploader break out of the tag
+// or forge a second meta entry.
+export function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
 }
 

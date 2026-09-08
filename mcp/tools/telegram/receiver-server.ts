@@ -30,7 +30,7 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards, chunkText, htmlToPlain } from './typing'
-import { extractRepliedAttachment } from './reply-attachment'
+import { extractRepliedAttachment, safeName } from './reply-attachment'
 // Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
@@ -926,13 +926,6 @@ const CALLBACK_URL_BASE = (() => {
 })()
 
 // ─── Message helpers (shared across all polling modes) ───────────────────────
-
-// Filenames and titles are uploader-controlled. They land inside the <channel>
-// notification — delimiter chars would let the uploader break out of the tag
-// or forge a second meta entry.
-function safeName(s: string | undefined): string | undefined {
-  return s?.replace(/[<>\[\]\r\n;]/g, '_')
-}
 
 type AttachmentMeta = {
   kind: string
