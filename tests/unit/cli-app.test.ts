@@ -44,6 +44,15 @@ describe('app — <source> classification (parseInstallSource)', () => {
     expect(parseInstallSource('agent-note')).toEqual({ registry_app: 'agent-note' });
     expect(parseInstallSource('getpod-manager')).toEqual({ registry_app: 'getpod-manager' });
   });
+
+  it('does not mistake `~other-user/...` for the current user\'s home (code-review round)', () => {
+    // expandHome() only expands the exact '~' / '~/...' forms; resolving
+    // anything else would produce a bogus path with a literal `~alice`
+    // segment. Falling through to registry_app instead surfaces a clear
+    // "not found in registry" from the server rather than a confusing
+    // filesystem error against a path nobody meant to construct.
+    expect(parseInstallSource('~alice/my-app')).toEqual({ registry_app: '~alice/my-app' });
+  });
 });
 
 describe('app', () => {
@@ -220,6 +229,15 @@ describe('app', () => {
       expect(mockRequest).not.toHaveBeenCalled();
     });
 
+    it('rejects a --ports entry with an empty value instead of silently sending port 0 (code-review round)', async () => {
+      // `Number('')` is 0, not NaN — a bare "web=" (e.g. a typo dropping the
+      // port number) must be reported as malformed, not silently coerced.
+      const code = await runCli(['app', 'install', 'agent-note', '--ports', 'web=']);
+      expect(code).toBe(1);
+      expect(stderr.join('')).toContain('Invalid --ports value for "web"');
+      expect(mockRequest).not.toHaveBeenCalled();
+    });
+
     it('--wait polls the job and reports success once it completes', async () => {
       mockRequest
         .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-4' } })
@@ -252,6 +270,28 @@ describe('app', () => {
       const code = await runCli(['app', 'install', 'agent-note', '--wait']);
       expect(code).toBe(1);
       expect(stderr.join('')).toContain('Install failed: compose build exited 1');
+    });
+
+    it('--wait tolerates a single transient poll failure instead of aborting the whole wait (code-review round)', async () => {
+      // A brief network blip mid-poll must not be reported as an install
+      // failure — the job keeps running server-side regardless of whether
+      // this one poll could reach it.
+      jest.useFakeTimers();
+      mockRequest
+        .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-6' } })
+        .mockRejectedValueOnce(new Error('Cannot reach gateway at http://127.0.0.1:10850: ECONNRESET'))
+        .mockResolvedValueOnce({ status: 200, ok: true, data: { id: 'job-6', status: 'completed', logs: [] } });
+      try {
+        const promise = runCli(['app', 'install', 'agent-note', '--wait']);
+        await jest.advanceTimersByTimeAsync(5_000);
+        const code = await promise;
+        expect(code).toBe(0);
+        expect(mockRequest).toHaveBeenCalledTimes(3);
+        expect(stderr.join('')).toMatch(/Poll failed, retrying: .*ECONNRESET/);
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ id: 'job-6', status: 'completed' }));
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

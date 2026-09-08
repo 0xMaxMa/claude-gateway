@@ -91,7 +91,11 @@ function parsePortsFlag(raw: string | boolean | undefined): Record<string, numbe
     }
     const name = trimmed.slice(0, eq);
     const value = trimmed.slice(eq + 1);
-    const port = Number(value);
+    // `Number('')` is 0, not NaN — checked separately so a trailing "NAME="
+    // with nothing after it is reported as the malformed input it is, rather
+    // than silently becoming port 0 (which the server would reject anyway,
+    // but with a more confusing "must be at least 1024" instead of this).
+    const port = value.trim() === '' ? NaN : Number(value);
     if (!Number.isInteger(port)) {
       process.stderr.write(`Invalid --ports value for "${name}" — "${value}" is not an integer.\n`);
       return null;
@@ -114,15 +118,21 @@ export interface InstallSourceBody {
  * it, so `app install` needs no separate `--registry-app`/`--github-url`/
  * `--local-path` flags for the common case:
  *   - `https://...` / `http://...`         → a GitHub URL (server validates the host)
- *   - starts with `/`, `./`, `../`, or `~`  → a local path (resolved to absolute —
+ *   - `/...`, `./...`, `../...`, `~`, `~/...` → a local path (resolved to absolute —
  *                                             the API requires one)
  *   - anything else                         → a registry app name
  * This is a pure client-side convenience; the server still validates the value
  * makes sense for the mode it was sent in.
+ *
+ * A bare `~other-user/...` (not `~` or `~/`) deliberately falls through to the
+ * registry-app case rather than being treated as local: `expandHome()` only
+ * expands the current user's home, so resolving that form would silently
+ * produce a bogus path with a literal `~other-user` path segment instead of
+ * either the intended home directory or a clear error.
  */
 export function parseInstallSource(source: string): InstallSourceBody {
   if (/^https?:\/\//i.test(source)) return { github_url: source };
-  if (source.startsWith('/') || source.startsWith('./') || source.startsWith('../') || source.startsWith('~')) {
+  if (source.startsWith('/') || source.startsWith('./') || source.startsWith('../') || source === '~' || source.startsWith('~/')) {
     return { local_path: path.resolve(expandHome(source)) };
   }
   return { registry_app: source };
@@ -156,7 +166,14 @@ async function confirm(flags: Record<string, string | boolean>, question: string
  *  to stderr as they appear (redacted defensively — see redact.ts — even
  *  though install logs are documented to name secrets, never their values).
  *  stdout gets exactly one JSON result, printed once the job is done, so
- *  `--json` output stays a single parseable value. */
+ *  `--json` output stays a single parseable value.
+ *
+ *  A single poll that fails to reach the gateway (a brief network blip, or
+ *  the gateway momentarily busy building the very app being installed) is
+ *  reported and retried rather than aborting the whole wait — the install job
+ *  itself keeps running server-side regardless of whether this one poll could
+ *  reach it, so throwing here would trade a transient hiccup for a spurious
+ *  "it failed" when the job was fine. */
 async function waitForJob(
   baseUrl: string,
   key: string | undefined,
@@ -167,8 +184,22 @@ async function waitForJob(
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
   let seenLogs = 0;
   for (;;) {
-    const result = await request({ method: 'GET', path: `/v1/apps/jobs/${encodeURIComponent(jobId)}`, baseUrl, key });
-    const job = result.data as JobState;
+    let job: JobState;
+    try {
+      const result = await request({ method: 'GET', path: `/v1/apps/jobs/${encodeURIComponent(jobId)}`, baseUrl, key });
+      job = result.data as JobState;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        process.stderr.write(
+          `Still waiting on job ${jobId}, and the last poll failed: ${(err as Error).message}\n` +
+            `Check it with: claude-gateway api GET /v1/apps/jobs/${jobId}\n`,
+        );
+        return 1;
+      }
+      process.stderr.write(`Poll failed, retrying: ${(err as Error).message}\n`);
+      await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
+      continue;
+    }
     const logs = job.logs ?? [];
     for (; seenLogs < logs.length; seenLogs++) {
       process.stderr.write(redactLine(logs[seenLogs]) + '\n');
