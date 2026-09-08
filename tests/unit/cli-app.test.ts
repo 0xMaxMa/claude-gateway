@@ -7,12 +7,15 @@
  * accepted).
  */
 const mockRequest = jest.fn();
+/** Mutable so a test can give the plan a `fallbackUrl` — that is the only
+ *  shape in which `resolveReachableUrl()` probes /health at all. */
+const mockUrlPlan: { baseUrl: string; fallbackUrl?: string } = { baseUrl: 'http://127.0.0.1:10850' };
 
 jest.mock('../../src/cli/http-client', () => ({
   ...jest.requireActual('../../src/cli/http-client'),
   request: (...args: unknown[]) => mockRequest(...args),
   loadCliConfig: () => ({}),
-  resolveUrlPlan: () => ({ baseUrl: 'http://127.0.0.1:10850' }),
+  resolveUrlPlan: () => mockUrlPlan,
   resolveKey: () => 'sk-admin-test',
 }));
 
@@ -82,7 +85,64 @@ describe('app', () => {
   afterEach(() => {
     outSpy.mockRestore();
     errSpy.mockRestore();
+    delete mockUrlPlan.fallbackUrl;
     if (ttyDescriptor) Object.defineProperty(process.stdin, 'isTTY', ttyDescriptor);
+  });
+
+  /**
+   * A usage error is the caller's, not the network's. `resolveReachableUrl()`
+   * probes /health whenever the plan has a fallback, and on failure prints
+   * "Cannot reach the gateway at … using …" — which, printed *above* the real
+   * "Missing argument", reads as a connectivity problem for a command that was
+   * never going to make a request in the first place.
+   */
+  describe('argument validation happens before the gateway is probed (code-review round)', () => {
+    beforeEach(() => {
+      mockUrlPlan.fallbackUrl = 'http://localhost:10850';
+    });
+
+    it.each(['start', 'stop', 'restart', 'uninstall', 'install'] as const)(
+      '`app %s` with no positional never probes /health',
+      async (verb) => {
+        const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response);
+        try {
+          expect(await runCli(['app', verb])).toBe(1);
+          expect(fetchSpy).not.toHaveBeenCalled();
+          expect(stderr.join('')).not.toMatch(/Cannot reach the gateway/);
+          expect(stderr.join('')).toMatch(/^Missing argument/);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      ['--version on a GitHub source', ['install', 'https://github.com/myorg/my-app', '--version', '1.0.0']],
+      ['--commit on a registry source', ['install', 'agent-note', '--commit', 'a'.repeat(40)]],
+      ['a malformed --env', ['install', 'agent-note', '--env', 'NOT-VALID']],
+      ['a malformed --ports', ['install', 'agent-note', '--ports', 'web=notanumber']],
+    ])('`app install` with %s never probes /health either', async (_label, argv) => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response);
+      try {
+        expect(await runCli(['app', ...(argv as string[])])).toBe(1);
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(stderr.join('')).not.toMatch(/Cannot reach the gateway/);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('a valid invocation still probes and still falls back — the check was moved, not removed', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+      try {
+        expect(await runCli(['app', 'list'])).toBe(0);
+        expect(fetchSpy).toHaveBeenCalled();
+        expect(stderr.join('')).toMatch(/Cannot reach the gateway/);
+        expect((mockRequest.mock.calls[0][0] as Sent).baseUrl).toBe('http://localhost:10850');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
   });
 
   it('a bare `app` prints its verbs and exits 1; `--help` exits 0 on stdout', async () => {

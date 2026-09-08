@@ -241,6 +241,34 @@ async function waitForJob(
   }
 }
 
+/** `install`'s request body, or null when the caller's own input was wrong
+ *  (message already on stderr). Built before any network call so a bad flag is
+ *  reported on its own — see the note in `runApps`. */
+function buildInstallBody(source: string, flags: Record<string, string | boolean>): Record<string, unknown> | null {
+  const sourceBody = parseInstallSource(source);
+  const version = strFlag(flags.version);
+  const commit = strFlag(flags.commit);
+  if (version !== undefined && !sourceBody.registry_app) {
+    process.stderr.write('--version only applies to a registry source (a plain app name).\n');
+    return null;
+  }
+  if (commit !== undefined && !sourceBody.github_url) {
+    process.stderr.write('--commit only applies to a GitHub source (an http(s):// URL).\n');
+    return null;
+  }
+  const envVars = parseEnvFlag(flags.env);
+  if (envVars === null) return null;
+  const portOverrides = parsePortsFlag(flags.ports);
+  if (portOverrides === null) return null;
+
+  const body: Record<string, unknown> = { ...sourceBody };
+  if (version !== undefined) body.version = version;
+  if (commit !== undefined) body.commit = commit;
+  if (Object.keys(envVars).length) body.env_vars = envVars;
+  if (Object.keys(portOverrides).length) body.ports = portOverrides;
+  return body;
+}
+
 export async function runApps(
   positionals: string[],
   flags: Record<string, string | boolean>,
@@ -258,6 +286,20 @@ export async function runApps(
     return 1;
   }
 
+  // Everything wrong with the invocation itself is reported before the first
+  // network call. `resolveReachableUrl()` probes /health and, when it falls
+  // back, writes "Cannot reach the gateway at … using …" to stderr — printed
+  // above the "Missing argument" that is the actual problem, that reads as a
+  // connectivity failure for a command that was never going to make a request.
+  const name = positionals[1];
+  if (verb !== 'list' && !name) {
+    process.stderr.write(`Missing argument: app ${verb} <${verb === 'install' ? 'source' : 'name'}>\n\n`);
+    printHelp(false);
+    return 1;
+  }
+  const installBody = verb === 'install' ? buildInstallBody(name, flags) : undefined;
+  if (installBody === null) return 1;
+
   const baseUrl = await resolveReachableUrl(resolveUrlPlan({ flagUrl: strFlag(flags.url), env: process.env, config }));
   const key = resolveKey({ flagKey: strFlag(flags.key), env: process.env, config });
   const compact = flags.json === true;
@@ -269,24 +311,12 @@ export async function runApps(
   }
 
   if (verb === 'start' || verb === 'stop' || verb === 'restart') {
-    const name = positionals[1];
-    if (!name) {
-      process.stderr.write(`Missing argument: app ${verb} <name>\n\n`);
-      printHelp(false);
-      return 1;
-    }
     const result = await request({ method: 'POST', path: `/v1/apps/${encodeURIComponent(name)}/${verb}`, baseUrl, key });
     printResult(result.data, compact);
     return 0;
   }
 
   if (verb === 'uninstall') {
-    const name = positionals[1];
-    if (!name) {
-      process.stderr.write('Missing argument: app uninstall <name>\n\n');
-      printHelp(false);
-      return 1;
-    }
     // No new implicit data deletion beyond what the API already does: this
     // removes the app's containers and installed files, but never its backups
     // (see DELETE /v1/apps/:name in apps-router.ts) — the confirmation prompt
@@ -301,35 +331,7 @@ export async function runApps(
   }
 
   // verb === 'install'
-  const source = positionals[1];
-  if (!source) {
-    process.stderr.write('Missing argument: app install <source>\n\n');
-    printHelp(false);
-    return 1;
-  }
-  const sourceBody = parseInstallSource(source);
-  const version = strFlag(flags.version);
-  const commit = strFlag(flags.commit);
-  if (version !== undefined && !sourceBody.registry_app) {
-    process.stderr.write('--version only applies to a registry source (a plain app name).\n');
-    return 1;
-  }
-  if (commit !== undefined && !sourceBody.github_url) {
-    process.stderr.write('--commit only applies to a GitHub source (an http(s):// URL).\n');
-    return 1;
-  }
-  const envVars = parseEnvFlag(flags.env);
-  if (envVars === null) return 1;
-  const portOverrides = parsePortsFlag(flags.ports);
-  if (portOverrides === null) return 1;
-
-  const body: Record<string, unknown> = { ...sourceBody };
-  if (version !== undefined) body.version = version;
-  if (commit !== undefined) body.commit = commit;
-  if (Object.keys(envVars).length) body.env_vars = envVars;
-  if (Object.keys(portOverrides).length) body.ports = portOverrides;
-
-  const result = await request({ method: 'POST', path: '/v1/apps/install', baseUrl, key, body });
+  const result = await request({ method: 'POST', path: '/v1/apps/install', baseUrl, key, body: installBody });
   const jobId = (result.data as { jobId?: string } | undefined)?.jobId;
   if (flags.wait === true && jobId) {
     return await waitForJob(baseUrl, key, jobId, flags);
