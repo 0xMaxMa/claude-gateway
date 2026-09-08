@@ -21,6 +21,7 @@ import { SkillsModule } from './tools/skills/module';
 import { AgentModule } from './tools/agent/module';
 import { BrowserModule } from './tools/browser/module';
 import { ImageModule } from './tools/image/module';
+import { VideoModule } from './tools/video/module';
 import { ShareFileModule } from './tools/share-file/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
@@ -46,6 +47,7 @@ const modules: AnyModule[] = [
   new AgentModule(),
   new BrowserModule(),
   new ImageModule(),
+  new VideoModule(),
   new ShareFileModule(),
   new AppsModule(),
   new ApiModule(),
@@ -85,6 +87,7 @@ for (const mod of modules) {
 const shutdownController = new AbortController();
 
 const imageEnabled = visibleTools.some((t) => t.name === 'generate_image');
+const videoEnabled = visibleTools.some((t) => t.name === 'generate_video');
 
 const mcp = new Server(
   { name: 'gateway', version: '1.0.0' },
@@ -96,7 +99,7 @@ const mcp = new Server(
         'claude/channel/permission': {},
       },
     },
-    instructions: buildChannelInstructions(imageEnabled),
+    instructions: buildChannelInstructions(imageEnabled, videoEnabled),
   },
 );
 
@@ -136,10 +139,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
 await mcp.connect(new StdioServerTransport());
 
 // Graceful shutdown — used by stdin-close, SIGINT, and SIGTERM paths.
-// Awaits any in-flight image cancel (E3) before exiting so the provider
-// actually stops generating when the user presses Stop, rather than the
+// Awaits any in-flight cancel (E3) on the media modules before exiting so the
+// provider actually stops generating when the user presses Stop, rather than the
 // process dying mid-request and the cancel call never reaching the server.
-const imageModuleRef = modules.find((m) => m.id === 'image') as { drainCancel?: () => Promise<void> } | undefined;
+const drainableModules = modules.filter(
+  (m): m is AnyModule & { drainCancel: () => Promise<void> } =>
+    typeof (m as { drainCancel?: unknown }).drainCancel === 'function',
+);
 let shuttingDown = false;
 function shutdown(): void {
   if (shuttingDown) return;
@@ -156,7 +162,7 @@ function shutdown(): void {
   // Give the event loop one tick so the poll loop's sleep() onAbort listener
   // fires and cancelledResult() sets activeCancelPromise before we try to drain it.
   setImmediate(async () => {
-    try { await imageModuleRef?.drainCancel?.(); } catch { /* non-fatal */ }
+    try { await Promise.all(drainableModules.map((m) => m.drainCancel())); } catch { /* non-fatal */ }
     clearTimeout(forceExit);
     process.exit(0);
   });
