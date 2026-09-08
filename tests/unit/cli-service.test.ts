@@ -1614,6 +1614,88 @@ describe('service start/stop/restart — discover the installed service even whe
       expect(code).toBe(1);
       expect(stderr.join('')).toMatch(/--scope system only applies to the systemd manager, not pm2/);
     });
+
+    /**
+     * The post-action `pm2 jlist` read is a *confirmation*, not the action.
+     * When it throws — a non-zero exit, or output that is not JSON — the
+     * exception used to escape to runCli's catch: `Error: Unexpected token …`,
+     * exit 1, and an empty stdout, for a start/stop/restart that had already
+     * succeeded. (`pm2Uninstall` guarded its own re-read; these three did not.)
+     */
+    describe('a post-action `pm2 jlist` failure never turns a successful action into a reported failure (code-review round)', () => {
+      /** Valid JSON for the reads before the action, garbage for every read
+       *  after it — exactly what a PM2 daemon dying mid-command produces. */
+      function jlistBreaksAfter(actionVerb: string, initialStatus: string): void {
+        let acted = false;
+        mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+          if (file === 'pm2' && args[0] === 'jlist') {
+            if (acted) return Buffer.from('<html>502 Bad Gateway</html>');
+            return Buffer.from(JSON.stringify([{ name: 'gateway', pm2_env: { status: initialStatus } }]));
+          }
+          if (file === 'pm2' && args[0] === actionVerb) {
+            acted = true;
+            return Buffer.from('');
+          }
+          return Buffer.from('');
+        }) as unknown as typeof execFileSync);
+      }
+
+      it('start: reports the health result (exit 0) instead of crashing with a JSON parse error', async () => {
+        jlistBreaksAfter('start', 'stopped');
+        const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+        try {
+          const code = await runService(['start'], { manager: 'pm2' });
+          expect(code).toBe(0);
+          expect(mockExecFileSync).toHaveBeenCalledWith('pm2', ['start', 'gateway'], expect.anything());
+          expect(stderr.join('')).not.toMatch(/Unexpected token|JSON/);
+          expect(stderr.join('')).toMatch(/could not re-read the PM2 process list/);
+          // stdout still carries exactly one parseable result for --json callers.
+          expect(JSON.parse(stdout.join(''))).toEqual(
+            expect.objectContaining({ manager: 'pm2', status: 'unknown', health: 'up' }),
+          );
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+
+      it('start: still reports exit 2 when the unconfirmable start also failed /health', async () => {
+        jest.useFakeTimers();
+        jlistBreaksAfter('start', 'stopped');
+        const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false } as Response);
+        try {
+          const promise = runService(['start'], { manager: 'pm2' });
+          await jest.advanceTimersByTimeAsync(20 * 500 + 5_000);
+          expect(await promise).toBe(2);
+          expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ status: 'unknown', health: 'down' }));
+        } finally {
+          fetchSpy.mockRestore();
+          jest.useRealTimers();
+        }
+      });
+
+      it('stop: reports success (exit 0) — `pm2 stop` returned 0, only the confirmation read did not', async () => {
+        jlistBreaksAfter('stop', 'online');
+        const code = await runService(['stop'], { manager: 'pm2' });
+        expect(code).toBe(0);
+        expect(mockExecFileSync).toHaveBeenCalledWith('pm2', ['stop', 'gateway'], expect.anything());
+        expect(stderr.join('')).not.toMatch(/Unexpected token|JSON/);
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ status: 'unknown', active: false }));
+      });
+
+      it('restart: reports the health result (exit 0) instead of crashing', async () => {
+        jlistBreaksAfter('restart', 'online');
+        const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+        try {
+          const code = await runService(['restart'], { manager: 'pm2' });
+          expect(code).toBe(0);
+          expect(mockExecFileSync).toHaveBeenCalledWith('pm2', ['restart', 'gateway'], expect.anything());
+          expect(stderr.join('')).not.toMatch(/Unexpected token|JSON/);
+          expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ status: 'unknown', health: 'up' }));
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+    });
   });
 
   it('rejects an unknown verb, listing the extended set', async () => {

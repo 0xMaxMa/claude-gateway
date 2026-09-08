@@ -971,6 +971,26 @@ function pm2Entry(): Pm2Entry | undefined {
   return list.find((item) => item.name === PM2_NAME);
 }
 
+/** The state PM2 reports *after* an action already succeeded.
+ *
+ *  `pm2Entry()` throws when `pm2 jlist` exits non-zero or prints something that
+ *  isn't JSON — and a re-read that fails is not the action failing: `pm2 start`
+ *  already returned 0. Letting it throw sends the exception all the way to
+ *  `runCli`'s catch, which prints `Error: Unexpected token …`, exits 1, and
+ *  writes nothing at all to stdout — reporting a start that genuinely worked as
+ *  a failure, with no JSON for `--json` callers to read. `pm2Uninstall()`
+ *  already guards its own re-read for this reason; these are the same case.
+ *
+ *  `unread` is kept distinct from "absent": one means PM2 says the process is
+ *  gone, the other means PM2 said nothing usable. */
+function pm2StateAfterAction(): { entry?: Pm2Entry; unread: boolean } {
+  try {
+    return { entry: pm2Entry(), unread: false };
+  } catch {
+    return { unread: true };
+  }
+}
+
 function pm2Status(flags: Record<string, string | boolean>): number {
   let entry: Pm2Entry | undefined;
   try {
@@ -1109,10 +1129,18 @@ async function pm2Start(flags: Record<string, string | boolean>, config: CliConf
     return 1;
   }
   const healthy = await waitForHealth(config, flags);
-  entry = pm2Entry();
-  const status = entry?.pm2_env?.status ?? 'absent';
-  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status, health: healthy ? 'up' : 'down' }, flags);
-  if (status !== 'online') {
+  const after = pm2StateAfterAction();
+  const status = after.unread ? 'unknown' : after.entry?.pm2_env?.status ?? 'absent';
+  printJson(
+    { manager: 'pm2', name: PM2_NAME, installed: after.unread ? true : !!after.entry, active: status === 'online', status, health: healthy ? 'up' : 'down' },
+    flags,
+  );
+  if (after.unread) {
+    // The start itself succeeded; only the confirmation read did not. Health is
+    // the stronger signal anyway, so fall through to it rather than calling a
+    // working service failed.
+    process.stderr.write(`Started ${PM2_NAME}, but could not re-read the PM2 process list to confirm it — reporting /health only.\n`);
+  } else if (status !== 'online') {
     process.stderr.write(`${PM2_NAME} did not come online — check: pm2 logs ${PM2_NAME}\n`);
     return 1;
   }
@@ -1122,7 +1150,6 @@ async function pm2Start(flags: Record<string, string | boolean>, config: CliConf
   }
   return 0;
 }
-
 /** Same idempotence convention as `systemdStop()` — an absent or already-
  *  stopped process is success, not an error, because the goal is already true. */
 async function pm2Stop(flags: Record<string, string | boolean>): Promise<number> {
@@ -1153,9 +1180,15 @@ async function pm2Stop(flags: Record<string, string | boolean>): Promise<number>
     process.stderr.write(`Could not stop the PM2 process "${PM2_NAME}": ${(err as Error).message}\nCheck: pm2 logs ${PM2_NAME}\n`);
     return 1;
   }
-  entry = pm2Entry();
-  const status = entry?.pm2_env?.status ?? 'absent';
-  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status }, flags);
+  const after = pm2StateAfterAction();
+  const status = after.unread ? 'unknown' : after.entry?.pm2_env?.status ?? 'absent';
+  printJson({ manager: 'pm2', name: PM2_NAME, installed: after.unread ? true : !!after.entry, active: status === 'online', status }, flags);
+  if (after.unread) {
+    // `pm2 stop` returned 0 — only the confirmation read failed, which is not
+    // grounds for reporting a stop that worked as a failure.
+    process.stderr.write(`Stopped ${PM2_NAME}, but could not re-read the PM2 process list to confirm it.\n`);
+    return 0;
+  }
   if (status === 'online') {
     process.stderr.write(`${PM2_NAME} is still online — check: pm2 logs ${PM2_NAME}\n`);
     return 1;
@@ -1188,10 +1221,15 @@ async function pm2Restart(flags: Record<string, string | boolean>, config: CliCo
     return 1;
   }
   const healthy = await waitForHealth(config, flags);
-  entry = pm2Entry();
-  const status = entry?.pm2_env?.status ?? 'absent';
-  printJson({ manager: 'pm2', name: PM2_NAME, installed: !!entry, active: status === 'online', status, health: healthy ? 'up' : 'down' }, flags);
-  if (status !== 'online') {
+  const after = pm2StateAfterAction();
+  const status = after.unread ? 'unknown' : after.entry?.pm2_env?.status ?? 'absent';
+  printJson(
+    { manager: 'pm2', name: PM2_NAME, installed: after.unread ? true : !!after.entry, active: status === 'online', status, health: healthy ? 'up' : 'down' },
+    flags,
+  );
+  if (after.unread) {
+    process.stderr.write(`Restarted ${PM2_NAME}, but could not re-read the PM2 process list to confirm it — reporting /health only.\n`);
+  } else if (status !== 'online') {
     process.stderr.write(`${PM2_NAME} did not come online — check: pm2 logs ${PM2_NAME}\n`);
     return 1;
   }
