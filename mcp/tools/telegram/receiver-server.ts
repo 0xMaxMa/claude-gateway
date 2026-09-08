@@ -30,6 +30,7 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { execFileSync } from 'child_process'
 import { createWorkingStateManager, drainOrphanForwards, chunkText, htmlToPlain } from './typing'
+import { extractRepliedAttachment, safeName } from './reply-attachment'
 // Import compiled dist/, not raw src/ — src/ is not published (files: ["mcp/"]),
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
@@ -587,7 +588,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. A nested <replied> block quotes an earlier message; it may carry replied_image_path (Read it) or replied_attachment_file_id (pass to download_attachment) when the quoted message held a photo or file. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -926,13 +927,6 @@ const CALLBACK_URL_BASE = (() => {
 
 // ─── Message helpers (shared across all polling modes) ───────────────────────
 
-// Filenames and titles are uploader-controlled. They land inside the <channel>
-// notification — delimiter chars would let the uploader break out of the tag
-// or forge a second meta entry.
-function safeName(s: string | undefined): string | undefined {
-  return s?.replace(/[<>\[\]\r\n;]/g, '_')
-}
-
 type AttachmentMeta = {
   kind: string
   file_id: string
@@ -1048,6 +1042,12 @@ async function handleInbound(
     } catch {}
   }
 
+  // A replied-to message may also carry a non-photo attachment (document, video,
+  // audio, …). Photos become an image_path above; everything else is surfaced by
+  // file_id so the agent can fetch it with download_attachment — without this a
+  // quote-reply of e.g. a CSV dropped the file entirely.
+  const repliedAttachment = extractRepliedAttachment(replyMsg)
+
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
   const channelParams = {
@@ -1074,6 +1074,13 @@ async function handleInbound(
         replied_user: replyMsg.from?.username ?? String(replyMsg.from?.id ?? ''),
         ...(replyMsg.text ? { replied_text: replyMsg.text } : {}),
         ...(repliedImagePath ? { replied_image_path: repliedImagePath } : {}),
+        ...(repliedAttachment ? {
+          replied_attachment_kind: repliedAttachment.kind,
+          replied_attachment_file_id: repliedAttachment.file_id,
+          ...(repliedAttachment.size != null ? { replied_attachment_size: String(repliedAttachment.size) } : {}),
+          ...(repliedAttachment.mime ? { replied_attachment_mime: repliedAttachment.mime } : {}),
+          ...(repliedAttachment.name ? { replied_attachment_name: repliedAttachment.name } : {}),
+        } : {}),
       } : {}),
     },
   }
