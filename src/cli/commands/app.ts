@@ -268,7 +268,7 @@ async function waitForJob(
 
 /** `install`'s request body, or null when the caller's own input was wrong
  *  (message already on stderr). Built before any network call so a bad flag is
- *  reported on its own — see the note in `runApps`. */
+ *  reported on its own — see the note in `runApp`. */
 function buildInstallBody(source: string, flags: Record<string, string | boolean>): Record<string, unknown> | null {
   const sourceBody = parseInstallSource(source);
   const version = strFlag(flags.version);
@@ -302,7 +302,7 @@ function buildInstallBody(source: string, flags: Record<string, string | boolean
   return body;
 }
 
-export async function runApps(
+export async function runApp(
   positionals: string[],
   flags: Record<string, string | boolean>,
   config: CliConfigView,

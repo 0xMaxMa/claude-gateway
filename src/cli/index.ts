@@ -7,7 +7,7 @@ import { printResult, helpStream, writeCommandHelp } from './output';
 import { paletteFor, Paint } from './colors';
 import { runGatewayLifecycle } from './commands/gateway';
 import { runService } from './commands/service';
-import { runApps } from './commands/app';
+import { runApp } from './commands/app';
 import { runUpdate, runClaude } from './commands/update';
 import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
@@ -89,7 +89,7 @@ export async function runCli(argv: string[]): Promise<number> {
       case 'service':
         return await runService(positionals, flags, config);
       case 'app':
-        return await runApps(positionals, flags, config);
+        return await runApp(positionals, flags, config);
       case 'update':
         return await runUpdate('claude-gateway', positionals, flags);
       case 'claude':
