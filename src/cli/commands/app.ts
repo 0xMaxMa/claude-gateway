@@ -2,7 +2,7 @@ import * as path from 'path';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
 import { createRl, ask } from '../prompt';
-import { redactLine } from '../redact';
+import { redactLine, redactLines } from '../redact';
 import type { JobState } from '../../apps/installer';
 
 /**
@@ -162,6 +162,14 @@ async function confirm(flags: Record<string, string | boolean>, question: string
   }
 }
 
+/** The job as it goes to stdout: the same object, with its log lines redacted
+ *  exactly like the copy streamed to stderr. `printResult(job)` serialises the
+ *  whole `JobState`, `logs` included, so printing it raw would undo — in the
+ *  same command — the redaction two lines above it. */
+function redactedJob(job: JobState): JobState {
+  return job.logs ? { ...job, logs: redactLines(job.logs) } : job;
+}
+
 /** Poll `GET /v1/apps/jobs/:jobId` until it settles, streaming new log lines
  *  to stderr as they appear (redacted defensively — see redact.ts — even
  *  though install logs are documented to name secrets, never their values).
@@ -214,11 +222,11 @@ async function waitForJob(
       process.stderr.write(redactLine(logs[seenLogs]) + '\n');
     }
     if (job.status === 'completed') {
-      printResult(job, compact);
+      printResult(redactedJob(job), compact);
       return 0;
     }
     if (job.status === 'failed') {
-      printResult(job, compact);
+      printResult(redactedJob(job), compact);
       process.stderr.write(`Install failed: ${job.error ?? 'unknown error'}\n`);
       return 1;
     }

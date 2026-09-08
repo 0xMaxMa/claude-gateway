@@ -296,6 +296,39 @@ describe('app', () => {
       }
     });
 
+    it('--wait redacts the job logs on stdout too, not only the streamed stderr copy (code-review round)', async () => {
+      // printResult(job) serialises the whole JobState, `logs` included — so
+      // printing the job raw undid, in the same command, the redaction applied
+      // to the copy streamed to stderr four lines earlier.
+      const secret = 'sk-livekey' + 'A'.repeat(30);
+      mockRequest
+        .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-8' } })
+        .mockResolvedValueOnce({
+          status: 200,
+          ok: true,
+          data: { id: 'job-8', status: 'completed', logs: [`exporting API_KEY=${secret}`] },
+        });
+      const code = await runCli(['app', 'install', 'agent-note', '--wait']);
+      expect(code).toBe(0);
+      expect(stdout.join('')).not.toContain(secret);
+      expect(stderr.join('')).not.toContain(secret);
+      expect(JSON.parse(stdout.join('')).logs[0]).toContain('«redacted»');
+    });
+
+    it('--wait redacts the logs of a FAILED job on stdout as well (code-review round)', async () => {
+      const secret = 'sk-livekey' + 'B'.repeat(30);
+      mockRequest
+        .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-9' } })
+        .mockResolvedValueOnce({
+          status: 200,
+          ok: true,
+          data: { id: 'job-9', status: 'failed', logs: [`token=${secret}`], error: 'build failed' },
+        });
+      const code = await runCli(['app', 'install', 'agent-note', '--wait']);
+      expect(code).toBe(1);
+      expect(stdout.join('')).not.toContain(secret);
+    });
+
     it('--wait fails fast on a non-transport poll error (404 job not found) instead of retrying for 30 minutes (code-review round)', async () => {
       // The gateway ANSWERED here (with an error), unlike the transient case
       // above — e.g. its in-memory job map was cleared by a restart, or the
