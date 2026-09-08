@@ -3,6 +3,7 @@ import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolve
 import { printResult, writeCommandHelp } from '../output';
 import { createRl, ask } from '../prompt';
 import { redactLine } from '../redact';
+import type { JobState } from '../../apps/installer';
 
 /**
  * `app list|start|stop|restart|uninstall|install` — a thin CLI wrapper over the
@@ -36,13 +37,12 @@ const WAIT_POLL_INTERVAL_MS = 1500;
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** `--env KEY=VALUE[,KEY=VALUE...]` → the `env_vars` object the install/­
- *  reconfigure body expects. Mirrors `service.ts`'s `--env` parsing (same
- *  comma-separated shape) minus the systemd-only reserved-key check, which has
- *  no equivalent here — an app's reserved names are declared in its own
- *  `app.yaml`, not known to this command, so the server is the one place that
- *  can validate them. Returns null (message already on stderr) on malformed
- *  input. */
+/** `--env KEY=VALUE[,KEY=VALUE...]` → the `env_vars` object the install body
+ *  expects. Mirrors `service.ts`'s `--env` parsing (same comma-separated
+ *  shape) minus the systemd-only reserved-key check, which has no equivalent
+ *  here — an app's reserved names are declared in its own `app.yaml`, not
+ *  known to this command, so the server is the one place that can validate
+ *  them. Returns null (message already on stderr) on malformed input. */
 function parseEnvFlag(raw: string | boolean | undefined): Record<string, string> | null {
   if (raw === undefined) return {};
   if (typeof raw !== 'string' || raw.trim() === '') {
@@ -150,14 +150,6 @@ async function confirm(flags: Record<string, string | boolean>, question: string
   } finally {
     rl.close();
   }
-}
-
-interface JobState {
-  id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  logs?: string[];
-  error?: string;
-  result?: unknown;
 }
 
 /** Poll `GET /v1/apps/jobs/:jobId` until it settles, streaming new log lines
