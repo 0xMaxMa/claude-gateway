@@ -1,5 +1,7 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import { unknownFlagNames, parseKeyValueList } from '../args';
+import { parseDotenv } from '../../load-dotenv';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
 import { confirmAction } from '../prompt';
@@ -40,6 +42,7 @@ const APP_FLAG_NAMES: ReadonlySet<string> = new Set([
   'version',
   'commit',
   'env',
+  'env-file',
   'ports',
   'wait',
 ]);
@@ -78,6 +81,45 @@ function parseEnvFlag(raw: string | boolean | undefined): Record<string, string>
   for (const { key, value } of pairs) {
     if (!ENV_KEY_RE.test(key)) {
       process.stderr.write(`Invalid --env key "${key}" — must match [A-Za-z_][A-Za-z0-9_]*.\n`);
+      return null;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** `--env-file <path>` → the same `env_vars` map `--env` builds, read from a
+ *  dotenv file so a secret never has to appear in the command line at all.
+ *  That matters here specifically: every value passed as `--env API_KEY=…` is
+ *  visible to any local user in `/proc/<pid>/cmdline` for as long as the
+ *  command runs, and is written verbatim into the caller's shell history.
+ *  Same flag name and same purpose as `service install --env-file`, and the
+ *  file is parsed by the shared `parseDotenv()` so an `.env` that works for
+ *  the gateway works here too. Returns null (message already on stderr) when
+ *  the file cannot be read or holds an invalid key. */
+function parseEnvFileFlag(raw: string | boolean | undefined): Record<string, string> | null {
+  if (raw === undefined) return {};
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    // Distinct from "not passed": the schema-less parser hands over a flag
+    // with nothing after it as boolean `true`, and reading that as "omitted"
+    // would install the app with none of the secrets the caller meant to give.
+    process.stderr.write('--env-file requires a path.\n');
+    return null;
+  }
+  const file = path.resolve(expandHome(raw));
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    process.stderr.write(`Could not read --env-file ${file}: ${(err as Error).message}\n`);
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const { key, value } of parseDotenv(text)) {
+    if (!ENV_KEY_RE.test(key)) {
+      // The key, never the value — this message goes to a terminal, and the
+      // file it is describing is the one holding the secrets.
+      process.stderr.write(`Invalid key "${key}" in ${file} — must match [A-Za-z_][A-Za-z0-9_]*.\n`);
       return null;
     }
     out[key] = value;
@@ -241,13 +283,21 @@ function buildInstallBody(source: string, flags: Record<string, string | boolean
   }
   const envVars = parseEnvFlag(flags.env);
   if (envVars === null) return null;
+  const fileEnv = parseEnvFileFlag(flags['env-file']);
+  if (fileEnv === null) return null;
   const portOverrides = parsePortsFlag(flags.ports);
   if (portOverrides === null) return null;
+
+  // `--env` wins on a conflict: it is the more specific of the two, named
+  // right here in the invocation, and it is how `docker run` resolves the same
+  // overlap — so a one-off `--env PORT=…` overrides the checked-in file
+  // without editing it.
+  const env = { ...fileEnv, ...envVars };
 
   const body: Record<string, unknown> = { ...sourceBody };
   if (version !== undefined) body.version = version;
   if (commit !== undefined) body.commit = commit;
-  if (Object.keys(envVars).length) body.env_vars = envVars;
+  if (Object.keys(env).length) body.env_vars = env;
   if (Object.keys(portOverrides).length) body.ports = portOverrides;
   return body;
 }
@@ -347,7 +397,7 @@ function printHelp(requested: boolean): void {
     ['app restart <name>', 'Restart an app'],
     ['app uninstall <name> [--yes]', "Remove an app's containers and installed files (keeps backups)"],
     [
-      'app install <source> [--version <v>] [--commit <sha>] [--env K=V,...] [--ports NAME=PORT,...] [--wait]',
+      'app install <source> [--version <v>] [--commit <sha>] [--env K=V,...] [--env-file <path>] [--ports NAME=PORT,...] [--wait]',
       'Install from the registry (plain name), a GitHub URL, or a local path (/, ./, ../, ~)',
     ],
   ];
@@ -355,6 +405,8 @@ function printHelp(requested: boolean): void {
   const lines = rows.map(([usage, desc]) => `  ${usage.padEnd(width)}${desc}`);
   lines.push(
     '',
+    '  --env-file reads KEY=VALUE lines from a dotenv file, so secrets need not appear in the',
+    '  command line (where /proc and shell history expose them); --env wins on a conflict.',
     '  <source> is classified by shape: an http(s):// URL is a GitHub source, a path starting',
     '  with /, ./, ../, or ~ is a local (symlinked) source, anything else is a registry app name.',
     '  install is asynchronous — it returns a jobId immediately (never reports "installed" on',

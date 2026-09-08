@@ -1055,11 +1055,15 @@ curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq 
 **Or use the CLI**, which wraps the same endpoints (see [CLI.md](./CLI.md) for the full reference):
 
 ```bash
-claude-gateway app install agent-note --env API_KEY=<secret> --wait   # follow the job to completion
-claude-gateway app list                                               # installed apps + status
+claude-gateway app install agent-note --env-file ./agent-note.env --wait   # follow the job to completion
+claude-gateway app list                                                    # installed apps + status
 claude-gateway app stop agent-note
 claude-gateway app uninstall agent-note --yes
 ```
+
+`--env-file` reads `KEY=VALUE` lines from a dotenv file. Prefer it over `--env` for anything secret:
+a value passed on the command line is readable by every local user in `/proc/<pid>/cmdline` while the
+install runs, and is written to your shell history. `--env` wins if both set the same variable.
 
 **App is then live at** `/app/getpod-manager/<portName>/`.
 

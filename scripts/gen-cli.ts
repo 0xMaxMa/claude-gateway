@@ -220,7 +220,7 @@ never mistaken for one.
 | \`claude-gateway app stop <name>\` | Stop a running app |
 | \`claude-gateway app restart <name>\` | Restart an app |
 | \`claude-gateway app uninstall <name> [--yes]\` | Remove an app's containers and installed files (keeps backups) |
-| \`claude-gateway app install <source> [--version <v>] [--commit <sha>] [--env KEY=VALUE,...] [--ports NAME=PORT,...] [--wait]\` | Install an app |
+| \`claude-gateway app install <source> [--version <v>] [--commit <sha>] [--env KEY=VALUE,...] [--env-file <path>] [--ports NAME=PORT,...] [--wait]\` | Install an app |
 
 A thin client over \`/v1/apps\` (see API.md's App Store section for the full HTTP reference) — every
 action is the same admin-gated call the dashboard's App Store UI makes, so there is only one
@@ -231,6 +231,12 @@ authorization/behavior path to keep correct.
 with \`/\`, \`./\`, \`../\`, or \`~\` is a local (symlinked, dev-mode) source, and anything else is a
 registry app name. \`--version\` only applies to a registry source; \`--commit\` only to a GitHub
 source (both optional — a GitHub install with no \`--commit\` resolves \`HEAD\`).
+
+\`--env\` and \`--env-file\` both fill the install's \`env_vars\`, and are merged (\`--env\` wins on a
+conflict). Prefer \`--env-file\` for secrets: a value passed on the command line is readable by every
+local user in \`/proc/<pid>/cmdline\` for as long as the install runs, and is written verbatim to the
+caller's shell history. The file is ordinary dotenv text — \`KEY=VALUE\` lines, \`#\` comments, and
+surrounding quotes stripped — parsed exactly like the gateway's own \`.env\`.
 
 \`install\` is asynchronous: the server returns a \`jobId\` immediately and this command never reports
 "installed" on its own — only that the job was **accepted**. Poll it with

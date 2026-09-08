@@ -19,6 +19,9 @@ jest.mock('../../src/cli/http-client', () => ({
   resolveKey: () => 'sk-admin-test',
 }));
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { runCli } from '../../src/cli';
 import { TransportError } from '../../src/cli/http-client';
 import { parseInstallSource } from '../../src/cli/commands/app';
@@ -372,6 +375,73 @@ describe('app', () => {
       expect((mockRequest.mock.calls[0][0] as Sent).body).toEqual({
         registry_app: 'agent-note',
         ports: { web: 8080, api: 9090 },
+      });
+    });
+
+    /**
+     * Every `--env API_KEY=…` value is readable by any local user in
+     * `/proc/<pid>/cmdline` while the command runs, and lands verbatim in the
+     * caller's shell history. `--env-file` is the way to pass a secret without
+     * that — the same flag `service install` already offers.
+     */
+    describe('--env-file (code-review round)', () => {
+      let dir: string;
+
+      beforeEach(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-app-env-'));
+      });
+      afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+      function writeEnvFile(body: string): string {
+        const file = path.join(dir, 'app.env');
+        fs.writeFileSync(file, body, { mode: 0o600 });
+        return file;
+      }
+
+      it('sends the file\'s KEY=VALUE lines as env_vars, without the secret ever being an argument', async () => {
+        mockRequest.mockResolvedValue({ status: 202, ok: true, data: { jobId: 'job-12' } });
+        const file = writeEnvFile('# comment\n\nAPI_KEY="s3cr3t"\nexport_ok=1\nDATABASE_URL=postgres://x\n');
+        expect(await runCli(['app', 'install', 'agent-note', '--env-file', file])).toBe(0);
+        expect((mockRequest.mock.calls[0][0] as Sent).body).toEqual({
+          registry_app: 'agent-note',
+          // Surrounding quotes stripped by the shared parseDotenv(), as for
+          // the gateway's own .env — a token with quotes in it 401s silently.
+          env_vars: { API_KEY: 's3cr3t', export_ok: '1', DATABASE_URL: 'postgres://x' },
+        });
+      });
+
+      it('merges with --env, and --env wins on a conflict', async () => {
+        mockRequest.mockResolvedValue({ status: 202, ok: true, data: { jobId: 'job-13' } });
+        const file = writeEnvFile('API_KEY=from-file\nONLY_IN_FILE=1\n');
+        expect(
+          await runCli(['app', 'install', 'agent-note', '--env-file', file, '--env', 'API_KEY=from-flag,ONLY_IN_FLAG=2']),
+        ).toBe(0);
+        expect((mockRequest.mock.calls[0][0] as Sent).body).toEqual({
+          registry_app: 'agent-note',
+          env_vars: { API_KEY: 'from-flag', ONLY_IN_FILE: '1', ONLY_IN_FLAG: '2' },
+        });
+      });
+
+      it('reports an unreadable file and makes no request', async () => {
+        const missing = path.join(dir, 'nope.env');
+        expect(await runCli(['app', 'install', 'agent-note', '--env-file', missing])).toBe(1);
+        expect(stderr.join('')).toContain(`Could not read --env-file ${missing}`);
+        expect(mockRequest).not.toHaveBeenCalled();
+      });
+
+      it('rejects the flag passed with no path rather than installing with no secrets', async () => {
+        // The schema-less parser reads a trailing `--env-file` as boolean true.
+        expect(await runCli(['app', 'install', 'agent-note', '--env-file'])).toBe(1);
+        expect(stderr.join('')).toContain('--env-file requires a path.');
+        expect(mockRequest).not.toHaveBeenCalled();
+      });
+
+      it('rejects an invalid key without echoing any value from the file', async () => {
+        const file = writeEnvFile('NOT-VALID=s3cr3t\n');
+        expect(await runCli(['app', 'install', 'agent-note', '--env-file', file])).toBe(1);
+        expect(stderr.join('')).toContain('Invalid key "NOT-VALID"');
+        expect(stderr.join('')).not.toContain('s3cr3t');
+        expect(mockRequest).not.toHaveBeenCalled();
       });
     });
 
