@@ -167,6 +167,35 @@ describe('WhatsApp Cloud channel management API', () => {
     expect(onDisk.agents[0].whatsapp_cloud).toBeUndefined();
   });
 
+  it('a partial credential PATCH on an ALREADY-CONNECTED channel is rejected — existing credentials are not silently wiped', async () => {
+    // Guards the merge branch at router.ts's whatsappCloudTouched block
+    // (`agent.whatsapp_cloud = {...(existing ?? {}), accessToken: at, ...}`):
+    // that branch is only reachable once the all-4-or-none validation above
+    // it has already passed, so a request rotating just one credential (e.g.
+    // "just the access token") must 400 here rather than ever reaching that
+    // merge and blanking the other three fields to ''.
+    const connect = await patch(CONNECT_BODY);
+    expect(connect.status).toBe(200);
+
+    const rotateTokenOnly = await patch({ whatsapp_cloud_access_token: 'rotated-token' });
+    expect(rotateTokenOnly.status).toBe(400);
+    expect(rotateTokenOnly.body.error).toMatch(/together/i);
+
+    const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    expect(onDisk.agents[0].whatsapp_cloud).toEqual({
+      accessToken: VALID_TOKEN,
+      phoneNumberId: VALID_PHONE_NUMBER_ID,
+      appSecret: VALID_APP_SECRET,
+      verifyToken: VALID_VERIFY_TOKEN,
+    });
+    expect(configs.get(AGENT_ID)!.whatsapp_cloud).toEqual({
+      accessToken: VALID_TOKEN,
+      phoneNumberId: VALID_PHONE_NUMBER_ID,
+      appSecret: VALID_APP_SECRET,
+      verifyToken: VALID_VERIFY_TOKEN,
+    });
+  });
+
   it('rejects non-string credential with 400', async () => {
     const res = await patch({ ...CONNECT_BODY, whatsapp_cloud_access_token: 123 });
     expect(res.status).toBe(400);

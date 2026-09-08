@@ -453,11 +453,16 @@ export class WhatsAppManager {
         const isGroup = resolved.kind === 'group';
         const sourcePolicy = isGroup ? cfg?.groupPolicy : cfg?.dmPolicy;
         const isPairing = cfg?.pairing !== false && sourcePolicy !== 'open' && sourcePolicy !== 'disabled';
-        const prev = getPendingSender('whatsapp', deniedAgentId, knockId);
+        // Namespaced per account, not just 'whatsapp' — the same JID can
+        // legitimately knock on two different numbers linked to this agent,
+        // and without the account dimension a knock on one number would
+        // show up (and be approvable) against the other's allowlist too.
+        const pendingChannel = `whatsapp:${this.accountId}`;
+        const prev = getPendingSender(pendingChannel, deniedAgentId, knockId);
         const code = prev?.code ?? (isPairing ? generatePairingCode() : undefined);
         const wasNew = isGroup
-          ? recordDeniedConversation('whatsapp', deniedAgentId, knockId, 'group', undefined, Date.now(), code)
-          : recordDeniedSender('whatsapp', deniedAgentId, knockId, undefined, Date.now(), code);
+          ? recordDeniedConversation(pendingChannel, deniedAgentId, knockId, 'group', undefined, Date.now(), code)
+          : recordDeniedSender(pendingChannel, deniedAgentId, knockId, undefined, Date.now(), code);
 
         if (isPairing && wasNew && code) {
           void this.sock?.sendMessage(resolved.conversationId, { text: pairingMessage(code, isGroup) })

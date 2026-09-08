@@ -349,7 +349,7 @@ describe('WhatsAppManager', () => {
       });
       await new Promise((r) => setImmediate(r));
       expect(fetchCalls).toHaveLength(0);
-      const pending = getPendingSenders('whatsapp', 'getpod');
+      const pending = getPendingSenders('whatsapp:default', 'getpod');
       expect(pending).toHaveLength(1);
       expect(pending[0].userId).toBe('66811110000@s.whatsapp.net');
       expect(pending[0].code).toBeTruthy();
@@ -365,7 +365,7 @@ describe('WhatsAppManager', () => {
       });
       await new Promise((r) => setImmediate(r));
       expect(mockSock.sendMessage).not.toHaveBeenCalled();
-      expect(getPendingSenders('whatsapp', 'getpod')).toHaveLength(1);
+      expect(getPendingSenders('whatsapp:default', 'getpod')).toHaveLength(1);
     });
 
     it('a group message requires @mention by default even under groupPolicy open', async () => {

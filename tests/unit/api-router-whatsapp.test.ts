@@ -20,7 +20,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createApiRouter } from '../../src/api/router';
-import { _resetPendingSenders } from '../../src/api/pending-senders';
+import { _resetPendingSenders, recordDeniedSender } from '../../src/api/pending-senders';
 import { AgentConfig, ApiKey } from '../../src/types';
 import type { WhatsAppStatus } from '../../src/whatsapp/manager';
 
@@ -374,6 +374,65 @@ describe('WhatsApp channel management API', () => {
       // is untouched by an edit aimed at a different account.
       expect(res.body.agent.whatsapp_dm_policy).toBeNull();
       expect(res.body.agent.whatsapp_accounts[1].dm_policy).toBe('open');
+    });
+
+    it('pending senders are isolated per account — the same JID knocking on two numbers does not merge or cross-clear', async () => {
+      await addAccount({ id: 'work' });
+      // Simulates the same real-world contact messaging both linked numbers —
+      // manager.ts records each under `whatsapp:${accountId}`, never the bare
+      // 'whatsapp' channel, precisely so this doesn't collide into one entry.
+      recordDeniedSender('whatsapp:default', AGENT_ID, USER, 'Default caller');
+      recordDeniedSender('whatsapp:work', AGENT_ID, USER, 'Work caller');
+
+      const defaultPending = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending`).set(ADMIN);
+      expect(defaultPending.body.senders).toHaveLength(1);
+      expect(defaultPending.body.senders[0].displayName).toBe('Default caller');
+
+      const workPending = await supertest.default(app)
+        .get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending?account_id=work`).set(ADMIN);
+      expect(workPending.body.senders).toHaveLength(1);
+      expect(workPending.body.senders[0].displayName).toBe('Work caller');
+
+      // Dismissing the knock on `default` must not touch `work`'s entry for
+      // the exact same JID — this is the cross-account leak the fix closes.
+      await supertest.default(app)
+        .delete(`/api/v1/agents/${AGENT_ID}/whatsapp/pending/${encodeURIComponent(USER)}`).set(ADMIN);
+      expect(
+        (await supertest.default(app).get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending`).set(ADMIN)).body.senders,
+      ).toHaveLength(0);
+      expect(
+        (
+          await supertest.default(app)
+            .get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending?account_id=work`)
+            .set(ADMIN)
+        ).body.senders,
+      ).toHaveLength(1);
+    });
+
+    it('approving a DM allowlist entry on one account only clears that account\'s pending knock', async () => {
+      await addAccount({ id: 'work' });
+      recordDeniedSender('whatsapp:default', AGENT_ID, USER, 'Default caller');
+      recordDeniedSender('whatsapp:work', AGENT_ID, USER, 'Work caller');
+
+      const res = await patch({
+        whatsapp_account_id: 'default',
+        whatsapp_dm_policy: 'allowlist',
+        whatsapp_dm_allowlist: [USER],
+      });
+      expect(res.status).toBe(200);
+
+      expect(
+        (await supertest.default(app).get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending`).set(ADMIN)).body.senders,
+      ).toHaveLength(0);
+      // `work` never had its allowlist touched — its pending knock survives.
+      expect(
+        (
+          await supertest.default(app)
+            .get(`/api/v1/agents/${AGENT_ID}/whatsapp/pending?account_id=work`)
+            .set(ADMIN)
+        ).body.senders,
+      ).toHaveLength(1);
     });
 
     it('DELETE .../whatsapp/accounts/:id unlinks it, drops it from config, and refuses the last one', async () => {

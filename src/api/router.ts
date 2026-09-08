@@ -2407,11 +2407,16 @@ export function createApiRouter(
       // the changed snapshot but keeps every existing manager (and its linked
       // session) alive because the id set is unchanged.
       agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Pending senders are namespaced per WhatsApp account (see
+      // pending-senders.ts's `channel` dimension) — the same JID can
+      // legitimately knock on two different numbers, so clearing must target
+      // only the account this PATCH actually touched.
+      const whatsappPendingChannel = `whatsapp:${whatsappTargetAccountId}`;
       if (Array.isArray(whatsapp_dm_allowlist)) {
-        for (const jid of whatsapp_dm_allowlist) clearPendingSender('whatsapp', agentId, jid);
+        for (const jid of whatsapp_dm_allowlist) clearPendingSender(whatsappPendingChannel, agentId, jid);
       }
       if (Array.isArray(whatsapp_group_allowlist)) {
-        for (const jid of whatsapp_group_allowlist) clearPendingSender('whatsapp', agentId, jid);
+        for (const jid of whatsapp_group_allowlist) clearPendingSender(whatsappPendingChannel, agentId, jid);
       }
     }
     if (whatsappCloudTouched) {
@@ -2711,30 +2716,36 @@ export function createApiRouter(
   });
 
   /**
-   * GET /api/v1/agents/:agentId/whatsapp/pending
-   * Recently denied WhatsApp senders/groups (Tier 1/3 discovery aid). Admin only.
-   * Mirrors GET .../slack/pending exactly, keyed under the 'whatsapp' channel
-   * namespace in the shared pending-senders store.
+   * GET /api/v1/agents/:agentId/whatsapp/pending?account_id=...
+   * Recently denied WhatsApp senders/groups (Tier 1/3 discovery aid) for ONE
+   * linked number. Admin only. Namespaced per-account (`whatsapp:${accountId}`
+   * in the shared pending-senders store) — the same JID can legitimately knock
+   * on two different numbers on the same agent, so this must not merge them.
+   * `account_id` defaults to the pre-multi-account 'default' id, so an old
+   * caller that never learned about accounts still gets that number's list.
    */
   router.get('/v1/agents/:agentId/whatsapp/pending', auth, (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
+    const accountId = (req.query.account_id as string | undefined) || DEFAULT_WHATSAPP_ACCOUNT_ID;
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    res.json({ senders: getPendingSenders('whatsapp', agentId) });
+    res.json({ senders: getPendingSenders(`whatsapp:${accountId}`, agentId) });
   });
 
   /**
-   * DELETE /api/v1/agents/:agentId/whatsapp/pending/:senderId
-   * Dismiss one knock from the in-memory pending list (admin only). The id is
-   * a WhatsApp JID (DM sender or group).
+   * DELETE /api/v1/agents/:agentId/whatsapp/pending/:senderId?account_id=...
+   * Dismiss one knock from one number's pending list (admin only). The id is
+   * a WhatsApp JID (DM sender or group). Same per-account namespacing and
+   * default as the GET route above.
    */
   router.delete('/v1/agents/:agentId/whatsapp/pending/:senderId', auth, (req: Request, res: Response) => {
     const apiKey = (req as AuthedRequest).apiKey;
     if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
     const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    const accountId = (req.query.account_id as string | undefined) || DEFAULT_WHATSAPP_ACCOUNT_ID;
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
-    clearPendingSender('whatsapp', agentId, senderId);
+    clearPendingSender(`whatsapp:${accountId}`, agentId, senderId);
     res.json({ ok: true });
   });
 
