@@ -3344,6 +3344,19 @@ export class AgentRunner extends EventEmitter {
     return picked;
   }
 
+  /**
+   * Which account id a send to `chatId` (with an optional explicit
+   * `accountId`) would actually use — the same resolution
+   * `sendWhatsAppMessage` applies internally, exposed read-only so a caller
+   * (the `/whatsapp/send` route) can run access-control/path-confinement
+   * checks against the REAL target account without duplicating or
+   * second-guessing this resolution logic. Throws the same errors
+   * `whatsAppManagerFor` would (unknown account / agent not started).
+   */
+  resolveWhatsAppAccountId(chatId: string | undefined, accountId?: string): string {
+    return this.whatsAppManagerFor(chatId, accountId).accountId;
+  }
+
   /** Live link status for one account (defaults to 'default'). */
   getWhatsAppStatus(accountId: string = DEFAULT_WHATSAPP_ACCOUNT_ID): WhatsAppStatus | undefined {
     return this.whatsappAccounts.get(accountId)?.getStatus();

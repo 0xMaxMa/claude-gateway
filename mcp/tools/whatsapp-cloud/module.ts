@@ -32,7 +32,61 @@ import { WhatsAppCloudClient } from '../../../dist/api/whatsapp-cloud-client.js'
 // measures against that exact value, and a second literal here would drift.
 import { MediaStore } from '../../../dist/history/media-store.js';
 import { optimizeImageFile } from '../../../dist/shared/image-optimize.js';
+// Same dist-only rule as the imports above — reused rather than
+// reimplemented so the outbound gate agrees with the inbound webhook's own
+// dmPolicy/dmAllowlist semantics.
+import { isWhatsAppCloudSenderAllowed } from '../../../dist/api/whatsapp-cloud-access.js';
 import { MAX_ATTACHMENT_BYTES } from '../shared/limits';
+
+/**
+ * Channel state-directory names that must never be reachable through
+ * `whatsapp_cloud_reply`'s `files` param — refusing these blocks the
+ * concrete exfiltration path (a prompt-injected turn passing a secret file
+ * as an "attachment to send"). Deny-list, not allow-list: this channel has
+ * no single "inbox" directory the way Telegram does, and legitimate
+ * attachments (agent-generated files, previously-downloaded inbound media in
+ * os.tmpdir()) can legitimately live outside the workspace.
+ */
+const DENIED_STATE_DIR_NAMES = [
+  '.whatsapp-state',
+  '.telegram-state',
+  '.discord-state',
+  '.line-state',
+  '.slack-state',
+  // Holds mcp-config.json — GATEWAY_API_KEY and every channel's tokens.
+  '.sessions',
+];
+
+/**
+ * Refuse to send a file living inside one of this agent's own secret-bearing
+ * directories (session credentials, per-session mcp-config.json). Mirrors
+ * Telegram's `assertSendable` posture: fail OPEN (allow) when a path can't
+ * be resolved at all — a genuinely missing file is caught by the send call
+ * itself with a clearer error.
+ */
+function assertSendableWhatsAppCloudFile(filePath: string): void {
+  const workspace = process.env.GATEWAY_WORKSPACE_DIR;
+  if (!workspace) return;
+  let real: string;
+  let workspaceReal: string;
+  try {
+    real = fs.realpathSync(filePath);
+    workspaceReal = fs.realpathSync(workspace);
+  } catch {
+    return;
+  }
+  for (const name of DENIED_STATE_DIR_NAMES) {
+    let dirReal: string;
+    try {
+      dirReal = fs.realpathSync(path.join(workspaceReal, name));
+    } catch {
+      continue;
+    }
+    if (real === dirReal || real.startsWith(dirReal + path.sep)) {
+      throw new Error(`refusing to send channel state: ${filePath}`);
+    }
+  }
+}
 
 /**
  * Extension-based mime sniff for outbound files — self-contained on purpose
@@ -275,6 +329,32 @@ export class WhatsAppCloudModule implements ToolModule {
       return { content: [{ type: 'text', text: 'whatsapp_cloud_reply: missing chat_id' }], isError: true };
     }
 
+    // chat_id allowlist: this channel has no gateway-side relay route to add
+    // a second checkpoint to (it posts to Meta directly from this
+    // subprocess), so the DM allowlist gate has to be enforced HERE — a
+    // prompt-injected turn must not be able to message an arbitrary phone
+    // number. A normal reply's chat_id is exactly the sender the inbound
+    // message arrived from, which already cleared this same gate, so the
+    // golden path is unaffected.
+    const dmPolicy = (process.env.WHATSAPP_CLOUD_DM_POLICY || undefined) as
+      | 'open'
+      | 'allowlist'
+      | 'disabled'
+      | undefined;
+    let dmAllowlist: string[] = [];
+    try {
+      const parsed: unknown = JSON.parse(process.env.WHATSAPP_CLOUD_DM_ALLOWLIST ?? '[]');
+      if (Array.isArray(parsed)) dmAllowlist = parsed.filter((v): v is string => typeof v === 'string');
+    } catch {
+      /* malformed env — treat as empty allowlist, closed-by-default posture below */
+    }
+    if (!isWhatsAppCloudSenderAllowed(dmPolicy, dmAllowlist, chatId)) {
+      return {
+        content: [{ type: 'text', text: `whatsapp_cloud_reply: chat_id '${chatId}' is not allowed for this account` }],
+        isError: true,
+      };
+    }
+
     // Template gate (Phase 3). Refused loudly, never silently downgraded to a
     // plain text send: outside the 24h window that text would ALSO fail, and a
     // silent swap would hide the real reason from the agent. The opt-in lives
@@ -339,6 +419,7 @@ export class WhatsAppCloudModule implements ToolModule {
       // Size-check before any upload starts, so an oversized file fails fast
       // instead of half-way through a multi-file batch.
       for (const f of files) {
+        assertSendableWhatsAppCloudFile(f);
         const st = fs.statSync(f);
         if (st.size > MAX_ATTACHMENT_BYTES) {
           throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`);

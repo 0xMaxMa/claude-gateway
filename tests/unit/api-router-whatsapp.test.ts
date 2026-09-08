@@ -46,6 +46,10 @@ function makeMockRunner() {
     requestWhatsAppPairingCode: jest.fn(async () => 'ABCD-1234'),
     unlinkWhatsApp: jest.fn(async () => {}),
     sendWhatsAppMessage: jest.fn(async () => {}),
+    // Mirrors AgentRunner's real fallback: an explicit accountId wins,
+    // otherwise 'default' (the tests don't exercise the "remembered inbound
+    // account" branch, which lives entirely in the real AgentRunner).
+    resolveWhatsAppAccountId: jest.fn((_chatId: string | undefined, accountId?: string) => accountId ?? 'default'),
     updateAgentConfig: jest.fn(),
   };
 }
@@ -57,7 +61,12 @@ describe('WhatsApp channel management API', () => {
   let runners: Map<string, ReturnType<typeof makeMockRunner>>;
   let app: express.Express;
 
-  const apiKeys: ApiKey[] = [{ key: 'sk-test-admin', agents: '*', admin: true }];
+  const apiKeys: ApiKey[] = [
+    { key: 'sk-test-admin', agents: '*', admin: true },
+    // Agent-scoped but NOT write-scoped — used to confirm /whatsapp/send
+    // requires write, not just agent access.
+    { key: 'sk-test-readonly', agents: [AGENT_ID] },
+  ];
 
   beforeEach(() => {
     _resetPendingSenders();
@@ -195,6 +204,7 @@ describe('WhatsApp channel management API', () => {
   });
 
   it('POST .../whatsapp/send requires jid and (text or image_path), then calls through', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
     const missingJid = await supertest
       .default(app)
       .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
@@ -223,6 +233,7 @@ describe('WhatsApp channel management API', () => {
   });
 
   it('POST .../whatsapp/send forwards the Phase-2 reply/document/ack fields', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
     const res = await supertest
       .default(app)
       .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
@@ -244,6 +255,7 @@ describe('WhatsApp channel management API', () => {
   });
 
   it('POST .../whatsapp/send ignores wrongly-typed Phase-2 fields instead of failing the send', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
     const res = await supertest
       .default(app)
       .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
@@ -254,6 +266,7 @@ describe('WhatsApp channel management API', () => {
   });
 
   it('POST .../whatsapp/send surfaces a send failure (e.g. not linked) as 502', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
     runners.get(AGENT_ID)!.sendWhatsAppMessage.mockRejectedValueOnce(new Error('WhatsApp is not linked'));
     const res = await supertest
       .default(app)
@@ -262,6 +275,49 @@ describe('WhatsApp channel management API', () => {
       .send({ jid: USER, text: 'hi' });
     expect(res.status).toBe(502);
     expect(res.body.error).toBe('WhatsApp is not linked');
+  });
+
+  it('POST .../whatsapp/send requires a write-scoped key, not just agent access', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+    const readOnly = { Authorization: 'Bearer sk-test-readonly' };
+    const res = await supertest
+      .default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
+      .set(readOnly)
+      .send({ jid: USER, text: 'hi' });
+    expect(res.status).toBe(403);
+    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).not.toHaveBeenCalled();
+  });
+
+  it('POST .../whatsapp/send refuses a jid the account is not allowed to message', async () => {
+    // No allowlist configured at all — closed by default, same posture as
+    // the inbound gate this mirrors.
+    const res = await supertest
+      .default(app)
+      .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
+      .set(ADMIN)
+      .send({ jid: USER, text: 'hi' });
+    expect(res.status).toBe(403);
+    expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).not.toHaveBeenCalled();
+  });
+
+  it('POST .../whatsapp/send refuses an image_path inside the account state directory', async () => {
+    configs.get(AGENT_ID)!.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+    const stateDir = path.join(configs.get(AGENT_ID)!.workspace, '.whatsapp-state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const credsPath = path.join(stateDir, 'creds.json');
+    fs.writeFileSync(credsPath, '{"secret":"do-not-leak"}');
+    try {
+      const res = await supertest
+        .default(app)
+        .post(`/api/v1/agents/${AGENT_ID}/whatsapp/send`)
+        .set(ADMIN)
+        .send({ jid: USER, text: 'hi', image_path: credsPath });
+      expect(res.status).toBe(400);
+      expect(runners.get(AGENT_ID)!.sendWhatsAppMessage).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it('whatsapp/pending routes reuse the generic pending-senders store', async () => {
@@ -313,6 +369,25 @@ describe('WhatsApp channel management API', () => {
       expect(runners.get(AGENT_ID)!.updateAgentConfig).toHaveBeenCalled();
     });
 
+    it('two concurrent POST .../whatsapp/accounts calls for different ids both survive — no in-memory clobber', async () => {
+      // Regression test for a race where two overlapping add/remove requests
+      // for the same agent both read the same pre-lock account snapshot; the
+      // loser's in-memory cfg.whatsapp assignment (built from that stale
+      // snapshot) used to stomp the winner's, even though the config FILE
+      // ended up correct. Firing both through the real Express app exercises
+      // the actual async interleaving, not a mocked one.
+      const [resA, resB] = await Promise.all([addAccount({ id: 'alpha' }), addAccount({ id: 'beta' })]);
+      expect(resA.status).toBe(201);
+      expect(resB.status).toBe(201);
+
+      const inMemoryIds = configs.get(AGENT_ID)!.whatsapp!.accounts.map((a) => a.id).sort();
+      expect(inMemoryIds).toEqual(['alpha', 'beta', 'default']);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const onDiskIds = (onDisk.agents[0].whatsapp.accounts as { id: string }[]).map((a) => a.id).sort();
+      expect(onDiskIds).toEqual(['alpha', 'beta', 'default']);
+    });
+
     it('POST .../whatsapp/accounts rejects a bad id (it becomes a directory name) and a duplicate', async () => {
       for (const bad of ['../escape', 'Work', 'has space', '', '-leading']) {
         const res = await addAccount({ id: bad });
@@ -325,6 +400,7 @@ describe('WhatsApp channel management API', () => {
 
     it('link/pairing-code/unlink/status/send all target the requested account', async () => {
       await addAccount({ id: 'work' });
+      configs.get(AGENT_ID)!.whatsapp!.accounts.find((a) => a.id === 'work')!.dmPolicy = 'open';
       const runner = runners.get(AGENT_ID)!;
 
       await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/whatsapp/link`).set(ADMIN).send({ account_id: 'work' });

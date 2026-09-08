@@ -24,7 +24,10 @@ import {
   DEFAULT_WHATSAPP_ACCOUNT_ID,
   WHATSAPP_ACCOUNT_ID_RE,
   resolveWhatsAppAccounts,
+  findWhatsAppAccount,
+  whatsAppStateDir,
 } from '../config/whatsapp-accounts';
+import { isWhatsAppSenderAllowed } from './whatsapp-access';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -2876,9 +2879,12 @@ export function createApiRouter(
   router.post('/v1/agents/:agentId/whatsapp/send', auth, async (req: Request, res: Response) => {
     const { agentId } = req.params as { agentId: string };
     const apiKey = (req as AuthedRequest).apiKey;
-    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: 'Access required' }); return; }
+    // write-scoped, like every other whatsapp/* mutation route: this route
+    // sends real outbound messages, not a read.
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
     const runner = agentRunners.get(agentId);
     if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const cfg = agentConfigs.get(agentId);
     const { jid, text, image_path, account_id, reply_to_message_id, as_document, message_id } = req.body as {
       jid?: unknown;
       text?: unknown;
@@ -2901,6 +2907,56 @@ export function createApiRouter(
       res.status(400).json({ error: 'account_id must be a string' });
       return;
     }
+
+    // Resolve which account this send will ACTUALLY use — same fallback
+    // logic sendWhatsAppMessage applies internally (last-inbound-account,
+    // then 'default', then the agent's only account) — so the checks below
+    // gate the real target without second-guessing or changing that
+    // resolution when account_id is omitted.
+    let resolvedAccountId: string;
+    try {
+      resolvedAccountId = runner.resolveWhatsAppAccountId(jid, account_id);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+
+    // jid allowlist: a prompt-injected turn must not be able to message an
+    // arbitrary WhatsApp JID through this "internal" bridge route. Confine
+    // sends to whatever this account is already configured to receive FROM
+    // — the same dmPolicy/dmAllowlist (or groupPolicy/groupAllowlist) gate
+    // inbound messages pass through. A normal reply's jid is exactly the
+    // chat the inbound message arrived on, which by construction already
+    // cleared this same gate, so the golden path is unaffected.
+    const account = findWhatsAppAccount(cfg?.whatsapp, resolvedAccountId);
+    const isGroupJid = jid.endsWith('@g.us');
+    const isDmJid = jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+    const jidAllowed = isGroupJid
+      ? isWhatsAppSenderAllowed(account?.groupPolicy, account?.groupAllowlist, jid)
+      : isDmJid && isWhatsAppSenderAllowed(account?.dmPolicy, account?.dmAllowlist, jid);
+    if (!jidAllowed) {
+      res.status(403).json({ error: `jid '${jid}' is not allowed to receive messages from this account` });
+      return;
+    }
+
+    // image_path confinement: refuse to send a file living inside this
+    // account's own state directory (creds.json et al) — the concrete
+    // exfiltration path a prompt-injected turn would use. Fail-open on an
+    // unresolvable path (missing file, etc.) — the send call below produces
+    // the real error for that case.
+    if (typeof image_path === 'string' && image_path && cfg) {
+      try {
+        const real = fs.realpathSync(image_path);
+        const stateReal = fs.realpathSync(whatsAppStateDir(cfg.workspace, resolvedAccountId));
+        if (real === stateReal || real.startsWith(stateReal + path.sep)) {
+          res.status(400).json({ error: `refusing to send channel state: ${image_path}` });
+          return;
+        }
+      } catch {
+        /* unresolvable path — let sendWhatsAppMessage report the real error */
+      }
+    }
+
     // Phase 2 extras — each is only carried through when actually present and
     // well-typed, so an older MCP build's three-field body produces an empty
     // options object and the exact pre-Phase-2 send behaviour.
@@ -2970,33 +3026,50 @@ export function createApiRouter(
       res.status(400).json({ error: 'label must be a string or null' });
       return;
     }
-    const existing = resolveWhatsAppAccounts(cfg.whatsapp);
-    if (existing.some((a) => a.id === id)) {
+    // Fast-fail check outside the lock, for a snappy 409 in the common case —
+    // the authoritative check happens again inside the lock below.
+    if (resolveWhatsAppAccounts(cfg.whatsapp).some((a) => a.id === id)) {
       res.status(409).json({ error: `WhatsApp account '${id}' already exists` });
       return;
     }
     const entry = { id, ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}) };
 
     try {
-      await writeAgentsToConfig(configPath, (agents) => {
-        const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
-        if (!agent) return;
-        // Reuses the PATCH merge helper purely for its create-the-block-and-
-        // materialize-the-implicit-default behavior; the patch itself is empty.
-        applyWhatsAppAccountPatch(agent as { whatsapp?: unknown }, id, {});
-        if (!entry.label) return;
-        const block = agent.whatsapp as { accounts: Record<string, unknown>[] };
-        const written = block.accounts.find((a) => a.id === id);
-        if (written) written.label = entry.label;
+      // The existing-accounts READ, the disk WRITE, and the in-memory
+      // `cfg.whatsapp` ASSIGNMENT all happen inside one lock-protected
+      // section — otherwise two concurrent add/remove requests for the same
+      // agent can both read the same stale `existing`, and the loser's
+      // in-memory assignment (built from that stale snapshot) clobbers the
+      // winner's, even though the file writes themselves are already
+      // serialized. updateAgentConfig() propagates whatever ends up in
+      // `cfg.whatsapp` straight to the live WhatsAppManager set, so a stale
+      // clobber here tears down a just-added account's manager.
+      await withConfigWriteLock(configPath, async () => {
+        const existing = resolveWhatsAppAccounts(cfg.whatsapp);
+        if (existing.some((a) => a.id === id)) {
+          throw Object.assign(new Error(`WhatsApp account '${id}' already exists`), { code: 'DUPLICATE_ACCOUNT' });
+        }
+        await writeAgentsToConfigImpl(configPath, (agents) => {
+          const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+          if (!agent) return;
+          // Reuses the PATCH merge helper purely for its create-the-block-and-
+          // materialize-the-implicit-default behavior; the patch itself is empty.
+          applyWhatsAppAccountPatch(agent as { whatsapp?: unknown }, id, {});
+          if (!entry.label) return;
+          const block = agent.whatsapp as { accounts: Record<string, unknown>[] };
+          const written = block.accounts.find((a) => a.id === id);
+          if (written) written.label = entry.label;
+        });
+        // Materializes the implicit 'default' too, so the in-memory list
+        // matches what was just written to disk.
+        cfg.whatsapp = { accounts: [...existing, entry] };
       });
     } catch (err) {
-      res.status(500).json({ error: `Failed to write config: ${(err as Error).message}` });
+      const code = (err as { code?: string }).code;
+      res.status(code === 'DUPLICATE_ACCOUNT' ? 409 : 500).json({ error: (err as Error).message });
       return;
     }
 
-    // Materializes the implicit 'default' too, so the in-memory list matches
-    // what was just written to disk.
-    cfg.whatsapp = { accounts: [...existing, entry] };
     agentRunners.get(agentId)?.updateAgentConfig(cfg);
 
     const accounts = whatsAppAccountsResponse(agentRunners, cfg, agentId);
@@ -3041,18 +3114,26 @@ export function createApiRouter(
     }
 
     try {
-      await writeAgentsToConfig(configPath, (agents) => {
-        const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
-        const block = agent?.whatsapp as { accounts?: unknown } | undefined;
-        if (!block || !Array.isArray(block.accounts)) return;
-        block.accounts = (block.accounts as Record<string, unknown>[]).filter((a) => a.id !== accountId);
+      // Disk write and in-memory `cfg.whatsapp` update in one lock-protected
+      // section — same race as the POST handler above: a concurrent
+      // add/remove for this agent must not be able to interleave between the
+      // read and the assignment. `unlinkWhatsApp` stays OUTSIDE the lock
+      // (above) since it's a slow, network-bound Baileys call and holding
+      // the global config lock across it would stall unrelated writers.
+      await withConfigWriteLock(configPath, async () => {
+        await writeAgentsToConfigImpl(configPath, (agents) => {
+          const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+          const block = agent?.whatsapp as { accounts?: unknown } | undefined;
+          if (!block || !Array.isArray(block.accounts)) return;
+          block.accounts = (block.accounts as Record<string, unknown>[]).filter((a) => a.id !== accountId);
+        });
+        cfg.whatsapp = { accounts: resolveWhatsAppAccounts(cfg.whatsapp).filter((a) => a.id !== accountId) };
       });
     } catch (err) {
       res.status(500).json({ error: `Failed to write config: ${(err as Error).message}` });
       return;
     }
 
-    cfg.whatsapp = { accounts: existing.filter((a) => a.id !== accountId) };
     agentRunners.get(agentId)?.updateAgentConfig(cfg);
 
     res.json({ ok: true, accounts: whatsAppAccountsResponse(agentRunners, cfg, agentId) });

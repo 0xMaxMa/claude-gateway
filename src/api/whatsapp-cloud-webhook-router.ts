@@ -44,7 +44,7 @@ import {
 } from './pending-senders';
 import { WhatsAppCloudClient } from './whatsapp-cloud-client';
 import { MediaStore } from '../history/media-store';
-import { sniffImageExt } from '../shared/image-sniff';
+import { sniffImageExt, sanitizeFilenameId } from '../shared/image-sniff';
 import type { WebhookAppHandler } from './webhooks-router';
 
 const WHATSAPP_CLOUD_API_BASE = 'https://graph.facebook.com/v20.0';
@@ -266,6 +266,14 @@ export function verifyMetaSignature(
   return timingSafeEqual(expectedBuf, actualBuf);
 }
 
+/** Constant-time string equality — same posture as verifyMetaSignature above. */
+function safeStringEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
+}
+
 /** Find the agent that has WhatsApp Cloud configured (mirrors resolveSlackAgent). */
 function resolveWhatsAppCloudAgent(
   agents: Map<string, AgentRunner>,
@@ -359,18 +367,20 @@ async function downloadWhatsAppCloudMedia(
 }
 
 function writeTempImage(buf: Buffer, messageId?: string): string {
-  const suffix = messageId ? `${messageId}-${Date.now()}` : `${Date.now()}`;
+  // messageId is Meta-webhook-supplied and not guaranteed to match wamid.*'s
+  // format — sanitize before it reaches a filename (see sanitizeFilenameId).
+  const suffix = `${sanitizeFilenameId(messageId)}-${Date.now()}`;
   const dest = path.join(os.tmpdir(), `whatsapp-cloud-img-${suffix}.${sniffImageExt(buf)}`);
-  fs.writeFileSync(dest, buf);
+  fs.writeFileSync(dest, buf, { mode: 0o600 });
   return dest;
 }
 
 function writeTempDocument(buf: Buffer, mimeType: string, filename: string | undefined, messageId?: string): string {
-  const suffix = messageId ? `${messageId}-${Date.now()}` : `${Date.now()}`;
+  const suffix = `${sanitizeFilenameId(messageId)}-${Date.now()}`;
   const extFromName = filename ? path.extname(filename) : '';
   const ext = extFromName || (mimeType === 'application/pdf' ? '.pdf' : '');
   const dest = path.join(os.tmpdir(), `whatsapp-cloud-doc-${suffix}${ext}`);
-  fs.writeFileSync(dest, buf);
+  fs.writeFileSync(dest, buf, { mode: 0o600 });
   return dest;
 }
 
@@ -408,7 +418,7 @@ export function createWhatsAppCloudWebhookHandler(
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
     const expected = runner?.getAgentConfig().whatsapp_cloud?.verifyToken;
-    if (mode === 'subscribe' && expected && typeof token === 'string' && token === expected) {
+    if (mode === 'subscribe' && expected && typeof token === 'string' && safeStringEqual(token, expected)) {
       res.status(200).type('text/plain').send(String(challenge ?? ''));
       return;
     }

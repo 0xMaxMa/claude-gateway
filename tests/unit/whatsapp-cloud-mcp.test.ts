@@ -81,6 +81,8 @@ describe('WhatsAppCloudModule — Phase 2 params', () => {
     'WHATSAPP_CLOUD_PHONE_NUMBER_ID',
     'WHATSAPP_CLOUD_REACTION_LEVEL',
     'WHATSAPP_CLOUD_TEMPLATES_ENABLED',
+    'WHATSAPP_CLOUD_DM_POLICY',
+    'WHATSAPP_CLOUD_DM_ALLOWLIST',
   ];
 
   beforeEach(() => {
@@ -89,6 +91,11 @@ describe('WhatsAppCloudModule — Phase 2 params', () => {
     process.env.WHATSAPP_CLOUD_PHONE_NUMBER_ID = '1234567890';
     delete process.env.WHATSAPP_CLOUD_REACTION_LEVEL;
     delete process.env.WHATSAPP_CLOUD_TEMPLATES_ENABLED;
+    // These tests exercise send behavior, not the DM allowlist gate itself
+    // (see the dedicated describe block for that) — 'open' keeps every
+    // chat_id in this suite allowed.
+    process.env.WHATSAPP_CLOUD_DM_POLICY = 'open';
+    delete process.env.WHATSAPP_CLOUD_DM_ALLOWLIST;
     sendText.mockClear();
     removeReaction.mockClear();
     sendInteractiveButtons.mockClear();
@@ -209,6 +216,8 @@ describe('WhatsAppCloudModule — Phase 3 interactive + templates', () => {
     'WHATSAPP_CLOUD_PHONE_NUMBER_ID',
     'WHATSAPP_CLOUD_REACTION_LEVEL',
     'WHATSAPP_CLOUD_TEMPLATES_ENABLED',
+    'WHATSAPP_CLOUD_DM_POLICY',
+    'WHATSAPP_CLOUD_DM_ALLOWLIST',
   ];
 
   beforeEach(() => {
@@ -217,6 +226,8 @@ describe('WhatsAppCloudModule — Phase 3 interactive + templates', () => {
     process.env.WHATSAPP_CLOUD_PHONE_NUMBER_ID = '1234567890';
     delete process.env.WHATSAPP_CLOUD_REACTION_LEVEL;
     delete process.env.WHATSAPP_CLOUD_TEMPLATES_ENABLED;
+    process.env.WHATSAPP_CLOUD_DM_POLICY = 'open';
+    delete process.env.WHATSAPP_CLOUD_DM_ALLOWLIST;
     for (const fn of [sendText, removeReaction, sendInteractiveButtons, sendInteractiveList, sendTemplate]) {
       fn.mockClear();
     }
@@ -504,13 +515,15 @@ describe('WhatsAppCloudModule — Phase 3 interactive + templates', () => {
  */
 describe('WhatsAppCloudModule — outbound image auto-optimize', () => {
   const restore: Record<string, string | undefined> = {};
-  const ENV_KEYS = ['WHATSAPP_CLOUD_ACCESS_TOKEN', 'WHATSAPP_CLOUD_PHONE_NUMBER_ID'];
+  const ENV_KEYS = ['WHATSAPP_CLOUD_ACCESS_TOKEN', 'WHATSAPP_CLOUD_PHONE_NUMBER_ID', 'WHATSAPP_CLOUD_DM_POLICY', 'WHATSAPP_CLOUD_DM_ALLOWLIST'];
   let tmpDir: string;
 
   beforeEach(() => {
     for (const k of ENV_KEYS) restore[k] = process.env[k];
     process.env.WHATSAPP_CLOUD_ACCESS_TOKEN = 'test-token';
     process.env.WHATSAPP_CLOUD_PHONE_NUMBER_ID = '1234567890';
+    process.env.WHATSAPP_CLOUD_DM_POLICY = 'open';
+    delete process.env.WHATSAPP_CLOUD_DM_ALLOWLIST;
     for (const fn of [sendText, uploadMedia, sendImage, sendDocument, optimizeImageFile]) fn.mockClear();
     optimizeImageFile.mockImplementation(async (p: string, _maxBytes: number) => p);
     uploadMedia.mockResolvedValue({ mediaId: 'media-1' });

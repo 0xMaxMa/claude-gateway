@@ -26,6 +26,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { WhatsAppAccountConfig } from '../types';
+import { writeConfigAtomicSync } from './config-write-lock';
 
 /** Reserved id of the pre-multi-account session — see the module doc above. */
 export const DEFAULT_WHATSAPP_ACCOUNT_ID = 'default';
@@ -174,8 +175,11 @@ export function upgradeWhatsAppAccountsFile(configPath: string): string[] {
   const upgraded = upgradeWhatsAppAccountsInConfig(config);
   if (upgraded.length === 0) return [];
 
-  const tmpPath = `${configPath}.tmp.whatsapp-accounts`;
-  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-  fs.renameSync(tmpPath, configPath);
+  // Reuse the project-wide hardened writer (mode 0600 + randomUUID() tmp
+  // suffix — both load-bearing, see config-write-lock.ts's own doc comment
+  // and issue #460) instead of a bespoke writeFileSync/renameSync pair that
+  // would silently downgrade config.json's permissions on the very first
+  // legacy-block upgrade.
+  writeConfigAtomicSync(configPath, config);
   return upgraded;
 }

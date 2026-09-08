@@ -770,6 +770,13 @@ export class SessionProcess extends EventEmitter {
             // to be forwarded. Absent/false both arrive as '', which
             // whatsapp_cloud_reply treats as "templates off".
             WHATSAPP_CLOUD_TEMPLATES_ENABLED: this.agentConfig.whatsapp_cloud?.templatesEnabled ? '1' : '',
+            // Same reasoning as the two flags above: the subprocess sends
+            // directly to Meta with no gateway-side checkpoint in between, so
+            // the DM allowlist gate has to be forwarded too — otherwise
+            // whatsapp_cloud_reply has no way to confine `chat_id` to numbers
+            // this account is actually allowed to talk to.
+            WHATSAPP_CLOUD_DM_POLICY: this.agentConfig.whatsapp_cloud?.dmPolicy ?? '',
+            WHATSAPP_CLOUD_DM_ALLOWLIST: JSON.stringify(this.agentConfig.whatsapp_cloud?.dmAllowlist ?? []),
             GATEWAY_AGENT_ID: this.agentConfig.id,
             // Must be the base URL without /api suffix (e.g. http://127.0.0.1:10850).
             // MCP tools append /api/v1/... themselves — a trailing /api here causes double-prefix 404s.

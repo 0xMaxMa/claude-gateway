@@ -65,7 +65,7 @@ import {
 } from '../config/whatsapp-accounts';
 import { createLogger } from '../logger';
 import { MediaStore } from '../history/media-store';
-import { sniffImageExt } from '../shared/image-sniff';
+import { sniffImageExt, sanitizeFilenameId } from '../shared/image-sniff';
 import {
   isResolvedSourceAllowed,
   resolveWhatsAppSource,
@@ -317,7 +317,11 @@ export class WhatsAppManager {
   private async connect(pairingPhoneNumber?: string): Promise<void> {
     this.stopping = false;
     const baileys = this.baileys ?? (this.baileys = await loadBaileys());
-    fs.mkdirSync(this.stateDir, { recursive: true });
+    // 0o700: this directory holds creds.json — a live linked-session
+    // credential equivalent to a password. Matches the 0o700 convention used
+    // for every other secret-bearing directory in this codebase (see
+    // config/bootstrap.ts, connectors/token-env.ts, session/process.ts).
+    fs.mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     const { state, saveCreds } = await baileys.useMultiFileAuthState(this.stateDir);
 
     const sock = baileys.default({
@@ -560,9 +564,9 @@ export class WhatsAppManager {
           if (buf.length > 0 && buf.length <= MAX_IMAGE_BYTES) {
             const dest = path.join(
               os.tmpdir(),
-              `whatsapp-sticker-${msg.key?.id ?? Date.now()}.${sniffImageExt(buf)}`,
+              `whatsapp-sticker-${sanitizeFilenameId(msg.key?.id)}.${sniffImageExt(buf)}`,
             );
-            fs.writeFileSync(dest, buf);
+            fs.writeFileSync(dest, buf, { mode: 0o600 });
             meta.sticker_path = dest;
           } else if (buf.length > MAX_IMAGE_BYTES) {
             this.logger.warn('Inbound WhatsApp sticker exceeds cap, dropping media', {
@@ -586,9 +590,9 @@ export class WhatsAppManager {
           if (buf.length > 0 && buf.length <= MAX_IMAGE_BYTES) {
             const dest = path.join(
               os.tmpdir(),
-              `whatsapp-img-${msg.key?.id ?? Date.now()}.${sniffImageExt(buf)}`,
+              `whatsapp-img-${sanitizeFilenameId(msg.key?.id)}.${sniffImageExt(buf)}`,
             );
-            fs.writeFileSync(dest, buf);
+            fs.writeFileSync(dest, buf, { mode: 0o600 });
             meta.image_path = dest;
           } else if (buf.length > MAX_IMAGE_BYTES) {
             this.logger.warn('Inbound WhatsApp image exceeds cap, dropping media', {

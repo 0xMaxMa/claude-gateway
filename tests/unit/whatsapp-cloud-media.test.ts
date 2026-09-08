@@ -8,6 +8,8 @@
  */
 import { createHmac } from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { createWhatsAppCloudWebhookHandler } from '../../src/api/whatsapp-cloud-webhook-router';
 import type { AgentRunner } from '../../src/agent/runner';
 
@@ -131,6 +133,21 @@ describe('WhatsApp Cloud inbound media download', () => {
     expect(imgPath).toBeTruthy();
     written.push(imgPath);
     expect(fs.readFileSync(imgPath)).toEqual(IMG);
+  });
+
+  test('a path-traversal message id cannot escape os.tmpdir() when naming the downloaded image', async () => {
+    // The webhook-supplied message id is not guaranteed to be a well-formed
+    // wamid.* string — a crafted id containing '../' segments must not
+    // resolve outside os.tmpdir() when concatenated into the temp filename.
+    await post([
+      { from: FROM, id: '../../../../tmp/evil-pwned', type: 'image', image: { id: 'media-1', mime_type: 'image/jpeg' } },
+    ]);
+    const imgPath = forwarded[0].meta.image_path;
+    expect(imgPath).toBeTruthy();
+    written.push(imgPath);
+    const real = path.resolve(imgPath);
+    expect(real.startsWith(path.resolve(os.tmpdir()) + path.sep)).toBe(true);
+    expect(real).not.toContain('..');
   });
 
   test('host-allowlist rejection: a non-fbcdn.net/graph/lookaside media url → refused before the bearer token is sent', async () => {
@@ -303,5 +320,41 @@ describe('WhatsApp Cloud inbound media download', () => {
       expect(forwarded).toHaveLength(1);
       expect(forwarded[0].content).toBe('hi');
     });
+  });
+});
+
+describe('WhatsApp Cloud verify handshake (GET hub.challenge)', () => {
+  let handler: ReturnType<typeof createWhatsAppCloudWebhookHandler>;
+
+  beforeEach(() => {
+    configExtra = {};
+    handler = createWhatsAppCloudWebhookHandler(new Map([[AGENT, fakeRunner()]]), '/tmp');
+  });
+
+  function get(query: Record<string, string>) {
+    const req = { params: { agentId: AGENT }, query };
+    const res = makeRes();
+    handler.verify(req as never, res as never);
+    return res;
+  }
+
+  test('matching mode + verify_token → 200 with the raw challenge string echoed back', () => {
+    const res = get({ 'hub.mode': 'subscribe', 'hub.verify_token': VERIFY_TOKEN, 'hub.challenge': 'echo-me-123' });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.type).toHaveBeenCalledWith('text/plain');
+    expect(res.send).toHaveBeenCalledWith('echo-me-123');
+  });
+
+  test('a same-length-but-wrong verify_token is rejected (constant-time compare, not just ===)', () => {
+    const wrongButSameLength = VERIFY_TOKEN.replace(/./g, '0');
+    expect(wrongButSameLength.length).toBe(VERIFY_TOKEN.length);
+    const res = get({ 'hub.mode': 'subscribe', 'hub.verify_token': wrongButSameLength, 'hub.challenge': 'echo-me-123' });
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.send).not.toHaveBeenCalled();
+  });
+
+  test('wrong hub.mode is rejected even with a correct verify_token', () => {
+    const res = get({ 'hub.mode': 'unsubscribe', 'hub.verify_token': VERIFY_TOKEN, 'hub.challenge': 'x' });
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 });

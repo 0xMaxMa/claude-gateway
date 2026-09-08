@@ -177,6 +177,13 @@ describe('WhatsAppManager', () => {
     expect(manager.getStatus().qr).toMatch(/^data:image\/png;base64,/);
   });
 
+  it('startLinking() creates the state directory with mode 0700 — creds.json is a bearer credential', async () => {
+    await manager.startLinking();
+    const stateDir = path.join(tmpDir, '.whatsapp-state');
+    const mode = fs.statSync(stateDir).mode & 0o777;
+    expect(mode).toBe(0o700);
+  });
+
   it('requestPairingCode() requests a code and does not set a QR', async () => {
     const code = await manager.requestPairingCode('+15551234567');
     expect(code).toBe('ABCD-1234');
@@ -437,6 +444,30 @@ describe('WhatsAppManager', () => {
       await new Promise((r) => setImmediate(r));
       expect(mockDownloadMediaMessage).toHaveBeenCalled();
       expect(fetchCalls[0].body).toMatchObject({ meta: expect.objectContaining({ image_path: expect.stringContaining('whatsapp-img-') }) });
+    });
+
+    it('a path-traversal message id cannot escape os.tmpdir() when naming the downloaded image', async () => {
+      // msg.key.id is set by the OTHER party's client, not us — a crafted id
+      // containing '../' segments must not resolve outside os.tmpdir() when
+      // concatenated into the temp filename.
+      agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+      await open();
+      listenerFor('messages.upsert')({
+        type: 'notify',
+        messages: [
+          {
+            key: { remoteJid: '66811110000@s.whatsapp.net', id: '../../../../tmp/evil-pwned' },
+            message: { imageMessage: {} },
+          },
+        ],
+      });
+      await new Promise((r) => setImmediate(r));
+      const meta = (fetchCalls[0].body as { meta: Record<string, string> }).meta;
+      expect(meta.image_path).toBeDefined();
+      const real = path.resolve(meta.image_path);
+      expect(real.startsWith(path.resolve(os.tmpdir()) + path.sep)).toBe(true);
+      expect(real).not.toContain('..');
+      fs.rmSync(meta.image_path, { force: true });
     });
 
     // ---- Phase 2 ---------------------------------------------------------
