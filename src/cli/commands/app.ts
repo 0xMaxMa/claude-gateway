@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request } from '../http-client';
+import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
 import { createRl, ask } from '../prompt';
 import { redactLine } from '../redact';
@@ -189,6 +189,15 @@ async function waitForJob(
       const result = await request({ method: 'GET', path: `/v1/apps/jobs/${encodeURIComponent(jobId)}`, baseUrl, key });
       job = result.data as JobState;
     } catch (err) {
+      if (!(err instanceof TransportError)) {
+        // The gateway answered with an error — most commonly 404 "Job not
+        // found" if it restarted mid-install (job state is in-memory, see
+        // AppInstaller.getJob in src/apps/installer.ts) or 401/403 if the key
+        // was revoked. Retrying for up to 30 minutes would never help here,
+        // unlike a transport failure below.
+        process.stderr.write(`Could not poll job ${jobId}: ${(err as Error).message}\n`);
+        return 1;
+      }
       if (Date.now() >= deadline) {
         process.stderr.write(
           `Still waiting on job ${jobId}, and the last poll failed: ${(err as Error).message}\n` +

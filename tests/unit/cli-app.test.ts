@@ -17,6 +17,7 @@ jest.mock('../../src/cli/http-client', () => ({
 }));
 
 import { runCli } from '../../src/cli';
+import { TransportError } from '../../src/cli/http-client';
 import { parseInstallSource } from '../../src/cli/commands/app';
 
 type Sent = { method: string; path: string; baseUrl: string; key?: string; body?: Record<string, unknown> };
@@ -275,11 +276,12 @@ describe('app', () => {
     it('--wait tolerates a single transient poll failure instead of aborting the whole wait (code-review round)', async () => {
       // A brief network blip mid-poll must not be reported as an install
       // failure — the job keeps running server-side regardless of whether
-      // this one poll could reach it.
+      // this one poll could reach it. Only a TransportError (never reached
+      // the gateway at all) is worth retrying.
       jest.useFakeTimers();
       mockRequest
         .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-6' } })
-        .mockRejectedValueOnce(new Error('Cannot reach gateway at http://127.0.0.1:10850: ECONNRESET'))
+        .mockRejectedValueOnce(new TransportError('Cannot reach gateway at http://127.0.0.1:10850: ECONNRESET'))
         .mockResolvedValueOnce({ status: 200, ok: true, data: { id: 'job-6', status: 'completed', logs: [] } });
       try {
         const promise = runCli(['app', 'install', 'agent-note', '--wait']);
@@ -292,6 +294,20 @@ describe('app', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('--wait fails fast on a non-transport poll error (404 job not found) instead of retrying for 30 minutes (code-review round)', async () => {
+      // The gateway ANSWERED here (with an error), unlike the transient case
+      // above — e.g. its in-memory job map was cleared by a restart, or the
+      // admin key was revoked mid-poll. Retrying would never help.
+      mockRequest
+        .mockResolvedValueOnce({ status: 202, ok: true, data: { jobId: 'job-7' } })
+        .mockRejectedValueOnce(new Error('HTTP 404 GET /v1/apps/jobs/job-7: Job not found'));
+      const code = await runCli(['app', 'install', 'agent-note', '--wait']);
+      expect(code).toBe(1);
+      expect(mockRequest).toHaveBeenCalledTimes(2);
+      expect(stderr.join('')).toContain('Could not poll job job-7: HTTP 404 GET /v1/apps/jobs/job-7: Job not found');
+      expect(stderr.join('')).not.toMatch(/retrying/);
     });
   });
 });
