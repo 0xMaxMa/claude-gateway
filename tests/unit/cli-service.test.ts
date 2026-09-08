@@ -1422,17 +1422,50 @@ describe('service start/stop/restart — discover the installed service even whe
       expect(stderr.join('')).toMatch(/not installed at user scope — run `service install` first/);
     });
 
-    it('start: is a no-op success when already active', async () => {
+    it('start: is a no-op success when already active — and still reports health (code-review round)', async () => {
       mockExistsSync.mockImplementation((p: unknown) => String(p) === unitPath);
       mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
         if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
         if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
         return Buffer.from('');
       }) as unknown as typeof execFileSync);
-      const code = await runService(['start'], { manager: 'systemd', scope: 'user' });
-      expect(code).toBe(0);
-      expectNoStateChange();
-      expect(stderr.join('')).toMatch(/already active/);
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+      try {
+        const code = await runService(['start'], { manager: 'systemd', scope: 'user' });
+        expect(code).toBe(0);
+        expectNoStateChange();
+        expect(stderr.join('')).toMatch(/already active/);
+        // The `health` field was missing entirely on this path, making the
+        // no-op the one `start` that reported less than it knew.
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, health: 'up' }));
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('start: exits 2 when the unit is active but answers nothing on /health (code-review round)', async () => {
+      // systemd calls a wedged process active; the caller asked for a running
+      // gateway, and got one that answers nothing. Exit 0 with no health field
+      // was indistinguishable from a healthy service.
+      jest.useFakeTimers();
+      mockExistsSync.mockImplementation((p: unknown) => String(p) === unitPath);
+      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+        if (file === 'systemctl' && args.includes('is-active')) return Buffer.from('active\n');
+        if (file === 'systemctl' && args.includes('is-enabled')) return Buffer.from('enabled\n');
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync);
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false } as Response);
+      try {
+        const promise = runService(['start'], { manager: 'systemd', scope: 'user' });
+        await jest.advanceTimersByTimeAsync(20 * 500 + 5_000);
+        expect(await promise).toBe(2);
+        expectNoStateChange();
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, health: 'down' }));
+        expect(stderr.join('')).toMatch(/did not answer \/health/);
+      } finally {
+        fetchSpy.mockRestore();
+        jest.useRealTimers();
+      }
     });
 
     it('start: reports a clear failure exit code when systemctl itself fails (e.g. a port conflict)', async () => {
@@ -1608,14 +1641,38 @@ describe('service start/stop/restart — discover the installed service even whe
       expect(stderr.join('')).toMatch(/run `service install --manager pm2` first/);
     });
 
-    it('start: is a no-op success when already online', async () => {
+    it('start: is a no-op success when already online — and still reports health (code-review round)', async () => {
       mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
         if (file === 'pm2' && args[0] === 'jlist') return pm2List('online');
         return Buffer.from('');
       }) as unknown as typeof execFileSync);
-      const code = await runService(['start'], { manager: 'pm2' });
-      expect(code).toBe(0);
-      expect(stderr.join('')).toMatch(/already online/);
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true } as Response);
+      try {
+        const code = await runService(['start'], { manager: 'pm2' });
+        expect(code).toBe(0);
+        expect(stderr.join('')).toMatch(/already online/);
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, health: 'up' }));
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('start: exits 2 when pm2 says online but /health never answers (code-review round)', async () => {
+      jest.useFakeTimers();
+      mockExecFileSync.mockImplementation(((file: string, args: string[]) => {
+        if (file === 'pm2' && args[0] === 'jlist') return pm2List('online');
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync);
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false } as Response);
+      try {
+        const promise = runService(['start'], { manager: 'pm2' });
+        await jest.advanceTimersByTimeAsync(20 * 500 + 5_000);
+        expect(await promise).toBe(2);
+        expect(JSON.parse(stdout.join(''))).toEqual(expect.objectContaining({ active: true, health: 'down' }));
+      } finally {
+        fetchSpy.mockRestore();
+        jest.useRealTimers();
+      }
     });
 
     it('stop: stops an online pm2 process', async () => {

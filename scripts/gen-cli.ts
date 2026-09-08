@@ -192,11 +192,13 @@ never mistaken for one.
   and refuse to run non-interactively without it.
 - \`install\` verifies \`/health\` on the **local bind address**, and \`uninstall\` reports the state the
   manager actually reports afterwards — never the state that was intended.
-- \`install\` exit codes: \`0\` fully healthy, \`1\` install/enable itself failed (or a validation/
-  confirmation gate refused — nothing was written), \`2\` install/enable succeeded but \`/health\`
-  never answered within the poll window. Distinguishing \`1\` from \`2\` by exit code alone means a
-  caller doesn't have to parse the JSON result on stdout just to tell "didn't happen" apart from
-  "happened, health unconfirmed".
+- Exit codes for \`install\`, \`start\` and \`restart\` (every command that is supposed to leave a
+  running gateway behind): \`0\` fully healthy, \`1\` the action itself failed — install/enable, or
+  the start/restart — or a validation/confirmation gate refused, \`2\` the action succeeded but
+  \`/health\` never answered within the poll window. Distinguishing \`1\` from \`2\` by exit code alone
+  means a caller doesn't have to parse the JSON result on stdout just to tell "didn't happen" apart
+  from "happened, health unconfirmed". \`status\`, \`stop\` and \`uninstall\` never return \`2\`; they
+  are not trying to produce a service that answers.
 - (systemd, user-scope installs) \`install\` refuses by default if a \`claude-gateway.service\` unit
   already exists and is enabled or active at *system* scope (e.g. from provisioning outside this
   CLI) — it prints the exact \`sudo systemctl disable --now claude-gateway.service\` to resolve it;
@@ -210,6 +212,9 @@ never mistaken for one.
   reported *active*, and can never start a stopped service. \`stop\` on an already-stopped (or never
   installed) service is a no-op success, matching \`uninstall\`'s idempotence; \`start\`/\`restart\` on a
   service that was never installed is an error telling you to run \`service install\` first.
+- \`start\` on a service that is *already* running still checks \`/health\` and still reports it, so
+  the result is the same shape either way and \`2\` still means "running, but answering nothing" —
+  a process manager calling a wedged gateway \`active\` is precisely the case a health check is for.
 
 ## App Store (Docker-compose apps)
 

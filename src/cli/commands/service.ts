@@ -843,8 +843,19 @@ async function systemdStart(
     return 1;
   }
   if (before.active) {
-    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before }, flags);
+    // Already active is still a `start` that has to answer "is it up?" — a
+    // wedged service reported active by systemd but answering nothing is
+    // exactly the state this exit code exists for. Reporting 0 with no
+    // `health` field at all would make the no-op path the one case where
+    // `start` says less than it knows, and a caller checking the exit code
+    // could not tell it apart from a healthy service.
+    const healthy = await waitForHealth(config, flags);
+    printJson({ manager: systemdManagerLabel(scope), unit: unitPath(scope), ...before, health: healthy ? 'up' : 'down' }, flags);
     process.stderr.write(`${UNIT_NAME} is already active.\n`);
+    if (!healthy) {
+      process.stderr.write(`Service did not answer /health yet — check: journalctl ${scopeHintPrefix(scope)}-u ${UNIT_NAME} -n 50 --no-pager\n`);
+      return EXIT_HEALTH_TIMEOUT;
+    }
     return 0;
   }
   try {
@@ -1108,8 +1119,18 @@ async function pm2Start(flags: Record<string, string | boolean>, config: CliConf
     return 1;
   }
   if (entry.pm2_env?.status === 'online') {
-    printJson({ manager: 'pm2', name: PM2_NAME, installed: true, active: true, status: entry.pm2_env.status }, flags);
+    // Same reasoning as systemdStart()'s already-active path: "PM2 says
+    // online" is not "the gateway answers", and this is still a `start`.
+    const healthy = await waitForHealth(config, flags);
+    printJson(
+      { manager: 'pm2', name: PM2_NAME, installed: true, active: true, status: entry.pm2_env.status, health: healthy ? 'up' : 'down' },
+      flags,
+    );
     process.stderr.write(`${PM2_NAME} is already online.\n`);
+    if (!healthy) {
+      process.stderr.write(`Service did not answer /health yet — check: pm2 logs ${PM2_NAME}\n`);
+      return EXIT_HEALTH_TIMEOUT;
+    }
     return 0;
   }
   try {
