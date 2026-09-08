@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { unknownFlagNames } from '../args';
+import { unknownFlagNames, parseKeyValueList } from '../args';
 import { CliConfigView, expandHome, resolveUrlPlan, resolveReachableUrl, resolveKey, request, TransportError } from '../http-client';
 import { printResult, writeCommandHelp } from '../output';
 import { confirmAction } from '../prompt';
@@ -58,28 +58,17 @@ const WAIT_POLL_INTERVAL_MS = 1500;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** `--env KEY=VALUE[,KEY=VALUE...]` → the `env_vars` object the install body
- *  expects. Mirrors `service.ts`'s `--env` parsing (same comma-separated
- *  shape) minus the systemd-only reserved-key check, which has no equivalent
- *  here — an app's reserved names are declared in its own `app.yaml`, not
- *  known to this command, so the server is the one place that can validate
- *  them. Returns null (message already on stderr) on malformed input. */
+ *  expects. Shares its list parsing with `service --env` (see
+ *  parseKeyValueList in ../args.ts); the systemd-only reserved-key check has
+ *  no equivalent here — an app's reserved names are declared in its own
+ *  app.yaml, not known to this command, so the server is the one place that
+ *  can validate them. Returns null (message already on stderr) on malformed
+ *  input. */
 function parseEnvFlag(raw: string | boolean | undefined): Record<string, string> | null {
-  if (raw === undefined) return {};
-  if (typeof raw !== 'string' || raw.trim() === '') {
-    process.stderr.write('--env requires a comma-separated list of KEY=VALUE pairs.\n');
-    return null;
-  }
+  const pairs = parseKeyValueList('env', raw, 'KEY=VALUE');
+  if (pairs === null) return null;
   const out: Record<string, string> = {};
-  for (const pair of raw.split(',')) {
-    const trimmed = pair.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) {
-      process.stderr.write(`Invalid --env entry "${trimmed}" — expected KEY=VALUE.\n`);
-      return null;
-    }
-    const key = trimmed.slice(0, eq);
-    const value = trimmed.slice(eq + 1);
+  for (const { key, value } of pairs) {
     if (!ENV_KEY_RE.test(key)) {
       process.stderr.write(`Invalid --env key "${key}" — must match [A-Za-z_][A-Za-z0-9_]*.\n`);
       return null;
@@ -95,32 +84,20 @@ function parseEnvFlag(raw: string | boolean | undefined): Record<string, string>
  *  parsePortsField in apps-router.ts), since this command has no access to the
  *  app's app.yaml to check port names against. */
 function parsePortsFlag(raw: string | boolean | undefined): Record<string, number> | null {
-  if (raw === undefined) return {};
-  if (typeof raw !== 'string' || raw.trim() === '') {
-    process.stderr.write('--ports requires a comma-separated list of NAME=PORT pairs.\n');
-    return null;
-  }
+  const pairs = parseKeyValueList('ports', raw, 'NAME=PORT');
+  if (pairs === null) return null;
   const out: Record<string, number> = {};
-  for (const pair of raw.split(',')) {
-    const trimmed = pair.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) {
-      process.stderr.write(`Invalid --ports entry "${trimmed}" — expected NAME=PORT.\n`);
-      return null;
-    }
-    const name = trimmed.slice(0, eq);
-    const value = trimmed.slice(eq + 1);
+  for (const { key, value } of pairs) {
     // `Number('')` is 0, not NaN — checked separately so a trailing "NAME="
     // with nothing after it is reported as the malformed input it is, rather
     // than silently becoming port 0 (which the server would reject anyway,
     // but with a more confusing "must be at least 1024" instead of this).
     const port = value.trim() === '' ? NaN : Number(value);
     if (!Number.isInteger(port)) {
-      process.stderr.write(`Invalid --ports value for "${name}" — "${value}" is not an integer.\n`);
+      process.stderr.write(`Invalid --ports value for "${key}" — "${value}" is not an integer.\n`);
       return null;
     }
-    out[name] = port;
+    out[key] = port;
   }
   return out;
 }

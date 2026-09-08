@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { unknownFlagNames } from '../args';
+import { unknownFlagNames, parseKeyValueList } from '../args';
 import { CliConfigView, resolveLocalUrl } from '../http-client';
 import { confirmAction, printFilePreview } from '../prompt';
 import { probeHealth } from '../health';
@@ -496,23 +496,10 @@ function parseAfterTargets(flags: Record<string, string | boolean>): string[] | 
  *  producing a unit that starts the wrong binary. Never for secrets — this
  *  text is written straight into the unit file; point at --env-file instead. */
 function parseExtraEnv(flags: Record<string, string | boolean>): Record<string, string> | null {
-  const raw = flags.env;
-  if (raw === undefined) return {};
-  if (typeof raw !== 'string' || raw.trim() === '') {
-    process.stderr.write('--env requires a comma-separated list of KEY=VALUE pairs.\n');
-    return null;
-  }
+  const pairs = parseKeyValueList('env', flags.env, 'KEY=VALUE');
+  if (pairs === null) return null;
   const out: Record<string, string> = {};
-  for (const pair of raw.split(',')) {
-    const trimmed = pair.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) {
-      process.stderr.write(`Invalid --env entry "${trimmed}" — expected KEY=VALUE.\n`);
-      return null;
-    }
-    const key = trimmed.slice(0, eq);
-    const value = trimmed.slice(eq + 1);
+  for (const { key, value } of pairs) {
     if (!ENV_KEY_RE.test(key)) {
       process.stderr.write(`Invalid --env key "${key}" — must match [A-Za-z_][A-Za-z0-9_]*.\n`);
       return null;

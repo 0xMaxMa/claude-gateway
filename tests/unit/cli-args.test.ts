@@ -1,4 +1,4 @@
-import { parseCliArgs } from '../../src/cli/args';
+import { parseCliArgs, parseKeyValueList, unknownFlagNames } from '../../src/cli/args';
 import {
   CHILD_MARKER,
   claimSupervisorEnv,
@@ -222,5 +222,83 @@ describe('parseCliArgs single-dash tokens', () => {
 
   it('does not let an alias be swallowed as the previous flag\u2019s value', () => {
     expect(parseCliArgs(['--url', '-h']).flags).toEqual({ url: true, help: true });
+  });
+});
+
+/**
+ * `service --env`, `app --env` and `app --ports` all parse the same
+ * `K=V[,K=V...]` shape and used to carry three near-identical copies of it —
+ * near-identical because they had already drifted (only one of them rejected a
+ * flag passed with no value at all). These pin the one shared implementation.
+ */
+describe('cli args parseKeyValueList (code-review round)', () => {
+  let stderr: string[];
+  let errSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    stderr = [];
+    errSpy = jest.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      stderr.push(chunk.toString());
+      return true;
+    });
+  });
+  afterEach(() => errSpy.mockRestore());
+
+  it('splits a comma-separated list, keeping `=` inside the value', () => {
+    expect(parseKeyValueList('env', 'A=1,B=x=y', 'KEY=VALUE')).toEqual([
+      { key: 'A', value: '1' },
+      { key: 'B', value: 'x=y' },
+    ]);
+  });
+
+  it('treats an omitted flag as an empty list, not an error', () => {
+    expect(parseKeyValueList('env', undefined, 'KEY=VALUE')).toEqual([]);
+    expect(stderr.join('')).toBe('');
+  });
+
+  it('rejects a flag passed with no value — the parser reads that as boolean true', () => {
+    expect(parseKeyValueList('ports', true, 'NAME=PORT')).toBeNull();
+    expect(stderr.join('')).toBe('--ports requires a comma-separated list of NAME=PORT pairs.\n');
+  });
+
+  it('rejects an entry with no `=`, or with an empty name', () => {
+    expect(parseKeyValueList('env', 'JUSTAKEY', 'KEY=VALUE')).toBeNull();
+    expect(stderr.join('')).toContain('Invalid --env entry "JUSTAKEY" — expected KEY=VALUE.');
+
+    stderr.length = 0;
+    expect(parseKeyValueList('env', '=novalue', 'KEY=VALUE')).toBeNull();
+    expect(stderr.join('')).toContain('Invalid --env entry "=novalue"');
+  });
+
+  it('ignores empty entries and surrounding whitespace, but keeps the value verbatim', () => {
+    expect(parseKeyValueList('env', ' A=1 , , B=  2', 'KEY=VALUE')).toEqual([
+      { key: 'A', value: '1' },
+      { key: 'B', value: '  2' },
+    ]);
+  });
+
+  it('names the flag it was given in every message', () => {
+    parseKeyValueList('ports', 'bad', 'NAME=PORT');
+    expect(stderr.join('')).toContain('Invalid --ports entry "bad" — expected NAME=PORT.');
+  });
+});
+
+describe('cli args unknownFlagNames (code-review round)', () => {
+  it('returns the flags the command does not declare, in the order given', () => {
+    expect(unknownFlagNames({ json: true, evn: 'A=1', foo: 'x' }, new Set(['json', 'env']))).toEqual(['evn', 'foo']);
+  });
+
+  it('returns an empty array when everything is known', () => {
+    expect(unknownFlagNames({ json: true, env: 'A=1' }, new Set(['json', 'env']))).toEqual([]);
+  });
+
+  it('does not treat inherited Object properties as known', () => {
+    // `known.has('constructor')` is false for a Set, but a plain-object lookup
+    // (`name in known`) would have said true — which would let `--constructor`
+    // through on every command.
+    expect(unknownFlagNames({ constructor: true, toString: 'x' }, new Set(['json']))).toEqual([
+      'constructor',
+      'toString',
+    ]);
   });
 });
