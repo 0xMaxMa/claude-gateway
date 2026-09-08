@@ -1397,6 +1397,10 @@ export class AgentRunner extends EventEmitter {
     if (meta['replied_message_id']) {
       const repliedAttrs = [
         'replied_image_path',
+        'replied_attachment_file_id',
+        'replied_attachment_kind',
+        'replied_attachment_mime',
+        'replied_attachment_name',
       ]
         .filter(k => meta[k])
         .map(k => ` ${k}="${meta[k]!.replace(/"/g, '&quot;')}"`)
