@@ -554,6 +554,10 @@ export interface SessionMeta {
    *  can restore the composer selection on reload; the agent's own context is the
    *  functional source of truth. Updated whenever a send carries image_params. */
   imageConfig?: ImageParams;
+  /** Last composer video options sent for this session. Mirrors imageConfig —
+   *  persisted so the web can restore the composer selection on reload. Updated
+   *  whenever a send carries video_params. */
+  videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
 }
@@ -589,6 +593,28 @@ export type ImageParams = {
    */
   image_refs?: string[];
   n?: number;
+};
+
+/**
+ * Video-generation options selected in the web composer (per-session), passed
+ * through the chat send body as `video_params` and surfaced to the agent so it
+ * calls the `generate_video` MCP tool with these exact values. Mirrors ImageParams.
+ * Without this bridge the agent receives no composer context for video and invents
+ * duration/aspect (e.g. a non-existent 10s cap, an 8+8 scene split, or a landscape
+ * clip when 9:16 was selected).
+ */
+export type VideoParams = {
+  model?: string;
+  resolution?: string;
+  aspect_ratio?: string;
+  /** Discrete clip length in seconds (model-specific, e.g. 6/10/15). */
+  duration?: number;
+  /**
+   * Source frame for image-to-video, if the composer selected one. A `ref` value
+   * (media-relative path or `artifact:<id>`) passed as the generate_video `image`
+   * argument. When present the source frame's own aspect wins over aspect_ratio.
+   */
+  image_ref?: string;
 };
 
 export type StreamEvent =

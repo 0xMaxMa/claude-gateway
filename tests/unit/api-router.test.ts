@@ -99,14 +99,14 @@ class MockAgentRunner extends EventEmitter {
   // Backing data for GET /v1/agents/sessions — override per-test via the impl fields.
   getHistoryDbImpl: () => { listSessions: (chatId?: string) => Array<Record<string, unknown>> } =
     () => ({ listSessions: () => [] });
-  getAllSessionMetaImpl: () => Promise<Map<string, { name: string; imageConfig?: unknown; model?: string }>> =
+  getAllSessionMetaImpl: () => Promise<Map<string, { name: string; imageConfig?: unknown; videoConfig?: unknown; model?: string }>> =
     () => Promise.resolve(new Map());
 
   getHistoryDb(): { listSessions: (chatId?: string) => Array<Record<string, unknown>> } {
     return this.getHistoryDbImpl();
   }
 
-  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: unknown; model?: string }>> {
+  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: unknown; videoConfig?: unknown; model?: string }>> {
     return this.getAllSessionMetaImpl();
   }
 }
@@ -1071,7 +1071,7 @@ describe('GET /api/v1/agents/sessions', () => {
     };
   }
 
-  function buildSessionsApp(agents: Record<string, { sessions: Array<Record<string, unknown>>; metaMap: Map<string, { name: string; imageConfig?: unknown; model?: string }> }>) {
+  function buildSessionsApp(agents: Record<string, { sessions: Array<Record<string, unknown>>; metaMap: Map<string, { name: string; imageConfig?: unknown; videoConfig?: unknown; model?: string }> }>) {
     const runners = new Map<string, import('../../src/agent/runner').AgentRunner>();
     const configs = new Map<string, AgentConfig>();
     for (const [id, data] of Object.entries(agents)) {
@@ -1103,6 +1103,24 @@ describe('GET /api/v1/agents/sessions', () => {
     expect(session.sessionName).toBe('My Session');
   });
 
+  it('S1b: exposes videoConfig from getAllSessionMeta, mirroring imageConfig', async () => {
+    const app = buildSessionsApp({
+      [AGENT_ID]: {
+        sessions: [makeHistorySession('sess-vid')],
+        metaMap: new Map([
+          ['sess-vid', { name: 'Vid Session', videoConfig: { model: 'grok-video/x', duration: 15 } }],
+        ]),
+      },
+    });
+
+    const res = await supertest.default(app).get(SESSIONS_URL).set(ADMIN_AUTH);
+
+    expect(res.status).toBe(200);
+    const session = res.body.agents[0].sessions[0];
+    expect(session.videoConfig).toEqual({ model: 'grok-video/x', duration: 15 });
+    expect(session.imageConfig).toBeNull();
+  });
+
   it('S2 (bad case): a session with no meta entry at all reports model: null, not undefined/missing', async () => {
     const app = buildSessionsApp({
       [AGENT_ID]: {
@@ -1117,6 +1135,7 @@ describe('GET /api/v1/agents/sessions', () => {
     const session = res.body.agents[0].sessions[0];
     expect(session).toHaveProperty('model');
     expect(session.model).toBeNull();
+    expect(session.videoConfig).toBeNull();
   });
 
   it('S3 (bad case): a meta entry that predates the model field reports model: null', async () => {

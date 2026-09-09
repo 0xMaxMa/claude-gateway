@@ -7,7 +7,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { AgentRunner } from '../agent/runner';
 import { callbackSink, errorCode, type ApiStreamCallbacks } from '../agent/turn-stream';
-import { AgentConfig, ApiKey, ImageParams, ModelConfig } from '../types';
+import { AgentConfig, ApiKey, ImageParams, ModelConfig, VideoParams } from '../types';
 import { isValidConnectorId } from '../connectors/custom';
 import { agentsDirForConfig } from '../config/agent-env';
 import { withConfigWriteLock, writeConfigAtomic } from '../config/config-write-lock';
@@ -406,8 +406,9 @@ export function createApiRouter(
       model?: unknown;
       store_user_message?: unknown;
       image_params?: unknown;
+      video_params?: unknown;
     };
-    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message, image_params } = body;
+    const { message, chat_id, session_id, stream, timeout_ms, media_files, model: requestModel, store_user_message, image_params, video_params } = body;
 
     if (message !== undefined && typeof message !== 'string') {
       res.status(400).json({ error: 'message must be a string if provided' });
@@ -504,6 +505,38 @@ export function createApiRouter(
       if (Object.keys(out).length) validatedImageParams = out;
     }
 
+    // Validate optional video_params — mirrors image_params. Surfaced to the agent
+    // so it calls generate_video with the composer-selected model/duration/
+    // resolution/aspect_ratio instead of inventing them.
+    let validatedVideoParams: VideoParams | undefined;
+    if (video_params !== undefined) {
+      if (typeof video_params !== 'object' || video_params === null || Array.isArray(video_params)) {
+        res.status(400).json({ error: 'video_params must be an object if provided' });
+        return;
+      }
+      const vp = video_params as Record<string, unknown>;
+      const vStrFields = ['model', 'resolution', 'aspect_ratio', 'image_ref'] as const;
+      const vOut: VideoParams = {};
+      for (const f of vStrFields) {
+        const v = vp[f];
+        if (v !== undefined) {
+          if (typeof v !== 'string') {
+            res.status(400).json({ error: `video_params.${f} must be a string` });
+            return;
+          }
+          if (v.trim()) vOut[f] = v.trim();
+        }
+      }
+      if (vp.duration !== undefined) {
+        if (typeof vp.duration !== 'number' || !Number.isFinite(vp.duration) || vp.duration < 1) {
+          res.status(400).json({ error: 'video_params.duration must be a positive number' });
+          return;
+        }
+        vOut.duration = Math.floor(vp.duration);
+      }
+      if (Object.keys(vOut).length) validatedVideoParams = vOut;
+    }
+
     // Allow message OR media_files. Image-only sends pass an empty text
     // alongside the image_path attribute on channelXml so Claude can Read the file.
     const trimmedMessage = typeof message === 'string' ? message.trim() : '';
@@ -595,7 +628,7 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, requestId },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId },
         );
 
         // Client disconnect — detaches this connection's sink. The turn keeps
@@ -637,6 +670,7 @@ export function createApiRouter(
             model: modelStr,
             skipUserMessage,
             imageParams: validatedImageParams,
+            videoParams: validatedVideoParams,
           }));
         }
         const syncResult: Record<string, unknown> = {
@@ -781,7 +815,7 @@ export function createApiRouter(
           description: cfg?.description ?? '',
           sessions: sessions.map((s) => {
             const meta = metaMap.get(s.sessionId);
-            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null, model: meta?.model ?? null };
+            return { ...s, sessionName: meta?.name ?? null, imageConfig: meta?.imageConfig ?? null, videoConfig: meta?.videoConfig ?? null, model: meta?.model ?? null };
           }),
         };
       }),
