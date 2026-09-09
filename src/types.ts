@@ -131,6 +131,36 @@ export interface AgentConfig {
      */
     pairing?: boolean;
   };
+  /**
+   * WeChat — a single personal account, linked via QR through Tencent's
+   * iLink Bot API bridge (see src/wechat/manager.ts's doc comment). No
+   * credential fields here (unlike telegram/discord/line/slack): the link
+   * flow is device-pairing, not a typed-in token, so there is nothing to
+   * store except the access-control policy. DM-only — no groupPolicy/
+   * groupAllowlist/requireMention fields exist because the bridge cannot
+   * reliably deliver WeChat group events at all (confirmed by both the
+   * Hermes-agent and OpenClaw source docs this channel was researched
+   * from), unlike every other allowlisted channel above.
+   */
+  wechat?: {
+    /**
+     * DM access policy (mirrors `line.dmPolicy`/`slack.dmPolicy` exactly).
+     * Closed by default: when absent, only senders in `dmAllowlist` may
+     * reach the agent.
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** iLink sender ids allowed under allowlist / closed-default. */
+    dmAllowlist?: string[];
+    /**
+     * Pairing aid for the allowlist (mirrors `line.pairing`/`slack.pairing`
+     * exactly — same orthogonal-boolean shape). When on, an un-allowlisted
+     * sender gets a one-time pairing code, and the same code shows in the
+     * UI "pending" row so an admin can visually match it before clicking
+     * "+ Add". Default true (absent ⇒ on). Only has an effect under
+     * `allowlist` (closed-default).
+     */
+    pairing?: boolean;
+  };
   claude: {
     model: string;
     /** @deprecated --dangerously-skip-permissions is always passed now; this field is ignored. */

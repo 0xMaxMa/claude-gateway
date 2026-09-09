@@ -16,6 +16,10 @@ import { TelegramReceiver } from '../telegram/receiver';
 import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
 import { SlackClient } from '../api/slack-client';
+import { WeChatManager, type WeChatStatus } from '../wechat/manager';
+import { createILinkClient, type ILinkUpdate } from '../wechat/ilink-client';
+import { isWeChatConversationAllowed } from '../api/wechat-access';
+import { recordDeniedSender, getPendingSender, generatePairingCode } from '../api/pending-senders';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -238,6 +242,12 @@ export class AgentRunner extends EventEmitter {
   // it exists only so writeAutoForward's fallback/command-reply path (below) has
   // somewhere to actually deliver Slack messages instead of silently dropping them.
   private slackOutbound: SlackClient | null = null;
+  // WeChat: unlike every credential-input channel above, constructed
+  // unconditionally (there's no config field to gate on — the link flow is
+  // QR device-pairing, not a typed-in token, same reasoning WhatsApp/Baileys
+  // uses). Does nothing until startWeChatLinking() is called or a
+  // previously-linked session is resumed at start().
+  private wechat: WeChatManager | null = null;
   private readonly sessionStore: SessionStore;
   private readonly idleTimeoutMs: number;
   private readonly maxConcurrent: number;
@@ -3043,6 +3053,8 @@ export class AgentRunner extends EventEmitter {
     // line_reply tool keeps the plain reply-first → push-fallback path).
     this.startLineReply();
     this.startSlackOutbound();
+    this.ensureWeChatManager();
+    await this.wechat?.resumeIfLinked();
     this.startIdleCleaner();
     this._startCleanupScheduler();
     this.logger.info('AgentRunner started', { agentId: this.agentConfig.id });
@@ -3095,6 +3107,92 @@ export class AgentRunner extends EventEmitter {
     // it up, same reasoning as LineReplyManager above.
     this.stopSlackOutbound();
     this.startSlackOutbound();
+    // WeChat has no credential to react to (QR-linked, not config-driven) —
+    // just hand the manager the fresh config so its access-control reads
+    // (dmPolicy/dmAllowlist/pairing) see the latest values.
+    this.wechat?.updateAgentConfig(newConfig);
+  }
+
+  /** Lazily construct this agent's WeChatManager — safe to call repeatedly. */
+  private ensureWeChatManager(): WeChatManager {
+    if (!this.wechat) {
+      this.wechat = new WeChatManager(
+        this.agentConfig,
+        this.gatewayConfig.gateway.logDir,
+        createILinkClient(process.env.ILINK_BASE_URL ?? ''),
+        (update) => this.handleWeChatInboundMessage(update),
+      );
+    }
+    return this.wechat;
+  }
+
+  getWeChatStatus(): WeChatStatus {
+    return this.ensureWeChatManager().getStatus();
+  }
+
+  async startWeChatLinking(): Promise<void> {
+    await this.ensureWeChatManager().startLinking();
+  }
+
+  async unlinkWeChat(): Promise<void> {
+    await this.ensureWeChatManager().unlink();
+  }
+
+  async sendWeChatMessage(toId: string, text: string): Promise<void> {
+    await this.ensureWeChatManager().sendMessage(toId, text);
+  }
+
+  /**
+   * Gate + forward one inbound WeChat message. Mirrors the LINE webhook
+   * router's own gate-then-forward-to-/channel shape exactly (see
+   * src/api/line-webhook-router.ts's `recordDeniedSender` call and its
+   * "forward to the agent's existing /channel intake" comment) — WeChat has
+   * no webhook of its own, so this is the equivalent point for a message
+   * arriving off WeChatManager's long-poll loop instead of an Express route.
+   */
+  private handleWeChatInboundMessage(update: ILinkUpdate): void {
+    const cfg = this.agentConfig.wechat;
+    const allowed = isWeChatConversationAllowed(cfg, { fromId: update.fromId });
+    if (!allowed) {
+      const pairingOn = cfg?.pairing !== false; // absent ⇒ on, mirrors line.pairing/slack.pairing
+      const existing = getPendingSender('wechat', this.agentConfig.id, update.fromId);
+      const code = pairingOn ? (existing?.code ?? generatePairingCode()) : undefined;
+      const isNew = recordDeniedSender(
+        'wechat',
+        this.agentConfig.id,
+        update.fromId,
+        update.displayName,
+        Date.now(),
+        code,
+      );
+      if (isNew && pairingOn && code) {
+        this.wechat
+          ?.sendMessage(
+            update.fromId,
+            `This account isn't approved to message this agent yet. Give the admin this code: ${code}`,
+          )
+          .catch((err) =>
+            this.logger.warn('WeChat pairing-code reply failed', { error: (err as Error).message }),
+          );
+      }
+      return;
+    }
+
+    const meta: Record<string, string> = {
+      source: 'wechat',
+      chat_id: update.fromId,
+      user_id: update.fromId,
+      user: update.displayName || update.fromId,
+      message_id: update.id,
+      ts: new Date(update.timestamp ?? Date.now()).toISOString(),
+    };
+    fetch(`http://127.0.0.1:${this.callbackPort}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: update.text ?? '', meta }),
+    }).catch((err) => {
+      this.logger.error('WeChat: failed to forward to callback', { error: (err as Error).message });
+    });
   }
 
   startSlackOutbound(): void {
