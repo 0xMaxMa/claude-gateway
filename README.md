@@ -119,6 +119,9 @@ claude-gateway service install              # systemd *user* unit — no sudo
 claude-gateway service install --print      # just show what it would install
 claude-gateway service status
 claude-gateway service uninstall            # asks first — this stops a running gateway
+claude-gateway service start                # start the installed service (found even if inactive)
+claude-gateway service restart
+claude-gateway service stop
 ```
 
 Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
@@ -126,11 +129,13 @@ non-interactive run is refused rather than left hanging). Always stop the gatewa
 `service uninstall` or `systemctl --user stop claude-gateway.service` — a bare `kill <pid>` bypasses
 systemd's own stop tracking, so `Restart=always` brings it right back regardless of exit code.
 
-`install`'s exit code distinguishes three outcomes: `0` fully healthy, `1` install/enable itself
-failed or a validation/confirmation gate refused (nothing was written), `2` install/enable
-succeeded but `/health` never answered within the poll window. A script that only checks the exit
-code — not the JSON result on stdout — can still tell "didn't happen" apart from "happened, health
-unconfirmed" this way.
+`install`, `start` and `restart` — the commands meant to leave a running gateway behind — share one
+exit-code contract with three outcomes: `0` fully healthy, `1` the action itself failed (or a
+validation/confirmation gate refused, so nothing was written), `2` the action succeeded but
+`/health` never answered within the poll window. A script that only checks the exit code — not the
+JSON result on stdout — can still tell "didn't happen" apart from "happened, health unconfirmed"
+this way. `start` on an already-running service is no exception: it still probes `/health` and can
+still exit `2`, because "the process manager calls it active" is not "the gateway answers".
 
 `install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
 exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
@@ -193,6 +198,11 @@ claude-gateway gateway restart
 claude-gateway gateway stop
 claude-gateway gateway logs     # tail the gateway's own log (works even when it is dead)
 ```
+
+`gateway restart`/`stop` only drive whatever manager is currently reported *active*. To start an
+installed service that is currently stopped — or to act on a specific `--manager`/`--scope`
+regardless of what else might be running — use `service start`/`stop`/`restart` instead; they
+discover the installed unit from disk the same way `service status`/`uninstall` do.
 
 Managing PM2 directly still works too:
 
@@ -904,6 +914,10 @@ claude-gateway gateway start               # run the gateway in the foreground
 claude-gateway gateway status              # is it running? which manager owns it?
 claude-gateway gateway logs --follow       # stream the gateway log (reads files, needs no server)
 claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
+claude-gateway service start|stop|restart  # drive the installed service (found even if inactive)
+claude-gateway app list                    # installed Docker-compose apps and their status
+claude-gateway app install agent-note      # install from the community registry
+claude-gateway app start|stop|restart <name>
 claude-gateway update check                # newer claude-gateway published?
 claude-gateway claude update               # update Claude Code via its own updater
 claude-gateway doctor                      # check config / key / connectivity
@@ -1039,6 +1053,19 @@ curl -X POST http://localhost:10850/api/v1/apps/install \
 ```bash
 curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq .status
 ```
+
+**Or use the CLI**, which wraps the same endpoints (see [CLI.md](./CLI.md) for the full reference):
+
+```bash
+claude-gateway app install agent-note --env-file ./agent-note.env --wait   # follow the job to completion
+claude-gateway app list                                                    # installed apps + status
+claude-gateway app stop agent-note
+claude-gateway app uninstall agent-note --yes
+```
+
+`--env-file` reads `KEY=VALUE` lines from a dotenv file. Prefer it over `--env` for anything secret:
+a value passed on the command line is readable by every local user in `/proc/<pid>/cmdline` while the
+install runs, and is written to your shell history. `--env` wins if both set the same variable.
 
 **App is then live at** `/app/getpod-manager/<portName>/`.
 

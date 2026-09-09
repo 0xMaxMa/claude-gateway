@@ -9,7 +9,7 @@ import {
   updateAvailable,
 } from '../../packages/registry';
 import { detectManager } from '../manager';
-import { createRl, ask } from '../prompt';
+import { confirmAction } from '../prompt';
 import { printJson } from '../output';
 import { writeCommandHelp } from '../output';
 
@@ -54,21 +54,6 @@ async function resolve(id: PackageId): Promise<Resolved | null> {
     return null;
   }
   return { config, current, latest, hasUpdate: updateAvailable(current, latest) };
-}
-
-async function confirm(flags: Record<string, string | boolean>, question: string): Promise<boolean> {
-  if (flags.yes === true) return true;
-  if (!process.stdin.isTTY) {
-    process.stderr.write('Refusing to update non-interactively without --yes.\n');
-    return false;
-  }
-  const rl = createRl();
-  try {
-    const answer = (await ask(rl, `${question} (y/N): `)).trim().toLowerCase();
-    return answer === 'y' || answer === 'yes';
-  } finally {
-    rl.close();
-  }
 }
 
 async function check(id: PackageId, flags: Record<string, string | boolean>): Promise<number> {
@@ -119,7 +104,7 @@ async function update(id: PackageId, flags: Record<string, string | boolean>): P
     `\n${config.npm}\n  current: ${current ?? 'not installed'}\n  target:  ${latest}\n` +
       `  notes:   ${RELEASE_NOTES[id](latest as string)}\n\n`,
   );
-  if (!(await confirm(flags, `Update ${config.npm} to ${latest}?`))) {
+  if (!(await confirmAction(flags, 'update', `Update ${config.npm} to ${latest}?`))) {
     process.stderr.write('Aborted — nothing was installed.\n');
     return 1;
   }

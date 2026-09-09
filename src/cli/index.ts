@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { parseCliArgs } from './args';
+import { parseCliArgs, unknownFlagNames } from './args';
 import { GENERATED_COMMANDS, GENERATED_NOUNS } from './commands.generated';
 import { GeneratedCommand } from './types';
 import { loadCliConfig, resolveUrlPlan, resolveKey, request, CliConfigView } from './http-client';
@@ -7,6 +7,7 @@ import { printResult, helpStream, writeCommandHelp } from './output';
 import { paletteFor, Paint } from './colors';
 import { runGatewayLifecycle } from './commands/gateway';
 import { runService } from './commands/service';
+import { runApp } from './commands/app';
 import { runUpdate, runClaude } from './commands/update';
 import { runDoctor } from './commands/doctor';
 import { runDebugBundle } from './commands/debug-bundle';
@@ -20,8 +21,11 @@ import { runChannels } from './commands/channels';
  *  No generated resource command declares a `--follow` value flag. `force` is
  *  here for the same reason: `service --force install` (flag before the verb)
  *  would otherwise swallow `install` as `--force`'s value and leave `service`
- *  with no verb at all — see issue #450. */
-const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force']);
+ *  with no verb at all — see issue #450. `wait` is here so `app install
+ *  <source> --wait` (flag after every positional, but before nothing) never
+ *  risks swallowing a token that happens to come after it in some other
+ *  invocation order. */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['help', 'json', 'yes', 'print', 'follow', 'force', 'wait']);
 /** Flags every command accepts, on top of whatever the generated manifest
  *  declares for that command. Anything outside this set and the command's own
  *  flags is a typo, and is reported rather than dropped: a resource command
@@ -84,6 +88,8 @@ export async function runCli(argv: string[]): Promise<number> {
         return await runGatewayLifecycle(positionals, flags, config);
       case 'service':
         return await runService(positionals, flags, config);
+      case 'app':
+        return await runApp(positionals, flags, config);
       case 'update':
         return await runUpdate('claude-gateway', positionals, flags);
       case 'claude':
@@ -174,8 +180,7 @@ async function runResourceCommand(
     }
     body = parsed as Record<string, unknown>;
   }
-  const known = new Set([...GLOBAL_FLAG_NAMES, ...cmd.flags.map((f) => f.name)]);
-  const unknown = Object.keys(flags).filter((name) => !known.has(name));
+  const unknown = unknownFlagNames(flags, new Set([...GLOBAL_FLAG_NAMES, ...cmd.flags.map((f) => f.name)]));
   if (unknown.length) {
     // Same treatment as an unknown verb: refuse and show what is accepted. A
     // mistyped flag used to reach the API as a missing field (`crons create
@@ -303,6 +308,13 @@ export const CORE_HELP: ReadonlyArray<readonly [string, string]> = [
   // was reported as missing from help by someone looking straight at it.
   ['gateway logs', 'Read the gateway log files (works when it is down)'],
   ['service install|status|uninstall', 'Run the gateway as a systemd-user or PM2 service'],
+  // Its own row, not folded into the line above, for the same reason `gateway
+  // logs` gets one: these three act on the installed service specifically
+  // (found even when inactive), never on install/uninstall state.
+  ['service start|stop|restart', 'Start/stop/restart the installed service (even if inactive)'],
+  ['app list', 'List installed apps and their status'],
+  ['app start|stop|restart|uninstall', 'Manage an installed app (Docker-compose)'],
+  ['app install', 'Install an app from the registry, GitHub, or a local path'],
   ['update [check]', 'Check for / install a newer claude-gateway'],
   ['claude version|update [check]', 'Inspect / update the Claude Code binary'],
   ['doctor', 'Check config/env/connectivity'],

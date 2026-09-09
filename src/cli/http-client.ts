@@ -213,8 +213,10 @@ export interface RequestOptions {
 
 /** A request that never reached a server (DNS, refused, timeout) — as opposed
  *  to one the gateway answered with an error status. Only the former is worth
- *  retrying at a different address. */
-class TransportError extends Error {
+ *  retrying at a different address, or worth retrying at all in a poll loop
+ *  (see `waitForJob` in commands/app.ts) — a gateway that *answered* with an
+ *  error (404, 401, 403, ...) will keep answering the same way. */
+export class TransportError extends Error {
   readonly transport = true;
 }
 
