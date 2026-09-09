@@ -32,8 +32,8 @@ function printHelp(): void {
     'check config, key resolution, manager and connectivity',
     'claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]',
     [
-      `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and`,
-      '  never fail the command. The key itself is never printed.',
+      `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and ${c.yellow('[warn]')}`,
+      '  rows are advisory — neither fails the command. The key itself is never printed.',
     ],
   );
 }
