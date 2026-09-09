@@ -345,6 +345,47 @@ describe('generate_video image-to-video source-frame resolution (normalizeRef)',
     expect(submitBody.image).toBe('https://gw.example.com/shared/tok-1');
   });
 
+  // #472: on a host with gateway.publicUrl unset, share mint succeeds (token,
+  // no url) but the source frame cannot be made into a fetchable https:// URL.
+  // Mirrors the generate_image fix — same actionable remedy + workaround, and
+  // the now-unusable share is still revoked rather than leaked.
+  test('share bridge ON but the minted share has no url (gateway.publicUrl unset) → actionable error, share revoked', async () => {
+    process.env.GATEWAY_API_URL = GATEWAY;
+    process.env.GATEWAY_API_KEY = 'gw-key';
+    process.env.GATEWAY_AGENT_ID = 'agent-1';
+    process.env.GATEWAY_SESSION_ID = 'session-1';
+
+    global.fetch = jest.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      calls.push({ url, method, body: init?.body });
+      if (url.endsWith('/api/v1/shares') && method === 'POST') {
+        return new Response(
+          JSON.stringify({ items: [{ share_id: 'sh-1', token: 'tok-1', url: '', expires_at: '2099-01-01T00:00:00Z' }] }),
+          { status: 201 },
+        );
+      }
+      if (url.includes('/api/v1/shares/') && method === 'DELETE') {
+        return new Response(JSON.stringify({ revoked: true }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    const res = await new VideoModule().handleTool('generate_video', {
+      action: 'generate',
+      model: 'grok-video/grok-imagine',
+      prompt: 'animate this',
+      image: 'media/session-1/frame.png',
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain('generate_video: source-frame sharing requires gateway.publicUrl to be configured');
+    expect(res.content[0]!.text).toContain('~/.claude-gateway/config.json');
+    expect(res.content[0]!.text).toContain('restart the gateway');
+    expect(calls.some((c) => c.method === 'DELETE' && c.url.includes('/api/v1/shares/sh-1'))).toBe(true);
+    expect(calls.some((c) => c.url.endsWith('/v1/videos/generations'))).toBe(false);
+  });
+
   test('share bridge ON but an artifact ref does not exist → error surfaced, no submit', async () => {
     process.env.GATEWAY_API_URL = GATEWAY;
     process.env.GATEWAY_API_KEY = 'gw-key';

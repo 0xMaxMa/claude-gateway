@@ -127,7 +127,11 @@ dead local service as healthy.
 \`doctor\` probes the address the CLI will use (that check decides its exit code) and adds an
 **informational** probe of the other address whenever the two differ, marked \`[--]\`. A public URL
 that rejects an unauthenticated \`/health\` is reported, but never fails \`doctor\` — the CLI is not
-using that address.
+using that address. It also checks \`gateway.publicUrl\` itself (marked \`[warn]\` when unset — a
+capability gap, not a misconfiguration — and \`[!!]\` when set but nothing answers), since that value
+backs \`generate_image\` reference edits, \`share_file\`, and \`/cli\`, and nothing else surfaces its
+absence (#472). Skipped when \`--url\`/\`$CLAUDE_GATEWAY_URL\` point at a different host — it is this
+host's own config file, so it is not context for a question about another machine.
 
 **Colour.** Help and diagnostic text is coloured only when the stream it is going to is a
 terminal — stdout for a requested help listing, stderr for everything else — so piping either one
