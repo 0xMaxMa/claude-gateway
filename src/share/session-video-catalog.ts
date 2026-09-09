@@ -15,7 +15,14 @@ import { MediaStore } from '../history/media-store';
  * videos in their own endpoint means image ordinals are untouched.
  */
 
-/** Clip containers the web renders with <video> (mirrors AGENT_VIDEO_URL_RE web-side). */
+/**
+ * Clip containers the web renders with <video>. MUST stay byte-identical to the
+ * web's AGENT_VIDEO_URL_RE (getpod apps/web: assistant.tsx + use-modal-chat.ts) —
+ * they live in separate repos, so there is no shared source to enforce it. A
+ * mismatch silently drops a clip the web can play (catalog too narrow) or lists
+ * one it cannot render (catalog too wide). Generated clips are always .mp4, so
+ * this only bites uploaded containers.
+ */
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v)$/i;
 
 export type SessionVideoCatalogItem = {
