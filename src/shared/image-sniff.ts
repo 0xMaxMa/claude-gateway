@@ -22,3 +22,16 @@ export function sniffImageExt(buf: Buffer): string {
   ) return 'webp';
   return 'jpg';
 }
+
+/**
+ * Reduce a sender-controlled id (WhatsApp message id, etc.) to a safe temp
+ * filename component. Callers build paths like
+ * `path.join(os.tmpdir(), \`prefix-${id}.ext\`)` from a value the OTHER
+ * party's client sets, not us — an id containing `../` segments would
+ * otherwise resolve outside the intended directory. Falls back to the
+ * current timestamp when the id is empty/missing or sanitizes to nothing.
+ */
+export function sanitizeFilenameId(id: string | undefined | null): string {
+  const cleaned = (id ?? '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+  return cleaned || String(Date.now());
+}

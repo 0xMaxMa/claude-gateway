@@ -20,6 +20,14 @@ import { getPendingSenders, clearPendingSender } from './pending-senders';
 import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
 import { fetchModelCatalog } from '../agent/model-catalog';
 import { DEFAULT_MODELS } from '../agent/runner';
+import {
+  DEFAULT_WHATSAPP_ACCOUNT_ID,
+  WHATSAPP_ACCOUNT_ID_RE,
+  resolveWhatsAppAccounts,
+  findWhatsAppAccount,
+  whatsAppStateDir,
+} from '../config/whatsapp-accounts';
+import { isWhatsAppSenderAllowed } from './whatsapp-access';
 
 const MAX_MESSAGE_LENGTH = 10_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -43,6 +51,31 @@ async function verifySlackBotToken(botToken: string): Promise<{ ok: boolean; err
     });
     const json = (await res.json()) as { ok: boolean; error?: string };
     return { ok: json.ok, error: json.error };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'network error' };
+  }
+}
+
+/**
+ * Standalone Graph API credential check for the WhatsApp Cloud connect
+ * flow's Save-time validation — mirrors verifySlackBotToken's placement and
+ * style directly above. Not WhatsAppCloudClient (src/api/whatsapp-cloud-client.ts)
+ * for the same reason: that class needs a logDir-backed logger this router
+ * has no other reason to plumb through for one validation call.
+ */
+async function verifyWhatsAppCloudCredentials(
+  accessToken: string,
+  phoneNumberId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v20.0/${encodeURIComponent(phoneNumberId)}?access_token=${encodeURIComponent(accessToken)}`,
+    );
+    const json = (await res.json()) as { error?: { message?: string } };
+    if (json.error) {
+      return { ok: false, error: json.error.message ?? 'unknown error' };
+    }
+    return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : 'network error' };
   }
@@ -193,6 +226,181 @@ export function openSseStream(res: Response): void {
 function maskToken(token: string): string {
   if (token.length <= 12) return '•'.repeat(token.length);
   return token.slice(0, 8) + '•••••' + token.slice(-4);
+}
+
+/**
+ * Live WhatsApp status for an agent, tolerant of a runner that doesn't
+ * implement `getWhatsAppStatus` — unlike every other channel's fields
+ * (config-derived, always safe to read), this one reaches into a live
+ * object. Test fixtures across this file stub `AgentRunner` as a plain
+ * object with only the methods each test needs; `?.()` (not just `?.`)
+ * keeps those fixtures passing instead of throwing "not a function".
+ */
+function getWhatsAppStatus(
+  agentRunners: Map<string, AgentRunner>,
+  id: string,
+  accountId: string = DEFAULT_WHATSAPP_ACCOUNT_ID,
+): { status: string; phoneNumber?: string } | undefined {
+  return agentRunners.get(id)?.getWhatsAppStatus?.(accountId);
+}
+
+/**
+ * The per-account WhatsApp block of an agent's API response — the source of
+ * truth for the multi-account UI (Phase 1 of the WhatsApp feature-parity
+ * plan). Config fields come from config.json; connected/status/number are
+ * LIVE runtime state read from that account's manager, exactly as the old
+ * flat `whatsapp_connected`/`whatsapp_status`/`whatsapp_number` were.
+ *
+ * An agent with no `whatsapp` block still reports a single 'default' entry
+ * (see resolveWhatsAppAccounts) — the same "always linkable" posture the
+ * single-account implementation had, just expressed as a one-element array.
+ */
+function whatsAppAccountsResponse(
+  agentRunners: Map<string, AgentRunner>,
+  cfg: AgentConfig,
+  id: string,
+): Array<Record<string, unknown>> {
+  return resolveWhatsAppAccounts(cfg.whatsapp).map((account) => {
+    const live = getWhatsAppStatus(agentRunners, id, account.id);
+    return {
+      id: account.id,
+      label: account.label ?? null,
+      connected: live?.status === 'linked',
+      status: live?.status ?? 'unlinked',
+      number: live?.phoneNumber ?? null,
+      dm_policy: account.dmPolicy ?? null,
+      dm_allowlist: account.dmAllowlist ?? [],
+      group_policy: account.groupPolicy ?? null,
+      group_allowlist: account.groupAllowlist ?? [],
+      require_mention: account.requireMention ?? null,
+      pairing: account.pairing ?? true,
+    };
+  });
+}
+
+/**
+ * Every WhatsApp field on an agent response: the `whatsapp_accounts` array
+ * (source of truth) plus the pre-multi-account flat `whatsapp_*` fields,
+ * mirrored from `accounts[0]`.
+ *
+ * The flat fields are kept deliberately: the Settings UI in the getpod-ai
+ * repo still reads them, and its multi-account rewrite is a separate,
+ * parallel PR. A single-account agent — which is every agent that hasn't
+ * opted into a second number — sees byte-identical values to before, so the
+ * old UI keeps working untouched until it switches to the array.
+ */
+function whatsAppResponseFields(
+  agentRunners: Map<string, AgentRunner>,
+  cfg: AgentConfig,
+  id: string,
+): Record<string, unknown> {
+  const accounts = whatsAppAccountsResponse(agentRunners, cfg, id);
+  const first = accounts[0];
+  return {
+    whatsapp_accounts: accounts,
+    whatsapp_connected: first.connected,
+    whatsapp_status: first.status,
+    whatsapp_number: first.number,
+    whatsapp_dm_policy: first.dm_policy,
+    whatsapp_dm_allowlist: first.dm_allowlist,
+    whatsapp_group_policy: first.group_policy,
+    whatsapp_group_allowlist: first.group_allowlist,
+    whatsapp_require_mention: first.require_mention,
+    whatsapp_pairing: first.pairing,
+  };
+}
+
+/** Access-control fields a PATCH may set on one WhatsApp account. */
+const WHATSAPP_ACCESS_FIELDS = [
+  'dmPolicy',
+  'dmAllowlist',
+  'groupPolicy',
+  'groupAllowlist',
+  'requireMention',
+  'pairing',
+] as const;
+
+/**
+ * Merge access-control fields into ONE account inside a container's `whatsapp`
+ * block, creating the block, the `accounts` array, and the account entry if
+ * they don't exist yet.
+ *
+ * Used for both halves of PATCH /v1/agents/:agentId — the on-disk agent entry
+ * (a plain parsed-JSON object) and the in-memory AgentConfig — so the two can
+ * never drift. `undefined` leaves a field alone, `null` clears it, anything
+ * else sets it, matching the flat single-account behavior this replaced.
+ *
+ * Creating the block on first touch is deliberate and unchanged from before:
+ * unlike every other channel, WhatsApp access control is meaningful to
+ * configure before a device has ever been linked, so there's no credential
+ * block whose absence should make the patch a no-op.
+ */
+function applyWhatsAppAccountPatch(
+  container: { whatsapp?: unknown },
+  accountId: string,
+  patch: Partial<Record<(typeof WHATSAPP_ACCESS_FIELDS)[number], unknown>>,
+): void {
+  const target = container as Record<string, unknown>;
+  const rawBlock = target.whatsapp;
+  const block: Record<string, unknown> =
+    rawBlock && typeof rawBlock === 'object' && !Array.isArray(rawBlock)
+      ? (rawBlock as Record<string, unknown>)
+      : {};
+  const accounts: Record<string, unknown>[] = Array.isArray(block.accounts)
+    ? (block.accounts as Record<string, unknown>[])
+    : [];
+  if (accounts.length === 0) accounts.push({ id: DEFAULT_WHATSAPP_ACCOUNT_ID });
+  let account = accounts.find((a) => a && typeof a === 'object' && a.id === accountId);
+  if (!account) {
+    account = { id: accountId };
+    accounts.push(account);
+  }
+  for (const field of WHATSAPP_ACCESS_FIELDS) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    if (value === null) delete account[field];
+    else account[field] = value;
+  }
+  block.accounts = accounts;
+  target.whatsapp = block;
+}
+
+/**
+ * Which account a WhatsApp request targets: an explicitly requested id, else
+ * the agent's first account. The fallback is what makes every pre-multi-account
+ * caller keep working unchanged — on a single-account agent the first account
+ * IS the only account, so omitting the id resolves to exactly what the flat
+ * single-account routes and PATCH fields always acted on.
+ */
+function whatsAppTargetAccountId(cfg: AgentConfig | undefined, requested: unknown): string {
+  if (typeof requested === 'string' && requested.trim()) return requested.trim();
+  if (!cfg) return DEFAULT_WHATSAPP_ACCOUNT_ID;
+  return resolveWhatsAppAccounts(cfg.whatsapp)[0].id;
+}
+
+/**
+ * Resolve the account a WhatsApp route targets, rejecting an explicitly
+ * requested id the agent doesn't have. Returns null after sending 404, so
+ * callers just `if (accountId === null) return;`.
+ *
+ * An OMITTED id is never rejected: it resolves to the first account, which is
+ * how the routes stayed backward compatible for callers that predate
+ * multi-account.
+ */
+function resolveWhatsAppRouteAccount(
+  agentConfigs: Map<string, AgentConfig>,
+  agentId: string,
+  requested: unknown,
+  res: Response,
+): string | null {
+  const cfg = agentConfigs.get(agentId);
+  const accountId = whatsAppTargetAccountId(cfg, requested);
+  if (typeof requested === 'string' && requested.trim() &&
+      !resolveWhatsAppAccounts(cfg?.whatsapp).some((a) => a.id === accountId)) {
+    res.status(404).json({ error: `WhatsApp account '${accountId}' not found` });
+    return null;
+  }
+  return accountId;
 }
 
 /** Detect MIME type from file magic bytes (first 12 bytes). */
@@ -787,6 +995,28 @@ export function createApiRouter(
         slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
         slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
         slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
+        // WhatsApp — no credential field to gate on (see
+        // WhatsAppAccountConfig's doc comment): connected/status/number are
+        // LIVE runtime state read from each account's manager, not derived
+        // from config.json. Access-control fields are always surfaced (not
+        // gated behind "connected") since they're meaningful to configure
+        // even before the first link. `whatsapp_accounts` is the source of
+        // truth; the flat `whatsapp_*` fields mirror accounts[0] for the
+        // not-yet-updated UI (see whatsAppResponseFields).
+        ...whatsAppResponseFields(agentRunners, cfg, id),
+        // WhatsApp Business Cloud API — webhook-based with real credentials
+        // (mirrors Slack's shape/semantics field-for-field), gated on
+        // appSecret the way Slack gates on signingSecret. DM-only: no
+        // group_policy/group_allowlist/require_mention fields exist for
+        // this channel (see AgentConfig.whatsapp_cloud's doc comment).
+        whatsapp_cloud_connected: !!cfg.whatsapp_cloud?.appSecret,
+        whatsapp_cloud_access_token_preview: cfg.whatsapp_cloud?.accessToken ? maskToken(cfg.whatsapp_cloud.accessToken) : null,
+        whatsapp_cloud_phone_number_id: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.phoneNumberId ?? null) : null,
+        whatsapp_cloud_webhook_path: cfg.whatsapp_cloud?.appSecret ? `/webhooks/whatsapp_cloud/${id}` : null,
+        whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
+        whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
+        whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
+        whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
       }));
     res.json({ agents });
   });
@@ -1500,8 +1730,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_account_id?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown; whatsapp_cloud_templates_enabled?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_account_id, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing, whatsapp_cloud_templates_enabled } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1701,6 +1931,133 @@ export function createApiRouter(
       }
     }
 
+    // WhatsApp — access-control fields only, same validation shape as Slack.
+    // No credential fields to validate here at all (see AgentConfig.whatsapp's
+    // doc comment): the "credential" is the linked device session on disk,
+    // never in this PATCH body.
+    if (whatsapp_dm_policy !== undefined && whatsapp_dm_policy !== null &&
+        !(typeof whatsapp_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_dm_policy))) {
+      res.status(400).json({ error: "whatsapp_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_dm_allowlist !== undefined && whatsapp_dm_allowlist !== null &&
+        !(Array.isArray(whatsapp_dm_allowlist) && whatsapp_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_group_policy !== undefined && whatsapp_group_policy !== null &&
+        !(typeof whatsapp_group_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_group_policy))) {
+      res.status(400).json({ error: "whatsapp_group_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_group_allowlist !== undefined && whatsapp_group_allowlist !== null &&
+        !(Array.isArray(whatsapp_group_allowlist) && whatsapp_group_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_group_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_require_mention !== undefined && whatsapp_require_mention !== null &&
+        typeof whatsapp_require_mention !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_require_mention must be a boolean or null' });
+      return;
+    }
+    if (whatsapp_pairing !== undefined && whatsapp_pairing !== null &&
+        typeof whatsapp_pairing !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_pairing must be a boolean or null' });
+      return;
+    }
+    if (whatsapp_account_id !== undefined && typeof whatsapp_account_id !== 'string') {
+      res.status(400).json({ error: 'whatsapp_account_id must be a string' });
+      return;
+    }
+    const whatsappAccessTouched = whatsapp_dm_policy !== undefined || whatsapp_dm_allowlist !== undefined ||
+      whatsapp_group_policy !== undefined || whatsapp_group_allowlist !== undefined ||
+      whatsapp_require_mention !== undefined || whatsapp_pairing !== undefined;
+    // Which account the access fields above apply to. Omitting
+    // whatsapp_account_id targets the first account, which keeps the flat
+    // single-account PATCH contract byte-identical for existing clients.
+    const whatsappTargetAccountId = whatsAppTargetAccountId(agentConfigs.get(agentId), whatsapp_account_id);
+    if (whatsappAccessTouched && typeof whatsapp_account_id === 'string' &&
+        !resolveWhatsAppAccounts(agentConfigs.get(agentId)?.whatsapp).some((a) => a.id === whatsappTargetAccountId)) {
+      // Patching an account that doesn't exist is a client bug, not an implicit
+      // create — accounts are created through POST /whatsapp/accounts, which is
+      // where id validation and duplicate rejection live.
+      res.status(404).json({ error: `WhatsApp account '${whatsappTargetAccountId}' not found` });
+      return;
+    }
+
+    // WhatsApp Business Cloud API — same validation shape as Slack above
+    // (webhook-based, real credentials), but FOUR fields must be provided
+    // together or all cleared together, not two.
+    if (whatsapp_cloud_access_token !== undefined && whatsapp_cloud_access_token !== null && typeof whatsapp_cloud_access_token !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_access_token must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_phone_number_id !== undefined && whatsapp_cloud_phone_number_id !== null && typeof whatsapp_cloud_phone_number_id !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_phone_number_id must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_app_secret !== undefined && whatsapp_cloud_app_secret !== null && typeof whatsapp_cloud_app_secret !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_app_secret must be a string or null' });
+      return;
+    }
+    if (whatsapp_cloud_verify_token !== undefined && whatsapp_cloud_verify_token !== null && typeof whatsapp_cloud_verify_token !== 'string') {
+      res.status(400).json({ error: 'whatsapp_cloud_verify_token must be a string or null' });
+      return;
+    }
+    const whatsappCloudTouched = whatsapp_cloud_access_token !== undefined || whatsapp_cloud_phone_number_id !== undefined ||
+      whatsapp_cloud_app_secret !== undefined || whatsapp_cloud_verify_token !== undefined;
+    if (whatsappCloudTouched) {
+      const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+      const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+      const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+      const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+      const allSet = at !== '' && pid !== '' && sec !== '' && vt !== '';
+      const allClear = at === '' && pid === '' && sec === '' && vt === '';
+      if (!allSet && !allClear) {
+        res.status(400).json({
+          error: 'whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, and whatsapp_cloud_verify_token must be provided together',
+        });
+        return;
+      }
+      // Reject bad/expired credentials at Save time instead of persisting them
+      // silently, same reasoning as verifySlackBotToken's Save-time check above.
+      if (allSet) {
+        const verify = await verifyWhatsAppCloudCredentials(at, pid);
+        if (!verify.ok) {
+          res.status(400).json({
+            error: `Invalid WhatsApp Cloud credentials — Graph API check failed: ${verify.error ?? 'unknown error'}`,
+          });
+          return;
+        }
+      }
+    }
+    if (whatsapp_cloud_dm_policy !== undefined && whatsapp_cloud_dm_policy !== null &&
+        !(typeof whatsapp_cloud_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(whatsapp_cloud_dm_policy))) {
+      res.status(400).json({ error: "whatsapp_cloud_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (whatsapp_cloud_dm_allowlist !== undefined && whatsapp_cloud_dm_allowlist !== null &&
+        !(Array.isArray(whatsapp_cloud_dm_allowlist) && whatsapp_cloud_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'whatsapp_cloud_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (whatsapp_cloud_pairing !== undefined && whatsapp_cloud_pairing !== null &&
+        typeof whatsapp_cloud_pairing !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_cloud_pairing must be a boolean or null' });
+      return;
+    }
+    // Template opt-in (Phase 3). Not an ACCESS field, but validated and
+    // persisted through the identical "merge into the existing whatsapp_cloud
+    // block" path as whatsapp_cloud_pairing above, so it rides the same flag
+    // rather than growing a second one-field branch.
+    if (whatsapp_cloud_templates_enabled !== undefined && whatsapp_cloud_templates_enabled !== null &&
+        typeof whatsapp_cloud_templates_enabled !== 'boolean') {
+      res.status(400).json({ error: 'whatsapp_cloud_templates_enabled must be a boolean or null' });
+      return;
+    }
+    const whatsappCloudAccessTouched = whatsapp_cloud_dm_policy !== undefined || whatsapp_cloud_dm_allowlist !== undefined ||
+      whatsapp_cloud_pairing !== undefined || whatsapp_cloud_templates_enabled !== undefined;
+
     try {
       await writeAgentsToConfig(configPath, (agents) => {
         const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
@@ -1819,6 +2176,62 @@ export function createApiRouter(
         if (connectors !== undefined) {
           const existing = (agent.connectors as Record<string, { enabled: boolean }>) ?? {};
           agent.connectors = { ...existing, ...connectorPatch };
+        }
+        // WhatsApp access fields — merged into ONE account of the multi-account
+        // block (see applyWhatsAppAccountPatch, which also explains why the
+        // block is created on first touch instead of skipped when absent).
+        if (whatsappAccessTouched) {
+          applyWhatsAppAccountPatch(agent as { whatsapp?: unknown }, whatsappTargetAccountId, {
+            dmPolicy: whatsapp_dm_policy,
+            dmAllowlist: whatsapp_dm_allowlist,
+            groupPolicy: whatsapp_group_policy,
+            groupAllowlist: whatsapp_group_allowlist,
+            requireMention: whatsapp_require_mention,
+            pairing: whatsapp_pairing,
+          });
+        }
+        // WhatsApp Cloud — credential block follows the SLACK pattern (delete
+        // the whole block if all 4 cleared, else merge), the OPPOSITE of the
+        // Baileys `whatsapp` block just above: Cloud API credentials are real,
+        // Meta-issued secrets, not an on-disk device-link session, so there's
+        // no "meaningful before ever linking" case to unconditionally create for.
+        if (whatsappCloudTouched) {
+          const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+          const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+          const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+          const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+          if (at === '' && pid === '' && sec === '' && vt === '') {
+            delete (agent as Record<string, unknown>).whatsapp_cloud;
+          } else {
+            const existing = agent.whatsapp_cloud as Record<string, unknown> | undefined;
+            agent.whatsapp_cloud = { ...(existing ?? {}), accessToken: at, phoneNumberId: pid, appSecret: sec, verifyToken: vt };
+          }
+        }
+        // Access fields — merge into the existing whatsapp_cloud block (re-read
+        // after the credential block above, which may have just created or
+        // deleted it). Skip silently when no whatsapp_cloud channel exists;
+        // policy without credentials is meaningless (same comment Slack's
+        // access block uses).
+        if (whatsappCloudAccessTouched) {
+          const existing = agent.whatsapp_cloud as Record<string, unknown> | undefined;
+          if (existing) {
+            if (whatsapp_cloud_dm_policy !== undefined) {
+              if (whatsapp_cloud_dm_policy === null) delete existing.dmPolicy;
+              else existing.dmPolicy = whatsapp_cloud_dm_policy;
+            }
+            if (whatsapp_cloud_dm_allowlist !== undefined) {
+              if (whatsapp_cloud_dm_allowlist === null) delete existing.dmAllowlist;
+              else existing.dmAllowlist = whatsapp_cloud_dm_allowlist;
+            }
+            if (whatsapp_cloud_pairing !== undefined) {
+              if (whatsapp_cloud_pairing === null) delete existing.pairing;
+              else existing.pairing = whatsapp_cloud_pairing;
+            }
+            if (whatsapp_cloud_templates_enabled !== undefined) {
+              if (whatsapp_cloud_templates_enabled === null) delete existing.templatesEnabled;
+              else existing.templatesEnabled = whatsapp_cloud_templates_enabled;
+            }
+          }
         }
       });
     } catch (err) {
@@ -2017,6 +2430,71 @@ export function createApiRouter(
         }
       }
     }
+    if (whatsappAccessTouched) {
+      applyWhatsAppAccountPatch(cfg, whatsappTargetAccountId, {
+        dmPolicy: whatsapp_dm_policy,
+        dmAllowlist: whatsapp_dm_allowlist,
+        groupPolicy: whatsapp_group_policy,
+        groupAllowlist: whatsapp_group_allowlist,
+        requireMention: whatsapp_require_mention,
+        pairing: whatsapp_pairing,
+      });
+      // Access-only edits never add or remove an account, so this re-sync is
+      // just handing the managers their new policy — syncWhatsAppAccounts sees
+      // the changed snapshot but keeps every existing manager (and its linked
+      // session) alive because the id set is unchanged.
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Pending senders are namespaced per WhatsApp account (see
+      // pending-senders.ts's `channel` dimension) — the same JID can
+      // legitimately knock on two different numbers, so clearing must target
+      // only the account this PATCH actually touched.
+      const whatsappPendingChannel = `whatsapp:${whatsappTargetAccountId}`;
+      if (Array.isArray(whatsapp_dm_allowlist)) {
+        for (const jid of whatsapp_dm_allowlist) clearPendingSender(whatsappPendingChannel, agentId, jid);
+      }
+      if (Array.isArray(whatsapp_group_allowlist)) {
+        for (const jid of whatsapp_group_allowlist) clearPendingSender(whatsappPendingChannel, agentId, jid);
+      }
+    }
+    if (whatsappCloudTouched) {
+      const at = typeof whatsapp_cloud_access_token === 'string' ? whatsapp_cloud_access_token.trim() : '';
+      const pid = typeof whatsapp_cloud_phone_number_id === 'string' ? whatsapp_cloud_phone_number_id.trim() : '';
+      const sec = typeof whatsapp_cloud_app_secret === 'string' ? whatsapp_cloud_app_secret.trim() : '';
+      const vt = typeof whatsapp_cloud_verify_token === 'string' ? whatsapp_cloud_verify_token.trim() : '';
+      if (at && pid && sec && vt) {
+        cfg.whatsapp_cloud = { ...(cfg.whatsapp_cloud ?? {}), accessToken: at, phoneNumberId: pid, appSecret: sec, verifyToken: vt };
+      } else {
+        delete cfg.whatsapp_cloud;
+      }
+      // WhatsApp Cloud is webhook-based — no receiver to start/stop. The
+      // webhook router reads config live via runner.getAgentConfig(); just
+      // keep the runner's copy in sync (same as Slack/LINE above).
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+    }
+    if (whatsappCloudAccessTouched && cfg.whatsapp_cloud) {
+      if (whatsapp_cloud_dm_policy !== undefined) {
+        if (whatsapp_cloud_dm_policy === null) delete cfg.whatsapp_cloud.dmPolicy;
+        else cfg.whatsapp_cloud.dmPolicy = whatsapp_cloud_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (whatsapp_cloud_dm_allowlist !== undefined) {
+        if (whatsapp_cloud_dm_allowlist === null) delete cfg.whatsapp_cloud.dmAllowlist;
+        else cfg.whatsapp_cloud.dmAllowlist = whatsapp_cloud_dm_allowlist as string[];
+      }
+      if (whatsapp_cloud_pairing !== undefined) {
+        if (whatsapp_cloud_pairing === null) delete cfg.whatsapp_cloud.pairing;
+        else cfg.whatsapp_cloud.pairing = whatsapp_cloud_pairing as boolean;
+      }
+      if (whatsapp_cloud_templates_enabled !== undefined) {
+        if (whatsapp_cloud_templates_enabled === null) delete cfg.whatsapp_cloud.templatesEnabled;
+        else cfg.whatsapp_cloud.templatesEnabled = whatsapp_cloud_templates_enabled as boolean;
+      }
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Anyone just added to the allowlist is now allowed — drop them from
+      // the in-memory knock list so the discovery UI stops surfacing them.
+      if (Array.isArray(whatsapp_cloud_dm_allowlist)) {
+        for (const id of whatsapp_cloud_dm_allowlist) clearPendingSender('whatsapp_cloud', agentId, id);
+      }
+    }
 
     res.json({
       agent: {
@@ -2061,6 +2539,17 @@ export function createApiRouter(
         slack_group_allowlist: cfg.slack?.signingSecret ? (cfg.slack?.groupAllowlist ?? []) : null,
         slack_require_mention: cfg.slack?.signingSecret ? (cfg.slack?.requireMention ?? null) : null,
         slack_pairing: cfg.slack?.signingSecret ? (cfg.slack?.pairing ?? true) : null,
+        ...whatsAppResponseFields(agentRunners, cfg, agentId),
+        // WhatsApp Cloud — same shape/semantics as Slack above, mirrors the
+        // GET /agents list response exactly.
+        whatsapp_cloud_connected: !!cfg.whatsapp_cloud?.appSecret,
+        whatsapp_cloud_access_token_preview: cfg.whatsapp_cloud?.accessToken ? maskToken(cfg.whatsapp_cloud.accessToken) : null,
+        whatsapp_cloud_phone_number_id: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.phoneNumberId ?? null) : null,
+        whatsapp_cloud_webhook_path: cfg.whatsapp_cloud?.appSecret ? `/webhooks/whatsapp_cloud/${agentId}` : null,
+        whatsapp_cloud_dm_policy: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmPolicy ?? null) : null,
+        whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
+        whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
+        whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
       },
     });
   });
@@ -2261,6 +2750,450 @@ export function createApiRouter(
     if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
     clearPendingSender('slack', agentId, senderId);
     res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp/pending?account_id=...
+   * Recently denied WhatsApp senders/groups (Tier 1/3 discovery aid) for ONE
+   * linked number. Admin only. Namespaced per-account (`whatsapp:${accountId}`
+   * in the shared pending-senders store) — the same JID can legitimately knock
+   * on two different numbers on the same agent, so this must not merge them.
+   * `account_id` defaults to the pre-multi-account 'default' id, so an old
+   * caller that never learned about accounts still gets that number's list.
+   */
+  router.get('/v1/agents/:agentId/whatsapp/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const accountId = (req.query.account_id as string | undefined) || DEFAULT_WHATSAPP_ACCOUNT_ID;
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders(`whatsapp:${accountId}`, agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/whatsapp/pending/:senderId?account_id=...
+   * Dismiss one knock from one number's pending list (admin only). The id is
+   * a WhatsApp JID (DM sender or group). Same per-account namespacing and
+   * default as the GET route above.
+   */
+  router.delete('/v1/agents/:agentId/whatsapp/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    const accountId = (req.query.account_id as string | undefined) || DEFAULT_WHATSAPP_ACCOUNT_ID;
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender(`whatsapp:${accountId}`, agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp_cloud/pending
+   * Recently denied WhatsApp Cloud senders (Tier 1 allowlist discovery aid).
+   * Admin only. Mirrors GET .../slack/pending exactly, keyed under the
+   * 'whatsapp_cloud' channel namespace in the shared pending-senders store.
+   */
+  router.get('/v1/agents/:agentId/whatsapp_cloud/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders('whatsapp_cloud', agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/whatsapp_cloud/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). Mirrors
+   * DELETE .../slack/pending/:senderId exactly. The id is a bare WhatsApp
+   * Cloud phone-number string (no groups on this channel).
+   */
+  router.delete('/v1/agents/:agentId/whatsapp_cloud/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender('whatsapp_cloud', agentId, senderId);
+    res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp/status
+   * Live link status — status/qr/pairingCode/phoneNumber straight from the
+   * in-process WhatsAppManager, never config-derived (there is no config
+   * field to derive it from). Polled by the web UI during linking and while
+   * showing the connected card. Requires write access (same as every other
+   * channel's connect surface), not just read.
+   *
+   * `?account_id=` selects one linked number; omitting it targets the agent's
+   * first account, which is the single account for anyone who hasn't added a
+   * second one. Same convention on link/pairing-code/unlink/send below.
+   */
+  router.get('/v1/agents/:agentId/whatsapp/status', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const accountId = resolveWhatsAppRouteAccount(agentConfigs, agentId, req.query.account_id, res);
+    if (accountId === null) return;
+    res.json({ account_id: accountId, ...(runner.getWhatsAppStatus?.(accountId) ?? { status: 'unlinked' }) });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/link
+   * Start (or restart) a QR-code linking flow. Returns immediately — poll
+   * GET .../status for the QR image once it's available.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/link', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const accountId = resolveWhatsAppRouteAccount(agentConfigs, agentId, (req.body as { account_id?: unknown } | undefined)?.account_id, res);
+    if (accountId === null) return;
+    try {
+      await runner.startWhatsAppLinking(accountId);
+      res.json({ ok: true, account_id: accountId });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/pairing-code
+   * Start linking via a text pairing code instead of QR. Body: {phoneNumber}
+   * (E.164, e.g. "+15551234567"). Returns the code once Baileys issues it.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/pairing-code', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { phoneNumber, account_id } = req.body as { phoneNumber?: unknown; account_id?: unknown };
+    if (typeof phoneNumber !== 'string' || !phoneNumber.trim()) {
+      res.status(400).json({ error: 'phoneNumber is required' });
+      return;
+    }
+    const accountId = resolveWhatsAppRouteAccount(agentConfigs, agentId, account_id, res);
+    if (accountId === null) return;
+    try {
+      const code = await runner.requestWhatsAppPairingCode(phoneNumber.trim(), accountId);
+      res.json({ pairingCode: code, account_id: accountId });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/unlink
+   * Logout and wipe the linked session. The user must scan/pair fresh afterward.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/unlink', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const accountId = resolveWhatsAppRouteAccount(agentConfigs, agentId, (req.body as { account_id?: unknown } | undefined)?.account_id, res);
+    if (accountId === null) return;
+    await runner.unlinkWhatsApp(accountId);
+    res.json({ ok: true, account_id: accountId });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/send
+   * INTERNAL — called by the `whatsapp_reply` MCP tool (via GATEWAY_API_URL/
+   * GATEWAY_API_KEY, same as every other MCP subprocess reaches the gateway),
+   * never by the web UI. Same auth as the rest of /api — no separate secret.
+   * Exists because Baileys has no stateless per-call send path (see
+   * WhatsAppManager's doc comment): the MCP tool cannot open its own
+   * connection, it must reach the live socket this process already holds.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/send', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    // write-scoped, like every other whatsapp/* mutation route: this route
+    // sends real outbound messages, not a read.
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const cfg = agentConfigs.get(agentId);
+    const { jid, text, image_path, account_id, reply_to_message_id, as_document, message_id } = req.body as {
+      jid?: unknown;
+      text?: unknown;
+      image_path?: unknown;
+      account_id?: unknown;
+      reply_to_message_id?: unknown;
+      as_document?: unknown;
+      message_id?: unknown;
+    };
+    if (typeof jid !== 'string' || !jid) { res.status(400).json({ error: 'jid is required' }); return; }
+    if (typeof text !== 'string' && typeof image_path !== 'string') {
+      res.status(400).json({ error: 'text or image_path is required' });
+      return;
+    }
+    // account_id comes from the `<channel account_id="…">` tag the agent was
+    // handed, so an agent replying in a thread answers from the SAME number the
+    // message arrived on. Omitted (older MCP builds, or an unprompted send) the
+    // runner falls back to the inbound account it remembers for this chat.
+    if (account_id !== undefined && typeof account_id !== 'string') {
+      res.status(400).json({ error: 'account_id must be a string' });
+      return;
+    }
+
+    // Resolve which account this send will ACTUALLY use — same fallback
+    // logic sendWhatsAppMessage applies internally (last-inbound-account,
+    // then 'default', then the agent's only account) — so the checks below
+    // gate the real target without second-guessing or changing that
+    // resolution when account_id is omitted.
+    let resolvedAccountId: string;
+    try {
+      resolvedAccountId = runner.resolveWhatsAppAccountId(jid, account_id);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+      return;
+    }
+
+    // jid allowlist: a prompt-injected turn must not be able to message an
+    // arbitrary WhatsApp JID through this "internal" bridge route. Confine
+    // sends to whatever this account is already configured to receive FROM
+    // — the same dmPolicy/dmAllowlist (or groupPolicy/groupAllowlist) gate
+    // inbound messages pass through. A normal reply's jid is exactly the
+    // chat the inbound message arrived on, which by construction already
+    // cleared this same gate, so the golden path is unaffected.
+    const account = findWhatsAppAccount(cfg?.whatsapp, resolvedAccountId);
+    const isGroupJid = jid.endsWith('@g.us');
+    const isDmJid = jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+    const jidAllowed = isGroupJid
+      ? isWhatsAppSenderAllowed(account?.groupPolicy, account?.groupAllowlist, jid)
+      : isDmJid && isWhatsAppSenderAllowed(account?.dmPolicy, account?.dmAllowlist, jid);
+    if (!jidAllowed) {
+      res.status(403).json({ error: `jid '${jid}' is not allowed to receive messages from this account` });
+      return;
+    }
+
+    // image_path confinement: refuse to send a file living inside this
+    // account's own state directory (creds.json et al) — the concrete
+    // exfiltration path a prompt-injected turn would use. Fail-open on an
+    // unresolvable path (missing file, etc.) — the send call below produces
+    // the real error for that case.
+    if (typeof image_path === 'string' && image_path && cfg) {
+      try {
+        const real = fs.realpathSync(image_path);
+        const stateReal = fs.realpathSync(whatsAppStateDir(cfg.workspace, resolvedAccountId));
+        if (real === stateReal || real.startsWith(stateReal + path.sep)) {
+          res.status(400).json({ error: `refusing to send channel state: ${image_path}` });
+          return;
+        }
+      } catch {
+        /* unresolvable path — let sendWhatsAppMessage report the real error */
+      }
+    }
+
+    // Phase 2 extras — each is only carried through when actually present and
+    // well-typed, so an older MCP build's three-field body produces an empty
+    // options object and the exact pre-Phase-2 send behaviour.
+    const sendOpts: { quotedMessageId?: string; asDocument?: boolean; ackMessageId?: string } = {};
+    if (typeof reply_to_message_id === 'string' && reply_to_message_id) {
+      sendOpts.quotedMessageId = reply_to_message_id;
+    }
+    if (as_document === true) sendOpts.asDocument = true;
+    // The inbound message whose ⏳ ack should be cleared once this send lands.
+    // Baileys' MCP tool can't clear it itself (it has no socket of its own) —
+    // see WhatsAppManager.clearAckReaction.
+    if (typeof message_id === 'string' && message_id) sendOpts.ackMessageId = message_id;
+    try {
+      await runner.sendWhatsAppMessage(
+        jid,
+        typeof text === 'string' ? text : '',
+        typeof image_path === 'string' ? image_path : undefined,
+        account_id,
+        sendOpts,
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/whatsapp/accounts
+   * Every linked-number slot on this agent — config plus live link state, the
+   * same objects the agent response's `whatsapp_accounts` field carries.
+   */
+  router.get('/v1/agents/:agentId/whatsapp/accounts', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const cfg = agentConfigs.get(agentId);
+    if (!cfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ accounts: whatsAppAccountsResponse(agentRunners, cfg, agentId) });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/whatsapp/accounts
+   * Body: {id, label?}. Adds an EMPTY account slot and starts its manager; the
+   * number itself is linked afterward through the normal
+   * POST .../whatsapp/link or .../pairing-code with this `account_id`.
+   *
+   * The id becomes a directory name under `.whatsapp-state/`, so it's held to
+   * WHATSAPP_ACCOUNT_ID_RE's conservative slug. 'default' can never be created
+   * here: it always already exists (implicitly when the config has no accounts
+   * array at all), which is what keeps a pre-multi-account linked session
+   * addressable — see src/config/whatsapp-accounts.ts.
+   */
+  router.post('/v1/agents/:agentId/whatsapp/accounts', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+    const cfg = agentConfigs.get(agentId);
+    if (!cfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    const { id, label } = req.body as { id?: unknown; label?: unknown };
+    if (typeof id !== 'string' || !WHATSAPP_ACCOUNT_ID_RE.test(id)) {
+      res.status(400).json({ error: 'id must be 1-32 chars of lowercase letters, digits, "-" or "_", starting with a letter or digit' });
+      return;
+    }
+    if (label !== undefined && label !== null && typeof label !== 'string') {
+      res.status(400).json({ error: 'label must be a string or null' });
+      return;
+    }
+    // Fast-fail check outside the lock, for a snappy 409 in the common case —
+    // the authoritative check happens again inside the lock below.
+    if (resolveWhatsAppAccounts(cfg.whatsapp).some((a) => a.id === id)) {
+      res.status(409).json({ error: `WhatsApp account '${id}' already exists` });
+      return;
+    }
+    const entry = { id, ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}) };
+
+    try {
+      // The existing-accounts READ, the disk WRITE, and the in-memory
+      // `cfg.whatsapp` ASSIGNMENT all happen inside one lock-protected
+      // section — otherwise two concurrent add/remove requests for the same
+      // agent can both read the same stale `existing`, and the loser's
+      // in-memory assignment (built from that stale snapshot) clobbers the
+      // winner's, even though the file writes themselves are already
+      // serialized. updateAgentConfig() propagates whatever ends up in
+      // `cfg.whatsapp` straight to the live WhatsAppManager set, so a stale
+      // clobber here tears down a just-added account's manager.
+      await withConfigWriteLock(configPath, async () => {
+        const existing = resolveWhatsAppAccounts(cfg.whatsapp);
+        if (existing.some((a) => a.id === id)) {
+          throw Object.assign(new Error(`WhatsApp account '${id}' already exists`), { code: 'DUPLICATE_ACCOUNT' });
+        }
+        await writeAgentsToConfigImpl(configPath, (agents) => {
+          const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+          if (!agent) return;
+          // Reuses the PATCH merge helper purely for its create-the-block-and-
+          // materialize-the-implicit-default behavior; the patch itself is empty.
+          applyWhatsAppAccountPatch(agent as { whatsapp?: unknown }, id, {});
+          if (!entry.label) return;
+          const block = agent.whatsapp as { accounts: Record<string, unknown>[] };
+          const written = block.accounts.find((a) => a.id === id);
+          if (written) written.label = entry.label;
+        });
+        // Materializes the implicit 'default' too, so the in-memory list
+        // matches what was just written to disk.
+        cfg.whatsapp = { accounts: [...existing, entry] };
+      });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      res.status(code === 'DUPLICATE_ACCOUNT' ? 409 : 500).json({ error: (err as Error).message });
+      return;
+    }
+
+    agentRunners.get(agentId)?.updateAgentConfig(cfg);
+
+    const accounts = whatsAppAccountsResponse(agentRunners, cfg, agentId);
+    res.status(201).json({ account: accounts.find((a) => a.id === id), accounts });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/whatsapp/accounts/:accountId
+   * Unlinks the number (logout + wipe that account's session directory), tears
+   * down its manager, and drops it from config.
+   *
+   * The last remaining account is deliberately NOT deletable: with no accounts
+   * left the config resolves back to an implicit 'default' (an agent always has
+   * one linkable slot), so the delete would silently degrade into an unlink.
+   * Callers wanting that should call POST .../whatsapp/unlink, which says so.
+   */
+  router.delete('/v1/agents/:agentId/whatsapp/accounts/:accountId', auth, async (req: Request, res: Response) => {
+    const { agentId, accountId } = req.params as { agentId: string; accountId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    if (!configPath) { res.status(501).json({ error: 'Agent management not available (no configPath)' }); return; }
+    const cfg = agentConfigs.get(agentId);
+    if (!cfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+
+    const existing = resolveWhatsAppAccounts(cfg.whatsapp);
+    // Fast-fail check outside the lock, for a snappy 404/409 in the common
+    // case — the authoritative check happens again inside the lock below,
+    // same pattern as the POST handler above.
+    if (!existing.some((a) => a.id === accountId)) {
+      res.status(404).json({ error: `WhatsApp account '${accountId}' not found` });
+      return;
+    }
+    if (existing.length === 1) {
+      res.status(409).json({ error: 'Cannot remove the last WhatsApp account — use POST /whatsapp/unlink instead' });
+      return;
+    }
+
+    // Unlink FIRST: once the account is out of config its manager is gone, and
+    // the session directory would be left behind still logged in on the phone.
+    try {
+      await agentRunners.get(agentId)?.unlinkWhatsApp(accountId);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to unlink account: ${(err as Error).message}` });
+      return;
+    }
+
+    try {
+      // Disk write and in-memory `cfg.whatsapp` update in one lock-protected
+      // section — same race as the POST handler above: a concurrent
+      // add/remove for this agent must not be able to interleave between the
+      // read and the assignment. `unlinkWhatsApp` stays OUTSIDE the lock
+      // (above) since it's a slow, network-bound Baileys call and holding
+      // the global config lock across it would stall unrelated writers.
+      await withConfigWriteLock(configPath, async () => {
+        // Authoritative re-check against the CURRENT cfg.whatsapp — a
+        // concurrent DELETE for a different account may have already run its
+        // own lock-protected section and shrunk the list since the fast-fail
+        // check above read its (now stale) snapshot. Without this, two
+        // concurrent deletes of two different accounts, with exactly two
+        // configured, could both pass the outer check and leave `accounts: []`
+        // on disk, silently violating the "always at least one" invariant.
+        const fresh = resolveWhatsAppAccounts(cfg.whatsapp);
+        if (!fresh.some((a) => a.id === accountId)) {
+          throw Object.assign(new Error(`WhatsApp account '${accountId}' not found`), { code: 'NOT_FOUND' });
+        }
+        if (fresh.length === 1) {
+          throw Object.assign(
+            new Error('Cannot remove the last WhatsApp account — use POST /whatsapp/unlink instead'),
+            { code: 'LAST_ACCOUNT' },
+          );
+        }
+        await writeAgentsToConfigImpl(configPath, (agents) => {
+          const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
+          const block = agent?.whatsapp as { accounts?: unknown } | undefined;
+          if (!block || !Array.isArray(block.accounts)) return;
+          block.accounts = (block.accounts as Record<string, unknown>[]).filter((a) => a.id !== accountId);
+        });
+        cfg.whatsapp = { accounts: fresh.filter((a) => a.id !== accountId) };
+      });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'NOT_FOUND') { res.status(404).json({ error: (err as Error).message }); return; }
+      if (code === 'LAST_ACCOUNT') { res.status(409).json({ error: (err as Error).message }); return; }
+      res.status(500).json({ error: `Failed to write config: ${(err as Error).message}` });
+      return;
+    }
+
+    agentRunners.get(agentId)?.updateAgentConfig(cfg);
+
+    res.json({ ok: true, accounts: whatsAppAccountsResponse(agentRunners, cfg, agentId) });
   });
 
   /**
@@ -2602,7 +3535,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack chats' });
+      res.status(400).json({ error: 'Sessions endpoint only supports telegram/discord/line/slack/whatsapp/whatsapp_cloud chats' });
       return;
     }
     try {
@@ -2792,7 +3725,7 @@ export function createApiRouter(
     }
     const { source, rawChatId } = parseHistoryChatId(chatId);
     if (!isChatChannel(source)) {
-      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack chats' });
+      res.status(400).json({ error: 'Cross-channel messaging only supported for telegram/discord/line/slack/whatsapp/whatsapp_cloud chats' });
       return;
     }
 
@@ -3669,5 +4602,10 @@ function parseHistoryChatId(fullChatId: string): { source: string; rawChatId: st
   if (fullChatId.startsWith('discord-')) return { source: 'discord', rawChatId: fullChatId.slice(8) };
   if (fullChatId.startsWith('line-')) return { source: 'line', rawChatId: fullChatId.slice(5) };
   if (fullChatId.startsWith('slack-')) return { source: 'slack', rawChatId: fullChatId.slice(6) };
+  // Checked BEFORE the plain 'whatsapp-' branch below: 'whatsapp_cloud-' does
+  // NOT collide with it (the char after "whatsapp" differs, '_' vs '-'), but
+  // ordering this first keeps the two visually adjacent and unambiguous.
+  if (fullChatId.startsWith('whatsapp_cloud-')) return { source: 'whatsapp_cloud', rawChatId: fullChatId.slice(15) };
+  if (fullChatId.startsWith('whatsapp-')) return { source: 'whatsapp', rawChatId: fullChatId.slice(9) };
   return { source: 'api', rawChatId: fullChatId };
 }

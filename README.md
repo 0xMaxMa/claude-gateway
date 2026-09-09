@@ -15,7 +15,7 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 - 📚 **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](#gatewayknowledge)
 - 🌙 **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](#gatewaydreaming)
 - 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
-- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, Cron, Skills, extensible to more)
+- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, WhatsApp, Cron, Skills, extensible to more)
 - 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
 - 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress
@@ -772,6 +772,8 @@ Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loa
 
 A variable you exported yourself always wins over the `.env` file and is never replaced by a reload. A token the gateway did read from a `.env` is refreshed when that file changes, so **rotating a token takes effect on the next config reload** rather than at the next restart. Note that only `config.json` is watched — editing a `.env` by hand applies on the following reload, while the MCP `agent_create` / `agent_update` tools write both files and so take effect immediately. If a `${VAR}` cannot be resolved from anywhere, that one agent is skipped — the rest of the gateway starts normally — and the skip is logged to `logs/gateway.log` with the name of the missing variable.
 
+WhatsApp Cloud's credentials (`accessToken`, `phoneNumberId`, `appSecret`, `verifyToken`) are plain fields under the agent's `whatsapp_cloud` config block, not a dedicated "bot token" field — but they resolve through the exact same mechanism as Telegram/Discord bot tokens: reference them as `${VAR}` in `config.json` and put the value in the agent's `.env` (or export it as a shell variable), same as above.
+
 ---
 
 ## Architecture
@@ -1383,6 +1385,9 @@ sees a message. If those aren't met the bot looks online but stays silent.
 | | Guild | **Message Content Intent** + **View Channel** + **Read Message History** | `groupPolicy` + `guildAllowlist` (+ optional `channelAllowlist`/`roleAllowlist`) | `requireMention` false, or @mentioned/replied |
 | **LINE** | 1:1 | webhook delivered (valid signature) | `dmPolicy` | — |
 | | Group/Room | webhook delivered + bot is a member | `groupPolicy` + `groupAllowlist` | `requireMention` false, or **native** @mention |
+| **WhatsApp (Baileys)** | DM | number is linked (QR/pairing-code device link) | `dmPolicy` + `pairing` → `dmAllowlist` (per account) | — |
+| | Group | number is linked and is a member of the group | `groupPolicy` + `groupAllowlist` (per account) | `requireMention` false, or @mentioned |
+| **WhatsApp (Cloud API)** | DM | webhook delivered (valid `X-Hub-Signature-256`) | `dmPolicy` + `pairing` → `dmAllowlist` | — (DM-only, no group concept) |
 
 **Telegram limits**
 - Exactly one process may poll a bot token — a second poller causes `409 Conflict`.
@@ -1401,6 +1406,14 @@ sees a message. If those aren't met the bot looks online but stays silent.
 - Group/room `requireMention` uses LINE's **native mention** only (`mention.mentionees[].isSelf`). Typing the bot's name as plain text does **not** count, and `@All` does **not** count as a bot mention. LINE attaches mentions to **text messages only**, so an image or file posted in a group cannot satisfy the gate — send media in a DM, or set `requireMention: false` for that agent.
 - Delivery is **reply-token-first (free) → push fallback (metered)**. The single-use reply token lives only ~1 min; after that, replies consume the OA's monthly push quota.
 - Max **5 message objects** per reply/push request (the gateway auto-chunks to fit).
+
+**WhatsApp limits**
+- Two independent modes, configured separately: the **Baileys** device-link bridge (`whatsapp` config block) and the **Cloud API** (`whatsapp_cloud` config block).
+- **Baileys** requires linking a device per number — QR code or a text pairing code, the same one-time handshake as WhatsApp Web. Multi-account: an agent can hold several linked numbers at once (`whatsapp.accounts[]`), each with its own DM/group policy and allowlist.
+- **Cloud API is DM-only** — a WhatsApp Business number has no group concept, so there's no `groupPolicy`/`groupAllowlist`/`requireMention` for it.
+- **Cloud API's inbound webhook requires a valid `X-Hub-Signature-256`** (HMAC-SHA256 of the raw body against `appSecret`); a bad or missing signature is rejected with `401` before the payload is parsed.
+- **Cloud API's 24-hour customer-service window**: free-form text replies only work within 24h of the user's last inbound message; outside that window only a pre-approved message template can reach them, and template sending is off by default (`templatesEnabled: false`) since it's the one send that can reach a user outside that window.
+- Inbound media cap is **20 MB** on both modes (same `MediaStore` cap LINE's file uploads use).
 
 ---
 

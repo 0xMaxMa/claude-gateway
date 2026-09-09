@@ -643,3 +643,145 @@ describe('HistoryDB.getMessages — limit input validation: good & bad cases (#1
     expect(page.messages.length).toBeLessThanOrEqual(MAX_HISTORY_LIMIT);
   });
 });
+
+/**
+ * Reply context (WhatsApp Phase 2) — persistence of the quoted-message metadata
+ * that both WhatsApp channels attach to an inbound reply.
+ *
+ * Display-only: these columns exist so the dashboard can render "in reply to X".
+ * Nothing here composes or sends a reply.
+ *
+ * Availability differs per channel and the tests pin both shapes:
+ *   whatsapp       (Baileys)   — inlines the quoted message => all three fields
+ *   whatsapp_cloud (Cloud API) — webhook reports only the quoted id => id only
+ */
+describe('HistoryDB — reply context (repliedTo* round-trip)', () => {
+  const REPLY = {
+    repliedToMessageId: '3EB0C767D26A1D8F2A11',
+    repliedToText: 'the original question',
+    repliedToUser: '66812345678@s.whatsapp.net',
+  };
+
+  it('round-trips all three repliedTo* fields (Baileys shape)', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg({ source: 'whatsapp', ...REPLY }));
+    const page = db.getMessages('telegram-12345');
+    expect(page.messages).toHaveLength(1);
+    const m = page.messages[0]!;
+    expect(m.repliedToMessageId).toBe(REPLY.repliedToMessageId);
+    expect(m.repliedToText).toBe(REPLY.repliedToText);
+    expect(m.repliedToUser).toBe(REPLY.repliedToUser);
+  });
+
+  it('round-trips id-only reply context, leaving text/user undefined (Cloud API shape)', () => {
+    // The Cloud webhook's `context.id` is all it gives — the other two must stay
+    // absent rather than becoming empty strings, so the UI can tell "quoted an
+    // unknown message" apart from "quoted an empty message".
+    const db = makeDb();
+    db.insertMessage(makeMsg({ source: 'whatsapp_cloud', repliedToMessageId: 'wamid.HBgL' }));
+    const m = db.getMessages('telegram-12345').messages[0]!;
+    expect(m.repliedToMessageId).toBe('wamid.HBgL');
+    expect(m.repliedToText).toBeUndefined();
+    expect(m.repliedToUser).toBeUndefined();
+  });
+
+  it('omits all repliedTo* keys entirely on a non-reply message', () => {
+    // Key-absent (not null) is the contract the dashboard reads: `in `-style checks
+    // and optional chaining both work without a null branch.
+    const db = makeDb();
+    db.insertMessage(makeMsg());
+    const m = db.getMessages('telegram-12345').messages[0]!;
+    expect(m.repliedToMessageId).toBeUndefined();
+    expect(m.repliedToText).toBeUndefined();
+    expect(m.repliedToUser).toBeUndefined();
+    expect(Object.keys(m)).not.toContain('repliedToMessageId');
+    expect(Object.keys(m)).not.toContain('repliedToText');
+    expect(Object.keys(m)).not.toContain('repliedToUser');
+  });
+
+  it('does not leak reply context between rows in the same chat', () => {
+    const db = makeDb();
+    db.insertMessage(makeMsg({ ts: 1, content: 'plain' }));
+    db.insertMessage(makeMsg({ ts: 2, content: 'a reply', ...REPLY }));
+    const page = db.getMessages('telegram-12345', { order: 'asc' });
+    expect(page.messages.map((m) => m.repliedToMessageId)).toEqual([undefined, REPLY.repliedToMessageId]);
+  });
+
+  it('surfaces reply context through searchMessages too', () => {
+    // searchMessages hand-rolls its own SELECT list; without the new columns there
+    // it would silently drop the fields that getMessages returns.
+    const db = makeDb();
+    db.insertMessage(makeMsg({ content: 'quokka sighting', ...REPLY }));
+    const page = db.searchMessages('telegram-12345', 'quokka');
+    expect(page.results).toHaveLength(1);
+    expect(page.results[0]!.repliedToMessageId).toBe(REPLY.repliedToMessageId);
+    expect(page.results[0]!.repliedToText).toBe(REPLY.repliedToText);
+    expect(page.results[0]!.repliedToUser).toBe(REPLY.repliedToUser);
+  });
+
+  it('migrates a pre-reply-context database in place (guarded ALTER)', () => {
+    // Simulate a deployed DB predating the feature: the messages table has
+    // image_refs but none of the replied_to_* columns. _initSchema must ALTER
+    // them in without touching the rows already there.
+    const dbDir = path.join(agentsBaseDir, AGENT_ID);
+    fs.mkdirSync(dbDir, { recursive: true });
+    const dbFile = path.join(dbDir, 'history.db');
+    const raw = new DatabaseSync(dbFile);
+    raw.exec(`
+      CREATE TABLE messages (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id             TEXT    NOT NULL,
+        session_id          TEXT    NOT NULL,
+        source              TEXT    NOT NULL,
+        role                TEXT    NOT NULL,
+        content             TEXT    NOT NULL,
+        sender_name         TEXT,
+        sender_id           TEXT,
+        platform_message_id TEXT,
+        media_files         TEXT,
+        image_refs          TEXT,
+        ts                  INTEGER NOT NULL,
+        created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+      );
+      INSERT INTO messages (chat_id, session_id, source, role, content, ts)
+      VALUES ('telegram-12345', 'old-session', 'telegram', 'user', 'pre-existing row', 1);
+    `);
+    raw.close();
+
+    const db = makeDb();
+    db.insertMessage(makeMsg({ ts: 2, content: 'a reply', ...REPLY }));
+    const page = db.getMessages('telegram-12345', { order: 'asc' });
+    // Pre-existing history survives the migration, with no reply context.
+    expect(page.messages).toHaveLength(2);
+    expect(page.messages[0]!.content).toBe('pre-existing row');
+    expect(page.messages[0]!.repliedToMessageId).toBeUndefined();
+    // And the new row round-trips through the freshly added columns.
+    expect(page.messages[1]!.repliedToMessageId).toBe(REPLY.repliedToMessageId);
+  });
+
+  it('is idempotent: reopening an already-migrated database does not re-ALTER or throw', () => {
+    // The guard is an existence check, not a try/catch, so a second open must see
+    // every column present and skip the ALTER — a duplicate ALTER would throw
+    // "duplicate column name" and take the whole gateway down at startup.
+    const db1 = makeDb();
+    db1.insertMessage(makeMsg({ ts: 1, ...REPLY }));
+
+    // Drop the singleton so the next forAgent() genuinely re-runs _initSchema
+    // against the same on-disk file, exactly like a process restart.
+    HistoryDB.evict(agentsBaseDir, AGENT_ID);
+    expect(() => makeDb()).not.toThrow();
+    HistoryDB.evict(agentsBaseDir, AGENT_ID);
+    const db3 = makeDb();
+
+    // Data intact, columns still single (a re-ALTER would have thrown above).
+    const m = db3.getMessages('telegram-12345').messages[0]!;
+    expect(m.repliedToMessageId).toBe(REPLY.repliedToMessageId);
+
+    const raw = new DatabaseSync(path.join(agentsBaseDir, AGENT_ID, 'history.db'));
+    const cols = (raw.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).map((c) => c.name);
+    raw.close();
+    for (const col of ['replied_to_message_id', 'replied_to_text', 'replied_to_user']) {
+      expect(cols.filter((c) => c === col)).toHaveLength(1);
+    }
+  });
+});

@@ -48,7 +48,7 @@ jest.mock('child_process', () => ({
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-import { AgentRunner, MAX_IMAGE_SIZE_BYTES } from '../../src/agent/runner';
+import { AgentRunner, MAX_IMAGE_SIZE_BYTES, WHATSAPP_CLOUD_WINDOW_NOTE } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, StreamEvent } from '../../src/types';
 import { SessionProcess } from '../../src/session/process';
 import * as historyCleanup from '../../src/history/cleanup';
@@ -5854,4 +5854,188 @@ describe('AgentRunner — history cleanup scheduler timezone', () => {
 
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ cleanupTimezone: 'Asia/Bangkok' }));
   }, 15000);
+});
+
+// ── channelSource / replyToolName — whatsapp_cloud regression ─────────────────
+// Coverage for the exact failure mode src/history/types.ts's CHAT_CHANNELS doc
+// comment warns about: a channelSource ternary with no 'whatsapp_cloud' branch
+// silently falls back to 'telegram' (every whatsapp_cloud session lands in the
+// wrong history bucket), and a replyToolName ternary with the same gap never
+// recognizes 'mcp__gateway__whatsapp_cloud_reply' as a reply (the plain-text
+// auto-forward fallback then double-posts every reply). Both ternaries live in
+// src/agent/runner.ts; this is the SAME test file/suite the Slack channel's
+// launch would have used had this exact regression been caught for it.
+describe('AgentRunner — channelSource / replyToolName (whatsapp_cloud)', () => {
+  let tmpDir: string;
+  let agentConfig: AgentConfig;
+  let gatewayConfig: GatewayConfig;
+  let runner: AgentRunner;
+
+  async function postWhatsAppCloud(port: number, chatId: string, content: string): Promise<void> {
+    await fetch(`http://127.0.0.1:${port}/channel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        meta: {
+          source: 'whatsapp_cloud',
+          chat_id: chatId,
+          message_id: '1',
+          user: chatId,
+          ts: new Date().toISOString(),
+        },
+      }),
+    });
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-wacloud-'));
+    agentConfig = makeAgentConfig(path.join(tmpDir, 'workspace'), {
+      whatsapp_cloud: {
+        accessToken: 'wa-cloud-token',
+        phoneNumberId: 'wa-cloud-phone-id',
+        appSecret: 'wa-cloud-secret',
+        verifyToken: 'wa-cloud-verify',
+      },
+    });
+    fs.mkdirSync(agentConfig.workspace, { recursive: true });
+    gatewayConfig = makeGatewayConfig();
+  });
+
+  afterEach(async () => {
+    if (runner) await runner.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('channelSource resolves to whatsapp_cloud, not the telegram fallback', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    const chatId = '66812340001';
+
+    await postWhatsAppCloud(port, chatId, 'hello');
+    await waitForSession(runner, chatId);
+    await new Promise(r => setTimeout(r, 80));
+
+    // Pre-fix (no 'whatsapp_cloud' branch in the channelSource ternary) this
+    // message would have silently landed under 'telegram-<chatId>' instead.
+    const page = runner.getHistoryDb().getMessages(`whatsapp_cloud-${chatId}`);
+    expect(page.messages.length).toBeGreaterThan(0);
+    expect(page.messages[0]!.content).toBe('hello');
+
+    const telegramPage = runner.getHistoryDb().getMessages(`telegram-${chatId}`);
+    expect(telegramPage.messages).toHaveLength(0);
+  }, 15000);
+
+  it('replyToolName resolves mcp__gateway__whatsapp_cloud_reply — no duplicate plain-text auto-forward', async () => {
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const port = getCallbackPort(runner);
+    const chatId = '66812340002';
+
+    await postWhatsAppCloud(port, chatId, 'please reply');
+    await waitForSession(runner, chatId);
+    await new Promise(r => setTimeout(r, 80));
+
+    const session = getSessions(runner).get(chatId)!;
+    session.emit('output', JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_wacloud_1',
+          name: 'mcp__gateway__whatsapp_cloud_reply',
+          input: { chat_id: chatId, text: 'hi back' },
+        }],
+      },
+    }));
+    session.emit('output', JSON.stringify({ type: 'result', is_error: false, result: 'hi back' }));
+    await new Promise(r => setTimeout(r, 100));
+
+    const page = runner.getHistoryDb().getMessages(`whatsapp_cloud-${chatId}`);
+    const assistantRows = page.messages.filter(m => m.role === 'assistant');
+    // Pre-fix (no 'whatsapp_cloud' branch in replyToolName), the tool_use name
+    // never matches replyToolName, replyCalled stays false, and the 'result'
+    // event's plain-text fallback ALSO writes an assistant row — landing two
+    // rows instead of one.
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]!.content).toBe('hi back');
+  }, 15000);
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildChannelXml — per-turn channel notes (Phase 3, WhatsApp feature parity)
+// ────────────────────────────────────────────────────────────────────────────
+/**
+ * buildChannelXml is a pure private static, so it is exercised directly rather
+ * than through a spawned session: what matters is the exact string the agent
+ * sees, and every other assertion in this file about it would be second-hand.
+ */
+describe('AgentRunner.buildChannelXml — WhatsApp Cloud 24h-window note', () => {
+  const build = (meta: Record<string, string>, content = 'hello'): string =>
+    (AgentRunner as unknown as {
+      buildChannelXml: (p: { content?: string; meta?: Record<string, string> }) => string;
+    }).buildChannelXml({ content, meta });
+
+  test('a whatsapp_cloud turn carries the note, as a well-formed XML comment', () => {
+    const xml = build({ source: 'whatsapp_cloud', chat_id: '66812345678', message_id: 'wamid.1' });
+    expect(xml).toContain(`<!-- ${WHATSAPP_CLOUD_WINDOW_NOTE} -->`);
+    // The note precedes the user's own content, never swallows it.
+    expect(xml).toMatch(/<!--.*-->hello<\/channel>$/);
+  });
+
+  test('the note names the escape hatch the agent would otherwise have to guess', () => {
+    const xml = build({ source: 'whatsapp_cloud', chat_id: '66812345678' });
+    expect(xml).toMatch(/24h/);
+    expect(xml).toMatch(/template_name/);
+    expect(xml).toMatch(/template_language/);
+  });
+
+  // It repeats on every single whatsapp_cloud turn, so length is a real cost.
+  test('the note stays one short line with no comment-breaking dashes', () => {
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE).not.toContain('\n');
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE).not.toContain('--');
+    expect(WHATSAPP_CLOUD_WINDOW_NOTE.length).toBeLessThan(260);
+  });
+
+  test.each(['whatsapp', 'slack', 'line', 'telegram', 'discord'])(
+    'a %s turn gets no note — this is a WhatsApp Business rule only',
+    (source) => {
+      const xml = build({ source, chat_id: 'c1', message_id: 'm1' });
+      expect(xml).not.toContain('<!--');
+      expect(xml).toContain('>hello</channel>');
+    },
+  );
+
+  test('a turn with no source at all (telegram default) gets no note', () => {
+    expect(build({ chat_id: 'c1' })).not.toContain('<!--');
+  });
+
+  // The note is prepended ahead of the <replied> block, so a quoted WhatsApp
+  // Cloud reply keeps both, in that order, and stays well-formed.
+  test('the note coexists with a <replied> block, note first', () => {
+    const xml = build({
+      source: 'whatsapp_cloud',
+      chat_id: '66812345678',
+      replied_message_id: 'wamid.0',
+    });
+    expect(xml.indexOf('<!--')).toBeLessThan(xml.indexOf('<replied'));
+    expect(xml).toContain('<replied message_id="wamid.0"');
+  });
+
+  // Phase 3 also surfaces the tapped button/list-row id, which is useless to
+  // the agent unless buildChannelXml actually emits it.
+  test('interactive_id from a button tap is emitted as a <channel> attribute', () => {
+    const xml = build(
+      { source: 'whatsapp_cloud', chat_id: '66812345678', interactive_id: 'confirm_booking' },
+      'Yes, confirm',
+    );
+    expect(xml).toContain('interactive_id="confirm_booking"');
+    // The title still arrives as ordinary content — the tap reads like typing.
+    expect(xml).toContain('>Yes, confirm</channel>');
+  });
+
+  test('no interactive_id attribute when the turn was not a tap', () => {
+    expect(build({ source: 'whatsapp_cloud', chat_id: '66812345678' })).not.toContain('interactive_id=');
+  });
 });

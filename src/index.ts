@@ -16,6 +16,7 @@ import { loadConfig, logSkippedAgents, SkippedAgent } from './config/loader';
 import { agentsDirForConfig, loadAgentEnvFiles } from './config/agent-env';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
+import { upgradeWhatsAppAccountsFile } from './config/whatsapp-accounts';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
@@ -580,6 +581,25 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     console.warn(`[gateway] Config migration skipped: ${(err as Error).message}`);
+  }
+
+  // ── WhatsApp multi-account upgrade (Phase 1) ─────────────────────────────
+  // Rewrite any legacy flat `whatsapp` block into `{ accounts: [{id:'default'…}] }`
+  // and persist it, so the config self-heals once instead of being re-normalized
+  // on every boot. Runs OUTSIDE the configVersion-gated migration above: a config
+  // already stamped at the current template version still needs this. The
+  // synthesized account keeps id 'default', which maps to the existing bare
+  // `.whatsapp-state/` directory — a linked session never moves.
+  try {
+    const upgradedAgents = upgradeWhatsAppAccountsFile(CONFIG_PATH);
+    if (upgradedAgents.length > 0) {
+      console.log(
+        `[gateway] Upgraded WhatsApp config to multi-account shape for: ${upgradedAgents.join(', ')}.`,
+      );
+    }
+  } catch (err) {
+    // Non-fatal — loadConfig normalizes the same thing in memory below.
+    console.warn(`[gateway] WhatsApp multi-account config upgrade skipped: ${(err as Error).message}`);
   }
 
   console.log(`[gateway] Loading config from ${CONFIG_PATH}`);
