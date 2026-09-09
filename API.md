@@ -255,6 +255,7 @@ before any path resolution.
 | `DELETE` | `/api/v1/shares/:shareId` | Key (owner/admin) | Revoke a share (uniform `404` when the key can't access the owner) |
 | `POST` | `/api/v1/image-artifacts` | Key (agent-scoped) | Register generated images as private artifacts (registration never makes a file public) |
 | `GET` | `/api/v1/image-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session image list (oldest first); mints nothing, returns no token |
+| `GET` | `/api/v1/video-catalog?agent_id=&session_id=` | Key (agent-scoped) | Deterministic per-session video list (oldest first); the video analogue of `/v1/image-catalog`, kept separate so clips never enter the image-reference surface; mints nothing, returns no token |
 | `GET`/`HEAD` | `/shared/:token` | None (token IS the capability) | Stream the shared file — images `inline`, documents as an `attachment` whose filename is sanitised (RFC 8187) and whose **extension is forced to match the sniffed type**, not the agent-chosen basename (so `%PDF-` bytes named `invoice.html` download as `invoice.pdf`); always `X-Content-Type-Options: nosniff`; uniform `404` for unknown/expired/revoked/traversal/type-mismatch; per-IP rate limited. This is the single public share primitive — the gateway, MCP subprocesses, and LINE image delivery all mint through `/api/v1/shares` and serve here |
 
 **Renamed in #444** (the bridge is no longer image-only):
