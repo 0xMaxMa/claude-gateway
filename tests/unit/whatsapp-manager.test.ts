@@ -125,6 +125,7 @@ describe('WhatsAppManager', () => {
     mockSock.sendMessage.mockClear();
     mockSock.requestPairingCode.mockClear();
     mockSock.logout.mockClear();
+    mockSock.end.mockClear();
     mockSock.readMessages.mockClear();
     mockSock.groupMetadata.mockClear();
     mockSock.groupMetadata.mockImplementation(async () => ({ participants: [] as unknown[] }));
@@ -182,6 +183,46 @@ describe('WhatsAppManager', () => {
     const stateDir = path.join(tmpDir, '.whatsapp-state');
     const mode = fs.statSync(stateDir).mode & 0o777;
     expect(mode).toBe(0o700);
+  });
+
+  describe('concurrent connect() calls (double-click "Link", or link then pairing-code)', () => {
+    it('a second startLinking() ends the first socket instead of leaving two live sockets', async () => {
+      await manager.startLinking();
+      expect(mockSock.end).not.toHaveBeenCalled();
+
+      await manager.startLinking();
+      // The first (now-stale) socket is torn down before the second is wired up.
+      expect(mockSock.end).toHaveBeenCalledTimes(1);
+      expect(mockMakeWASocket).toHaveBeenCalledTimes(2);
+    });
+
+    it('the first (superseded) socket\'s connection.update no longer mutates status', async () => {
+      await manager.startLinking();
+      const staleOnConnectionUpdate = listenerFor('connection.update');
+
+      await manager.startLinking();
+      // A late event from the superseded socket must not flip status to
+      // 'linked' out from under the second, still-pending connection.
+      staleOnConnectionUpdate({ connection: 'open' });
+      expect(manager.getStatus().status).toBe('pending_scan');
+    });
+
+    it("the first (superseded) socket's messages.upsert is ignored, not double-processed", async () => {
+      agentConfig.whatsapp = { accounts: [{ id: 'default', dmPolicy: 'open' }] };
+      await manager.startLinking();
+      const staleOnMessagesUpsert = listenerFor('messages.upsert');
+
+      await manager.startLinking();
+
+      // Same shape as the "allowed DM forwards content" test — if this were
+      // still wired up, it would forward to the callback port.
+      staleOnMessagesUpsert({
+        type: 'notify',
+        messages: [{ key: { remoteJid: '66811110000@s.whatsapp.net', id: 'MSG1', fromMe: false }, message: { conversation: 'hi' } }],
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(fetchCalls).toHaveLength(0);
+    });
   });
 
   it('requestPairingCode() requests a code and does not set a QR', async () => {

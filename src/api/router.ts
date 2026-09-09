@@ -3095,6 +3095,9 @@ export function createApiRouter(
     if (!cfg) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
 
     const existing = resolveWhatsAppAccounts(cfg.whatsapp);
+    // Fast-fail check outside the lock, for a snappy 404/409 in the common
+    // case — the authoritative check happens again inside the lock below,
+    // same pattern as the POST handler above.
     if (!existing.some((a) => a.id === accountId)) {
       res.status(404).json({ error: `WhatsApp account '${accountId}' not found` });
       return;
@@ -3121,15 +3124,35 @@ export function createApiRouter(
       // (above) since it's a slow, network-bound Baileys call and holding
       // the global config lock across it would stall unrelated writers.
       await withConfigWriteLock(configPath, async () => {
+        // Authoritative re-check against the CURRENT cfg.whatsapp — a
+        // concurrent DELETE for a different account may have already run its
+        // own lock-protected section and shrunk the list since the fast-fail
+        // check above read its (now stale) snapshot. Without this, two
+        // concurrent deletes of two different accounts, with exactly two
+        // configured, could both pass the outer check and leave `accounts: []`
+        // on disk, silently violating the "always at least one" invariant.
+        const fresh = resolveWhatsAppAccounts(cfg.whatsapp);
+        if (!fresh.some((a) => a.id === accountId)) {
+          throw Object.assign(new Error(`WhatsApp account '${accountId}' not found`), { code: 'NOT_FOUND' });
+        }
+        if (fresh.length === 1) {
+          throw Object.assign(
+            new Error('Cannot remove the last WhatsApp account — use POST /whatsapp/unlink instead'),
+            { code: 'LAST_ACCOUNT' },
+          );
+        }
         await writeAgentsToConfigImpl(configPath, (agents) => {
           const agent = (agents as Record<string, unknown>[]).find((a) => a.id === agentId);
           const block = agent?.whatsapp as { accounts?: unknown } | undefined;
           if (!block || !Array.isArray(block.accounts)) return;
           block.accounts = (block.accounts as Record<string, unknown>[]).filter((a) => a.id !== accountId);
         });
-        cfg.whatsapp = { accounts: resolveWhatsAppAccounts(cfg.whatsapp).filter((a) => a.id !== accountId) };
+        cfg.whatsapp = { accounts: fresh.filter((a) => a.id !== accountId) };
       });
     } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'NOT_FOUND') { res.status(404).json({ error: (err as Error).message }); return; }
+      if (code === 'LAST_ACCOUNT') { res.status(409).json({ error: (err as Error).message }); return; }
       res.status(500).json({ error: `Failed to write config: ${(err as Error).message}` });
       return;
     }

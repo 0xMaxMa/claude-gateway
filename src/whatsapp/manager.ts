@@ -207,6 +207,12 @@ export class WhatsAppManager {
   private loggedOut = false;
   private stopping = false;
   private restartCount = 0;
+  /**
+   * Bumped at the start of every connect() call. A socket's event handlers
+   * capture the generation they were created under and become no-ops once a
+   * newer connect() supersedes them — see connect()'s doc comment.
+   */
+  private connectGeneration = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly stateDir: string;
   private readonly logger: ReturnType<typeof createLogger>;
@@ -314,8 +320,23 @@ export class WhatsAppManager {
     return this.pairingCode;
   }
 
+  /**
+   * A concurrent second call (double-click "Link", a pairing-code retry, or
+   * .../link then .../pairing-code back to back — none of this is guarded at
+   * the route layer) must not leave two live sockets both wired to
+   * this.sock/this.status/this.phoneNumber. Every call bumps
+   * connectGeneration and captures it as `myGeneration`; any socket from an
+   * earlier generation is torn down (here, or by the generation check inside
+   * its own event handlers below) rather than left running alongside the new
+   * one.
+   */
   private async connect(pairingPhoneNumber?: string): Promise<void> {
     this.stopping = false;
+    const myGeneration = ++this.connectGeneration;
+    if (this.sock) {
+      try { this.sock.end(undefined); } catch { /* already closing */ }
+      this.sock = null;
+    }
     const baileys = this.baileys ?? (this.baileys = await loadBaileys());
     // 0o700: this directory holds creds.json — a live linked-session
     // credential equivalent to a password. Matches the 0o700 convention used
@@ -329,16 +350,23 @@ export class WhatsAppManager {
       browser: baileys.Browsers.ubuntu('Claude Gateway'),
       logger: this.pinoLogger,
     });
+    if (myGeneration !== this.connectGeneration) {
+      // Superseded again while awaiting the auth-state load above.
+      try { sock.end(undefined); } catch { /* already closing */ }
+      return;
+    }
     this.sock = sock;
     this.status = this.status === 'linked' ? 'reconnecting' : 'pending_scan';
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
+      if (myGeneration !== this.connectGeneration) return;
       void this.handleConnectionUpdate(update);
     });
 
     sock.ev.on('messages.upsert', (payload) => {
+      if (myGeneration !== this.connectGeneration) return;
       void this.handleMessagesUpsert(payload);
     });
 
@@ -351,9 +379,20 @@ export class WhatsAppManager {
         // assume "the socket is up" meant "the connection is open"; it
         // doesn't — those are two different moments).
         await this.waitForSocketOpen(sock);
+        if (myGeneration !== this.connectGeneration) {
+          throw new Error('WhatsApp connection superseded by a newer connect() call');
+        }
         this.pairingCode = await sock.requestPairingCode(pairingPhoneNumber);
       } catch (err) {
         this.logger.error('requestPairingCode failed', { error: (err as Error).message });
+        // The socket never finished opening (or got superseded mid-wait) —
+        // drop it rather than leaving an abandoned, never-linked socket
+        // wired to this.sock (waitForSocketOpen's timeout has no Baileys
+        // 'close' event to clean it up on its own).
+        if (myGeneration === this.connectGeneration) {
+          try { this.sock?.end(undefined); } catch { /* already closing */ }
+          this.sock = null;
+        }
         throw err;
       }
     }

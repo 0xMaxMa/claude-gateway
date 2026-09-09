@@ -122,4 +122,49 @@ describe('chunkText()', () => {
       expect(chunks[chunks.length - 1]).toBe('b'.repeat(10));
     });
   });
+
+  describe('surrogate pairs (astral characters, e.g. most emoji) are never split', () => {
+    // U+1F600 😀 — outside the BMP, so it's TWO UTF-16 code units (a high +
+    // low surrogate). A hard cut landing between them produces an unpaired
+    // surrogate in each half, which is mojibake on the receiving side.
+    const EMOJI = '\u{1F600}';
+
+    /** True if `s` ends in a high surrogate with no following low surrogate. */
+    function endsWithUnpairedHighSurrogate(s: string): boolean {
+      if (!s) return false;
+      const code = s.charCodeAt(s.length - 1);
+      return code >= 0xd800 && code <= 0xdbff;
+    }
+
+    /** True if `s` starts with a low surrogate with no preceding high surrogate. */
+    function startsWithUnpairedLowSurrogate(s: string): boolean {
+      if (!s) return false;
+      const code = s.charCodeAt(0);
+      return code >= 0xdc00 && code <= 0xdfff;
+    }
+
+    test("mode 'length': a hard cut never separates a surrogate pair", () => {
+      const text = `aaa${EMOJI}bbb${EMOJI}ccc${EMOJI}ddd`;
+      const chunks = chunkText(text, 4, 'length');
+      expect(chunks.join('')).toBe(text);
+      for (const c of chunks) {
+        expect(endsWithUnpairedHighSurrogate(c)).toBe(false);
+        expect(startsWithUnpairedLowSurrogate(c)).toBe(false);
+      }
+    });
+
+    test("mode 'newline' hard-cut fallback never separates a surrogate pair", () => {
+      // No paragraph/newline/space boundary anywhere, so this exercises the
+      // hard-cut fallback directly, same as the "unbroken run" test above. An
+      // ODD maxChars against an all-2-unit-wide alphabet guarantees a naive
+      // cut would misalign with pair boundaries on the very first chunk.
+      const text = EMOJI.repeat(20);
+      const chunks = chunkText(text, 9);
+      expect(chunks.join('')).toBe(text);
+      for (const c of chunks) {
+        expect(endsWithUnpairedHighSurrogate(c)).toBe(false);
+        expect(startsWithUnpairedLowSurrogate(c)).toBe(false);
+      }
+    });
+  });
 });

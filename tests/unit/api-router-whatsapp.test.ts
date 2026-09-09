@@ -534,5 +534,36 @@ describe('WhatsApp channel management API', () => {
         .delete(`/api/v1/agents/${AGENT_ID}/whatsapp/accounts/ghost`).set(ADMIN);
       expect(ghost.status).toBe(404);
     });
+
+    it('two concurrent DELETEs of the last two accounts cannot both succeed — accounts never goes to zero', async () => {
+      // Regression test: the "can't remove the last account" guard used to be
+      // checked only OUTSIDE the config-write lock, against a snapshot taken
+      // before either request's write. With exactly two accounts configured,
+      // two concurrent DELETEs for the two DIFFERENT ids could both pass that
+      // stale check and both succeed, leaving `accounts: []` on disk — the
+      // exact invariant this 409 exists to prevent. The fix re-validates
+      // "not found" / "last account" against the CURRENT list, inside the
+      // same lock as the write, so the second request to actually run sees
+      // the first one's already-applied removal and is refused.
+      await addAccount({ id: 'work' });
+
+      const [resDefault, resWork] = await Promise.all([
+        supertest.default(app).delete(`/api/v1/agents/${AGENT_ID}/whatsapp/accounts/default`).set(ADMIN),
+        supertest.default(app).delete(`/api/v1/agents/${AGENT_ID}/whatsapp/accounts/work`).set(ADMIN),
+      ]);
+
+      const statuses = [resDefault.status, resWork.status].sort();
+      // Exactly one wins (200) and the other is refused (409) — never both 200.
+      expect(statuses).toEqual([200, 409]);
+
+      const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const onDiskAccounts = onDisk.agents[0].whatsapp?.accounts as { id: string }[] | undefined;
+      expect(onDiskAccounts).toHaveLength(1);
+
+      const inMemoryAccounts = configs.get(AGENT_ID)!.whatsapp!.accounts;
+      expect(inMemoryAccounts).toHaveLength(1);
+      // In-memory and on-disk must agree on which one survived.
+      expect(inMemoryAccounts.map((a) => a.id)).toEqual(onDiskAccounts!.map((a) => a.id));
+    });
   });
 });

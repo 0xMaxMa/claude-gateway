@@ -18,6 +18,25 @@
  */
 
 /**
+ * A hard cut at `idx` (a UTF-16 code-unit index) can land between the two
+ * code units of a surrogate pair (e.g. most emoji, which sit outside the
+ * BMP) — splitting one across two chunks produces an unpaired surrogate in
+ * each, which renders as U+FFFD / mojibake on the receiving side. Nudges
+ * `idx` back by one so the pair stays together, unless doing so would leave
+ * no room in this chunk at all (`idx <= minIdx`), in which case the split is
+ * accepted rather than looping forever on an impossibly small budget.
+ */
+function avoidSurrogateSplit(text: string, idx: number, minIdx = 0): number {
+  if (idx <= minIdx || idx >= text.length) return idx;
+  const before = text.charCodeAt(idx - 1);
+  const at = text.charCodeAt(idx);
+  const isHighSurrogate = before >= 0xd800 && before <= 0xdbff;
+  const isLowSurrogate = at >= 0xdc00 && at <= 0xdfff;
+  if (isHighSurrogate && isLowSurrogate && idx - 1 > minIdx) return idx - 1;
+  return idx;
+}
+
+/**
  * Split `text` into chunks of at most `maxChars` characters.
  *
  * `mode`:
@@ -31,7 +50,8 @@
  *    whitespace trimming. For callers whose limit is a strict byte/char
  *    budget where losing a space would matter.
  *
- * Returns `[]` for empty input and `[text]` when it already fits.
+ * Returns `[]` for empty input and `[text]` when it already fits. A hard cut
+ * (either mode) never splits a surrogate pair — see avoidSurrogateSplit.
  */
 export function chunkText(
   text: string,
@@ -46,8 +66,11 @@ export function chunkText(
 
   if (mode === 'length') {
     const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += maxChars) {
-      chunks.push(text.slice(i, i + maxChars));
+    let i = 0;
+    while (i < text.length) {
+      const end = avoidSurrogateSplit(text, Math.min(i + maxChars, text.length), i);
+      chunks.push(text.slice(i, end));
+      i = end;
     }
     return chunks;
   }
@@ -67,7 +90,7 @@ export function chunkText(
     let cut = remaining.lastIndexOf('\n\n', maxChars);
     if (cut < half) cut = remaining.lastIndexOf('\n', maxChars);
     if (cut < half) cut = remaining.lastIndexOf(' ', maxChars);
-    if (cut <= 0) cut = maxChars;
+    if (cut <= 0) cut = avoidSurrogateSplit(remaining, maxChars);
     const piece = remaining.slice(0, cut).replace(/\s+$/, '');
     // A cut that trims to nothing (a run of whitespace) would push an empty
     // bubble; skip it, but still advance `remaining` so the loop terminates.
