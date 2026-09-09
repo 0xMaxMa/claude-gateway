@@ -1400,18 +1400,31 @@ export class AgentRunner extends EventEmitter {
    * session path; refs that were never staged (catalog refs, artifact:<id>)
    * pass through untouched. (#74)
    */
-  static remapImageParamsRefs(
-    p: ImageParams | undefined,
+  // Build the staging→promoted path map: promoteUiUploads moves a turn's
+  // ui-upload files into per-session storage, so any ref built from a staging
+  // path must follow the file to its new location (#74). Empty map = nothing
+  // moved (or no uploads), so callers leave their refs untouched.
+  private static buildRefRemap(
     stagedPaths: readonly string[] | undefined,
     promotedPaths: readonly string[] | undefined,
-  ): ImageParams | undefined {
-    if (!p || !stagedPaths?.length || !promotedPaths?.length) return p;
+  ): Map<string, string> {
     const map = new Map<string, string>();
+    if (!stagedPaths?.length || !promotedPaths?.length) return map;
     for (let i = 0; i < Math.min(stagedPaths.length, promotedPaths.length); i++) {
       const from = stagedPaths[i]!;
       const to = promotedPaths[i]!;
       if (from !== to) map.set(from, to);
     }
+    return map;
+  }
+
+  static remapImageParamsRefs(
+    p: ImageParams | undefined,
+    stagedPaths: readonly string[] | undefined,
+    promotedPaths: readonly string[] | undefined,
+  ): ImageParams | undefined {
+    if (!p) return p;
+    const map = AgentRunner.buildRefRemap(stagedPaths, promotedPaths);
     if (!map.size) return p;
     const remap = (r: string): string => map.get(r) ?? r;
     return {
@@ -1419,6 +1432,21 @@ export class AgentRunner extends EventEmitter {
       ...(p.image_ref ? { image_ref: remap(p.image_ref) } : {}),
       ...(p.image_refs?.length ? { image_refs: p.image_refs.map(remap) } : {}),
     };
+  }
+
+  // Video analogue of remapImageParamsRefs. The composer's image-to-video
+  // source frame (VideoParams.image_ref) is built from a staging path; without
+  // this remap the raw ref dangles after promoteUiUploads moves the file, and
+  // generate_video fails share_ref_not_found. artifact:/catalog refs aren't in
+  // the map, so they pass through untouched.
+  static remapVideoParamsRefs(
+    p: VideoParams | undefined,
+    stagedPaths: readonly string[] | undefined,
+    promotedPaths: readonly string[] | undefined,
+  ): VideoParams | undefined {
+    if (!p?.image_ref) return p;
+    const to = AgentRunner.buildRefRemap(stagedPaths, promotedPaths).get(p.image_ref);
+    return to ? { ...p, image_ref: to } : p;
   }
 
   private static buildChannelXml(params: {
@@ -3386,6 +3414,8 @@ export class AgentRunner extends EventEmitter {
     // Refs built from staging paths must follow the files to their promoted
     // location — see remapImageParamsRefs (#74).
     const imageParams = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFiles);
+    // The image-to-video source frame follows the same staging→promoted move.
+    const videoParams = AgentRunner.remapVideoParamsRefs(opts.videoParams, opts.mediaFiles, finalMediaFiles);
 
     // Resolve media files to absolute paths for file-path based image passing
     // (same pattern as Telegram — Claude Code reads files via Read tool instead of base64 inline)
@@ -3447,7 +3477,7 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttr = effectiveImagePaths.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePaths[0]!)}"` : '';
     const imageParamsNote = imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '';
-    const videoParamsNote = opts.videoParams ? AgentRunner.buildVideoParamsNote(opts.videoParams) : '';
+    const videoParamsNote = videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : '';
     // Persist the composer image options to session meta so the web can restore the
     // selection on reload (SessionMeta.imageConfig). Only when the send carries them
     // (the web sends image_params on first-set/change), so this holds the latest.
@@ -3685,6 +3715,8 @@ export class AgentRunner extends EventEmitter {
     // Refs built from staging paths must follow the files to their promoted
     // location — see remapImageParamsRefs (#74).
     const imageParamsStream = AgentRunner.remapImageParamsRefs(opts.imageParams, opts.mediaFiles, finalMediaFilesStream);
+    // The image-to-video source frame follows the same staging→promoted move.
+    const videoParamsStream = AgentRunner.remapVideoParamsRefs(opts.videoParams, opts.mediaFiles, finalMediaFilesStream);
 
     // Resolve media files to absolute paths for file-path based image passing
     const imagePathsStream = finalMediaFilesStream?.length ? this.resolveMediaPaths(finalMediaFilesStream) : [];
@@ -3964,7 +3996,7 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttrStream = effectiveImagePathsStream.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePathsStream[0]!)}"` : '';
     const imageParamsNoteStream = imageParamsStream ? AgentRunner.buildImageParamsNote(imageParamsStream) : '';
-    const videoParamsNoteStream = opts.videoParams ? AgentRunner.buildVideoParamsNote(opts.videoParams) : '';
+    const videoParamsNoteStream = videoParamsStream ? AgentRunner.buildVideoParamsNote(videoParamsStream) : '';
     // Persist composer image config to session meta (SessionMeta.imageConfig) so the
     // web restores the selection on reload. This is the streaming path the web uses.
     // image_refs are per-turn and deliberately excluded (#73).

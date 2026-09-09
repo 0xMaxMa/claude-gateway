@@ -187,3 +187,39 @@ describe('buildVideoParamsNote', () => {
     expect(note).not.toContain('explicitly SELECTED model=');
   });
 });
+
+describe('remapVideoParamsRefs — the i2v source frame follows promoted files (#74)', () => {
+  const STAGED = ['media/ui-upload/abc123/frame.jpeg'];
+  const PROMOTED = ['media/api-s1/1-frame.jpeg'];
+
+  const remap = (p: VideoParams | undefined, staged?: string[], promoted?: string[]) =>
+    AgentRunner.remapVideoParamsRefs(p, staged, promoted);
+
+  it('rewrites a staged image_ref to its promoted path', () => {
+    const out = remap(
+      { model: 'grok-imagine-video-1.5', aspect_ratio: '9:16', image_ref: STAGED[0] },
+      STAGED,
+      PROMOTED,
+    );
+    expect(out).toEqual({
+      model: 'grok-imagine-video-1.5',
+      aspect_ratio: '9:16',
+      image_ref: PROMOTED[0],
+    });
+  });
+
+  it('leaves a catalog/artifact source frame untouched', () => {
+    const p: VideoParams = { image_ref: 'artifact:frame_x' };
+    expect(remap(p, STAGED, PROMOTED)).toBe(p);
+  });
+
+  it('is a no-op without params, without an image_ref, without media files, or when promotion failed', () => {
+    expect(remap(undefined, STAGED, PROMOTED)).toBeUndefined();
+    const noRef: VideoParams = { model: 'grok-imagine-video-1.5', duration: 6 };
+    expect(remap(noRef, STAGED, PROMOTED)).toBe(noRef);
+    const p: VideoParams = { image_ref: STAGED[0] };
+    expect(remap(p, undefined, undefined)).toBe(p);
+    // promoteUiUploads returns the ORIGINAL path when a move fails — no mapping entry.
+    expect(remap(p, STAGED, [...STAGED])).toBe(p);
+  });
+});
