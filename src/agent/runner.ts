@@ -6,7 +6,7 @@ import * as http from 'http';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams } from '../types';
+import { AgentConfig, CustomConnectorEntry, GatewayConfig, Logger, Message, ModelConfig, StreamEvent, ApiAttachment, ImageParams, VideoParams } from '../types';
 import { withConfigWriteLock, writeConfigAtomicSync } from '../config/config-write-lock';
 import { createLogger } from '../logger';
 import { SessionProcess, MAX_HISTORY_MESSAGES, resolveMaxHistoryMessages, INTERRUPTED_NO_REPLY_TEXT } from '../session/process';
@@ -1326,6 +1326,57 @@ export class AgentRunner extends EventEmitter {
       `second-guess an explicit selection, and do not drop any of them. ` +
       `Do NOT open or Read the referenced files first — the image model receives the actual files; ` +
       `reading them wastes minutes and can push the request past its timeout. Go straight to generate_image.\n`
+    );
+  }
+
+  /**
+   * Render composer-selected video options as a directive the agent reads and
+   * forwards to the generate_video MCP tool. Mirrors buildImageParamsNote. Returns
+   * '' when no usable options are present. Without this the agent gets no composer
+   * context for video and invents duration/aspect (a phantom 10s cap, an 8+8 scene
+   * split, or a landscape clip when 9:16 was picked).
+   */
+  private static buildVideoParamsNote(p: VideoParams): string {
+    const attrs = [
+      p.model ? `model="${AgentRunner.escapeXmlAttr(p.model)}"` : '',
+      p.resolution ? `resolution="${AgentRunner.escapeXmlAttr(p.resolution)}"` : '',
+      p.aspect_ratio ? `aspect_ratio="${AgentRunner.escapeXmlAttr(p.aspect_ratio)}"` : '',
+      typeof p.duration === 'number' ? `duration="${p.duration}"` : '',
+      p.image_ref ? `image_ref="${AgentRunner.escapeXmlAttr(p.image_ref)}"` : '',
+    ].filter(Boolean);
+    if (!attrs.length) return '';
+    // The generate_video schema lets the agent pick model/duration itself; when the
+    // composer selection isn't made authoritative the agent falls back to
+    // action="list" and self-selects, or invents a duration cap and splits the clip
+    // into multiple scenes. Nail every field down.
+    const modelNote = p.model
+      ? `The user explicitly SELECTED model="${AgentRunner.escapeXmlAttr(p.model)}" in the composer. ` +
+        `Call generate_video with that exact model — do NOT call action="list" to second-guess an ` +
+        `explicit selection or substitute a different model.\n`
+      : '';
+    const durationNote =
+      typeof p.duration === 'number'
+        ? `duration=${p.duration} is a valid length for the selected model — pass it verbatim as the "duration" ` +
+          `argument. Do NOT invent a maximum, do NOT clamp it to a smaller value, and do NOT split the request ` +
+          `into multiple shorter scenes/clips. Generate exactly ONE clip of this duration.\n`
+        : '';
+    const aspectNote = p.aspect_ratio
+      ? `Pass aspect_ratio="${AgentRunner.escapeXmlAttr(p.aspect_ratio)}" verbatim — do NOT change the orientation.\n`
+      : '';
+    const refNote = p.image_ref
+      ? `The user selected a source image for image-to-video. Pass image_ref="${AgentRunner.escapeXmlAttr(p.image_ref)}" ` +
+        `as the "image" argument of generate_video (the source frame's own aspect then wins). ` +
+        `Do NOT call list_refs to second-guess it, and do NOT open or Read the file first.\n`
+      : '';
+    return (
+      `<video-params ${attrs.join(' ')} />\n` +
+      `The user selected the video-generation options above in the composer. When the request involves ` +
+      `creating a video, call the generate_video tool (action="generate") using these exact values, then ` +
+      `deliver the returned video with your reply tool.\n` +
+      modelNote +
+      durationNote +
+      aspectNote +
+      refNote
     );
   }
 
@@ -3309,7 +3360,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     message: string,
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams },
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams },
   ): Promise<{ text: string; attachments: ApiAttachment[] }> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -3396,6 +3447,7 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttr = effectiveImagePaths.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePaths[0]!)}"` : '';
     const imageParamsNote = imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '';
+    const videoParamsNote = opts.videoParams ? AgentRunner.buildVideoParamsNote(opts.videoParams) : '';
     // Persist the composer image options to session meta so the web can restore the
     // selection on reload (SessionMeta.imageConfig). Only when the send carries them
     // (the web sends image_params on first-set/change), so this holds the latest.
@@ -3412,6 +3464,7 @@ export class AgentRunner extends EventEmitter {
       `${message}\n\n` +
       `${systemNote}` +
       `${imageParamsNote}` +
+      `${videoParamsNote}` +
       `</channel>` +
       (skillInvocation ? `\n${formatSkillContext(skillInvocation)}` : '');
 
@@ -3606,7 +3659,7 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     message: string,
     callbacks: ApiStreamCallbacks,
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; requestId?: string },
+    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string },
   ): Promise<() => void> {
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
@@ -3911,6 +3964,7 @@ export class AgentRunner extends EventEmitter {
     // Build channel XML with image_path attribute (like Telegram) for first image
     const imageAttrStream = effectiveImagePathsStream.length ? ` image_path="${AgentRunner.escapeXmlAttr(effectiveImagePathsStream[0]!)}"` : '';
     const imageParamsNoteStream = imageParamsStream ? AgentRunner.buildImageParamsNote(imageParamsStream) : '';
+    const videoParamsNoteStream = opts.videoParams ? AgentRunner.buildVideoParamsNote(opts.videoParams) : '';
     // Persist composer image config to session meta (SessionMeta.imageConfig) so the
     // web restores the selection on reload. This is the streaming path the web uses.
     // image_refs are per-turn and deliberately excluded (#73).
@@ -3928,6 +3982,7 @@ export class AgentRunner extends EventEmitter {
       `${message}\n\n` +
       systemNote +
       imageParamsNoteStream +
+      videoParamsNoteStream +
       `</channel>` +
       (skillInvocationStream ? `\n${formatSkillContext(skillInvocationStream)}` : '');
 

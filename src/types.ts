@@ -591,6 +591,28 @@ export type ImageParams = {
   n?: number;
 };
 
+/**
+ * Video-generation options selected in the web composer (per-session), passed
+ * through the chat send body as `video_params` and surfaced to the agent so it
+ * calls the `generate_video` MCP tool with these exact values. Mirrors ImageParams.
+ * Without this bridge the agent receives no composer context for video and invents
+ * duration/aspect (e.g. a non-existent 10s cap, an 8+8 scene split, or a landscape
+ * clip when 9:16 was selected).
+ */
+export type VideoParams = {
+  model?: string;
+  resolution?: string;
+  aspect_ratio?: string;
+  /** Discrete clip length in seconds (model-specific, e.g. 6/10/15). */
+  duration?: number;
+  /**
+   * Source frame for image-to-video, if the composer selected one. A `ref` value
+   * (media-relative path or `artifact:<id>`) passed as the generate_video `image`
+   * argument. When present the source frame's own aspect wins over aspect_ratio.
+   */
+  image_ref?: string;
+};
+
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_use'; name: string; id: string; input?: Record<string, unknown> }
