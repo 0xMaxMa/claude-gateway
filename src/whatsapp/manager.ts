@@ -326,7 +326,7 @@ export class WhatsAppManager {
 
     const sock = baileys.default({
       auth: state,
-      browser: baileys.Browsers.ubuntu('GetPod'),
+      browser: baileys.Browsers.ubuntu('Claude Gateway'),
       logger: this.pinoLogger,
     });
     this.sock = sock;
