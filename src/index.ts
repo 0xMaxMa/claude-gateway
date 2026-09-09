@@ -588,8 +588,10 @@ async function main(): Promise<void> {
   // replayed through globalLogger below so a dropped agent is diagnosable from
   // logs/gateway.log at startup too, not only on reload (#427).
   const startupSkips: SkippedAgent[] = [];
+  let publicUrlUnsetAtStartup = false;
   const config: GatewayConfig = loadConfig(CONFIG_PATH, {
     onSkippedAgent: (s) => startupSkips.push(s),
+    onPublicUrlUnset: () => { publicUrlUnsetAtStartup = true; },
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
@@ -604,6 +606,12 @@ async function main(): Promise<void> {
   // went missing.
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
+  // Same #427 rationale as skipped agents: the console.warn already happened
+  // inside loadConfig (before logDir/globalLogger could exist), replay it here
+  // so it also reaches logs/gateway.log under structured/JSON logging (#472).
+  if (publicUrlUnsetAtStartup) {
+    globalLogger.warn('gateway.publicUrl is not set at startup — public share links are disabled');
+  }
 
   // ── Context isolation check ──────────────────────────────────────────────
   const guard = new ContextIsolationGuard();

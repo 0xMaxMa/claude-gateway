@@ -116,9 +116,11 @@ export class ConfigWatcher extends EventEmitter {
 
     let newConfig: GatewayConfig;
     const skipped: SkippedAgent[] = [];
+    let publicUrlUnset = false;
     try {
       newConfig = loadConfig(this.configPath, {
         onSkippedAgent: (s) => skipped.push(s),
+        onPublicUrlUnset: () => { publicUrlUnset = true; },
       });
       newConfig.gateway.logDir = expandHome(newConfig.gateway.logDir);
     } catch (err) {
@@ -131,6 +133,11 @@ export class ConfigWatcher extends EventEmitter {
     // Report drops before the no-change bail-out below: a silently dropped
     // agent produces exactly zero diff, so this is the only trace it leaves.
     logSkippedAgents(this.logger, skipped, 'Agent skipped during config reload');
+    // Same #427 rationale as skipped agents (#472): the console.warn inside
+    // loadConfig never reaches logs/gateway.log on its own.
+    if (publicUrlUnset) {
+      this.logger.warn('gateway.publicUrl is not set after reload — public share links are disabled');
+    }
 
     const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
 

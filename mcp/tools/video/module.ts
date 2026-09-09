@@ -418,7 +418,12 @@ export class VideoModule implements ToolModule {
     // share API only fills when gateway.publicUrl is configured.
     if (!item.url) {
       await revokeSharesBestEffort([item.share_id]);
-      return fail('generate_video: source-frame sharing requires gateway.publicUrl to be configured.');
+      return fail(
+        'generate_video: source-frame sharing requires gateway.publicUrl to be configured ' +
+        '(set it in ~/.claude-gateway/config.json to your externally reachable base URL ending ' +
+        'in /gateway, then restart the gateway). As a workaround, pass a publicly reachable ' +
+        'https:// image URL instead of a local path or artifact ref.',
+      );
     }
     return { url: item.url, mintedShareIds: [item.share_id] };
   }

@@ -308,6 +308,41 @@ describe('config-loader', () => {
     }
   });
 
+  // Independent review of #474: the console.warn alone never reaches
+  // logs/gateway.log under structured logging — the exact #427 failure mode
+  // for skipped agents. onPublicUrlUnset lets a caller with a real logger
+  // replay the warning there too.
+  it('onPublicUrlUnset fires once when unset, never when a value is configured (#472)', () => {
+    const configPath = path.join(tmpDir, 'public-url-callback.json');
+    const write = (publicUrl: unknown) => {
+      fs.writeFileSync(configPath, JSON.stringify({
+        gateway: { logDir: '/tmp', timezone: 'UTC', publicUrl },
+        agents: [{
+          id: 'test',
+          description: '',
+          workspace: '/tmp',
+          env: '/tmp/.env',
+          telegram: { botToken: 'tok' },
+          claude: { model: 'claude-sonnet-4-6', dangerouslySkipPermissions: false, extraFlags: [] },
+        }],
+      }));
+      return configPath;
+    };
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let fired = 0;
+      loadConfig(write(undefined), { onPublicUrlUnset: () => { fired += 1; } });
+      expect(fired).toBe(1);
+
+      fired = 0;
+      loadConfig(write('https://pod-maxma.example.com/gateway'), { onPublicUrlUnset: () => { fired += 1; } });
+      expect(fired).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('boots from the shipped config.template.json gateway block', () => {
     const template = JSON.parse(
       fs.readFileSync(path.join(__dirname, '..', '..', 'config.template.json'), 'utf-8'),

@@ -120,6 +120,14 @@ export interface LoadConfigOptions {
    * is diagnosable — see issue #427.
    */
   onSkippedAgent?: (skipped: SkippedAgent) => void;
+  /**
+   * Called when `gateway.publicUrl` resolves to unset (absent, blank, or
+   * whitespace-only). Same rationale as `onSkippedAgent` (#427): a bare
+   * `console.warn` here never reaches `logs/gateway.log` under structured
+   * logging, so callers that have a logger should pass this to make the gap
+   * diagnosable there too — see issue #472.
+   */
+  onPublicUrlUnset?: () => void;
 }
 
 /**
@@ -296,6 +304,7 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
       '          generate_image reference edits, share_file, and /cli will not work.\n' +
       '          See README "gateway.publicUrl".',
     );
+    options?.onPublicUrlUnset?.();
     interpolatedGateway.publicUrl = undefined;
   } else {
     const normalizedPublicUrl = resolveGatewayPublicUrl(rawPublicUrl);
