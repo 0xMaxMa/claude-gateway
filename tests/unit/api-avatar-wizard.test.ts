@@ -630,24 +630,53 @@ describe('POST /api/v1/agents/wizard/start', () => {
     }
   });
 
-  it('returns 409 when wizard already in progress for same agentId', async () => {
+  it('replaces a stale pending draft on repeat start for same agentId (#2493)', async () => {
+    // Contract change (#2493): a second start for an id whose only draft is still
+    // `pending` (user hit Back/Cancel then retried) replaces it instead of 409'ing.
+    // Both starts run real generation, so arm the claude mock twice.
     const { app, tmpDir } = buildCtx();
     mockClaudeSuccess('=== AGENTS.md ===\n# Agent: Dupbot\n\ncontent\n');
+    mockClaudeSuccess('=== AGENTS.md ===\n# Agent: Dupbot\n\ncontent again\n');
     try {
       const res1 = await supertest.default(app)
         .post('/api/v1/agents/wizard/start')
         .set('Authorization', `Bearer ${ADMIN_KEY}`)
         .send({ id: 'dupbot', prompt: 'A bot' });
       expect(res1.status).toBe(201);
+      expect(wizardStore.get(res1.body.wizardId)?.step).toBe('pending');
 
       const res2 = await supertest.default(app)
         .post('/api/v1/agents/wizard/start')
         .set('Authorization', `Bearer ${ADMIN_KEY}`)
         .send({ id: 'dupbot', prompt: 'A bot again' });
-      expect(res2.status).toBe(409);
+      expect(res2.status).toBe(201);
+      // The pending draft was replaced: fresh wizardId, old one gone.
+      expect(res2.body.wizardId).not.toBe(res1.body.wizardId);
+      expect(wizardStore.get(res1.body.wizardId)).toBeUndefined();
+      expect(wizardStore.findByAgentId('dupbot')?.wizardId).toBe(res2.body.wizardId);
 
-      wizardStore.delete(res1.body.wizardId);
+      wizardStore.delete(res2.body.wizardId);
     } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still 409s when the existing draft is already confirmed for same agentId (#2493 guard)', async () => {
+    // The pending-replace path must NOT weaken the real conflict: a `confirmed`
+    // draft has written files, so a repeat start still 409s (before any generation).
+    const { app, tmpDir } = buildCtx();
+    const prior = wizardStore.create('confbot', 'p', { 'AGENTS.md': '#' });
+    wizardStore.update(prior.wizardId, { step: 'confirmed' });
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/wizard/start')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ id: 'confbot', prompt: 'A bot again' });
+      expect(res.status).toBe(409);
+      // The confirmed draft is untouched.
+      expect(wizardStore.get(prior.wizardId)?.step).toBe('confirmed');
+    } finally {
+      wizardStore.delete(prior.wizardId);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });

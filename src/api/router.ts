@@ -1379,9 +1379,19 @@ export function createApiRouter(
       res.status(409).json({ error: `Agent '${id}' already exists` });
       return;
     }
-    if (wizardStore.findByAgentId(id)) {
-      res.status(409).json({ error: `Wizard for agent '${id}' is already in progress` });
-      return;
+    const existingWizard = wizardStore.findByAgentId(id);
+    if (existingWizard) {
+      if (existingWizard.step === 'pending') {
+        // A prior draft for this id never advanced past generation — the user hit
+        // Back/Cancel then restarted with the same id (#2493). It owns no on-disk
+        // agent, so replace it rather than dead-ending the resume with a 409.
+        // WIZARD_MAX_CONCURRENT still caps generation load.
+        wizardStore.delete(existingWizard.wizardId);
+      } else {
+        // 'confirmed'/'complete': files were already written — a real conflict.
+        res.status(409).json({ error: `Wizard for agent '${id}' is already in progress` });
+        return;
+      }
     }
 
     if (wizardStartsInFlight >= WIZARD_MAX_CONCURRENT) {
