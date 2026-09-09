@@ -55,6 +55,12 @@ jobs:
           # would tag the Release `main` and create refs/tags/main.
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
 
+      # npm <11.5.1 has a bug (npm/cli#8976, #9088) where it signs the OIDC
+      # provenance statement but sends the publish PUT to the wrong path,
+      # failing with a 404. Upgrading npm before publish avoids it.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
       - name: Publish to npm
         run: npm publish --access public --provenance
         env:
