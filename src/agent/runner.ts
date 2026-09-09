@@ -3489,6 +3489,12 @@ export class AgentRunner extends EventEmitter {
         .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfig }, 'api')
         .catch(() => {});
     }
+    // Persist composer video options the same way (SessionMeta.videoConfig).
+    if (videoParams) {
+      this.sessionStore
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { videoConfig: videoParams }, 'api')
+        .catch(() => {});
+    }
     const channelXml =
       `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}"${imageAttr}>\n` +
       `${message}\n\n` +
@@ -4009,6 +4015,12 @@ export class AgentRunner extends EventEmitter {
         .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig: durableImageConfigStream }, 'api')
         .catch(() => {});
     }
+    // Persist composer video options the same way (SessionMeta.videoConfig).
+    if (videoParamsStream) {
+      this.sessionStore
+        .updateSessionMeta(this.agentConfig.id, chatId, sessionId, { videoConfig: videoParamsStream }, 'api')
+        .catch(() => {});
+    }
     const channelXml =
       `<channel source="api" chat_id="${chatId}" session_id="${sessionId}" ts="${new Date().toISOString()}"${imageAttrStream}>\n` +
       `${message}\n\n` +
@@ -4168,7 +4180,7 @@ export class AgentRunner extends EventEmitter {
     return this.historyDb;
   }
 
-  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; model?: string }>> {
+  getAllSessionMeta(): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
     return this.sessionStore.getAllSessionMeta(this.agentConfig.id);
   }
 

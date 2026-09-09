@@ -1313,6 +1313,7 @@ Send a message to an agent. Returns a JSON response or SSE stream.
 | `media_files` | No | Array of `mediaPath` strings returned by the Media Upload endpoint |
 | `store_user_message` | No | Set to `false` to skip persisting the user message in session history — only the assistant response is stored. Requires a write or admin key. Useful for proactive/trigger prompts where the user trigger should be invisible. |
 | `image_params` | No | Composer-selected image-generation options, surfaced to the agent so it calls the built-in `generate_image` tool with them. An object with optional string fields `model`, `quality`, `size`, `aspect_ratio`, `image_ref` and optional positive number `n`. Empty/whitespace strings are ignored; a non-object (or `n < 1`) returns `400`. The latest sent value is persisted to session meta as `imageConfig` (see the sessions list endpoint) so a web client can restore the selection on reload. |
+| `video_params` | No | Composer-selected video-generation options, surfaced to the agent so it calls the built-in `generate_video` tool with them (model/duration/aspect made authoritative — no invented cap, no scene split). An object with optional string fields `model`, `resolution`, `aspect_ratio`, `image_ref` (source frame for image-to-video) and optional positive integer `duration`. Empty/whitespace strings are ignored; a non-object (or `duration < 1`) returns `400`. The latest sent value is persisted to session meta as `videoConfig` (see the sessions list endpoint) so a web client can restore the selection on reload. |
 
 #### Slash command dispatch
 
@@ -2836,6 +2837,7 @@ curl -H "X-Api-Key: admin-key-456" \
           "lastMessage": "Sure, I can help with that!",
           "sessionName": "Project Planning",
           "imageConfig": { "model": "openai/gpt-image-1", "quality": "medium" },
+          "videoConfig": { "model": "grok-video/grok-imagine-video-1.5", "duration": 15 },
           "model": "claude-opus-4-8"
         }
       ]
@@ -2857,6 +2859,7 @@ curl -H "X-Api-Key: admin-key-456" \
 | `lastMessage` | string\|null | Preview of the last message content |
 | `sessionName` | string\|null | Human-readable session name (set via `/rename` or `POST /sessions`) |
 | `imageConfig` | object\|null | Last `image_params` sent for this session (composer image-generation options); `null` when none set. Lets a web client restore the composer selection on reload. |
+| `videoConfig` | object\|null | Last `video_params` sent for this session (composer video-generation options); `null` when none set. Lets a web client restore the composer selection on reload. |
 | `model` | string\|null | Real Claude model that produced the session's latest turn, captured from the stream and updated every turn (so a mid-session `/model` switch is reflected). `null` for legacy sessions recorded before this was tracked, or when no turn has run yet. |
 
 **Error responses:**

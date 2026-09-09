@@ -554,6 +554,10 @@ export interface SessionMeta {
    *  can restore the composer selection on reload; the agent's own context is the
    *  functional source of truth. Updated whenever a send carries image_params. */
   imageConfig?: ImageParams;
+  /** Last composer video options sent for this session. Mirrors imageConfig —
+   *  persisted so the web can restore the composer selection on reload. Updated
+   *  whenever a send carries video_params. */
+  videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
 }
