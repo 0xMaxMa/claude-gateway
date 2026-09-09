@@ -17,6 +17,7 @@ import {
   DEFAULT_SHARE_TTL_SECONDS,
 } from '../share/share-store';
 import { computeSessionImageCatalog } from '../share/session-image-catalog';
+import { computeSessionVideoCatalog } from '../share/session-video-catalog';
 
 /**
  * Share bridge HTTP surface (#70, plan §10/§11).
@@ -557,6 +558,30 @@ export function createSharesPrivateRouter(
       return;
     }
     const items = computeSessionImageCatalog({ agentsBaseDir, store, agentId, sessionId });
+    res.json({ items });
+  });
+
+  /**
+   * GET /api/v1/video-catalog?agent_id=...&session_id=... — the deterministic
+   * video list of one session, oldest first. Response:
+   * { items: [{ index, relative_path, origin, ts, available, desc? }] }.
+   *
+   * The video analogue of /v1/image-catalog, kept separate so clips never leak
+   * into the image-reference surface. Read-only: mints nothing, returns no token.
+   */
+  router.get('/v1/video-catalog', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    const agentId = typeof req.query.agent_id === 'string' ? req.query.agent_id.trim() : '';
+    const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    if (!isValidAgentId(agentId) || !isValidSessionId(sessionId)) {
+      res.status(400).json({ error: 'agent_id and session_id must be valid identifiers' });
+      return;
+    }
+    if (!canAccessAgent(apiKey, agentId)) {
+      res.status(403).json({ error: `API key has no access to agent '${agentId}'` });
+      return;
+    }
+    const items = computeSessionVideoCatalog({ agentsBaseDir, agentId, sessionId });
     res.json({ items });
   });
 
