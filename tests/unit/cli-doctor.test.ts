@@ -284,6 +284,28 @@ describe('cli doctor', () => {
       expect(code).toBe(0);
     });
 
+    // Independent review of #474: `loadCliConfig` (http-client.ts) parses
+    // config.json directly and never interpolates ${VAR} — unlike the gateway
+    // process's own loader.ts. A publicUrl configured with an env placeholder
+    // (a pattern loader.ts explicitly supports) would otherwise reach this
+    // check as the literal string, fail to fetch, and report a healthy,
+    // correctly configured gateway as broken.
+    it('set with an unresolved ${VAR} placeholder → informational, does not fail doctor', async () => {
+      const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://${PUBLIC_HOST}/gateway', bind: '0.0.0.0' };
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      const code = await runDoctor({}, proxied);
+
+      const body = report();
+      const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      expect(check.ok).toBe(true);
+      expect(check.info).toBe(true);
+      expect(check.warn).toBeFalsy();
+      expect(check.detail).toContain('unresolved');
+      expect(body.ok).toBe(true);
+      expect(code).toBe(0);
+    });
+
     it('does not run when --url points at a different host (this host\'s config is not the subject)', async () => {
       const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);

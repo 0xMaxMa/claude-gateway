@@ -95,6 +95,19 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
         warn: true,
         detail: 'not set — generate_image reference edits, share_file, and /cli will not work (see README "gateway.publicUrl")',
       });
+    } else if (/\$\{[^}]+\}/.test(gatewayPublicUrl)) {
+      // `loadCliConfig` (http-client.ts) reads config.json directly and does not
+      // interpolate ${VAR} placeholders like the gateway process's own loader
+      // does — this CLI invocation may not even share that env. Probing the
+      // literal placeholder string always fails, which would report a healthy,
+      // correctly configured gateway as broken. Configured-but-unverifiable is
+      // not a failure.
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: true,
+        info: true,
+        detail: `configured (${gatewayPublicUrl}) — contains an unresolved \${VAR}; reachability cannot be checked from the CLI`,
+      });
     } else {
       const shareHealth = await probeHealth(gatewayPublicUrl);
       // `answered`, not `ok`: a proxy that answers 401/403 to an unauthenticated
