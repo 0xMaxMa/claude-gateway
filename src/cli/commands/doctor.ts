@@ -3,6 +3,7 @@ import { probeHealth, HealthProbe } from '../health';
 import { detectManager } from '../manager';
 import { printJson, helpStream, writeCommandHelp } from '../output';
 import { paletteFor } from '../colors';
+import { normalizePublicUrl } from '../../cli-viewer/url';
 
 /**
  * `doctor` — quick health check of the CLI's view of the gateway: is config
@@ -80,6 +81,26 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const health = await probeHealth(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
+  // Shared by the new check below and the alt-address block further down —
+  // both describe `config.publicUrl`, and using one normalizer (rather than
+  // each hand-rolling trim/strip) keeps them from silently disagreeing on
+  // what "the same URL" means.
+  const normalizedPublicUrl = normalizePublicUrl(config.publicUrl) ?? '';
+
+  // A gateway fronted by a reverse proxy has two addresses for one process.
+  // Resolved here (selection only, no network call yet) so the new
+  // gatewayPublicUrl check below can detect when it's about to probe the
+  // identical URL and share one fetch instead of firing two.
+  const alt =
+    baseUrl === localUrl
+      ? normalizedPublicUrl && normalizedPublicUrl !== baseUrl
+        ? { urlName: 'publicUrl', healthName: 'publicHealth', url: normalizedPublicUrl }
+        : undefined
+      : manager !== 'unknown'
+        ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
+        : undefined;
+  let altHealth: HealthProbe | undefined;
+
   // #472: gateway.publicUrl backs every feature that hands out a public link
   // (generate_image reference edits, share_file, /cli). Nothing else in
   // `doctor` checks for its presence — the row below (`publicUrl`/`publicHealth`)
@@ -87,7 +108,7 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // Gated on `diagnosingThisHost` like `manager` above: this is this host's own
   // config file, so it is noise (and a config leak) when --url points elsewhere.
   if (diagnosingThisHost) {
-    const gatewayPublicUrl = (config.publicUrl ?? '').trim().replace(/\/+$/, '');
+    const gatewayPublicUrl = normalizedPublicUrl;
     if (!gatewayPublicUrl) {
       checks.push({
         name: 'gatewayPublicUrl',
@@ -109,7 +130,18 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
         detail: `configured (${gatewayPublicUrl}) — contains an unresolved \${VAR}; reachability cannot be checked from the CLI`,
       });
     } else {
-      const shareHealth = await probeHealth(gatewayPublicUrl);
+      // Reuse an existing probe of the identical URL rather than firing a
+      // second one: `health` already covers the no-proxy case (publicUrl ==
+      // baseUrl), and the alt block below covers the reverse-proxy case
+      // (publicUrl == alt.url). Two independent probes of the same address a
+      // few hundred ms apart can disagree under a flaky/loaded proxy, which
+      // would otherwise show up as two contradictory rows for one fact.
+      const shareHealth =
+        gatewayPublicUrl === baseUrl
+          ? health
+          : alt?.urlName === 'publicUrl'
+            ? (altHealth = await probeHealth(alt.url))
+            : await probeHealth(gatewayPublicUrl);
       // `answered`, not `ok`: a proxy that answers 401/403 to an unauthenticated
       // probe is up and doing its job, not unreachable — same reasoning as the
       // publicHealth note below. Only "nothing answered at all" is a real fail.
@@ -121,7 +153,6 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
     }
   }
 
-  // A gateway fronted by a reverse proxy has two addresses for one process.
   // Probe the one the CLI is *not* using as well: without it, the most
   // confusing states — proxy down while the gateway is healthy, or the reverse
   // — appear as a single contradictory line with nothing to explain it. The
@@ -132,20 +163,9 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // somewhere else. Passing the flag through would make it echo the target back
   // as its own alternative, and then offer this host's publicUrl as context for
   // a question about another host entirely.
-  const publicUrl = (config.publicUrl ?? '').replace(/\/+$/, '');
-  const alt =
-    baseUrl === localUrl
-      ? publicUrl && publicUrl !== baseUrl
-        ? { urlName: 'publicUrl', healthName: 'publicHealth', url: publicUrl }
-        : undefined
-      : manager !== 'unknown'
-        ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
-        : undefined;
-
-  let altHealth: HealthProbe | undefined;
   if (alt) {
     checks.push({ name: alt.urlName, ok: true, detail: alt.url, info: true });
-    altHealth = await probeHealth(alt.url);
+    altHealth = altHealth ?? (await probeHealth(alt.url));
     checks.push({ name: alt.healthName, ok: altHealth.ok, detail: altHealth.detail, info: true });
   }
 

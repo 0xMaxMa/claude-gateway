@@ -607,6 +607,22 @@ describe('config-watcher', () => {
     watcher.stop();
   });
 
+  // Independent review of #474: gateway.publicUrl staying unset across many
+  // reloads (LINE-only/localhost-only deployments, called out as legitimate)
+  // must not re-log on every unrelated config edit — only on the transition
+  // into that state.
+  it('does not re-warn about gateway.publicUrl on a reload where it was already unset', () => {
+    const configPath = path.join(tmpDir, 'config-public-url-persist-unset.json');
+    writeConfigFile(configPath, rawConfig());
+    const watcher = new ConfigWatcher(configPath, loadConfig(configPath), logger);
+
+    writeConfigFile(configPath, rawConfig({ alfredModel: 'claude-sonnet-4-6' }));
+    watcher.reload();
+
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('gateway.publicUrl'));
+    watcher.stop();
+  });
+
   // ---------------------------------------------------------------------------
   // U-CW-06: config.json changes rapidly multiple times — debounce, emit once
   // ---------------------------------------------------------------------------

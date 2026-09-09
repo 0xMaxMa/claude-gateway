@@ -155,6 +155,27 @@ describe('cli doctor', () => {
       expect(stderr.join('')).toMatch(/the public URL answered HTTP 401/);
     });
 
+    // Independent review of #474: gatewayPublicUrl and the alt-address block
+    // both describe config.publicUrl — when they resolve to the identical
+    // URL (the common reverse-proxy case exercised here), they must share
+    // one probe rather than firing two, which could otherwise disagree under
+    // a flaky proxy and double the load on the operator's public endpoint.
+    it('gatewayPublicUrl and publicHealth share one probe when they resolve to the same URL', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true } as Response);
+      global.fetch = fetchMock;
+
+      const code = await runDoctor({}, proxied);
+
+      const body = report();
+      const gw = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      const pub = body.checks.find((c) => c.name === 'publicHealth')!;
+      expect(gw.ok).toBe(true);
+      expect(pub.ok).toBe(true);
+      const proxyCalls = fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('https://proxy.example.com'));
+      expect(proxyCalls).toHaveLength(1);
+      expect(code).toBe(0);
+    });
+
     it('falls back to publicUrl when no gateway is live on this host', async () => {
       (readLocalGateway as jest.Mock).mockReturnValue(null);
       global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
@@ -314,6 +335,25 @@ describe('cli doctor', () => {
 
       const names = report().checks.map((c) => c.name);
       expect(names).not.toContain('gatewayPublicUrl');
+    });
+
+    // Independent review of #474: when publicUrl equals the CLI's own base
+    // URL (no reverse proxy — same host, same address), gatewayPublicUrl must
+    // reuse the already-computed `health` probe rather than firing a second
+    // one against the identical address.
+    it('reuses the health probe when publicUrl equals this host\'s own address (no proxy)', async () => {
+      const samePlace: CliConfigView = { ...configWithKey, publicUrl: 'http://127.0.0.1:10850' };
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true } as Response);
+      global.fetch = fetchMock;
+
+      const code = await runDoctor({}, samePlace);
+
+      const body = report();
+      expect(body.checks.find((c) => c.name === 'gatewayPublicUrl')).toEqual(
+        expect.objectContaining({ ok: true, detail: expect.stringContaining('reachable') }),
+      );
+      expect(fetchMock.mock.calls.filter((c) => String(c[0]).includes('127.0.0.1:10850'))).toHaveLength(1);
+      expect(code).toBe(0);
     });
   });
 

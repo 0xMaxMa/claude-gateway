@@ -134,9 +134,14 @@ export class ConfigWatcher extends EventEmitter {
     // agent produces exactly zero diff, so this is the only trace it leaves.
     logSkippedAgents(this.logger, skipped, 'Agent skipped during config reload');
     // Same #427 rationale as skipped agents (#472): the console.warn inside
-    // loadConfig never reaches logs/gateway.log on its own.
-    if (publicUrlUnset) {
-      this.logger.warn('gateway.publicUrl is not set after reload — public share links are disabled');
+    // loadConfig never reaches logs/gateway.log on its own. Gated on the
+    // transition (was set, now unset) rather than firing on every reload: a
+    // LINE-only/localhost-only deployment intentionally keeps this unset, and
+    // every unrelated config.json edit (adding an agent, tuning a timeout)
+    // would otherwise re-log the same fact forever, burying genuinely new
+    // warnings.
+    if (publicUrlUnset && this.currentConfig.gateway.publicUrl !== undefined) {
+      this.logger.warn('gateway.publicUrl became unset on reload — public share links are now disabled');
     }
 
     const { fieldChanges, addedAgents } = this.diffConfig(this.currentConfig, newConfig);
