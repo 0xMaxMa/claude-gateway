@@ -6,7 +6,7 @@ import type { CliConfigView } from '../../src/cli/http-client';
 
 interface DoctorReport {
   ok: boolean;
-  checks: Array<{ name: string; ok: boolean; detail: string; info?: boolean }>;
+  checks: Array<{ name: string; ok: boolean; detail: string; info?: boolean; warn?: boolean }>;
 }
 
 describe('cli doctor', () => {
@@ -51,7 +51,7 @@ describe('cli doctor', () => {
     expect(code).toBe(0);
     const body = report();
     expect(body.ok).toBe(true);
-    expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health']);
+    expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'gatewayPublicUrl']);
     expect(body.checks.every((c) => c.ok)).toBe(true);
   });
 
@@ -123,9 +123,12 @@ describe('cli doctor', () => {
       const code = await runDoctor({}, proxied);
 
       const body = report();
-      expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'publicUrl', 'publicHealth']);
+      expect(body.checks.map((c) => c.name)).toEqual(['config', 'apiKey', 'url', 'manager', 'health', 'gatewayPublicUrl', 'publicUrl', 'publicHealth']);
       expect(body.checks.find((c) => c.name === 'url')?.detail).toMatch(/^http:\/\/127\.0\.0\.1:/);
       expect(body.checks.find((c) => c.name === 'publicHealth')?.info).toBe(true);
+      expect(body.checks.find((c) => c.name === 'gatewayPublicUrl')).toEqual(
+        expect.objectContaining({ ok: true, detail: expect.stringContaining('reachable') }),
+      );
       expect(code).toBe(0);
     });
 
@@ -211,6 +214,84 @@ describe('cli doctor', () => {
       const names = report().checks.map((c) => c.name);
       expect(names).not.toContain('publicHealth');
       expect(names).not.toContain('localHealth');
+    });
+  });
+
+  /**
+   * #472: gateway.publicUrl backs every feature that hands out a public link
+   * (generate_image reference edits, share_file, /cli). Nothing checked for its
+   * presence before this — a misconfigured or unset value only ever surfaced as
+   * a late, unrelated-looking failure deep inside generate_image.
+   */
+  describe('gateway.publicUrl check (#472)', () => {
+    it('unset → warn, lists the disabled features, does not fail doctor', async () => {
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      const code = await runDoctor({}, configWithKey);
+
+      const body = report();
+      const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      expect(check.ok).toBe(true);
+      expect(check.warn).toBe(true);
+      expect(check.detail).toMatch(/generate_image/);
+      expect(check.detail).toMatch(/share_file/);
+      expect(body.ok).toBe(true);
+      expect(code).toBe(0);
+    });
+
+    it('set and reachable → ok, no warn', async () => {
+      const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      const code = await runDoctor({}, proxied);
+
+      const check = report().checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      expect(check.ok).toBe(true);
+      expect(check.warn).toBeFalsy();
+      expect(check.detail).toContain('reachable');
+      expect(code).toBe(0);
+    });
+
+    it('set but nothing answers → fails doctor', async () => {
+      const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+      global.fetch = jest.fn().mockImplementation((url: string) =>
+        String(url).startsWith('http://127.0.0.1') ? Promise.resolve({ ok: true } as Response) : Promise.reject(new Error('ECONNREFUSED')),
+      );
+
+      const code = await runDoctor({}, proxied);
+
+      const body = report();
+      const check = body.checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      expect(check.ok).toBe(false);
+      expect(check.warn).toBeFalsy();
+      expect(check.detail).toMatch(/unreachable/);
+      expect(body.ok).toBe(false);
+      expect(code).toBe(1);
+    });
+
+    it('set but answers with an auth-rejecting status → still counted reachable (proxy is doing its job)', async () => {
+      const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+      global.fetch = jest.fn().mockImplementation((url: string) =>
+        String(url).startsWith('http://127.0.0.1')
+          ? Promise.resolve({ ok: true } as Response)
+          : Promise.resolve({ ok: false, status: 401 } as Response),
+      );
+
+      const code = await runDoctor({}, proxied);
+
+      const check = report().checks.find((c) => c.name === 'gatewayPublicUrl')!;
+      expect(check.ok).toBe(true);
+      expect(code).toBe(0);
+    });
+
+    it('does not run when --url points at a different host (this host\'s config is not the subject)', async () => {
+      const proxied: CliConfigView = { ...configWithKey, publicUrl: 'https://proxy.example.com/gateway', bind: '0.0.0.0' };
+      global.fetch = jest.fn().mockResolvedValue({ ok: true } as Response);
+
+      await runDoctor({ url: 'http://other-host:8080' }, proxied);
+
+      const names = report().checks.map((c) => c.name);
+      expect(names).not.toContain('gatewayPublicUrl');
     });
   });
 

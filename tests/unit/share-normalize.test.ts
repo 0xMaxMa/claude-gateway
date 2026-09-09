@@ -394,6 +394,23 @@ describe('generate_image share-bridge normalization (#70)', () => {
       expect(res.isError).toBe(true);
       expect(revokeCalls().map((c) => c.url)).toEqual([`${GATEWAY}/api/v1/shares/shr_1`]);
     });
+
+    // #472: on a host with gateway.publicUrl unset, share mint succeeds
+    // (token, no url) but the ref cannot be made into a fetchable https://
+    // URL for the provider. The failure must name the remedy and the
+    // workaround rather than just "not configured", and the now-unusable
+    // share must still be revoked rather than leaked.
+    test('minted share with no url (gateway.publicUrl unset) → actionable error, share revoked', async () => {
+      shareItems = [{ share_id: 'shr_1', url: '', expires_at: new Date(Date.now() + 60000).toISOString() }];
+      const res = await generate({ image: 'media/session-1/duck.png' });
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain('generate_image: image reference sharing requires gateway.publicUrl to be configured');
+      expect(res.content[0]!.text).toContain('~/.claude-gateway/config.json');
+      expect(res.content[0]!.text).toContain('restart the gateway');
+      expect(res.content[0]!.text).toContain('https:// image URL instead of a local path or artifact ref');
+      expect(shareCalls()).toHaveLength(1);
+      expect(revokeCalls().map((c) => c.url)).toEqual([`${GATEWAY}/api/v1/shares/shr_1`]);
+    });
   });
 
   describe('artifact registration after delivery (§8)', () => {

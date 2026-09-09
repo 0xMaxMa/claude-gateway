@@ -17,6 +17,11 @@ interface Check {
   /** Informational only: reported, but never fails the command. Used for the
    *  URL the CLI is *not* using — its state is context, not a verdict. */
   info?: boolean;
+  /** A real gap worth the operator's attention, but not a failure: some
+   *  deployments (LINE-only, localhost-only) are legitimately fine without the
+   *  thing being warned about. Never fails the command, like `info`, but
+   *  rendered distinctly so it doesn't read as "nothing to see here". */
+  warn?: boolean;
 }
 
 function printHelp(): void {
@@ -75,6 +80,34 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const health = await probeHealth(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
+  // #472: gateway.publicUrl backs every feature that hands out a public link
+  // (generate_image reference edits, share_file, /cli). Nothing else in
+  // `doctor` checks for its presence — the row below (`publicUrl`/`publicHealth`)
+  // only exists when the value happens to be set, and stays silent otherwise.
+  // Gated on `diagnosingThisHost` like `manager` above: this is this host's own
+  // config file, so it is noise (and a config leak) when --url points elsewhere.
+  if (diagnosingThisHost) {
+    const gatewayPublicUrl = (config.publicUrl ?? '').trim().replace(/\/+$/, '');
+    if (!gatewayPublicUrl) {
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: true,
+        warn: true,
+        detail: 'not set — generate_image reference edits, share_file, and /cli will not work (see README "gateway.publicUrl")',
+      });
+    } else {
+      const shareHealth = await probeHealth(gatewayPublicUrl);
+      // `answered`, not `ok`: a proxy that answers 401/403 to an unauthenticated
+      // probe is up and doing its job, not unreachable — same reasoning as the
+      // publicHealth note below. Only "nothing answered at all" is a real fail.
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: shareHealth.answered,
+        detail: shareHealth.answered ? `reachable (${gatewayPublicUrl})` : `unreachable: ${shareHealth.detail}`,
+      });
+    }
+  }
+
   // A gateway fronted by a reverse proxy has two addresses for one process.
   // Probe the one the CLI is *not* using as well: without it, the most
   // confusing states — proxy down while the gateway is healthy, or the reverse
@@ -103,13 +136,14 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
     checks.push({ name: alt.healthName, ok: altHealth.ok, detail: altHealth.detail, info: true });
   }
 
-  const allOk = checks.every((c) => c.info || c.ok);
+  const allOk = checks.every((c) => c.info || c.warn || c.ok);
   const c = paletteFor(process.stderr);
   // Pad before colouring so escape codes never count toward the column width.
   const lines = checks.map((chk) => {
-    // `info` is checked first: an advisory row is marked `[--]` whether it
-    // passed or not, so the reader can tell the verdict rows from the context.
-    const mark = chk.info ? c.dim('[--]') : chk.ok ? c.green('[ok]') : c.red('[!!]');
+    // `warn`/`info` are checked first: an advisory row is marked distinctly
+    // whether it passed or not, so the reader can tell the verdict rows from
+    // the context.
+    const mark = chk.warn ? c.yellow('[warn]') : chk.info ? c.dim('[--]') : chk.ok ? c.green('[ok]') : c.red('[!!]');
     return `  ${mark} ${c.bold(chk.name.padEnd(12))} ${chk.detail}`;
   });
   // Name the right component. A public URL that answered with a status is not

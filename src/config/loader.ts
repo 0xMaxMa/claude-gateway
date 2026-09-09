@@ -280,12 +280,24 @@ export function loadConfig(configPath: string, options?: LoadConfigOptions): Gat
   // Interpolate gateway config (fatal if env vars missing here)
   const interpolatedGateway = interpolateObject(config.gateway) as Record<string, unknown>;
   const rawPublicUrl = interpolatedGateway.publicUrl;
-  if (typeof rawPublicUrl === 'string' && !rawPublicUrl.trim()) {
-    // Blank/whitespace-only is "not configured", not "invalid". Normalize to
-    // undefined so downstream consumers see a single unset representation and
+  if (rawPublicUrl === undefined || (typeof rawPublicUrl === 'string' && !rawPublicUrl.trim())) {
+    // Blank/whitespace-only/absent is "not configured", not "invalid". Normalize
+    // to undefined so downstream consumers see a single unset representation and
     // report "not configured" rather than throwing or emitting a broken link.
+    //
+    // Warn once here rather than staying silent: nothing else in the load path
+    // reports this gap, and it otherwise surfaces only much later as an
+    // unrelated-looking failure inside generate_image (#472). This is a
+    // capability limitation, not a misconfiguration — LINE-only and
+    // localhost-only deployments are legitimately fine without the key — so it
+    // is a warning, never a thrown error.
+    console.warn(
+      '[gateway] gateway.publicUrl is not set — public share links are disabled.\n' +
+      '          generate_image reference edits, share_file, and /cli will not work.\n' +
+      '          See README "gateway.publicUrl".',
+    );
     interpolatedGateway.publicUrl = undefined;
-  } else if (rawPublicUrl !== undefined) {
+  } else {
     const normalizedPublicUrl = resolveGatewayPublicUrl(rawPublicUrl);
     if (!normalizedPublicUrl) {
       throw new ConfigValidationError(

@@ -247,22 +247,29 @@ describe('config-loader', () => {
       return configPath;
     };
 
-    const valid = write('public-url-valid.json', 'https://pod-maxma.example.com/gateway/');
-    expect(loadConfig(valid).gateway.publicUrl).toBe('https://pod-maxma.example.com/gateway');
+    // #472: a configured value must never trigger the "not set" warning.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const valid = write('public-url-valid.json', 'https://pod-maxma.example.com/gateway/');
+      expect(loadConfig(valid).gateway.publicUrl).toBe('https://pod-maxma.example.com/gateway');
+      expect(warnSpy).not.toHaveBeenCalled();
 
-    for (const [index, value] of [
-      'https://pod-maxma.example.com',
-      'http://pod-maxma.example.com/gateway',
-      'https://pod-maxma.example.com/gateway?token=x',
-      'not-a-url',
-    ].entries()) {
-      expect(() => loadConfig(write(`public-url-invalid-${index}.json`, value))).toThrow(
-        /gateway\.publicUrl/,
-      );
+      for (const [index, value] of [
+        'https://pod-maxma.example.com',
+        'http://pod-maxma.example.com/gateway',
+        'https://pod-maxma.example.com/gateway?token=x',
+        'not-a-url',
+      ].entries()) {
+        expect(() => loadConfig(write(`public-url-invalid-${index}.json`, value))).toThrow(
+          /gateway\.publicUrl/,
+        );
+      }
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 
-  it('treats blank/whitespace/absent gateway.publicUrl as unset (no throw)', () => {
+  it('treats blank/whitespace/absent gateway.publicUrl as unset (no throw), and warns exactly once each (#472)', () => {
     const write = (name: string, publicUrl: unknown) => {
       const configPath = path.join(tmpDir, name);
       fs.writeFileSync(configPath, JSON.stringify({
@@ -279,12 +286,26 @@ describe('config-loader', () => {
       return configPath;
     };
 
-    // Empty string (the value config.template.json used to ship) → unset, boots.
-    expect(loadConfig(write('public-url-empty.json', '')).gateway.publicUrl).toBeUndefined();
-    // Whitespace-only → same as empty.
-    expect(loadConfig(write('public-url-blank.json', '   ')).gateway.publicUrl).toBeUndefined();
-    // Absent key (JSON.stringify drops undefined) → unset, no regression.
-    expect(loadConfig(write('public-url-absent.json', undefined)).gateway.publicUrl).toBeUndefined();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Empty string (the value config.template.json used to ship) → unset, boots, warns once.
+      warnSpy.mockClear();
+      expect(loadConfig(write('public-url-empty.json', '')).gateway.publicUrl).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]![0]).toMatch(/gateway\.publicUrl is not set/);
+
+      // Whitespace-only → same as empty, warns once.
+      warnSpy.mockClear();
+      expect(loadConfig(write('public-url-blank.json', '   ')).gateway.publicUrl).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+
+      // Absent key (JSON.stringify drops undefined) → unset, no regression, warns once.
+      warnSpy.mockClear();
+      expect(loadConfig(write('public-url-absent.json', undefined)).gateway.publicUrl).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('boots from the shipped config.template.json gateway block', () => {
