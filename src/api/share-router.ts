@@ -17,6 +17,7 @@ import {
   DEFAULT_SHARE_TTL_SECONDS,
 } from '../share/share-store';
 import { computeSessionImageCatalog } from '../share/session-image-catalog';
+import { readPublicBase } from '../config/public-base';
 import { computeSessionVideoCatalog } from '../share/session-video-catalog';
 
 /**
@@ -267,8 +268,10 @@ export function createSharesPrivateRouter(
    * Body: { agent_id, session_id, purpose?, ttl_seconds?, allow_documents?, refs: [{artifact_id}|{path}] }
    * Response: { items: [{ share_id, token, url?, expires_at }] } — order preserved.
    * `token` is always present (host-agnostic capability); `url` is a convenience
-   * built from `gateway.publicUrl` and is omitted when that is unset — callers
-   * with their own public base (e.g. LINE) build the URL from `token`.
+   * built from `gateway.publicUrl` when set, else from the inbound-Host fallback
+   * (`.public-base`, learned from real external requests behind Traefik). It is
+   * omitted only when neither is known — callers with their own public base
+   * (e.g. LINE) build the URL from `token`.
    * `allow_documents` widens the allowlist to PDF for THIS request only and is
    * recorded on each minted row (#444); without it a PDF is still 415.
    */
@@ -411,6 +414,12 @@ export function createSharesPrivateRouter(
       return;
     }
 
+    // Resolve the public base for the `url` convenience field: the configured
+    // `gateway.publicUrl` wins; otherwise fall back to the inbound-Host base
+    // learned from real external (Traefik-fronted) requests. Read per-request so
+    // a base learned after startup takes effect without a gateway restart.
+    const baseUrl = publicBaseUrl ?? readPublicBase(agentsBaseDir) ?? undefined;
+
     const items = resolved.map((r) => {
       const mint = store.mintShare({
         agentId,
@@ -425,7 +434,7 @@ export function createSharesPrivateRouter(
       return {
         share_id: mint.shareId,
         token: mint.token,
-        ...(publicBaseUrl ? { url: `${publicBaseUrl}/shared/${mint.token}` } : {}),
+        ...(baseUrl ? { url: `${baseUrl}/shared/${mint.token}` } : {}),
         expires_at: new Date(mint.expiresAtMs).toISOString(),
         // only present for refs resolved from an artifact_id
         // whose generation recorded a provider task id — the hook a

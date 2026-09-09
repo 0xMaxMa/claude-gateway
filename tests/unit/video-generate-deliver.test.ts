@@ -345,10 +345,11 @@ describe('generate_video image-to-video source-frame resolution (normalizeRef)',
     expect(submitBody.image).toBe('https://gw.example.com/shared/tok-1');
   });
 
-  // #472: on a host with gateway.publicUrl unset, share mint succeeds (token,
-  // no url) but the source frame cannot be made into a fetchable https:// URL.
-  // Mirrors the generate_image fix — same actionable remedy + workaround, and
-  // the now-unusable share is still revoked rather than leaked.
+  // #472: on a host with gateway.publicUrl unset AND no inbound-Host base learned
+  // yet, share mint succeeds (token, no url) but the source frame cannot be made
+  // into a fetchable https:// URL. Mirrors the generate_image fix — resend
+  // guidance + config/workaround remedies, and the now-unusable share is still
+  // revoked rather than leaked.
   test('share bridge ON but the minted share has no url (gateway.publicUrl unset) → actionable error, share revoked', async () => {
     process.env.GATEWAY_API_URL = GATEWAY;
     process.env.GATEWAY_API_KEY = 'gw-key';
@@ -379,9 +380,9 @@ describe('generate_video image-to-video source-frame resolution (normalizeRef)',
     });
 
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text).toContain('generate_video: source-frame sharing requires gateway.publicUrl to be configured');
+    expect(res.content[0]!.text).toContain('generate_video: could not resolve the gateway public URL');
+    expect(res.content[0]!.text).toContain('Send your request again');
     expect(res.content[0]!.text).toContain('~/.claude-gateway/config.json');
-    expect(res.content[0]!.text).toContain('restart the gateway');
     expect(calls.some((c) => c.method === 'DELETE' && c.url.includes('/api/v1/shares/sh-1'))).toBe(true);
     expect(calls.some((c) => c.url.endsWith('/v1/videos/generations'))).toBe(false);
   });

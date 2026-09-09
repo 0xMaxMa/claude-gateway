@@ -125,6 +125,45 @@ describe('file share router', () => {
       const fetched = await supertest.default(noBaseApp).get(`/shared/${item.token}`);
       expect(fetched.status).toBe(200);
     });
+
+    test('inbound-Host fallback: url is filled from .public-base when no config base', async () => {
+      // Pod with no gateway.publicUrl, but the gateway has learned its public host
+      // from a real inbound request and persisted it to <agentsRoot>/../.public-base.
+      // The mint endpoint must fill `url` from that fallback so image/video i2i/i2v
+      // work without a per-pod config edit.
+      const target = path.resolve(baseDir, '..', '.public-base');
+      const FALLBACK = 'https://pod-fallback.develop-vm.getpod.ai/gateway';
+      fs.writeFileSync(target, FALLBACK);
+      try {
+        const noBaseApp = express();
+        noBaseApp.use(express.json());
+        noBaseApp.use(createSharesPublicRouter(store, baseDir));
+        noBaseApp.use('/api', createSharesPrivateRouter(store, KEYS, baseDir)); // no config base
+        const res = await supertest
+          .default(noBaseApp)
+          .post('/api/v1/shares')
+          .set(AUTH_A1)
+          .send({ agent_id: AGENT, session_id: SESSION, refs: [{ path: `${SESSION}/ok.png` }] });
+        expect(res.status).toBe(201);
+        const item = res.body.items[0] as { url?: string; token: string };
+        expect(item.url).toBe(`${FALLBACK}/shared/${item.token}`);
+      } finally {
+        fs.rmSync(target, { force: true });
+      }
+    });
+
+    test('config base wins over the .public-base fallback', async () => {
+      // buildApp() mounts the private router WITH BASE_URL; a stale .public-base
+      // must never override an explicitly configured gateway.publicUrl.
+      const target = path.resolve(baseDir, '..', '.public-base');
+      fs.writeFileSync(target, 'https://stale.example.com/gateway');
+      try {
+        const item = await mintOne();
+        expect(item.url.startsWith(`${BASE_URL}/shared/`)).toBe(true);
+      } finally {
+        fs.rmSync(target, { force: true });
+      }
+    });
   });
 
   describe('id format validation (HIGH #1 — sandbox-escape guard)', () => {

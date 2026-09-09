@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import * as http from 'node:http';
 import { exec } from 'child_process';
 import * as crypto from 'crypto';
@@ -30,6 +30,7 @@ import {
 import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
+import { externalHostFromHeaders, persistPublicBase } from '../config/public-base';
 import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
@@ -630,6 +631,22 @@ export class GatewayRouter {
     );
 
     this.app.use(express.json());
+
+    // Inbound-Host fallback for share URLs: learn the gateway's own public base
+    // from real external requests. Production pods sit behind Traefik, whose
+    // routing rule pins the Host to the pod's FQDN, so the Host of an external
+    // request IS the gateway's public host. Persisting it lets the share mint
+    // endpoint fill `url` even on pods whose `gateway.publicUrl` was never set at
+    // provision time (getpod #1939), so image-to-image / image-to-video work
+    // without a per-pod config edit or restart. Loopback / internal / dotless
+    // hosts (MCP subprocess, health checks) are ignored so they can't clobber it.
+    // Best-effort and idempotent (writes only on change); never blocks a request.
+    const agentsRootForBase = this.agentsRoot();
+    this.app.use((req: Request, _res: Response, next: NextFunction) => {
+      const host = externalHostFromHeaders(req.headers);
+      if (host) persistPublicBase(agentsRootForBase, host);
+      next();
+    });
 
     // `/cli` webview terminal viewer routes (device flow + agent-scoped viewer).
     // Registered here (after the body parser, before the /api auth router) so it

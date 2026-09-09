@@ -512,15 +512,19 @@ export class ImageModule implements ToolModule {
         await revokeSharesBestEffort(minted.map((m) => m.share_id));
         return fail('generate_image: image share service returned a mismatched share count.');
       }
-      // Provider fetches these refs over HTTPS, so each needs an absolute URL —
-      // which the share API only fills when gateway.publicUrl is configured.
+      // Provider fetches these refs over HTTPS, so each needs an absolute URL.
+      // The share API fills `url` from gateway.publicUrl, or — when that is unset
+      // — from the public host learned off a real inbound (Traefik-fronted)
+      // request. If it is still empty the gateway hasn't seen an external request
+      // yet this run, so ask the user to resend rather than push a broken URL.
       if (minted.some((m) => !m.url)) {
         await revokeSharesBestEffort(minted.map((m) => m.share_id));
         return fail(
-          'generate_image: image reference sharing requires gateway.publicUrl to be configured ' +
-          '(set it in ~/.claude-gateway/config.json to your externally reachable base URL ending ' +
-          'in /gateway, then restart the gateway). As a workaround, pass a publicly reachable ' +
-          'https:// image URL instead of a local path or artifact ref.',
+          'generate_image: could not resolve the gateway public URL for the reference image yet. ' +
+          'Send your request again (the gateway learns its public URL from an inbound message). ' +
+          'If it keeps failing, set gateway.publicUrl in ~/.claude-gateway/config.json to your ' +
+          'externally reachable base URL ending in /gateway, or pass a publicly reachable https:// ' +
+          'image URL instead of a local path or artifact ref.',
         );
       }
     }
