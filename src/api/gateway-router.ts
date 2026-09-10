@@ -30,7 +30,7 @@ import {
 import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
-import { externalHostFromHeaders, persistPublicBase } from '../config/public-base';
+import { buildTrustList, learnableHostFromRequest, persistPublicBase } from '../config/public-base';
 import { createApiRouter } from './router';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
@@ -638,12 +638,20 @@ export class GatewayRouter {
     // request IS the gateway's public host. Persisting it lets the share mint
     // endpoint fill `url` even on pods whose `gateway.publicUrl` was never set at
     // provision time (getpod #1939), so image-to-image / image-to-video work
-    // without a per-pod config edit or restart. Loopback / internal / dotless
-    // hosts (MCP subprocess, health checks) are ignored so they can't clobber it.
+    // without a per-pod config edit or restart.
+    //
+    // SECURITY: `X-Forwarded-Host`/`Host` are client-controllable, so learning is
+    // FAIL-SAFE-OFF — we only trust them when the request's immediate TCP peer is
+    // in the operator's `gateway.trustedProxies` allowlist (analogous to Express
+    // `trust proxy`). Without an allowlist an attacker on a bare self-host could
+    // poison the pod-wide base URL via a spoofed header. getpod pods opt in by
+    // trusting their Traefik hop. Loopback / internal / dotless hosts (MCP
+    // subprocess, health checks) are ignored so they can't clobber the real host.
     // Best-effort and idempotent (writes only on change); never blocks a request.
     const agentsRootForBase = this.agentsRoot();
+    const trustedProxies = buildTrustList(this.gatewayConfig?.gateway?.trustedProxies);
     this.app.use((req: Request, _res: Response, next: NextFunction) => {
-      const host = externalHostFromHeaders(req.headers);
+      const host = learnableHostFromRequest(req.socket?.remoteAddress, req.headers, trustedProxies);
       if (host) persistPublicBase(agentsRootForBase, host);
       next();
     });

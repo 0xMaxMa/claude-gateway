@@ -362,6 +362,38 @@ public base — e.g. LINE, which derives its host from the inbound webhook — b
 `<base>/shared/<token>` themselves. HTTP is accepted only for local development
 hosts such as `http://host.docker.internal:10850/gateway`.
 
+### `gateway.trustedProxies` (optional) — inbound-Host share fallback
+
+When `publicUrl` is unset, the gateway can instead **learn** its own public base
+from real inbound requests: behind a reverse proxy whose routing rule pins the
+`Host` to this gateway's FQDN, the request `Host` (or `X-Forwarded-Host`) IS the
+public host. It is persisted to a gateway-level `.public-base` file and used as
+the `url` fallback when minting shares — so reference edits (`generate_image`
+i2i) and image-to-video (i2v) work without hand-editing `publicUrl` on each pod.
+
+> **Security — this is fail-safe-off, and must be.** `X-Forwarded-Host` and
+> `Host` are client-controllable. If the gateway is reachable directly, or behind
+> a proxy that does not strip these headers, an attacker could send
+> `X-Forwarded-Host: evil.com` and poison the pod-wide base URL — every share
+> link minted afterward would point at their domain. So the gateway **only**
+> trusts forwarding headers when the request's immediate TCP peer is in this
+> allowlist. **Unset/empty = the fallback never activates**; set `publicUrl`
+> explicitly instead. Any reverse proxy you place in front must also strip or
+> overwrite `X-Forwarded-Host` from client requests.
+
+Entries are IPs, `addr/prefix` CIDRs, or the presets
+`loopback` | `linklocal` | `uniquelocal` | `private` (analogous to Express
+`trust proxy`). A reverse proxy co-located with the gateway on a private/Docker
+network is the common case:
+
+```json
+{
+  "gateway": {
+    "trustedProxies": ["private"]
+  }
+}
+```
+
 ### `gateway.oauthReturnUrl` (optional)
 
 Where to send the browser after a connector OAuth sign-in finishes. The gateway is

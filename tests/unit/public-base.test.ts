@@ -1,12 +1,16 @@
 /**
  * Unit tests for the inbound-Host fallback helper (src/config/public-base.ts):
- * host extraction/validation, atomic idempotent persistence, and read-back.
+ * host extraction/validation, the trusted-proxy gate (fail-safe-off), atomic
+ * idempotent persistence, and read-back.
  */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   externalHostFromHeaders,
+  buildTrustList,
+  isTrustedPeer,
+  learnableHostFromRequest,
   persistPublicBase,
   readPublicBase,
 } from '../../src/config/public-base';
@@ -28,9 +32,10 @@ describe('public-base inbound-Host fallback', () => {
       ).toBe('pod-fwd.develop-vm.getpod.ai');
     });
 
-    it('takes the first entry of a comma list and lowercases', () => {
+    it('takes the last (closest-hop) entry of a comma list and lowercases', () => {
+      // A prepended client-supplied value must never win over the proxy's own.
       expect(
-        externalHostFromHeaders({ 'x-forwarded-host': 'Pod-X.Vm.Example.com, other.com' }),
+        externalHostFromHeaders({ 'x-forwarded-host': 'Evil.com, Pod-X.Vm.Example.com' }),
       ).toBe('pod-x.vm.example.com');
     });
 
@@ -58,6 +63,79 @@ describe('public-base inbound-Host fallback', () => {
 
     it('returns empty when no host header is present', () => {
       expect(externalHostFromHeaders({})).toBe('');
+    });
+  });
+
+  describe('buildTrustList', () => {
+    it('returns null when no allowlist is configured (fail-safe-off)', () => {
+      expect(buildTrustList(undefined)).toBeNull();
+      expect(buildTrustList(null)).toBeNull();
+      expect(buildTrustList([])).toBeNull();
+      expect(buildTrustList(['  ', 'not-an-ip', 'garbage/xx'])).toBeNull();
+    });
+
+    it('matches a CIDR entry', () => {
+      const list = buildTrustList(['10.0.0.0/8']);
+      expect(isTrustedPeer('10.1.2.3', list)).toBe(true);
+      expect(isTrustedPeer('11.0.0.1', list)).toBe(false);
+    });
+
+    it('matches a single IP entry', () => {
+      const list = buildTrustList(['203.0.113.7']);
+      expect(isTrustedPeer('203.0.113.7', list)).toBe(true);
+      expect(isTrustedPeer('203.0.113.8', list)).toBe(false);
+    });
+
+    it('supports the `private` preset (RFC1918 + loopback + link-local)', () => {
+      const list = buildTrustList(['private']);
+      expect(isTrustedPeer('172.20.0.5', list)).toBe(true); // docker bridge
+      expect(isTrustedPeer('192.168.1.10', list)).toBe(true);
+      expect(isTrustedPeer('127.0.0.1', list)).toBe(true);
+      expect(isTrustedPeer('8.8.8.8', list)).toBe(false); // public
+    });
+
+    it('unwraps IPv4-mapped IPv6 peers', () => {
+      const list = buildTrustList(['10.0.0.0/8']);
+      expect(isTrustedPeer('::ffff:10.1.2.3', list)).toBe(true);
+    });
+
+    it('matches IPv6 loopback via preset', () => {
+      const list = buildTrustList(['loopback']);
+      expect(isTrustedPeer('::1', list)).toBe(true);
+      expect(isTrustedPeer('2001:db8::1', list)).toBe(false);
+    });
+  });
+
+  describe('isTrustedPeer', () => {
+    it('is always false without a trust list', () => {
+      expect(isTrustedPeer('10.1.2.3', null)).toBe(false);
+    });
+    it('is false for a missing / unparseable peer address', () => {
+      const list = buildTrustList(['private']);
+      expect(isTrustedPeer(undefined, list)).toBe(false);
+      expect(isTrustedPeer('', list)).toBe(false);
+      expect(isTrustedPeer('not-an-ip', list)).toBe(false);
+    });
+  });
+
+  describe('learnableHostFromRequest (the security gate)', () => {
+    const headers = { 'x-forwarded-host': 'pod-x.vm.example.com' };
+
+    it('learns the host when the peer is a trusted proxy', () => {
+      const list = buildTrustList(['private']);
+      expect(learnableHostFromRequest('172.20.0.5', headers, list)).toBe('pod-x.vm.example.com');
+    });
+
+    it('refuses a spoofed X-Forwarded-Host from an untrusted peer', () => {
+      const list = buildTrustList(['private']);
+      // Public attacker hitting a directly-exposed gateway with a forged header.
+      expect(learnableHostFromRequest('203.0.113.9', { 'x-forwarded-host': 'evil.com' }, list)).toBe(
+        '',
+      );
+    });
+
+    it('never learns when no allowlist is configured (default)', () => {
+      expect(learnableHostFromRequest('172.20.0.5', headers, null)).toBe('');
     });
   });
 

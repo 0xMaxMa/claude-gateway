@@ -398,6 +398,18 @@ export interface GatewayConfig {
      */
     publicUrl?: string;
     /**
+     * Allowlist of reverse-proxy source addresses whose forwarding headers
+     * (`X-Forwarded-Host` / `Host`) may be trusted to learn this gateway's own
+     * public base URL when `publicUrl` is unset (the inbound-Host share fallback;
+     * see `src/config/public-base.ts`). Entries are IPs, `addr/prefix` CIDRs, or
+     * the presets `loopback` | `linklocal` | `uniquelocal` | `private`, analogous
+     * to Express `trust proxy`. FAIL-SAFE-OFF: when unset/empty the gateway never
+     * learns its host from request headers (a spoofed header could otherwise
+     * poison share links on a directly-exposed self-host), and `publicUrl` must
+     * be set explicitly. A co-located reverse proxy typically uses `["private"]`.
+     */
+    trustedProxies?: string[];
+    /**
      * Optional "come back here after signing in" URL for the generic MCP
      * OAuth callback (oauth-connectors-router.ts) — e.g. a downstream
      * product's own connectors page. This gateway is product-agnostic, so
