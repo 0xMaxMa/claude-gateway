@@ -19,10 +19,9 @@
  * The actual fix is the `incremental: true` + `tsBuildInfoFile` cache below:
  * the first build after a fresh checkout still pays full cost, but every
  * repeat `tsc` invocation on the same checkout (`pretest`, `pretest:unit`,
- * `typecheck`, `check:full`) reuses the cached type info instead of
- * recompiling `src/` from scratch — which is the case that actually matters
- * on this host, where the same checkout runs tests repeatedly across a
- * session.
+ * `typecheck`) reuses the cached type info instead of recompiling `src/`
+ * from scratch — which is the case that actually matters on this host,
+ * where the same checkout runs tests repeatedly across a session.
  */
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -68,16 +67,10 @@ describe('build pipeline is not needlessly heavy on this host (#479)', () => {
     expect(scripts['pretest']).toBe('npm run build');
   });
 
-  it('provides a single check:full pipeline that does not run tsc twice', () => {
-    const checkFull = scripts['check:full'];
-    expect(checkFull).toBeDefined();
-    // `npm run build` (tsc, which type-checks as part of compiling) must appear
-    // exactly once, and check:full must not also shell out to `npm run
-    // typecheck` / a bare `tsc --noEmit` — that would type-check the same
-    // source tree a second time for nothing.
-    expect((checkFull!.match(/npm run build/g) ?? []).length).toBe(1);
-    expect(checkFull).not.toMatch(/npm run typecheck/);
-    expect(checkFull).not.toMatch(/tsc --noEmit/);
-    expect(checkFull).toMatch(/jest/);
+  it('does not carry a redundant check:full script duplicating npm test', () => {
+    // npm test already runs `pretest` (npm run build) before jest, so a
+    // separate check:full: "npm run build && jest" script would be an exact
+    // duplicate of `npm test` — not a distinct pipeline.
+    expect(scripts['check:full']).toBeUndefined();
   });
 });

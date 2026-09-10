@@ -41,7 +41,6 @@
     "integration:hb": "jest --testPathPattern=heartbeat-e2e --testTimeout=15000",
     "integration:cs": "jest --testPathPattern=character-system --testTimeout=15000",
     "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ./.tsbuildinfo-check",
-    "check:full": "npm run build && NODE_OPTIONS=--max-old-space-size=2560 jest",
     "gen-cli": "ts-node scripts/gen-cli.ts",
     "gen-cli:check": "ts-node scripts/gen-cli.ts --check"
   },
