@@ -701,6 +701,102 @@ describe('POST /api/v1/agents/wizard/start', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/agents/describe/rewrite
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /api/v1/agents/describe/rewrite', () => {
+  it('returns 403 without admin key', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${READ_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(403);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 400 when text is missing', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({});
+      expect(res.status).toBe(400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 400 when text is empty/whitespace', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: '   ' });
+      expect(res.status).toBe(400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 200 with rewritten text on success', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('A polished, clarified description of the agent.');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('A polished, clarified description of the agent.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips markdown code fences from the model output', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('```markdown\nA fenced description that should be unwrapped.\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('A fenced description that should be unwrapped.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 500 when Claude fails, without leaking error details', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeFailure();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Failed to re-write description');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // The concurrency cap (429 when rewritesInFlight >= REWRITE_MAX_CONCURRENT) is a
+  // 3-line counter guard, kept as its own counter separate from wizardStartsInFlight
+  // (see router.ts). Same brittleness note as the wizard/start concurrency case above —
+  // covered by manual smoke test rather than orchestrating genuinely concurrent hanging
+  // spawns in Jest's single-threaded event loop.
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/v1/agents/wizard/:wizardId/avatar
 // ─────────────────────────────────────────────────────────────────────────────
 

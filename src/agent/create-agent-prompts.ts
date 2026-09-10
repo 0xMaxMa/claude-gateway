@@ -88,6 +88,31 @@ export function parseGeneratedFiles(output: string): Map<string, string> {
 }
 
 /**
+ * Build the Claude prompt to re-write a rough "describe your agent" draft.
+ * Polishes wording and moderately clarifies what's implied by the draft —
+ * never invents capabilities or intent the user didn't express.
+ */
+export function buildRewriteDescriptionPrompt(currentText: string): string {
+  const safeText = currentText.replace(/"""/g, "'''");
+  return `You are a senior prompt engineer cleaning up a rough draft description of a Claude Gateway agent.
+
+Current draft:
+"""
+${safeText}
+"""
+
+Rewrite this draft:
+- Fix grammar, wording, and clarity.
+- Moderately clarify and flesh out what is already implied by the draft (e.g. role, context, behavior hinted at but not spelled out).
+- Do NOT invent new capabilities, responsibilities, or intent that the draft does not express or imply.
+- Keep the same language the draft is written in.
+- Preserve the original meaning and scope — this is a polish-and-clarify pass, not a rewrite into something new.
+
+Output ONLY the rewritten description text — no preamble, no explanation, no commentary, no quotes, no markdown code fences.
+Start directly with the first word of the rewritten description.`;
+}
+
+/**
  * Build the Claude update prompt for an existing agent.md file.
  */
 export function buildUpdatePrompt(name: string, currentContent: string): string {
