@@ -1577,6 +1577,9 @@ npm test
 
 # Type check without building
 npm run typecheck
+
+# Build + full test suite in one pipeline (build runs once, not twice)
+npm run check:full
 ```
 
 ### Writing tests that wait
