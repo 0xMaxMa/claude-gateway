@@ -4,19 +4,25 @@
  * host to ~95% RAM with swap saturated (peak RSS occurred during the
  * `pretest` -> `tsc` step, not during the Jest run itself).
  *
- * `tests/unit/**` never touches `dist/` for real: the only unit test that
- * references it (`whatsapp-cloud-mcp.test.ts`) uses `jest.mock(path, factory,
- * { virtual: true })`, and `mcp-no-src-imports.test.ts` only checks that a
- * matching `src/` counterpart exists via `existsSync`, never reads `dist/`
- * itself. So `test:unit` paid the full build cost for nothing.
+ * `pretest`/`pretest:unit` still build before tests run — several `mcp/tools/**`
+ * modules under test (`mcp/tools/telegram/typing.ts`, `whatsapp-cloud/module.ts`,
+ * `slack/module.ts`, `skills/handlers.ts`) contain real (non-mocked) TypeScript
+ * imports from `dist/**`, so ts-jest genuinely needs `dist/` built to resolve
+ * them — a `jest.mock(path, factory, { virtual: true })` only substitutes the
+ * module at runtime, it does not stop ts-jest's TypeScript compiler from
+ * resolving the import statement at compile time (confirmed by running
+ * `test:unit` against a checkout with no `dist/`: TS2307 "Cannot find module"
+ * on those four files). Skipping the build for `test:unit` alone would break
+ * it on any fresh checkout and in `release.yml`, which runs `npm run test:unit`
+ * before its separate `Build` step.
  *
- * The full `npm test` run is different: `tests/integration/cli-dispatch.test.ts`
- * spawns the real `dist/entry.js` binary and `tests/helpers/pty-harness.ts`
- * spawns the real `dist/shell/claude-pty-shell.js`, so that path still needs a
- * real build — `pretest` must stay wired there. The fix is scoped to the
- * `test:unit` path (which was needlessly building) plus incremental caching
- * so repeat `tsc` invocations (full `npm test`, `typecheck`, `check:full`)
- * stay cheap after the first.
+ * The actual fix is the `incremental: true` + `tsBuildInfoFile` cache below:
+ * the first build after a fresh checkout still pays full cost, but every
+ * repeat `tsc` invocation on the same checkout (`pretest`, `pretest:unit`,
+ * `typecheck`, `check:full`) reuses the cached type info instead of
+ * recompiling `src/` from scratch — which is the case that actually matters
+ * on this host, where the same checkout runs tests repeatedly across a
+ * session.
  */
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
@@ -46,12 +52,13 @@ describe('build pipeline is not needlessly heavy on this host (#479)', () => {
     expect(buildInfoPath.replace(/^\.\//, '').split('/')[0]).not.toBe('dist');
   });
 
-  it('does not force a full tsc build before running unit tests alone', () => {
-    // test:unit only exercises tests/unit/**, none of which reads a real dist/
-    // artifact (mocks are `{ virtual: true }`, and the src-import guard checks
-    // src/ existence, not dist/ content) — so it must not carry a pretest:unit
-    // build hook.
-    expect(scripts['pretest:unit']).toBeUndefined();
+  it('still builds before unit tests — several mcp/tools/** files import dist/ for real', () => {
+    // mcp/tools/telegram/typing.ts, whatsapp-cloud/module.ts, slack/module.ts,
+    // and skills/handlers.ts import from dist/** directly (not behind a jest
+    // virtual mock), so ts-jest needs a real dist/ to type-check them.
+    // Removing this hook makes `npm run test:unit` fail with TS2307 on a
+    // fresh checkout (and in release.yml, which runs it before its build step).
+    expect(scripts['pretest:unit']).toBe('npm run build');
     expect(scripts['test:unit']).toBeDefined();
   });
 
