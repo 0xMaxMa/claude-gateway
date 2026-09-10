@@ -44,7 +44,7 @@ function makeClient(overrides: Partial<ILinkClient> = {}): jest.Mocked<ILinkClie
     requestLinkQr: jest.fn().mockResolvedValue({ qrDataUri: 'data:image/png;base64,QR', loginSessionId: 's1' }),
     pollLinkStatus: jest.fn().mockResolvedValue({ linked: false }),
     getUpdates: jest.fn().mockResolvedValue([]),
-    sendText: jest.fn().mockResolvedValue({ contextToken: 'ctx-1' }),
+    sendText: jest.fn().mockResolvedValue(undefined),
     ...overrides,
   } as jest.Mocked<ILinkClient>;
 }
@@ -211,13 +211,9 @@ describe('WeChatManager', () => {
     await manager.unlink();
   });
 
-  test('sendMessage chunks long text and echoes the returned contextToken on the next send', async () => {
+  test('sendMessage chunks long text, using the same contextToken for every chunk (sendmessage returns none to refresh it)', async () => {
     const client = makeClient({
       pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
-      sendText: jest
-        .fn()
-        .mockResolvedValueOnce({ contextToken: 'ctx-a' })
-        .mockResolvedValueOnce({ contextToken: 'ctx-b' }),
     });
     const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
     await manager.startLinking();
@@ -227,7 +223,34 @@ describe('WeChatManager', () => {
 
     expect(client.sendText).toHaveBeenCalledTimes(2);
     expect(client.sendText).toHaveBeenNthCalledWith(1, CREDS, 'u1', 'a'.repeat(3990), undefined);
-    expect(client.sendText).toHaveBeenNthCalledWith(2, CREDS, 'u1', 'b'.repeat(20), 'ctx-a');
+    expect(client.sendText).toHaveBeenNthCalledWith(2, CREDS, 'u1', 'b'.repeat(20), undefined);
+
+    await manager.unlink();
+  });
+
+  test("an inbound message's contextToken is captured and echoed on the next send to that sender (real iLink protocol: the token flows from received messages, sendmessage returns none)", async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 'm1', fromId: 'u1', text: 'hi', contextToken: 'ctx-from-u1' }])
+        .mockResolvedValue([]),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+    await manager.startLinking();
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 1);
+    // Give the poll loop's first iteration a chance to process the update
+    // before sending — real iLink delivers the token strictly before any
+    // reply would be composed, since the reply is presumably triggered by
+    // the very message that carried it.
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 2);
+
+    await manager.sendMessage('u1', 'reply');
+
+    expect(client.sendText).toHaveBeenCalledWith(CREDS, 'u1', 'reply', 'ctx-from-u1');
 
     await manager.unlink();
   });

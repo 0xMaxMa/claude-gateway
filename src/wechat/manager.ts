@@ -1,22 +1,27 @@
 /**
  * WeChatManager — one instance per agent, owning that agent's link to a
- * single personal WeChat account through Tencent's iLink Bot API bridge.
+ * single personal WeChat account through Tencent's iLink Bot API ("WeChat
+ * ClawBot" — see src/wechat/ilink-client.ts's doc comment: this is Tencent's
+ * own self-serve product, `Tencent/openclaw-weixin` on GitHub, not a
+ * third-party grey-market bridge as first assumed during research).
  *
  * Deliberately NOT modeled on a persistent-socket channel (there is no
  * WeChat equivalent of Discord's gateway connection or WhatsApp's Baileys
  * socket in this codebase). iLink delivers messages via long-polling
- * (`getupdates`, 35s timeout per the Hermes-agent doc this was researched
- * from) — there is also no existing hand-rolled long-poll loop to copy in
- * this codebase; Telegram's polling lives inside the external
- * `claude --channels` CLI, not here. The loop below is the new piece.
+ * (`getupdates`, 35s timeout, confirmed against Tencent's own protocol doc)
+ * — there is also no existing hand-rolled long-poll loop to copy in this
+ * codebase; Telegram's polling lives inside the external `claude --channels`
+ * CLI, not here. The loop below is the new piece.
  *
  * What IS reused from existing channels:
  *  - The QR/status state machine shape (`status`/`qr`/`loggedOut`) mirrors
  *    every device-linked channel's UX contract, kept intentionally small
  *    since WeChat (unlike WhatsApp/Baileys) has no pairing-code option and
  *    no multi-account support in v1.
- *  - `WECHAT_CHANNEL_ENABLED` is a hard kill switch: iLink is a third-party
- *    dependency GetPod does not control, so the whole channel must be
+ *  - `WECHAT_CHANNEL_ENABLED` is a hard kill switch: even though this is
+ *    Tencent's own product, GetPod doesn't control it (protocol changes,
+ *    the undocumented `need_verifycode`/`verify_code_blocked` states this
+ *    integration can't yet act on, etc.), so the whole channel must be
  *    disableable with one env var and no redeploy of manager logic.
  */
 import * as fs from 'fs';
@@ -220,13 +225,19 @@ export class WeChatManager {
    * Send a single outbound message, chunked over iLink's 4000-char limit with
    * the documented 0.3s inter-chunk delay. Media is out of scope for v1 (see
    * the plan's non-goals) — text only.
+   *
+   * `contextToken` is NOT refreshed here — per Tencent's real protocol
+   * (confirmed against `Tencent/openclaw-weixin`'s own doc), the token flows
+   * the other way: an INBOUND message establishes it (captured in
+   * `runPollLoop` below), and every subsequent send to that sender echoes
+   * whatever was captured last. `sendmessage`'s own response carries no
+   * token to update.
    */
   async sendMessage(toId: string, text: string): Promise<void> {
     if (!this.credentials) throw new Error('WeChat account is not linked');
     const chunks = chunkWeChatText(text);
     for (let i = 0; i < chunks.length; i++) {
-      const result = await this.client.sendText(this.credentials, toId, chunks[i], this.contextTokens[toId]);
-      this.contextTokens[toId] = result.contextToken;
+      await this.client.sendText(this.credentials, toId, chunks[i], this.contextTokens[toId]);
       if (i < chunks.length - 1) await sleep(WECHAT_CHUNK_DELAY_MS);
     }
     await this.persistSession();
@@ -244,6 +255,10 @@ export class WeChatManager {
         const updates = await this.client.getUpdates(this.credentials, this.timing.pollTimeoutSeconds);
         backoffMs = this.timing.pollBackoffBaseMs;
         for (const update of updates) {
+          // Captured unconditionally, even for a redelivered id: iLink may
+          // hand back a fresher token on a retry, and there's no separate
+          // signal for "this token changed" to key off instead.
+          if (update.contextToken) this.contextTokens[update.fromId] = update.contextToken;
           if (this.isDuplicate(update.id)) continue;
           this.rememberMessage(update.id);
           this.onMessage?.(update);

@@ -17,7 +17,12 @@ import { DiscordReceiver } from '../discord/receiver';
 import { LineReplyManager } from './line-reply-manager';
 import { SlackClient } from '../api/slack-client';
 import { WeChatManager, type WeChatStatus } from '../wechat/manager';
-import { createILinkClient, type ILinkUpdate } from '../wechat/ilink-client';
+import {
+  createILinkClient,
+  createFakeILinkClient,
+  isWeChatILinkFakeEnabled,
+  type ILinkUpdate,
+} from '../wechat/ilink-client';
 import { isWeChatConversationAllowed } from '../api/wechat-access';
 import { recordDeniedSender, getPendingSender, generatePairingCode } from '../api/pending-senders';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
@@ -3116,10 +3121,19 @@ export class AgentRunner extends EventEmitter {
   /** Lazily construct this agent's WeChatManager — safe to call repeatedly. */
   private ensureWeChatManager(): WeChatManager {
     if (!this.wechat) {
+      // WECHAT_ILINK_FAKE is local-testing-only (see ilink-client.ts's
+      // createFakeILinkClient doc comment) — never set in a real deployment.
+      // The real client needs no account/credential of its own (confirmed
+      // against Tencent's own protocol doc — see ilink-client.ts's module
+      // comment), this flag exists purely to skip a real QR scan while
+      // iterating on the UI.
+      const client = isWeChatILinkFakeEnabled()
+        ? createFakeILinkClient()
+        : createILinkClient(process.env.ILINK_BASE_URL ?? '');
       this.wechat = new WeChatManager(
         this.agentConfig,
         this.gatewayConfig.gateway.logDir,
-        createILinkClient(process.env.ILINK_BASE_URL ?? ''),
+        client,
         (update) => this.handleWeChatInboundMessage(update),
       );
     }
