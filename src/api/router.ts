@@ -1380,19 +1380,16 @@ export function createApiRouter(
       return;
     }
     const existingWizard = wizardStore.findByAgentId(id);
-    if (existingWizard) {
-      if (existingWizard.step === 'pending') {
-        // A prior draft for this id never advanced past generation — the user hit
-        // Back/Cancel then restarted with the same id (#2493). It owns no on-disk
-        // agent, so replace it rather than dead-ending the resume with a 409.
-        // WIZARD_MAX_CONCURRENT still caps generation load.
-        wizardStore.delete(existingWizard.wizardId);
-      } else {
-        // 'confirmed'/'complete': files were already written — a real conflict.
-        res.status(409).json({ error: `Wizard for agent '${id}' is already in progress` });
-        return;
-      }
+    if (existingWizard && existingWizard.step !== 'pending') {
+      // 'confirmed'/'complete': files were already written — a real conflict.
+      res.status(409).json({ error: `Wizard for agent '${id}' is already in progress` });
+      return;
     }
+    // A prior 'pending' draft for this id never advanced past generation — the
+    // user hit Back/Cancel then restarted with the same id (#2493). It owns no
+    // on-disk agent, so it's safe to replace — but don't delete it until the
+    // replacement is guaranteed below, so a 429/500 doesn't destroy it for nothing.
+    // WIZARD_MAX_CONCURRENT still caps generation load.
 
     if (wizardStartsInFlight >= WIZARD_MAX_CONCURRENT) {
       res.status(429).json({ error: 'Too many wizard starts in progress, please retry later' });
@@ -1435,6 +1432,7 @@ export function createApiRouter(
     }
 
     const files = Object.fromEntries(parsedFiles);
+    if (existingWizard) wizardStore.delete(existingWizard.wizardId);
     const state = wizardStore.create(id, prompt.trim(), files);
     if (signatureEmoji) wizardStore.update(state.wizardId, { signatureEmoji });
 

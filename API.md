@@ -737,7 +737,7 @@ curl -X POST \
 |--------|------|
 | 400 | Invalid `id` format or missing `prompt` |
 | 403 | Not an admin key |
-| 409 | Agent or wizard already exists for this ID |
+| 409 | Agent already exists, or a `confirmed`/`complete` wizard is already in progress for this ID (a `pending` draft is replaced instead) |
 | 429 | Too many wizard starts in progress (max 2 concurrent) |
 | 500 | Claude generation failed |
 
