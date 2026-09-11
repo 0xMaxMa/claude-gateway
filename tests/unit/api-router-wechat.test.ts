@@ -142,13 +142,13 @@ describe('WeChat channel management API', () => {
 
     it('surfaces a 500 when the kill switch is off (startWeChatLinking rejects)', async () => {
       const { runner } = fakeRunner({
-        startWeChatLinking: jest.fn().mockRejectedValue(new Error('WECHAT_CHANNEL_ENABLED is not "true"')),
+        startWeChatLinking: jest.fn().mockRejectedValue(new Error('WECHAT_CHANNEL_DISABLED is "true"')),
       });
       runners.set(AGENT_ID, runner);
 
       const res = await supertest.default(app).post(`/api/v1/agents/${AGENT_ID}/wechat/link`).set(WRITE_ONLY);
       expect(res.status).toBe(500);
-      expect(res.body.error).toMatch(/WECHAT_CHANNEL_ENABLED/);
+      expect(res.body.error).toMatch(/WECHAT_CHANNEL_DISABLED/);
     });
   });
 

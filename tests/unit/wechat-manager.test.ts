@@ -80,41 +80,41 @@ describe('chunkWeChatText()', () => {
 });
 
 describe('isWeChatChannelEnabled()', () => {
-  const original = process.env.WECHAT_CHANNEL_ENABLED;
+  const original = process.env.WECHAT_CHANNEL_DISABLED;
   afterEach(() => {
-    if (original === undefined) delete process.env.WECHAT_CHANNEL_ENABLED;
-    else process.env.WECHAT_CHANNEL_ENABLED = original;
+    if (original === undefined) delete process.env.WECHAT_CHANNEL_DISABLED;
+    else process.env.WECHAT_CHANNEL_DISABLED = original;
   });
 
-  test('false when unset', () => {
-    delete process.env.WECHAT_CHANNEL_ENABLED;
-    expect(isWeChatChannelEnabled()).toBe(false);
-  });
-  test('false for any value other than the literal string "true"', () => {
-    process.env.WECHAT_CHANNEL_ENABLED = 'TRUE';
-    expect(isWeChatChannelEnabled()).toBe(false);
-    process.env.WECHAT_CHANNEL_ENABLED = '1';
-    expect(isWeChatChannelEnabled()).toBe(false);
-  });
-  test('true only for the literal string "true"', () => {
-    process.env.WECHAT_CHANNEL_ENABLED = 'true';
+  test('true when unset — enabled by default so an existing deployer needs no config to get WeChat on update', () => {
+    delete process.env.WECHAT_CHANNEL_DISABLED;
     expect(isWeChatChannelEnabled()).toBe(true);
+  });
+  test('true for any value other than the literal string "true"', () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'TRUE';
+    expect(isWeChatChannelEnabled()).toBe(true);
+    process.env.WECHAT_CHANNEL_DISABLED = '1';
+    expect(isWeChatChannelEnabled()).toBe(true);
+  });
+  test('false only for the literal string "true" — the admin kill switch', () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    expect(isWeChatChannelEnabled()).toBe(false);
   });
 });
 
 describe('WeChatManager', () => {
   let workspace: string;
-  const original = process.env.WECHAT_CHANNEL_ENABLED;
+  const original = process.env.WECHAT_CHANNEL_DISABLED;
 
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-manager-test-'));
-    process.env.WECHAT_CHANNEL_ENABLED = 'true';
+    delete process.env.WECHAT_CHANNEL_DISABLED;
   });
 
   afterEach(() => {
     fs.rmSync(workspace, { recursive: true, force: true });
-    if (original === undefined) delete process.env.WECHAT_CHANNEL_ENABLED;
-    else process.env.WECHAT_CHANNEL_ENABLED = original;
+    if (original === undefined) delete process.env.WECHAT_CHANNEL_DISABLED;
+    else process.env.WECHAT_CHANNEL_DISABLED = original;
   });
 
   test('starts unlinked with no QR', () => {
@@ -122,10 +122,10 @@ describe('WeChatManager', () => {
     expect(manager.getStatus()).toEqual({ status: 'unlinked', qr: undefined, loggedOut: false });
   });
 
-  test('startLinking() throws when the channel kill switch is off', async () => {
-    delete process.env.WECHAT_CHANNEL_ENABLED;
+  test('startLinking() throws when an admin has set the kill switch', async () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
     const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
-    await expect(manager.startLinking()).rejects.toThrow(/WECHAT_CHANNEL_ENABLED/);
+    await expect(manager.startLinking()).rejects.toThrow(/WECHAT_CHANNEL_DISABLED/);
   });
 
   test('startLinking() shows the QR, then transitions to linked once iLink confirms', async () => {
@@ -419,7 +419,7 @@ describe('WeChatManager', () => {
       path.join(workspace, '.wechat-state', 'session.json'),
       JSON.stringify({ credentials: CREDS, contextTokens: {} }),
     );
-    delete process.env.WECHAT_CHANNEL_ENABLED;
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
 
     const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
     await manager.resumeIfLinked();

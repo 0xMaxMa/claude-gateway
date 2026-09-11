@@ -18,12 +18,17 @@
  *    every device-linked channel's UX contract, kept intentionally small
  *    since WeChat (unlike WhatsApp/Baileys) has no pairing-code option and
  *    no multi-account support in v1.
- *  - `WECHAT_CHANNEL_ENABLED` is a hard kill switch: even though this is
- *    Tencent's own product, no deployer of this gateway controls it
- *    (protocol changes, the undocumented `need_verifycode`/
- *    `verify_code_blocked` states this integration can't yet act on, etc.),
- *    so the whole channel must be disableable with one env var and no
- *    redeploy of manager logic.
+ *  - `WECHAT_CHANNEL_DISABLED` is a hard kill switch, enabled by default (like
+ *    every other channel here — WhatsApp's own unofficial Baileys bridge has
+ *    no equivalent gate; a user linking via QR is already the informed
+ *    consent). Opt-OUT rather than opt-IN deliberately: an opt-in flag would
+ *    silently break WeChat for every existing deployer on their first update
+ *    after this channel ships, since nothing prompts them to set it. The
+ *    escape hatch still exists because, even though this is Tencent's own
+ *    product, no deployer of this gateway controls it (protocol changes, the
+ *    undocumented `need_verifycode`/`verify_code_blocked` states this
+ *    integration can't yet act on, etc.) — an admin who hits one of those can
+ *    kill the whole channel with one env var and no redeploy of manager logic.
  */
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -130,7 +135,7 @@ export function chunkWeChatText(text: string): string[] {
 }
 
 export function isWeChatChannelEnabled(): boolean {
-  return process.env.WECHAT_CHANNEL_ENABLED === 'true';
+  return process.env.WECHAT_CHANNEL_DISABLED !== 'true';
 }
 
 function wechatStateFile(workspace: string): string {
@@ -190,15 +195,15 @@ export class WeChatManager {
   }
 
   /**
-   * Start a fresh QR-code linking flow. Requires `WECHAT_CHANNEL_ENABLED` —
-   * this is the hard kill switch for a third-party dependency no deployer of
-   * this gateway controls (see module doc comment).
+   * Start a fresh QR-code linking flow. Blocked only if an admin has set
+   * `WECHAT_CHANNEL_DISABLED` — the hard kill switch for a third-party
+   * dependency no deployer of this gateway controls (see module doc comment).
    */
   async startLinking(): Promise<void> {
     if (!isWeChatChannelEnabled()) {
       throw new Error(
-        'WeChat channel is disabled (WECHAT_CHANNEL_ENABLED is not "true") — the iLink bridge ' +
-          'this channel depends on can be killed instantly without a redeploy; ask an admin to enable it.',
+        'WeChat channel is disabled (WECHAT_CHANNEL_DISABLED is "true") — the iLink bridge ' +
+          'this channel depends on can be killed instantly without a redeploy; ask an admin to re-enable it.',
       );
     }
     this.stopping = false;
