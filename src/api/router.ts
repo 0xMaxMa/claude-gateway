@@ -436,6 +436,14 @@ const WIZARD_MAX_CONCURRENT = 2;
 let rewritesInFlight = 0;
 const REWRITE_MAX_CONCURRENT = 2;
 
+/**
+ * Max input length for a describe/rewrite. A real "describe your agent" draft is
+ * far shorter than this; the cap keeps an oversized payload from pinning a Claude
+ * subprocess for the full 120s timeout (two such requests would occupy both
+ * REWRITE_MAX_CONCURRENT slots and block everyone else).
+ */
+const REWRITE_MAX_TEXT_LENGTH = 8_000;
+
 /** Call Claude --print with stdin prompt; resolves with stdout on exit 0. */
 function runClaude(prompt: string, timeoutMs = 120_000): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -1468,6 +1476,10 @@ export function createApiRouter(
       res.status(400).json({ error: 'text is required' });
       return;
     }
+    if (text.length > REWRITE_MAX_TEXT_LENGTH) {
+      res.status(400).json({ error: `text too long (max ${REWRITE_MAX_TEXT_LENGTH} characters)` });
+      return;
+    }
 
     if (rewritesInFlight >= REWRITE_MAX_CONCURRENT) {
       res.status(429).json({ error: 'Too many re-write requests in progress, please retry later' });
@@ -1486,7 +1498,12 @@ export function createApiRouter(
     }
 
     let rewritten = rawOutput.trim();
-    const fenceMatch = rewritten.match(/^```(?:markdown|md|text)?\s*\n([\s\S]*?)\n```\s*$/);
+    // Strip a wrapping code fence if the model added one, regardless of the
+    // language hint (```markdown, ```md, ```text, ```plaintext, ```html, …) or
+    // none at all. Requires the opening fence to sit on its own line so inline
+    // backticks in a single-line answer are never mistaken for a wrapper; the
+    // closing newline is optional and CRLF is tolerated.
+    const fenceMatch = rewritten.match(/^```[^\r\n`]*\r?\n([\s\S]*?)\r?\n?```\s*$/);
     if (fenceMatch) rewritten = (fenceMatch[1] ?? '').trim();
 
     // Claude occasionally returns an empty/whitespace-only completion. Never

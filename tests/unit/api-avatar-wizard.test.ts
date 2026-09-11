@@ -744,6 +744,23 @@ describe('POST /api/v1/agents/describe/rewrite', () => {
     }
   });
 
+  it('returns 400 when text exceeds the max length, before spawning Claude', async () => {
+    const { app, tmpDir } = buildCtx();
+    // An oversized draft would otherwise pin a Claude subprocess for the full
+    // timeout; reject it up front (no runClaude mock is set, so if the handler
+    // did spawn, the test would surface it rather than 400 cleanly).
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'x'.repeat(8_001) });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/too long/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('returns 200 with rewritten text on success', async () => {
     const { app, tmpDir } = buildCtx();
     mockClaudeSuccess('A polished, clarified description of the agent.');
@@ -769,6 +786,38 @@ describe('POST /api/v1/agents/describe/rewrite', () => {
         .send({ text: 'a rough draft' });
       expect(res.status).toBe(200);
       expect(res.body.text).toBe('A fenced description that should be unwrapped.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips code fences with any language hint (not just markdown/md/text)', async () => {
+    const { app, tmpDir } = buildCtx();
+    // The model sometimes tags the fence with an unexpected language; the older
+    // regex only knew markdown|md|text and would leak the ``` into the saved text.
+    mockClaudeSuccess('```plaintext\nUnwrapped despite the plaintext hint.\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('Unwrapped despite the plaintext hint.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips a bare code fence with no language and no trailing newline', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('```\nUnwrapped from a bare fence.```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('Unwrapped from a bare fence.');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
