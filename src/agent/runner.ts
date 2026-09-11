@@ -25,7 +25,7 @@ import {
   type ILinkUpdate,
 } from '../wechat/ilink-client';
 import { isWeChatConversationAllowed } from '../api/wechat-access';
-import { recordDeniedSender, getPendingSender, generatePairingCode } from '../api/pending-senders';
+import { recordDeniedSender, getPendingSender, generatePairingCode, clearPendingSender } from '../api/pending-senders';
 import { hasMarkdown, normalizeTelegramLineBreaks, toTelegramHtml, containsTelegramHtml } from '../telegram/markdown';
 import { detectSkillCommand, formatSkillContext, type SkillRegistry } from '../skills';
 import { isBuiltinCommand } from './builtin-commands';
@@ -3218,6 +3218,15 @@ export class AgentRunner extends EventEmitter {
       }
       return;
     }
+
+    // Self-heal a stale pending-knock record for a sender who's now allowed.
+    // Approving a sender already clears their pending entry (router.ts's
+    // wechat_dm_allowlist PATCH handler), but confirmed live 2026-09-11: a
+    // sender can still show as both allowed AND pending in the UI, most
+    // likely a race between that approval and a message processed in the
+    // same window. Clearing it here too means any such staleness can't
+    // outlive this sender's very next allowed message.
+    clearPendingSender('wechat', this.agentConfig.id, update.fromId);
 
     const meta: Record<string, string> = {
       source: 'wechat',
