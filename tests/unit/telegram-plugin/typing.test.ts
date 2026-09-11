@@ -69,6 +69,19 @@ describe('createWorkingStateManager', () => {
     jest.clearAllMocks()
   })
 
+  test('managed turns never enter the legacy heartbeat/stall loop, including repeated notification starts', async () => {
+    const bot = makeBotApi(), fsApi = makeFsApi(), incident = jest.fn();
+    const mgr = createWorkingStateManager(TYPING_DIR, bot, fsApi, incident, 'orchestration');
+    mgr.start('123');
+    await jest.advanceTimersByTimeAsync(STALLED_TIMEOUT_MS * 2 + 60000);
+    mgr.start('123');
+    await jest.advanceTimersByTimeAsync(STALLED_TIMEOUT_MS * 2 + 60000);
+    expect(mgr.states.size).toBe(0);
+    expect(fsApi.writeFileSync).not.toHaveBeenCalled();
+    expect(bot.sendMessage).not.toHaveBeenCalled();
+    expect(incident).not.toHaveBeenCalled();
+  });
+
   describe('start()', () => {
     test('creates signal file and initializes state', () => {
       const bot = makeBotApi()

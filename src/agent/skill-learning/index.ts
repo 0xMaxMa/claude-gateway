@@ -17,7 +17,7 @@ import { runReviewer, type ClaudeSpawnFn } from './reviewer';
 import { applyProposal, readSkillOrigin, type ExistingSkill } from './writer';
 import { startCurator, curateOnce, type CuratorResult } from './curator';
 import { computeRollup } from './metrics';
-import { SkillNotifier, buildChannelSend, type ChannelTokens } from './notifier';
+import { SkillNotifier, type SkillNotifierOpts, type ChannelTokens } from './notifier';
 import type { SessionSignals, SkillLearningConfig, ResolvedSkillLearningCfg, SkillMetricsRollup } from './types';
 
 /** Debounce: fire the review this long after the last turn ends (session-idle proxy). */
@@ -59,9 +59,11 @@ export interface SkillLearningManagerOpts {
   reviewSpawn?: ClaudeSpawnFn;
   /** Injectable clock (tests). */
   now?: () => number;
-  /** Channel credentials for skill-write notifications (fan-out across all configured channels). */
+  /** @deprecated Credentials alone never authorize notification fan-out. Use sendNotification. */
   channels?: ChannelTokens;
-  /** Injectable notifier (tests). Production builds one from `channels`. */
+  /** Exact origin-session delivery. No allowlist broadcast fallback. */
+  sendNotification?: SkillNotifierOpts['send'];
+  /** Injectable notifier (tests). Production uses the origin-session sender. */
   notifier?: SkillNotifier;
 }
 
@@ -96,7 +98,7 @@ export class SkillLearningManager {
       new SkillNotifier({
         workspaceDir: this.workspaceDir,
         notify: this.cfg.notify,
-        send: buildChannelSend(this.workspaceDir, opts.channels ?? {}, opts.logger),
+        send: opts.sendNotification,
         logger: opts.logger,
       });
   }
@@ -108,7 +110,7 @@ export class SkillLearningManager {
   // ---- Turn lifecycle (called by the runner; all best-effort) ----------------
 
   /** A user turn begins. `invokedSkills` = skills detected in the incoming message. */
-  onTurnStart(mapKey: string, sessionId: string, firstUserMessage: string, invokedSkills: string[] = []): void {
+  onTurnStart(mapKey: string, sessionId: string, firstUserMessage: string, invokedSkills: string[] = [], startedAt?: number): void {
     try {
       let a = this.accum.get(mapKey);
       if (!a || a.sessionId !== sessionId) {
@@ -116,7 +118,7 @@ export class SkillLearningManager {
       } else {
         a.turnIdx += 1;
       }
-      a.startedAt = this.now();
+      a.startedAt = startedAt ?? this.now();
       a.toolUseIds.clear();
       a.toolCalls = 0;
       a.tokensIn = 0;

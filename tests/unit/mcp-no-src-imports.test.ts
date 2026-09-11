@@ -14,8 +14,9 @@
  *   (b) a published directory from package.json `files` (e.g. `dist/` — the
  *       compiled artifact both runtimes consume), or
  *   (c) an exact published top-level file (e.g. `config.template.json`).
- * It may NEVER reach into `src/` (or any other non-published path), because that
- * path is absent from the tarball an end user installs. For `dist/` imports it
+ * Runtime imports may NEVER reach into `src/` (or another non-published path), because that
+ * path is absent from the installed tarball. Explicit type-only declarations are
+ * erased by Bun and therefore excluded. For `dist/` imports it
  * also checks that a matching `src/` source exists, so a typo'd dist path (whose
  * directory ships but whose file does not exist) is caught too.
  *
@@ -25,6 +26,7 @@
  * `dist/`, and `make start` builds first — but a fresh checkout that launches an
  * MCP tool without building will hit the same "Cannot find module".
  */
+import * as ts from 'typescript'
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve, dirname, relative, sep } from 'path'
 
@@ -99,6 +101,14 @@ function stripComments(source: string): string {
 
 /** Pull every relative import/require specifier out of a source file. */
 export function relativeSpecifiers(source: string): string[] {
+  // Bun erases explicit type-only declarations; they never resolve at runtime.
+  const tree = ts.createSourceFile('module.ts', source, ts.ScriptTarget.Latest, true)
+  for (const node of [...tree.statements].reverse()) {
+    if ((ts.isImportDeclaration(node) && node.importClause?.isTypeOnly) ||
+        (ts.isExportDeclaration(node) && node.isTypeOnly)) {
+      source = source.slice(0, node.pos) + ' '.repeat(node.end - node.pos) + source.slice(node.end)
+    }
+  }
   source = stripComments(source)
   const specs: string[] = []
   const patterns = [
@@ -186,6 +196,13 @@ describe('mcp/ must not import from unpublished paths (packaging guard)', () => 
   })
 
   // ── Rule-level tests (synthetic inputs, independent of the live tree) ────────
+
+  it('ignores erased types but still checks runtime imports', () => {
+    expect(relativeSpecifiers(`import type { A } from './types';
+      export type { B } from './other-types';
+      import { type C, runtime } from './mixed';
+      const lazy = import('./lazy'); require('./required');`)).toEqual(['./mixed', './lazy', './required'])
+  })
 
   it('rejects a raw src/ import', () => {
     expect(classifyImport(anchor, '../../../src/agent/turn-trace')).toMatch(/NOT in package.json files/)

@@ -553,7 +553,7 @@ export class VideoModule implements ToolModule {
           byok: job.byok ?? false,
           cost: job.cost ?? 0,
           files: [filePath],
-          note: 'Video saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]). Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
+          note: (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker' ? 'Video saved. Call task_stage_file with this file path, then report completion. Orchestration handles delivery.' : 'Video saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]). Do NOT open/Read the file to inspect it first; attach it and answer briefly.')
             + (model ? ` Mention which model made it (${model}).` : ''),
         }),
       }],

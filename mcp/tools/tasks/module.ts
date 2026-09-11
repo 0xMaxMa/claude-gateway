@@ -1,0 +1,29 @@
+import type { McpToolDefinition, McpToolResult } from '../../types';
+
+const schema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
+const text = { type: 'string' };
+export const AGENT_TASK_TOOLS: McpToolDefinition[] = [
+  { name: 'task_spawn', description: 'Durably queue a task for an independent worker. Returns after commit without waiting for worker startup or completion.',
+    inputSchema: schema({ title: text, instructions: text, target_profile: text, spoken_acknowledgement: { type: 'string', description: 'Required for live voice: a short natural response in the user language explaining the specific work you are about to do. Describe the specific user request as your own task, in the voice of your existing persona; do not announce handing it to a worker or use a generic acknowledgement. Speak as the person doing the work; avoid Thai delegation phrases such as สั่งเช็คแล้ว, สั่งไปแล้ว or ส่งให้ตรวจแล้ว. Describe queued work as accepted/to do next, and only say it is running when that state is confirmed. Do not claim completion. The gateway manages playback and channel text-before-voice ordering.' }, skill_name: { type: 'string', description: 'Exact installed gateway or discovered Claude Code runtime skill name for skill-worker. Native skills are invoked directly by the CLI; shared/workspace skills are supplied with their resources. Never supply a file path.' }, skill_args: { type: 'string', description: 'Arguments for the installed skill; required with skill_name.' }, continue_task_id: { type: 'string', description: 'Prior task ID in this conversation for related follow-up work. Reuses its worker session when compatible; waits for success by default. Queue every authorized dependent step now, using each returned task ID for the next step. Omit for independent work.' }, continuation_policy: { type: 'string', enum: ['after_success', 'after_terminal'], description: 'With continue_task_id: after_success (default) starts only after the predecessor succeeds; otherwise fails without executing. Use after_terminal only for explicitly authorized recovery/inspection that must run after failure or cancellation.' }, context_refs: { type: 'array', items: text, description: 'Only orchestration input IDs, authorized attachment refs or task artifact IDs. Put project filenames in instructions instead.' } }, ['title', 'instructions', 'target_profile']) },
+  { name: 'task_status', description: 'Read current persisted task snapshots in this conversation. Never wait for worker completion.', inputSchema: schema({ task_id: text }, []) },
+  { name: 'task_cancel', description: 'Request cancellation, including needs_reconciliation cleanup. cancel_requested is not proof of termination. Existing files are retained. Set replaced_by_task_id only for a known replacement task, never infer from similar titles.', inputSchema: schema({ task_id: text, replaced_by_task_id: text }, ['task_id']) },
+  { name: 'task_update', description: 'Accept a revised task instruction. applied_revision changes only when the worker accepts it.', inputSchema: schema({ task_id: text, expected_revision: { type: 'integer', minimum: 1 }, instruction: text, mode: { type: 'string', enum: ['when_ready', 'interrupt_and_resume'] } }, ['task_id', 'expected_revision', 'instruction', 'mode']) },
+  { name: 'task_answer', description: 'Answer the matching pending question on a task.', inputSchema: schema({ task_id: text, question_id: text, answer: text }, ['task_id', 'question_id', 'answer']) },
+];
+export const WORKER_REPORT_TOOLS: McpToolDefinition[] = [
+  { name: 'task_memory_append', description: 'Append an explicitly requested memory note for a channel task. API tasks cannot write memory. Files are restricted to MEMORY.md, USER.md, or memory/<name>.md. Retains existing content and deduplicates retries.', inputSchema: schema({ note: text, path: text }, ['note']) },
+  { name: 'task_stage_file', description: 'Stage a finished image or document for the user. The orchestration attaches it to the next completed agent response after this task succeeds, using the original destination. This tool does not send to a channel. Call once per output file. For an image returned by an MCP tool (such as a remote browser screenshot), omit path to use the latest captured image in this attempt, or pass source_tool_call_id to select its tool call. The gateway saves the actual image bytes; never invent a screenshot filename. For an existing local file supply path.', inputSchema: schema({ path: text, source_tool_call_id: text, caption: text }, []) },
+  { name: 'task_report_progress', description: 'Report a short factual progress observation for your current task.', inputSchema: schema({ text }, ['text']) },
+  { name: 'task_request_input', description: 'Ask the user for information required by your task, then end this turn immediately.', inputSchema: schema({ question: text }, ['question']) },
+];
+
+export async function callTaskBridge(tool: string, args: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<McpToolResult> {
+  // Rotated by the gateway at each decision/attempt boundary. A loaded token is
+  // immutable for this request; late requests cannot borrow the next decision.
+  const { readFile } = await import('node:fs/promises');
+  const scope = JSON.parse(await readFile(process.env.GATEWAY_ORCHESTRATION_TICKET_FILE!, 'utf8')) as { url: string; token: string };
+  const response = await fetch(scope.url, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${scope.token}` },
+    body: JSON.stringify({ tool, args, action_id: requestId }) });
+  const body = await response.text();
+  return { content: [{ type: 'text', text: body }], ...(response.ok ? {} : { isError: true }) };
+}

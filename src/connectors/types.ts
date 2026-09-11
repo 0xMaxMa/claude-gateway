@@ -48,6 +48,10 @@ export type ConnectorCredentialOwner = 'none' | 'static' | 'gateway' | 'external
 export interface ConnectorStatus {
   id: string;
   label: string;
+  /** False requires explicit per-agent enablement, even on opt-out gateways. */
+  defaultEnabled?: boolean;
+  /** Optional same-origin resource listing/revocation path, configured by an admin. */
+  resourcesPath?: string;
   description?: string;
   /** Mirrors CustomConnectorEntry.credentialOwner — see that type. Tells a caller
    *  which way to offer connecting: a paste-token box ('static'), a "Sign in" link
@@ -101,6 +105,10 @@ export interface ConnectorStatus {
  */
 export interface CustomConnectorEntry {
   label: string;
+  /** False requires explicit per-agent enablement, even on opt-out gateways. */
+  defaultEnabled?: boolean;
+  /** Optional same-origin resource listing/revocation path, configured by an admin. */
+  resourcesPath?: string;
   description?: string;
   /** Raw config as pasted, e.g. {"command":"npx","args":["gmail-mcp"]} or
    *  {"type":"streamable-http","url":"...","headers":{"Authorization":"Bearer {api_key}"}}. */

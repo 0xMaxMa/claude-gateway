@@ -735,7 +735,9 @@ export class ImageModule implements ToolModule {
           files,
           ...(artifacts ? { artifacts } : {}),
           ...(droppedImages > 0 ? { dropped_images: droppedImages } : {}),
-          note: 'Image saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]), or line_image on LINE. Do NOT open/Read the file to inspect it first; attach it and answer briefly.'
+          note: (process.env.GATEWAY_ORCHESTRATION_ROLE === 'worker'
+            ? 'Image saved. Call task_stage_file for each output path, then finish this task. The agent orchestration engine owns user-facing delivery.'
+            : 'Image saved. Deliver it to the user with your channel delivery tool — api_reply/reply (files: [...]), or line_image on LINE. Do NOT open/Read the file to inspect it first; attach it and answer briefly.')
             + (model ? ` Mention which model made it (${model}).` : '')
             + (artifacts ? ' To edit this image later, reference it via its artifact_ref (e.g. image: "artifact:...").' : '')
             + (droppedImages > 0 ? ` (${droppedImages} extra image(s) beyond the cap were not saved)` : ''),

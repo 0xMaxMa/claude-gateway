@@ -76,6 +76,7 @@ function makeMockProcess(): MockChildProcess {
 }
 
 jest.mock('child_process', () => ({
+  ...jest.requireActual('child_process'),
   spawn: jest.fn((...args) => {
     lastProcess = makeMockProcess();
     return lastProcess;
@@ -184,6 +185,34 @@ describe('SessionProcess', () => {
     expect(lastProcess!.stdin!.write).toHaveBeenCalledWith(
       expect.stringMatching(/"type":"user".*"text":"hello world"/s),
     );
+  });
+
+  it.each(['telegram', 'discord', 'line', 'slack', 'api'] as const)('managed %s turns never create or renew legacy typing signals', async source => {
+    const mcp = path.join(tmpDir, 'managed-mcp.json');
+    fs.writeFileSync(mcp, '{"mcpServers":{}}');
+    const sp = makeSp('managed-session', source, agentConfig, gatewayConfig, sessionStore, '123', {
+      role: 'agent', mcpConfigPath: mcp, overlay: 'Managed agent', context: 'Fixture',
+    });
+    await sp.start();
+    sp.sendMessage('Report the completed worker result');
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Done' }] } }) + '\n'));
+    lastProcess!.stdout!.emit('data', Buffer.from(JSON.stringify({ type: 'result', result: 'Done' }) + '\n'));
+    const dir = path.join(agentConfig.workspace, `.${source}-state`, 'typing');
+    for (const suffix of ['', '.status', '.heartbeat', '.processing']) expect(fs.existsSync(path.join(dir, '123' + suffix))).toBe(false);
+  });
+
+  it('sends images in the same user turn with pending history context', async () => {
+    const sp = makeSp('chat:111', 'telegram', agentConfig, gatewayConfig, sessionStore);
+    await sp.start();
+    (sp as any).pendingInitialPrompt = 'Earlier conversation';
+    const image = { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png' as const, data: 'aW1hZ2U=' } };
+    sp.sendMessage('Describe this', [image]);
+    const writes = (lastProcess!.stdin!.write as jest.Mock).mock.calls;
+    expect(JSON.parse(writes[writes.length - 1][0]).message.content).toEqual([
+      { type: 'text', text: 'Earlier conversation\n\nDescribe this' }, image,
+    ]);
+    sp.sendMessage('Next turn');
+    expect(JSON.parse(writes[writes.length - 1][0]).message.content).toEqual([{ type: 'text', text: 'Next turn' }]);
   });
 
   // --------------------------------------------------------------------------
@@ -381,6 +410,59 @@ describe('SessionProcess', () => {
       secretNames: ['access_token'],
       credentialOwner: 'external' as const,
     };
+
+    it.each(['host-worker'] as const)('managed %s loads connectors into the actual CLI config and removes secrets at stop', async role => {
+      gatewayConfig.gateway.customConnectors = { github: githubCustomConnector };
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=fixture-old\n');
+      const ticket = path.join(tmpDir, 'ticket.json');
+      fs.writeFileSync(ticket, JSON.stringify({ mcpServers: { gateway: { command: 'fixture-bridge' } } }));
+      const profile = { role: 'worker' as const, hostExecution: role === 'host-worker', mcpConfigPath: ticket, overlay: 'Fixture', context: 'Fixture' };
+      const sp = makeSp('managed-connector', 'api', agentConfig, gatewayConfig, sessionStore, undefined, profile);
+      await sp.start();
+      const args = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![1] as string[];
+      const configPath = args[args.indexOf('--mcp-config')+1];
+      const servers=JSON.parse(fs.readFileSync(configPath,'utf8')).mcpServers;
+      expect(servers.github.headers.Authorization).toBe('Bearer fixture-old');
+      expect(servers.gateway.command).toBe('fixture-bridge');
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
+      expect(sp.connectorConfigChanged('github',servers.github)).toBe(false);
+      expect(sp.isSpawnedConnectorTool('mcp__github__list_issues')).toBe(true);
+      expect(sp.isSpawnedConnectorTool('mcp__unknown__list_issues')).toBe(false);
+      expect(sp.isSpawnedConnectorTool('mcp__github__')).toBe(false);
+      expect(sp.isSpawnedConnectorTool('mcp__github_other__list_issues')).toBe(false);
+      expect(sp.connectorConfigChanged('github',{...servers.github,headers:{Authorization:'Bearer fixture-new'}})).toBe(true);
+      expect(sp.connectorConfigChanged('github',undefined)).toBe(true);
+      await sp.stop();expect(fs.existsSync(configPath)).toBe(false);
+      expect(fs.existsSync(ticket)).toBe(true);
+      fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=fixture-new\n');
+      const next=makeSp('managed-next','api',agentConfig,gatewayConfig,sessionStore,undefined,profile);
+      const fresh=(next as any).writeMcpConfig();
+      expect(JSON.parse(fs.readFileSync(fresh,'utf8')).mcpServers.github.headers.Authorization).toBe('Bearer fixture-new');
+      agentConfig.connectors={github:{enabled:false}};
+      expect(JSON.parse(fs.readFileSync((next as any).writeMcpConfig(),'utf8')).mcpServers.github).toBeUndefined();
+    });
+
+    it.each(['agent','container-agent','container-worker','isolated-worker','tools-disabled','read-only-decision'])('%s never inherits host connectors', async kind => {
+      gatewayConfig.gateway.customConnectors={github:githubCustomConnector};
+      fs.writeFileSync(TOKEN_ENV,'CUSTOM__github__access_token=host-secret\n');
+      const ticket=path.join(tmpDir,'restricted-ticket.json');fs.writeFileSync(ticket,'{"mcpServers":{"gateway":{"command":"fixture"}}}');
+      if(kind.startsWith('container')) agentConfig.type='app-agent';
+      if(kind==='tools-disabled') agentConfig.allow_tools=false;
+      const profile={role:kind.endsWith('worker')?'worker' as const:'agent' as const,mcpConfigPath:ticket,overlay:'',context:'',connectorsAllowed:kind!=='read-only-decision'};
+      const sp=makeSp('restricted','api',agentConfig,gatewayConfig,sessionStore,undefined,profile);
+      expect((sp as any).writeMcpConfig()).toBe(ticket);
+      expect(fs.readFileSync(ticket,'utf8')).not.toContain('host-secret');
+      expect(sp.isSpawnedConnectorTool('mcp__github__list_issues')).toBe(false);
+      if (kind === 'agent') {
+        // Even an explicitly enabled connector flag cannot grant execution to a decision.
+        await sp.start();
+        const args = (require('child_process').spawn as jest.Mock).mock.calls.slice(-1)[0]![1] as string[];
+        expect(args).toContain('--strict-mcp-config');
+        expect(args[args.indexOf('--mcp-config') + 1]).toBe(ticket);
+        expect(sp.isSpawnedConnectorTool('mcp__github__list_issues')).toBe(false);
+        await sp.stop();
+      }
+    });
 
     it('enabled + connected → github http entry injected with bearer header', async () => {
       fs.writeFileSync(TOKEN_ENV, 'CUSTOM__github__access_token=ghp_inject\n', { mode: 0o600 });

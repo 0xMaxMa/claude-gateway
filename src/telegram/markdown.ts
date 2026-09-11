@@ -97,10 +97,22 @@ function padEnd(s: string, width: number): string {
  * Splits a table row like `| a | b | c |` into trimmed cell strings.
  */
 function splitCells(line: string): string[] {
-  return line
+  const body = line
     .replace(/^\s*\|\s*/, '')
     .replace(/\s*\|\s*$/, '')
-    .split(/\s*\|\s*/)
+  const cells: string[] = []
+  let cell = ''
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '\\' && i + 1 < body.length) {
+      const next = body[++i]
+      cell += next === '|' ? next : '\\' + next
+    } else if (body[i] === '|') {
+      cells.push(cell.trim())
+      cell = ''
+    } else cell += body[i]
+  }
+  cells.push(cell.trim())
+  return cells
 }
 
 /**

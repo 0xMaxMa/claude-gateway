@@ -80,7 +80,7 @@ function makeAgentConfig(workspace: string, overrides: Partial<AgentConfig> = {}
 
 function makeGatewayConfig(): GatewayConfig {
   return {
-    gateway: { logDir: '/tmp/test-cmd-logs', timezone: 'UTC' },
+    gateway: { logDir: '/tmp/test-cmd-logs', timezone: 'UTC', headless: false },
     agents: [],
   };
 }
@@ -349,6 +349,18 @@ describe('AgentRunner /command endpoint', () => {
 
     expect(data.success).toBe(true);
     expect(data.restarted).toBe(false);
+  });
+
+  it.each([true, undefined])('cli_pair rejects non-interactive headless=%s', async headless => {
+    gatewayConfig.gateway.headless = headless;
+    gatewayConfig.gateway.publicUrl = 'https://host.example/gw';
+    runner = new AgentRunner(agentConfig, gatewayConfig);
+    await runner.start();
+    const { data } = await sendCommand(getCallbackPort(runner), {
+      command: 'cli_pair', payload: { channel: 'telegram', user_id: 'fixture' },
+    });
+    expect(data).toMatchObject({ success: false, error: 'interactive_mode_required' });
+    expect(data.pairingId).toBeUndefined();
   });
 
   // --------------------------------------------------------------------------

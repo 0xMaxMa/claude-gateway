@@ -13,7 +13,7 @@ All API endpoints require an API key configured in `config.json`. Pass it via:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/health` | None | Liveness only — returns `{"status":"ok"}` (no agent list) |
-| `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats + heartbeat history |
+| `GET` | `/status` | Admin key or dashboard session¹ | Per-agent stats, legacy/managed sessions, worker pools + heartbeat history |
 | `GET` | `/processes` | Admin key or dashboard session¹ | Host process tree for the dashboard |
 | `GET` | `/knowledge/graph` | Admin key or dashboard session¹ | Memory-wiki as `{ nodes, edges, demo, scope }` for the dashboard **Knowledge base** tab. `?scope=shared` (default) = the cross-agent Shared KB; `?scope=agent:<id>` = that agent's Lane-2 memory (`workspace/memory/*.md`, id validated against the known-agents allowlist). Computed on-demand (independent of `gateway.knowledge.shared.graph` and the nightly reindex). Shared scope serves a labelled demo (`demo:true`) when empty; `?demo=off` returns the real model; `?demo=<N>` a synthetic N-node graph for scale testing |
 | `GET` | `/knowledge/sources` | Admin key or dashboard session¹ | Graph sources for the KB tab's selector: `{ sources: [{ id, label, count }] }` — the Shared KB plus every agent with ≥1 Lane-2 memory note |
@@ -77,6 +77,10 @@ browser to open a link owns it (a link opened in a second browser is rejected), 
 | `POST` | `/api/v1/agents/:agentId/greeting` | Write | Stream a proactive welcome from `GREETING.md` into an existing session (SSE); returns 204 if file absent |
 | `GET` | `/api/v1/models` | Key | List available models — live catalog when configured, `gateway.models` otherwise |
 | `PUT` | `/api/v1/agents/:agentId/model` | Admin | Set the active model for an agent |
+
+### Orchestration and voice
+
+See [activity polling, scoped task dispatch, voice WebSocket protocol and dashboard fields](#orchestration-and-live-voice).
 
 ### Session Management API
 
@@ -360,6 +364,216 @@ Closes with code `4404` if the session is not running in PTY mode.
 
 ---
 
+## Orchestration and live voice
+
+When TTS `voiceId` is empty, Auto selects a voice from the configured provider's
+catalog. An explicit session/chat choice takes precedence over the configured
+voice. Auto keeps its choice for the gateway process and provider/account; after
+restart it deterministically selects the lowest voice ID in the current catalog.
+Catalog changes can therefore change Auto after a restart. Set a voice explicitly
+to pin it across restarts. Catalog failures leave text chat available and report a
+recoverable TTS error instead of preventing gateway startup.
+
+Orchestration is enabled gateway-wide with `gateway.orchestration` and automatically sets and saves `gateway.headless: true`. See [configuration, worker pooling and compatibility limits](README.md#gatewayorchestration-and-agent-overrides). Existing message/session endpoints retain their authentication and session ownership rules. An initial message response may acknowledge a queued task; it is not proof of task completion. Worker results arrive later in the original conversation.
+
+Telegram orchestration publishes an editable tool-activity message in the originating chat/topic. It uses the legacy Telegram layout: up to four previous details prefixed with `☑️ :`, the current detail prefixed with `🕐 :` when history exists, and `(elapsed: …)`. Agent and Worker tools share readable legacy labels; task IDs, raw MCP names and historical task lists are omitted. Details remain bounded and redacted. Updates are coalesced (at least four seconds apart per message) and respect Telegram retry-after responses. The message is deleted when all managed work in that conversation is idle. Elapsed-only updates run every ten seconds; tool detail changes can update sooner. This best-effort status is separate from durable task/result delivery and never controls worker execution; it does not replay inactive history at startup. Restarting during active work may create a new status message.
+
+Worker failures retain a bounded, redacted `failure` object (`code`, `message`, `observedAt`) on the task and attempt. Gateway shutdown is reported as `GATEWAY_SHUTDOWN`, rather than an unexplained issue failure. Agent `task_status` and notification context include this evidence and the latest eight tool activity entries (tool name, use/result, error flag and timestamp). Uncertain process outcomes remain `needs_reconciliation`; failure evidence does not authorize replaying side effects. Older failed tasks without stored evidence are not retroactively assigned a cause.
+
+Managed Agent timeout diagnostics are emitted as `response.timeout` with `responseId`, `phase` (`startup`, `first_response`, `idle`, or `total`), `elapsedMs`, and `idleMs`. The existing `response.failed` event still closes a failed turn. `conversation.idleTimeoutMs` limits inactivity after inference starts; the legacy `decisionTimeoutMs: 15000` template value no longer overrides the 120000 default; startup/first-response budgets are separate and `maxDecisionDurationMs` remains a hard cap. Shorter API request deadlines remain enforced. No automatic replay of side effects is introduced.
+
+Managed activity is based on durable input, decision and Worker states, including autonomous result turns. A completed Agent acknowledgement does not make a running Worker idle. Telegram/Discord/LINE typing renewal stops at idle or user-input/reconciliation waits; legacy file-heartbeat warnings and replay recovery are excluded for managed turns. API/voice retain their own request, process and transport deadlines.
+
+Uploaded still images (PNG/JPEG/GIF/WebP) are supplied as native image content in the Agent's input turn before any task dispatch. Existing attachment upload and authorization rules are unchanged. The Agent can answer image questions directly; workers still inherit original attachment references for subsequent execution. Native image input is bounded to 5 MiB per image, 20 MiB and 20 images per turn. Unsupported, missing or over-limit images are identified to the Agent instead of silently treating a filename as visible image content.
+
+### Session activity
+
+`GET /api/v1/agents/:agentId/sessions/:sessionId/activity?after=0`
+
+Requires an API key authorized for the Agent and the conversation principal. `after` is a non-negative event cursor; pass the previous response's `cursor` on the next poll. Invalid session IDs/cursor syntax return `400`; inaccessible activity returns `403`. The response contains current bounded task/response snapshots and incremental tool activity (at most 500 tool events per poll):
+
+```json
+{
+  "cursor": 12,
+  "busy": false,
+  "tasks": [{
+    "taskId": "<task-id>", "title": "Review change", "state": "completed",
+    "stateVersion": 3, "result": "Review finished", "updatedAt": 1788760000000
+  }],
+  "responses": [{
+    "id": "<response-id>", "requestId": null, "state": "completed",
+    "text": "Review finished", "createdAt": 1788760000000, "files": []
+  }],
+  "tools": [{
+    "seq": 12, "type": "tool_use", "id": "<tool-use-id>", "name": "Bash",
+    "input": { "command": "npm test" }, "taskId": "<task-id>", "role": "worker"
+  }]
+}
+```
+
+Activity snapshots retain all non-terminal tasks plus the latest 100 terminal tasks, so newer completed work cannot hide an older running task. `/tasks` paginates active work and `/stop` selects cancellable work independently of terminal history.
+
+Deduplicate responses by `id` and tool events by `seq`; snapshots are repeated across polls. Background responses may have `requestId: null`. `busy` describes the conversational Agent turn, so also inspect task states for running workers. `tool_result` events identify the call and may include `is_error`; this feed does not expose raw reasoning or complete tool-result bodies. Files use the existing media delivery API. Old events are pruned independently of task snapshots.
+
+### Internal task dispatch
+
+**Telegram tool status.** While managed work is active, its tool-status message moves to the bottom after six newer gateway-observed user messages or delivered replies in the same account/chat/topic, at most once per 30 seconds. The replacement is sent silently before the previous message is deleted. Failed replacement preserves the old message; failed deletion retains its ID for retry and blocks additional replacements. Synthetic task-report inputs do not count. This approximates chat activity, not the user's scroll position. Legacy mode is unchanged.
+
+**Orchestration skills.** Agent catalogs combine gateway workspace/module/shared skills with metadata discovered from the installed Claude Code runtime through an initialization-only handshake (no model request). Native/bundled skills such as `/code-review` and their reported aliases run directly through the worker's `Skill` tool; gateway shared/workspace skills retain their supplied files/resources. Gateway definitions take precedence for the same name. Discovery is cached briefly and refreshed before routing, while workers check availability in their actual execution environment. App discovery runs inside the validated container without host fallback. If discovery fails, ordinary gateway skills remain available and the Agent must report incomplete discovery rather than inventing a missing-skill or MCP-inventory diagnosis.
+
+The Agent's scoped MCP `task_spawn` tool takes `title`, `instructions`, `target_profile`, optional `context_refs`, and optional `continue_task_id`/`continuation_policy`. A new continuation defaults to `after_success`: it is queued durably and starts only after its predecessor completes successfully. Failed/cancelled predecessors cause `TASK_DEPENDENCY_FAILED` without starting the dependent worker. Explicit `after_terminal` is for authorized recovery/inspection after a terminal outcome; uncertain or still-running predecessors continue to block it. Existing persisted tasks without the policy retain their previous terminal-only behavior. Skill dispatch also uses the registered `skill_name`/`skill_args`; live-voice delegation requires a contextual `spoken_acknowledgement`. These are model-facing tool fields, **not additional fields on the public messages endpoint**.
+
+A continuation must reference a task in the same conversation. The gateway derives the workstream, queues behind its unfinished work and resumes a compatible worker session when available. Receipts/status retain `taskId`, `workstreamId`, `continueTaskId` and, after assignment, `workerId`. Workers report progress, request input and stage files through attempt-scoped tools. A playback stop does not cancel a worker task. The internal bridge/tickets must not be exposed as a public host execution API.
+
+Task command identity is scoped to the originating input rather than the temporary decision. After interruption, matching committed mutations return the original receipt even when inference produces a new tool-call ID. A conflicting mutation for an input that already committed commands returns `RECOVERY_COMMAND_CONFLICT`; inspect persisted task status and obtain a new user input before issuing new work. This is task-command deduplication, not a guarantee that arbitrary external connector side effects are idempotent.
+
+Host orchestration Agents and host workers load enabled native connectors using the same configuration as legacy mode. Connector credentials are refreshed on each new managed subprocess; in-flight tasks are not restarted for connector changes. Read-only decisions, disabled tools, isolated workers and app containers do not receive host connectors. Channel token hot reload applies to subsequent delivery attempts, including file and speech transport.
+
+### User task cancellation
+
+For orchestration-enabled API sessions, `POST /api/v1/agents/:agentId/sessions/:sessionId/stop` interrupts the Agent reply and returns `{ stopped, menuId, tasks: [{ taskId, title, state }], responseText }`. Render `responseText` as an assistant message. Sending `/stop` through the messages endpoint returns the same numbered question using the normal JSON/SSE reply contract. A subsequent numeric message selects from that frozen menu without inference; `0` dismisses it. Menus are bound to the authenticated principal and session, expire after five minutes, and are replaced by another `/stop` or dismissed by unrelated text. Task selection does not follow worker-slot reuse or list reordering. `cancel_requested` means stopping, not confirmed termination. Only the selected task is cancelled; completed side effects are not rolled back. Legacy `/stop` retains its existing response and behavior.
+
+Telegram private chats get task buttons plus Dismiss. The receiver and gateway both gate the new control path on orchestration; stale callbacks cannot cancel tasks in another session or after mode changes.
+
+Worker file sharing uses the same active-attempt path checks as file staging.
+Pass the original absolute path inside the active task workspace, an authorized
+input attachment, or this session's media directory. Do not copy files into the
+agent-wide media root. The private task bridge returns `ARTIFACT_PATH_DENIED`
+with a corrective `message` and `retryable: true`; retry only after correcting the
+path. The MCP share client preserves the bridge error code (including stale or
+unauthorized attempts) instead of replacing every error with `share_scope_denied`.
+Files outside scope remain inaccessible and container boundaries are unchanged.
+
+### Agent orchestration and voice configuration
+
+`gateway.orchestration` is `true` or `false` for all agents and channels. `agents[].orchestration` holds conversation/task/event tuning. All speech settings live directly at `agents[].voice`: `enabled`, `stt`, `tts`, `notes`, `language`, `turns`, and `playback`. No gateway voice defaults are inherited. New agents start disabled with no selected models. Voice requires both orchestration and the agent's voice switch; channel reply policy remains independently controlled by `/voice`.
+
+Orchestration text delivery covers Telegram, Discord, LINE, Slack, WhatsApp (linked Baileys accounts and Cloud API), and WeChat. Linked channels reuse their running gateway transport; WhatsApp replies retain the receiving account in the durable binding. WhatsApp supports staged image/document delivery. WeChat currently supports text only; staged attachments report `CHANNEL_ATTACHMENTS_UNSUPPORTED`. WhatsApp and WeChat task/session menus use text commands (`/orch <token>`) instead of native buttons. Voice reply controls remain supported on Telegram, Discord, LINE and Slack; unsupported channels return an explicit notice.
+
+
+Old object-form gateway settings and `agents[].orchestration.voice` are migrated once, preserving the effective values and explicit overrides in each agent before removing the old fields. Existing global task/conversation/event tuning is copied into each agent too. The migration is idempotent, preserves raw environment references, and coordinates with config writers. Provider API keys remain environment variables or upstream connector credentials.
+
+### Channel speech failures
+
+Telegram, Discord, LINE and Slack deliver the response text before speech. If
+synthesis fails, the same response/destination gets one durable plain-text notice
+explaining that audio could not be created, with a normalized provider diagnostic.
+All provider failures use concise, provider-independent wording, retain the HTTP
+status when available, and suggest a relevant action or `/voice off`. Chat notices
+omit technical details and reference IDs; the failed delivery ID remains the log
+reference. Quota, rate limit, payment, authentication, permission, unavailable,
+timeout, network, language/model, invalid response and unknown errors each have
+short messages. Unknown future failures use a safe generic notice. The failure and pending notice are
+committed together; a restart does not duplicate the notice or retry paid synthesis.
+Gateway logs and the delivery outbox retain the normalized failure code. Raw
+provider messages and credentials are never included. A Google structured daily
+quota violation is identified as a daily limit; a bare HTTP 429 remains ambiguous
+between rate limiting and exhausted quota. Turning voice off or an uncertain
+channel send does not produce a misleading synthesis-failure notice.
+
+### Telegram voice notes
+
+Voice-note failures retain normalized provider codes in `voice_note_transcripts`
+and return a readable provider diagnostic plus a `Reference` input ID in the
+original conversation. Gateway logs record the same reference, provider, model,
+HTTP status and category without raw provider messages or credentials. This
+applies to the shared voice-note flow across channels, including Gemini and Paxa
+errors and ElevenLabs batch HTTP errors. A failed note is not automatically
+retried; quota/payment/configuration failures should be resolved before resending.
+
+For orchestration-enabled Telegram ingress, `agents[].voice.enabled` together with `agents[].voice.notes.enabled` enables transcription. Outgoing voice controls are available by default; set `agents[].voice.notes.replyWithVoice: false` to deny them for an Agent. The old gateway-level `replyWithVoice` value is ignored. Inbound transcription can be disabled independently. Voice synthesis requires an ElevenLabs or Cartesia `voice.tts` provider and an optional `voiceId` (empty selects Auto), without a browser WebSocket. Authorized users in private chats use `/voice` and its Always / Voice messages only / Off buttons, or `/voice on`, `/voice auto` and `/voice off` directly. The preference is stored per Agent/chat in `telegram_voice_preferences`, defaults to Off even when voice capability is enabled, and survives session switches/restarts. On enables bounded spoken summaries for both typed and voice-note replies and automatic Worker reports; Off keeps text-only responses. The English menu includes Dismiss, which closes it without changing the preference. Successful mode selection replaces the menu with a persistent confirmation. The menu never invokes inference or TTS. Pending audio checks the preference before synthesis and again before Telegram submission; a send already submitted cannot be recalled by this toggle.
+
+Voice reply mode `auto` sends audio only for voice-origin inputs and their dependent task results; typed-only conversations remain text-only. Modes apply to Telegram, Discord, LINE and Slack. Preferences are stored in `voice_reply_modes` per Agent/chat, with old boolean preferences used as a fallback; old On/Off choices retain their meaning. Browser live voice remains independent.
+
+The gateway synthesizes MP3 and submits Telegram `sendVoice` to the original bound chat/topic. Speech deliveries have their own durable outbox entry and provider message receipt, with the voice/model pinned when queued. Failed synthesis keeps the text reply available. Ambiguous sends remain `unknown` for reconciliation and are not blindly retried. Voice-enabled Agent turns use CLI JSON-schema validation for display_text and spoken_text, and consume structured_output from the terminal result. Short plain conversational replies (up to 600 characters, without code, URLs or structured data) can be spoken directly in their original language. Long reports require the explicit spoken summary and are never truncated into audio. Browser voice changes do not change the Agent-configured Telegram voice.
+
+`/voices` uses the same provider-neutral catalog as web Voice controls. ElevenLabs and Cartesia adapters list real provider voices; Cartesia pages through its [voice catalog API](https://docs.cartesia.ai/api-reference/voices/list). Each chat’s choice is stored in `telegram_tts_voices`, scoped to the provider. Telegram menus first select a gender category, then show paginated voice names with ✅ on the selected voice and Back/Dismiss controls. Menus are bound to the chat/provider for five minutes. Selection does not enable auto voice replies. Changed providers require a new selection if the chat had explicitly selected an old provider’s voice. Missing catalogs report unavailable rather than inventing voices. Speech file output supports native MP3 through ElevenLabs and Cartesia; other providers need a catalog and file-synthesis adapter.
+
+Telegram registers `/tasks`, `/voice` and `/voices` only with orchestration enabled for Telegram. `/cli` is registered only with `gateway.headless: false`, and is hidden for app-agents and orchestration agents. Help and callback handling follow the same capability checks. Hot-reloading orchestration/headless mode refreshes receiver command registration without stopping Agent/Worker tasks.
+
+Telegram `/tasks` is a direct gateway control for the active chat session. Its paginated list and detail callbacks check conversation membership; cancellation checks the task ID against the current session before calling the same user-cancellation service as `/stop`. Viewing/refreshing tasks does not interrupt Agent responses. Old task buttons cannot cancel work after switching to another session. Progress is the latest worker/runtime report, not an inferred percentage.
+
+### Discord, LINE and Slack orchestration controls
+
+The global `gateway.orchestration` switch applies to all Agents and all connected channels. Per-Agent settings only override tuning; per-Agent `enabled` and `channels` are ignored. `/session` and `/sessions` are direct gateway controls on these orchestration channels and do not invoke the model.
+
+
+
+Enable `gateway.orchestration` and configure the same `voice.notes` / `voice.tts` fields as Telegram. `/voice [on|auto|off]`, `/voices`, `/tasks` and `/stop` are intercepted before inference. Settings retain the existing tables with namespaced non-Telegram keys (`[channel, chatId]`); Telegram keys remain unchanged. This prevents preferences for identical IDs on different platforms from colliding. Preferences apply across threads in a chat; delivery retains the original thread binding.
+
+Explicit audio shares serve MP3 and M4A inline with `Accept-Ranges: bytes`, single-range `206` responses and `Content-Range` for player probes/seeking. GET and HEAD retain the existing token, containment and MIME checks; document shares remain downloads.
+
+LINE loading uses `POST /v2/bot/chat/loading/start` for 1:1 user IDs. Ingress starts the indicator before media download; the orchestration runtime renews it from durable input/decision/task state, every four seconds with five-second expiry. A newly delivered acknowledgement triggers renewal on the next one-second activity tick if work remains. Idle, user-input wait, reconciliation, global Off and shutdown stop renewals. Loading renewals and outgoing orchestration replies/menus are serialized per Agent/chat, so a late renewal cannot overtake the reply that clears it. Ingress awaits its initial loading request before forwarding any command. Queued renewals recheck activity before sending. LINE clears loading on outgoing messages, has no explicit stop endpoint, and only shows it while the user is viewing the 1:1 chat; groups/rooms are unsupported. See [LINE's loading API](https://developers.line.biz/en/reference/messaging-api/#display-a-loading-indicator).
+
+Control tokens expire after five minutes and bind channel, chat, thread, session and principal. Replayed setting/cancellation selections, foreign users and session switches cannot reuse the token. Task views expose title/status/progress/question, not worker instructions, credentials or installed skill bodies. Discord and Slack edit the existing menu; LINE replaces quick replies with a new message and uses a valid reply token before push fallback.
+
+| Ingress | Normalization and validation |
+|---|---|
+| Discord receiver | Native slash commands/buttons re-run the access gate. Audio attachments carry `attachment_kind: voice`; only Discord CDN references are downloaded. |
+| `POST /webhooks/line/:agentId` | Existing signed JSON route handles audio blobs and scoped control postbacks. Postbacks re-run the current source access policy. |
+| `POST /webhooks/slack/:agentId` | Accepts signed JSON Events and signed URL-encoded slash-command / `block_actions` bodies. Audio downloads require HTTPS Slack hosts, bounded bytes and no credential-bearing redirects. |
+
+Slack app registration remains an external setup step: point Slash Commands and Interactivity at the same webhook URL, enable `commands`, `files:read`, `files:write` alongside existing messaging scopes, and reinstall after scope changes. The bot token does not administer Slack autocomplete registrations, so disabled orchestration rejects stale commands but cannot remove them from Slack’s app settings. See [Slack slash commands](https://docs.slack.dev/interactivity/implementing-slash-commands/) and [interaction payloads](https://docs.slack.dev/interactivity/handling-user-interaction/). Native slash commands are unavailable inside Slack threads; `@bot /command` messages preserve the thread context.
+
+Speech uses a bounded MP3 file pinned to the selected provider/voice/model. Discord uploads an audio attachment; Slack uses [external file upload](https://docs.slack.dev/messaging/working-with-files/) and completes it in the original thread; LINE sends an [audio message](https://developers.line.biz/en/reference/messaging-api/#audio-message) after converting provider MP3 to AAC-LC mono 44.1 kHz M4A with fast-start metadata. This requires `ffmpeg` and `ffprobe` in the gateway host PATH; conversion errors produce `LINE_AUDIO_CONVERSION_FAILED` and retain the text response. Duration comes from the converted file. The 30-minute share URL ends in `/audio.m4a`; public fetches revalidate it and serve `audio/mp4` with `nosniff` (older MP3 shares retain `audio/mpeg`); ordinary `any` shares remain image/PDF-only. Turning voice Off suppresses synthesis and pending delivery; already accepted sends cannot be recalled.
+
+### Live voice endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/agents/:agentId/voice-settings` | Effective voice settings and `orchestration_enabled`; requires access to this Agent |
+| `PATCH` | `/api/v1/agents/:agentId/voice-settings` | Persist a partial Agent voice override; requires write permission for this Agent |
+| `GET` | `/api/v1/agents/:agentId/voice-settings/catalog?provider=upstream` | Provider voice/model catalog for the settings UI; provider may also be `elevenlabs`, `cartesia`, `deepgram`, `paxalabs`, or `upstream:paxalabs` |
+| `GET` | `/api/v1/agents/:agentId/voice-sessions/voices` | Available voices: `{ voices: [{ id, name, gender? }], default_voice_id }` |
+| `POST` | `/api/v1/agents/:agentId/sessions/:sessionId/voice-sessions` | Create a voice lease and single-use WebSocket ticket; body `{ "chat_id": "<chat-id>" }` |
+| `GET` (WebSocket upgrade) | `/api/v1/agents/:agentId/voice-sessions/:voiceSessionId/stream?ticket=<ticket>` | Duplex audio/control stream |
+| `DELETE` | `/api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/:voiceSessionId` | Close the owned voice lease; returns `204` |
+
+HTTP endpoints require an authorized API key. Voice must be enabled at `agents[].voice.enabled`, with gateway orchestration enabled. Ticket creation verifies the existing chat/session pair and principal. Only one voice lease is allowed per conversation. Tickets expire after 30 seconds and are consumed at upgrade; the WebSocket must use the same Origin as ticket creation. No public URL or `voice.allowedOrigins` setup is required. Direct browser requests use API-key authentication with non-credentialed CORS; cookie-authenticated products must enforce session ownership and credentialed CORS at their trusted proxy. The legacy `allowedOrigins` field is ignored. Disabled voice or an occupied lease returns `409`; ownership/origin errors are rejected. Do not send the API key in the WebSocket URL.
+
+Creation returns `voice_session_id`, `ticket`, `expires_at` (Unix milliseconds), `stream_path`, input/output formats and duplex/playback capabilities. Both audio directions currently use mono 16 kHz PCM signed 16-bit little-endian.
+
+Voice settings writes validate the same voice configuration schema as startup, reject unknown fields, and merge nested `stt`, `tts`, `notes`, `turns` and `playback` overrides under a configuration write lock. They write only `agents[].voice` and preserve other agents and task settings. An empty new configuration stays disabled; enabling it requires selected speech models. Changes apply to new voice connections and subsequent replies; existing queued speech retains its pinned settings. Enabling Agent voice does not enable gateway orchestration. Browser clients do not need to save settings to register a URL. API keys are never accepted in this body. The catalog returns `{ provider, voices, models, warnings }`. Model entries include `can_do_text_to_speech`, `can_do_speech_to_text`, `realtime`, `voice_messages`, and optional `conversation` capabilities so clients can combine connected providers into role-specific model pickers. Scribe STT entries come from supported transport IDs (the ElevenLabs model endpoint lists synthesis models); Cartesia currently lists the adapter-supported Sonic 3 model. Paxa and Deepgram model inventories are fetched from their provider APIs; unavailable credentials/catalogs return `503` without upstream credentials.
+
+The `upstream` provider uses the origin of `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (falling back to `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`), and the `/v1/voice/elevenlabs/` relay endpoints. It requires a provider service implementing this relay; an ordinary Anthropic-compatible messages endpoint alone is insufficient. The relay resolves the user's ElevenLabs BYOK connection. Direct `elevenlabs` configuration remains supported with `ELEVENLABS_API_KEY`.
+
+Voice settings `language` is a recognition hint for STT. TTS follows the language of the approved spoken response, including typed messages while the microphone is muted. Model and voice catalog permissions are independent: a missing model-list permission returns usable voices and supported synthesis defaults marked `catalog_source: supported_defaults`, with a warning to enable `models_read` for the complete provider catalog.
+
+After connecting, send JSON `{ "type": "voice.start", "voice_id": "<catalog-id>" }` (`voice_id` is optional). Wait for `voice.state` with `state: "listening"`, `generation`, `epoch` and `utterance_id` before sending microphone frames.
+
+Binary audio uses a 44-byte header followed by PCM bytes: ASCII `CGV1` (4 bytes), generation UUID (16 bytes), epoch (uint32 big-endian), sequence (uint32 big-endian), segment UUID (16 bytes). Microphone segment IDs are the current utterance ID; playback frames identify the segment from `playback.start`. Reject stale generations/epochs. Payloads must have an even byte length and are bounded to 32,000 bytes per frame.
+
+Client JSON controls:
+
+| Type | Fields / behavior |
+|---|---|
+| `voice.configure` | `voice_id`; validated against the catalog, acknowledged by `voice.configured` |
+| `speech.activity` | Signals current microphone speech activity |
+| `speech.started` | `epoch`; signals a possible interruption |
+| `speech.ended` | `last_audio_seq`; signals an utterance boundary |
+| `utterance.commit` | `last_audio_seq`, optional `final: true`; finalize received audio |
+| `voice.mute` | `muted` boolean, `policy: "commit"` or `"discard"`, `last_audio_seq`; commit pending input before muting or discard it |
+| `playback.progress` | `epoch`, `sample_offset`; samples actually played, not merely received |
+| `playback.clear.ack` | Acknowledge that queued audio was cleared |
+| `voice.stop` | Close voice transport; does not cancel background tasks |
+
+Server controls include `voice.state`, `voice.configured`, `stt.partial`, `stt.segment`, `stt.final`, `utterance.accepted`, `response.text`, `response.speech`, `playback.start`, `playback.end`, `playback.clear`, `voice.notice` and `voice.error`. Correlate chat/voice output using `response_id` and `request_id` when present; avoid rendering duplicate bubbles. Clear local queued audio on `playback.clear`. `SPEECH_SUMMARY_UNAVAILABLE` is a notice that approved spoken text is unavailable; retain the text response instead of reading the full report aloud.
+
+Voice errors include a safe `message`, `category`, `retryable`, optional `httpStatus`, and `referenceId` alongside `code`. Preview generation failures return the same diagnostic fields plus `error`. The reference correlates with server logs; raw provider bodies and credentials are never returned. Payment/authentication/permission/quota errors require corrective action before retrying. Explicit rate-limit, network, timeout and temporary-unavailability errors permit a later retry; this flag does not automatically retry or resubmit audio. A bare HTTP 429 remains `quota_or_rate_limit` unless a recognized provider code distinguishes the cause. Unknown errors remain non-retryable diagnostics rather than guessed billing or model failures.
+
+
+A connected, same-principal voice session can speak typed chat responses while its microphone is muted, including a task acknowledgement and the later worker result. The chosen voice remains the vocal identity. Spoken summaries follow the response language unless the user explicitly requests different chat/audio languages.
+
+### Dashboard and retention
+
+Dashboard managed Sessions follow the current runtime lifecycle: only Agent sessions used or Worker sessions admitted in this runtime make a parent row visible. Stored conversations remain available through history; reading the dashboard does not activate them.
+
+`GET /status` retains legacy sessions and includes managed sessions in `agents[].sessions`, marked `orchestration: true`. Managed rows carry `status` (`thinking`, `working`, `queued`, `waiting_input`, `needs_reconciliation` or `idle`), nested `tasks` and `workerIds`. `agents[].orchestration` includes `agentProcesses`, task summaries and `workerPool` (`maxWorkers`, `idleTtlMs`, `workers`). Worker records expose worker/session/workstream IDs, busy/idle state and idle `expiresAt`. Task summaries expose predecessor, worker session, resume status, active host PID and latest tool. A container PID here is the host Docker client PID. Finished tasks do not claim a stale PID is still running.
+
+`/dashboard` displays managed and legacy sessions together; expanding a managed row reveals its worker/task details. Headless sessions have no interactive PTY viewer. The direct path is `/dashboard`; `/gateway/dashboard` requires a reverse-proxy prefix.
+
+Worker idle expiry (default 10 minutes) retires a pool slot, not the task. Task records in the per-agent `orchestration.db` have **no automatic deletion policy yet**. Event/tool activity defaults to seven-day retention. Eligible private task workspaces are archived separately after seven days by default; host/container user files are excluded. Existing chat-history retention does not delete task records.
+
 ## System Endpoints
 
 ### GET /health
@@ -538,6 +752,8 @@ curl -H "X-Api-Key: my-secret-key-123" \
 ```
 
 `name` is an optional display name (`null` when unset); the UI falls back to `id` in that case.
+
+`orchestration_enabled` reports the effective gateway mode for this Agent. When true, clients must continue observing session history after an acknowledgement stream ends: completed tasks produce later assistant replies. False or absent retains legacy request/response behavior.
 
 ---
 
@@ -2074,7 +2290,7 @@ XML families, script and style), is stored as `.bin`. When the bytes cannot be f
 over the 20 MB media cap, an empty upload, or a failed transfer — the turn is still
 forwarded, with no `meta.image_path` and a `content` that states the file is not
 available and why, so the agent never mistakes a lost attachment for one it has yet to
-open. Sticker, video, audio, and location messages are ignored. The
+open. Sticker, video, and location messages are ignored. Audio messages are transcribed when orchestration and the Agent’s voice-note recognition are enabled; legacy mode ignores audio. The
 request is acknowledged (`200 {"ok":true}`) **before** event processing, so LINE never
 sees a slow response.
 
@@ -3030,7 +3246,7 @@ curl -H "X-Api-Key: my-secret-key-123" \
 
 Manage persistent scheduled jobs. All routes require the same API key auth as the Agent API. Write operations (`POST`, `PUT`, `DELETE`) additionally verify the key has access to the job's `agentId`.
 
-Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restarts.
+Jobs are persisted to `~/.claude-gateway/crons.json` and survive gateway restarts. Existing agent-type jobs require no data migration when enabling orchestration: CronManager supplies a stable internal principal scoped to the Agent and job, while retaining the existing cron session ID. The Agent’s `allow_tools` policy still applies (unset defaults to false); external API requests still require their authenticated principal.
 
 ### Job schema
 
@@ -4680,6 +4896,7 @@ any other admin caller.
 | `access_token` | string | Required, non-empty |
 | `label` | string | Required, non-empty |
 | `config` | object | Required. Must contain **exactly one** `{access_token}` placeholder and no others |
+| `defaultEnabled` | boolean | Optional. `false` requires explicit per-agent opt-in. Omitted preserves existing gateway defaults; `true` never overrides `gateway.connectorsDefaultEnabled: false`. Returned in create/list/status responses when configured |
 | `description` | string | Optional |
 | `sourceUrl` | string | Optional |
 
@@ -4764,6 +4981,12 @@ connector that slugs to the same id does not inherit them.
 ### POST /api/v1/connectors/custom
 
 Add a user-pasted connector. **Admin.**
+
+Before relying on per-connector opt-in, clients should check that
+`GET /api/v1/connectors` returns `capabilities.perConnectorDefaults: true`.
+Older gateways may ignore unknown fields. Store a personal browser connector
+with `defaultEnabled: false`, then enable only selected agents through the
+existing agent PATCH endpoint.
 
 **Request body:**
 
@@ -5038,3 +5261,91 @@ curl -X POST \
 | 404 | Unknown package name |
 | 500 | `npm install` failed — body contains stderr |
 | 503 | npm registry unreachable |
+
+Worker execution defaults to the host Agent's existing workspace, or its app container. `default-worker` accepts general-purpose tasks without Git or `tasks.projectRoot`; an authorized directory can be included in task instructions. Explicit workspace policies remain unchanged.
+
+Worker MCP admission: only explicitly configured `isolated-worktree` execution of `default-worker` can return `WORKER_GIT_PROJECT_REQUIRED` with an actionable message and `retryable: true` before creating a task. Correct the worker profile or project configuration before resubmitting; retain `continue_task_id` for related work. This does not change public API authentication or container permissions.
+
+Manual `POST /api/v1/crons/:id/run` for an orchestration agent remains pending through delegated work and the final Agent report. A queue acknowledgement is not a successful run result. The job timeout covers this wait; absent an explicit value, managed jobs have no fixed total wait deadline when worker maxDurationMs is zero. Normal chat/API requests still return their initial Agent response without waiting for workers.
+
+Worker observation: `tasks.idleTimeoutMs` defaults to 300000 and now marks a quiet worker for inspection, **not termination**. Silence while a tool or subsequent model response is pending does not prove a stall. `tasks.defaultTimeoutMs` remains an alias for this observation threshold. Worker startup/first-response budgets remain bounded; `tasks.maxDurationMs: 0` means no total deadline (a positive value is an explicit hard deadline). Cancellation, process exit, and terminal results still end work. No completed or interrupted side effects are replayed automatically.
+
+Every 15 seconds, managed workers publish `task.execution` observations, available through task status, activity, dashboard data and `/tasks`. Linux host workers sample the owned process tree's CPU ticks, logical read/write counters (including pipes), and child membership without reading argv/environment. PID start times fence reused identities. CPU/I/O movement is **process activity**, not proof that tests passed or useful work advanced. Diagnostics use tool protocol metadata rather than parsing framework-specific output. `lastTool` records the tool name, `returned` or `error`, timestamp, and an exit code only when explicitly provided as numeric metadata. `returned` means a result was received, not that the task succeeded. Raw tool output and test counts are not copied into diagnostics; relevant verification belongs in the worker’s task progress/result. Quiet/sleeping/network-waiting work is retained and cancellable. Non-Linux or inaccessible telemetry, including app-container internals, is explicitly unavailable; Docker-client host activity is not represented as container progress. Detached/reparented children outside the owned group cannot be observed reliably. Observation timestamps are separate from last actual activity, so polling alone is not evidence of activity. Telegram task details separate Progress from Diagnostics and show Elapsed from the first start (frozen after completion). Terminal task observations are historical, not a live process guarantee.
+
+After an interrupted task, the Agent must compare the timestamps of progress and execution evidence and verify current files, commits and test results before claiming what remains. A stale progress report is not proof that later edits did not happen.
+
+
+Task cancellation also supports `needs_reconciliation` and `recovering`. The
+request enters `cancel_requested`; the scheduler confirms process termination
+before marking it `cancelled`. Unconfirmed cleanup returns
+`needs_reconciliation` with `CLEANUP_UNCONFIRMED` and a **Retry cleanup** button.
+Legacy process records without a kernel identity can be closed when their process
+group is absent, but a live group is not signalled based on its PID alone.
+Container execution requires separate proof; stopping its host Docker client is
+not proof of container termination. Cancellation preserves workspace files and
+prior side effects. The scoped `task_cancel` tool accepts optional
+`replaced_by_task_id` to record a known replacement in the same conversation.
+
+`task_status` includes recorded workspace modes/paths, file paths observed in tool
+calls, and recent tool descriptions. These are historical evidence, explicitly
+marked `currentFilesystemVerified: false`; neither timeout nor an absent remote
+branch proves that local work was deleted. The Agent must verify actual files/Git
+state before claiming work was lost. Task browser `Updated` includes the latest
+persisted tool activity, not only state changes.
+
+
+### Orchestration response text and voice replay
+
+`GET /api/v1/agents/:agentId/sessions/:sessionId/activity/stream` is an authenticated SSE stream. Each `data:` frame contains `{responseId, text, final}`; `text` is the current display-text snapshot, not a delta. Replace the previous snapshot with the same responseId. Current generating responses are replayed on connection; canonical message history is the source for completed responses. Heartbeat comments keep the connection alive. Agent access and conversation membership are required. Slow clients are disconnected and may reconnect.
+
+History messages may include `responseId` for orchestration assistant responses; clients should use it to reconcile streamed and persisted messages.
+
+`GET /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays` returns `{response_ids: string[]}` for retained completed browser TTS recordings.
+
+`GET /api/v1/agents/:agentId/sessions/:sessionId/voice-sessions/replays/:responseId` returns the original synthesized audio as `audio/wav`, or 404 if missing/expired. This GET never invokes a TTS provider. Both endpoints use API authentication, Agent access and conversation membership; no bearer credential belongs in the URL. Recordings are retained for at most 30 days with a 64 MiB per-Agent budget, oldest first eviction, and a 16 MiB per-recording limit. Disabling new voice synthesis does not delete existing recordings.
+
+### Connector resources
+
+Admin-created HTTP connectors may set `resourcesPath` (a simple same-origin path such as `/v1/grants`). `GET /v1/connectors/:id/resources` lists those resources; `DELETE /v1/connectors/:id/resources/:resourceId` revokes one. Both require connector-admin access, use stored credentials without exposing them to the caller, reject redirects, and have a 10-second network timeout. The list endpoint advertises `capabilities.connectorResources`. `DELETE /v1/connectors/:id?remove=true` explicitly removes the connector definition and its agent flags as well as credentials; ordinary DELETE retains its existing behavior. Revoke remote resources before removing their local credentials.
+
+For existing HTTP connectors, admins can PATCH `/v1/connectors/:id/management` with `{ "resourcesPath": "/v1/grants" }` without replacing credentials. Model provider capacity/unavailability is reported as HTTP 503 by the message API and with an actionable provider message in chat.
+
+### PaxaLabs speech providers
+
+Agent voice settings accept `paxalabs` (gateway environment key) and `upstream:paxalabs` (BYOK proxy under `ANTHROPIC_BASE_URL`) for `voice.tts.provider`, `voice.stt.provider`, and `voice.notes.provider`. Models are `paxa-tts-flash-v1` and `paxa-stt-lite-v1-preview`, respectively. `GET /v1/agents/:agentId/voice-settings` includes `direct_providers`, containing provider names only, never credentials.
+
+The voice WebSocket `voice.state` listening event includes `stt_mode: "batch" | "realtime"`. In batch mode, `utterance.commit` (including microphone mute with commit policy) finalizes the recording and starts transcription; `stt.partial` is not emitted. Clients should display a transcribing state until the final transcript is available. Paxa accepts only `th`/`en` language hints; omission enables detection.
+
+### Cancel an orchestration task
+
+`POST /api/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/cancel` cancels one task without an inference turn. Requires an API key with access to the agent and membership of the task conversation; the task must belong to the supplied session. Returns `{ "task": { "taskId": "...", "state": "cancel_requested" } }` while stopping, or `cancelled` once stopped. A task that already finished retains its terminal state. Existing files and completed side effects are retained.
+
+Voice clients may include `model` in `voice.start` and update it during the connection with `{ "type": "voice.configure", "model": "model-id" }`. The server acknowledges with `voice.configured`; subsequent utterance submissions use that model, including their new worker tasks. Existing running tasks retain their assigned model. This is the Agent model, independent of STT/TTS model selection.
+
+### Voice model catalog and preview
+
+`GET /api/v1/agents/:agentId/voice-settings/catalog?provider=upstream:gemini` lists connected Gemini models and prebuilt voices. Gemini TTS uses generateContent; Gemini STT transcribes recorded segments after pause/mute (no live partials). Direct Gemini uses `GEMINI_API_KEY`; upstream Gemini reuses the pod provider credentials.
+
+BYOK catalog IDs use `<provider>/<native-model>`, e.g. `gemini/gemini-3.1-flash-tts-preview`. Catalog entries include `native_model_id`, `provider`, `source` (`byok` or `gateway`), and `metered: false`. Legacy bare IDs still use their explicitly configured provider. A mismatched prefix is rejected. Voice managed-pool routing is not enabled; missing BYOK credentials never switch payer.
+
+`POST /api/v1/agents/:agentId/voice-settings/preview` requires agent write access. Body: `{ "provider": "upstream:gemini", "model": "gemini/gemini-3.1-flash-tts-preview", "voiceId": "Kore", "language": "en" }`. Preview language defaults to English. Supported codes: `ar`, `de`, `en`, `es`, `fr`, `hi`, `id`, `it`, `ja`, `ko`, `pt`, `ru`, `th`, `vi`, `zh`; PaxaLabs accepts only `en` and `th`. Returns `{ "mime": "audio/wav", "audio": "<base64>" }` for a short fixed preview, without saving settings or adding chat history. Generation uses the selected provider account.
+
+
+### Telegram live task menus and selection confirmations
+
+In orchestration mode, `/tasks` keeps one live task menu per private chat.
+Opening it again deletes the previous menu (or closes its controls if deletion
+is unavailable). The receiver remembers the latest menu across restarts.
+Both the list and task detail refresh every three seconds, editing Telegram only
+when displayed content changes. Navigation stays on the selected page/task;
+auto-refresh never repeats a Stop action. Completed task details stop refreshing
+after showing the final state. Dismiss, session changes, revoked access, and
+message deletion stop tracking. Telegram `retry_after` delays further updates.
+These reads do not invoke the agent or consume inference tokens.
+
+Selecting `/voice` or `/voices` replaces the menu with a persistent confirmation
+and removes its buttons, matching `/models`. Dismiss does not record a selection.
+
+Upstream voice uses the same Claude provider settings as the Agent: the `env` block in `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`) takes precedence over inherited environment. Credentials are resolved as one group, so a settings identity cannot silently fall back to another exported token. Catalog, preview, STT and TTS resolve this connection when requested; a shell export is not required after restart. Model-catalog failures retain any available voices and report a provider diagnostic without changing saved selections.
+
+At startup, orchestration migrates registered, running app-agent containers that still use legacy host Claude settings/seed-file mounts, before starting their Agent runners. Migration verifies Compose ownership and all remaining isolation constraints, backs up the generated Compose/Dockerfile, and recreates only the `agent` service with the current seed-directory mount (`--no-deps --no-build`). App/database services and mounted workspace/media remain intact. Unknown mounts or privileged containers are rejected; migration never enables a host fallback or restores unsafe mounts automatically.

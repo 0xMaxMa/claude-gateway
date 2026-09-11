@@ -51,7 +51,7 @@ export function resolveEnabledConnectors(
   // for an id that resolves to nothing — a "changed" fingerprint that restarts every
   // session on the box, forever, since it never matches what a spawn recorded.
   const out: Record<string, unknown> = Object.create(null);
-  const isEnabled = (id: string): boolean => enabled[id]?.enabled ?? defaultEnabled;
+  const isEnabled = (id: string): boolean => enabled[id]?.enabled ?? (defaultEnabled && customConnectors[id]?.defaultEnabled !== false);
 
   for (const [id, entry] of Object.entries(customConnectors)) {
     if (!isEnabled(id)) continue; // opted out (or not opted in)
@@ -169,6 +169,8 @@ export function listConnectorStatus(
         credentialOwner: entry.credentialOwner,
         connected,
         repoUrl: entry.sourceUrl,
+        ...(entry.resourcesPath ? { resourcesPath: entry.resourcesPath } : {}),
+        ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}),
         ...(refresh ? { refresh } : {}),
       } as ConnectorStatus;
     } catch (err) {

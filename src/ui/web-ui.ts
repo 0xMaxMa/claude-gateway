@@ -171,6 +171,7 @@ export function generateDashboardHtml(): string {
     .proc-tree .proc-orphan { color: #fc8181; }
     .proc-tree .proc-label { color: #718096; }
     .proc-tree .proc-summary { color: #f6e05e; font-weight: 600; }
+    .session-modes { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
     .session-id {
       font-family: monospace;
       font-size: 0.75rem;
@@ -854,8 +855,18 @@ export function generateDashboardHtml(): string {
     document.getElementById('pty-refresh-btn').addEventListener('click', function() { void refreshPtyViewer(); });
     document.getElementById('pty-mode-toggle-btn').addEventListener('click', togglePtyInputMode);
 
+    const expandedSessionRows = new Set();
     // Event delegation for Live buttons (avoids inline onclick + HTML injection)
     document.getElementById('sessions-tbody').addEventListener('click', function(e) {
+      const toggle = e.target.closest('.btn-workers');
+      if (toggle) {
+        const key=toggle.getAttribute('data-expand-key'), open=!expandedSessionRows.has(key);
+        if(open)expandedSessionRows.add(key);else expandedSessionRows.delete(key);
+        toggle.setAttribute('aria-expanded',String(open));
+        toggle.textContent=(open ? '▾ ' : '▸ ')+toggle.getAttribute('data-label');
+        const detail=document.getElementById(toggle.getAttribute('aria-controls'));if(detail)detail.hidden=!open;
+        return;
+      }
       const btn = e.target.closest('.btn-stream');
       if (btn) void openPtyViewer(btn.getAttribute('data-agent-id'), btn.getAttribute('data-session-id'));
     });
@@ -943,7 +954,7 @@ export function generateDashboardHtml(): string {
         const rows = [];
         agents.forEach(function(a) {
           (a.sessions || []).forEach(function(s) {
-            const statusBadge = s.isRunning
+            const statusBadge = s.orchestration ? '<span class="badge '+(['thinking','working'].includes(s.status) ? 'badge-green' : 'badge-gray')+'">'+escHtml(s.status)+'</span>' : s.isRunning
               ? '<span class="badge badge-green">running</span>'
               : '<span class="badge badge-gray">stopped</span>';
             const uptime = s.isRunning ? fmtUptime(s.uptimeSec || 0) : '<span class="ts">&mdash;</span>';
@@ -956,13 +967,17 @@ export function generateDashboardHtml(): string {
             const liveBtn = (s.hasPtyStream && s.isRunning && s.mode === 'pty-shell')
               ? '<button class="btn-stream" data-agent-id="' + escHtml(a.id) + '" data-session-id="' + escHtml(s.sessionId || '') + '">💻 View</button>'
               : '<span class="ts">&mdash;</span>';
+            const key=a.id+':'+s.sessionId, detailId='workers-'+encodeURIComponent(key), open=expandedSessionRows.has(key);
+            const childTasks=s.tasks||[], count=childTasks.length;
+            const label='Workers / tasks ('+count+')';
+            const expand=s.orchestration ? '<br><button class="btn-stream btn-workers" data-expand-key="'+escHtml(key)+'" data-label="'+escHtml(label)+'" aria-expanded="'+open+'" aria-controls="'+escHtml(detailId)+'">'+(open?'▾ ':'▸ ')+escHtml(label)+'</button>' : '';
             rows.push(
-              '<tr class="session-row">' +
+              '<tr class="session-row" data-agent="'+escHtml(a.id)+'" data-session="'+escHtml(s.sessionId)+'">' +
               '<td><span style="color:#90cdf4;font-weight:600;">' + escHtml(a.id) + '</span></td>' +
-              '<td>' + sessId + '</td>' +
+              '<td>' + sessId + expand + '</td>' +
               '<td>' + chatCell + '</td>' +
               '<td>' + sourceBadge(s.source) + '</td>' +
-              '<td>' + modeBadge(s.mode) + '</td>' +
+              '<td><div class="session-modes">' + (s.orchestration ? '<span class="badge badge-purple">orchestration</span>' : '') + modeBadge(s.mode) + '</div></td>' +
               '<td>' + fmtModel(s.model) + '</td>' +
               '<td>' + fmtTokens(s.tokens) + '</td>' +
               '<td>' + statusBadge + '</td>' +
@@ -971,6 +986,17 @@ export function generateDashboardHtml(): string {
               '<td>' + liveBtn + '</td>' +
               '</tr>'
             );
+            if (s.orchestration) {
+              const pool=a.orchestration.workerPool, slots=pool ? pool.workers.filter(w => (s.workerIds||[]).includes(w.workerId)) : [];
+              let content='<div style="padding:12px 20px;border-left:3px solid #805ad5"><div class="ts">'+escHtml(a.orchestration.workspaceMode)+(a.container ? ' · '+escHtml(a.container) : '')+(pool ? ' · Agent pool '+pool.workers.length+'/'+pool.maxWorkers+' · idle TTL '+Math.round(pool.idleTtlMs/60000)+' min' : '')+'</div>';
+              slots.forEach(function(w){content+='<div class="worker-slot">'+escHtml(w.state)+' · Worker '+escHtml(w.workerId)+' · session '+escHtml(w.sessionId)+(w.expiresAt ? ' · expires '+escHtml(new Date(w.expiresAt).toLocaleTimeString()) : '')+'</div>';});
+              if (count) {
+                content+='<table class="worker-tasks"><thead><tr><th>Worker / Session</th><th>Task</th><th>Status</th><th>Tool</th><th>Process</th></tr></thead><tbody>';
+                childTasks.forEach(function(t){content+='<tr data-task="'+escHtml(t.taskId)+'"><td>'+escHtml(t.workerId||'Unassigned')+'<br><span class="ts">'+escHtml(t.workerSessionId||'')+(t.resumed?' · resumed':'')+'</span></td><td>'+escHtml(t.title)+'<br><span class="ts">'+escHtml(t.taskId)+(t.continueTaskId?' · follows '+escHtml(t.continueTaskId):'')+'</span></td><td>'+escHtml(t.state)+'</td><td>'+escHtml(t.lastTool ? t.lastTool.name+' · '+t.lastTool.type+(t.lastTool.is_error?' (error)':'') : '—')+'</td><td>'+escHtml(t.hostProcessId ? String(t.hostProcessId)+(t.container?' (docker exec)':'') : '—')+'</td></tr>';});
+                content+='</tbody></table>';
+              } else content+='<div class="ts">No worker tasks in this session</div>';
+              rows.push('<tr class="session-workers" id="'+escHtml(detailId)+'"'+(open?'':' hidden')+'><td colspan="11">'+content+'</div></td></tr>');
+            }
           });
         });
 
@@ -1024,7 +1050,7 @@ export function generateDashboardHtml(): string {
 
       function cat(p) {
         const a = p.args;
-        if (a.includes('node') && a.includes('dist/index')) return 'orchestrator';
+        if (a.includes('node') && (a.includes('dist/index') || a.includes('dist/entry'))) return 'orchestrator';
         if (a.includes('claude-pty-shell')) return 'pty';
         if (a.includes('bun') && a.includes('mcp/server')) return 'mcp';
         if (a.includes('bun') && a.includes('telegram') && a.includes('receiver')) return 'telegram';

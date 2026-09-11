@@ -373,3 +373,12 @@ describe('resolveTelegramReplyFormat() — agent-authored HTML must not render l
     expect(sendText).toContain('&lt;script&gt;')
   })
 })
+
+test('escaped pipes inside command titles do not create extra Telegram table columns', () => {
+  const html=toTelegramHtml('| PR | Title |\n| --- | --- |\n| #470 | service start\\|stop\\|restart |');
+  const lines=html.replace('<pre>','').replace('</pre>','').split('\n');
+  expect(lines[0].split('|')).toHaveLength(4); // two columns, including outside borders
+  expect(lines[1].split('|')).toHaveLength(4);
+  expect(html).toContain('service start|stop|restart');
+  expect(html).not.toContain('start\\');
+});

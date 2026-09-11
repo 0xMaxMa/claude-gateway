@@ -119,6 +119,16 @@ export class SessionStore {
       const filePath = this.resolvePath(agentId, chatId);
       const dir = path.dirname(filePath);
       fs.mkdirSync(dir, { recursive: true });
+      if (message.operationId && fs.existsSync(filePath)) {
+        // Orchestration retries reconcile under the same writer lock. A malformed
+        // canonical file must surface an error, not be reset during recovery.
+        const existing = fs.readFileSync(filePath, 'utf-8').split('\n').filter(line => line.trim()).map(line => JSON.parse(line) as Message);
+        const prior = existing.find(item => item.operationId === message.operationId);
+        if (prior) {
+          if (prior.role !== message.role || prior.content !== message.content) throw new Error('history operation payload conflict');
+          return;
+        }
+      }
       const line = JSON.stringify(message) + '\n';
       fs.appendFileSync(filePath, line, 'utf-8');
     });
@@ -547,11 +557,20 @@ export class SessionStore {
         try {
           const raw = fs.readFileSync(sessionPath, 'utf-8');
           messages = JSON.parse(raw) as Message[];
-        } catch {
+        } catch (error) {
+          if (message.operationId) throw error;
           messages = [];
         }
       }
 
+      if (message.operationId) {
+        const prior = messages.find(item => item.operationId === message.operationId);
+        if (prior) {
+          if (prior.role !== message.role || prior.content !== message.content) throw new Error('history operation payload conflict');
+          await this._updateMessageCountInIndex(agentId, chatId, sessionId, messages.length, channel);
+          return;
+        }
+      }
       messages.push(message);
 
       // Write atomically

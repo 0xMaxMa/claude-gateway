@@ -10,8 +10,9 @@
       "claude.dangerouslySkipPermissions"
     ]
   },
-  "configVersion": "1.0.31",
+  "configVersion": "1.0.32",
   "gateway": {
+    "orchestration": false,
     "logDir": "~/.claude-gateway/logs",
     "timezone": "Asia/Bangkok",
     "bind": "127.0.0.1",
@@ -148,6 +149,11 @@
         "extraFlags": []
       },
       "signatureEmoji": "",
+      "voice": { "enabled": false },
+      "orchestration": {
+        "conversation": { "backend": "inherit", "notificationPolicy": "existing_receive_path", "maxActiveSessions": 2, "idleTimeoutMs": 120000 },
+        "tasks": { "projectRoot": "", "idleTimeoutMs": 300000, "maxDurationMs": 0, "maxConcurrentPerAgent": 10, "maxConcurrentPerConversation": 10, "workerIdleTtlMs": 600000, "maxQueuedPerAgent": 100, "maxQueuedPerConversation": 20 }
+      },
       "heartbeat": {
         "rateLimitMinutes": 30
       },

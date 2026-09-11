@@ -1,4 +1,7 @@
+import { inferenceFailureMessage } from '../orchestration/inference-errors';
+import { voiceSettingsRouter } from './voice-settings-router';
 import { Router, Request, Response } from 'express';
+import { apiPrincipal } from '../orchestration/identity';
 import { randomUUID, createHash } from 'crypto';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -553,6 +556,7 @@ export function createApiRouter(
 ): Router {
   const router = Router();
   const auth = createApiAuthMiddleware(apiKeys);
+  router.use(voiceSettingsRouter(agentConfigs, agentRunners, apiKeys, configPath));
 
   async function writeAgentsToConfigImpl(
     cfgPath: string,
@@ -812,7 +816,9 @@ export function createApiRouter(
     // instead of being sent to Claude. They flow through the SAME response path as a
     // normal message — same SSE events when stream, same JSON shape when sync — so the
     // client treats a command reply exactly like any other assistant reply.
-    const isBuiltinCommand = !!trimmedMessage && AgentRunner.isApiBuiltinCommand(trimmedMessage);
+    const stopReply = runner.apiTaskStopReply?.(sessionId, apiPrincipal(apiKey), trimmedMessage);
+    const commandMessage = stopReply ?? trimmedMessage;
+    const isBuiltinCommand = !!commandMessage && AgentRunner.isApiBuiltinCommand(commandMessage);
 
     if (stream) {
       // SSE streaming mode
@@ -827,7 +833,7 @@ export function createApiRouter(
           openSseStream(res);
           try {
             const { responseText } = await runner.executeApiCommand(
-              sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage, model: modelStr },
+              sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, model: modelStr, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage },
             );
             sseCallbacks.onChunk({ type: 'text_delta', text: responseText } as import('../types').StreamEvent);
             sseCallbacks.onDone(responseText, []);
@@ -852,7 +858,7 @@ export function createApiRouter(
           chatIdStr,
           trimmedMessage,
           sseCallbacks,
-          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId },
+          { timeoutMs, allowTools, mediaFiles: validatedMediaFiles, model: modelStr, skipUserMessage, imageParams: validatedImageParams, videoParams: validatedVideoParams, requestId, principalId: apiPrincipal(apiKey) },
         );
 
         // Client disconnect — detaches this connection's sink. The turn keeps
@@ -865,11 +871,11 @@ export function createApiRouter(
           if (code === 'CONFLICT') {
             res.status(409).json({ error: 'Session already has a pending request' });
           } else {
-            res.status(500).json({ error: 'Internal error' });
+            res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: inferenceFailureMessage(err) ?? 'Internal error', ...(inferenceFailureMessage(err) ? { code } : {}) });
           }
         } else {
           try {
-            res.write(`data: ${JSON.stringify({ type: 'error', message: 'Internal error' })}\n\n`);
+            res.write(`data: ${JSON.stringify({ type: 'error', message: inferenceFailureMessage(err) ?? 'Internal error' })}\n\n`);
             res.end();
           } catch { /* client gone */ }
         }
@@ -882,7 +888,7 @@ export function createApiRouter(
         if (isBuiltinCommand) {
           // Built-in command — answer locally, return the same JSON shape as a normal reply.
           ({ responseText } = await runner.executeApiCommand(
-            sessionId, chatIdStr, trimmedMessage, { skipPersist: skipUserMessage },
+            sessionId, chatIdStr, commandMessage, { skipPersist: skipUserMessage, principalId: apiPrincipal(apiKey), displayCommand: trimmedMessage },
           ));
         } else {
           const agentCfgSync = agentConfigs.get(agentId)!;
@@ -895,6 +901,8 @@ export function createApiRouter(
             skipUserMessage,
             imageParams: validatedImageParams,
             videoParams: validatedVideoParams,
+            requestId,
+            principalId: apiPrincipal(apiKey),
           }));
         }
         const syncResult: Record<string, unknown> = {
@@ -916,7 +924,7 @@ export function createApiRouter(
         } else if (code === 'CONFLICT') {
           res.status(409).json({ error: 'Session already has a pending request' });
         } else {
-          res.status(500).json({ error: 'Internal error' });
+          res.status(code === 'PROVIDER_CAPACITY' || code === 'PROVIDER_UNAVAILABLE' ? 503 : 500).json({ error: inferenceFailureMessage(err) ?? 'Internal error', ...(inferenceFailureMessage(err) ? { code } : {}) });
         }
       }
     }
@@ -962,6 +970,7 @@ export function createApiRouter(
         description: cfg.description,
         model: cfg.claude?.model ?? null,
         allow_tools: cfg.allow_tools ?? false,
+        orchestration_enabled: cfg.orchestration?.enabled === true,
         connectors: cfg.connectors ?? {},
         avatarUrl: cfg.avatar ? `/api/v1/agents/${id}/avatar` : null,
         telegram_connected: !!cfg.telegram?.botToken,
@@ -4024,7 +4033,7 @@ export function createApiRouter(
         content.trim(),
         senderName,
         sseCallbacks,
-        { timeoutMs: DEFAULT_TIMEOUT_MS, requestId },
+        { timeoutMs: DEFAULT_TIMEOUT_MS, requestId, principalId: apiPrincipal(apiKey), allowTools: runner.getAgentConfig().allow_tools ?? Boolean(apiKey.allow_tools) },
       );
       res.on('close', cleanup);
     } catch (err: unknown) {
@@ -4606,7 +4615,7 @@ export function createApiRouter(
     const { runner, chatId } = ctx;
     const { sessionId } = req.params as { sessionId: string };
     try {
-      const { result } = await runner.executeApiCommand(sessionId, chatId, '/stop', { skipPersist: true });
+      const { result } = await runner.executeApiCommand(sessionId, chatId, '/stop', { skipPersist: true, principalId: apiPrincipal((req as AuthedRequest).apiKey) });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
@@ -4646,6 +4655,48 @@ export function createApiRouter(
    * is keyed by session id, and a client resuming after a reload may well have
    * nothing but the session id left.
    */
+  router.get('/v1/agents/:agentId/sessions/:sessionId/activity/stream', auth, async (req: Request, res: Response) => {
+    const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
+    const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
+    if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId)) { res.status(403).end(); return; }
+    let unsubscribe: (() => void) | undefined, heartbeat: ReturnType<typeof setInterval> | undefined;
+    let closed = false;
+    res.on('close', () => { closed = true; unsubscribe?.(); clearInterval(heartbeat); });
+    try {
+      await runner.authorizeVoiceSession(sessionId, apiPrincipal(key));
+      if (closed) return;
+      res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+      res.flushHeaders();
+      unsubscribe = await runner.subscribeResponseText(sessionId, apiPrincipal(key), value => {
+        if (closed) return;
+        if (res.writableLength > 1024 * 1024) { res.end(); return; }
+        res.write(`data: ${JSON.stringify(value)}\n\n`);
+      });
+      if (closed) { unsubscribe(); return; }
+      heartbeat = setInterval(() => { if (!closed) res.write(': heartbeat\n\n'); }, 15000);
+    } catch { if (!res.headersSent) res.status(403); res.end(); }
+  });
+
+  router.post('/v1/agents/:agentId/sessions/:sessionId/tasks/:taskId/cancel', auth, async (req: Request, res: Response) => {
+    const { agentId, sessionId, taskId } = req.params as { agentId: string; sessionId: string; taskId: string };
+    const key = (req as AuthedRequest).apiKey, runner = agentRunners.get(agentId);
+    if (!canAccessAgent(key, agentId) || !runner || !isValidSessionId(sessionId) || !isValidSessionId(taskId)) { res.status(403).json({ error: 'Task unavailable' }); return; }
+    try { res.json({ task: await runner.cancelApiTask(sessionId, apiPrincipal(key), taskId) }); }
+    catch { res.status(403).json({ error: 'Task unavailable for this principal' }); }
+  });
+
+  router.get('/v1/agents/:agentId/sessions/:sessionId/activity', auth, async (req: Request, res: Response) => {
+    const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canAccessAgent(apiKey, agentId)) { res.status(403).json({ error: 'Access denied' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: 'Agent not found' }); return; }
+    const after = Number(req.query.after ?? 0);
+    if (!isValidSessionId(sessionId) || !Number.isSafeInteger(after) || after < 0) { res.status(400).json({ error: 'Invalid session or cursor' }); return; }
+    try { res.json(await runner.orchestrationActivity(sessionId, apiPrincipal(apiKey), after)); }
+    catch (error) { res.status(403).json({ error: 'Activity unavailable for this principal' }); }
+  });
+
   router.get('/v1/agents/:agentId/sessions/:sessionId/stream', auth, (req: Request, res: Response) => {
     const { agentId, sessionId } = req.params as { agentId: string; sessionId: string };
     const apiKey = (req as AuthedRequest).apiKey;
@@ -4838,7 +4889,7 @@ export function createApiRouter(
         chatId,
         content,
         sseCallbacks,
-        { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true, requestId },
+        { timeoutMs: DEFAULT_TIMEOUT_MS, skipUserMessage: true, requestId, principalId: apiPrincipal(apiKey) },
       );
 
       res.on('close', onClientDisconnect);

@@ -29,10 +29,13 @@ import { ShareFileModule } from './tools/share-file/module';
 import { AppsModule } from './tools/apps/module';
 import { ApiModule } from './tools/api/module';
 import { MemoryModule } from './tools/memory/module';
+import { AGENT_TASK_TOOLS, WORKER_REPORT_TOOLS, callTaskBridge } from './tools/tasks/module';
 import { buildChannelInstructions } from './instructions';
 import type { ChannelModule, ToolModule, McpToolDefinition } from './types';
 
 const ORIGIN_CHANNEL = process.env.GATEWAY_ORIGIN_CHANNEL ?? '';
+const ORCHESTRATION_ROLE = process.env.GATEWAY_ORCHESTRATION_ROLE;
+if (ORCHESTRATION_ROLE && !['agent', 'worker'].includes(ORCHESTRATION_ROLE)) throw new Error('Invalid orchestration MCP role');
 
 type AnyModule = ChannelModule | ToolModule;
 
@@ -40,7 +43,7 @@ function isChannelModule(mod: AnyModule): mod is ChannelModule {
   return 'start' in mod && typeof (mod as ChannelModule).start === 'function';
 }
 
-const modules: AnyModule[] = [
+const modules: AnyModule[] = ORCHESTRATION_ROLE ? [new MemoryModule(), ...(ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true' ? [new ImageModule(), new VideoModule(), new ShareFileModule(), new BrowserModule()] : [])] : [
   new TelegramModule(),
   new DiscordModule(),
   new LineModule(),
@@ -76,10 +79,15 @@ for (const mod of modules) {
   if (!visible) continue;
 
   for (const tool of mod.getTools()) {
+    if (ORCHESTRATION_ROLE && !['memory_search', 'memory_get'].includes(tool.name) && !(ORCHESTRATION_ROLE === 'worker' &&
+      ((mod.id === 'image' || mod.id === 'video' || mod.id === 'share-file' || mod.id === 'browser') || (mod.id === 'memory' && process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true')))) continue;
     toolMap.set(tool.name, mod);
     visibleTools.push(tool);
   }
 }
+
+const taskTools = ORCHESTRATION_ROLE === 'agent' ? AGENT_TASK_TOOLS : ORCHESTRATION_ROLE === 'worker' ? WORKER_REPORT_TOOLS.filter(tool => tool.name !== 'task_memory_append' || process.env.GATEWAY_ORCHESTRATION_WRITE_MEMORY === 'true') : [];
+if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE) visibleTools.push(...taskTools);
 
 // Initialize channel modules so their bot API clients are ready for tool calls.
 // initBot() returns immediately after creating the client — no blocking.
@@ -105,7 +113,7 @@ const mcp = new Server(
         'claude/channel/permission': {},
       },
     },
-    instructions: buildChannelInstructions(imageEnabled, videoEnabled),
+    instructions: ORCHESTRATION_ROLE ? 'Use scoped task tools and memory retrieval. The agent writes user-facing responses; workers return task results and orchestration handles delivery.' : buildChannelInstructions(imageEnabled, videoEnabled),
   },
 );
 
@@ -116,6 +124,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const toolName = req.params.name;
   const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+  if (ORCHESTRATION_ROLE && process.env.GATEWAY_ORCHESTRATION_TICKET_FILE && taskTools.some(tool => tool.name === toolName)) {
+    return callTaskBridge(toolName, args, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
+  }
 
   const mod = toolMap.get(toolName);
   if (!mod) {
@@ -123,6 +134,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       content: [{ type: 'text', text: `unknown tool: ${toolName}` }],
       isError: true,
     };
+  }
+  if (ORCHESTRATION_ROLE === 'worker' && process.env.GATEWAY_ORCHESTRATION_MEDIA === 'true') {
+    const validation = await callTaskBridge('task_validate', {}, String(extra.requestId), AbortSignal.any([extra.signal, shutdownController.signal]));
+    if (validation.isError) return validation;
   }
 
   // extra.signal fires on notifications/cancelled for THIS call (the SDK matches

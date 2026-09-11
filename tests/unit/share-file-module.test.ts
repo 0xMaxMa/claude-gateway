@@ -237,3 +237,36 @@ describe('share_file MCP module', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('worker share error diagnostics', () => {
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const os = require('os') as typeof import('os');
+  test.each([
+    ['STALE_ATTEMPT', 'STALE_ATTEMPT'],
+    ['SHARE_NOT_CONFIGURED', 'SHARE_NOT_CONFIGURED'],
+    ['TOOL_DENIED', 'TOOL_DENIED'],
+    ['private provider error with secret details', 'share_scope_denied'],
+  ])('preserves machine-readable %s without exposing raw response details', async (upstream, expected) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-share-error-'));
+    const ticket = path.join(root, 'ticket.json');
+    fs.writeFileSync(ticket, JSON.stringify({ url: 'http://127.0.0.1:19999', token: 'fixture-worker-token' }));
+    const previousRole = process.env.GATEWAY_ORCHESTRATION_ROLE;
+    const previousTicket = process.env.GATEWAY_ORCHESTRATION_TICKET_FILE;
+    const request = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: upstream, message: 'private diagnostic' }), { status: 400 }));
+    try {
+      process.env.GATEWAY_ORCHESTRATION_ROLE = 'worker';
+      process.env.GATEWAY_ORCHESTRATION_TICKET_FILE = ticket;
+      const result = await new ShareFileModule().handleTool('share_file', { path: '/workspace/report.pdf' });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(expected);
+      expect(result.content[0].text).not.toContain('private');
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      request.mockRestore();
+      if (previousRole === undefined) delete process.env.GATEWAY_ORCHESTRATION_ROLE; else process.env.GATEWAY_ORCHESTRATION_ROLE = previousRole;
+      if (previousTicket === undefined) delete process.env.GATEWAY_ORCHESTRATION_TICKET_FILE; else process.env.GATEWAY_ORCHESTRATION_TICKET_FILE = previousTicket;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

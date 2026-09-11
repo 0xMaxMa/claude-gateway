@@ -213,6 +213,7 @@ function makeMcpReader(proc: ChildProcess) {
  *  its web_app button. */
 function startMockCallbackServer(port: number) {
   const commands: Array<Record<string, unknown>> = []
+  const voice = new Map<string, string>()
   const server = http.createServer((req, res) => {
     let raw = ''
     req.on('data', c => { raw += c })
@@ -221,7 +222,21 @@ function startMockCallbackServer(port: number) {
       try { body = raw ? JSON.parse(raw) : {} } catch {}
       commands.push(body)
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      if (body['command'] === 'cli_pair') {
+      if (body['command'] === 'telegram_voice') {
+        const mode = (body['payload'] as any)?.mode, chat = String(body['chat_id'])
+        if (typeof mode === 'string') voice.set(chat, mode)
+        res.end(JSON.stringify({success:true,mode:voice.get(chat)??'off',enabled:(voice.get(chat)??'off')!=='off'}))
+      } else if(body.command==='task_stop') {
+        const payload=body.payload as any
+        res.end(JSON.stringify(payload.menu_id?{success:true,text:payload.index===0?'Dismissed.':'Stopping task: Review PR.'}:{success:true,menuId:'11111111-1111-1111-1111-111111111111',tasks:[{title:'Review PR',state:'running'}],text:'Which task would you like to stop?'}))
+      } else if(body.command==='telegram_tasks') {
+        const payload=body.payload as any
+        const task={taskId:'33333333-3333-3333-3333-333333333333',title:'Review PR',state:payload.action==='cancel'?'cancel_requested':'running',canStop:payload.action!=='cancel',progress:'Checking tests',updatedAt:1}
+        res.end(JSON.stringify({success:true,sessionId:'fixture-session',...(payload.action?{task}:{tasks:[task],page:0,pages:1,total:1})}))
+      } else if(body.command==='telegram_voices') {
+        const payload=body.payload as any
+        res.end(JSON.stringify(payload.action?{success:true,name:'Dynamic voice'}:{success:true,menuId:'22222222-2222-2222-2222-222222222222',provider:'fixture-provider',page:0,pages:1,selected:'Dynamic voice',gender:payload.gender,groups:['male','female'],voices:payload.gender?[{name:'Dynamic voice',gender:'female',index:0,selected:true}]:[]}))
+      } else if (body['command'] === 'cli_pair') {
         res.end(JSON.stringify({ success: true, pairingId: 'a'.repeat(36), code: '1234', url: 'https://host.example/cli/' + 'a'.repeat(36) }))
       } else if (body['command'] === 'get_model') {
         res.end(JSON.stringify({ model: 'claude-opus-5' }))
@@ -241,7 +256,7 @@ function startMockCallbackServer(port: number) {
 
 // ── test suite ──────────────────────────────────────────────────────────────
 
-describe('Telegram plugin E2E (process + mock Telegram API)', () => {
+describe.each([{orchestration:true,interactive:false},{orchestration:false,interactive:true},{orchestration:false,interactive:false}])('Telegram plugin E2E %j', ({orchestration,interactive}) => {
   let tmpDir: string
   let mock: ReturnType<typeof startMockTelegramServer>
   let proc: ChildProcess
@@ -282,6 +297,8 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
       env: {
         ...process.env,
         TELEGRAM_BOT_TOKEN: BOT_TOKEN,
+        GATEWAY_ORCHESTRATION_ENABLED: String(orchestration),
+        GATEWAY_INTERACTIVE_CLI_ENABLED: String(interactive),
         TELEGRAM_STATE_DIR: tmpDir,
         TELEGRAM_API_ROOT: `http://127.0.0.1:${port}`,
         CLAUDE_CHANNEL_CALLBACK: `http://127.0.0.1:${cbPort}/channel`,
@@ -480,6 +497,7 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
       },
     })
 
+    if(!interactive){const reply=await mock.waitForCall('sendMessage',t0,20000);expect(reply.body.text).toContain('headless: false');expect(mockCb.commands.some(c=>c.command==='cli_pair')).toBe(false);return}
     // The receiver must reply with an inline keyboard carrying a Mini App button.
     const send = await mock.waitForCall('sendMessage', t0, 20000)
     expect(String(send.body['chat_id'])).toBe(USER_ID)
@@ -499,6 +517,104 @@ describe('Telegram plugin E2E (process + mock Telegram API)', () => {
   }, 30000)
 
   // ── test 7: /models picker can be dismissed without changing the model ─────
+
+  test('/voice shows Off by default; On/Off buttons bypass the model and reject unauthorized users', async () => {
+    if(!orchestration)return
+    let at = Date.now()
+    const from = { id: Number(USER_ID), is_bot: false, first_name: 'Tester' }
+    const message = { message_id: 850, date: Math.floor(at/1000), chat: {id:Number(USER_ID),type:'private'},from,text:'/voice',entities:[{type:'bot_command',offset:0,length:6}] }
+    mock.queueUpdate({message})
+    const menu = await mock.waitForCall('sendMessage',at,20000)
+    expect(menu.body.text).toContain('🔇 Off')
+    const markup = typeof menu.body.reply_markup === 'string' ? JSON.parse(menu.body.reply_markup) : menu.body.reply_markup
+    expect((markup as any).inline_keyboard.slice(0,3).flat().map((b:any)=>b.callback_data)).toEqual(['voice:on','voice:auto','voice:off'])
+    for (const mode of ['on','auto','off']) {
+      at = Date.now()
+      mock.queueUpdate({callback_query:{id:'voice-'+mode,chat_instance:'voice',data:'voice:'+mode,from,message}})
+      const ack = await mock.waitForCall('answerCallbackQuery',at,20000)
+      expect(ack.body.text).toContain('Voice')
+      const edited = await mock.waitForCall('editMessageText',at,20000)
+      expect(String(edited.body.message_id)).toBe('850')
+      expect(edited.body.text).toBe(ack.body.text)
+    }
+    for (const choice of ['on','off']) {
+      at = Date.now()
+      mock.queueUpdate({message:{...message,message_id:choice==='on'?851:852,text:'/voice '+choice}})
+      const reply = await mock.waitForCall('sendMessage',at,20000)
+      expect(reply.body.text).toContain(choice==='on'?'🔊 Always':'🔇 Off')
+    }
+    const before = mockCb.commands.length
+    at = Date.now()
+    mock.queueUpdate({callback_query:{id:'voice-dismiss',chat_instance:'voice',data:'voice:dismiss',from,message}})
+    const dismissed = await mock.waitForCall('answerCallbackQuery',at,20000)
+    expect(dismissed.body.text).toBe('Dismissed')
+    await mock.waitForCall('deleteMessage',at,20000)
+    expect(mockCb.commands).toHaveLength(before)
+    expect((markup as any).inline_keyboard[3]).toEqual([{text:'Dismiss',callback_data:'voice:dismiss'}])
+    at = Date.now()
+    mock.queueUpdate({callback_query:{id:'voice-denied',chat_instance:'voice',data:'voice:on',from:{...from,id:999888777},message}})
+    const denied = await mock.waitForCall('answerCallbackQuery',at,20000)
+    expect(denied.body.text).toBe('Not authorized.')
+    expect(mockCb.commands).toHaveLength(before)
+    expect(mockCb.commands.filter(c=>c.command==='telegram_voice')).toHaveLength(6)
+  })
+
+  test('/stop preserves legacy routing or shows scoped task buttons; /voices uses provider data',async()=>{
+    let at=Date.now();const from={id:Number(USER_ID),is_bot:false,first_name:'User'},chat={id:Number(USER_ID),type:'private'}
+    const message={message_id:960,date:Math.floor(at/1000),from,chat,text:'/stop',entities:[{type:'bot_command',offset:0,length:5}]}
+    mock.queueUpdate({message})
+    if(!orchestration){await sleep(300);expect(mockCb.commands.some(c=>c.command==='task_stop')).toBe(false);return}
+    const menu=await mock.waitForCall('sendMessage',at,20000)
+    const markup=menu.body.reply_markup as any
+    expect(markup.inline_keyboard[0][0].text).toContain('Review PR')
+    at=Date.now();mock.queueUpdate({callback_query:{id:'stop-task',chat_instance:'stop',from,message,data:markup.inline_keyboard[0][0].callback_data}})
+    const result=await mock.waitForCall('sendMessage',at,20000);expect(result.body.text).toBe('Stopping task: Review PR.')
+    await mock.waitForCall('deleteMessage',at,20000)
+    at=Date.now();mock.queueUpdate({message:{...message,message_id:961,text:'/voices',entities:[{type:'bot_command',offset:0,length:7}]}})
+    const voices=await mock.waitForCall('sendMessage',at,20000);expect(voices.body.text).toContain('fixture-provider')
+    const categories=voices.body.reply_markup as any;expect(categories.inline_keyboard[0][0].text).toBe('👨 Male');expect(categories.inline_keyboard[1][0].text).toBe('👩 Female')
+    at=Date.now();mock.queueUpdate({callback_query:{id:'voice-group',chat_instance:'voice',from,message,data:categories.inline_keyboard[1][0].callback_data}})
+    const filtered=await mock.waitForCall('editMessageText',at,20000)
+    const buttons=filtered.body.reply_markup as any;expect(buttons.inline_keyboard[0][0].text).toBe('✅ Dynamic voice')
+    expect(buttons.inline_keyboard.flat().some((b:any)=>b.text==='Back')).toBe(true)
+    expect(mockCb.commands.some(c=>c.command==='telegram_voices'&&(c.payload as any)?.gender==='female')).toBe(true)
+    await mock.waitForCall('answerCallbackQuery',at,20000)
+    at=Date.now();mock.queueUpdate({callback_query:{id:'voice-pick',chat_instance:'voice',from,message,data:buttons.inline_keyboard[0][0].callback_data}})
+    const ack=await mock.waitForCall('answerCallbackQuery',at,20000);expect(ack.body.text).toContain('Selected: Dynamic voice')
+  })
+
+  test('/tasks browses details, stops a task and dismisses without inference',async()=>{
+    const from={id:Number(USER_ID),first_name:'Test',is_bot:false},message={message_id:972,date:Math.floor(Date.now()/1000),chat:{id:Number(USER_ID),type:'private'},from,text:'/tasks',entities:[{type:'bot_command',offset:0,length:6}]}
+    let at=Date.now();mock.queueUpdate({message})
+    const reply=await mock.waitForCall('sendMessage',at,20000)
+    if(!orchestration){expect(reply.body.text).toContain('require orchestration');expect(mockCb.commands.some(c=>c.command==='telegram_tasks')).toBe(false);return}
+    expect(reply.body.text).toContain('Tasks (1)')
+    let buttons=(reply.body.reply_markup as any).inline_keyboard.flat()
+    const click=async(data:string,id:string)=>{
+      const since=Date.now();mock.queueUpdate({callback_query:{id,chat_instance:'tasks',from,message:{...message,message_id:500},data}})
+      const edit=await mock.waitForCall('editMessageText',since,20000);await mock.waitForCall('answerCallbackQuery',since,20000);return edit
+    }
+    const detail=await click(buttons[0].callback_data,'task-details');expect(detail.body.text).toContain('Checking tests')
+    buttons=(detail.body.reply_markup as any).inline_keyboard.flat()
+    const stopped=await click(buttons.find((b:any)=>b.text==='🔴 Stop task').callback_data,'task-cancel')
+    expect(stopped.body.text).toContain('Stopping');expect((stopped.body.reply_markup as any).inline_keyboard.flat().some((b:any)=>b.text==='🔴 Stop task')).toBe(false)
+    at=Date.now();mock.queueUpdate({callback_query:{id:'task-dismiss',chat_instance:'tasks',from,message:{...message,message_id:500},data:'taskdismiss'}})
+    await mock.waitForCall('deleteMessage',at,20000)
+  })
+
+  test('registered commands and help follow orchestration and interactive config',async()=>{
+    const call=await mock.waitForCall('setMyCommands',0,20000)
+    const commands=call.body.commands as Array<{command:string}>
+    expect(commands.some(c=>c.command==='voice')).toBe(orchestration)
+    expect(commands.some(c=>c.command==='voices')).toBe(orchestration)
+    expect(commands.some(c=>c.command==='tasks')).toBe(orchestration)
+    expect(commands.some(c=>c.command==='cli')).toBe(interactive)
+    const at=Date.now()
+    mock.queueUpdate({message:{message_id:950,date:Math.floor(at/1000),from:{id:Number(USER_ID),is_bot:false,first_name:'User'},chat:{id:Number(USER_ID),type:'private'},text:'/help',entities:[{type:'bot_command',offset:0,length:5}]}})
+    const help=await mock.waitForCall('sendMessage',at,20000)
+    expect(String(help.body.text).includes('/voice')).toBe(orchestration)
+    expect(String(help.body.text).includes('/cli')).toBe(interactive)
+  })
 
   test('/models Dismiss acknowledges and deletes the picker without setting a model', async () => {
     const t0 = Date.now()

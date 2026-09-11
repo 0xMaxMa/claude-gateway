@@ -21,6 +21,7 @@
     "!mcp/node_modules",
     "!mcp/node_modules/**",
     "README.md",
+    "scripts/orchestration/",
     "config.template.json"
   ],
   "publishConfig": {

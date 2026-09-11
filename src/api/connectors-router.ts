@@ -12,6 +12,7 @@ import {
 } from '../connectors/token-env';
 import {
   slugify,
+  substitutePlaceholders,
   extractPlaceholders,
   customSecretKey,
   isValidConnectorId,
@@ -148,7 +149,7 @@ export function createConnectorsRouter(
   // blast radius to the client that asked.
   router.get('/v1/connectors', async (_req: Request, res: Response) => {
     try {
-      res.json({ connectors: listConnectorStatus(await store.read()) });
+      res.json({ connectors: listConnectorStatus(await store.read()), capabilities: { perConnectorDefaults: true, connectorResources: true } });
     } catch (err) {
       console.error(`connectors-router: listing connectors failed: ${(err as Error).message}`);
       res.status(500).json({ error: 'Connector configuration could not be read' });
@@ -185,7 +186,7 @@ export function createConnectorsRouter(
       // them and every counter would read a constant 0.
       const refresh =
         custom.credentialOwner === 'gateway' ? refreshStatusOf(req.params.id, tokenEnv) : undefined;
-      res.json({ id: req.params.id, connected, ...(refresh ? { refresh } : {}) });
+      res.json({ id: req.params.id, connected, ...(custom.defaultEnabled !== undefined ? { defaultEnabled: custom.defaultEnabled } : {}), ...(refresh ? { refresh } : {}) });
     } catch (err) {
       console.error(
         `connectors-router: status for connector=${req.params.id} failed: ${(err as Error).message}`,
@@ -193,6 +194,72 @@ export function createConnectorsRouter(
       res.status(500).json({ error: `Connector '${req.params.id}' has an unreadable configuration` });
     }
   });
+
+  router.patch('/v1/connectors/:id/management', async (req: Request, res: Response) => {
+    if (!requireAdmin(req, res)) return;
+    const resourcesPath = req.body?.resourcesPath;
+    if (typeof resourcesPath !== 'string' || !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(resourcesPath)) {
+      res.status(400).json({ error: 'Invalid resourcesPath' }); return;
+    }
+    try {
+      let found = false;
+      await store.mutate(entries => {
+        const entry = entries[req.params.id];
+        if (!entry || typeof entry.config.url !== 'string') return;
+        entry.resourcesPath = resourcesPath; found = true;
+      });
+      if (!found) { res.status(404).json({ error: 'HTTP connector not found' }); return; }
+      res.json({ ok: true });
+    } catch { res.status(500).json({ error: 'Could not update connector management' }); }
+  });
+
+  // Admin-only management of resources at a connector's configured origin.
+  // Neither target URLs nor credentials are accepted from the request.
+  async function manageResource(req: Request, res: Response): Promise<void> {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const entry = (await store.read())[req.params.id];
+      if (!entry?.resourcesPath || !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(entry.resourcesPath)) {
+        res.status(404).json({ error: 'Connector resource management is unavailable' }); return;
+      }
+      const tokenEnv = readTokenEnv();
+      const secrets = Object.fromEntries(entry.secretNames.map(name => [name, tokenEnv[customSecretKey(req.params.id, name)]]));
+      if (entry.secretNames.some(name => !secrets[name])) {
+        res.status(409).json({ error: 'Connector is disconnected' }); return;
+      }
+      const config = substitutePlaceholders(entry.config, secrets);
+      const origin = new URL(String(config.url));
+      if (origin.username || origin.password || !(origin.protocol === 'https:' ||
+          (origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)))) {
+        res.status(400).json({ error: 'Resource management requires HTTPS or loopback' }); return;
+      }
+      const resourceId = req.params.resourceId;
+      if (resourceId && !/^[A-Za-z0-9_-]{1,120}$/.test(resourceId)) {
+        res.status(400).json({ error: 'Invalid resource id' }); return;
+      }
+      const headers = config.headers as Record<string, string> | undefined;
+      const upstream = await fetch(origin.origin + entry.resourcesPath + (resourceId ? '/' + resourceId : ''), {
+        method: resourceId ? 'DELETE' : 'GET',
+        headers: headers?.Authorization ? { Authorization: headers.Authorization } : {},
+        redirect: 'error', signal: AbortSignal.timeout(10000),
+      });
+      if (!upstream.ok) { res.status(502).json({ error: 'Connector resource request failed', upstreamStatus: upstream.status }); return; }
+      if (resourceId) { await upstream.body?.cancel(); res.json({ ok: true }); return; }
+      const reader = upstream.body?.getReader();
+      const chunks: Uint8Array[] = []; let size = 0;
+      if (reader) while (true) {
+        const next = await reader.read(); if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 262144) { await reader.cancel(); throw Error('RESOURCE_RESPONSE_TOO_LARGE'); }
+        chunks.push(next.value);
+      }
+      res.json(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    } catch {
+      res.status(502).json({ error: 'Could not reach connector resource service' });
+    }
+  }
+  router.get('/v1/connectors/:id/resources', manageResource);
+  router.delete('/v1/connectors/:id/resources/:resourceId', manageResource);
 
   // Connect — store the secret into a customConnectors entry with exactly one
   // secret name. That is what makes reconnecting a paste-token custom connector
@@ -503,7 +570,7 @@ export function createConnectorsRouter(
         //
         // 'external': the definition lives in the control plane that pushed it,
         // which the caller can re-push in full via /oauth/receive at any time.
-        if (entry.credentialOwner === 'static' || entry.credentialOwner === 'gateway') {
+        if (req.query.remove !== 'true' && (entry.credentialOwner === 'static' || entry.credentialOwner === 'gateway')) {
           return { found: true, hard: false } as const;
         }
         // The entry AND the per-agent enablement flags that reference it, in this
@@ -549,6 +616,8 @@ export function createConnectorsRouter(
       secrets?: unknown;
       sourceUrl?: unknown;
       oauth?: unknown;
+      defaultEnabled?: unknown;
+      resourcesPath?: unknown;
     };
 
     if (typeof body.label !== 'string' || !body.label.trim()) {
@@ -561,6 +630,16 @@ export function createConnectorsRouter(
       Array.isArray(body.config)
     ) {
       res.status(400).json({ error: 'config is required and must be a JSON object' });
+      return;
+    }
+    if (body.defaultEnabled !== undefined && typeof body.defaultEnabled !== 'boolean') {
+      res.status(400).json({ error: 'defaultEnabled must be a boolean' });
+      return;
+    }
+    if (body.resourcesPath !== undefined &&
+        (typeof body.resourcesPath !== 'string' || !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/.test(body.resourcesPath) ||
+         typeof (body.config as Record<string, unknown>).url !== 'string')) {
+      res.status(400).json({ error: 'resourcesPath requires an HTTP connector and a simple absolute path' });
       return;
     }
     if (body.oauth !== undefined && typeof body.oauth !== 'boolean') {
@@ -661,6 +740,8 @@ export function createConnectorsRouter(
     try {
       const entry: CustomConnectorEntry = {
         label: body.label.trim(),
+        ...(typeof body.resourcesPath === 'string' ? { resourcesPath: body.resourcesPath } : {}),
+        ...(typeof body.defaultEnabled === 'boolean' ? { defaultEnabled: body.defaultEnabled } : {}),
         description: typeof body.description === 'string' ? body.description : undefined,
         config: body.config as Record<string, unknown>,
         secretNames,
@@ -702,7 +783,7 @@ export function createConnectorsRouter(
 
       const connected = secretNames.every((name: string) => hasSecret(customSecretKey(id, name)));
       if (connected) await restartSessionsUsing(id, { overlay: { [id]: entry } });
-      res.json({ id, label: entry.label, connected });
+      res.json({ id, label: entry.label, connected, ...(entry.defaultEnabled !== undefined ? { defaultEnabled: entry.defaultEnabled } : {}) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
