@@ -17,7 +17,7 @@ import { HistoryDB, MAX_HISTORY_LIMIT } from '../history/db';
 import { isChatChannel } from '../history/types';
 import { wizardStore } from './wizard-state';
 import { getPendingSenders, clearPendingSender } from './pending-senders';
-import { buildGenerationPrompt, parseGeneratedFiles } from '../agent/create-agent-prompts';
+import { buildGenerationPrompt, parseGeneratedFiles, buildRewriteDescriptionPrompt } from '../agent/create-agent-prompts';
 import { fetchModelCatalog } from '../agent/model-catalog';
 import { DEFAULT_MODELS } from '../agent/runner';
 import {
@@ -427,6 +427,22 @@ const TELEGRAM_API_BASE = process.env.TELEGRAM_API_BASE ?? 'https://api.telegram
 /** Max simultaneous wizard/start Claude subprocesses to prevent resource exhaustion. */
 let wizardStartsInFlight = 0;
 const WIZARD_MAX_CONCURRENT = 2;
+
+/**
+ * Max simultaneous describe/rewrite Claude subprocesses. Kept separate from
+ * wizardStartsInFlight so a burst of rewrite calls can't starve wizard-start
+ * slots (or vice versa) — the two features don't share a concurrency budget.
+ */
+let rewritesInFlight = 0;
+const REWRITE_MAX_CONCURRENT = 2;
+
+/**
+ * Max input length for a describe/rewrite. A real "describe your agent" draft is
+ * far shorter than this; the cap keeps an oversized payload from pinning a Claude
+ * subprocess for the full 120s timeout (two such requests would occupy both
+ * REWRITE_MAX_CONCURRENT slots and block everyone else).
+ */
+const REWRITE_MAX_TEXT_LENGTH = 8_000;
 
 /** Call Claude --print with stdin prompt; resolves with stdout on exit 0. */
 function runClaude(prompt: string, timeoutMs = 120_000): Promise<string> {
@@ -1442,6 +1458,65 @@ export function createApiRouter(
       files,
       expiresAt: new Date(state.expiresAt).toISOString(),
     });
+  });
+
+  /**
+   * POST /api/v1/agents/describe/rewrite
+   * Re-write a rough "describe your agent" draft into cleaner, moderately
+   * clarified text. Stateless: no wizardId/agentId involved, single string
+   * in, single string out.
+   */
+  router.post('/v1/agents/describe/rewrite', auth, async (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+
+    const body = req.body as { text?: unknown };
+    const { text } = body;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      res.status(400).json({ error: 'text is required' });
+      return;
+    }
+    if (text.length > REWRITE_MAX_TEXT_LENGTH) {
+      res.status(400).json({ error: `text too long (max ${REWRITE_MAX_TEXT_LENGTH} characters)` });
+      return;
+    }
+
+    if (rewritesInFlight >= REWRITE_MAX_CONCURRENT) {
+      res.status(429).json({ error: 'Too many re-write requests in progress, please retry later' });
+      return;
+    }
+
+    let rawOutput: string;
+    rewritesInFlight++;
+    try {
+      rawOutput = await runClaude(buildRewriteDescriptionPrompt(text.trim()));
+    } catch (err) {
+      console.error(`[api] describe/rewrite failed: ${(err as Error).message}`);
+      res.status(500).json({ error: 'Failed to re-write description' });
+      return;
+    } finally {
+      rewritesInFlight--;
+    }
+
+    let rewritten = rawOutput.trim();
+    // Strip a wrapping code fence if the model added one, regardless of the
+    // language hint (```markdown, ```md, ```text, ```plaintext, ```html, …) or
+    // none at all. Requires the opening fence to sit on its own line so inline
+    // backticks in a single-line answer are never mistaken for a wrapper; the
+    // closing newline is optional and CRLF is tolerated.
+    const fenceMatch = rewritten.match(/^```[^\r\n`]*\r?\n([\s\S]*?)\r?\n?```\s*$/);
+    if (fenceMatch) rewritten = (fenceMatch[1] ?? '').trim();
+
+    // Claude occasionally returns an empty/whitespace-only completion. Never
+    // answer 200 with an empty string: the frontend would overwrite the user's
+    // draft with nothing and silently destroy their input. Surface an error so
+    // the client can keep the original text and let the user retry.
+    if (!rewritten) {
+      res.status(502).json({ error: 'Re-write produced no output, please try again' });
+      return;
+    }
+
+    res.status(200).json({ text: rewritten });
   });
 
   /**

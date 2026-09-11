@@ -50,6 +50,28 @@ function mockClaudeFailure(): void {
   });
 }
 
+/**
+ * Queue a spawn that hangs — it never emits 'close', so the corresponding
+ * runClaude() promise stays pending and its in-flight counter slot stays taken
+ * until the returned release() is called. Lets a test deterministically hold the
+ * concurrency slots open, then drain them cleanly so no child handle leaks.
+ */
+function mockClaudeHang(): { release: () => void } {
+  let releaseFn = (): void => {};
+  mockSpawn.mockImplementationOnce(() => {
+    const stdin = Object.assign(new EventEmitter(), { write: jest.fn(), end: jest.fn() });
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const child = Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: jest.fn() });
+    releaseFn = (): void => {
+      stdout.emit('data', Buffer.from('released'));
+      child.emit('close', 0);
+    };
+    return child;
+  });
+  return { release: () => releaseFn() };
+}
+
 // ── Mock fetch ────────────────────────────────────────────────────────────────
 
 const mockFetch = jest.fn();
@@ -698,6 +720,224 @@ describe('POST /api/v1/agents/wizard/start', () => {
   // The concurrency cap (429 when wizardStartsInFlight >= WIZARD_MAX_CONCURRENT) is a
   // 3-line counter guard. Orchestrating genuinely concurrent hanging spawns in Jest's
   // single-threaded event loop is brittle, so this case is covered by manual smoke test.
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/agents/describe/rewrite
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /api/v1/agents/describe/rewrite', () => {
+  it('returns 403 without admin key', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${READ_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(403);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 400 when text is missing', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({});
+      expect(res.status).toBe(400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 400 when text is empty/whitespace', async () => {
+    const { app, tmpDir } = buildCtx();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: '   ' });
+      expect(res.status).toBe(400);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 400 when text exceeds the max length, before spawning Claude', async () => {
+    const { app, tmpDir } = buildCtx();
+    // An oversized draft would otherwise pin a Claude subprocess for the full
+    // timeout; reject it up front (no runClaude mock is set, so if the handler
+    // did spawn, the test would surface it rather than 400 cleanly).
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'x'.repeat(8_001) });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/too long/);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 200 with rewritten text on success', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('A polished, clarified description of the agent.');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('A polished, clarified description of the agent.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips markdown code fences from the model output', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('```markdown\nA fenced description that should be unwrapped.\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('A fenced description that should be unwrapped.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips code fences with any language hint (not just markdown/md/text)', async () => {
+    const { app, tmpDir } = buildCtx();
+    // The model sometimes tags the fence with an unexpected language; the older
+    // regex only knew markdown|md|text and would leak the ``` into the saved text.
+    mockClaudeSuccess('```plaintext\nUnwrapped despite the plaintext hint.\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('Unwrapped despite the plaintext hint.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips a bare code fence with no language and no trailing newline', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeSuccess('```\nUnwrapped from a bare fence.```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(200);
+      expect(res.body.text).toBe('Unwrapped from a bare fence.');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 500 when Claude fails, without leaking error details', async () => {
+    const { app, tmpDir } = buildCtx();
+    mockClaudeFailure();
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('Failed to re-write description');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 502 when the model returns empty/whitespace-only output', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Claude occasionally emits nothing (or only whitespace). The handler must
+    // NOT answer 200 with an empty string — that would let the frontend
+    // overwrite the user's draft with nothing and silently destroy it.
+    mockClaudeSuccess('   \n  \n');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(502);
+      expect(res.body.text).toBeUndefined();
+      expect(res.body.error).toBe('Re-write produced no output, please try again');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 502 when the model output is an empty code fence', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Fence-stripping can also reduce the output to empty — same guard applies.
+    mockClaudeSuccess('```markdown\n\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(502);
+      expect(res.body.text).toBeUndefined();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 429 when both concurrency slots are already in flight', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Hold both REWRITE_MAX_CONCURRENT (=2) slots open with hanging spawns, then
+    // confirm a third request is rejected with 429 before it can spawn Claude.
+    // Synchronize on the spawn call-count (the handler increments the counter and
+    // spawns only after passing the 429 gate) rather than on arbitrary timers.
+    const spawnsBefore = mockSpawn.mock.calls.length;
+    const hang1 = mockClaudeHang();
+    const hang2 = mockClaudeHang();
+    try {
+      const p1 = supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft one' })
+        .then((r) => r, (e) => e);
+      const p2 = supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft two' })
+        .then((r) => r, (e) => e);
+
+      // Wait until both in-flight requests have spawned (both slots occupied).
+      for (let i = 0; i < 500 && mockSpawn.mock.calls.length < spawnsBefore + 2; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(mockSpawn.mock.calls.length).toBe(spawnsBefore + 2);
+
+      const res3 = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft three' });
+      expect(res3.status).toBe(429);
+      // The rejected request must not have spawned Claude.
+      expect(mockSpawn.mock.calls.length).toBe(spawnsBefore + 2);
+
+      // Drain the two hanging spawns so their requests resolve and no child leaks.
+      hang1.release();
+      hang2.release();
+      await Promise.all([p1, p2]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

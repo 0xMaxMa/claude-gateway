@@ -837,6 +837,46 @@ connected). Rejected with `409` only while the wizard is still in step `pending`
 
 ---
 
+### POST /api/v1/agents/describe/rewrite
+
+**Auth:** admin key.
+
+Stateless helper for the "describe your agent" step of agent creation. Calls Claude to
+clean up a rough draft description into clearer, moderately clarified text — no
+`wizardId`/`agentId` involved, single string in, single string out.
+
+**Request body:**
+
+| Field | Required | Description |
+|-------|----------|--------------|
+| `text` | Yes | Draft description to re-write (max 8,000 characters) |
+
+```bash
+curl -X POST \
+  -H "X-Api-Key: admin-key-456" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "bot that like. helps with crypto stuff and is fun to talk 2"}' \
+  http://localhost:10850/api/v1/agents/describe/rewrite | jq
+```
+
+```json
+{
+  "text": "A friendly assistant that helps with crypto-related questions in a fun, conversational tone."
+}
+```
+
+**Error responses:**
+
+| Status | When |
+|--------|------|
+| 400 | Missing/empty `text`, or `text` exceeds 8,000 characters |
+| 403 | Not an admin key |
+| 429 | Too many re-write requests in progress (max 2 concurrent) |
+| 500 | Claude generation failed |
+| 502 | Claude produced no usable output (empty after fence-stripping) |
+
+---
+
 ### DELETE /api/v1/agents/:agentId
 
 Remove an agent from `config.json` and stop the running process. Requires admin key. Does **not** delete the workspace directory.
