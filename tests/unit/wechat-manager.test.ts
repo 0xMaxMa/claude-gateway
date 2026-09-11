@@ -373,6 +373,51 @@ describe('WeChatManager', () => {
     await expect(manager.sendMessage('u1', 'hi')).rejects.toThrow(/not linked/);
   });
 
+  test('sendMessage throws when the kill switch is flipped mid-session, even with a linked account', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+    await manager.startLinking();
+
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    await expect(manager.sendMessage('u1', 'hi')).rejects.toThrow(/WECHAT_CHANNEL_DISABLED/);
+    expect(client.sendText).not.toHaveBeenCalled();
+
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+    await manager.unlink();
+  });
+
+  test('runPollLoop stops dispatching once the kill switch is flipped mid-run, without crashing', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockResolvedValue([{ id: 'm1', fromId: 'u1', text: 'hi' }]),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, onMessage, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => onMessage.mock.calls.length >= 1);
+
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    const callsAtDisable = (client.getUpdates as jest.Mock).mock.calls.length;
+    // Give the loop a few timing cycles to notice and exit — then confirm it
+    // actually stopped calling getUpdates rather than continuing forever.
+    await new Promise((r) => setTimeout(r, 50));
+    const callsShortlyAfter = (client.getUpdates as jest.Mock).mock.calls.length;
+    await new Promise((r) => setTimeout(r, 50));
+    const callsLater = (client.getUpdates as jest.Mock).mock.calls.length;
+
+    expect(callsAtDisable).toBeGreaterThan(0);
+    expect(callsLater).toBe(callsShortlyAfter); // no further polls once stopped
+
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+    await manager.unlink();
+  });
+
   test('unlink() stops the poll loop and wipes the saved session', async () => {
     const client = makeClient({
       pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),

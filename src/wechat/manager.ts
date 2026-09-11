@@ -294,6 +294,12 @@ export class WeChatManager {
    * token to update.
    */
   async sendMessage(toId: string, text: string): Promise<void> {
+    if (!isWeChatChannelEnabled()) {
+      throw new Error(
+        'WeChat channel is disabled (WECHAT_CHANNEL_DISABLED is "true") — the iLink bridge ' +
+          'this channel depends on can be killed instantly without a redeploy; ask an admin to re-enable it.',
+      );
+    }
     if (!this.credentials) throw new Error('WeChat account is not linked');
     const chunks = chunkWeChatText(text);
     for (let i = 0; i < chunks.length; i++) {
@@ -324,6 +330,16 @@ export class WeChatManager {
     }
     let consecutiveFailures = 0;
     while (!this.stopping && generation === this.pollGeneration && this.credentials) {
+      if (!isWeChatChannelEnabled()) {
+        // Admin flipped the kill switch while this loop was already running
+        // (resumeIfLinked()/startLinking() only check it before the loop
+        // starts) — stop dispatching on the next iteration boundary rather
+        // than requiring a redeploy/restart to take effect.
+        this.logger.warn('WeChat channel disabled mid-run, stopping poll loop', {
+          agentId: this.agentConfig.id,
+        });
+        return;
+      }
       try {
         const updates = await this.client.getUpdates(this.credentials, this.timing.pollTimeoutSeconds);
         consecutiveFailures = 0;
