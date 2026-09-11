@@ -1,0 +1,482 @@
+/**
+ * Unit tests for src/wechat/manager.ts. The `ILinkClient` is always mocked —
+ * there is no real iLink account to test against (see the module doc comment
+ * on src/wechat/ilink-client.ts) — so these tests exercise the manager's own
+ * state machine, chunking, de-dup, and backoff logic in isolation.
+ */
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import {
+  WeChatManager,
+  chunkWeChatText,
+  isWeChatChannelEnabled,
+  WECHAT_MAX_MESSAGE_LENGTH,
+  hasSavedWeChatSession,
+} from '../../src/wechat/manager';
+import { ILinkClient, ILinkCredentials } from '../../src/wechat/ilink-client';
+import { AgentConfig } from '../../src/types';
+
+const FAST_TIMING = {
+  pollTimeoutSeconds: 1,
+  pollRetryDelayMs: 5,
+  pollBackoffDelayMs: 20,
+  pollMaxConsecutiveFailures: 3,
+  linkAttemptTimeoutMs: 200,
+  linkPollIntervalMs: 5,
+  // Bounds how many times a mock `getUpdates` (which resolves instantly,
+  // unlike the real 35s long-poll) can spin per test — without this, a tight
+  // loop against an instantly-resolving mock exhausts the heap in seconds.
+  pollIdleDelayMs: 5,
+};
+
+function makeAgentConfig(workspace: string): AgentConfig {
+  return {
+    id: 'test-agent',
+    description: 'test',
+    workspace,
+    env: 'test',
+    claude: { model: 'claude', extraFlags: [] },
+  };
+}
+
+function makeClient(overrides: Partial<ILinkClient> = {}): jest.Mocked<ILinkClient> {
+  return {
+    requestLinkQr: jest.fn().mockResolvedValue({ qrDataUri: 'data:image/png;base64,QR', loginSessionId: 's1' }),
+    pollLinkStatus: jest.fn().mockResolvedValue({ linked: false }),
+    getUpdates: jest.fn().mockResolvedValue([]),
+    sendText: jest.fn().mockResolvedValue(undefined),
+    notifyStart: jest.fn().mockResolvedValue(undefined),
+    notifyStop: jest.fn().mockResolvedValue(undefined),
+    ...overrides,
+  } as jest.Mocked<ILinkClient>;
+}
+
+const CREDS: ILinkCredentials = { accountId: 'acct-1', token: 'tok-1', baseUrl: 'https://example.test' };
+
+describe('chunkWeChatText()', () => {
+  test('text at or under the limit is returned as a single chunk', () => {
+    expect(chunkWeChatText('hello')).toEqual(['hello']);
+    const exact = 'a'.repeat(WECHAT_MAX_MESSAGE_LENGTH);
+    expect(chunkWeChatText(exact)).toEqual([exact]);
+  });
+
+  test('text over the limit splits on the nearest newline', () => {
+    const text = 'a'.repeat(3990) + '\n' + 'b'.repeat(20);
+    const chunks = chunkWeChatText(text);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toBe('a'.repeat(3990));
+    expect(chunks[1]).toBe('b'.repeat(20));
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(WECHAT_MAX_MESSAGE_LENGTH);
+  });
+
+  test('a single line with no newlines hard-cuts at the limit', () => {
+    const text = 'x'.repeat(WECHAT_MAX_MESSAGE_LENGTH + 500);
+    const chunks = chunkWeChatText(text);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toHaveLength(WECHAT_MAX_MESSAGE_LENGTH);
+    expect(chunks[1]).toHaveLength(500);
+  });
+});
+
+describe('isWeChatChannelEnabled()', () => {
+  const original = process.env.WECHAT_CHANNEL_DISABLED;
+  afterEach(() => {
+    if (original === undefined) delete process.env.WECHAT_CHANNEL_DISABLED;
+    else process.env.WECHAT_CHANNEL_DISABLED = original;
+  });
+
+  test('true when unset — enabled by default so an existing deployer needs no config to get WeChat on update', () => {
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+    expect(isWeChatChannelEnabled()).toBe(true);
+  });
+  test('true for any value other than the literal string "true"', () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'TRUE';
+    expect(isWeChatChannelEnabled()).toBe(true);
+    process.env.WECHAT_CHANNEL_DISABLED = '1';
+    expect(isWeChatChannelEnabled()).toBe(true);
+  });
+  test('false only for the literal string "true" — the admin kill switch', () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    expect(isWeChatChannelEnabled()).toBe(false);
+  });
+});
+
+describe('WeChatManager', () => {
+  let workspace: string;
+  const original = process.env.WECHAT_CHANNEL_DISABLED;
+
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-manager-test-'));
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+  });
+
+  afterEach(() => {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    if (original === undefined) delete process.env.WECHAT_CHANNEL_DISABLED;
+    else process.env.WECHAT_CHANNEL_DISABLED = original;
+  });
+
+  test('starts unlinked with no QR', () => {
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
+    expect(manager.getStatus()).toEqual({ status: 'unlinked', qr: undefined, loggedOut: false });
+  });
+
+  test('startLinking() throws when an admin has set the kill switch', async () => {
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
+    await expect(manager.startLinking()).rejects.toThrow(/WECHAT_CHANNEL_DISABLED/);
+  });
+
+  test('startLinking() shows the QR, then transitions to linked once iLink confirms', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest
+        .fn()
+        .mockResolvedValueOnce({ linked: false })
+        .mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, onMessage, FAST_TIMING);
+
+    await manager.startLinking();
+
+    expect(manager.getStatus()).toEqual({ status: 'linked', qr: undefined, loggedOut: false });
+    expect(client.requestLinkQr).toHaveBeenCalledTimes(1);
+    expect(client.pollLinkStatus).toHaveBeenCalledWith('s1');
+    expect(hasSavedWeChatSession(workspace)).toBe(true);
+
+    await manager.unlink();
+  });
+
+  test('a QR scan that never completes reverts to unlinked once the attempt window elapses', async () => {
+    const client = makeClient({ pollLinkStatus: jest.fn().mockResolvedValue({ linked: false }) });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkAttemptTimeoutMs: 15,
+      linkPollIntervalMs: 5,
+    });
+
+    await manager.startLinking();
+
+    expect(manager.getStatus().status).toBe('unlinked');
+    expect(hasSavedWeChatSession(workspace)).toBe(false);
+  });
+
+  test('delivers each inbound message once and drops a redelivered duplicate id', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 'm1', fromId: 'u1', text: 'hi' }])
+        .mockResolvedValueOnce([{ id: 'm1', fromId: 'u1', text: 'hi' }]) // redelivered — must be dropped
+        .mockResolvedValueOnce([{ id: 'm2', fromId: 'u1', text: 'again' }])
+        .mockResolvedValue([]),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(
+      makeAgentConfig(workspace),
+      '/tmp',
+      client,
+      onMessage,
+      { ...FAST_TIMING, linkPollIntervalMs: 1 },
+    );
+
+    await manager.startLinking();
+    await waitUntil(() => onMessage.mock.calls.length >= 2);
+
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage.mock.calls[0][0].id).toBe('m1');
+    expect(onMessage.mock.calls[1][0].id).toBe('m2');
+
+    await manager.unlink();
+  });
+
+  test('calls notifyStart before the first getUpdates call, once poll loop starts', async () => {
+    const calls: string[] = [];
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      notifyStart: jest.fn().mockImplementation(async () => {
+        calls.push('notifyStart');
+      }),
+      getUpdates: jest.fn().mockImplementation(async () => {
+        calls.push('getUpdates');
+        return [];
+      }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => calls.includes('getUpdates'));
+
+    expect(calls[0]).toBe('notifyStart');
+    await manager.unlink();
+  });
+
+  test('a failed notifyStart does not block the poll loop from starting', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      notifyStart: jest.fn().mockRejectedValue(new Error('notifystart down')),
+      getUpdates: jest.fn().mockResolvedValue([{ id: 'm1', fromId: 'u1', text: 'hi' }]),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, onMessage, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => onMessage.mock.calls.length >= 1);
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    await manager.unlink();
+  });
+
+  test('unlink() calls notifyStop when a session was linked', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await manager.unlink();
+
+    expect(client.notifyStop).toHaveBeenCalledWith(CREDS);
+  });
+
+  test('unlink() does not call notifyStop when never linked', async () => {
+    const client = makeClient();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+
+    await manager.unlink();
+
+    expect(client.notifyStop).not.toHaveBeenCalled();
+  });
+
+  test('recovers to linked after a transient getUpdates failure', async () => {
+    let calls = 0;
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error('transport error'));
+        return Promise.resolve([]);
+      }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => calls >= 2);
+    await waitUntil(() => manager.getStatus().status === 'linked');
+
+    expect(manager.getStatus().status).toBe('linked');
+    await manager.unlink();
+  });
+
+  test('a single getUpdates failure does NOT flip status to reconnecting (a lone Cloudflare-edge blip on an idle long-poll is normal, not a disconnect)', async () => {
+    let calls = 0;
+    let sawReconnecting = false;
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error('transient 524'));
+        return Promise.resolve([]);
+      }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    while (calls < 2) {
+      if (manager.getStatus().status === 'reconnecting') sawReconnecting = true;
+      await new Promise((r) => setTimeout(r, 1));
+    }
+
+    expect(sawReconnecting).toBe(false);
+    await manager.unlink();
+  });
+
+  test('stays linked even through many consecutive getUpdates failures (getUpdates errors never mark reconnecting — see runPollLoop\'s doc comment)', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockRejectedValue(new Error('persistent failure')),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 5);
+
+    expect(manager.getStatus().status).toBe('linked');
+    await manager.unlink();
+  });
+
+  test('sendMessage chunks long text, using the same contextToken for every chunk (sendmessage returns none to refresh it)', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+    await manager.startLinking();
+
+    const longText = 'a'.repeat(3990) + '\n' + 'b'.repeat(20);
+    await manager.sendMessage('u1', longText);
+
+    expect(client.sendText).toHaveBeenCalledTimes(2);
+    expect(client.sendText).toHaveBeenNthCalledWith(1, CREDS, 'u1', 'a'.repeat(3990), undefined);
+    expect(client.sendText).toHaveBeenNthCalledWith(2, CREDS, 'u1', 'b'.repeat(20), undefined);
+
+    await manager.unlink();
+  });
+
+  test("an inbound message's contextToken is captured and echoed on the next send to that sender (real iLink protocol: the token flows from received messages, sendmessage returns none)", async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 'm1', fromId: 'u1', text: 'hi', contextToken: 'ctx-from-u1' }])
+        .mockResolvedValue([]),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+    await manager.startLinking();
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 1);
+    // Give the poll loop's first iteration a chance to process the update
+    // before sending — real iLink delivers the token strictly before any
+    // reply would be composed, since the reply is presumably triggered by
+    // the very message that carried it.
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 2);
+
+    await manager.sendMessage('u1', 'reply');
+
+    expect(client.sendText).toHaveBeenCalledWith(CREDS, 'u1', 'reply', 'ctx-from-u1');
+
+    await manager.unlink();
+  });
+
+  test('sendMessage throws when no account is linked', async () => {
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
+    await expect(manager.sendMessage('u1', 'hi')).rejects.toThrow(/not linked/);
+  });
+
+  test('sendMessage throws when the kill switch is flipped mid-session, even with a linked account', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+    await manager.startLinking();
+
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    await expect(manager.sendMessage('u1', 'hi')).rejects.toThrow(/WECHAT_CHANNEL_DISABLED/);
+    expect(client.sendText).not.toHaveBeenCalled();
+
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+    await manager.unlink();
+  });
+
+  test('runPollLoop stops dispatching once the kill switch is flipped mid-run, without crashing', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockResolvedValue([{ id: 'm1', fromId: 'u1', text: 'hi' }]),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, onMessage, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => onMessage.mock.calls.length >= 1);
+
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+    const callsAtDisable = (client.getUpdates as jest.Mock).mock.calls.length;
+    // Give the loop a few timing cycles to notice and exit — then confirm it
+    // actually stopped calling getUpdates rather than continuing forever.
+    await new Promise((r) => setTimeout(r, 50));
+    const callsShortlyAfter = (client.getUpdates as jest.Mock).mock.calls.length;
+    await new Promise((r) => setTimeout(r, 50));
+    const callsLater = (client.getUpdates as jest.Mock).mock.calls.length;
+
+    expect(callsAtDisable).toBeGreaterThan(0);
+    expect(callsLater).toBe(callsShortlyAfter); // no further polls once stopped
+
+    delete process.env.WECHAT_CHANNEL_DISABLED;
+    await manager.unlink();
+  });
+
+  test('unlink() stops the poll loop and wipes the saved session', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+    await manager.startLinking();
+    expect(hasSavedWeChatSession(workspace)).toBe(true);
+
+    await manager.unlink();
+
+    expect(manager.getStatus()).toEqual({ status: 'unlinked', qr: undefined, loggedOut: false });
+    expect(hasSavedWeChatSession(workspace)).toBe(false);
+    await expect(manager.sendMessage('u1', 'hi')).rejects.toThrow(/not linked/);
+  });
+
+  test('resumeIfLinked() restores a session persisted by a prior instance and resumes polling', async () => {
+    const client1 = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const agentConfig = makeAgentConfig(workspace);
+    const manager1 = new WeChatManager(agentConfig, '/tmp', client1, undefined, FAST_TIMING);
+    await manager1.startLinking();
+    await manager1.unlink(); // stop manager1's own loop; the session file itself is wiped too —
+    // so re-persist it standalone to simulate "gateway restarted with a session file already on disk".
+    fs.mkdirSync(path.join(workspace, '.wechat-state'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.wechat-state', 'session.json'),
+      JSON.stringify({ credentials: CREDS, contextTokens: {} }),
+    );
+
+    const client2 = makeClient();
+    const manager2 = new WeChatManager(agentConfig, '/tmp', client2, undefined, FAST_TIMING);
+    await manager2.resumeIfLinked();
+
+    expect(manager2.getStatus().status).toBe('linked');
+    await waitUntil(() => (client2.getUpdates as jest.Mock).mock.calls.length >= 1);
+
+    await manager2.unlink();
+  });
+
+  test('resumeIfLinked() is a no-op when the channel is disabled, even with a saved session', async () => {
+    fs.mkdirSync(path.join(workspace, '.wechat-state'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.wechat-state', 'session.json'),
+      JSON.stringify({ credentials: CREDS, contextTokens: {} }),
+    );
+    process.env.WECHAT_CHANNEL_DISABLED = 'true';
+
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', makeClient());
+    await manager.resumeIfLinked();
+
+    expect(manager.getStatus().status).toBe('unlinked');
+  });
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('waitUntil() timed out');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

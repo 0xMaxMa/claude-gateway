@@ -1033,6 +1033,13 @@ export function createApiRouter(
         whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
         whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
         whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
+        // WeChat — "connected" is LIVE manager state (a linked QR session),
+        // never config-derived (there is no credential field to check — see
+        // AgentConfig.wechat's doc comment). DM-only: no group_* fields exist.
+        wechat_connected: agentRunners.get(id)?.getWeChatStatus?.()?.status === 'linked',
+        wechat_dm_policy: cfg.wechat?.dmPolicy ?? null,
+        wechat_dm_allowlist: cfg.wechat?.dmAllowlist ?? [],
+        wechat_pairing: cfg.wechat?.pairing ?? true,
       }));
     res.json({ agents });
   });
@@ -1813,8 +1820,8 @@ export function createApiRouter(
       return;
     }
 
-    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_account_id?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown; whatsapp_cloud_templates_enabled?: unknown };
-    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_account_id, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing, whatsapp_cloud_templates_enabled } = body;
+    const body = req.body as { name?: unknown; description?: unknown; model?: unknown; allow_tools?: unknown; telegram_bot_token?: unknown; discord_bot_token?: unknown; line_channel_access_token?: unknown; line_channel_secret?: unknown; line_dm_policy?: unknown; line_dm_allowlist?: unknown; line_group_policy?: unknown; line_group_allowlist?: unknown; line_require_mention?: unknown; line_pairing?: unknown; slack_bot_token?: unknown; slack_signing_secret?: unknown; slack_dm_policy?: unknown; slack_dm_allowlist?: unknown; slack_group_policy?: unknown; slack_group_allowlist?: unknown; slack_require_mention?: unknown; slack_pairing?: unknown; connectors?: unknown; whatsapp_account_id?: unknown; whatsapp_dm_policy?: unknown; whatsapp_dm_allowlist?: unknown; whatsapp_group_policy?: unknown; whatsapp_group_allowlist?: unknown; whatsapp_require_mention?: unknown; whatsapp_pairing?: unknown; whatsapp_cloud_access_token?: unknown; whatsapp_cloud_phone_number_id?: unknown; whatsapp_cloud_app_secret?: unknown; whatsapp_cloud_verify_token?: unknown; whatsapp_cloud_dm_policy?: unknown; whatsapp_cloud_dm_allowlist?: unknown; whatsapp_cloud_pairing?: unknown; whatsapp_cloud_templates_enabled?: unknown; wechat_dm_policy?: unknown; wechat_dm_allowlist?: unknown; wechat_pairing?: unknown };
+    const { name, description, model, allow_tools, telegram_bot_token, discord_bot_token, line_channel_access_token, line_channel_secret, line_dm_policy, line_dm_allowlist, line_group_policy, line_group_allowlist, line_require_mention, line_pairing, slack_bot_token, slack_signing_secret, slack_dm_policy, slack_dm_allowlist, slack_group_policy, slack_group_allowlist, slack_require_mention, slack_pairing, connectors, whatsapp_account_id, whatsapp_dm_policy, whatsapp_dm_allowlist, whatsapp_group_policy, whatsapp_group_allowlist, whatsapp_require_mention, whatsapp_pairing, whatsapp_cloud_access_token, whatsapp_cloud_phone_number_id, whatsapp_cloud_app_secret, whatsapp_cloud_verify_token, whatsapp_cloud_dm_policy, whatsapp_cloud_dm_allowlist, whatsapp_cloud_pairing, whatsapp_cloud_templates_enabled, wechat_dm_policy, wechat_dm_allowlist, wechat_pairing } = body;
     if (name !== undefined && name !== null && typeof name !== 'string') {
       res.status(400).json({ error: 'name must be a string or null' });
       return;
@@ -1967,6 +1974,30 @@ export function createApiRouter(
     const slackAccessTouched = slack_dm_policy !== undefined || slack_dm_allowlist !== undefined ||
       slack_group_policy !== undefined || slack_group_allowlist !== undefined || slack_require_mention !== undefined ||
       slack_pairing !== undefined;
+
+    // WeChat — DM-only access control (no credential, no group tier: see
+    // AgentConfig.wechat's doc comment for why). Unlike LINE/Slack's access
+    // fields, this is NOT gated on an existing wechat block already being
+    // present — linking happens out-of-band (QR scan, via the /wechat/link
+    // route below) and never touches config.json, so policy must be settable
+    // independent of link status.
+    if (wechat_dm_policy !== undefined && wechat_dm_policy !== null &&
+        !(typeof wechat_dm_policy === 'string' && ['open', 'allowlist', 'disabled'].includes(wechat_dm_policy))) {
+      res.status(400).json({ error: "wechat_dm_policy must be 'open', 'allowlist', 'disabled', or null" });
+      return;
+    }
+    if (wechat_dm_allowlist !== undefined && wechat_dm_allowlist !== null &&
+        !(Array.isArray(wechat_dm_allowlist) && wechat_dm_allowlist.every((u) => typeof u === 'string'))) {
+      res.status(400).json({ error: 'wechat_dm_allowlist must be an array of strings or null' });
+      return;
+    }
+    if (wechat_pairing !== undefined && wechat_pairing !== null &&
+        typeof wechat_pairing !== 'boolean') {
+      res.status(400).json({ error: 'wechat_pairing must be a boolean or null' });
+      return;
+    }
+    const wechatAccessTouched = wechat_dm_policy !== undefined || wechat_dm_allowlist !== undefined ||
+      wechat_pairing !== undefined;
 
     // connectors: a partial map of { [connectorId]: { enabled: boolean } } to merge.
     const connectorPatch: Record<string, { enabled: boolean }> = {};
@@ -2256,6 +2287,25 @@ export function createApiRouter(
             }
           }
         }
+        // WeChat access fields — get-or-create `agent.wechat` (not gated on it
+        // already existing, unlike LINE/Slack: see the validation block above
+        // for why).
+        if (wechatAccessTouched) {
+          const existing = (agent.wechat as Record<string, unknown> | undefined) ?? {};
+          if (wechat_dm_policy !== undefined) {
+            if (wechat_dm_policy === null) delete existing.dmPolicy;
+            else existing.dmPolicy = wechat_dm_policy;
+          }
+          if (wechat_dm_allowlist !== undefined) {
+            if (wechat_dm_allowlist === null) delete existing.dmAllowlist;
+            else existing.dmAllowlist = wechat_dm_allowlist;
+          }
+          if (wechat_pairing !== undefined) {
+            if (wechat_pairing === null) delete existing.pairing;
+            else existing.pairing = wechat_pairing;
+          }
+          agent.wechat = existing;
+        }
         if (connectors !== undefined) {
           const existing = (agent.connectors as Record<string, { enabled: boolean }>) ?? {};
           agent.connectors = { ...existing, ...connectorPatch };
@@ -2472,6 +2522,31 @@ export function createApiRouter(
         for (const id of slack_group_allowlist) clearPendingSender('slack', agentId, id);
       }
     }
+    if (wechatAccessTouched) {
+      const existing = cfg.wechat ?? {};
+      if (wechat_dm_policy !== undefined) {
+        if (wechat_dm_policy === null) delete existing.dmPolicy;
+        else existing.dmPolicy = wechat_dm_policy as 'open' | 'allowlist' | 'disabled';
+      }
+      if (wechat_dm_allowlist !== undefined) {
+        if (wechat_dm_allowlist === null) delete existing.dmAllowlist;
+        else existing.dmAllowlist = wechat_dm_allowlist as string[];
+      }
+      if (wechat_pairing !== undefined) {
+        if (wechat_pairing === null) delete existing.pairing;
+        else existing.pairing = wechat_pairing as boolean;
+      }
+      cfg.wechat = existing;
+      // WeChat has no receiver/webhook to start/stop — WeChatManager reads
+      // access control live off the agent config on every inbound message
+      // (see AgentRunner.handleWeChatInboundMessage); just keep it in sync.
+      agentRunners.get(agentId)?.updateAgentConfig(cfg);
+      // Anyone just added to an allowlist is now allowed — drop them from the
+      // in-memory knock list so the discovery UI stops surfacing them.
+      if (Array.isArray(wechat_dm_allowlist)) {
+        for (const userId of wechat_dm_allowlist) clearPendingSender('wechat', agentId, userId);
+      }
+    }
     if (connectors !== undefined) {
       const before = cfg.connectors ?? {};
       const merged = { ...before, ...connectorPatch };
@@ -2633,6 +2708,10 @@ export function createApiRouter(
         whatsapp_cloud_dm_allowlist: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.dmAllowlist ?? []) : null,
         whatsapp_cloud_pairing: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.pairing ?? true) : null,
         whatsapp_cloud_templates_enabled: cfg.whatsapp_cloud?.appSecret ? (cfg.whatsapp_cloud?.templatesEnabled ?? false) : null,
+        wechat_connected: agentRunners.get(agentId)?.getWeChatStatus?.()?.status === 'linked',
+        wechat_dm_policy: cfg.wechat?.dmPolicy ?? null,
+        wechat_dm_allowlist: cfg.wechat?.dmAllowlist ?? [],
+        wechat_pairing: cfg.wechat?.pairing ?? true,
       },
     });
   });
@@ -2835,6 +2914,112 @@ export function createApiRouter(
     res.json({ ok: true });
   });
 
+  /**
+   * GET /api/v1/agents/:agentId/wechat/status
+   * Live link status — status/qr straight from the in-process WeChatManager,
+   * never config-derived (there is no credential field to derive it from —
+   * see AgentConfig.wechat's doc comment). Polled by the web UI during
+   * linking and while showing the connected card. Requires write access
+   * (same as every other channel's connect surface), not just read. Mirrors
+   * WhatsApp's `/whatsapp/status` route shape, once that channel lands.
+   */
+  router.get('/v1/agents/:agentId/wechat/status', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json(runner.getWeChatStatus());
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/wechat/link
+   * Start (or restart) a QR-code linking flow. Returns once linked or once
+   * the attempt window elapses — unlike WhatsApp's fire-and-forget
+   * `/whatsapp/link`, there is no separate pairing-code path to race against,
+   * so the client can simply await this and then re-check `/status` once.
+   */
+  router.post('/v1/agents/:agentId/wechat/link', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    try {
+      await runner.startWeChatLinking();
+      res.json({ ok: true, status: runner.getWeChatStatus() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/wechat/unlink
+   * Logout and wipe the linked session. The user must scan fresh afterward.
+   */
+  router.post('/v1/agents/:agentId/wechat/unlink', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    await runner.unlinkWeChat();
+    res.json({ ok: true });
+  });
+
+  /**
+   * POST /api/v1/agents/:agentId/wechat/send
+   * INTERNAL — called by the `wechat_reply` MCP tool (via GATEWAY_API_URL/
+   * GATEWAY_API_KEY, same as every other MCP subprocess reaches the
+   * gateway), never by the web UI. Exists because the manager's live iLink
+   * session/credentials only exist inside this process — same reasoning
+   * WhatsApp's `/whatsapp/send` route documents for its Baileys socket.
+   */
+  router.post('/v1/agents/:agentId/wechat/send', auth, async (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!canWriteAgent(apiKey, agentId)) { res.status(403).json({ error: 'Write permission required' }); return; }
+    const runner = agentRunners.get(agentId);
+    if (!runner) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    const { to_id, text } = req.body as { to_id?: unknown; text?: unknown };
+    if (typeof to_id !== 'string' || !to_id) { res.status(400).json({ error: 'to_id is required' }); return; }
+    if (typeof text !== 'string' || !text) { res.status(400).json({ error: 'text is required' }); return; }
+    try {
+      await runner.sendWeChatMessage(to_id, text);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * GET /api/v1/agents/:agentId/wechat/pending
+   * Recently denied WeChat senders (Tier 1 allowlist discovery aid). Admin
+   * only. Mirrors GET .../line/pending exactly, keyed under the 'wechat'
+   * channel namespace in the shared pending-senders store.
+   */
+  router.get('/v1/agents/:agentId/wechat/pending', auth, (req: Request, res: Response) => {
+    const { agentId } = req.params as { agentId: string };
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    res.json({ senders: getPendingSenders('wechat', agentId) });
+  });
+
+  /**
+   * DELETE /api/v1/agents/:agentId/wechat/pending/:senderId
+   * Dismiss one knock from the in-memory pending list (admin only). Mirrors
+   * DELETE .../line/pending/:senderId exactly. The id is an iLink sender id,
+   * so no format validation.
+   */
+  router.delete('/v1/agents/:agentId/wechat/pending/:senderId', auth, (req: Request, res: Response) => {
+    const apiKey = (req as AuthedRequest).apiKey;
+    if (!isAdmin(apiKey)) { res.status(403).json({ error: 'Admin key required' }); return; }
+    const { agentId, senderId } = req.params as { agentId: string; senderId: string };
+    if (!agentConfigs.has(agentId)) { res.status(404).json({ error: `Agent '${agentId}' not found` }); return; }
+    clearPendingSender('wechat', agentId, senderId);
+    res.json({ ok: true });
+  });
   /**
    * GET /api/v1/agents/:agentId/whatsapp/pending?account_id=...
    * Recently denied WhatsApp senders/groups (Tier 1/3 discovery aid) for ONE

@@ -209,6 +209,7 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
   // in config.json, not here — see AgentConfig.whatsapp_cloud's doc comment),
   // so unlike `whatsapp` above this is single-purpose: message-turn state only.
   whatsapp_cloud: '.whatsapp-cloud-state',
+  wechat: '.wechat-state',
 };
 
 export class SessionProcess extends EventEmitter {
