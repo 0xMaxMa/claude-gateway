@@ -25,9 +25,13 @@
  *    step some accounts hit) has no UI path yet — those statuses currently
  *    fall back to "expired" (ask the user to retry) rather than prompting
  *    for a code. See `pollLinkStatus`'s doc comment.
- *  - Media (image/voice/file/video item types) is out of scope for v1 per
- *    the plan's non-goals — only `text_item` is read/written here.
+ *  - Media: inbound IMAGES (item type 2) are downloaded + decrypted (see
+ *    `resolveWeixinImageRef`/`downloadWeixinImage` below, confirmed live
+ *    2026-09-11 against protocol.md + `NousResearch/hermes-agent`'s working
+ *    Python implementation). Voice/file/video (types 3/4/5) and ALL outbound
+ *    media sending are still out of scope — only `text_item` is written.
  */
+import * as crypto from 'crypto';
 import * as QRCode from 'qrcode';
 
 const DEFAULT_ILINK_BASE_URL = 'https://ilinkai.weixin.qq.com';
@@ -56,6 +60,16 @@ export interface ILinkQrSession {
 export interface ILinkLinkResult {
   linked: boolean;
   credentials?: ILinkCredentials;
+  /**
+   * The raw status string Tencent returned (`wait`/`scaned`/`confirmed`/
+   * `expired`/`need_verifycode`/`verify_code_blocked`/`scaned_but_redirect`/
+   * `binded_redirect`), surfaced purely for operational logging — nothing
+   * downstream branches on it besides `linked` above. Added after a live
+   * link attempt where the confirm button was tapped but nothing here ever
+   * saw `confirmed`, with zero visibility into which of these statuses it
+   * actually got stuck on.
+   */
+  status?: string;
 }
 
 export interface ILinkUpdate {
@@ -77,6 +91,28 @@ export interface ILinkUpdate {
    * itself no longer returns one.
    */
   contextToken?: string;
+  /** Present when this message carries an inbound image (item type 2). Download+decrypt via `downloadWeixinImage()`. */
+  image?: ILinkImageRef;
+  /** Present when this message carries an inbound file (item type 4, e.g. a PDF). Download+decrypt via `downloadWeixinImage()`, same as an image. */
+  file?: ILinkFileRef;
+}
+
+/** Resolved download target for an inbound image, from `resolveWeixinImageRef()`. */
+export interface ILinkImageRef {
+  url: string;
+  /** Absent means the bytes at `url` are already plaintext. */
+  aesKey?: Buffer;
+  /**
+   * Sender-declared plaintext byte count (`file_item.len` — files only, per
+   * protocol.md). When set and the decrypted buffer is longer than this,
+   * `downloadWeixinImage` keeps the trailing `expectedLength` bytes and
+   * drops the rest as a leading prefix — confirmed live 2026-09-11: a real
+   * decrypted PDF carried 3 extra bytes before its `%PDF-` header despite a
+   * byte-perfect key/cipher (images never show this, only files), so
+   * WeChat's file upload path evidently prepends a few bytes ahead of the
+   * real content that protocol.md doesn't document.
+   */
+  expectedLength?: number;
 }
 
 export interface ILinkClient {
@@ -98,6 +134,23 @@ export interface ILinkClient {
    * per Tencent's documented `sendmessage` response (`{ret, errmsg}` only).
    */
   sendText(creds: ILinkCredentials, toId: string, text: string, contextToken?: string): Promise<void>;
+  /**
+   * Tell iLink's backend this channel client has started, before the first
+   * `getUpdates` call — confirmed via Tencent's own official client
+   * (`Tencent/openclaw-weixin`'s `src/channel.ts`, checked 2026-09-10): it
+   * calls this unconditionally before starting its poll loop, and
+   * protocol.md documents it as "notify the backend that the client
+   * started." This codebase never called it at all, which is the likely
+   * cause of `getUpdates` failing (Cloudflare 522/524) on the large
+   * majority of polls during live testing — never confirmed as THE fix
+   * (Tencent's own docs don't spell out what not calling it does), but it's
+   * a real gap versus the reference implementation, not a stretch. Failure
+   * here must never block startup — Tencent's own client only logs a
+   * warning and continues (see `notifyStart`'s call site in manager.ts).
+   */
+  notifyStart(creds: ILinkCredentials): Promise<void>;
+  /** Counterpart to notifyStart, sent on channel stop. Same non-blocking contract. */
+  notifyStop(creds: ILinkCredentials): Promise<void>;
 }
 
 /** Random uint32 → decimal string → base64, per protocol.md's `X-WECHAT-UIN` spec. */
@@ -142,10 +195,43 @@ interface ILinkFetchOptions {
   /** Omit entirely for the pre-auth QR flow, per protocol.md's header table. */
   botToken?: string;
   baseUrl: string;
+  /**
+   * Hard cap on this single request, in ms. Without this, a slow/unresponsive
+   * host (observed live: `get_qrcode_status`'s `redirect_host` after
+   * `scaned_but_redirect`) hangs `fetch()` forever with no error and no
+   * timeout — which stalls the entire `startLinking()` poll loop silently
+   * (the loop's own deadline check only runs BETWEEN awaited calls, so it
+   * never fires while stuck inside one). Defaults to 15s; `getUpdates`
+   * overrides this to cover its own documented long-poll window.
+   */
+  timeoutMs?: number;
+}
+
+const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * `redirect_host` (and `baseurl` on a `confirmed` response) — confirmed live
+ * (2026-09-10) to arrive as a bare host, e.g. `ilinkai2.weixin.qq.com`, NOT a
+ * full `https://...` URL as protocol.md's naming implies. `new URL(path,
+ * base)` throws "Invalid URL" on a schemeless base, which silently wedged
+ * every poll after a real scan forever (the retry loop in
+ * WeChatManager.startLinking keeps calling this same host, gets the same
+ * throw every time, and only the attempt's 2-minute deadline ever ends it).
+ */
+function normalizeIlinkHost(host: string): string {
+  return /^https?:\/\//i.test(host) ? host : `https://${host}`;
 }
 
 async function ilinkFetch<T>(opts: ILinkFetchOptions): Promise<T> {
-  const url = new URL(opts.path, opts.baseUrl);
+  let url: URL;
+  try {
+    url = new URL(opts.path, opts.baseUrl);
+  } catch {
+    // Bare `new URL()` errors ("Invalid URL") carry no context — surface
+    // which baseUrl actually failed, since this is exactly what a malformed
+    // `redirect_host`/`baseurl` from iLink looks like (see normalizeIlinkHost).
+    throw new Error(`iLink ${opts.method} ${opts.path}: invalid baseUrl "${opts.baseUrl}"`);
+  }
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) url.searchParams.set(k, v);
   }
@@ -153,6 +239,16 @@ async function ilinkFetch<T>(opts: ILinkFetchOptions): Promise<T> {
   const headers: Record<string, string> = {
     'iLink-App-Id': 'bot',
     'iLink-App-ClientVersion': CLIENT_VERSION_HEADER,
+    // Force a fresh connection per request instead of reusing Node's
+    // undici keep-alive pool. Confirmed root cause, sourced from a second
+    // independent reference implementation (Hermes-agent's
+    // `gateway/platforms/weixin.py`, `_make_ssl_connector()`): "proxies like
+    // Cloudflare Warp leave peer-initiated FIN in CLOSE_WAIT" — a pooled
+    // keep-alive connection can go stale (closed server-side) without the
+    // client noticing, and a later request reusing it just hangs/fails.
+    // Hermes-agent works around this with a 2s keepalive_timeout; the
+    // simpler equivalent here is to never keep the connection alive at all.
+    Connection: 'close',
   };
   // Auth headers are sent for the QR POST too (it still identifies the
   // client), but NOT for the unauthenticated GET status-poll — see
@@ -164,11 +260,25 @@ async function ilinkFetch<T>(opts: ILinkFetchOptions): Promise<T> {
   }
   if (opts.botToken) headers['Authorization'] = `Bearer ${opts.botToken}`;
 
-  const res = await fetch(url.toString(), {
-    method: opts.method,
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      method: opts.method,
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`iLink ${opts.method} ${opts.path}: timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     throw new Error(`iLink ${opts.method} ${opts.path}: HTTP ${res.status}`);
   }
@@ -186,11 +296,49 @@ interface GetQrcodeStatusResponse {
   ilink_bot_id?: string;
   baseurl?: string;
   ilink_user_id?: string;
+  /**
+   * Present on `scaned_but_redirect` per protocol.md ("Continue polling at
+   * redirect_host when present") — subsequent polls for this SAME
+   * loginSessionId must go to this host instead, or the flow can silently
+   * dead-end (polling the original host forever, always getting the same
+   * pre-redirect status back, even after the user taps Confirm on their
+   * phone). See `pollLinkStatus`'s `redirectHosts` map below.
+   */
+  redirect_host?: string;
 }
 
 interface WeixinMessageItem {
   type: number; // 1=text, 2=image, 3=voice, 4=file, 5=video, 11/12=tool-call
   text_item?: { text: string };
+  /**
+   * Present on a type=2 (image) item. `aeskey` (raw 32 hex chars) takes
+   * precedence over `media.aes_key` (base64 of either 16 raw bytes or a
+   * 32-char hex string) per protocol.md — see `resolveWeixinImageRef`.
+   */
+  image_item?: {
+    aeskey?: string;
+    media?: {
+      encrypt_query_param?: string;
+      aes_key?: string;
+      full_url?: string;
+    };
+  };
+  /**
+   * Present on a type=4 (file) item. Unlike `image_item`, protocol.md
+   * documents no top-level `aeskey` for files — the key comes from
+   * `media.aes_key` only. `file_name` is the attachment's real name
+   * (including extension), needed to stage it usefully.
+   */
+  file_item?: {
+    file_name?: string;
+    /** Plaintext byte count, as a decimal string, per protocol.md. */
+    len?: string;
+    media?: {
+      encrypt_query_param?: string;
+      aes_key?: string;
+      full_url?: string;
+    };
+  };
 }
 
 interface WeixinMessage {
@@ -221,9 +369,195 @@ function baseInfo(): { channel_version: string; bot_agent: string } {
   return { channel_version: CHANNEL_VERSION, bot_agent: BOT_AGENT };
 }
 
-/** Extract the first text item's body — media items are ignored (out of scope for v1). */
+/** Extract the first text item's body — image items are handled separately by resolveWeixinImageRef; voice/file/video are still ignored. */
 function textFromItems(items: WeixinMessageItem[] | undefined): string | undefined {
   return items?.find((i) => i.type === 1)?.text_item?.text;
+}
+
+/**
+ * Hosts Tencent actually serves inbound-media downloads from, per
+ * `NousResearch/hermes-agent`'s `gateway/platforms/weixin.py`
+ * (`_WEIXIN_CDN_ALLOWLIST`, confirmed live 2026-09-11). Only checked against
+ * a server-supplied `full_url` — a URL built from `encrypt_query_param`
+ * against `DEFAULT_CDN_BASE_URL` below doesn't need it (that host is our own
+ * trusted constant). This is an SSRF guard: without it, a malicious/buggy
+ * `full_url` could point this server's own outbound fetch at an arbitrary
+ * internal host.
+ */
+const WEIXIN_CDN_ALLOWLIST = new Set([
+  'novac2c.cdn.weixin.qq.com',
+  'ilinkai.weixin.qq.com',
+  'wx.qlogo.cn',
+  'thirdwx.qlogo.cn',
+  'res.wx.qq.com',
+  'mmbiz.qpic.cn',
+  'mmbiz.qlogo.cn',
+  // Confirmed live 2026-09-11: real `image_item.media.full_url` responses use
+  // the `.wechat.com` domain family, not `.weixin.qq.com` — same mismatch
+  // class as `redirect_host` earlier this session (docs/Hermes-agent's own
+  // allowlist assumed `.weixin.qq.com`; our own post-link `baseUrl` for
+  // authenticated calls is ALSO `ilinkai.wechat.com`, confirming this is the
+  // real production domain, not a one-off).
+  'novac2c.cdn.wechat.com',
+  'ilinkai.wechat.com',
+]);
+
+const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
+
+/**
+ * Decode an inbound AES key from its `media.aes_key` (base64) encoding.
+ * protocol.md: "the download decoder accepts base64 of either 16 raw bytes
+ * or a 32-character hexadecimal key" — both shapes are used in practice.
+ */
+function parseAesKeyBase64(aesKeyB64: string): Buffer {
+  const decoded = Buffer.from(aesKeyB64, 'base64');
+  if (decoded.length === 16) return decoded;
+  if (decoded.length === 32) {
+    const text = decoded.toString('ascii');
+    if (/^[0-9a-fA-F]{32}$/.test(text)) return Buffer.from(text, 'hex');
+  }
+  throw new Error(`iLink image: unrecognized aes_key encoding (${decoded.length} bytes decoded)`);
+}
+
+/**
+ * Resolve an inbound image item (type=2) into a download URL + AES key, or
+ * `undefined` if `items` carries no image. Throws if a server-supplied
+ * `full_url` host isn't in `WEIXIN_CDN_ALLOWLIST` — callers must not let that
+ * abort processing of the rest of the batch (see `getUpdates`'s try/catch).
+ */
+interface WeixinMediaBlock {
+  encrypt_query_param?: string;
+  aes_key?: string;
+  full_url?: string;
+}
+
+/**
+ * Shared URL+key resolution for any media item's `media` block. `rawHexKey`
+ * is the item-type-specific top-level key field when one exists (only
+ * `image_item.aeskey` per protocol.md — files have no equivalent, so callers
+ * for other item types pass `undefined`).
+ */
+function resolveMediaRef(media: WeixinMediaBlock | undefined, rawHexKey: string | undefined): ILinkImageRef | undefined {
+  let aesKey: Buffer | undefined;
+  if (rawHexKey && /^[0-9a-fA-F]{32}$/.test(rawHexKey)) {
+    aesKey = Buffer.from(rawHexKey, 'hex');
+  } else if (media?.aes_key) {
+    aesKey = parseAesKeyBase64(media.aes_key);
+  }
+
+  let url: string | undefined;
+  if (media?.full_url) {
+    const host = new URL(media.full_url).hostname;
+    if (!WEIXIN_CDN_ALLOWLIST.has(host)) {
+      throw new Error(`iLink media: refusing to download from non-allowlisted host "${host}"`);
+    }
+    url = media.full_url;
+  } else if (media?.encrypt_query_param) {
+    url = `${DEFAULT_CDN_BASE_URL}/download?encrypted_query_param=${encodeURIComponent(media.encrypt_query_param)}`;
+  }
+
+  return url ? { url, aesKey } : undefined;
+}
+
+export function resolveWeixinImageRef(items: WeixinMessageItem[] | undefined): ILinkImageRef | undefined {
+  const item = items?.find((i) => i.type === 2 && i.image_item);
+  if (!item?.image_item) return undefined;
+  return resolveMediaRef(item.image_item.media, item.image_item.aeskey);
+}
+
+export interface ILinkFileRef extends ILinkImageRef {
+  /** Attachment's real filename (including extension), e.g. "report.pdf". */
+  fileName: string;
+}
+
+/** Resolve an inbound file item (type=4) — protocol.md has no top-level aeskey for files, only media.aes_key. */
+export function resolveWeixinFileRef(items: WeixinMessageItem[] | undefined): ILinkFileRef | undefined {
+  const item = items?.find((i) => i.type === 4 && i.file_item);
+  if (!item?.file_item) return undefined;
+  const ref = resolveMediaRef(item.file_item.media, undefined);
+  if (!ref) return undefined;
+  const expectedLength = item.file_item.len ? parseInt(item.file_item.len, 10) : undefined;
+  return {
+    ...ref,
+    fileName: item.file_item.file_name || 'file',
+    expectedLength: Number.isFinite(expectedLength) ? expectedLength : undefined,
+  };
+}
+
+/**
+ * AES-128-ECB decrypt with PERMISSIVE PKCS#7 unpadding: if the trailing
+ * padding doesn't validate, return the padded bytes as-is instead of
+ * throwing. Mirrors `NousResearch/hermes-agent`'s `_aes128_ecb_decrypt`
+ * exactly (confirmed live 2026-09-11) — Node's built-in auto-unpad
+ * (`setAutoPadding(true)`) throws "bad decrypt" on the same real-world edge
+ * cases Hermes-agent's own implementation was written to tolerate.
+ */
+export function aes128EcbDecryptPermissive(ciphertext: Buffer, key: Buffer): Buffer {
+  const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
+  decipher.setAutoPadding(false);
+  const padded = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  if (padded.length === 0) return padded;
+  const padLen = padded[padded.length - 1];
+  if (padLen >= 1 && padLen <= 16 && padded.length >= padLen) {
+    const tail = padded.subarray(padded.length - padLen);
+    if (tail.every((b) => b === padLen)) return padded.subarray(0, padded.length - padLen);
+  }
+  return padded;
+}
+
+/**
+ * Download (and decrypt, if `ref.aesKey` is set) an inbound image's bytes.
+ * No bot-token auth — protocol.md documents this as a plain CDN GET against
+ * a pre-signed/scoped URL.
+ */
+/** 20 MB — matches MediaStore.maxUploadBytes (not imported directly: ilink-client is a
+ * protocol-layer module and shouldn't depend on history/media-store's storage layer). */
+const DEFAULT_MAX_MEDIA_BYTES = 20 * 1024 * 1024;
+
+export async function downloadWeixinImage(
+  ref: ILinkImageRef,
+  opts: { timeoutMs?: number; maxBytes?: number } = {},
+): Promise<Buffer> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_MEDIA_BYTES;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    // redirect: 'manual' — WEIXIN_CDN_ALLOWLIST only validates ref.url's OWN
+    // host; fetch()'s default 'follow' would silently chase a redirect to
+    // any other host, defeating that check as an SSRF guard. A redirect
+    // response here is treated as a hard failure rather than re-validated,
+    // since the legitimate CDN paths (both the trusted default base and an
+    // allowlisted full_url) are not expected to redirect at all.
+    res = await fetch(ref.url, { signal: controller.signal, redirect: 'manual' });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+    throw new Error('iLink media download: refusing to follow a redirect (SSRF guard)');
+  }
+  if (!res.ok) {
+    throw new Error(`iLink image download: HTTP ${res.status}`);
+  }
+  // Reject on the declared size before buffering the body when the server
+  // tells us upfront (LINE's webhook router enforces the same cap the same
+  // way — see MAX_MEDIA_BYTES's declaredSize check there).
+  const declaredLength = Number(res.headers?.get?.('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`iLink media download: declared size ${declaredLength} exceeds ${maxBytes} byte cap`);
+  }
+  const raw = Buffer.from(await res.arrayBuffer());
+  if (raw.length > maxBytes) {
+    throw new Error(`iLink media download: ${raw.length} bytes exceeds ${maxBytes} byte cap`);
+  }
+  const decrypted = ref.aesKey ? aes128EcbDecryptPermissive(raw, ref.aesKey) : raw;
+  // See ILinkImageRef.expectedLength's doc comment — trims a leading prefix
+  // WeChat's file-upload path adds ahead of the real content.
+  if (ref.expectedLength !== undefined && decrypted.length > ref.expectedLength) {
+    return decrypted.subarray(decrypted.length - ref.expectedLength);
+  }
+  return decrypted;
 }
 
 /**
@@ -238,6 +572,11 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
   // one client instance could in principle serve more than one credential
   // set, even though v1 only ever uses it for a single linked account.
   const updateCursors = new Map<string, string>();
+  // Which host to poll get_qrcode_status on next, per in-flight login
+  // attempt — starts at qrBaseUrl, switches once `redirect_host` is seen
+  // (see GetQrcodeStatusResponse's doc comment on that field for why this
+  // exists at all).
+  const qrStatusHosts = new Map<string, string>();
 
   return {
     async requestLinkQr(): Promise<ILinkQrSession> {
@@ -252,19 +591,25 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
     },
 
     async pollLinkStatus(loginSessionId: string): Promise<ILinkLinkResult> {
+      const pollHost = qrStatusHosts.get(loginSessionId) ?? qrBaseUrl;
       const res = await ilinkFetch<GetQrcodeStatusResponse>({
         method: 'GET',
         path: '/ilink/bot/get_qrcode_status',
         query: { qrcode: loginSessionId },
-        baseUrl: qrBaseUrl,
+        baseUrl: pollHost,
       });
+      if (res.status === 'scaned_but_redirect' && res.redirect_host) {
+        qrStatusHosts.set(loginSessionId, normalizeIlinkHost(res.redirect_host));
+      }
       if (res.status === 'confirmed' && res.bot_token && res.ilink_bot_id) {
+        qrStatusHosts.delete(loginSessionId);
         return {
           linked: true,
+          status: res.status,
           credentials: {
             accountId: res.ilink_bot_id,
             token: res.bot_token,
-            baseUrl: res.baseurl || qrBaseUrl,
+            baseUrl: res.baseurl ? normalizeIlinkHost(res.baseurl) : qrBaseUrl,
           },
         };
       }
@@ -272,7 +617,7 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
       // module doc comment) — surface as "still not linked" so the caller's
       // own attempt-timeout eventually reports back to the user, rather than
       // silently hanging on a status this client can't act on.
-      return { linked: false };
+      return { linked: false, status: res.status };
     },
 
     async getUpdates(creds: ILinkCredentials, _timeoutSeconds: number): Promise<ILinkUpdate[]> {
@@ -283,9 +628,22 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
         body: { get_updates_buf: cursor, base_info: baseInfo() },
         botToken: creds.token,
         baseUrl: creds.baseUrl,
+        // iLink's own long-poll legitimately blocks up to _timeoutSeconds —
+        // give it headroom above that instead of the 15s default meant for
+        // quick request/response calls.
+        timeoutMs: _timeoutSeconds * 1000 + 10_000,
       });
       if (res.get_updates_buf !== undefined) updateCursors.set(creds.accountId, res.get_updates_buf);
-      if (res.ret !== 0) {
+      // `ret` is OMITTED entirely on a successful response (confirmed live
+      // 2026-09-10 — every real getupdates success we captured had no `ret`
+      // field at all, just `msgs`/`get_updates_buf`), matching protocol.md's
+      // explicit rule for sendMessage ("an absent ret does not trigger this
+      // check") which applies the same way here. The old `res.ret !== 0`
+      // check was true for `undefined` too, so it threw "ret=undefined" on
+      // every single successful call — the actual reason messages we KNEW
+      // existed (confirmed via a raw curl to the same account) never made it
+      // through this client.
+      if (res.ret !== undefined && res.ret !== 0) {
         throw new Error(`iLink getupdates failed: ret=${res.ret} errmsg=${res.errmsg ?? 'unknown'}`);
       }
       return (res.msgs ?? [])
@@ -293,13 +651,32 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
         // inbound message, so treating them as one would make the agent
         // reply to itself.
         .filter((m) => m.message_type === 1)
-        .map((m) => ({
-          id: m.message_id,
-          fromId: m.from_user_id,
-          text: textFromItems(m.item_list),
-          timestamp: m.create_time_ms,
-          contextToken: m.context_token,
-        }));
+        .map((m) => {
+          let image: ILinkImageRef | undefined;
+          let file: ILinkFileRef | undefined;
+          try {
+            image = resolveWeixinImageRef(m.item_list);
+          } catch {
+            // A malformed item or a non-allowlisted full_url (SSRF guard)
+            // must not drop the whole batch — this one message just arrives
+            // without its image, same as any other undeliverable-media case.
+            image = undefined;
+          }
+          try {
+            file = resolveWeixinFileRef(m.item_list);
+          } catch {
+            file = undefined;
+          }
+          return {
+            id: m.message_id,
+            fromId: m.from_user_id,
+            text: textFromItems(m.item_list),
+            timestamp: m.create_time_ms,
+            contextToken: m.context_token,
+            image,
+            file,
+          };
+        });
     },
 
     async sendText(creds: ILinkCredentials, toId: string, text: string, contextToken?: string): Promise<void> {
@@ -321,9 +698,35 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
         botToken: creds.token,
         baseUrl: creds.baseUrl,
       });
-      if (res.ret !== 0) {
+      // Same fix as getUpdates above — confirmed live: a successful
+      // sendmessage response is just `{"message_id": ...}`, no `ret` field
+      // at all. Per protocol.md: "A non-zero ret throws; an absent ret does
+      // not trigger this check."
+      if (res.ret !== undefined && res.ret !== 0) {
         throw new Error(`iLink sendmessage failed: ret=${res.ret} errmsg=${res.errmsg ?? 'unknown'}`);
       }
+    },
+
+    async notifyStart(creds: ILinkCredentials): Promise<void> {
+      await ilinkFetch<{ ret?: number; errmsg?: string }>({
+        method: 'POST',
+        path: '/ilink/bot/msg/notifystart',
+        body: { base_info: baseInfo() },
+        botToken: creds.token,
+        baseUrl: creds.baseUrl,
+        timeoutMs: 10_000,
+      });
+    },
+
+    async notifyStop(creds: ILinkCredentials): Promise<void> {
+      await ilinkFetch<{ ret?: number; errmsg?: string }>({
+        method: 'POST',
+        path: '/ilink/bot/msg/notifystop',
+        body: { base_info: baseInfo() },
+        botToken: creds.token,
+        baseUrl: creds.baseUrl,
+        timeoutMs: 10_000,
+      });
     },
   };
 }
@@ -417,6 +820,9 @@ export function createFakeILinkClient(): ILinkClient {
       // eslint-disable-next-line no-console -- local-testing-only visibility, not production logging
       console.log(`[fake-ilink] would send to ${toId} (ctx=${contextToken ?? 'none'}): ${text}`);
     },
+
+    async notifyStart(): Promise<void> {},
+    async notifyStop(): Promise<void> {},
   };
 }
 

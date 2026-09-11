@@ -196,6 +196,7 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
   discord: '.discord-state',
   line: '.line-state',
   slack: '.slack-state',
+  wechat: '.wechat-state',
 };
 
 export class SessionProcess extends EventEmitter {

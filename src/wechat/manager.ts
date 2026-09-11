@@ -58,9 +58,23 @@ export const WECHAT_CHUNK_DELAY_MS = 300;
 /** `getupdates` long-poll timeout, per the iLink contract both source docs describe. */
 const POLL_TIMEOUT_SECONDS = 35;
 
-/** Backoff after a poll/link failure, capped, doubling each consecutive failure. */
-const POLL_BACKOFF_BASE_MS = 1_000;
-const POLL_BACKOFF_MAX_MS = 30_000;
+/**
+ * getUpdates failure handling — deliberately NOT exponential backoff.
+ * Matches Tencent's own official client (`Tencent/openclaw-weixin`'s
+ * `src/monitor/monitor.ts`, confirmed live 2026-09-10) exactly: a short flat
+ * retry for the first few failures, one fixed pause after
+ * `POLL_MAX_CONSECUTIVE_FAILURES` in a row, then reset back to fast retries.
+ * An earlier exponential-backoff version of this (1s→2s→4s...capped at 30s,
+ * NEVER resetting while failures continued) starved the poll loop of
+ * attempts during a real live test: the endpoint returns Cloudflare 522/524
+ * on the large majority of idle long-polls (confirmed via direct curl
+ * outside this codebase too — it's Tencent/Cloudflare-side flakiness, not a
+ * bug here), so how OFTEN we retry directly determines whether a queued
+ * message actually gets picked up in a timely way.
+ */
+const POLL_RETRY_DELAY_MS = 2_000;
+const POLL_BACKOFF_DELAY_MS = 30_000;
+const POLL_MAX_CONSECUTIVE_FAILURES = 3;
 
 /** How long a QR login attempt stays valid before `startLinking()` must be called again. */
 const LINK_ATTEMPT_TIMEOUT_MS = 2 * 60 * 1000;
@@ -72,8 +86,11 @@ const RECENT_MESSAGE_CACHE_SIZE = 200;
 /** Timing knobs, overridable in tests so the suite doesn't depend on real wall-clock delays. */
 export interface WeChatManagerTiming {
   pollTimeoutSeconds: number;
-  pollBackoffBaseMs: number;
-  pollBackoffMaxMs: number;
+  /** Flat retry delay for the first `pollMaxConsecutiveFailures` getUpdates failures in a row. */
+  pollRetryDelayMs: number;
+  /** Fixed pause once `pollMaxConsecutiveFailures` failures happen consecutively — then the counter resets. */
+  pollBackoffDelayMs: number;
+  pollMaxConsecutiveFailures: number;
   linkAttemptTimeoutMs: number;
   linkPollIntervalMs: number;
   /**
@@ -88,8 +105,9 @@ export interface WeChatManagerTiming {
 
 const DEFAULT_TIMING: WeChatManagerTiming = {
   pollTimeoutSeconds: POLL_TIMEOUT_SECONDS,
-  pollBackoffBaseMs: POLL_BACKOFF_BASE_MS,
-  pollBackoffMaxMs: POLL_BACKOFF_MAX_MS,
+  pollRetryDelayMs: POLL_RETRY_DELAY_MS,
+  pollBackoffDelayMs: POLL_BACKOFF_DELAY_MS,
+  pollMaxConsecutiveFailures: POLL_MAX_CONSECUTIVE_FAILURES,
   linkAttemptTimeoutMs: LINK_ATTEMPT_TIMEOUT_MS,
   linkPollIntervalMs: LINK_POLL_INTERVAL_MS,
   pollIdleDelayMs: 0,
@@ -189,9 +207,33 @@ export class WeChatManager {
     this.status = 'pending_scan';
 
     const deadline = Date.now() + this.timing.linkAttemptTimeoutMs;
+    let lastLoggedStatus: string | undefined;
     while (!this.stopping && Date.now() < deadline) {
       await sleep(this.timing.linkPollIntervalMs);
-      const result = await this.client.pollLinkStatus(session.loginSessionId);
+      let result;
+      try {
+        result = await this.client.pollLinkStatus(session.loginSessionId);
+      } catch (err) {
+        // A single request failing/timing out (observed live: the host
+        // `scaned_but_redirect` redirects to can be slow or unresponsive)
+        // must not abort the whole attempt — keep polling until the
+        // deadline above, same as a transient "wait" status would.
+        this.logger.warn('WeChat QR status poll failed, retrying', {
+          agentId: this.agentConfig.id,
+          error: (err as Error).message,
+        });
+        continue;
+      }
+      // Only every STATUS CHANGE is logged (not every poll) — a real attempt
+      // polls every 2s for up to 2 minutes, so logging unconditionally would
+      // mostly just repeat "wait" dozens of times.
+      if (result.status && result.status !== lastLoggedStatus) {
+        this.logger.info('WeChat QR link status changed', {
+          agentId: this.agentConfig.id,
+          status: result.status,
+        });
+        lastLoggedStatus = result.status;
+      }
       if (result.linked && result.credentials) {
         this.credentials = result.credentials;
         this.contextTokens = {};
@@ -203,6 +245,10 @@ export class WeChatManager {
       }
     }
     if (!this.stopping) {
+      this.logger.warn('WeChat QR link attempt timed out', {
+        agentId: this.agentConfig.id,
+        lastStatus: lastLoggedStatus ?? 'unknown',
+      });
       this.status = 'unlinked';
       this.qrDataUri = undefined;
     }
@@ -213,6 +259,14 @@ export class WeChatManager {
     this.stopping = true;
     this.pollGeneration += 1; // orphans any in-flight poll loop's iteration check
     await this.pollLoopPromise?.catch(() => {});
+    if (this.credentials) {
+      await this.client.notifyStop(this.credentials).catch((err) => {
+        this.logger.warn('WeChat notifyStop failed (continuing anyway)', {
+          agentId: this.agentConfig.id,
+          error: (err as Error).message,
+        });
+      });
+    }
     this.credentials = undefined;
     this.contextTokens = {};
     this.qrDataUri = undefined;
@@ -249,11 +303,24 @@ export class WeChatManager {
   }
 
   private async runPollLoop(generation: number): Promise<void> {
-    let backoffMs = this.timing.pollBackoffBaseMs;
+    // Tell iLink this client is now listening, before the first getUpdates
+    // call — see ILinkClient.notifyStart's doc comment. Mirrors Tencent's
+    // own client exactly: never blocks startup on failure, just logs.
+    if (this.credentials) {
+      try {
+        await this.client.notifyStart(this.credentials);
+      } catch (err) {
+        this.logger.warn('WeChat notifyStart failed (continuing anyway)', {
+          agentId: this.agentConfig.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+    let consecutiveFailures = 0;
     while (!this.stopping && generation === this.pollGeneration && this.credentials) {
       try {
         const updates = await this.client.getUpdates(this.credentials, this.timing.pollTimeoutSeconds);
-        backoffMs = this.timing.pollBackoffBaseMs;
+        consecutiveFailures = 0;
         for (const update of updates) {
           // Captured unconditionally, even for a redelivered id: iLink may
           // hand back a fresher token on a retry, and there's no separate
@@ -265,14 +332,34 @@ export class WeChatManager {
         }
         if (this.timing.pollIdleDelayMs > 0) await sleep(this.timing.pollIdleDelayMs);
       } catch (err) {
-        this.logger.warn('WeChat getUpdates failed, backing off', {
+        consecutiveFailures += 1;
+        // Flat 2s retry for the first few failures, one fixed 30s pause after
+        // pollMaxConsecutiveFailures in a row, then reset — NOT exponential
+        // backoff. See POLL_RETRY_DELAY_MS's doc comment for why.
+        const backingOff = consecutiveFailures >= this.timing.pollMaxConsecutiveFailures;
+        this.logger.warn('WeChat getUpdates failed, retrying', {
           agentId: this.agentConfig.id,
           error: (err as Error).message,
-          backoffMs,
+          consecutiveFailures,
+          backingOff,
         });
-        this.status = 'reconnecting';
-        await sleep(backoffMs);
-        backoffMs = Math.min(backoffMs * 2, this.timing.pollBackoffMaxMs);
+        // Deliberately NOT flipping to 'reconnecting' here, at any failure
+        // count. Unlike WhatsApp/Baileys' persistent socket (where a drop is
+        // real and 'reconnecting' means something), getUpdates is a
+        // stateless long-poll retried in a loop — a thrown error here is
+        // almost always just a Cloudflare edge timeout on an otherwise-idle
+        // poll (confirmed live: happens on the large majority of idle polls
+        // against a perfectly healthy, still-linked account), not a session
+        // problem. Marking 'reconnecting' — which the web UI reads as
+        // wechat_connected=false and hides the pending-senders/allowlist
+        // section for — on ordinary transport errors made the UI flap
+        // between connected/disconnected during completely normal idle
+        // operation. `status` stays 'linked' through routine getUpdates
+        // failures; only a real session problem (not detected yet — would
+        // need iLink's business-level ret/errcode, which the thrown Error
+        // here doesn't carry structured) should ever downgrade it.
+        await sleep(backingOff ? this.timing.pollBackoffDelayMs : this.timing.pollRetryDelayMs);
+        if (backingOff) consecutiveFailures = 0;
         continue;
       }
       if (this.status === 'reconnecting') this.status = 'linked';

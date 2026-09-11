@@ -21,6 +21,7 @@ import {
   createILinkClient,
   createFakeILinkClient,
   isWeChatILinkFakeEnabled,
+  downloadWeixinImage,
   type ILinkUpdate,
 } from '../wechat/ilink-client';
 import { isWeChatConversationAllowed } from '../api/wechat-access';
@@ -51,6 +52,7 @@ import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
+import { isChatChannel } from '../history/types';
 import type { SkillLearningManager } from './skill-learning';
 import { spawnArchiveReindex } from './knowledge';
 import { resolveEnabledConnectors } from '../connectors/resolve';
@@ -477,14 +479,13 @@ export class AgentRunner extends EventEmitter {
           const chatId = meta['chat_id'] ?? '';
           const content = params.content ?? '';
 
-          // Set channel early so all handlers (including session commands) have it
-          const channelSource = (meta['source'] === 'discord'
-            ? 'discord'
-            : meta['source'] === 'line'
-              ? 'line'
-              : meta['source'] === 'slack'
-                ? 'slack'
-                : 'telegram') as ChatChannel;
+          // Set channel early so all handlers (including session commands) have it.
+          // Derived from the canonical CHAT_CHANNELS list (see history/types.ts's
+          // doc comment) — a hand-copied ternary here is exactly what silently
+          // turned every WeChat (and, historically, Slack) message into
+          // 'telegram' before, since a new channel added elsewhere is easy to
+          // forget adding to a chain of `=== 'x' ? 'x' : ...` checks.
+          const channelSource = (isChatChannel(meta['source']) ? meta['source'] : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
 
           // Slack: remember the current message's thread context so the
@@ -1141,7 +1142,13 @@ export class AgentRunner extends EventEmitter {
         for (const entry of entries) {
           const meta = entry.meta ?? {};
           const content = entry.content ?? '';
-          const userContent = content || (meta['attachment_file_id'] || meta['image_path'] ? '(photo)' : '');
+          // `image_path` is used for ANY attachment, not just photos (see
+          // handleWeChatInboundMessage's doc comment) — a non-image
+          // extension (e.g. WeChat's PDF/file support) must not show as
+          // "(photo)" in the transcript.
+          const isImagePath = /\.(jpe?g|png|gif|webp|heic|bmp)$/i.test(meta['image_path'] ?? '');
+          const attachmentPlaceholder = meta['attachment_file_id'] ? '(photo)' : meta['image_path'] ? (isImagePath ? '(photo)' : '(file)') : '';
+          const userContent = content || attachmentPlaceholder;
           const userTs = Date.now();
           await this.sessionStore.appendTelegramMessage(this.agentConfig.id, chatId, sessionId, {
             role: 'user',
@@ -1719,6 +1726,9 @@ export class AgentRunner extends EventEmitter {
       let lastAssistantTextThisTurn = '';
       let typingDoneTimer: ReturnType<typeof setTimeout> | null = null;
       const TYPING_DONE_DELAY_MS = 3000;
+      // Same hand-copied-ternary gap CHAT_CHANNELS' doc comment warns about —
+      // 'wechat' was missing here too (confirmed live 2026-09-11), so this
+      // turn-completion tracking never recognized a wechat_reply tool call.
       const replyToolName =
         source === 'discord'
           ? 'mcp__gateway__discord_reply'
@@ -1726,7 +1736,9 @@ export class AgentRunner extends EventEmitter {
             ? 'mcp__gateway__line_reply'
             : source === 'slack'
               ? 'mcp__gateway__slack_reply'
-              : 'mcp__gateway__telegram_reply';
+              : source === 'wechat'
+                ? 'mcp__gateway__wechat_reply'
+                : 'mcp__gateway__telegram_reply';
 
       proc.on('output', (line: string) => {
         try {
@@ -2953,6 +2965,21 @@ export class AgentRunner extends EventEmitter {
       }
       return;
     }
+    // WeChat has no .forward consumer either — same gap that used to silently
+    // drop every command reply / no-tool-call fallback for Slack (confirmed
+    // live 2026-09-11: the agent's plain-text reply showed up in the web
+    // session view but never reached the user's phone, because it landed in
+    // a chatId.forward file nothing reads for this channel). Deliver via the
+    // manager directly, mirroring Slack's branch above.
+    if (this.channelFor(chatId) === 'wechat') {
+      void this.wechat?.sendMessage(chatId, text).catch((err: unknown) => {
+        this.logger.warn('WeChat auto-forward failed', {
+          chatId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return;
+    }
     const typingDir = this.getTypingDir(chatId);
     const forwardPath = path.join(typingDir, `${chatId}.forward`);
     try {
@@ -3200,13 +3227,62 @@ export class AgentRunner extends EventEmitter {
       message_id: update.id,
       ts: new Date(update.timestamp ?? Date.now()).toISOString(),
     };
-    fetch(`http://127.0.0.1:${this.callbackPort}/channel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: update.text ?? '', meta }),
-    }).catch((err) => {
-      this.logger.error('WeChat: failed to forward to callback', { error: (err as Error).message });
-    });
+
+    void (async () => {
+      // Stage an inbound image or file to a temp path the same way LINE's
+      // webhook router does (src/api/line-webhook-router.ts's
+      // downloadLineImage/drainToFile pattern) — AgentRunner.injectTurn
+      // already knows how to take meta.image_path from here (the field name
+      // is historical; the mechanism itself is content-agnostic — it just
+      // copies whatever's at that path into MediaStore), rewrite the path
+      // for the agent's sandbox, and clean up the ephemeral original. No
+      // format sniffing for images: always staged as .jpg, matching
+      // Hermes-agent's own assumption for this same protocol. Files keep
+      // their real name/extension (sniffing isn't needed — it's given).
+      // update.id (Tencent's message_id) arrives as a JSON number at runtime
+      // despite ILinkUpdate declaring it a string (confirmed live
+      // 2026-09-11: `.replace is not a function` on a real image message) —
+      // String() it before sanitizing.
+      const safeId = String(update.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (update.image) {
+        try {
+          const bytes = await downloadWeixinImage(update.image, { maxBytes: MediaStore.maxUploadBytes });
+          const tempPath = path.join(os.tmpdir(), `wechat-img-${safeId}-${Date.now()}.jpg`);
+          await fsPromises.writeFile(tempPath, bytes);
+          meta.image_path = tempPath;
+          meta.media_ephemeral = '1';
+        } catch (err) {
+          this.logger.warn('WeChat image download failed, forwarding text only', {
+            error: (err as Error).message,
+          });
+        }
+      } else if (update.file) {
+        try {
+          const bytes = await downloadWeixinImage(update.file, { maxBytes: MediaStore.maxUploadBytes });
+          // Preserve the sender's real filename/extension (unlike images,
+          // which are always staged as .jpg) — the agent's Read tool needs a
+          // correct extension to make sense of a PDF/docx/etc.
+          const safeName = update.file.fileName.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'file';
+          const tempPath = path.join(os.tmpdir(), `wechat-file-${safeId}-${Date.now()}-${safeName}`);
+          await fsPromises.writeFile(tempPath, bytes);
+          meta.image_path = tempPath;
+          meta.media_ephemeral = '1';
+        } catch (err) {
+          this.logger.warn('WeChat file download failed, forwarding text only', {
+            error: (err as Error).message,
+          });
+        }
+      }
+      try {
+        await fetch(`http://127.0.0.1:${this.callbackPort}/channel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: update.text ?? '', meta }),
+        });
+      } catch (err) {
+        this.logger.error('WeChat: failed to forward to callback', { error: (err as Error).message });
+      }
+    })();
   }
 
   startSlackOutbound(): void {

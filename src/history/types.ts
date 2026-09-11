@@ -14,8 +14,17 @@
  * (type says X is valid, some hand-copied runtime check disagrees)
  * impossible to reintroduce for this union — adding a channel here updates
  * every consumer's type AND its guard in one place.
+ *
+ * WeChat repeated the exact same "channelSource ternary with no branch"
+ * mistake this file exists to prevent (confirmed live 2026-09-11: every
+ * WeChat message silently became 'telegram', so the agent never got the
+ * `wechat_reply` MCP tool and had no way to answer) — it was added to
+ * `AgentConfig`/`ILinkClient` etc. without ever being added here, so the
+ * ternary in `agent/runner.ts`'s channel callback handler still had to be
+ * hand-checked for every branch instead of deriving from `isChatChannel()`.
+ * Fixed by adding it here and switching that ternary to the guard.
  */
-export const CHAT_CHANNELS = ['telegram', 'discord', 'line', 'slack'] as const;
+export const CHAT_CHANNELS = ['telegram', 'discord', 'line', 'slack', 'wechat'] as const;
 export type ChatChannel = (typeof CHAT_CHANNELS)[number];
 export function isChatChannel(value: unknown): value is ChatChannel {
   return typeof value === 'string' && (CHAT_CHANNELS as readonly string[]).includes(value);

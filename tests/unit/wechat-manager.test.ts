@@ -19,8 +19,9 @@ import { AgentConfig } from '../../src/types';
 
 const FAST_TIMING = {
   pollTimeoutSeconds: 1,
-  pollBackoffBaseMs: 5,
-  pollBackoffMaxMs: 20,
+  pollRetryDelayMs: 5,
+  pollBackoffDelayMs: 20,
+  pollMaxConsecutiveFailures: 3,
   linkAttemptTimeoutMs: 200,
   linkPollIntervalMs: 5,
   // Bounds how many times a mock `getUpdates` (which resolves instantly,
@@ -45,6 +46,8 @@ function makeClient(overrides: Partial<ILinkClient> = {}): jest.Mocked<ILinkClie
     pollLinkStatus: jest.fn().mockResolvedValue({ linked: false }),
     getUpdates: jest.fn().mockResolvedValue([]),
     sendText: jest.fn().mockResolvedValue(undefined),
+    notifyStart: jest.fn().mockResolvedValue(undefined),
+    notifyStop: jest.fn().mockResolvedValue(undefined),
     ...overrides,
   } as jest.Mocked<ILinkClient>;
 }
@@ -188,7 +191,74 @@ describe('WeChatManager', () => {
     await manager.unlink();
   });
 
-  test('backs off after a getUpdates failure, reports reconnecting, then recovers', async () => {
+  test('calls notifyStart before the first getUpdates call, once poll loop starts', async () => {
+    const calls: string[] = [];
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      notifyStart: jest.fn().mockImplementation(async () => {
+        calls.push('notifyStart');
+      }),
+      getUpdates: jest.fn().mockImplementation(async () => {
+        calls.push('getUpdates');
+        return [];
+      }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => calls.includes('getUpdates'));
+
+    expect(calls[0]).toBe('notifyStart');
+    await manager.unlink();
+  });
+
+  test('a failed notifyStart does not block the poll loop from starting', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      notifyStart: jest.fn().mockRejectedValue(new Error('notifystart down')),
+      getUpdates: jest.fn().mockResolvedValue([{ id: 'm1', fromId: 'u1', text: 'hi' }]),
+    });
+    const onMessage = jest.fn();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, onMessage, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => onMessage.mock.calls.length >= 1);
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    await manager.unlink();
+  });
+
+  test('unlink() calls notifyStop when a session was linked', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await manager.unlink();
+
+    expect(client.notifyStop).toHaveBeenCalledWith(CREDS);
+  });
+
+  test('unlink() does not call notifyStop when never linked', async () => {
+    const client = makeClient();
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, FAST_TIMING);
+
+    await manager.unlink();
+
+    expect(client.notifyStop).not.toHaveBeenCalled();
+  });
+
+  test('recovers to linked after a transient getUpdates failure', async () => {
     let calls = 0;
     const client = makeClient({
       pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
@@ -206,6 +276,49 @@ describe('WeChatManager', () => {
     await manager.startLinking();
     await waitUntil(() => calls >= 2);
     await waitUntil(() => manager.getStatus().status === 'linked');
+
+    expect(manager.getStatus().status).toBe('linked');
+    await manager.unlink();
+  });
+
+  test('a single getUpdates failure does NOT flip status to reconnecting (a lone Cloudflare-edge blip on an idle long-poll is normal, not a disconnect)', async () => {
+    let calls = 0;
+    let sawReconnecting = false;
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error('transient 524'));
+        return Promise.resolve([]);
+      }),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    while (calls < 2) {
+      if (manager.getStatus().status === 'reconnecting') sawReconnecting = true;
+      await new Promise((r) => setTimeout(r, 1));
+    }
+
+    expect(sawReconnecting).toBe(false);
+    await manager.unlink();
+  });
+
+  test('stays linked even through many consecutive getUpdates failures (getUpdates errors never mark reconnecting — see runPollLoop\'s doc comment)', async () => {
+    const client = makeClient({
+      pollLinkStatus: jest.fn().mockResolvedValueOnce({ linked: true, credentials: CREDS }),
+      getUpdates: jest.fn().mockRejectedValue(new Error('persistent failure')),
+    });
+    const manager = new WeChatManager(makeAgentConfig(workspace), '/tmp', client, undefined, {
+      ...FAST_TIMING,
+      linkPollIntervalMs: 1,
+    });
+
+    await manager.startLinking();
+    await waitUntil(() => (client.getUpdates as jest.Mock).mock.calls.length >= 5);
 
     expect(manager.getStatus().status).toBe('linked');
     await manager.unlink();
