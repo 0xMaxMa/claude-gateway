@@ -18,8 +18,41 @@ export function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, (answer) => resolve(answer)));
 }
 
-/** Reads lines until a blank line (after at least one non-blank line). */
-export async function askMultiline(rl: readline.Interface, intro: string): Promise<string> {
+/**
+ * Ask before doing something the caller cannot undo — removing a service,
+ * uninstalling an app, replacing an installed package.
+ *
+ * `--yes` skips the prompt. A non-interactive stdin *without* `--yes` refuses
+ * rather than blocking on a question nobody can answer, so every one of these
+ * commands is safe to run from a script, a cron job, or CI: it either has
+ * explicit consent or it does nothing.
+ *
+ * `action` names the verb in that refusal ("Refusing to uninstall …") — the one
+ * thing that differed between the three byte-identical copies of this function
+ * that used to live in commands/service.ts, commands/app.ts and
+ * commands/update.ts. Kept in prompt.ts with the other interactive helpers so a
+ * fix to the gate (or to what counts as consent) reaches all of them at once.
+ */
+export async function confirmAction(
+  flags: Record<string, string | boolean>,
+  action: string,
+  question: string,
+): Promise<boolean> {
+  if (flags.yes === true) return true;
+  if (!process.stdin.isTTY) {
+    process.stderr.write(`Refusing to ${action} non-interactively without --yes.\n`);
+    return false;
+  }
+  const rl = createRl();
+  try {
+    const answer = (await ask(rl, `${question} (y/N): `)).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+/** Reads lines until a blank line (after at least one non-blank line). */export async function askMultiline(rl: readline.Interface, intro: string): Promise<string> {
   console.log(intro);
   const lines: string[] = [];
   while (true) {

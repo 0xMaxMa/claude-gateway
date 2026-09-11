@@ -63,6 +63,25 @@ describe('webhooks dispatcher', () => {
     expect(res.body.error).toContain('no Slack-enabled agent');
   });
 
+  // WhatsApp Cloud's GET verify is a REAL handshake (unlike LINE/Slack's
+  // always-200 dummy handler) — with no agent configured there's nothing to
+  // match `hub.verify_token` against, so it 403s instead of 200ing.
+  it('routes GET /webhooks/whatsapp_cloud to the verify handler (403 when no agent/params)', async () => {
+    const res = await supertest.default(makeApp()).get('/webhooks/whatsapp_cloud');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('verification failed');
+  });
+
+  it('dispatches POST /webhooks/whatsapp_cloud to the WhatsApp Cloud handler (404 when no agent)', async () => {
+    const res = await supertest.default(makeApp())
+      .post('/webhooks/whatsapp_cloud')
+      .set('Content-Type', 'application/json')
+      .send({ object: 'whatsapp_business_account', entry: [] });
+    // Reaches the WhatsApp Cloud handler, which resolves no configured agent.
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('no WhatsApp Cloud-enabled agent');
+  });
+
   // `app` is attacker-controlled (`:app` path segment, no auth on this zone). A
   // plain-object lookup with no own-property guard would resolve these to a
   // truthy prototype-chain value instead of undefined, bypassing the 404 below

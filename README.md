@@ -15,7 +15,7 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 - 📚 **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](#gatewayknowledge)
 - 🌙 **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](#gatewaydreaming)
 - 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
-- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, Cron, Skills, extensible to more)
+- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, WhatsApp, Cron, Skills, extensible to more)
 - 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
 - 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
 - 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress
@@ -119,6 +119,9 @@ claude-gateway service install              # systemd *user* unit — no sudo
 claude-gateway service install --print      # just show what it would install
 claude-gateway service status
 claude-gateway service uninstall            # asks first — this stops a running gateway
+claude-gateway service start                # start the installed service (found even if inactive)
+claude-gateway service restart
+claude-gateway service stop
 ```
 
 Install and uninstall both prompt before acting; pass `--yes` in scripts (without it, a
@@ -126,11 +129,13 @@ non-interactive run is refused rather than left hanging). Always stop the gatewa
 `service uninstall` or `systemctl --user stop claude-gateway.service` — a bare `kill <pid>` bypasses
 systemd's own stop tracking, so `Restart=always` brings it right back regardless of exit code.
 
-`install`'s exit code distinguishes three outcomes: `0` fully healthy, `1` install/enable itself
-failed or a validation/confirmation gate refused (nothing was written), `2` install/enable
-succeeded but `/health` never answered within the poll window. A script that only checks the exit
-code — not the JSON result on stdout — can still tell "didn't happen" apart from "happened, health
-unconfirmed" this way.
+`install`, `start` and `restart` — the commands meant to leave a running gateway behind — share one
+exit-code contract with three outcomes: `0` fully healthy, `1` the action itself failed (or a
+validation/confirmation gate refused, so nothing was written), `2` the action succeeded but
+`/health` never answered within the poll window. A script that only checks the exit code — not the
+JSON result on stdout — can still tell "didn't happen" apart from "happened, health unconfirmed"
+this way. `start` on an already-running service is no exception: it still probes `/health` and can
+still exit `2`, because "the process manager calls it active" is not "the gateway answers".
 
 `install` also refuses (rather than just warning) if a `claude-gateway.service` unit already
 exists and is enabled or active at *system* scope (e.g. one written by provisioning outside this
@@ -193,6 +198,11 @@ claude-gateway gateway restart
 claude-gateway gateway stop
 claude-gateway gateway logs     # tail the gateway's own log (works even when it is dead)
 ```
+
+`gateway restart`/`stop` only drive whatever manager is currently reported *active*. To start an
+installed service that is currently stopped — or to act on a specific `--manager`/`--scope`
+regardless of what else might be running — use `service start`/`stop`/`restart` instead; they
+discover the installed unit from disk the same way `service status`/`uninstall` do.
 
 Managing PM2 directly still works too:
 
@@ -762,6 +772,8 @@ Tokens are stored per-agent at `~/.claude-gateway/agents/<id>/.env` and auto-loa
 
 A variable you exported yourself always wins over the `.env` file and is never replaced by a reload. A token the gateway did read from a `.env` is refreshed when that file changes, so **rotating a token takes effect on the next config reload** rather than at the next restart. Note that only `config.json` is watched — editing a `.env` by hand applies on the following reload, while the MCP `agent_create` / `agent_update` tools write both files and so take effect immediately. If a `${VAR}` cannot be resolved from anywhere, that one agent is skipped — the rest of the gateway starts normally — and the skip is logged to `logs/gateway.log` with the name of the missing variable.
 
+WhatsApp Cloud's credentials (`accessToken`, `phoneNumberId`, `appSecret`, `verifyToken`) are plain fields under the agent's `whatsapp_cloud` config block, not a dedicated "bot token" field — but they resolve through the exact same mechanism as Telegram/Discord bot tokens: reference them as `${VAR}` in `config.json` and put the value in the agent's `.env` (or export it as a shell variable), same as above.
+
 ---
 
 ## Architecture
@@ -904,6 +916,10 @@ claude-gateway gateway start               # run the gateway in the foreground
 claude-gateway gateway status              # is it running? which manager owns it?
 claude-gateway gateway logs --follow       # stream the gateway log (reads files, needs no server)
 claude-gateway service install             # run it as a systemd-user (or --manager pm2) service
+claude-gateway service start|stop|restart  # drive the installed service (found even if inactive)
+claude-gateway app list                    # installed Docker-compose apps and their status
+claude-gateway app install agent-note      # install from the community registry
+claude-gateway app start|stop|restart <name>
 claude-gateway update check                # newer claude-gateway published?
 claude-gateway claude update               # update Claude Code via its own updater
 claude-gateway doctor                      # check config / key / connectivity
@@ -1039,6 +1055,19 @@ curl -X POST http://localhost:10850/api/v1/apps/install \
 ```bash
 curl http://localhost:10850/api/v1/apps/jobs/<jobId> -H "X-Api-Key: <key>" | jq .status
 ```
+
+**Or use the CLI**, which wraps the same endpoints (see [CLI.md](./CLI.md) for the full reference):
+
+```bash
+claude-gateway app install agent-note --env-file ./agent-note.env --wait   # follow the job to completion
+claude-gateway app list                                                    # installed apps + status
+claude-gateway app stop agent-note
+claude-gateway app uninstall agent-note --yes
+```
+
+`--env-file` reads `KEY=VALUE` lines from a dotenv file. Prefer it over `--env` for anything secret:
+a value passed on the command line is readable by every local user in `/proc/<pid>/cmdline` while the
+install runs, and is written to your shell history. `--env` wins if both set the same variable.
 
 **App is then live at** `/app/getpod-manager/<portName>/`.
 
@@ -1356,6 +1385,9 @@ sees a message. If those aren't met the bot looks online but stays silent.
 | | Guild | **Message Content Intent** + **View Channel** + **Read Message History** | `groupPolicy` + `guildAllowlist` (+ optional `channelAllowlist`/`roleAllowlist`) | `requireMention` false, or @mentioned/replied |
 | **LINE** | 1:1 | webhook delivered (valid signature) | `dmPolicy` | — |
 | | Group/Room | webhook delivered + bot is a member | `groupPolicy` + `groupAllowlist` | `requireMention` false, or **native** @mention |
+| **WhatsApp (Baileys)** | DM | number is linked (QR/pairing-code device link) | `dmPolicy` + `pairing` → `dmAllowlist` (per account) | — |
+| | Group | number is linked and is a member of the group | `groupPolicy` + `groupAllowlist` (per account) | `requireMention` false, or @mentioned |
+| **WhatsApp (Cloud API)** | DM | webhook delivered (valid `X-Hub-Signature-256`) | `dmPolicy` + `pairing` → `dmAllowlist` | — (DM-only, no group concept) |
 
 **Telegram limits**
 - Exactly one process may poll a bot token — a second poller causes `409 Conflict`.
@@ -1374,6 +1406,14 @@ sees a message. If those aren't met the bot looks online but stays silent.
 - Group/room `requireMention` uses LINE's **native mention** only (`mention.mentionees[].isSelf`). Typing the bot's name as plain text does **not** count, and `@All` does **not** count as a bot mention. LINE attaches mentions to **text messages only**, so an image or file posted in a group cannot satisfy the gate — send media in a DM, or set `requireMention: false` for that agent.
 - Delivery is **reply-token-first (free) → push fallback (metered)**. The single-use reply token lives only ~1 min; after that, replies consume the OA's monthly push quota.
 - Max **5 message objects** per reply/push request (the gateway auto-chunks to fit).
+
+**WhatsApp limits**
+- Two independent modes, configured separately: the **Baileys** device-link bridge (`whatsapp` config block) and the **Cloud API** (`whatsapp_cloud` config block).
+- **Baileys** requires linking a device per number — QR code or a text pairing code, the same one-time handshake as WhatsApp Web. Multi-account: an agent can hold several linked numbers at once (`whatsapp.accounts[]`), each with its own DM/group policy and allowlist.
+- **Cloud API is DM-only** — a WhatsApp Business number has no group concept, so there's no `groupPolicy`/`groupAllowlist`/`requireMention` for it.
+- **Cloud API's inbound webhook requires a valid `X-Hub-Signature-256`** (HMAC-SHA256 of the raw body against `appSecret`); a bad or missing signature is rejected with `401` before the payload is parsed.
+- **Cloud API's 24-hour customer-service window**: free-form text replies only work within 24h of the user's last inbound message; outside that window only a pre-approved message template can reach them, and template sending is off by default (`templatesEnabled: false`) since it's the one send that can reach a user outside that window.
+- Inbound media cap is **20 MB** on both modes (same `MediaStore` cap LINE's file uploads use).
 
 ---
 

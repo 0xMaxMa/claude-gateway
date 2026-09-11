@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import PQueue from 'p-queue';
-import { ImageParams, Message, SessionIndex, SessionMeta } from '../types';
+import { ImageParams, Message, SessionIndex, SessionMeta, VideoParams } from '../types';
 import { CHAT_CHANNELS, type ChatChannelOrApi } from '../history/types';
 
 // getAllSessionMeta's directory-prefix scan below needs 'api' alongside the
@@ -453,7 +453,7 @@ export class SessionStore {
     agentId: string,
     chatId: string,
     sessionId: string,
-    meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn' | 'imageConfig' | 'model'>>,
+    meta: Partial<Pick<SessionMeta, 'name' | 'totalTokensUsed' | 'messageCount' | 'lastInputTokens' | 'loadedAtSpawn' | 'archivedCount' | 'messageCountAtSpawn' | 'imageConfig' | 'videoConfig' | 'model'>>,
     channel: ChatChannelOrApi = 'telegram',
   ): Promise<void> {
     const queue = this.getTelegramQueue(agentId, chatId);
@@ -615,8 +615,8 @@ export class SessionStore {
   }
 
   /** Get all session metadata (name) for an agent, keyed by sessionId. */
-  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; model?: string }>> {
-    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; model?: string }>();
+  async getAllSessionMeta(agentId: string): Promise<Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>> {
+    const metaMap = new Map<string, { name: string; imageConfig?: ImageParams; videoConfig?: VideoParams; model?: string }>();
     const sessionsDir = path.join(this.agentsBaseDir, agentId, 'sessions');
     let entries: fs.Dirent[];
     try {
@@ -631,7 +631,7 @@ export class SessionStore {
         const chatId = e.name.slice(channel.length + 1);
         const index = await this.loadIndex(agentId, chatId, channel);
         if (index) {
-          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, model: s.model });
+          for (const s of index.sessions) metaMap.set(s.id, { name: s.name, imageConfig: s.imageConfig, videoConfig: s.videoConfig, model: s.model });
         }
       });
     await Promise.all(reads);

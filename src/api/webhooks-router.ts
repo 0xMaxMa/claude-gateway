@@ -22,6 +22,7 @@ import express, { Router, type Request, type Response } from 'express';
 import type { AgentRunner } from '../agent/runner';
 import { createLineWebhookHandler, type LineWebhookOptions } from './line-webhook-router';
 import { createSlackWebhookHandler, type SlackWebhookOptions } from './slack-webhook-router';
+import { createWhatsAppCloudWebhookHandler, type WhatsAppCloudWebhookOptions } from './whatsapp-cloud-webhook-router';
 
 const MAX_BODY_BYTES = 256 * 1024; // pre-auth body cap
 
@@ -44,6 +45,7 @@ export interface WebhookAppHandler {
 export interface WebhooksOptions {
   line?: LineWebhookOptions;
   slack?: SlackWebhookOptions;
+  whatsapp_cloud?: WhatsAppCloudWebhookOptions;
 }
 
 export function createWebhooksRouter(
@@ -57,6 +59,7 @@ export function createWebhooksRouter(
   const handlers: Record<string, WebhookAppHandler> = {
     line: createLineWebhookHandler(agents, logDir, opts.line ?? {}),
     slack: createSlackWebhookHandler(agents, logDir, opts.slack ?? {}),
+    whatsapp_cloud: createWhatsAppCloudWebhookHandler(agents, logDir, opts.whatsapp_cloud ?? {}),
   };
 
   const resolve = (req: Request, res: Response): WebhookAppHandler | null => {

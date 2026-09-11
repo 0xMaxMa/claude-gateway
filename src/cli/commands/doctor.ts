@@ -3,6 +3,7 @@ import { probeHealth, HealthProbe } from '../health';
 import { detectManager } from '../manager';
 import { printJson, helpStream, writeCommandHelp } from '../output';
 import { paletteFor } from '../colors';
+import { normalizePublicUrl } from '../../cli-viewer/url';
 
 /**
  * `doctor` — quick health check of the CLI's view of the gateway: is config
@@ -17,6 +18,11 @@ interface Check {
   /** Informational only: reported, but never fails the command. Used for the
    *  URL the CLI is *not* using — its state is context, not a verdict. */
   info?: boolean;
+  /** A real gap worth the operator's attention, but not a failure: some
+   *  deployments (LINE-only, localhost-only) are legitimately fine without the
+   *  thing being warned about. Never fails the command, like `info`, but
+   *  rendered distinctly so it doesn't read as "nothing to see here". */
+  warn?: boolean;
 }
 
 function printHelp(): void {
@@ -27,8 +33,8 @@ function printHelp(): void {
     'check config, key resolution, manager and connectivity',
     'claude-gateway doctor [--url <url>] [--key <key>] [--config <path>] [--json]',
     [
-      `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and`,
-      '  never fail the command. The key itself is never printed.',
+      `  Exits 0 when every check passes. Rows marked ${c.dim('[--]')} are informational and ${c.yellow('[warn]')}`,
+      '  rows are advisory — neither fails the command. The key itself is never printed.',
     ],
   );
 }
@@ -75,7 +81,78 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   const health = await probeHealth(baseUrl);
   checks.push({ name: 'health', ok: health.ok, detail: health.detail });
 
+  // Shared by the new check below and the alt-address block further down —
+  // both describe `config.publicUrl`, and using one normalizer (rather than
+  // each hand-rolling trim/strip) keeps them from silently disagreeing on
+  // what "the same URL" means.
+  const normalizedPublicUrl = normalizePublicUrl(config.publicUrl) ?? '';
+
   // A gateway fronted by a reverse proxy has two addresses for one process.
+  // Resolved here (selection only, no network call yet) so the new
+  // gatewayPublicUrl check below can detect when it's about to probe the
+  // identical URL and share one fetch instead of firing two.
+  const alt =
+    baseUrl === localUrl
+      ? normalizedPublicUrl && normalizedPublicUrl !== baseUrl
+        ? { urlName: 'publicUrl', healthName: 'publicHealth', url: normalizedPublicUrl }
+        : undefined
+      : manager !== 'unknown'
+        ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
+        : undefined;
+  let altHealth: HealthProbe | undefined;
+
+  // #472: gateway.publicUrl backs every feature that hands out a public link
+  // (generate_image reference edits, share_file, /cli). Nothing else in
+  // `doctor` checks for its presence — the row below (`publicUrl`/`publicHealth`)
+  // only exists when the value happens to be set, and stays silent otherwise.
+  // Gated on `diagnosingThisHost` like `manager` above: this is this host's own
+  // config file, so it is noise (and a config leak) when --url points elsewhere.
+  if (diagnosingThisHost) {
+    const gatewayPublicUrl = normalizedPublicUrl;
+    if (!gatewayPublicUrl) {
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: true,
+        warn: true,
+        detail: 'not set — generate_image reference edits, share_file, and /cli will not work (see README "gateway.publicUrl")',
+      });
+    } else if (/\$\{[^}]+\}/.test(gatewayPublicUrl)) {
+      // `loadCliConfig` (http-client.ts) reads config.json directly and does not
+      // interpolate ${VAR} placeholders like the gateway process's own loader
+      // does — this CLI invocation may not even share that env. Probing the
+      // literal placeholder string always fails, which would report a healthy,
+      // correctly configured gateway as broken. Configured-but-unverifiable is
+      // not a failure.
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: true,
+        info: true,
+        detail: `configured (${gatewayPublicUrl}) — contains an unresolved \${VAR}; reachability cannot be checked from the CLI`,
+      });
+    } else {
+      // Reuse an existing probe of the identical URL rather than firing a
+      // second one: `health` already covers the no-proxy case (publicUrl ==
+      // baseUrl), and the alt block below covers the reverse-proxy case
+      // (publicUrl == alt.url). Two independent probes of the same address a
+      // few hundred ms apart can disagree under a flaky/loaded proxy, which
+      // would otherwise show up as two contradictory rows for one fact.
+      const shareHealth =
+        gatewayPublicUrl === baseUrl
+          ? health
+          : alt?.urlName === 'publicUrl'
+            ? (altHealth = await probeHealth(alt.url))
+            : await probeHealth(gatewayPublicUrl);
+      // `answered`, not `ok`: a proxy that answers 401/403 to an unauthenticated
+      // probe is up and doing its job, not unreachable — same reasoning as the
+      // publicHealth note below. Only "nothing answered at all" is a real fail.
+      checks.push({
+        name: 'gatewayPublicUrl',
+        ok: shareHealth.answered,
+        detail: shareHealth.answered ? `reachable (${gatewayPublicUrl})` : `unreachable: ${shareHealth.detail}`,
+      });
+    }
+  }
+
   // Probe the one the CLI is *not* using as well: without it, the most
   // confusing states — proxy down while the gateway is healthy, or the reverse
   // — appear as a single contradictory line with nothing to explain it. The
@@ -86,30 +163,20 @@ export async function runDoctor(flags: Record<string, string | boolean>, config:
   // somewhere else. Passing the flag through would make it echo the target back
   // as its own alternative, and then offer this host's publicUrl as context for
   // a question about another host entirely.
-  const publicUrl = (config.publicUrl ?? '').replace(/\/+$/, '');
-  const alt =
-    baseUrl === localUrl
-      ? publicUrl && publicUrl !== baseUrl
-        ? { urlName: 'publicUrl', healthName: 'publicHealth', url: publicUrl }
-        : undefined
-      : manager !== 'unknown'
-        ? { urlName: 'localUrl', healthName: 'localHealth', url: localUrl }
-        : undefined;
-
-  let altHealth: HealthProbe | undefined;
   if (alt) {
     checks.push({ name: alt.urlName, ok: true, detail: alt.url, info: true });
-    altHealth = await probeHealth(alt.url);
+    altHealth = altHealth ?? (await probeHealth(alt.url));
     checks.push({ name: alt.healthName, ok: altHealth.ok, detail: altHealth.detail, info: true });
   }
 
-  const allOk = checks.every((c) => c.info || c.ok);
+  const allOk = checks.every((c) => c.info || c.warn || c.ok);
   const c = paletteFor(process.stderr);
   // Pad before colouring so escape codes never count toward the column width.
   const lines = checks.map((chk) => {
-    // `info` is checked first: an advisory row is marked `[--]` whether it
-    // passed or not, so the reader can tell the verdict rows from the context.
-    const mark = chk.info ? c.dim('[--]') : chk.ok ? c.green('[ok]') : c.red('[!!]');
+    // `warn`/`info` are checked first: an advisory row is marked distinctly
+    // whether it passed or not, so the reader can tell the verdict rows from
+    // the context.
+    const mark = chk.warn ? c.yellow('[warn]') : chk.info ? c.dim('[--]') : chk.ok ? c.green('[ok]') : c.red('[!!]');
     return `  ${mark} ${c.bold(chk.name.padEnd(12))} ${chk.detail}`;
   });
   // Name the right component. A public URL that answered with a status is not

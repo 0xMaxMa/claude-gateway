@@ -14,6 +14,76 @@ export interface HistoryConfig {
   maxHistoryMessages?: number;
 }
 
+/**
+ * One linked WhatsApp number (Baileys device-link) belonging to an agent.
+ *
+ * Multi-account (Phase 1 of the WhatsApp feature-parity plan): an agent used
+ * to have exactly ONE flat `whatsapp` block; it now has an array of these.
+ * Every access-control field below is per-account — two numbers on the same
+ * agent can run completely different DM/group policies.
+ *
+ * There is still NO credential field here: the "credential" remains the
+ * linked device session on disk. Its location is derived from `id` —
+ * `'default'` keeps the historical bare `<workspace>/.whatsapp-state/`
+ * directory (so upgrading a live gateway never has to move a linked
+ * session), every other account gets `<workspace>/.whatsapp-state/<id>/`.
+ */
+export interface WhatsAppAccountConfig {
+  /**
+   * Stable slug identifying this account. Doubles as the on-disk state
+   * directory suffix and as the `account_id` the `whatsapp_reply` MCP tool
+   * passes back, so it must be filesystem-safe and must never be reused for
+   * a different number. `'default'` is reserved for the pre-multi-account
+   * session (see the class doc above).
+   */
+  id: string;
+  /** Display name shown in the Settings UI (e.g. "Sales line"). Falls back to `id`. */
+  label?: string;
+  /**
+   * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
+   * Gates 1:1 conversations (JIDs ending `@s.whatsapp.net`). Necessary
+   * even though the number itself is authenticated via QR/pairing-code
+   * linking: unlike a fresh bot token, a WhatsApp number is typically the
+   * owner's real number that other people already have — without this,
+   * anyone who knows the number could reach the agent once linked.
+   */
+  dmPolicy?: 'open' | 'allowlist' | 'disabled';
+  /** Allowed sender JIDs/numbers (E.164 or bare digits — normalized at the access-gate boundary). */
+  dmAllowlist?: string[];
+  /**
+   * Group access policy (mirrors `slack.groupPolicy`/`line.groupPolicy`).
+   * Gates group JIDs (ending `@g.us`) the linked number is a member of.
+   */
+  groupPolicy?: 'open' | 'allowlist' | 'disabled';
+  /** Allowed group JIDs. */
+  groupAllowlist?: string[];
+  /**
+   * In groups, only respond when the bot is @mentioned (mirrors
+   * `slack.requireMention`/`line.requireMention`). Default true. No
+   * effect on DMs.
+   */
+  requireMention?: boolean;
+  /**
+   * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
+   * exactly). Default true (absent ⇒ on). Only has an effect under
+   * `allowlist` (closed-default) for either tier.
+   */
+  pairing?: boolean;
+  /**
+   * Mark inbound messages as read (blue double-ticks) once they pass the
+   * access gate. Default true (absent ⇒ on) — the agent HAS received the
+   * message at that point, so the receipt is honest. Set false for a number
+   * whose owner would rather not advertise that. Phase 2.
+   */
+  sendReadReceipts?: boolean;
+  /**
+   * Ack-reaction level (ported from Slack's ack reaction). `'ack'` (default
+   * when absent) reacts ⏳ on the inbound message at receipt and clears it
+   * once the reply lands; `'off'` skips BOTH the add and the clear. Phase 2.
+   */
+  reactionLevel?: 'off' | 'ack';
+}
+
 export interface AgentConfig {
   id: string;
   description: string;
@@ -130,6 +200,95 @@ export interface AgentConfig {
      * (absent ⇒ on). Only has an effect under `allowlist` (closed-default).
      */
     pairing?: boolean;
+  };
+  /**
+   * WhatsApp — via WhatsApp Web device linking (the Baileys library), NOT
+   * the official Meta Cloud API. Unlike every other channel, there is NO
+   * credential field here: the "credential" is the linked device session
+   * itself, persisted on disk at `<workspace>/.whatsapp-state/` (Baileys'
+   * `creds.json`, written by `useMultiFileAuthState`), not in this config.
+   * Live link status (unlinked/pending-scan/linked/reconnecting) is
+   * ephemeral runtime state held by WhatsAppManager, never persisted here.
+   *
+   * Unofficial/reverse-engineered protocol — using it violates WhatsApp's
+   * ToS and carries real account-ban risk (elevated further since GetPod
+   * agents run on cloud/datacenter IPs, the exact traffic profile
+   * WhatsApp's abuse detection flags). This is a user-accepted trade-off,
+   * disclosed prominently in the web UI's connect flow — not enforced or
+   * mitigated by this config.
+   */
+  whatsapp?: {
+    /**
+     * The linked numbers for this agent — one entry per WhatsApp account
+     * (Phase 1 of the WhatsApp feature-parity plan replaced the single flat
+     * block that used to live here with this array). Order is meaningful
+     * only for back-compat: `accounts[0]` is what the legacy flat
+     * `whatsapp_*` API response fields are derived from.
+     *
+     * An absent or empty array is treated as `[{ id: 'default' }]` at
+     * runtime (see `resolveWhatsAppAccounts` in src/config/whatsapp-accounts.ts),
+     * so an agent that has never been configured still gets a linkable
+     * 'default' account exactly like it did before multi-account.
+     */
+    accounts: WhatsAppAccountConfig[];
+  };
+  /**
+   * WhatsApp — via the official Meta WhatsApp Business Cloud API (webhook +
+   * bearer-token REST, NOT the unofficial Baileys device-link bridge — see
+   * `whatsapp` above). Real, first-class credentials issued by Meta, so this
+   * channel follows the Slack template (webhook-based with real credentials)
+   * rather than the Baileys `whatsapp` block's on-disk-session pattern.
+   *
+   * DM-only: the Cloud API has no group concept (a WhatsApp Business number
+   * cannot be added to a group chat the way a personal/linked number can),
+   * so there is no groupPolicy/groupAllowlist/requireMention here — every
+   * inbound sender is a bare phone-number string, never a JID.
+   */
+  whatsapp_cloud?: {
+    /** Permanent (or long-lived) access token — Bearer auth for the Graph API. */
+    accessToken: string;
+    /** The WhatsApp Business phone number id (Meta's numeric id, not the phone number itself). */
+    phoneNumberId: string;
+    /** App Secret — verifies X-Hub-Signature-256 (HMAC-SHA256 of the raw request body). */
+    appSecret: string;
+    /** Verify token — compared against `hub.verify_token` on the GET webhook handshake. */
+    verifyToken: string;
+    /**
+     * DM access policy (mirrors `slack.dmPolicy`/`line.dmPolicy` exactly).
+     * Gates inbound senders — a bare phone-number string (e.g. "66812345678"),
+     * NOT a JID. `dmAllowlist` entries must be bare digits.
+     */
+    dmPolicy?: 'open' | 'allowlist' | 'disabled';
+    /** Allowed sender phone numbers — bare digits (E.164 without the leading "+"), never JIDs. */
+    dmAllowlist?: string[];
+    /**
+     * Pairing aid for the allowlist (mirrors `slack.pairing`/`line.pairing`
+     * exactly). Default true (absent ⇒ on). Only has an effect under
+     * `allowlist` (closed-default).
+     */
+    pairing?: boolean;
+    /**
+     * Mark inbound messages as read (blue double-ticks) once they pass the
+     * access gate. Default true (absent ⇒ on). Same field/semantics as the
+     * per-account Baileys `WhatsAppAccountConfig.sendReadReceipts`. Phase 2.
+     */
+    sendReadReceipts?: boolean;
+    /**
+     * Ack-reaction level (ported from Slack's ack reaction). `'ack'` (default
+     * when absent) reacts ⏳ on the inbound message at receipt and clears it
+     * once `whatsapp_cloud_reply` lands; `'off'` skips both. Phase 2.
+     */
+    reactionLevel?: 'off' | 'ack';
+    /**
+     * Allow `whatsapp_cloud_reply` to send pre-approved message TEMPLATES
+     * (Phase 3). Default false — opt-in on purpose, unlike the other Phase 2/3
+     * booleans here which default on: a template is the one send that reaches
+     * a user OUTSIDE WhatsApp's 24h customer-service window, so an agent must
+     * never gain that reach silently just by upgrading the gateway. With this
+     * unset, a template send is refused with an explanatory error rather than
+     * being dropped.
+     */
+    templatesEnabled?: boolean;
   };
   /**
    * WeChat — a single personal account, linked via QR through Tencent's
@@ -594,6 +753,10 @@ export interface SessionMeta {
    *  can restore the composer selection on reload; the agent's own context is the
    *  functional source of truth. Updated whenever a send carries image_params. */
   imageConfig?: ImageParams;
+  /** Last composer video options sent for this session. Mirrors imageConfig —
+   *  persisted so the web can restore the composer selection on reload. Updated
+   *  whenever a send carries video_params. */
+  videoConfig?: VideoParams;
   /** Real model from Claude stream, updated per turn (e.g. "claude-opus-4-8"). */
   model?: string;
 }
@@ -629,6 +792,28 @@ export type ImageParams = {
    */
   image_refs?: string[];
   n?: number;
+};
+
+/**
+ * Video-generation options selected in the web composer (per-session), passed
+ * through the chat send body as `video_params` and surfaced to the agent so it
+ * calls the `generate_video` MCP tool with these exact values. Mirrors ImageParams.
+ * Without this bridge the agent receives no composer context for video and invents
+ * duration/aspect (e.g. a non-existent 10s cap, an 8+8 scene split, or a landscape
+ * clip when 9:16 was selected).
+ */
+export type VideoParams = {
+  model?: string;
+  resolution?: string;
+  aspect_ratio?: string;
+  /** Discrete clip length in seconds (model-specific, e.g. 6/10/15). */
+  duration?: number;
+  /**
+   * Source frame for image-to-video, if the composer selected one. A `ref` value
+   * (media-relative path or `artifact:<id>`) passed as the generate_video `image`
+   * argument. When present the source frame's own aspect wins over aspect_ratio.
+   */
+  image_ref?: string;
 };
 
 export type StreamEvent =

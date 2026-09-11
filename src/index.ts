@@ -16,6 +16,7 @@ import { loadConfig, logSkippedAgents, SkippedAgent } from './config/loader';
 import { agentsDirForConfig, loadAgentEnvFiles } from './config/agent-env';
 import { detectMigration, applyMigration, loadCleanTemplate } from './config/migrator';
 import { ensureConfigExists, firstRunNotice } from './config/bootstrap';
+import { upgradeWhatsAppAccountsFile } from './config/whatsapp-accounts';
 import { loadWorkspace, watchWorkspace, migrateWorkspaceFiles, classifyWorkspaceRestart } from './agent/workspace-loader';
 import { resolveArchiveConfig, makeSharedPromoter, resolveSharedConfig, resolveReflectionConfig, sharedVaultDir, SharedReflectionManager } from './agent/knowledge';
 import { watchSkills } from './skills';
@@ -582,14 +583,35 @@ async function main(): Promise<void> {
     console.warn(`[gateway] Config migration skipped: ${(err as Error).message}`);
   }
 
+  // ── WhatsApp multi-account upgrade (Phase 1) ─────────────────────────────
+  // Rewrite any legacy flat `whatsapp` block into `{ accounts: [{id:'default'…}] }`
+  // and persist it, so the config self-heals once instead of being re-normalized
+  // on every boot. Runs OUTSIDE the configVersion-gated migration above: a config
+  // already stamped at the current template version still needs this. The
+  // synthesized account keeps id 'default', which maps to the existing bare
+  // `.whatsapp-state/` directory — a linked session never moves.
+  try {
+    const upgradedAgents = upgradeWhatsAppAccountsFile(CONFIG_PATH);
+    if (upgradedAgents.length > 0) {
+      console.log(
+        `[gateway] Upgraded WhatsApp config to multi-account shape for: ${upgradedAgents.join(', ')}.`,
+      );
+    }
+  } catch (err) {
+    // Non-fatal — loadConfig normalizes the same thing in memory below.
+    console.warn(`[gateway] WhatsApp multi-account config upgrade skipped: ${(err as Error).message}`);
+  }
+
   console.log(`[gateway] Loading config from ${CONFIG_PATH}`);
   // Skips are collected rather than logged inline: the structured logger needs
   // config.gateway.logDir, so it cannot exist until this call returns. They are
   // replayed through globalLogger below so a dropped agent is diagnosable from
   // logs/gateway.log at startup too, not only on reload (#427).
   const startupSkips: SkippedAgent[] = [];
+  let publicUrlUnsetAtStartup = false;
   const config: GatewayConfig = loadConfig(CONFIG_PATH, {
     onSkippedAgent: (s) => startupSkips.push(s),
+    onPublicUrlUnset: () => { publicUrlUnsetAtStartup = true; },
   });
   config.gateway.logDir = expandTilde(config.gateway.logDir);
 
@@ -604,6 +626,12 @@ async function main(): Promise<void> {
   // went missing.
   const globalLogger = createLogger('gateway', expandTilde(config.gateway.logDir));
   logSkippedAgents(globalLogger, startupSkips, 'Agent skipped at startup');
+  // Same #427 rationale as skipped agents: the console.warn already happened
+  // inside loadConfig (before logDir/globalLogger could exist), replay it here
+  // so it also reaches logs/gateway.log under structured/JSON logging (#472).
+  if (publicUrlUnsetAtStartup) {
+    globalLogger.warn('gateway.publicUrl is not set at startup — public share links are disabled');
+  }
 
   // ── Context isolation check ──────────────────────────────────────────────
   const guard = new ContextIsolationGuard();

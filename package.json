@@ -1,6 +1,6 @@
 {
   "name": "@0xmaxma/claude-gateway",
-  "version": "1.8.9",
+  "version": "1.8.12",
   "description": "Multi-agent gateway for Claude",
   "repository": {
     "type": "git",
@@ -31,8 +31,8 @@
     "start": "node --no-warnings=ExperimentalWarning --env-file-if-exists=.env dist/entry.js gateway start",
     "postinstall": "if command -v bun >/dev/null 2>&1; then bun install --cwd mcp; else echo 'Warning: bun not found. Run `cd mcp && bun install` manually to enable MCP tools.'; fi",
     "pretest": "npm run build",
-    "test": "NODE_OPTIONS=--max-old-space-size=2560 jest",
     "pretest:unit": "npm run build",
+    "test": "NODE_OPTIONS=--max-old-space-size=2560 jest",
     "test:unit": "jest --testPathPattern=unit",
     "test:e2e": "jest --testPathPattern=tests/e2e --forceExit",
     "integration": "jest --testPathPattern=integration --testTimeout=15000",
@@ -40,12 +40,13 @@
     "test:manual": "jest --testPathPattern=phase-manual --testTimeout=15000",
     "integration:hb": "jest --testPathPattern=heartbeat-e2e --testTimeout=15000",
     "integration:cs": "jest --testPathPattern=character-system --testTimeout=15000",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ./.tsbuildinfo-check",
     "gen-cli": "ts-node scripts/gen-cli.ts",
     "gen-cli:check": "ts-node scripts/gen-cli.ts --check"
   },
   "dependencies": {
     "@line/bot-sdk": "^11.0.2",
+    "@whiskeysockets/baileys": "^6.7.24",
     "@xterm/headless": "^6.0.0",
     "chokidar": "^3.5.0",
     "cron-parser": "^5.5.0",
@@ -55,7 +56,9 @@
     "node-cron": "^3.0.0",
     "node-pty": "^1.1.0",
     "p-queue": "^6.6.2",
+    "pino": "^10.3.1",
     "qrcode": "^1.5.4",
+    "sharp": "^0.35.4",
     "ws": "^8.21.0"
   },
   "devDependencies": {

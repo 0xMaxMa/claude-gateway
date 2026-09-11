@@ -516,7 +516,12 @@ export class ImageModule implements ToolModule {
       // which the share API only fills when gateway.publicUrl is configured.
       if (minted.some((m) => !m.url)) {
         await revokeSharesBestEffort(minted.map((m) => m.share_id));
-        return fail('generate_image: image reference sharing requires gateway.publicUrl to be configured.');
+        return fail(
+          'generate_image: image reference sharing requires gateway.publicUrl to be configured ' +
+          '(set it in ~/.claude-gateway/config.json to your externally reachable base URL ending ' +
+          'in /gateway, then restart the gateway). As a workaround, pass a publicly reachable ' +
+          'https:// image URL instead of a local path or artifact ref.',
+        );
       }
     }
     // Merge back preserving the caller's order. taskIds/priorPrompts are

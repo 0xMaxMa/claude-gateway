@@ -79,8 +79,8 @@ export class HistoryDB {
     this.db.exec('PRAGMA foreign_keys=ON');
     this._initSchema();
     this.insertStmt = this.db.prepare(
-      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (chat_id, session_id, source, role, content, sender_name, sender_id, platform_message_id, media_files, image_refs, replied_to_message_id, replied_to_text, replied_to_user, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -126,6 +126,9 @@ export class HistoryDB {
         platform_message_id TEXT,
         media_files         TEXT,
         image_refs          TEXT,
+        replied_to_message_id TEXT,
+        replied_to_text       TEXT,
+        replied_to_user       TEXT,
         ts                  INTEGER NOT NULL,
         created_at          INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
       );
@@ -195,13 +198,31 @@ export class HistoryDB {
 
     `);
 
-    // image_refs (#74) postdates existing DBs: CREATE TABLE IF NOT EXISTS won't
-    // touch them, so migrate with an explicit existence check. Only ALTER when the
-    // column is genuinely absent — a blanket try/catch would also swallow real
-    // failures (disk full, corruption) as if the column already existed.
+    // Additive column migrations. These postdate existing DBs: CREATE TABLE IF NOT
+    // EXISTS won't touch them, so migrate with an explicit existence check. Only
+    // ALTER when the column is genuinely absent — a blanket try/catch would also
+    // swallow real failures (disk full, corruption) as if the column already
+    // existed. Reading table_info once and filtering makes the whole step
+    // idempotent: a second startup sees every column present and ALTERs nothing.
+    //
+    //   image_refs            (#74) — catalog refs a user turn pointed at
+    //   replied_to_message_id / replied_to_text / replied_to_user (WhatsApp Phase 2)
+    //     — quoted-message context, so the dashboard can render "in reply to X".
+    //
+    // All nullable, so SQLite's ADD COLUMN is an O(1) schema-only rewrite and
+    // existing rows keep their history with NULLs in the new columns.
+    const ADDITIVE_MESSAGE_COLUMNS: ReadonlyArray<readonly [name: string, ddlType: string]> = [
+      ['image_refs', 'TEXT'],
+      ['replied_to_message_id', 'TEXT'],
+      ['replied_to_text', 'TEXT'],
+      ['replied_to_user', 'TEXT'],
+    ];
     const messageCols = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>;
-    if (!messageCols.some((c) => c.name === 'image_refs')) {
-      this.db.exec('ALTER TABLE messages ADD COLUMN image_refs TEXT');
+    const present = new Set(messageCols.map((c) => c.name));
+    for (const [name, ddlType] of ADDITIVE_MESSAGE_COLUMNS) {
+      if (!present.has(name)) {
+        this.db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${ddlType}`);
+      }
     }
   }
 
@@ -218,6 +239,9 @@ export class HistoryDB {
         msg.platformMessageId ?? null,
         msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
         msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null,
+        msg.repliedToMessageId ?? null,
+        msg.repliedToText ?? null,
+        msg.repliedToUser ?? null,
         msg.ts,
       );
     } catch (err) {
@@ -536,7 +560,8 @@ export class HistoryDB {
     // skipped or repeated when the caller passes the cursor's id component back.
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
-             platform_message_id, media_files, image_refs, ts
+             platform_message_id, media_files, image_refs,
+             replied_to_message_id, replied_to_text, replied_to_user, ts
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY ts ${order}, id ${order}
@@ -582,7 +607,9 @@ export class HistoryDB {
         SELECT
           messages.id, messages.chat_id, messages.session_id, messages.source,
           messages.role, messages.content, messages.sender_name, messages.sender_id,
-          messages.platform_message_id, messages.media_files, messages.ts,
+          messages.platform_message_id, messages.media_files,
+          messages.replied_to_message_id, messages.replied_to_text,
+          messages.replied_to_user, messages.ts,
           snippet(messages_fts, 0, '<b>', '</b>', '...', 32) AS snippet
         FROM messages_fts
         JOIN messages ON messages.id = messages_fts.rowid
@@ -785,6 +812,14 @@ export class HistoryDB {
       platformMessageId: (r['platform_message_id'] as string | null) ?? undefined,
       mediaFiles,
       ...(imageRefs?.length ? { imageRefs } : {}),
+      // Reply context (WhatsApp Phase 2). Conditionally spread like imageRefs, so a
+      // message that never quoted anything carries no repliedTo* keys at all — the
+      // frontend can treat "key absent" as "not a reply" rather than probing for
+      // null. Cloud API rows legitimately have the id but not text/user, so each
+      // key is independently gated.
+      ...(r['replied_to_message_id'] ? { repliedToMessageId: r['replied_to_message_id'] as string } : {}),
+      ...(r['replied_to_text'] ? { repliedToText: r['replied_to_text'] as string } : {}),
+      ...(r['replied_to_user'] ? { repliedToUser: r['replied_to_user'] as string } : {}),
       ts: r['ts'] as number,
     };
   }
