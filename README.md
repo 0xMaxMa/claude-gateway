@@ -1388,6 +1388,7 @@ sees a message. If those aren't met the bot looks online but stays silent.
 | **WhatsApp (Baileys)** | DM | number is linked (QR/pairing-code device link) | `dmPolicy` + `pairing` → `dmAllowlist` (per account) | — |
 | | Group | number is linked and is a member of the group | `groupPolicy` + `groupAllowlist` (per account) | `requireMention` false, or @mentioned |
 | **WhatsApp (Cloud API)** | DM | webhook delivered (valid `X-Hub-Signature-256`) | `dmPolicy` + `pairing` → `dmAllowlist` | — (DM-only, no group concept) |
+| **WeChat** | DM | iLink long-poll (`getupdates`) delivers a new message | `dmPolicy` + `pairing` → `dmAllowlist` | — (DM-only, no group concept) |
 
 **Telegram limits**
 - Exactly one process may poll a bot token — a second poller causes `409 Conflict`.
@@ -1414,6 +1415,13 @@ sees a message. If those aren't met the bot looks online but stays silent.
 - **Cloud API's inbound webhook requires a valid `X-Hub-Signature-256`** (HMAC-SHA256 of the raw body against `appSecret`); a bad or missing signature is rejected with `401` before the payload is parsed.
 - **Cloud API's 24-hour customer-service window**: free-form text replies only work within 24h of the user's last inbound message; outside that window only a pre-approved message template can reach them, and template sending is off by default (`templatesEnabled: false`) since it's the one send that can reach a user outside that window.
 - Inbound media cap is **20 MB** on both modes (same `MediaStore` cap LINE's file uploads use).
+
+**WeChat limits**
+- Single personal account per agent, linked via **QR code only** (no pairing-code option, no multi-account support in v1) through Tencent's own iLink Bot API bridge (`wechat` config block) — Tencent's self-serve product, not a third-party bridge.
+- **DM-only** — no `groupPolicy`/`groupAllowlist`/`requireMention` fields exist because the iLink bridge cannot reliably deliver WeChat group events.
+- Inbound delivery is **long-polling** (`getupdates`, 35s timeout), not a webhook — there is no `/webhooks/wechat/...` route.
+- Outbound text is capped at **4000 characters** per message (iLink's documented limit); longer replies are auto-chunked on line boundaries with a short delay between chunks.
+- The whole channel can be disabled without a redeploy via `WECHAT_CHANNEL_DISABLED=true` (opt-out, enabled by default) — see [WeChat Channel API](API.md#wechat-channel-api).
 
 ---
 
