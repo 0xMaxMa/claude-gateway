@@ -8,6 +8,11 @@ mcp/**/*.js.map
 mcp/**/*.d.ts
 mcp/**/*.d.ts.map
 
+# TypeScript incremental build cache (kept outside dist/ so it never ships in
+# the npm package, which whitelists dist/ via package.json `files`)
+.tsbuildinfo
+.tsbuildinfo-check
+
 # Environment & config
 .env
 .env.*
