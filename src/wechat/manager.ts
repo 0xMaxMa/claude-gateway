@@ -19,10 +19,11 @@
  *    since WeChat (unlike WhatsApp/Baileys) has no pairing-code option and
  *    no multi-account support in v1.
  *  - `WECHAT_CHANNEL_ENABLED` is a hard kill switch: even though this is
- *    Tencent's own product, GetPod doesn't control it (protocol changes,
- *    the undocumented `need_verifycode`/`verify_code_blocked` states this
- *    integration can't yet act on, etc.), so the whole channel must be
- *    disableable with one env var and no redeploy of manager logic.
+ *    Tencent's own product, no deployer of this gateway controls it
+ *    (protocol changes, the undocumented `need_verifycode`/
+ *    `verify_code_blocked` states this integration can't yet act on, etc.),
+ *    so the whole channel must be disableable with one env var and no
+ *    redeploy of manager logic.
  */
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
@@ -159,7 +160,7 @@ export class WeChatManager {
   constructor(
     private agentConfig: AgentConfig,
     logDir: string,
-    private readonly client: ILinkClient = createILinkClient(''),
+    private readonly client: ILinkClient = createILinkClient('', agentConfig.wechat?.botAgent),
     /** Called once per new inbound message, after de-dup — never for a retried delivery. */
     private readonly onMessage?: (update: ILinkUpdate) => void,
     private readonly timing: WeChatManagerTiming = DEFAULT_TIMING,
@@ -190,8 +191,8 @@ export class WeChatManager {
 
   /**
    * Start a fresh QR-code linking flow. Requires `WECHAT_CHANNEL_ENABLED` —
-   * this is the hard kill switch for a third-party dependency GetPod doesn't
-   * control (see module doc comment).
+   * this is the hard kill switch for a third-party dependency no deployer of
+   * this gateway controls (see module doc comment).
    */
   async startLinking(): Promise<void> {
     if (!isWeChatChannelEnabled()) {

@@ -3156,7 +3156,7 @@ export class AgentRunner extends EventEmitter {
       // iterating on the UI.
       const client = isWeChatILinkFakeEnabled()
         ? createFakeILinkClient()
-        : createILinkClient(process.env.ILINK_BASE_URL ?? '');
+        : createILinkClient(process.env.ILINK_BASE_URL ?? '', this.agentConfig.wechat?.botAgent);
       this.wechat = new WeChatManager(
         this.agentConfig,
         this.gatewayConfig.gateway.logDir,

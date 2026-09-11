@@ -269,7 +269,7 @@ describe('createILinkClient() — real HTTP contract', () => {
     expect(headers['Authorization']).toBe('Bearer tok-1');
     expect(JSON.parse(init?.body as string)).toEqual({
       get_updates_buf: '',
-      base_info: { channel_version: expect.any(String), bot_agent: 'GetPod' },
+      base_info: { channel_version: expect.any(String), bot_agent: 'claude-gateway' },
     });
   });
 
@@ -401,7 +401,15 @@ describe('createILinkClient() — real HTTP contract', () => {
     });
     expect(typeof body.msg.client_id).toBe('string');
     expect(body.msg.client_id.length).toBeGreaterThan(0);
-    expect(body.base_info).toEqual({ channel_version: expect.any(String), bot_agent: 'GetPod' });
+    expect(body.base_info).toEqual({ channel_version: expect.any(String), bot_agent: 'claude-gateway' });
+  });
+
+  test('a deployer-supplied botAgent overrides the "claude-gateway" default in base_info', async () => {
+    mockFetchOnce(200, { ret: 0 });
+    const client = createILinkClient(undefined, 'my-custom-bot');
+    await client.sendText(CREDS, 'u1', 'hi');
+    const body = JSON.parse(calls[0].init?.body as string);
+    expect(body.base_info.bot_agent).toBe('my-custom-bot');
   });
 
   test('sendText() sends an empty string context_token when none is known yet', async () => {
@@ -439,7 +447,7 @@ describe('createILinkClient() — real HTTP contract', () => {
     const [{ url, init }] = calls;
     expect(url).toBe('https://ilinkai.weixin.qq.com/ilink/bot/msg/notifystart');
     expect(JSON.parse(init?.body as string)).toEqual({
-      base_info: { channel_version: expect.any(String), bot_agent: 'GetPod' },
+      base_info: { channel_version: expect.any(String), bot_agent: 'claude-gateway' },
     });
     const headers = init?.headers as Record<string, string>;
     expect(headers['Authorization']).toBe('Bearer tok-1');

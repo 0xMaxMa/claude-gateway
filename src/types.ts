@@ -160,6 +160,16 @@ export interface AgentConfig {
      * `allowlist` (closed-default).
      */
     pairing?: boolean;
+    /**
+     * `base_info.bot_agent` — a short, sanitized identity string sent with
+     * every iLink request (protocol.md: "self-declared identity of the
+     * upstream bot/app, analogous to HTTP User-Agent... not used for
+     * authentication or routing"). Mirrors `channels.openclaw-weixin.botAgent`
+     * in `Tencent/openclaw-weixin`'s own config — this gateway has no single
+     * fixed product identity, so each deployer sets their own here rather
+     * than one being hardcoded. Defaults to this package's own name when unset.
+     */
+    botAgent?: string;
   };
   claude: {
     model: string;

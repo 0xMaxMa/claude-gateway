@@ -38,8 +38,12 @@ const DEFAULT_ILINK_BASE_URL = 'https://ilinkai.weixin.qq.com';
 
 /** `base_info.bot_agent` — a short ASCII observability tag, per protocol.md's
  * "sanitized observability identifier... not used for authentication or
- * routing" — analogous to `bot_agent: "OpenClaw"` in Tencent's own examples. */
-const BOT_AGENT = 'GetPod';
+ * routing" — analogous to `bot_agent: "OpenClaw"` in Tencent's own examples.
+ * This gateway has no single fixed downstream product identity, so this is
+ * only the fallback when a deployer doesn't set `AgentConfig.wechat.botAgent`
+ * — see that field's doc comment. Mirrors `channels.openclaw-weixin.botAgent`
+ * in `Tencent/openclaw-weixin`'s own config being per-deployment, not fixed. */
+const DEFAULT_BOT_AGENT = 'claude-gateway';
 /** `base_info.channel_version` — this integration's own version, not the
  * gateway's. Bump when this file's request/response handling changes. */
 const CHANNEL_VERSION = '1.0.0';
@@ -365,10 +369,6 @@ interface SendMessageResponse {
   errmsg?: string;
 }
 
-function baseInfo(): { channel_version: string; bot_agent: string } {
-  return { channel_version: CHANNEL_VERSION, bot_agent: BOT_AGENT };
-}
-
 /** Extract the first text item's body — image items are handled separately by resolveWeixinImageRef; voice/file/video are still ignored. */
 function textFromItems(items: WeixinMessageItem[] | undefined): string | undefined {
   return items?.find((i) => i.type === 1)?.text_item?.text;
@@ -566,8 +566,13 @@ export async function downloadWeixinImage(
  * encoding, and the unhandled verification-code statuses) still to confirm
  * against a real account.
  */
-export function createILinkClient(baseUrl?: string): ILinkClient {
+export function createILinkClient(baseUrl?: string, botAgent?: string): ILinkClient {
   const qrBaseUrl = baseUrl || DEFAULT_ILINK_BASE_URL;
+  const resolvedBotAgent = botAgent || DEFAULT_BOT_AGENT;
+  const clientBaseInfo = (): { channel_version: string; bot_agent: string } => ({
+    channel_version: CHANNEL_VERSION,
+    bot_agent: resolvedBotAgent,
+  });
   // getupdates' cursor must survive across polls — scoped per accountId so
   // one client instance could in principle serve more than one credential
   // set, even though v1 only ever uses it for a single linked account.
@@ -625,7 +630,7 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
       const res = await ilinkFetch<GetUpdatesResponse>({
         method: 'POST',
         path: '/ilink/bot/getupdates',
-        body: { get_updates_buf: cursor, base_info: baseInfo() },
+        body: { get_updates_buf: cursor, base_info: clientBaseInfo() },
         botToken: creds.token,
         baseUrl: creds.baseUrl,
         // iLink's own long-poll legitimately blocks up to _timeoutSeconds —
@@ -687,13 +692,19 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
           msg: {
             from_user_id: '',
             to_user_id: toId,
-            client_id: `getpod-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            // A fixed prefix, not resolvedBotAgent: this is just a dedup/
+            // idempotency token, not user-facing, and a deployer's own
+            // botAgent value isn't guaranteed to be ID-safe (arbitrary
+            // characters, unlike the sanitized UA-style string protocol.md
+            // describes for bot_agent itself, which this gateway doesn't
+            // enforce on its own botAgent config field).
+            client_id: `${DEFAULT_BOT_AGENT}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
             message_type: 2,
             message_state: 2,
             context_token: contextToken ?? '',
             item_list: [{ type: 1, text_item: { text } }],
           },
-          base_info: baseInfo(),
+          base_info: clientBaseInfo(),
         },
         botToken: creds.token,
         baseUrl: creds.baseUrl,
@@ -711,7 +722,7 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
       await ilinkFetch<{ ret?: number; errmsg?: string }>({
         method: 'POST',
         path: '/ilink/bot/msg/notifystart',
-        body: { base_info: baseInfo() },
+        body: { base_info: clientBaseInfo() },
         botToken: creds.token,
         baseUrl: creds.baseUrl,
         timeoutMs: 10_000,
@@ -722,7 +733,7 @@ export function createILinkClient(baseUrl?: string): ILinkClient {
       await ilinkFetch<{ ret?: number; errmsg?: string }>({
         method: 'POST',
         path: '/ilink/bot/msg/notifystop',
-        body: { base_info: baseInfo() },
+        body: { base_info: clientBaseInfo() },
         botToken: creds.token,
         baseUrl: creds.baseUrl,
         timeoutMs: 10_000,
