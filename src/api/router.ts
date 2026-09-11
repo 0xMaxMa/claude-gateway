@@ -1489,6 +1489,15 @@ export function createApiRouter(
     const fenceMatch = rewritten.match(/^```(?:markdown|md|text)?\s*\n([\s\S]*?)\n```\s*$/);
     if (fenceMatch) rewritten = (fenceMatch[1] ?? '').trim();
 
+    // Claude occasionally returns an empty/whitespace-only completion. Never
+    // answer 200 with an empty string: the frontend would overwrite the user's
+    // draft with nothing and silently destroy their input. Surface an error so
+    // the client can keep the original text and let the user retry.
+    if (!rewritten) {
+      res.status(502).json({ error: 'Re-write produced no output, please try again' });
+      return;
+    }
+
     res.status(200).json({ text: rewritten });
   });
 

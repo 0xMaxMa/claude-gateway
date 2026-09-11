@@ -789,6 +789,41 @@ describe('POST /api/v1/agents/describe/rewrite', () => {
     }
   });
 
+  it('returns 502 when the model returns empty/whitespace-only output', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Claude occasionally emits nothing (or only whitespace). The handler must
+    // NOT answer 200 with an empty string — that would let the frontend
+    // overwrite the user's draft with nothing and silently destroy it.
+    mockClaudeSuccess('   \n  \n');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(502);
+      expect(res.body.text).toBeUndefined();
+      expect(res.body.error).toBe('Re-write produced no output, please try again');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 502 when the model output is an empty code fence', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Fence-stripping can also reduce the output to empty — same guard applies.
+    mockClaudeSuccess('```markdown\n\n```');
+    try {
+      const res = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'a rough draft' });
+      expect(res.status).toBe(502);
+      expect(res.body.text).toBeUndefined();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   // The concurrency cap (429 when rewritesInFlight >= REWRITE_MAX_CONCURRENT) is a
   // 3-line counter guard, kept as its own counter separate from wizardStartsInFlight
   // (see router.ts). Same brittleness note as the wizard/start concurrency case above —
