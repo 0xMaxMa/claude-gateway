@@ -1490,7 +1490,8 @@ export function createApiRouter(
     rewritesInFlight++;
     try {
       rawOutput = await runClaude(buildRewriteDescriptionPrompt(text.trim()));
-    } catch {
+    } catch (err) {
+      console.error(`[api] describe/rewrite failed: ${(err as Error).message}`);
       res.status(500).json({ error: 'Failed to re-write description' });
       return;
     } finally {
