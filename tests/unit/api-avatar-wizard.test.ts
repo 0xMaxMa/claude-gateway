@@ -50,6 +50,28 @@ function mockClaudeFailure(): void {
   });
 }
 
+/**
+ * Queue a spawn that hangs — it never emits 'close', so the corresponding
+ * runClaude() promise stays pending and its in-flight counter slot stays taken
+ * until the returned release() is called. Lets a test deterministically hold the
+ * concurrency slots open, then drain them cleanly so no child handle leaks.
+ */
+function mockClaudeHang(): { release: () => void } {
+  let releaseFn = (): void => {};
+  mockSpawn.mockImplementationOnce(() => {
+    const stdin = Object.assign(new EventEmitter(), { write: jest.fn(), end: jest.fn() });
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    const child = Object.assign(new EventEmitter(), { stdout, stderr, stdin, kill: jest.fn() });
+    releaseFn = (): void => {
+      stdout.emit('data', Buffer.from('released'));
+      child.emit('close', 0);
+    };
+    return child;
+  });
+  return { release: () => releaseFn() };
+}
+
 // ── Mock fetch ────────────────────────────────────────────────────────────────
 
 const mockFetch = jest.fn();
@@ -873,11 +895,49 @@ describe('POST /api/v1/agents/describe/rewrite', () => {
     }
   });
 
-  // The concurrency cap (429 when rewritesInFlight >= REWRITE_MAX_CONCURRENT) is a
-  // 3-line counter guard, kept as its own counter separate from wizardStartsInFlight
-  // (see router.ts). Same brittleness note as the wizard/start concurrency case above —
-  // covered by manual smoke test rather than orchestrating genuinely concurrent hanging
-  // spawns in Jest's single-threaded event loop.
+  it('returns 429 when both concurrency slots are already in flight', async () => {
+    const { app, tmpDir } = buildCtx();
+    // Hold both REWRITE_MAX_CONCURRENT (=2) slots open with hanging spawns, then
+    // confirm a third request is rejected with 429 before it can spawn Claude.
+    // Synchronize on the spawn call-count (the handler increments the counter and
+    // spawns only after passing the 429 gate) rather than on arbitrary timers.
+    const spawnsBefore = mockSpawn.mock.calls.length;
+    const hang1 = mockClaudeHang();
+    const hang2 = mockClaudeHang();
+    try {
+      const p1 = supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft one' })
+        .then((r) => r, (e) => e);
+      const p2 = supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft two' })
+        .then((r) => r, (e) => e);
+
+      // Wait until both in-flight requests have spawned (both slots occupied).
+      for (let i = 0; i < 500 && mockSpawn.mock.calls.length < spawnsBefore + 2; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      expect(mockSpawn.mock.calls.length).toBe(spawnsBefore + 2);
+
+      const res3 = await supertest.default(app)
+        .post('/api/v1/agents/describe/rewrite')
+        .set('Authorization', `Bearer ${ADMIN_KEY}`)
+        .send({ text: 'draft three' });
+      expect(res3.status).toBe(429);
+      // The rejected request must not have spawned Claude.
+      expect(mockSpawn.mock.calls.length).toBe(spawnsBefore + 2);
+
+      // Drain the two hanging spawns so their requests resolve and no child leaks.
+      hang1.release();
+      hang2.release();
+      await Promise.all([p1, p2]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
