@@ -85,6 +85,9 @@ export interface WhatsAppAccountConfig {
 }
 
 export interface AgentConfig {
+  /** Opt-in conversation/task/voice runtime; absent preserves legacy behavior. */
+  orchestration?: import('./orchestration/config').OrchestrationConfig;
+  voice?: import('./orchestration/config').AgentVoiceConfig;
   id: string;
   description: string;
   /** Editable display name shown in the UI instead of `id`. null/absent falls back to `id`. */
@@ -376,6 +379,8 @@ export interface WatchHandle {
 }
 
 export interface ApiKey {
+  /** Stable service identity. Never use a display description as an identity. */
+  id?: string;
   key: string;
   description?: string;
   agents: string[] | '*'; // agent IDs this key can access, or '*' for all
@@ -413,6 +418,10 @@ export interface LogsConfig {
 
 export interface GatewayConfig {
   gateway: {
+    /** One switch for every Agent/channel; object form supplies shared defaults. */
+    orchestration?: import('./orchestration/gateway-config').GatewayOrchestration;
+    /** Main Claude process cap shared by legacy, conversation and worker roles. */
+    processLimits?: { maxTotal?: number; reservedAgent?: number };
     logDir: string;
     /** Log verbosity, rotation and retention. Absent = LOGS_DEFAULTS. */
     logs?: LogsConfig;
@@ -733,6 +742,8 @@ export interface LoadedWorkspace {
 }
 
 export interface Message {
+  /** Internal append idempotency marker; optional for existing history files. */
+  operationId?: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   ts: number;

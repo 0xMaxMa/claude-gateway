@@ -113,14 +113,14 @@ describe('inbound image download → meta.image_path', () => {
   }
 
   function makeRes() {
-    const res = { status: jest.fn(), json: jest.fn() };
+    const res = { status: jest.fn(), json: jest.fn(), headersSent: false };
     res.status.mockReturnValue(res as never);
-    res.json.mockReturnValue(res as never);
+    res.json.mockImplementation(() => { res.headersSent = true; return res; });
     return res;
   }
 
   /** Drive the real handler with a correctly signed event_callback. */
-  function post(event: Record<string, unknown>, eventId = `Ev${Math.random()}`) {
+  function post(event: Record<string, unknown>, eventId = `Ev${Math.random()}`, res = makeRes()) {
     const buf = Buffer.from(
       JSON.stringify({
         type: 'event_callback',
@@ -142,7 +142,7 @@ describe('inbound image download → meta.image_path', () => {
       headers: {},
       body: buf,
     };
-    return handler.handlePost(req as never, makeRes() as never);
+    return handler.handlePost(req as never, res as never);
   }
 
   const imageEvent = (files: unknown[]) => ({
@@ -185,6 +185,31 @@ describe('inbound image download → meta.image_path', () => {
     global.fetch = realFetch;
     for (const f of written) fs.rmSync(f, { force: true });
     written.length = 0;
+  });
+
+  test('draining orchestration keeps webhook unacknowledged until durable admission and returns retryable failure', async () => {
+    const runner = fakeRunner();
+    runner.requiresDurableChannelIngress = jest.fn(() => true);
+    handler = createSlackWebhookHandler(new Map([[AGENT, runner]]), '/tmp');
+    let rejectAdmission!: () => void;
+    global.fetch = (async () => new Promise<Response>(resolve => { rejectAdmission = () => resolve({ ok: false } as Response); })) as typeof fetch;
+    const res = makeRes();
+    const pending = post(imageEvent([]), 'EvDurableDrain', res);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.requiresDurableChannelIngress).toHaveBeenCalledWith('slack');
+    expect(res.status).not.toHaveBeenCalled();
+    rejectAdmission(); await pending;
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.status).not.toHaveBeenCalledWith(200);
+  });
+
+  test.each([{mimetype:'audio/mpeg'},{mimetype:'video/mp4',subtype:'slack_audio'},{mimetype:'video/webm',media_display_type:'audio'}])('orchestration audio %j is downloaded with scoped credentials and marked for STT',async(file)=>{
+    const runner=fakeRunner();const config=runner.getAgentConfig();config.orchestration={enabled:true,channels:['slack']};runner.getAgentConfig=()=>config;
+    handler=createSlackWebhookHandler(new Map([[AGENT,runner]]),'/tmp');downloadResponse=()=>new Response(new Uint8Array([255,251,144,0]));
+    await post({...imageEvent([{id:'audio1',...file,url_private_download:PRIVATE_URL}]),text:''});
+    expect(forwarded[0].meta).toMatchObject({media_type:'audio',attachment_kind:'voice',media_ephemeral:'1'});
+    written.push(forwarded[0].meta.image_path);expect(forwarded[0].meta.image_path).toMatch(/\.(mp3|m4a|webm)$/);
+    expect(downloadInits[0].redirect).toBe('error');
   });
 
   test('image attachment → bytes fetched with the bot token, meta.image_path written to disk', async () => {

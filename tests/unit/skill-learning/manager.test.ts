@@ -2,14 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { HistoryDB } from '../../../src/history/db';
-import { SkillLearningManager } from '../../../src/agent/skill-learning';
+import { SkillLearningManager, type SkillLearningManagerOpts } from '../../../src/agent/skill-learning';
 import { extractFrontmatter } from '../../../src/skills/parser';
 import type { ClaudeSpawnFn } from '../../../src/agent/skill-learning/reviewer';
 import type { SkillLearningConfig } from '../../../src/agent/skill-learning/types';
 
 const NOW = 1_000_000;
 
-function setup(cfg: SkillLearningConfig = {}, spawn?: ClaudeSpawnFn) {
+function setup(cfg: SkillLearningConfig = {}, spawn?: ClaudeSpawnFn, notifications: Pick<SkillLearningManagerOpts, 'sendNotification' | 'channels'> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-mgr-'));
   const ws = path.join(dir, 'ws');
   fs.mkdirSync(path.join(ws, 'skills'), { recursive: true });
@@ -21,6 +21,7 @@ function setup(cfg: SkillLearningConfig = {}, spawn?: ClaudeSpawnFn) {
     globalCfg: cfg,
     reviewSpawn: spawn,
     now: () => NOW,
+    ...notifications,
   });
   return { db, ws, mgr, dir };
 }
@@ -86,6 +87,25 @@ describe('SkillLearningManager — telemetry capture', () => {
 });
 
 describe('SkillLearningManager — review path', () => {
+  it('passes the originating session to notification delivery and never broadcasts from credentials alone', async () => {
+    const send = jest.fn();
+    for (const scoped of [true, false]) {
+      const { db, ws, mgr, dir } = setup({ minToolCalls: 1, notify: true }, createEnvelope('origin-flow'), {
+        channels: { telegramBotToken: 'unused-token' }, ...(scoped ? { sendNotification: send } : {}),
+      });
+      const fetchSpy = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('No network allowed'));
+      try {
+        seedTranscript(db, 'web-session');
+        mgr.onTurnStart('web-chat', 'web-session', 'work'); mgr.onToolUse('web-chat', 'tool'); mgr.onTurnEnd('web-chat', 'web-session');
+        await mgr.runReviewNow('web-chat', 'web-session');
+        expect(fs.readFileSync(path.join(ws, 'SKILLS_LEARNED.md'), 'utf8')).toContain('origin-flow');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally { fetchSpy.mockRestore(); fs.rmSync(dir, { recursive: true, force: true }); }
+    }
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.stringContaining('origin-flow'), 'web-session');
+  });
+
   it('a qualifying session writes a learned skill (origin:auto) live', async () => {
     const { db, ws, mgr, dir } = setup({ minToolCalls: 3 }, createEnvelope('deploy-flow'));
     seedTranscript(db, 'sess1');

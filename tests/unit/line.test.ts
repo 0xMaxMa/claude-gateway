@@ -150,7 +150,7 @@ describe('normalizeLineEvent()', () => {
     expect(norm!.meta.reply_token).toBe('rt-123');
   });
 
-  test('other media (e.g. sticker/video) → null (only text, image and file handled)', () => {
+  test('audio is normalized; sticker, video and location remain unsupported', () => {
     expect(
       normalizeLineEvent(textEvent({ message: { type: 'sticker', id: 's1' } })),
     ).toBeNull();
@@ -159,7 +159,7 @@ describe('normalizeLineEvent()', () => {
     ).toBeNull();
     expect(
       normalizeLineEvent(textEvent({ message: { type: 'audio', id: 'a1' } })),
-    ).toBeNull();
+    ).toMatchObject({ meta: { media_type: 'audio', attachment_kind: 'voice' } });
     expect(
       normalizeLineEvent(textEvent({ message: { type: 'location', id: 'l1' } })),
     ).toBeNull();

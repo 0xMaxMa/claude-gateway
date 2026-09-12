@@ -58,6 +58,7 @@ describe('Discord /cli end-to-end (mocked client)', () => {
   let mod: DiscordModule;
   let client: ReturnType<typeof makeFakeClient>;
   let abort: AbortController;
+  let forwarded:any[];
   let fetchMock: jest.Mock;
   const origFetch = global.fetch;
   const origEnv = { ...process.env };
@@ -66,6 +67,7 @@ describe('Discord /cli end-to-end (mocked client)', () => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-disc-'));
     fs.writeFileSync(path.join(tmp, 'access.json'), JSON.stringify({ dmPolicy: 'open' }));
     process.env.DISCORD_STATE_DIR = tmp;
+    process.env.GATEWAY_INTERACTIVE_CLI_ENABLED = 'true';
     process.env.CLAUDE_CHANNEL_CALLBACK = 'http://127.0.0.1:9/channel';
     fetchMock = installCallbackStub();
 
@@ -74,7 +76,8 @@ describe('Discord /cli end-to-end (mocked client)', () => {
     (mod as unknown as { client: unknown }).client = client;
     abort = new AbortController();
     // start() blocks until the signal aborts — fire and forget.
-    void mod.start(async () => {}, abort.signal);
+    forwarded=[];
+    void mod.start(async message => {forwarded.push(message);}, abort.signal);
     await tick(2);
   });
 
@@ -159,4 +162,14 @@ describe('Discord /cli end-to-end (mocked client)', () => {
 
     expect(cliPairingStore.get(pairingId)?.status).toBe('denied');
   });
+  test('orchestration slash commands and buttons pass authenticated scope without model text substitution',async()=>{
+    const base={channelId:'dm-chan',guildId:null,user:{id:USER,username:'tester'},client:{user:{id:'bot-1'}},reply:jest.fn(),deferReply:jest.fn(),deferUpdate:jest.fn(),deleteReply:jest.fn(),message:{id:'menu'}};
+    client.emit('interactionCreate',{...base,id:'slash-1',isChatInputCommand:()=>true,commandName:'tasks',options:{getString:()=>null}});await tick();
+    expect(forwarded.at(-1)).toMatchObject({text:'/tasks',senderId:USER,chatId:'dm-chan'});
+    client.emit('interactionCreate',{...base,id:'click-1',isButton:()=>true,customId:'orch:11111111-1111-4111-8111-111111111111'});await tick();
+    expect(forwarded.at(-1)).toMatchObject({text:'/orch 11111111-1111-4111-8111-111111111111',controlMessageId:'menu'});expect(base.deferUpdate).toHaveBeenCalled();
+    fs.writeFileSync(path.join(tmp,'access.json'),JSON.stringify({dmPolicy:'disabled'}));
+    const count=forwarded.length;client.emit('interactionCreate',{...base,isButton:()=>true,customId:'orch:11111111-1111-4111-8111-111111111111'});await tick();expect(forwarded).toHaveLength(count);
+  });
+
 });

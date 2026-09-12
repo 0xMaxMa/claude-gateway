@@ -1,3 +1,4 @@
+import {commandDefinitions} from '../../../mcp/tools/discord/commands';
 import { SLASH_COMMANDS } from '../../../mcp/tools/discord/commands';
 
 describe('SLASH_COMMANDS', () => {
@@ -26,4 +27,10 @@ describe('SLASH_COMMANDS', () => {
     expect(names).toContain('new');
     expect(names).toContain('model');
   });
+});
+
+test('orchestration voice/task commands and CLI are registered only in supported modes',()=>{
+ const names=(orch:boolean,interactive:boolean)=>commandDefinitions(orch,interactive).map(c=>c.name);
+ expect(names(true,false)).toEqual(expect.arrayContaining(['voice','voices','tasks','stop']));expect(names(true,false)).not.toContain('cli');
+ expect(names(false,false)).not.toEqual(expect.arrayContaining(['voice','voices','tasks']));expect(names(false,true)).toContain('cli');
 });

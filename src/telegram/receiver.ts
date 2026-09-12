@@ -22,6 +22,7 @@ export class TelegramReceiver {
     private readonly agentConfig: AgentConfig,
     private readonly callbackPort: number,
     private readonly logDir: string,
+    private readonly headless = true,
   ) {
     this.logger = createLogger(`${agentConfig.id}:receiver`, logDir);
   }
@@ -41,9 +42,12 @@ export class TelegramReceiver {
       env: {
         ...process.env,
         TELEGRAM_RECEIVER_MODE: 'true',
+        GATEWAY_INTERACTIVE_CLI_ENABLED: String(!this.headless && this.agentConfig.type !== 'app-agent' && !this.agentConfig.orchestration?.enabled),
+        GATEWAY_ORCHESTRATION_ENABLED: String(Boolean(this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('telegram'))),
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         TELEGRAM_STATE_DIR: stateDir,
         CLAUDE_CHANNEL_CALLBACK: `http://127.0.0.1:${this.callbackPort}/channel`,
+        GATEWAY_ORCHESTRATION_INGRESS_DIR: this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('telegram') ? path.join(stateDir, 'orchestration-ingress') : '',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

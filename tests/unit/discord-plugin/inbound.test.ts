@@ -115,3 +115,8 @@ describe('createMessageHandler', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+test('audio attachments retain their voice type for orchestration STT',async()=>{
+ const handler=jest.fn();await createMessageHandler('a',handler,baseConfig,openAccess)(makeMockMessage({attachments:{first:()=>({url:'https://cdn.discordapp.com/attachments/voice.ogg',contentType:'audio/ogg'})}}));
+ expect(handler).toHaveBeenCalledWith(expect.objectContaining({attachmentKind:'voice',attachmentFileId:'https://cdn.discordapp.com/attachments/voice.ogg'}));
+});

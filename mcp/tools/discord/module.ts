@@ -190,6 +190,10 @@ export class DiscordModule implements ChannelModule {
     const { createDiscordClient } = await import('./client');
     this.client = await createDiscordClient(token);
     this.running = true;
+    if(process.env.CLAUDE_CHANNEL_CALLBACK){
+      const {registerCommands}=await import('./commands');
+      await registerCommands(this.client,token,process.env.GATEWAY_ORCHESTRATION_ENABLED==='true',process.env.GATEWAY_INTERACTIVE_CLI_ENABLED==='true').catch(err=>process.stderr.write(`discord: command registration failed: ${err}\n`));
+    }
   }
 
   async start(handler: InboundMessageHandler, signal: AbortSignal): Promise<void> {
@@ -296,7 +300,12 @@ export class DiscordModule implements ChannelModule {
       // button) instead of forwarding the text to the agent. Only reached after
       // gate() authorized this user, so it inherits the channel's access control.
       const cliText = (msg.content ?? '').replace(/<@!?\d+>/g, '').trim().toLowerCase();
+      if(/^\/(voice|voices|tasks|stop|help|orch)(?:\s|$)/.test(cliText)){
+        await handler({channel:'discord',accountId:this.client.user?.id??'discord',senderId:context.userId,chatId:context.channelId,chatType:isDM?'direct':'group',text:(msg.content??'').replace(/<@!?\d+>/g,'').trim(),messageId:msg.id,ts:Date.now()});
+        return;
+      }
       if (cliText === '/cli') {
+        if(process.env.GATEWAY_INTERACTIVE_CLI_ENABLED!=='true'){await msg.channel.send('The terminal viewer requires interactive mode.');return;}
         const base = cliCallbackBase();
         try {
           const res = await fetch(base + '/command', {
@@ -336,7 +345,7 @@ export class DiscordModule implements ChannelModule {
       const typingFileDir = path.join(this.stateDir, 'typing');
       try {
         fs.mkdirSync(typingFileDir, { recursive: true });
-        fs.writeFileSync(path.join(typingFileDir, channelId), '');
+        if (process.env.GATEWAY_ORCHESTRATION_ENABLED !== 'true') fs.writeFileSync(path.join(typingFileDir, channelId), '');
         await fetch(`https://discord.com/api/v10/channels/${channelId}/typing`, {
           method: 'POST',
           headers: { Authorization: `Bot ${this.getToken()!}`, 'Content-Length': '0' },
@@ -388,7 +397,14 @@ export class DiscordModule implements ChannelModule {
     // Security mirrors the message path: the access gate must return 'deliver'.
     // discord.js client is typed as `any` (dynamic import) so we narrow locally.
     interface ButtonInteraction {
+      id?: string;
       isButton?: () => boolean;
+      isChatInputCommand?: () => boolean;
+      commandName?: string;
+      options?: {getString(name:string):string|null};
+      deferUpdate?: () => Promise<unknown>;
+      deferReply?: (options: {ephemeral:boolean}) => Promise<unknown>;
+      deleteReply?: () => Promise<unknown>;
       customId?: string;
       guildId?: string | null;
       channelId: string;
@@ -401,6 +417,28 @@ export class DiscordModule implements ChannelModule {
     }
     this.client.on('interactionCreate', async (interaction: ButtonInteraction) => {
       try {
+        const orchButton=interaction.isButton?.()&&/^orch:[a-f0-9-]{36}$/.test(interaction.customId??'');
+        const slash=interaction.isChatInputCommand?.();
+        if(orchButton||slash){
+          const isDM=!interaction.guildId,isThread=interaction.channel?.isThread?.()??false;
+          const context:DiscordMessageContext={guildId:interaction.guildId??null,channelId:interaction.channelId,threadId:isThread?interaction.channelId:null,userId:interaction.user.id,username:interaction.user.username,messageId:interaction.message?.id??'',isDM,isThread,mentionsBot:true};
+          const access=gate(loadAccessFn(),context,saveAccessFn,()=>randomBytes(3).toString('hex'));
+          if(access.action!=='deliver'){await interaction.reply({content:'Not authorized.',ephemeral:true});return;}
+          if(orchButton)await interaction.deferUpdate?.();else await interaction.deferReply?.({ephemeral:true});
+          let text=orchButton?`/orch ${interaction.customId!.slice(5)}`:`/${interaction.commandName}`;
+          if(slash){
+            const name=interaction.commandName;
+            const arg=interaction.options?.getString(name==='voice'?'mode':name==='ask'?'question':'name');
+            if(name==='ask')text=arg??'';else if(arg)text+=' '+arg;
+            if(name==='cli'){
+              const channel=await this.client.channels.fetch(interaction.channelId);
+              await handleDiscordMessage({id:randomBytes(12).toString('hex'),content:'/cli',author:{id:interaction.user.id,username:interaction.user.username,bot:false},guild:interaction.guildId?{id:interaction.guildId}:null,guildId:interaction.guildId,channelId:interaction.channelId,channel,mentions:{has:()=>true}} as any);
+              await interaction.deleteReply?.();return;
+            }
+          }
+          await handler({channel:'discord',accountId:interaction.client.user?.id??'discord',senderId:interaction.user.id,chatId:interaction.channelId,chatType:isDM?'direct':'group',text,messageId:interaction.id??randomBytes(12).toString('hex'),controlMessageId:orchButton?interaction.message?.id:undefined,ts:Date.now()});
+          if(slash)await interaction.deleteReply?.();return;
+        }
         if (!interaction.isButton?.()) return;
 
         // `/cli` approve/deny — unlock (or reject) a pending terminal-viewer
@@ -518,7 +556,7 @@ export class DiscordModule implements ChannelModule {
         const typingFileDir = path.join(this.stateDir, 'typing');
         try {
           fs.mkdirSync(typingFileDir, { recursive: true });
-          fs.writeFileSync(path.join(typingFileDir, channelId), '');
+          if (process.env.GATEWAY_ORCHESTRATION_ENABLED !== 'true') fs.writeFileSync(path.join(typingFileDir, channelId), '');
         } catch {}
 
         const inbound: InboundMessage = {
@@ -621,6 +659,8 @@ export class DiscordModule implements ChannelModule {
   }
 
   private async processTypingSignals(typingDir: string, token: string): Promise<void> {
+    // Managed activity is derived from durable Agent/Worker state; stale legacy files are not work.
+    if (process.env.GATEWAY_ORCHESTRATION_ENABLED === 'true') return;
     let files: string[];
     try { files = fs.readdirSync(typingDir); } catch { return; }
 

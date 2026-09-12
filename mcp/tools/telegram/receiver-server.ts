@@ -25,6 +25,13 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
+import { confirmSelection, voiceModeConfirmation } from './selection-confirmation'
+import { LiveTaskBrowser, type TaskBrowserMessage } from './task-browser'
+import { ReceiverSpool } from '../receiver-spool'
+const orchestrationSpool = process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR && process.env.CLAUDE_CHANNEL_CALLBACK
+  ? new ReceiverSpool(process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR, process.env.CLAUDE_CHANNEL_CALLBACK) : undefined
+const ORCHESTRATION_ENABLED = process.env.GATEWAY_ORCHESTRATION_ENABLED === 'true' || Boolean(orchestrationSpool)
+const INTERACTIVE_CLI_ENABLED = process.env.GATEWAY_INTERACTIVE_CLI_ENABLED === 'true' && !ORCHESTRATION_ENABLED
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
@@ -35,6 +42,7 @@ import { extractRepliedAttachment, safeName } from './reply-attachment'
 // so a src/ import crashes this bun-run receiver on installed packages (the bug
 // that silenced every bot on systemd installs). Enforced by
 // tests/unit/mcp-no-src-imports.test.ts.
+import { formatTaskDetail, type TaskDetail } from './task-detail'
 import { formatTurnIncident, type TurnIncident } from '../../../dist/agent/turn-trace.js'
 import { createIncidentStore } from '../../../dist/agent/incident-store.js'
 import type { RecoveryOutcome } from '../../../dist/agent/incident.js'
@@ -214,6 +222,7 @@ const typingManager = createWorkingStateManager(
       )
     }
   },
+  ORCHESTRATION_ENABLED ? 'orchestration' : 'legacy',
 )
 
 // Stages whose recovery must run in the runner process (live session control):
@@ -863,17 +872,18 @@ const RECEIVER_MODE = process.env.TELEGRAM_RECEIVER_MODE === 'true'
 import { parseMenuFileContent } from './menu-parser'
 
 const BOT_COMMANDS = [
+  ...(ORCHESTRATION_ENABLED ? [{ command: 'tasks', description: 'View pending tasks in this chat' }, { command: 'voice', description: 'Turn automatic voice replies on or off' }, { command: 'voices', description: 'Choose the agent voice' }] : []),
   { command: 'session', description: 'Show current session info' },
   { command: 'sessions', description: 'Manage conversation sessions' },
   { command: 'new', description: 'Create a new session' },
   { command: 'rename', description: 'Rename current session' },
   { command: 'clear', description: 'Clear current session history' },
   { command: 'compact', description: 'Summarize and compress session history' },
-  { command: 'stop', description: 'Interrupt the agent and stop current work' },
+  { command: 'stop', description: ORCHESTRATION_ENABLED ? 'Stop the agent reply and choose a task to cancel' : 'Interrupt the agent and stop current work' },
   { command: 'restart', description: 'Graceful restart session' },
   { command: 'model', description: 'Show current AI model' },
   { command: 'models', description: 'Switch AI model' },
-  { command: 'cli', description: 'Open the live terminal viewer' },
+  ...(INTERACTIVE_CLI_ENABLED ? [{ command: 'cli', description: 'Open the live terminal viewer' }] : []),
   { command: 'start', description: 'Welcome and setup guide' },
   { command: 'status', description: 'Check your pairing status' },
   { command: 'help', description: 'What this bot can do' },
@@ -1055,6 +1065,7 @@ async function handleInbound(
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
+      ...(ctx.message?.message_thread_id != null ? { message_thread_id: String(ctx.message.message_thread_id) } : {}),
       user: from.username ?? String(from.id),
       user_id: String(from.id),
       // Human-readable name for the chat picker / history (first_name is always
@@ -1103,15 +1114,16 @@ async function handleInbound(
   // turns in --print --channels mode).
   const callbackUrl = process.env.CLAUDE_CHANNEL_CALLBACK
   if (callbackUrl) {
-    fetch(callbackUrl, {
+    if (orchestrationSpool) orchestrationSpool.enqueue(channelParams)
+    else fetch(callbackUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(channelParams),
     }).catch(err => {
       process.stderr.write(`telegram channel: callback POST failed: ${err}\n`)
     })
-    // Start typing indicator loop — only in receiver mode with a real AgentRunner
-    if (RECEIVER_MODE) {
+    // Legacy turn watchdog only. Orchestration owns typing through durable task/decision state.
+    if (RECEIVER_MODE && !ORCHESTRATION_ENABLED) {
       typingManager.start(chat_id)
     }
   }
@@ -1157,12 +1169,13 @@ bot.command('help', async ctx => {
     `/rename <name> — rename current session\n` +
     `/clear — clear current session history\n` +
     `/compact — summarise and compress session history\n` +
-    `/stop — interrupt the running turn\n` +
+    (ORCHESTRATION_ENABLED ? `/stop — stop the reply and choose a task to cancel\n` : `/stop — interrupt the running turn\n`) +
     `/restart — graceful restart session\n\n` +
     `*Agent*\n` +
     `/model — show current AI model\n` +
     `/models — switch AI model\n` +
-    `/cli — open the live terminal viewer\n\n` +
+    (ORCHESTRATION_ENABLED ? `/tasks — view pending tasks in this chat\n/voice — turn automatic voice replies on/off (default off)\n/voices — choose the agent voice\n` : '') +
+    (INTERACTIVE_CLI_ENABLED ? `/cli — open the live terminal viewer\n\n` : '\n') +
     `*Account*\n` +
     `/start — pairing instructions\n` +
     `/status — check your pairing state`,
@@ -1295,6 +1308,7 @@ bot.command('models', async ctx => {
 // this bot's token), so nothing secret rides in the URL. Private chat + allowlist
 // only, matching every other command.
 bot.command('cli', async ctx => {
+  if (!INTERACTIVE_CLI_ENABLED) { await ctx.reply('Terminal viewer requires interactive mode (headless: false).'); return }
   if (ctx.chat?.type !== 'private') return
   const access = loadAccess()
   if (!access.allowFrom.includes(String(ctx.from!.id))) return
@@ -1358,6 +1372,144 @@ bot.command('restart', async ctx => {
     '\u26a0\ufe0f Restart session?\nThis will graceful-restart the current Claude session.',
     { reply_markup: keyboard },
   )
+})
+
+type VoicePicker = {menuId:string;provider:string;page:number;pages:number;gender?:string;groups:string[];selected:string;voices:Array<{name:string;gender?:string;index:number;selected:boolean}>}
+async function voicePickerRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
+  if(!CALLBACK_URL_BASE)throw new Error('not_configured')
+  const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(20000),body:JSON.stringify({command:'telegram_voices',chat_id:chatId,payload:{...payload,user_id:userId}})})
+  const result=await response.json() as VoicePicker & {success?:boolean;name?:string}
+  if(!response.ok||!result.success)throw new Error('unavailable')
+  return result
+}
+function voicePickerMenu(menu:VoicePicker) {
+  const keyboard=new InlineKeyboard()
+  const labels:Record<string,string>={male:'👨 Male',female:'👩 Female',neutral:'Neutral',unspecified:'Unspecified'}
+  if(!menu.gender){
+    for(const group of menu.groups)keyboard.text(labels[group],`voicegroup:${menu.menuId}:${group}`).row()
+  }else{
+    for(const v of menu.voices)keyboard.text(`${v.selected?'✅ ':''}${v.name.slice(0,60)}`,`voicepick:${menu.menuId}:${v.index}`).row()
+    if(menu.page>0)keyboard.text('Previous',`voicepage:${menu.menuId}:${menu.gender}:${menu.page-1}`)
+    if(menu.page+1<menu.pages)keyboard.text('Next',`voicepage:${menu.menuId}:${menu.gender}:${menu.page+1}`)
+    keyboard.row().text('Back',`voicegroup:${menu.menuId}:back`).row()
+  }
+  keyboard.text('Dismiss',`voicedismiss:${menu.menuId}`)
+  return {text:`Agent voice · ${menu.provider}\nSelected: ${menu.selected}\n${menu.gender?`${labels[menu.gender]} — choose a voice (${menu.page+1}/${menu.pages}):`:'Choose a voice category:'}`,reply_markup:keyboard}
+}
+bot.command('voices',async ctx=>{
+  if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
+  if(!ORCHESTRATION_ENABLED){await ctx.reply('Voice controls require orchestration mode.');return}
+  try{const menu=voicePickerMenu(await voicePickerRequest(String(ctx.chat.id),String(ctx.from!.id)));await ctx.reply(menu.text,{reply_markup:menu.reply_markup})}
+  catch{await ctx.reply('Voice list unavailable. Check the TTS provider configuration and try /voices again.')}
+})
+
+type TaskView = TaskDetail & {taskId:string;title:string;state:string;progress?:string;question?:string;updatedAt:number;startedAt?:number;finishedAt?:number;canStop:boolean}
+type TaskBrowser = {sessionId:string;task?:TaskView;tasks?:TaskView[];page?:number;pages?:number;total?:number}
+async function taskBrowserRequest(chatId:string,userId:string,payload:Record<string,unknown>={}) {
+  if(!CALLBACK_URL_BASE)throw Error('not_configured')
+  const response=await fetch(CALLBACK_URL_BASE+'/command',{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),body:JSON.stringify({command:'telegram_tasks',chat_id:chatId,payload:{...payload,user_id:userId}})})
+  const result=await response.json() as TaskBrowser & {success?:boolean}
+  if(!response.ok||!result.success)throw Error((result as {error?:string}).error==='TASK_SESSION_CHANGED'?'TASK_SESSION_CHANGED':'unavailable')
+  if(typeof result.sessionId!=='string'||!result.sessionId)throw Error('unavailable')
+  return result
+}
+function taskBrowserMenu(result:TaskBrowser) {
+  const keyboard=new InlineKeyboard()
+  const labels:Record<string,string>={queued:'⏳ Queued',starting:'⏳ Starting',running:'🔥 Running',waiting_input:'💬 Waiting for your input',interrupting:'⏸ Interrupting',cancel_requested:'⏹ Stopping',recovering:'🔄 Recovering',needs_reconciliation:'⚠️ Needs reconciliation',completed:'✅ Completed',failed:'❌ Failed',cancelled:'⏹ Cancelled'}
+  let text:string
+  if(result.task){
+    const task=result.task
+    text=formatTaskDetail(task,labels[task.state]??task.state)
+    if(task.canStop)keyboard.text(task.state==='needs_reconciliation'?'🔄 Retry cleanup':'🔴 Stop task',`taskcancel:${task.taskId}`).row()
+    keyboard.text('Back','tasklist:0').row()
+  }else{
+    text=result.total?`Tasks (${result.total}) · Page ${(result.page??0)+1}/${result.pages}\nChoose a task for details.`:'No pending tasks in this chat.'
+    for(const [i,task] of (result.tasks??[]).entries())keyboard.text(`${(result.page??0)*10+i+1}. ${task.title.replace(/\s+/g,' ').slice(0,45)} · ${labels[task.state]??task.state}`,`taskview:${task.taskId}`).row()
+    if((result.page??0)>0)keyboard.text('Previous',`tasklist:${result.page!-1}`)
+    if((result.page??0)+1<(result.pages??1))keyboard.text('Next',`tasklist:${result.page!+1}`)
+    keyboard.row()
+  }
+  keyboard.text('Dismiss','taskdismiss')
+  return {text,reply_markup:keyboard}
+}
+const TASK_BROWSER_FILE = join(STATE_DIR, 'task-browser.json')
+let restoredTaskBrowsers: TaskBrowserMessage[] = []
+try { const saved = JSON.parse(readFileSync(TASK_BROWSER_FILE, 'utf8')); if (Array.isArray(saved)) restoredTaskBrowsers = saved } catch {}
+const liveTaskBrowser = new LiveTaskBrowser({
+  read: taskBrowserRequest,
+  render: result => taskBrowserMenu(result as TaskBrowser),
+  send: async (chat, menu) => (await bot.api.sendMessage(chat, menu.text, {reply_markup: menu.reply_markup as InlineKeyboard})).message_id,
+  edit: (chat, id, menu) => bot.api.editMessageText(chat, id, menu.text, {reply_markup: menu.reply_markup as InlineKeyboard}),
+  remove: (chat, id) => bot.api.deleteMessage(chat, id),
+  close: (chat, id) => bot.api.editMessageText(chat, id, 'Task view closed.', {reply_markup: {inline_keyboard: []}}),
+  allowed: (chat, user) => ORCHESTRATION_ENABLED && chat === user && loadAccess().allowFrom.includes(user),
+  persist: entries => {
+    mkdirSync(STATE_DIR, {recursive:true,mode:0o700})
+    const temp = TASK_BROWSER_FILE + '.tmp'
+    writeFileSync(temp,JSON.stringify(entries),{mode:0o600});renameSync(temp,TASK_BROWSER_FILE)
+  },
+}, restoredTaskBrowsers)
+if (ORCHESTRATION_ENABLED) setInterval(() => { void liveTaskBrowser.tick().catch(() => {}) }, 3000).unref()
+bot.command('tasks',async ctx=>{
+  if(ctx.chat?.type!=='private'||!isCallbackAuthorized(ctx))return
+  if(!ORCHESTRATION_ENABLED){await ctx.reply('Task controls require orchestration mode.');return}
+  try{await liveTaskBrowser.open(String(ctx.chat.id),String(ctx.from!.id))}
+  catch{await ctx.reply('Could not load tasks. Please try /tasks again.')}
+})
+
+async function taskStopRequest(chatId: string, userId: string, menuId?: string, index?: number) {
+  if (!CALLBACK_URL_BASE) throw new Error('not_configured')
+  const response=await fetch(CALLBACK_URL_BASE+'/command', {
+    method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(10000),
+    body:JSON.stringify({command:'task_stop',chat_id:chatId,payload:{user_id:userId,menu_id:menuId,index}}),
+  })
+  const result=await response.json() as {success?:boolean;legacy?:boolean;text?:string;menuId?:string;tasks?:Array<{title:string;state:string}>}
+  if (!response.ok || !result.success) throw new Error('unavailable')
+  return result
+}
+bot.command('stop',async (ctx,next)=>{
+  if (!ORCHESTRATION_ENABLED || ctx.chat?.type!=='private') return next()
+  if (!isCallbackAuthorized(ctx)) return
+  try {
+    const result=await taskStopRequest(String(ctx.chat.id),String(ctx.from!.id))
+    if (result.legacy) return
+    const keyboard=new InlineKeyboard()
+    for (const [i,task] of (result.tasks??[]).entries()) keyboard.text(`${i+1}. ${task.title.slice(0,65)} (${task.state})`,`taskstop:${result.menuId}:${i+1}`).row()
+    if (result.tasks?.length) keyboard.text('Dismiss',`taskstop:${result.menuId}:0`)
+    await ctx.reply(result.text??'Nothing to stop.',result.tasks?.length?{reply_markup:keyboard}:{})
+  } catch { await ctx.reply('Could not load tasks. Please try /stop again.') }
+})
+
+// Voice settings are handled directly; no model call or TTS for this menu.
+type VoiceReplyMode = 'on' | 'auto' | 'off'
+async function telegramVoiceSetting(chatId: string, mode?: VoiceReplyMode): Promise<VoiceReplyMode> {
+  if (!CALLBACK_URL_BASE) throw new Error('not_configured')
+  const response = await fetch(CALLBACK_URL_BASE + '/command', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'telegram_voice', chat_id: chatId, payload: { mode } }),
+    signal: AbortSignal.timeout(10000),
+  })
+  const result = await response.json() as { success?: boolean; enabled?: boolean; mode?: VoiceReplyMode }
+  if (!response.ok || !result.success || typeof result.enabled !== 'boolean') throw new Error('unavailable')
+  return result.mode ?? (result.enabled ? 'on' : 'off')
+}
+function voiceMenu(mode: VoiceReplyMode) {
+  const labels = {on:'🔊 Always', auto:'🎙️ Only reply voice message', off:'🔇 Off'}
+  const keyboard = new InlineKeyboard()
+  for (const value of ['on','auto','off'] as const) keyboard.text(`${mode === value ? '✅ ' : ''}${labels[value]}`, `voice:${value}`).row()
+  return {text: `Voice replies: ${labels[mode]}\nAuto replies with audio to voice messages and their task results.`, reply_markup: keyboard.text('Dismiss','voice:dismiss')}
+}
+bot.command('voice', async ctx => {
+  if (!ORCHESTRATION_ENABLED) { await ctx.reply('Voice controls require orchestration mode.'); return }
+  if (ctx.chat?.type !== 'private' || !isCallbackAuthorized(ctx)) return
+  const choice = ctx.match.trim().toLowerCase()
+  if (choice && choice !== 'on' && choice !== 'off' && choice !== 'auto') {
+    await ctx.reply('Use /voice to open the menu, or /voice on, /voice auto and /voice off.'); return
+  }
+  try {
+    const menu = voiceMenu(await telegramVoiceSetting(String(ctx.chat.id), choice ? choice as VoiceReplyMode : undefined))
+    await ctx.reply(menu.text, choice ? {} : { reply_markup: menu.reply_markup })
+  } catch { await ctx.reply('Voice settings are unavailable. Check the agent TTS configuration.') }
 })
 
 // /session — show current session info (direct command, no typing manager)
@@ -1481,6 +1633,69 @@ function validModelRows(value: unknown): Array<{ id: string; label: string }> {
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
+  const voicePicker=/^(voicepick|voicepage|voicegroup|voicedismiss):([a-f0-9-]{36})(?::(male|female|neutral|unspecified|back))?(?::(\d+))?$/.exec(data)
+  if(voicePicker){
+    if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
+    try{
+      const action=voicePicker[1],id=voicePicker[2],n=Number(voicePicker[4]),chatId=String(ctx.callbackQuery.message.chat.id),userId=String(ctx.from.id)
+      if(action==='voicepage'||action==='voicegroup'){
+        const menu=voicePickerMenu(await voicePickerRequest(chatId,userId,{menu_id:id,page:action==='voicepage'?n:0,gender:voicePicker[3]==='back'?undefined:voicePicker[3]}))
+        await ctx.editMessageText(menu.text,{reply_markup:menu.reply_markup}).catch(()=>{});await ctx.answerCallbackQuery().catch(()=>{})
+      }else{
+        const result=await voicePickerRequest(chatId,userId,{action:action==='voicepick'?'choose':'dismiss',menu_id:id,index:n})
+        await ctx.answerCallbackQuery({text:action==='voicepick'?`Selected: ${result.name}`.slice(0,180):'Dismissed'}).catch(()=>{})
+        if(action==='voicepick') await confirmSelection(ctx,`✅ Agent voice: ${result.name} · ${result.provider}`)
+        else await ctx.deleteMessage().catch(()=>{})
+      }
+    }catch{await ctx.answerCallbackQuery({text:'Voice list changed or unavailable. Use /voices again.'}).catch(()=>{})}
+    return
+  }
+
+  const taskBrowser=/^(taskview|taskcancel):([a-f0-9-]{36})$|^(tasklist):(\d+)$|^(taskdismiss)$/.exec(data)
+  if(taskBrowser){
+    if(!ORCHESTRATION_ENABLED||ctx.callbackQuery.message?.chat.type!=='private'||!isCallbackAuthorized(ctx)){await ctx.answerCallbackQuery({text:'Not available or not authorized.'}).catch(()=>{});return}
+    try{
+      await ctx.answerCallbackQuery().catch(()=>{})
+      const payload=data==='taskdismiss'?{action:'dismiss'}:taskBrowser[1]?{action:taskBrowser[1]==='taskcancel'?'cancel':'detail',task_id:taskBrowser[2]}:{page:Number(taskBrowser[4])}
+      await liveTaskBrowser.navigate(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),ctx.callbackQuery.message.message_id,payload)
+    }catch{await ctx.answerCallbackQuery({text:'Task unavailable. Use /tasks to refresh.'}).catch(()=>{})}
+    return
+  }
+
+  const taskStop=/^taskstop:([a-f0-9-]{36}):(\d+)$/.exec(data)
+  if (taskStop) {
+    if (!ORCHESTRATION_ENABLED) { await ctx.answerCallbackQuery({text:'Task controls require orchestration mode.'}).catch(()=>{}); return }
+    if (ctx.callbackQuery.message?.chat.type!=='private' || !isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({text:'Not authorized.'}).catch(()=>{}); return
+    }
+    try {
+      const result=await taskStopRequest(String(ctx.callbackQuery.message.chat.id),String(ctx.from.id),taskStop[1],Number(taskStop[2]))
+      await ctx.answerCallbackQuery({text:Number(taskStop[2])===0?'Dismissed':'Stop requested.'}).catch(()=>{})
+      await ctx.deleteMessage().catch(()=>{})
+      if (Number(taskStop[2])!==0) await ctx.reply(result.text??'Stop requested.')
+    } catch { await ctx.answerCallbackQuery({text:'Selection unavailable. Use /stop to refresh.'}).catch(()=>{}) }
+    return
+  }
+
+  if (data === 'voice:on' || data === 'voice:auto' || data === 'voice:off' || data === 'voice:dismiss') {
+    if (!ORCHESTRATION_ENABLED) { await ctx.answerCallbackQuery({text:'Voice controls require orchestration mode.'}).catch(()=>{}); return }
+    if (ctx.callbackQuery.message?.chat.type !== 'private' || !isCallbackAuthorized(ctx)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return
+    }
+    if (data === 'voice:dismiss') {
+      await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
+      await ctx.deleteMessage().catch(() => {})
+      return
+    }
+    try {
+      await telegramVoiceSetting(String(ctx.callbackQuery.message.chat.id), data.slice(6) as VoiceReplyMode)
+      const confirmation=voiceModeConfirmation(data.slice(6))
+      await ctx.answerCallbackQuery({text:confirmation}).catch(()=>{})
+      await confirmSelection(ctx,confirmation)
+    } catch { await ctx.answerCallbackQuery({ text: 'Could not update voice settings. Please try again.' }).catch(() => {}) }
+    return
+  }
+
   // Handle interactive-menu choice: choice:<N>. A tap is routed back exactly like
   // the user typing "N" — same content + meta as the text path — so the session's
   // pending-menu handler injects the selection into the PTY. Security mirrors the
@@ -1514,7 +1729,7 @@ bot.on('callback_query:data', async ctx => {
       }).catch(err => {
         process.stderr.write(`telegram channel: choice callback POST failed: ${err}\n`)
       })
-      if (RECEIVER_MODE) typingManager.start(chat_id)
+      if (RECEIVER_MODE && !ORCHESTRATION_ENABLED) typingManager.start(chat_id)
     }
     return
   }
@@ -1732,7 +1947,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Compacting...' }).catch(() => {})
       await ctx.deleteMessage().catch(() => {})
       await ctx.reply('🧠 Session compacting, please wait...\nThis may take a moment.').catch(() => {})
-      if (RECEIVER_MODE) {
+      if (RECEIVER_MODE && !ORCHESTRATION_ENABLED) {
         typingManager.start(chatId)
       }
       await fetch(CALLBACK_URL_BASE + '/command', {

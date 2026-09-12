@@ -28,7 +28,15 @@ export class ShareFileModule implements ToolModule {
   }
 
   getTools(): McpToolDefinition[] {
-    return shareFileToolDefs;
+    if (process.env.GATEWAY_ORCHESTRATION_ROLE !== 'worker') return shareFileToolDefs;
+    return shareFileToolDefs.map(tool => ({
+      ...tool,
+      description: tool.description + ' In a task, use the original absolute file path in the active task workspace, a supplied input attachment or this session’s media directory. The gateway stages it automatically; do not copy it to the agent-wide media root. Describe this as creating a link (Thai: สร้างลิงก์).',
+      inputSchema: { ...shareFileInputSchema, properties: { ...shareFileInputSchema.properties,
+        path: { type: 'string', description: 'Original absolute file path in the active task workspace or session media, or artifact:<id>.' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Up to 5 authorized absolute file paths or artifact refs.' },
+      } },
+    }));
   }
 
   async handleTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {

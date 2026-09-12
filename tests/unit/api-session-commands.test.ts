@@ -44,6 +44,7 @@ function makeMockProcess(): MockChildProcess {
 const mockCompactorCli = jest.fn(() => ({ status: 0, stdout: '', stderr: '', error: undefined as Error | undefined }));
 
 jest.mock('child_process', () => ({
+  ...jest.requireActual('child_process'),
   spawn: jest.fn((_bin: string, args: string[]) => {
     const proc = makeMockProcess();
     if (args.includes('--print')) {
@@ -69,6 +70,10 @@ jest.mock('child_process', () => ({
 import { AgentRunner } from '../../src/agent/runner';
 import { AgentConfig, GatewayConfig, Message } from '../../src/types';
 import { SessionStore } from '../../src/session/store';
+import { OrchestrationStore } from '../../src/orchestration/store';
+import { TaskService } from '../../src/orchestration/tasks/service';
+import { DecisionService } from '../../src/orchestration/decisions';
+import { StopControls } from '../../src/orchestration/stop-controls';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -208,4 +213,46 @@ describe('executeApiCommand session counting (#160)', () => {
     expect(result.success).toBe(true);
     expect(await getSessionStore(runner).loadSession(agentId, sessionId)).toEqual([]);
   });
+  test('managed /stop persists the numbered prompt and numeric replies cancel only the selected task',async()=>{
+    const store=new OrchestrationStore(':memory:',agentId),tasks=new TaskService(store),decisions=new DecisionService(store);
+    try{
+      const input=store.acceptInput({scope:{agentId,agentSessionId:sessionId,source:'api',accountId:'owner',chatId,threadKey:'',principalId:'owner'},text:'Work'});
+      const decision=decisions.begin(input.conversationId,'owner',[input.inputId]);
+      const task=tasks.spawn({...input,...decision,principalId:'owner',actionId:'spawn',execute:true,writeMemory:false},{title:'Review PR',instructions:'fixture',targetProfile:'default-worker'});
+      const control=new StopControls(store,tasks,()=>false);
+      (runner as any).agentConfig.orchestration={enabled:true,channels:['api']};
+      (runner as any).orchestration={stopControls:control,authorizeSession:(_s:string,p:string)=>store.assertMember(input.conversationId,p)};
+      const menu=await runner.executeApiCommand(sessionId,chatId,'/stop',{skipPersist:true,principalId:'owner'});
+      expect(menu.responseText).toContain('1. Review PR');expect(menu.result.responseText).toBe(menu.responseText);
+      const command=runner.apiTaskStopReply(sessionId,'owner','1')!;
+      const chosen=await runner.executeApiCommand(sessionId,chatId,command,{principalId:'owner',displayCommand:'1'});
+      expect(chosen.responseText).toContain('Cancelled task: Review PR');expect(store.task(task.taskId)!.state).toBe('cancelled');
+    }finally{(runner as any).orchestration=undefined;store.close();}
+  });
+  test('disabled orchestration retains legacy stop and ignores numeric stop menus',async()=>{
+    const open=jest.fn();(runner as any).orchestration={stopControls:{open,replyCommand:jest.fn()},isBusy:()=>false};
+    try{
+      (runner as any).agentConfig.orchestration={enabled:false};
+      expect(runner.apiTaskStopReply(sessionId,'owner','1')).toBeUndefined();
+      const result=await runner.executeApiCommand(sessionId,chatId,'/stop',{principalId:'owner'});
+      expect(result.responseText).toBe('No active session to stop.');expect(open).not.toHaveBeenCalled();
+    }finally{(runner as any).orchestration=undefined;}
+  });
+
+  test('command capability hot reload replaces only the receiver and picks up the latest mode',async()=>{
+    const spawn=require('child_process').spawn as jest.Mock;
+    const stop=jest.spyOn(runner,'stop');
+    runner.startTelegramReceiver();const original=(runner as any).receiver;
+    (runner as any).gatewayConfig.gateway.headless=false;runner.refreshTelegramCommands();
+    await new Promise(resolve=>setImmediate(resolve));
+    expect((runner as any).receiver).not.toBe(original);
+    const environment=()=>spawn.mock.calls.filter((c:any[])=>c[1]?.[0]?.endsWith('receiver-server.ts')).at(-1)[2].env;
+    expect(environment().GATEWAY_INTERACTIVE_CLI_ENABLED).toBe('true');
+    (runner as any).gatewayConfig.gateway.orchestration=true;
+    runner.updateAgentConfig({...((runner as any).agentConfig),orchestration:{}});
+    await new Promise(resolve=>setImmediate(resolve));
+    expect(environment().GATEWAY_ORCHESTRATION_ENABLED).toBe('true');expect(environment().GATEWAY_INTERACTIVE_CLI_ENABLED).toBe('false');
+    expect(stop).not.toHaveBeenCalled();
+  });
+
 });

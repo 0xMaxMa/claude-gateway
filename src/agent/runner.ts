@@ -1,4 +1,14 @@
+import { chunkText } from '../telegram/chunks';
+import { resolveChannelFile } from '../orchestration/file-delivery';
+import type { ControlMenu } from '../orchestration/channel-controls';
+import { VOICE_REPLY_MODES, VoiceReplyMode } from '../orchestration/voice-reply-policy';
+import {applyGatewayOrchestration} from '../orchestration/gateway-config';
+import { channelSender, ChannelSender } from '../orchestration/delivery';
+import { sendControlMenu } from '../orchestration/control-delivery';
+import { stopMenuText } from '../orchestration/stop-controls';
 import { randomUUID } from 'crypto';
+import type { AgentOrchestrationRuntime } from '../orchestration/runtime';
+import { RuntimeProfile } from '../session/runtime-profile';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as fsPromises from 'fs/promises';
@@ -53,6 +63,8 @@ import { buildCliUrl } from '../cli-viewer/url';
 import { TUI_REQUEST_TOO_LARGE } from '../shell/screen';
 import { HistoryDB } from '../history/db';
 import { MediaStore } from '../history/media-store';
+import { ingestOrchestrationMedia } from '../orchestration/media';
+import { receiveChannelMedia } from '../orchestration/channel-media';
 import { scheduleCleanup, resolveRetentionDays } from '../history/cleanup';
 import type { HistorySource, ChatChannel, ChatChannelOrApi } from '../history/types';
 import { isChatChannel } from '../history/types';
@@ -256,6 +268,7 @@ export class AgentRunner extends EventEmitter {
   private readonly slackThreadTs = new Map<string, string>();
   private receiver: TelegramReceiver | null = null;
   private discordReceiver: DiscordReceiver | null = null;
+  private discordCommandConfig = '';
   // LINE slow-LLM postback button manager (null when LINE disabled or threshold=0).
   private lineReply: LineReplyManager | null = null;
   // Slack has no reply-token TTL to work around (see the plan's "no reply-manager
@@ -409,6 +422,7 @@ export class AgentRunner extends EventEmitter {
   // Skill self-improvement (planning-62). Optional — set by index.ts per agent.
   // All calls are guarded (`this.skillLearning?.`) and best-effort.
   private skillLearning?: SkillLearningManager;
+  private readonly skillNotificationOrigins = new Map<string, { source: ChatChannel; chatId: string; thread: string }>();
 
   // Path to gateway config.json for persisting model changes
   private readonly configPath: string;
@@ -423,10 +437,173 @@ export class AgentRunner extends EventEmitter {
 
   // Cancel function for the daily history cleanup timer
   private cancelCleanup: (() => void) | null = null;
+  private orchestration?: AgentOrchestrationRuntime;
+  private orchestrationStarting?: Promise<AgentOrchestrationRuntime>;
+
+  requiresDurableChannelIngress(source: string): boolean {
+    return Boolean((this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(source)) ||
+      this.orchestration?.ownsChannelIngress(source));
+  }
+
+  private orchestrationForApi(sessionId: string): boolean {
+    return Boolean((this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy()) ||
+      (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('api')));
+  }
+
+  private async sendLinkedOrchestrationChannel(...[binding, text, _id, file]: Parameters<ChannelSender>): ReturnType<ChannelSender> {
+    const channel = String(binding.channel), chat = String(binding.chat_id);
+    if (channel === 'wechat' && file) return {state: 'failed', code: 'CHANNEL_ATTACHMENTS_UNSUPPORTED'};
+    let path: string | undefined;
+    if (file) {
+      try { path = resolveChannelFile(this.agentConfig, file).path; }
+      catch { return {state: 'failed', code: 'ATTACHMENT_UNAVAILABLE'}; }
+    }
+    try {
+      if (channel === 'whatsapp') {
+        // Persist the receiving number in the binding; an in-memory last-chat map
+        // can change while a worker is running or disappear after a restart.
+        const thread = String(binding.thread_key ?? '');
+        const account = thread.startsWith('whatsapp-account:') ? thread.slice('whatsapp-account:'.length) : undefined;
+        await this.sendWhatsAppMessage(chat, file?.caption || text, path, account, {asDocument: !!file && file.kind !== 'image'});
+      } else if (channel === 'wechat') await this.sendWeChatMessage(chat, text);
+      else return {state: 'failed', code: 'DELIVERY_NOT_CONFIGURED'};
+      return {state: 'delivered'};
+    } catch { return {state: 'unknown', code: 'PROVIDER_RECEIPT_UNKNOWN'}; }
+  }
+
+  private async sendOrchestrationControl(channel: string, chatId: string, menu: ControlMenu, meta: Record<string, string>): Promise<void> {
+    if (!['whatsapp', 'whatsapp_cloud', 'wechat'].includes(channel)) return sendControlMenu(this.agentConfig, channel, chatId, menu, meta);
+    const text = [menu.text, ...menu.buttons.map(button => `${button.label}: /orch ${button.data.replace(/^orch:/, '')}`)].join('\n');
+    const send = channelSender(() => this.agentConfig, fetch, () => false, (...args) => this.sendLinkedOrchestrationChannel(...args));
+    for (const part of chunkText(text, 1900)) {
+      const result = await send({channel, chat_id: chatId, thread_key: channel === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : ''}, part, randomUUID());
+      if (result.state !== 'delivered') throw new Error(result.code);
+    }
+  }
+
+  private async getOrchestration(): Promise<AgentOrchestrationRuntime> {
+    if (this.orchestration) return this.orchestration;
+    if (!this.orchestrationStarting) {
+      this.orchestrationStarting = import('../orchestration/runtime').then(({ AgentOrchestrationRuntime }) => AgentOrchestrationRuntime.open(this.agentConfig, this.gatewayConfig, this.agentDir,
+        this.sessionStore, this.historyDb, {
+          sendLinkedChannel: (...args) => this.sendLinkedOrchestrationChannel(...args),
+          skills: () => this.skillRegistry,
+          refreshSkills: async () => {
+            try {
+              const { discoverCliSkills } = await import('../orchestration/cli-skills');
+              this.skillRegistry.cliSkills = await discoverCliSkills(this.agentConfig, undefined, this.gatewayConfig);
+              delete this.skillRegistry.cliDiscoveryError;
+            } catch {
+              this.skillRegistry.cliSkills = [];
+              this.skillRegistry.cliDiscoveryError = 'CLI_SKILL_DISCOVERY_UNAVAILABLE';
+            }
+          },
+          onManagedTurn: (sessionId, text, metrics, skills) => {
+            const key = `orchestration:${sessionId}`;
+            this.skillLearning?.onTurnStart(key, sessionId, text, skills, metrics.startedAt);
+            for (const id of metrics.toolIds) this.skillLearning?.onToolUse(key, id);
+            this.skillLearning?.onTokenUsage(key, metrics.inputTokens, metrics.totalTokens);
+            this.skillLearning?.onTurnEnd(key, sessionId);
+          },
+          createAgentSession: async (sessionId, profile, model, scope) => {
+            const key = scope && scope.source !== 'api' ? scope.chatId : sessionId;
+            const old = this.sessions.get(key);
+            if (old) {
+              if (!old.isIdle(0)) throw Object.assign(new Error('Agent session is busy'), { code: 'CONFLICT' });
+              await old.stop(); this.sessions.delete(key);
+            }
+            if (this.sessions.size >= this.maxConcurrent) throw new Error('Session pool full');
+            if (this.agentConfig.type !== 'app-agent') spawnArchiveReindex(this.agentConfig.workspace, this.agentConfig.knowledge, this.gatewayConfig.gateway.knowledge);
+            const agentSession = new SessionProcess(sessionId, scope?.source ?? 'api', this.agentConfig, this.gatewayConfig, this.sessionStore, scope?.chatId, profile);
+            agentSession.historyLimit = resolveMaxHistoryMessages(this.agentConfig.history?.maxHistoryMessages, this.gatewayConfig.gateway.history?.maxHistoryMessages);
+            if (model) agentSession.modelOverride = model;
+            this.sessions.set(key, agentSession);
+            return agentSession;
+          },
+          releaseAgentSession: async (sessionId, agentSession) => {
+            await agentSession.stop();
+            for (const [key, value] of this.sessions) if (value === agentSession) this.sessions.delete(key);
+          },
+        })).then(orchestration => { this.orchestration = orchestration; return orchestration; }).catch(error => { this.orchestrationStarting = undefined; throw error; });
+    }
+    return this.orchestrationStarting;
+  }
+
+  async orchestrationActivity(sessionId: string, principalId: string, after: number) {
+    return (await this.getOrchestration()).activity(sessionId, principalId, after);
+  }
+
+  async subscribeResponseText(sessionId: string, principalId: string, receive: (value: { responseId: string; text: string; final: boolean }) => void) {
+    return (await this.getOrchestration()).subscribeText(sessionId, principalId, receive);
+  }
+  async voiceReplay(sessionId: string, principalId: string, responseId?: string) {
+    return (await this.getOrchestration()).voiceAudio(sessionId, principalId, responseId);
+  }
+  saveVoiceReplay(sessionId: string, principalId: string, responseId: string, audio: Buffer): void {
+    this.orchestration?.saveVoiceAudio(sessionId, principalId, responseId, audio);
+  }
+  async authorizeVoiceSession(sessionId: string, principalId: string): Promise<void> {
+    (await this.getOrchestration()).authorizeSession(sessionId, principalId);
+  }
+  async subscribeVoiceResults(sessionId: string, principalId: string, receive: (result: { responseId: string; text: string; spoken: string; requestId?: string; speechOnly?: boolean }) => void, gender?: () => string | undefined): Promise<() => void> {
+    return (await this.getOrchestration()).subscribeVoiceResults(sessionId, principalId, receive, gender);
+  }
+  recordVoicePlayback(responseId: string, principalId: string, progress: { generation: string; epoch: number; generatedSamples: number; playedSamples: number }, state: string): void {
+    this.orchestration?.recordPlayback(responseId, principalId, progress, state);
+  }
+  async submitVoiceUtterance(sessionId: string, chatId: string, principalId: string, text: string, utteranceId: string, allowTools: boolean, model?: string): Promise<{ inputId: string; response: Promise<string>; stream?: AsyncIterable<{ responseId: string; text: string }>; responseId(): string | undefined }> {
+    if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.voice?.enabled) throw new Error('Voice is disabled');
+    if (!(await this.apiSessionExists(chatId, sessionId))) throw new Error('Session not found');
+    const orchestration = await this.getOrchestration();
+    const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: principalId,
+      chatId, threadKey: '', principalId }, text, model, modality: 'live_voice', ingressKey: `utterance:${utteranceId}` }, { execute: allowTools, writeMemory: false });
+    // The browser refreshes history on utterance.accepted, before inference finishes.
+    await orchestration.flushHistory();
+    return { ...accepted, responseId: () => orchestration.responseIdForInput(accepted.inputId) };
+  }
+  async cancelApiTask(sessionId: string, principalId: string, taskId: string) {
+    if (!this.agentConfig.orchestration?.enabled) throw new Error('Task controls require orchestration mode');
+    const runtime = await this.getOrchestration();
+    const task = runtime.taskControls.cancel(sessionId, principalId, taskId);
+    return task;
+  }
+  stopVoiceResponse(sessionId: string): void { this.orchestration?.stopResponse(sessionId); }
+
+  private async sendOrchestratedApi(sessionId: string, chatId: string, message: string,
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
+    onText?: (text: string) => void, onTool?: (event: import('../orchestration/tool-activity').ToolActivity) => void): Promise<{ text: string; attachments: ApiAttachment[] }> {
+    if (this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
+    if (!opts.principalId) throw new Error('Authenticated principal required for conversation orchestration');
+    const deadline = Date.now() + opts.timeoutMs;
+    this.pendingApiSessions.add(sessionId); // reserve before the first await
+    try {
+      const orchestration = await this.getOrchestration();
+      await this.sessionStore.ensureApiSession(this.agentConfig.id, chatId, sessionId);
+      this.apiChatIds.set(sessionId, chatId);
+      const media = opts.mediaFiles?.length ? await promoteUiUploads(this.agentsBaseDir, this.agentConfig.id, sessionId, opts.mediaFiles, this.logger) : [];
+      const index = await this.sessionStore.loadIndex(this.agentConfig.id, chatId, 'api');
+      const saved = index?.sessions.find(session => session.id === sessionId)?.imageConfig;
+      const selected = { ...(saved ? AgentRunner.durableImageConfig(saved) : {}), ...opts.imageParams };
+      const imageParams = AgentRunner.remapImageParamsRefs(Object.keys(selected).length ? selected : undefined, opts.mediaFiles, media);
+      const videoParams = AgentRunner.remapVideoParamsRefs(opts.videoParams, opts.mediaFiles, media);
+      if (videoParams) await this.sessionStore.updateSessionMeta(this.agentConfig.id, chatId, sessionId, { videoConfig: videoParams }, 'api');
+      const imageConfig = opts.imageParams && imageParams ? AgentRunner.durableImageConfig(imageParams) : undefined;
+      if (imageConfig) await this.sessionStore.updateSessionMeta(this.agentConfig.id, chatId, sessionId, { imageConfig }, 'api');
+      const requestId = opts.requestId ?? randomUUID();
+      let text = await orchestration.send({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: 'api', accountId: opts.principalId,
+        chatId, threadKey: '', principalId: opts.principalId }, text: message || '[Attachment inspection requested]', attachmentIds: media,
+        requestId, storeUserMessage: !opts.skipUserMessage,
+        metadata: imageParams || videoParams ? { promptContext: (imageParams ? AgentRunner.buildImageParamsNote(imageParams) : '') + (videoParams ? AgentRunner.buildVideoParamsNote(videoParams) : ''), imageRefs: imageParams?.image_refs } : undefined },
+        { execute: opts.allowTools ?? false, writeMemory: false }, { timeoutMs: opts.timeoutMs, model: opts.model, onText, onTool });
+      if (opts.waitForTasks) text = await orchestration.waitForTaskReport(sessionId, opts.principalId, requestId, text, deadline);
+      this.addApiAttachments(sessionId, orchestration.responseFiles(sessionId, requestId).map(ref => MediaStore.resolvePath(this.agentsBaseDir, this.agentConfig.id, ref)));
+      return { text, attachments: this.popApiAttachments(sessionId) };
+    } finally { this.pendingApiSessions.delete(sessionId); }
+  }
 
   constructor(agentConfig: AgentConfig, gatewayConfig: GatewayConfig, logger?: Logger) {
     super();
-    this.agentConfig = agentConfig;
+    this.agentConfig = applyGatewayOrchestration(agentConfig,gatewayConfig);
     this.gatewayConfig = gatewayConfig;
     this.logger = logger ?? createLogger(agentConfig.id, gatewayConfig.gateway.logDir);
 
@@ -460,6 +637,23 @@ export class AgentRunner extends EventEmitter {
   }
 
   /** Wire the skill-learning manager (planning-62). Optional; unset = feature off. */
+  async notifySkillLearning(sessionId: string, text: string): Promise<void> {
+    if (this.orchestration?.ownsSession(sessionId)) {
+      const conversation = this.orchestration.store.get('SELECT source,chat_id FROM conversations WHERE agent_session_id=?', sessionId);
+      const source = conversation?.source as ChatChannelOrApi;
+      const index = source && source !== 'api' ? await this.sessionStore.loadIndex(this.agentConfig.id, String(conversation!.chat_id), source) : undefined;
+      await this.orchestration.notifySession(sessionId, text, source === 'api' || index?.activeSessionId === sessionId);
+      return;
+    }
+    const origin = this.skillNotificationOrigins.get(sessionId);
+    if (!origin) return; // Diary only when the original destination is unavailable.
+    this.historyDb.insertMessage({ chatId: `${origin.source}-${origin.chatId}`, sessionId, source: origin.source, role: 'assistant', content: text, ts: Date.now() });
+    const index = await this.sessionStore.loadIndex(this.agentConfig.id, origin.chatId, origin.source);
+    if (index?.activeSessionId !== sessionId) return;
+    const result = await channelSender(() => this.agentConfig)({ channel: origin.source, chat_id: origin.chatId, thread_key: origin.thread }, text, randomUUID());
+    if (result.state !== 'delivered') this.logger.warn('Skill notification delivery failed', { sessionId, code: result.code });
+  }
+
   setSkillLearning(manager: SkillLearningManager | undefined): void {
     this.skillLearning = manager;
   }
@@ -489,7 +683,7 @@ export class AgentRunner extends EventEmitter {
       req.on('data', (chunk) => {
         raw += chunk;
       });
-      req.on('end', () => {
+      req.on('end', async () => {
         if (url.pathname === '/command') {
           this.handleCommandRequest(raw, res);
           return;
@@ -509,8 +703,6 @@ export class AgentRunner extends EventEmitter {
         // receiver (Bun) can try to reuse the stale socket → "socket connection
         // was closed unexpectedly". Closing per-request avoids the race entirely.
         res.setHeader('Connection', 'close');
-        res.writeHead(200);
-        res.end('ok');
         try {
           const params = JSON.parse(raw) as {
             content?: string;
@@ -528,6 +720,63 @@ export class AgentRunner extends EventEmitter {
           // forget adding to a chain of `=== 'x' ? 'x' : ...` checks.
           const channelSource = (isChatChannel(meta['source']) ? meta['source'] : 'telegram') as ChatChannel;
           this.channelSourceMap.set(chatId, channelSource);
+
+          const channelOrchestration = this.orchestration?.ownsChannel(channelSource, chatId) || (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channelSource));
+          if (channelSource!=='telegram' && this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes(channelSource) && /^\/sessions?(?:\s|$)/.test(content.trim())) {
+            const index=await this.sessionStore.listSessions(this.agentConfig.id,chatId,channelSource);
+            const current=index.sessions.find(session=>session.id===index.activeSessionId);
+            const text=content.trim()==='/sessions'
+              ? `Sessions\n${index.sessions.slice(0,15).map(session=>`${session.id===index.activeSessionId?'✅ ':''}${session.name}\n${session.id}`).join('\n\n')}`
+              : `Current session: ${current?.name??'(unnamed)'}\n${index.activeSessionId}\nMode: Orchestration\nModel: ${this.agentConfig.claude.model}\nMessages: ${current?.messageCount??0}\n\nCommands: /session /sessions /voice /voices /tasks /stop`;
+            await this.sendOrchestrationControl(channelSource,chatId,{text,buttons:[]},meta);
+            res.writeHead(200);res.end('ok');return;
+          }
+          if (channelSource!=='telegram' && (/^\/(voice|voices|tasks|stop|orch)(?:\s|$)/.test(content.trim()) || (this.agentConfig.orchestration?.enabled&&(this.agentConfig.orchestration.channels??['api']).includes(channelSource)&&content.trim()==='/help'))) {
+            const enabled=!!(this.agentConfig.orchestration?.enabled&&(this.agentConfig.orchestration.channels??['api']).includes(channelSource));
+            if(enabled){
+              const sessionId=await this.sessionStore.getActiveSessionId(this.agentConfig.id,chatId,channelSource);
+              const runtime=await this.getOrchestration();
+              const scope={channel:channelSource,chatId,thread:meta.thread_ts??meta.message_thread_id??'',sessionId,principalId:`${channelSource}:${meta.user_id??meta.user??chatId}`};
+              let menu;
+              try{menu=await runtime.channelControls.handle(scope,content.trim());}
+              catch{menu={text:'Control unavailable or expired. Please open the command again.',buttons:[]};}
+              await this.sendOrchestrationControl(channelSource,chatId,menu,meta);
+              res.writeHead(200);res.end('ok');return;
+            }
+            // Keep the legacy /stop path, but never turn disabled controls into model prompts.
+            if(!/^\/stop(?:\s|$)/.test(content.trim())){
+              await this.sendOrchestrationControl(channelSource,chatId,{text:'These controls require orchestration mode.',buttons:[]},meta);
+              res.writeHead(200);res.end('ok');return;
+            }
+          }
+          if (channelOrchestration && !isBuiltinCommand(content.trim(), channelSource)) {
+            const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, channelSource);
+            const orchestration = await this.getOrchestration();
+            const media: string[] = [];
+            if (meta.image_path || meta.document_path) {
+              const attachmentPath = meta.image_path || meta.document_path;
+              media.push(ingestOrchestrationMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, attachmentPath));
+              if (meta.media_ephemeral === '1') AgentRunner.discardEphemeralStaging(attachmentPath);
+            }
+            else if (meta.attachment_file_id) media.push(await receiveChannelMedia(this.agentConfig, this.agentsBaseDir, channelSource, chatId, meta.attachment_file_id));
+            if (meta.replied_image_path) media.push(ingestOrchestrationMedia(this.agentsBaseDir, this.agentConfig.id, `${channelSource}-${chatId}`, meta.replied_image_path));
+            const senderId = meta.user_id ?? meta.user ?? chatId;
+            const accepted = orchestration.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId, source: channelSource,
+              accountId: this.agentConfig.id, chatId, threadKey: channelSource === 'whatsapp' && meta.account_id ? `whatsapp-account:${meta.account_id}` : meta.thread_ts ?? meta.message_thread_id ?? '', principalId: `${channelSource}:${senderId}` },
+              text: content || '[Attachment inspection requested]', attachmentIds: media, trustedChannelMember: true,
+              modality: ['voice', 'audio'].includes(meta.media_type ?? meta.attachment_kind) ? 'voice_note' : 'text',
+              ingressKey: meta.message_id, metadata: { senderId, senderName: meta.sender_name, platformMessageId: meta.message_id,
+                attachmentName: meta.attachment_name, mediaType: meta.media_type ?? meta.attachment_kind, repliedText: meta.replied_text } },
+              { execute: this.agentConfig.allow_tools !== false, writeMemory: this.agentConfig.allow_tools !== false });
+            // The durable receipt precedes receiver acknowledgment and inference.
+            res.writeHead(200); res.end('ok');
+            void accepted.response.catch(error => {
+              // The durable decision/outbox owns failure delivery and activity, including autonomous turns.
+              this.logger.error('Conversation channel turn failed', { chatId, code: error.code ?? 'ORCHESTRATION_ERROR', ...(error.timeout ? {timeout: error.timeout} : {}) });
+            });
+            return;
+          }
+          res.writeHead(200); res.end('ok');
 
           // Slack: remember the current message's thread context so the
           // auto-forward fallback (writeAutoForward) can stay in-thread. A
@@ -596,6 +845,7 @@ export class AgentRunner extends EventEmitter {
           this.channelCoalesce.set(chatId, buf);
           return;
         } catch (err) {
+          if (!res.headersSent) { res.writeHead(503); res.end('Channel input was not accepted'); }
           this.logger.warn('Failed to parse channel callback body', {
             error: (err as Error).message,
           });
@@ -643,6 +893,10 @@ export class AgentRunner extends EventEmitter {
     }
 
     const session = this.sessions.get(chatId);
+    if (session?.runtimeProfile || this.requiresDurableChannelIngress('telegram')) {
+      respond({ ok: false, error: 'Recovery is owned by orchestration; legacy turn replay is disabled.' });
+      return;
+    }
     const autoRecover = this.gatewayConfig.gateway.selfHealing?.autoRecover === true;
 
     const req: RecoveryRequest = {
@@ -855,6 +1109,75 @@ export class AgentRunner extends EventEmitter {
     }
 
     const command = body.command;
+    if (command === 'telegram_voices') {
+      const chatId=body.chat_id??'',payload=body.payload??{};
+      if(!/^\d+$/.test(chatId)||payload.user_id!==chatId){respond({success:false},400);return;}
+      if(!this.agentConfig.orchestration?.enabled||!this.agentConfig.orchestration.channels?.includes('telegram')){respond({success:false,error:'Voice controls unavailable.'});return;}
+      try {
+        const voices=(await this.getOrchestration()).telegramVoices;
+        if(payload.action==='dismiss'&&typeof payload.menu_id==='string'){voices.dismiss(chatId,payload.menu_id);respond({success:true});}
+        else if(payload.action==='choose'&&typeof payload.menu_id==='string'&&typeof payload.index==='number')respond({success:true,...await voices.choose(chatId,payload.menu_id,payload.index)});
+        else respond({success:true,...await voices.menu(chatId,typeof payload.page==='number'?payload.page:0,typeof payload.menu_id==='string'?payload.menu_id:undefined,typeof payload.gender==='string'?payload.gender:undefined)});
+      } catch {respond({success:false,error:'Voice list unavailable or provider changed. Use /voices to refresh.'});}
+      return;
+    }
+
+    if (command === 'telegram_tasks') {
+      const chatId=body.chat_id??'', payload=body.payload??{}, principalId=`telegram:${payload.user_id??''}`;
+      if (!/^\d+$/.test(chatId) || payload.user_id!==chatId) { respond({success:false},400); return; }
+      if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.orchestration.channels?.includes('telegram')) { respond({success:false,error:'Task controls require orchestration mode.'}); return; }
+      try {
+        const runtime=await this.getOrchestration();
+        const sessionId=await this.sessionStore.getActiveSessionId(this.agentConfig.id,chatId,'telegram');
+        if (payload.session_id !== undefined && payload.session_id !== sessionId) { respond({success:false,error:'TASK_SESSION_CHANGED'}); return; }
+        if (payload.action==='detail' || payload.action==='cancel') {
+          if (typeof payload.task_id!=='string') throw Error('INVALID_TASK');
+          const task=payload.action==='cancel' ? runtime.taskControls.cancel(sessionId,principalId,payload.task_id) : runtime.taskControls.detail(sessionId,principalId,payload.task_id);
+          respond({success:true,sessionId,task});
+        } else respond({success:true,sessionId,...runtime.taskControls.list(sessionId,principalId,typeof payload.page==='number'?payload.page:0)});
+      } catch { respond({success:false,error:'Task unavailable. Use /tasks to refresh.'}); }
+      return;
+    }
+
+    if (command === 'task_stop') {
+      const chatId=body.chat_id ?? '', principalId=`telegram:${body.payload?.user_id ?? ''}`;
+      if (!/^\d+$/.test(chatId) || body.payload?.user_id !== chatId) { respond({success:false,error:'invalid_request'},400); return; }
+      try {
+        if (!(this.agentConfig.orchestration?.enabled && this.agentConfig.orchestration.channels?.includes('telegram'))) {
+          if (body.payload?.menu_id) { respond({success:false,error:'Orchestration is disabled.'}); return; }
+          await this.handleCommandStop(chatId); respond({success:true,legacy:true}); return;
+        }
+        const runtime=await this.getOrchestration();
+        const sessionId=await this.sessionStore.getActiveSessionId(this.agentConfig.id,chatId,'telegram');
+        if (typeof body.payload?.menu_id === 'string' && typeof body.payload?.index === 'number') {
+          respond({success:true,...runtime.stopControls.choose(sessionId,principalId,body.payload.menu_id,body.payload.index)});
+        } else {
+          const menu=runtime.stopControls.open(sessionId,principalId);
+          respond({success:true,...menu,text:stopMenuText(menu,true)});
+        }
+      } catch { respond({success:false,error:'Selection unavailable. Use /stop to refresh the task list.'}); }
+      return;
+    }
+
+    if (command === 'telegram_voice') {
+      const chatId = body.chat_id ?? '';
+      const value = body.payload?.enabled;
+      const mode = body.payload?.mode;
+      if (!/^\d+$/.test(chatId) || (value !== undefined && typeof value !== 'boolean') || (mode !== undefined && !VOICE_REPLY_MODES.includes(mode as VoiceReplyMode))) {
+        respond({ success: false, error: 'invalid_request' }, 400); return;
+      }
+      if (!this.agentConfig.orchestration?.enabled || !this.agentConfig.orchestration.channels?.includes('telegram') || !this.agentConfig.voice?.enabled || this.agentConfig.voice?.notes?.replyWithVoice === false) {
+        respond({ success: false, error: 'voice_not_configured' }); return;
+      }
+      try {
+        const runtime = await this.getOrchestration();
+        if (mode !== undefined) runtime.store.setTelegramVoiceMode(chatId, mode as VoiceReplyMode);
+        else if (typeof value === 'boolean') runtime.store.setTelegramVoice(chatId, value);
+        respond({ success: true, enabled: runtime.store.telegramVoice(chatId), mode: runtime.store.telegramVoiceMode(chatId) });
+      } catch { respond({ success: false, error: 'voice_settings_unavailable' }, 500); }
+      return;
+    }
+
 
     if (command === 'get_model') {
       respond({ model: this.agentConfig.claude.model });
@@ -890,6 +1213,7 @@ export class AgentRunner extends EventEmitter {
     // its initData. The browser-facing routes live on the gateway; here we only
     // mint the pairing and hand back the phone-openable link.
     if (command === 'cli_pair') {
+      if (this.gatewayConfig.gateway.headless !== false || this.agentConfig.type === 'app-agent' || this.agentConfig.orchestration?.enabled) { respond({success:false,error:'interactive_mode_required'}); return; }
       const payload = body.payload ?? {};
       const channel = payload['channel'];
       const userId = typeof payload['user_id'] === 'string' ? payload['user_id'] : '';
@@ -1355,6 +1679,8 @@ export class AgentRunner extends EventEmitter {
         session.setProcessing(true);
         const turnText = blocks.join('\n');
         // Skill-learning: mark the start of a user turn (cheap, best-effort).
+        const originMeta = entries[0]?.meta ?? {};
+        this.skillNotificationOrigins.set(sessionId, { source: channelSource, chatId, thread: originMeta.thread_ts ?? originMeta.message_thread_id ?? '' });
         this.skillLearning?.onTurnStart(chatId, sessionId, entries[0]?.content ?? '', invokedSkills);
         session.sendMessage(turnText);
         // Remember this turn for the C1 guarded resend (Phase 3b): reset the
@@ -2290,7 +2616,7 @@ export class AgentRunner extends EventEmitter {
           // event. Start the typing-done timer here so the indicator stays alive
           // through multi-turn tool-call sequences and only stops when all work is done.
           if (obj['type'] === 'session_idle' && proc.backend === 'pty-shell') {
-            // A parent can become idle immediately after dispatching background
+            // An agent can become idle immediately after dispatching background
             // Agent/Workflow work. Keep the Telegram typing signal and processing
             // sentinel alive until the task notification starts its follow-up turn.
             const waitingForBackgroundWork = proc.retainBackgroundWorkingState();
@@ -2347,7 +2673,7 @@ export class AgentRunner extends EventEmitter {
       }
 
       proc.on('backgroundWorkExpired', () => {
-        // The child task never notified its parent within the bounded grace
+        // The child task never notified its agent within the bounded grace
         // window; release the Telegram typing signal instead of leaving it live.
         this.writeTypingDone(mapKey);
       });
@@ -2413,6 +2739,10 @@ export class AgentRunner extends EventEmitter {
       total: this.sessions.size,
     });
     return proc;
+  }
+
+  apiTaskStopReply(sessionId: string, principalId: string, text: string): string | undefined {
+    return this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes('api') ? this.orchestration?.stopControls.replyCommand(sessionId,principalId,text) : undefined;
   }
 
   static isApiBuiltinCommand(content: string): boolean {
@@ -2637,6 +2967,10 @@ export class AgentRunner extends EventEmitter {
    * "No turn in progress." that fired whenever interrupt() no-op'd mid-spawn.
    */
   private async handleCommandStop(chatId: string): Promise<void> {
+    if (this.orchestration && this.agentConfig.orchestration?.enabled) {
+      const sessionId = await this.sessionStore.getActiveSessionId(this.agentConfig.id, chatId, this.channelFor(chatId));
+      if (this.orchestration.stopResponse(sessionId)) { this.writeAutoForward(chatId, 'Response stopped. Tasks remain active.'); return; }
+    }
     // Cancel queued + buffered work first so nothing flushes in behind the interrupt.
     const buffered = this.channelCoalesce.get(chatId);
     if (buffered?.timer) clearTimeout(buffered.timer);
@@ -3046,7 +3380,9 @@ export class AgentRunner extends EventEmitter {
     const { immediate, deferred } = await this.restartOrDefer({
       skipBusy: false,
       deferIdle: true,
-      filter: (proc) => proc.connectorConfigChanged(connectorId, target),
+      // Managed turns use a fresh subprocess/config on their next decision or task.
+      // Never send them through legacy restart/replay while effects may be in flight.
+      filter: (proc) => !proc.runtimeProfile && proc.connectorConfigChanged(connectorId, target),
     });
     return { restarted: immediate + deferred > 0 };
   }
@@ -3274,7 +3610,7 @@ export class AgentRunner extends EventEmitter {
   private startIdleCleaner(): void {
     this.idleCleanerTimer = setInterval(async () => {
       for (const [id, proc] of this.sessions) {
-        // A parent that just dispatched Agent/Workflow/Monitor work is CLI-idle
+        // An agent that just dispatched Agent/Workflow/Monitor work is CLI-idle
         // but that dispatch may still need this session to receive its
         // eventual task notification.
         if (proc.hasLikelyOutstandingBackgroundWork()) continue;
@@ -3289,6 +3625,7 @@ export class AgentRunner extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    if (this.agentConfig.orchestration?.enabled || fs.existsSync(path.join(this.agentDir, 'orchestration.db'))) await this.getOrchestration();
     this.stopping = false;
     await this.sweepStaleSessionDirs();
     await this.startCallbackServer();
@@ -3297,16 +3634,20 @@ export class AgentRunner extends EventEmitter {
         this.agentConfig,
         this.callbackPort,
         this.gatewayConfig.gateway.logDir,
+        this.gatewayConfig.gateway.headless !== false,
       );
       this.receiver.start();
+      this.telegramCommandConfig=this.telegramCommandsKey();
     }
     if (this.agentConfig.discord?.botToken) {
       this.discordReceiver = new DiscordReceiver(
         this.agentConfig,
         this.callbackPort,
         this.gatewayConfig.gateway.logDir,
+        this.gatewayConfig.gateway.headless !== false,
       );
       this.discordReceiver.start();
+    this.discordCommandConfig=this.telegramCommandsKey();
     }
     // LINE slow-LLM postback button: gateway-side token lifecycle + cache.
     // Enabled for any LINE agent unless its threshold is 0 (then the MCP
@@ -3366,8 +3707,32 @@ export class AgentRunner extends EventEmitter {
     }
   }
 
+  private telegramCommandConfig = '';
+  private telegramCommandsKey(): string {
+    return JSON.stringify([this.gatewayConfig.gateway.headless !== false, this.agentConfig.type,
+      Boolean(this.agentConfig.orchestration?.enabled), this.agentConfig.orchestration?.channels ?? ['api']]);
+  }
+  /** Reload only the receiver when command visibility changes; Agent/Worker work continues. */
+  refreshTelegramCommands(): void {
+    const discord=this.discordReceiver,discordKey=this.telegramCommandsKey();
+    if(discord&&discordKey!==this.discordCommandConfig){
+      this.discordCommandConfig=discordKey;
+      void discord.stop().then(()=>{if(this.discordReceiver!==discord||this.stopping)return;this.discordReceiver=null;this.startDiscordReceiver();});
+    }
+    const previous=this.receiver, key=this.telegramCommandsKey();
+    if(!previous || key===this.telegramCommandConfig)return;
+    this.telegramCommandConfig=key;
+    void previous.stop().then(()=>{
+      if(this.receiver!==previous || this.stopping)return;
+      this.receiver=null;this.startTelegramReceiver();
+    });
+  }
+
   updateAgentConfig(newConfig: AgentConfig): void {
+    newConfig=applyGatewayOrchestration(newConfig,this.gatewayConfig);
+    this.orchestration?.updateAgentConfig(newConfig);
     this.agentConfig = newConfig;
+    this.refreshTelegramCommands();
     // Restart LineReplyManager if the LINE config changed so the live instance
     // picks up a new access token, threshold, or labels without a full restart.
     this.stopLineReply();
@@ -3743,8 +4108,10 @@ export class AgentRunner extends EventEmitter {
       this.agentConfig,
       this.callbackPort,
       this.gatewayConfig.gateway.logDir,
+      this.gatewayConfig.gateway.headless !== false,
     );
     this.receiver.start();
+    this.telegramCommandConfig=this.telegramCommandsKey();
     this.logger.info('TelegramReceiver hot-started', { agentId: this.agentConfig.id });
   }
 
@@ -3765,8 +4132,10 @@ export class AgentRunner extends EventEmitter {
       this.agentConfig,
       this.callbackPort,
       this.gatewayConfig.gateway.logDir,
+      this.gatewayConfig.gateway.headless !== false,
     );
     this.discordReceiver.start();
+    this.discordCommandConfig=this.telegramCommandsKey();
     this.logger.info('DiscordReceiver hot-started', { agentId: this.agentConfig.id });
   }
 
@@ -3782,6 +4151,12 @@ export class AgentRunner extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.orchestrationStarting) {
+      const orchestration = await this.orchestrationStarting.catch(() => undefined);
+      await orchestration?.close();
+      this.orchestration = undefined;
+      this.orchestrationStarting = undefined;
+    }
     if (this.idleCleanerTimer !== null) {
       clearInterval(this.idleCleanerTimer);
       this.idleCleanerTimer = null;
@@ -3871,6 +4246,17 @@ export class AgentRunner extends EventEmitter {
     return this.receiver?.isRunning() ?? false;
   }
 
+  getOrchestrationSummary() {
+    if (!this.agentConfig.orchestration?.enabled && !this.orchestration) return undefined;
+    const summary = this.orchestration?.dashboardSummary() ?? { enabled: true, backend: 'headless', workspaceMode: this.agentConfig.type === 'app-agent' ? 'container' : this.agentConfig.orchestration?.tasks?.workspaceMode ?? 'host', activeAgentSessions: [], tasks: [], sessions: [] };
+    const processes = [...this.sessions.values()].filter(p => p.runtimeProfile?.role === 'agent' && p.isRunning());
+    return { ...summary, sessions: summary.sessions.map(s => {
+      const p = processes.find(p => p.sessionId === s.sessionId);
+      return { ...s, model: p?.model ?? s.model, tokens: p?.totalTokens ?? 0, spawnedAt: p?.spawnedAt ?? 0,
+        uptimeSec: p ? Math.floor((Date.now() - p.spawnedAt) / 1000) : 0 };
+    }), agentProcesses: processes.map(p => ({ sessionId: p.sessionId, hostProcessId: p.processId, container: this.agentConfig.container })) };
+  }
+
   getSessionsSummary(): Array<{ chatId: string; sessionId: string; source: string; mode: string; model: string; isRunning: boolean; spawnedAt: number; uptimeSec: number; tokens: number }> {
     const now = Date.now();
     // A single logical session can appear multiple times in the ring buffer: a
@@ -3911,8 +4297,9 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     message: string,
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
   ): Promise<{ text: string; attachments: ApiAttachment[] }> {
+    if (this.orchestrationForApi(sessionId)) return this.sendOrchestratedApi(sessionId, chatId, message, opts);
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
         new Error(`Session ${sessionId} already has a pending request`),
@@ -4218,8 +4605,19 @@ export class AgentRunner extends EventEmitter {
     chatId: string,
     message: string,
     callbacks: ApiStreamCallbacks,
-    opts: { timeoutMs: number; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string },
+    opts: { timeoutMs: number; waitForTasks?: boolean; allowTools?: boolean; mediaFiles?: string[]; model?: string; skipUserMessage?: boolean; imageParams?: ImageParams; videoParams?: VideoParams; requestId?: string; principalId?: string },
   ): Promise<() => void> {
+    if (this.orchestrationForApi(sessionId)) {
+      if (this.pendingApiSessions.has(sessionId)) throw Object.assign(new Error('Session already has a pending request'), { code: 'CONFLICT' });
+      const turn = this.turnStreams.start(turnStreamKey('api', sessionId), opts.requestId ?? randomUUID());
+      const sink = callbackSink(callbacks); turn.attach(sink, 0);
+      void this.sendOrchestratedApi(sessionId, chatId, message, { ...opts, requestId: turn.requestId },
+        text => turn.emit({ type: 'text_delta', text } as StreamEvent),
+        event => { if (event.type === 'tool_use') turn.emit({ ...event, type: 'tool_use' }); })
+        .then(result => this.turnStreams.complete(turn, resultEvent(result.text, result.attachments)))
+        .catch(error => this.turnStreams.complete(turn, errorEvent(error), error));
+      return () => turn.detach(sink);
+    }
     if (this.pendingApiSessions.has(sessionId)) {
       const err = Object.assign(
         new Error(`Session ${sessionId} already has a pending request`),
@@ -4715,7 +5113,7 @@ export class AgentRunner extends EventEmitter {
     sessionId: string,
     chatId: string,
     command: string,
-    opts?: { skipPersist?: boolean; model?: string },
+    opts?: { skipPersist?: boolean; model?: string; principalId?: string; displayCommand?: string },
   ): Promise<{ result: Record<string, unknown>; responseText: string }> {
     const agentId = this.agentConfig.id;
     const storeChatId = chatId;           // sessionStore adds channel prefix internally
@@ -4734,6 +5132,8 @@ export class AgentRunner extends EventEmitter {
     if (!AgentRunner.isApiBuiltinCommand(cmd)) {
       throw new Error(`Unknown command: ${cmd}`);
     }
+
+    if (cmd === '/stop' && this.agentConfig.orchestration?.enabled && opts?.principalId) this.orchestration?.authorizeSession(sessionId, opts.principalId);
 
     // Register session in the api-{chatId} index on first use (same as sendApiMessageStream)
     await this.sessionStore.ensureApiSession(agentId, storeChatId, sessionId).catch((err: unknown) => {
@@ -4758,7 +5158,7 @@ export class AgentRunner extends EventEmitter {
     // Persist the full user command before executing so it appears in history.
     // Skip for /clear — clearSession() below wipes the table anyway; only the response survives.
     if (cmd !== '/clear') {
-      persist('user', command);
+      persist('user', opts?.displayCommand ?? command);
     }
 
     let result: Record<string, unknown>;
@@ -4773,8 +5173,23 @@ export class AgentRunner extends EventEmitter {
           ? `Current model: ${model}\n(To switch models use the model picker or the /api/v1/agents/:id/model endpoint — argument ignored.)`
           : `Current model: ${model}`;
       } else if (cmd === '/stop') {
+        if (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels??['api']).includes('api') && this.orchestration && opts?.principalId) {
+          const selection=/^\/stop\s+([a-f0-9-]{36})\s+(\d+)$/.exec(command.trim());
+          if (selection) {
+            try {
+              const selected=this.orchestration.stopControls.choose(sessionId,opts.principalId,selection[1],Number(selection[2]));
+              result={...selected}; responseText=selected.text;
+            } catch { result={error:'STOP_SELECTION_UNAVAILABLE'}; responseText='Selection unavailable. Use /stop to refresh the task list.'; }
+          } else {
+            const menu=this.orchestration.stopControls.open(sessionId,opts.principalId);
+            responseText=stopMenuText(menu); result={...menu,responseText};
+          }
+          forcePersist=true;
+        } else {
         const session = this.sessions.get(sessionId);
-        const stopped = session ? session.interrupt() : false;
+        const stopped = this.agentConfig.orchestration?.enabled && this.orchestration?.isBusy(sessionId)
+          ? this.orchestration.stopResponse(sessionId)
+          : session ? session.interrupt() : false;
         result = { stopped };
         responseText = stopped
           ? 'Session was interrupted before I could respond.'
@@ -4784,6 +5199,8 @@ export class AgentRunner extends EventEmitter {
         // a typed /stop command show the same outcome instead of the button leaving a
         // silently-dangling user turn.
         forcePersist = stopped;
+
+        }
       } else if (cmd === '/restart') {
         this.restartProcess(sessionId).catch(() => {});
         result = { restarting: true };
@@ -5072,6 +5489,80 @@ export class AgentRunner extends EventEmitter {
     MediaStore.deleteMediaFiles(this.agentsBaseDir, this.agentConfig.id, mediaPaths);
   }
 
+  /** The route has already authorized this API principal for the Agent. Preserve
+   * the original channel binding, but never impersonate its human sender. */
+  private async sendOrchestratedChannel(rawChatId: string, channel: ChatChannel, sessionId: string,
+    message: string, senderName: string | undefined, callbacks: ApiStreamCallbacks,
+    opts: { timeoutMs: number; requestId?: string; principalId?: string; allowTools?: boolean }): Promise<() => void> {
+    if (!opts.principalId) throw new Error('Authenticated principal required for conversation orchestration');
+    const runtime = await this.getOrchestration();
+    const rows = runtime.store.all('SELECT * FROM conversations WHERE agent_session_id=?', sessionId);
+    if (rows.length > 1 || rows.some(row => row.source !== channel || row.chat_id !== rawChatId)) throw new Error('Ambiguous or mismatched channel session');
+    if (!rows.length) {
+      const index = await this.sessionStore.loadIndex(this.agentConfig.id, rawChatId, channel);
+      if (!index?.sessions.some(session => session.id === sessionId)) throw new Error('Session not found');
+    }
+    const requestId = opts.requestId ?? randomUUID();
+    const accepted = runtime.submitInput({ scope: { agentId: this.agentConfig.id, agentSessionId: sessionId,
+      source: channel, accountId: String(rows[0]?.account_id ?? this.agentConfig.id), chatId: rawChatId,
+      threadKey: String(rows[0]?.thread_key ?? ''), principalId: opts.principalId },
+      text: message, requestId, trustedChannelMember: true, metadata: { senderName, senderId: opts.principalId } },
+      { execute: opts.allowTools ?? false, writeMemory: false });
+    const turn = this.turnStreams.start(turnStreamKey(channel, sessionId), requestId);
+    const sink = callbackSink(callbacks); turn.attach(sink, 0);
+    let displayed = '';
+    const unsubscribe = runtime.subscribeText(sessionId, opts.principalId, event => {
+      if (event.responseId !== runtime.responseIdForInput(accepted.inputId)) return;
+      if (event.text.startsWith(displayed)) {
+        const delta = event.text.slice(displayed.length); displayed = event.text;
+        if (delta) turn.emit({ type: 'text_delta', text: delta });
+      }
+    });
+    const input = runtime.store.get('SELECT conversation_id FROM conversation_inputs WHERE id=?', accepted.inputId)!;
+    const conversation = runtime.store.assertMember(String(input.conversation_id), opts.principalId);
+    let cursor = { streamId: String(conversation.stream_id), seq: Number(conversation.last_event_seq) };
+    const events = runtime.events.subscribe(String(conversation.id), opts.principalId, cursor);
+    let closed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const close = () => { closed = true; clearTimeout(timer); unsubscribe(); events.close(); };
+    const forward = (page: import('../orchestration/events').EventPage) => {
+      if (page.snapshotRequired) throw new Error('Tool activity history expired; reload session activity');
+      for (const event of page.events) {
+        if (event.seq <= cursor.seq) continue;
+        const payload = event.payload as unknown as import('../orchestration/tool-activity').ToolActivity;
+        if (event.type === 'tool.activity' && payload.type === 'tool_use') turn.emit({ ...payload, type: 'tool_use' });
+        cursor = { streamId: page.cursor.streamId, seq: event.seq };
+      }
+    };
+    const drain = () => {
+      while (true) {
+        const page = runtime.events.read(String(conversation.id), opts.principalId!, cursor);
+        forward(page);
+        if (!page.snapshotRequired && !page.events.length) break;
+      }
+    };
+    const fail = (error: Error) => {
+      if (closed) return;
+      try { drain(); } catch { /* Preserve the original stream/provider failure. */ }
+      this.turnStreams.completeAndRelease(turn, errorEvent(error), error);
+      close();
+    };
+    void (async () => {
+      for await (const page of events.pages) { if (closed) break; forward(page); }
+    })().catch(fail);
+    timer = setTimeout(() => fail(Object.assign(new Error('Agent response timeout'), { code: 'TIMEOUT_SOFT' })), opts.timeoutMs);
+    void accepted.response.then(text => {
+      if (closed) return;
+      try {
+        // Drain before terminal success, even when completion precedes the next poll.
+        drain();
+        this.turnStreams.completeAndRelease(turn, resultEvent(text, []));
+        close();
+      } catch (error) { fail(error instanceof Error ? error : new Error('Tool activity stream failed')); }
+    }, fail);
+    return () => { turn.detach(sink); }; // Durable work and original channel delivery survive disconnect.
+  }
+
   /**
    * Send a message into an existing channel session (cross-channel continuation from UI).
    * The session process receives full history context from the session JSON (Layer 1).
@@ -5087,8 +5578,11 @@ export class AgentRunner extends EventEmitter {
     message: string,
     senderName: string | undefined,
     callbacks: ApiStreamCallbacks,
-    opts: { timeoutMs: number; requestId?: string },
+    opts: { timeoutMs: number; requestId?: string; principalId?: string; allowTools?: boolean },
   ): Promise<() => void> {
+    const managed = (this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes(channel)) ||
+      (this.orchestration?.ownsSession(sessionId) && !this.orchestration.canReturnToLegacy());
+    if (managed) return this.sendOrchestratedChannel(rawChatId, channel, sessionId, message, senderName, callbacks, opts);
     // Ensure the session process uses the correct channel source
     this.channelSourceMap.set(rawChatId, channel);
 

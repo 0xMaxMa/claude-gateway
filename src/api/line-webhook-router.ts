@@ -1,3 +1,4 @@
+import { orderLineRequest } from '../shared/line-request-order';
 /**
  * LINE inbound webhook handler (openclaw-style: LINE is webhook-only, no polling).
  *
@@ -350,7 +351,7 @@ export type NormalizedLineMessage = {
 /**
  * Normalize a LINE webhook event into the gateway's {content, meta} intake shape.
  * Returns null for anything we don't handle (message types other than text/image/
- * file, or a source we can't key a conversation on).
+ * file/audio, or a source we can't key a conversation on).
  *
  * `resolved` lets the caller pass the source it already resolved for the access
  * gate, so a single event isn't re-parsed; omitted, it resolves here.
@@ -361,11 +362,11 @@ export function normalizeLineEvent(
 ): NormalizedLineMessage | null {
   if (event.type !== 'message') return null;
   const msg = (event as webhook.MessageEvent).message;
-  // Text, image, and file are handled. Image/file bytes are fetched separately in
+  // Text, image, file and audio are normalized; audio routing is orchestration-only. Image/file bytes are fetched separately in
   // handlePost (via the LINE blob API) and surfaced to the agent through
   // meta.image_path — the generic "local path the agent should Read" channel,
   // which the runner stages into MediaStore regardless of media kind.
-  if (!msg || (msg.type !== 'text' && msg.type !== 'image' && msg.type !== 'file')) return null;
+  if (!msg || (msg.type !== 'text' && msg.type !== 'image' && msg.type !== 'file' && msg.type !== 'audio')) return null;
   // Accept 1:1 user, group, and room sources. chat_id is the conversation key
   // (userId / groupId / roomId — the reply/push target); user_id is the human
   // who sent it (may be absent in groups → falls back to the conversation id).
@@ -385,6 +386,7 @@ export function normalizeLineEvent(
   };
   if (msg.type === 'image') meta.media_type = 'image';
   let content = text;
+  if (msg.type === 'audio') { meta.media_type = 'audio'; meta.attachment_kind = 'voice'; content = '(voice message)'; }
   if (msg.type === 'file') {
     const file = msg as webhook.FileMessageContent;
     meta.media_type = 'file';
@@ -425,12 +427,12 @@ export type NormalizedLinePostback = { chatId: string; replyToken: string; data:
  */
 export function markMediaUnavailable(
   norm: NormalizedLineMessage,
-  mediaType: 'image' | 'file',
+  mediaType: 'image' | 'file' | 'audio',
   reason: string,
 ): void {
   delete norm.meta.image_path;
   const name = norm.meta.attachment_name;
-  const label = mediaType === 'image' ? 'image' : name ? `file: ${name}` : 'file';
+  const label = mediaType === 'image' ? 'image' : mediaType === 'audio' ? 'audio' : name ? `file: ${name}` : 'file';
   norm.content = `(${label} — not available: ${reason})`;
 }
 
@@ -549,9 +551,11 @@ export function createLineWebhookHandler(
       '';
     persistPublicBase(runner.getAgentConfig().workspace, host, logger);
 
-    // Acknowledge immediately; process events after responding.
-    res.status(200).json({ ok: true });
-
+    // Orchestrated conversations retain durable admission while draining after opt-out.
+    const orchestrationConfig = runner.getAgentConfig().orchestration;
+    const durableIngress = runner.requiresDurableChannelIngress?.('line') ?? (orchestrationConfig?.enabled && (orchestrationConfig.channels ?? ['api']).includes('line'));
+    if (!durableIngress) res.status(200).json({ ok: true });
+    try {
     let events: webhook.Event[] = [];
     try {
       events = (JSON.parse(buf.toString('utf8')) as { events?: webhook.Event[] }).events ?? [];
@@ -583,6 +587,12 @@ export function createLineWebhookHandler(
       // is safe — only users who received the button can tap it.
       const pb = normalizeLinePostback(event);
       if (pb) {
+        if(/^orch:[a-f0-9-]{36}$/.test(pb.data)){
+          if(!isResolvedSourceAllowed(cfg,resolveLineSource(event.source)))continue;
+          const forwarded=await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:`/orch ${pb.data.slice(5)}`,meta:{source:'line',chat_id:pb.chatId,user_id:event.source?.userId??pb.chatId,reply_token:pb.replyToken}})});
+          if(!forwarded.ok)throw Error('Control unavailable');
+          continue;
+        }
         // `/cli` approve/deny — unlock (or reject) a terminal-viewer pairing.
         // The pairing binds the requesting user; approveCliPairing checks the
         // tapping user (pb.chatId, a LINE-verified id) matches, so bypassing the
@@ -750,11 +760,21 @@ export function createLineWebhookHandler(
       // and instructs the agent to Read it, same as Telegram attachments.
       // Images and files share that path; meta.media_type tells them apart.
       const mediaType = norm.meta.media_type;
-      if ((mediaType === 'image' || mediaType === 'file') && blobClient && norm.meta.message_id) {
+      if (mediaType === 'audio' && !(runner.getAgentConfig().orchestration?.enabled && (runner.getAgentConfig().orchestration?.channels ?? ['api']).includes('line'))) continue;
+      // Loading animation (best-effort, 1:1 only — LINE rejects it for
+      // groups/rooms, where chat_id is a groupId/roomId).
+      if (client && norm.meta.line_chat_type === 'user') {
+        await orderLineRequest(runner.getAgentConfig().id, userId, () => client.showLoadingAnimation({ chatId: userId, loadingSeconds: LOADING_SECONDS }))
+          .catch((err) => logger.debug('showLoadingAnimation failed', { error: (err as Error).message }));
+      }
+
+      if ((mediaType === 'image' || mediaType === 'file' || mediaType === 'audio') && blobClient && norm.meta.message_id) {
         try {
           let mediaPath: string | null;
           if (mediaType === 'image') {
             mediaPath = await downloadLineImage(blobClient, norm.meta.message_id);
+          } else if (mediaType === 'audio') {
+            mediaPath = await downloadLineFile(blobClient, norm.meta.message_id, 'voice.m4a');
           } else {
             // The extension comes from the RAW event name (safeFileExt sanitises
             // it itself) — meta.attachment_name is the display label and has
@@ -789,27 +809,22 @@ export function createLineWebhookHandler(
         }
       }
 
-      // Loading animation (best-effort, 1:1 only — LINE rejects it for
-      // groups/rooms, where chat_id is a groupId/roomId).
-      if (client && norm.meta.line_chat_type === 'user') {
-        client
-          .showLoadingAnimation({ chatId: userId, loadingSeconds: LOADING_SECONDS })
-          .catch((err) => logger.debug('showLoadingAnimation failed', { error: (err as Error).message }));
-      }
-
       // Forward to the agent's existing /channel intake (same path Telegram uses).
       try {
-        await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`, {
+        const forwarded = await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(norm),
         });
+        if (durableIngress && !forwarded.ok) throw new Error('Durable input admission failed');
       } catch (err) {
+        if (durableIngress && !res.headersSent) res.status(503).json({ error: 'Input admission unavailable' });
         logger.error('LINE webhook: failed to forward to callback', {
           error: (err as Error).message,
         });
       }
     }
+    } finally { if (!res.headersSent) res.status(200).json({ ok: true }); }
   };
 
   return { verify: handleGet, handlePost };

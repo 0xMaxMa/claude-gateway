@@ -31,6 +31,7 @@ import { cliPairingStore, type CliPairing } from '../cli-viewer/pairing-store';
 import { verifyTelegramInitData } from '../cli-viewer/telegram-initdata';
 import { normalizePublicUrl } from '../cli-viewer/url';
 import { createApiRouter } from './router';
+import { VoiceApi } from './voice-router';
 import { createCronRouter } from './cron-router';
 import { createMetaRouter } from './meta-router';
 import { createWorkspaceRouter } from './workspace-router';
@@ -231,6 +232,7 @@ export class GatewayRouter {
   private readonly app: express.Application;
   private server: Server | null = null;
   private wss: WebSocketServer | null = null;
+  private voiceApi?: VoiceApi;
 
   /** Cached /processes result (3s TTL, avoids blocking execSync on every poll). */
   private processesCache: { data: unknown[]; ts: number } | null = null;
@@ -709,6 +711,8 @@ export class GatewayRouter {
         this.gatewayConfig.gateway.models,
       );
       this.app.use('/api', apiRouter);
+      this.voiceApi = new VoiceApi(this.agents, this.configs, this.gatewayConfig.gateway.api.keys);
+      this.app.use('/api', this.voiceApi.router);
     }
 
     // Mount workspace file routes
@@ -1314,7 +1318,10 @@ export class GatewayRouter {
 
         const lastActivity = this.lastActivityAt.get(id);
         // PTY streams are keyed per session, so liveness is per session too.
-        const sessions = runner.getSessionsSummary().map((s) => ({
+        const orchestration = runner.getOrchestrationSummary?.();
+        const managedSessions = orchestration?.sessions ?? [];
+        const managedIds = new Set(managedSessions.map(s => s.sessionId));
+        const sessions = [...runner.getSessionsSummary().filter(s => !managedIds.has(s.sessionId)), ...managedSessions].map((s) => ({
           ...s,
           hasPtyStream: ptyStreamRegistry.hasSockets(s.sessionId),
         }));
@@ -1329,6 +1336,9 @@ export class GatewayRouter {
           id,
           isRunning: runner.isRunning(),
           hasChannel,
+          orchestration,
+          agentType: agentConfig?.type ?? 'host-agent',
+          container: agentConfig?.container,
           messagesReceived: this.messagesReceived.get(id) ?? 0,
           messagesSent: this.messagesSent.get(id) ?? 0,
           lastActivityAt: lastActivity ? lastActivity.toISOString() : null,
@@ -1422,6 +1432,7 @@ export class GatewayRouter {
       this.ticketPruner.unref();
 
       this.server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
+        if (this.voiceApi?.upgrade(req, socket, head)) return;
         const url = req.url ?? '';
         const match = url.match(/\/api\/v1\/agents\/([^/?]+)\/pty-stream(?:\?.*)?$/);
         if (!match) {
@@ -1558,6 +1569,7 @@ export class GatewayRouter {
   }
 
   async stop(): Promise<void> {
+    await this.voiceApi?.close();
     if (this.ticketPruner) clearInterval(this.ticketPruner);
     // Terminate live WebSocket clients first. The dashboard PTY viewer holds these
     // open indefinitely; without an explicit terminate, server.close() below would

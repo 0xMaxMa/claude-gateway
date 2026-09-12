@@ -16,6 +16,8 @@ export type InboundMessage = {
   replyToMessageId?: string;
   threadId?: string;
   attachmentFileId?: string;
+  attachmentKind?: 'voice' | 'file';
+  controlMessageId?: string;
   ts: number;
 };
 

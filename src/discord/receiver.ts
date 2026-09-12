@@ -24,6 +24,7 @@ export class DiscordReceiver {
     private readonly agentConfig: AgentConfig,
     private readonly callbackPort: number,
     private readonly logDir: string,
+    private readonly headless = true,
   ) {
     this.logger = createLogger(`${agentConfig.id}:discord-receiver`, logDir);
   }
@@ -52,8 +53,11 @@ export class DiscordReceiver {
         DISCORD_DM_ALLOWLIST: (this.agentConfig.discord?.dmAllowlist ?? []).join(','),
         DISCORD_GUILD_ALLOWLIST: (this.agentConfig.discord?.guildAllowlist ?? []).join(','),
         DISCORD_CHANNEL_ALLOWLIST: (this.agentConfig.discord?.channelAllowlist ?? []).join(','),
+        GATEWAY_ORCHESTRATION_ENABLED: String(!!(this.agentConfig.orchestration?.enabled&&(this.agentConfig.orchestration.channels??['api']).includes('discord'))),
+        GATEWAY_INTERACTIVE_CLI_ENABLED: String(!this.headless&&this.agentConfig.type!=='app-agent'&&!this.agentConfig.orchestration?.enabled),
         GATEWAY_AGENT_ID: this.agentConfig.id,
         CLAUDE_CHANNEL_CALLBACK: `http://127.0.0.1:${this.callbackPort}/channel`,
+        GATEWAY_ORCHESTRATION_INGRESS_DIR: this.agentConfig.orchestration?.enabled && (this.agentConfig.orchestration.channels ?? ['api']).includes('discord') ? path.join(stateDir, 'orchestration-ingress') : '',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

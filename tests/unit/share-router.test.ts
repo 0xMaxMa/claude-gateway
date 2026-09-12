@@ -62,6 +62,46 @@ describe('file share router', () => {
     return a;
   };
 
+  test('explicit audio shares support iPhone byte probes, seeking and inline playback', async () => {
+    const audio = Buffer.concat([Buffer.from([255, 251, 144, 0]), Buffer.alloc(1000, 7)]);
+    fs.writeFileSync(path.join(mediaDir, 'voice.mp3'), audio);
+    const share = store.mintShare({ agentId: AGENT, sessionId: SESSION, relativePath: `${SESSION}/voice.mp3`,
+      dedupeRef: 'voice', purpose: 'channel_delivery', ttlSeconds: 60, allowKind: 'audio' });
+    const url = `/shared/${share.token}`;
+    const full = await request().get(url).expect(200);
+    expect(full.headers['content-type']).toBe('audio/mpeg');
+    expect(full.headers['content-disposition']).toBe('inline');
+    expect(full.headers['accept-ranges']).toBe('bytes');
+    expect(full.body).toEqual(audio);
+    for (const [range, start, end] of [['bytes=0-1', 0, 1], ['bytes=4-', 4, 1003], ['bytes=-5', 999, 1003], ['bytes=1000-9999', 1000, 1003]] as const) {
+      const part = await request().get(url).set('Range', range).expect(206);
+      expect(part.headers['content-range']).toBe(`bytes ${start}-${end}/${audio.length}`);
+      expect(Number(part.headers['content-length'])).toBe(end - start + 1);
+      expect(part.body).toEqual(audio.subarray(start, end + 1));
+    }
+    const invalid = await request().get(url).set('Range', 'bytes=2000-').expect(416);
+    expect(invalid.headers['content-range']).toBe(`bytes */${audio.length}`);
+    await request().head(url).set('Range', 'bytes=0-1').expect(200).expect('Content-Length', String(audio.length));
+    await request().get(url).set('Range', 'bytes=0-1').set('If-Range', '"old-version"').expect(200);
+    // A range never bypasses the fetch-time MIME check or token revocation.
+    fs.writeFileSync(path.join(mediaDir, 'voice.mp3'), HTML);
+    await request().get(url).set('Range', 'bytes=0-1').expect(404);
+    fs.writeFileSync(path.join(mediaDir, 'voice.mp3'), audio); store.revokeShare(share.shareId);
+    await request().get(url).set('Range', 'bytes=0-1').expect(404);
+  });
+
+  test('M4A suffix serves audio/mp4 and ranges, while rejecting video or mismatched extensions', async () => {
+    const audio=Buffer.concat([Buffer.from('00000020667479704d344120','hex'),Buffer.alloc(1000)]);
+    fs.writeFileSync(path.join(mediaDir,'voice.m4a'),audio);
+    const share=store.mintShare({agentId:AGENT,sessionId:SESSION,relativePath:`${SESSION}/voice.m4a`,dedupeRef:'m4a',purpose:'channel_delivery',ttlSeconds:60,allowKind:'audio'});
+    const url=`/shared/${share.token}/audio.m4a`;
+    const res=await request().get(url).set('Range','bytes=0-1').expect(206);
+    expect(res.headers['content-type']).toBe('audio/mp4');expect(res.headers['content-disposition']).toBe('inline');expect(res.body).toEqual(audio.subarray(0,2));
+    await request().get(`/shared/${share.token}/audio.mp3`).expect(404);
+    audio.write('isom',8);fs.writeFileSync(path.join(mediaDir,'voice.m4a'),audio);
+    await request().get(url).expect(404);
+  });
+
   const mintOne = async (refPath = `${SESSION}/ok.png`, extra: Record<string, unknown> = {}) => {
     const res = await request()
       .post('/api/v1/shares')

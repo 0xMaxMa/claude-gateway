@@ -1,3 +1,4 @@
+import { migrateAgentVoiceConfig } from '../orchestration/gateway-config';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -442,6 +443,7 @@ export function detectMigration(
 
   // Dry-run merge on a clone to detect what would be added/removed
   const configClone = structuredClone(config);
+  migrateAgentVoiceConfig(configClone);
   const added: string[] = [];
   const warnings: string[] = [];
 
@@ -533,6 +535,8 @@ export function applyMigration(
 ): MigrationResult {
   const added: string[] = [];
   const warnings: string[] = [];
+
+  migrateAgentVoiceConfig(config);
 
   // Preserve external bind for an upgrading config (Issue #204) BEFORE the
   // template merge: config.template.json ships gateway.bind = "127.0.0.1", and

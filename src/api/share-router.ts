@@ -80,7 +80,7 @@ function rfc8187(value: string): string {
  *  `application/pdf`; saved under its own name it would be a .html file that
  *  the browser renders from `file://`, running whatever script follows the PDF
  *  magic (reflected file download). The extension must describe the bytes. */
-const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf' };
+const EXT_FOR_MIME: Record<string, string> = { 'application/pdf': 'pdf', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a' };
 
 /**
  * Build the `Content-Disposition` for a non-image share (#444). The basename
@@ -173,7 +173,7 @@ export function createSharesPublicRouter(
 
   // /shared is the path after production Traefik strips /gateway.
   // /gateway/shared is the direct-path alias used by localhost Docker E2E.
-  router.all(['/shared/:token', '/gateway/shared/:token'], (req: Request, res: Response) => {
+  router.all(['/shared/:token', '/gateway/shared/:token', '/shared/:token/audio.m4a', '/gateway/shared/:token/audio.m4a', '/shared/:token/audio.mp3', '/gateway/shared/:token/audio.mp3'], (req: Request, res: Response) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.status(405).set('Allow', 'GET, HEAD').type('text/plain').send('Method Not Allowed');
       return;
@@ -211,15 +211,30 @@ export function createSharesPublicRouter(
       // Content-Type (§12.9/§12.10, #444).
       const mime = mimeDetectorFor(share.allowKind)(header);
       if (!mime) throw new Error('unsupported type');
+      if ((req.path.endsWith('/audio.m4a') && mime !== 'audio/mp4') || (req.path.endsWith('/audio.mp3') && mime !== 'audio/mpeg')) throw new Error('audio extension mismatch');
 
-      // Images keep the exact `inline` they have always had. Anything else is
-      // offered as a download — the share origin must never invite a browser to
-      // render a non-image it just sniffed.
-      const isImage = mime.startsWith('image/');
-      res.status(200).set({
+      // Explicitly authorized audio is playable inline and supports iOS byte
+      // probes/seeking. Documents remain downloads; MIME is still revalidated.
+      const isImage = mime.startsWith('image/'), isAudio = mime === 'audio/mpeg' || mime === 'audio/mp4';
+      let start = 0, end = stat.size - 1, status = 200;
+      if (isAudio) res.set('Accept-Ranges', 'bytes');
+      if (isAudio && req.method === 'GET' && req.headers.range && !req.headers['if-range']) {
+        const ranges = req.range(stat.size, { combine: true });
+        if (ranges === -1) {
+          fs.closeSync(fd); fd = undefined;
+          res.status(416).set({ 'Content-Range': `bytes */${stat.size}`, 'Content-Length': '0', 'Cache-Control': 'private, no-store' }).end();
+          return;
+        }
+        // Unsupported/malformed/multipart ranges fall back to the whole resource.
+        if (Array.isArray(ranges) && ranges.type === 'bytes' && ranges.length === 1) {
+          ({ start, end } = ranges[0]); status = 206;
+          res.set('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        }
+      }
+      res.status(status).set({
         'Content-Type': mime,
-        'Content-Length': String(stat.size),
-        'Content-Disposition': isImage ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime),
+        'Content-Length': String(end - start + 1),
+        'Content-Disposition': isImage || isAudio ? 'inline' : attachmentDisposition(path.basename(share.relativePath), mime),
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       });
@@ -228,7 +243,7 @@ export function createSharesPublicRouter(
         res.end();
       } else {
         // createReadStream owns the fd from here (autoClose defaults true).
-        const stream = fs.createReadStream('', { fd, start: 0 });
+        const stream = fs.createReadStream('', { fd, start, end });
         stream.on('error', () => {
           try { res.destroy(); } catch { /* already gone */ }
         });

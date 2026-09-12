@@ -31,6 +31,11 @@ import { randomUUID } from 'crypto';
  */
 const locks = new Map<string, Promise<unknown>>();
 
+/** Synchronous readers may write only when no asynchronous mutation is pending. */
+export function configWritePending(configPath: string): boolean {
+  return locks.has(path.resolve(configPath));
+}
+
 export function withConfigWriteLock<T>(
   configPath: string,
   fn: () => T | Promise<T>,

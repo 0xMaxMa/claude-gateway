@@ -7,8 +7,10 @@
 
 import { DiscordModule } from './module';
 import type { InboundMessage } from '../../types';
+import { ReceiverSpool } from '../receiver-spool';
 
 const CALLBACK_URL = process.env.CLAUDE_CHANNEL_CALLBACK;
+const spool = process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR && CALLBACK_URL ? new ReceiverSpool(process.env.GATEWAY_ORCHESTRATION_INGRESS_DIR, CALLBACK_URL) : undefined;
 if (!CALLBACK_URL) {
   process.stderr.write('discord receiver: CLAUDE_CHANNEL_CALLBACK required\n');
   process.exit(1);
@@ -30,6 +32,9 @@ async function postCallback(inbound: InboundMessage): Promise<void> {
   if (inbound.attachmentFileId) {
     meta['attachment_file_id'] = inbound.attachmentFileId;
   }
+  if(inbound.attachmentKind)meta.attachment_kind=inbound.attachmentKind;
+  if(inbound.controlMessageId)meta.control_message_id=inbound.controlMessageId;
+  if (spool && !/^\/(voice|voices|tasks|stop|orch)(?:\s|$)/.test(inbound.text??'')) { spool.enqueue({ content: inbound.text ?? '', meta }); return; }
 
   try {
     await fetch(CALLBACK_URL!, {

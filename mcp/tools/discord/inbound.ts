@@ -45,6 +45,7 @@ export function createMessageHandler(
       messageId: message.id,
       threadId: isThread ? message.channelId : undefined,
       attachmentFileId: message.attachments.first()?.url,
+      attachmentKind: (message.attachments.first()?.contentType?.startsWith('audio/') || (typeof message.flags==='number' ? !!(message.flags&8192) : message.flags?.has(8192))) ? 'voice' : 'file',
       ts: message.createdTimestamp,
     };
 

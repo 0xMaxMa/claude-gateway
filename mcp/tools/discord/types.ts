@@ -108,7 +108,8 @@ export interface DiscordMessage {
     parentId?: string | null;
   };
   createdTimestamp: number;
-  attachments: { first(): { url: string } | undefined };
+  flags?: number | {has(bit:number):boolean};
+  attachments: { first(): { url: string; contentType?: string | null; name?: string } | undefined };
   client: { user: { id: string } | null };
   startThread(options: { name: string; autoArchiveDuration: number }): Promise<{ id: string }>;
 }

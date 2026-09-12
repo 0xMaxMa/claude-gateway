@@ -1,9 +1,15 @@
+import type { InputImage } from './input-image';
+import { prepareContainerProfile, stopContainerProfile, CONTAINER_SUPERVISOR, containerNode, assertContainerBinding } from '../orchestration/container';
 import { spawn, ChildProcess } from 'child_process';
 import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { RuntimeProfile, runtimeProfileArgs } from './runtime-profile';
+import { StringDecoder } from 'string_decoder';
+import { stopProcessGroup } from '../orchestration/process-supervisor';
+import { gatewayCapacity } from '../orchestration/capacity';
 import chokidar from 'chokidar';
 import { AgentConfig, GatewayConfig } from '../types';
 import { resolveSharedConfig, sharedVaultDir } from '../agent/knowledge';
@@ -213,6 +219,11 @@ const STATE_SUBDIR: Record<ChatChannel, string> = {
 };
 
 export class SessionProcess extends EventEmitter {
+  private managedProcessGroup?: number;
+  private containerAttempt?: { directory: string; config: string };
+  managedGroupStopped = false;
+  get processId(): number | undefined { return this.isRunning() ? this.process?.pid : undefined; }
+  get managedProcessId(): number | undefined { return this.managedProcessGroup; }
   readonly sessionId: string;
   readonly chatId: string;
   readonly source: ChatChannelOrApi;
@@ -345,6 +356,7 @@ export class SessionProcess extends EventEmitter {
     gatewayConfig: GatewayConfig,
     sessionStore: SessionStore,
     chatId?: string,  // for telegram/discord: actual chatId; for api: same as sessionId
+    readonly runtimeProfile?: RuntimeProfile,
   ) {
     super();
     this.sessionId = sessionId;
@@ -372,6 +384,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   private appendToStore(msg: { role: 'user' | 'assistant' | 'system'; content: string; ts: number }): Promise<void> {
+    if (this.runtimeProfile) return Promise.resolve(); // orchestration owns canonical history operations
     return this.source !== 'api'
       ? this.sessionStore.appendTelegramMessage(this.agentConfig.id, this.chatId, this.sessionId, msg, this.sessionChannel)
       : this.sessionStore.appendMessage(this.agentConfig.id, this.sessionId, msg);
@@ -419,7 +432,7 @@ export class SessionProcess extends EventEmitter {
    * re-spawn it with the latest model from config.json.
    */
   private setupRestartWatcher(): void {
-    if (this.restartWatcher) return;
+    if (this.restartWatcher || this.runtimeProfile) return;
     this.restartWatcher = chokidar.watch(this.restartSignalPath, { ignoreInitial: true });
     this.restartWatcher.on('add', () => {
       // Read signal file content before deleting — may contain a notify payload
@@ -667,7 +680,37 @@ export class SessionProcess extends EventEmitter {
     return this.spawnedConnectors.get(connectorId) !== now;
   }
 
+  /** Only trust connector namespaces actually written into this subprocess config. */
+  isSpawnedConnectorTool(name: string): boolean {
+    if (!this.spawnedConnectors || this.agentConfig.type === 'app-agent' ||
+        this.agentConfig.allow_tools === false || this.runtimeProfile?.role === 'agent' || this.runtimeProfile?.connectorsAllowed === false ||
+        (this.runtimeProfile?.role === 'worker' && !this.runtimeProfile.hostExecution)) return false;
+    return [...this.spawnedConnectors.keys()].some(id => name.startsWith(`mcp__${id}__`) && name.length > id.length + 7);
+  }
+
+  private managedMcpConfigPath?: string;
+
   private writeMcpConfig(): string | null {
+    if (this.runtimeProfile) {
+      // Orchestrators dispatch execution; only eligible workers receive connectors.
+      // App and isolated workers must never receive host connector credentials
+      // or start host-configured stdio servers inside their execution boundary.
+      if (this.runtimeProfile.role === 'agent' || this.agentConfig.allow_tools === false || this.runtimeProfile.connectorsAllowed === false || this.agentConfig.type === 'app-agent' || (this.runtimeProfile.role === 'worker' && !this.runtimeProfile.hostExecution)) return this.runtimeProfile.mcpConfigPath;
+      const ticket = JSON.parse(fs.readFileSync(this.runtimeProfile.mcpConfigPath, 'utf8'));
+      const connectors = resolveEnabledConnectors(this.agentConfig, this.gatewayConfig.gateway.customConnectors,
+        this.gatewayConfig.gateway.connectorsDefaultEnabled ?? true);
+      this.spawnedConnectors = new Map();
+      for (const [id, server] of Object.entries(connectors)) {
+        if (isReservedConnectorId(id)) continue;
+        this.spawnedConnectors.set(id, connectorFingerprint(server));
+      }
+      const servers = Object.fromEntries([...this.spawnedConnectors.keys()].map(id => [id, connectors[id]]));
+      const configPath = path.join(path.dirname(this.runtimeProfile.mcpConfigPath), 'managed-connectors.json');
+      fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { ...servers, ...ticket.mcpServers } }), { mode: 0o600 });
+      fs.chmodSync(configPath, 0o600);
+      this.managedMcpConfigPath = configPath;
+      return configPath;
+    }
     if (this.source === 'api' && !this.agentConfig.allow_tools) return null;
 
     const stateDir = path.join(this.agentConfig.workspace, '.telegram-state');
@@ -893,6 +936,18 @@ export class SessionProcess extends EventEmitter {
       '--verbose',
     ];
 
+    if (this.runtimeProfile) {
+      if (this.agentConfig.type === 'app-agent' && this.runtimeProfile.hostExecution) throw new Error('Container roles cannot use host execution');
+      if (this.gatewayConfig.gateway.headless === false) throw new Error('Orchestration runtime profile is only verified for the configured headless backend');
+      const context = this.runtimeProfile.context ?? fs.readFileSync(path.join(this.agentConfig.workspace, 'CLAUDE.md'), 'utf8');
+      args.push(...runtimeProfileArgs({ ...this.runtimeProfile, context, containerExecution: this.agentConfig.type === 'app-agent', mcpConfigPath: this.containerAttempt?.config ?? mcpConfigPath ?? this.runtimeProfile.mcpConfigPath, skillPluginDir: this.containerAttempt && this.runtimeProfile.skillPluginDir ? this.containerAttempt.directory + '/skill-plugin' : this.runtimeProfile.skillPluginDir }, this.agentConfig.claude.extraFlags ?? []));
+      if (this.runtimeProfile.workerSession) {
+        const session = this.runtimeProfile.workerSession;
+        args.push(session.resume ? '--resume' : '--session-id', session.id);
+      }
+      args.push('--dangerously-skip-permissions');
+      return args;
+    }
     if (mcpConfigPath) {
       // NOTE: --strict-mcp-config is intentionally omitted.
       // With --strict-mcp-config, Claude Code blocks all plugin MCP servers (e.g. figma).
@@ -921,10 +976,10 @@ export class SessionProcess extends EventEmitter {
     // NOTE: NO --channels flag — messages arrive via stdin injection, not Telegram channels
   }
 
-  private static toStreamJsonTurn(text: string): string {
+  private static toStreamJsonTurn(text: string, images: readonly InputImage[] = []): string {
     return JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
+      message: { role: 'user', content: [{ type: 'text', text }, ...images] },
     });
   }
 
@@ -933,8 +988,13 @@ export class SessionProcess extends EventEmitter {
     this.spawnContext = { loadedAtSpawn, archivedCount, messageCountAtSpawn };
 
     // Determine if this is a docker-exec app-agent before computing paths
+    assertContainerBinding(this.agentConfig, this.runtimeProfile);
     const isAppAgent = this.agentConfig.type === 'app-agent' && !!this.agentConfig.container;
 
+    if (isAppAgent && this.runtimeProfile) {
+      this.containerAttempt = await prepareContainerProfile(this.agentConfig, this.runtimeProfile);
+      this.runtimeProfile.context = await containerNode(this.agentConfig.container!, "process.stdout.write(require('fs').readFileSync('/workspace/CLAUDE.md','utf8'))");
+    }
     const mcpConfigPath = this.writeMcpConfig();
 
     // For app-agents, Claude runs inside the container where /workspace is mounted.
@@ -1037,7 +1097,7 @@ export class SessionProcess extends EventEmitter {
       CLAUDE_WORKSPACE: '/workspace',
       GATEWAY_RESTART_SIGNAL_PATH: containerRestartPath,
     };
-    if (process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
+    if (!this.runtimeProfile && process.env.GATEWAY_API_URL) containerEnv.GATEWAY_API_URL = process.env.GATEWAY_API_URL;
 
     // Secrets are forwarded by NAME only (`-e KEY`, no `=value`), which makes
     // Docker read the value from this process's own environment (set on the spawn
@@ -1049,7 +1109,7 @@ export class SessionProcess extends EventEmitter {
     // Claude credentials — it is a bearer token for the agent's whole bot
     // account. It is already placed in the spawn env below, unconditionally.
     const containerAuthEnv = isAppAgent ? this.resolveContainerAuthEnv() : {};
-    const byNameKeys = ['TELEGRAM_BOT_TOKEN', ...Object.keys(containerAuthEnv)];
+    const byNameKeys = [...(this.runtimeProfile ? [] : ['TELEGRAM_BOT_TOKEN']), ...Object.keys(containerAuthEnv)];
     const dockerEnvFlags = [
       ...Object.entries(containerEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...byNameKeys.flatMap((k) => ['-e', k]),
@@ -1060,7 +1120,7 @@ export class SessionProcess extends EventEmitter {
           'exec', '--workdir', '/workspace', '--user', String(containerUid), '-i',
           ...dockerEnvFlags,
           this.agentConfig.container!,
-          this.agentConfig.claudeBin ?? claudeBin,
+          ...(this.containerAttempt ? ['node', '-e', CONTAINER_SUPERVISOR, this.containerAttempt.directory, this.agentConfig.claudeBin ?? claudeBin] : [this.agentConfig.claudeBin ?? claudeBin]),
           ...allArgs,
         ]
       : allArgs;
@@ -1078,11 +1138,18 @@ export class SessionProcess extends EventEmitter {
     // minimal PATH that predates the native-installer migration.
     const hardenedPath = pathWithNativeBin();
 
-    const proc = spawn(spawnBin, spawnArgs, {
+    const capacityEnabled = Boolean(this.runtimeProfile || this.gatewayConfig.gateway.processLimits || this.gatewayConfig.agents?.some(agent => agent.orchestration?.enabled));
+    const releaseCapacity = this.runtimeProfile?.capacityReserved ? () => {} : gatewayCapacity(this.gatewayConfig).acquire(this.runtimeProfile?.role ?? 'legacy', capacityEnabled);
+    if (!releaseCapacity) throw Object.assign(new Error('Gateway process capacity exceeded'), { code: 'CAPACITY_EXCEEDED' });
+    let proc: ReturnType<typeof spawn>;
+    try { proc = spawn(spawnBin, spawnArgs, {
       env: {
         ...process.env,
         ...containerAuthEnv,
         ...(hardenedPath ? { PATH: hardenedPath } : {}),
+        GATEWAY_ORIGIN_SESSION_ID: this.runtimeProfile?.originSessionId ?? this.sessionId,
+        GATEWAY_TASK_ID: this.runtimeProfile?.taskId ?? '',
+        GATEWAY_TASK_ATTEMPT_ID: this.runtimeProfile?.attemptId ?? '',
         CLAUDE_WORKSPACE: isAppAgent ? '/workspace' : this.agentConfig.workspace,
         TELEGRAM_BOT_TOKEN: this.agentConfig.telegram?.botToken ?? '',
         GATEWAY_RESTART_SIGNAL_PATH: this.restartSignalPath,
@@ -1091,10 +1158,14 @@ export class SessionProcess extends EventEmitter {
         ...(ptyStreamSocketPath ? { PTY_SHELL_STREAM_SOCKET: ptyStreamSocketPath } : {}),
       },
       cwd: this.agentConfig.workspace,
+      ...(this.runtimeProfile?.role === 'worker' && process.platform === 'linux' ? { detached: true } : {}),
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }); } catch (error) { releaseCapacity(); throw error; }
 
     this.process = proc;
+    proc.once('exit', releaseCapacity);
+    proc.once('error', releaseCapacity);
+    if (this.runtimeProfile?.role === 'worker' && process.platform === 'linux') this.managedProcessGroup = proc.pid;
     // Fresh child is alive: clear any exit observed for a prior process (e.g.
     // after an auto-restart), so isRunning()/interrupt() see it as live.
     this._exited = false;
@@ -1114,7 +1185,9 @@ export class SessionProcess extends EventEmitter {
     // becomes Turn 2 — two separate responses forwarded to the channel. Deferring
     // history to sendMessage() bundles [history + activation + user reply] into a
     // single turn so Claude produces exactly one response.
-    if (this.source !== 'api') {
+    if (this.runtimeProfile) {
+      this.pendingInitialPrompt = historyPrompt ?? undefined;
+    } else if (this.source !== 'api') {
       if (historyPrompt) {
         // Has history: defer to first incoming user message to prevent double-response.
         this.pendingInitialPrompt = `${historyPrompt}\n\n${CHANNELS_ACTIVATION_PROMPT}`;
@@ -1127,7 +1200,7 @@ export class SessionProcess extends EventEmitter {
     }
 
     // Capture stdout — emit output events + persist assistant replies
-    const typingDir = this.source !== 'api' ? this.typingDir : null;
+    const typingDir = this.source !== 'api' && !this.runtimeProfile ? this.typingDir : null;
     const heartbeatPath = typingDir ? path.join(typingDir, `${this.chatId}.heartbeat`) : null;
     const statusPath    = typingDir ? path.join(typingDir, `${this.chatId}.status`)    : null;
 
@@ -1153,11 +1226,13 @@ export class SessionProcess extends EventEmitter {
     // Track context from message_start events (first sub-call of each turn) for accurate context % display.
     // result.usage is cumulative across all sub-calls; message_start.usage reflects a single API call's context.
     let lastMessageStartContext = 0;
+    let orchestrationOutputBuffer = '';
+    const orchestrationDecoder = new StringDecoder('utf8');
 
     proc.stdout?.on('data', (data: Buffer) => {
       // Child produced output => the session is doing real work right now. Count
       // this as activity so the idle reaper measures "time since the session last
-      // did anything", not just "time since the parent last injected a message".
+      // did anything", not just "time since the agent last injected a message".
       // Without this, a self-paced loop (a /loop in dynamic mode using
       // ScheduleWakeup) that wakes itself and works entirely inside this child
       // process stays invisible to the idle timer and gets reaped mid-flight.
@@ -1166,7 +1241,10 @@ export class SessionProcess extends EventEmitter {
       if (heartbeatPath) {
         try { fs.writeFileSync(heartbeatPath, String(Date.now())) } catch {}
       }
-      const lines = data.toString().split('\n');
+      const lines = this.runtimeProfile
+        ? (orchestrationOutputBuffer + orchestrationDecoder.write(data)).split('\n')
+        : data.toString().split('\n');
+      if (this.runtimeProfile) orchestrationOutputBuffer = lines.pop() ?? '';
       for (const line of lines) {
         if (!line.trim()) continue;
         this.emit('output', line);
@@ -1457,7 +1535,7 @@ export class SessionProcess extends EventEmitter {
       if (this.lastSpawnAt && Date.now() - this.lastSpawnAt >= RESTART_COUNT_RESET_MS) {
         this.restartCount = 0;
       }
-      if (!this.stopping) this.scheduleRestart();
+      if (!this.stopping && !this.runtimeProfile) this.scheduleRestart();
     });
 
     proc.on('error', (err) => {
@@ -1547,6 +1625,7 @@ export class SessionProcess extends EventEmitter {
    * that Claude Code was replaying on every request.
    */
   private recoverFromCorruptedThinking(): void {
+    if (this.runtimeProfile) return; // recovery belongs to the orchestration, never replay task effects
     if (this.restartRequested || this.stopping) return; // already respawning
     if (this.thinkingRecoveryCount >= MAX_THINKING_RECOVERIES) {
       this.logger.error('Thinking-block recovery limit reached — not respawning again', {
@@ -1565,7 +1644,7 @@ export class SessionProcess extends EventEmitter {
     if (this.process) this.process.kill('SIGTERM');
   }
 
-  sendMessage(text: string): void {
+  sendMessage(text: string, images: readonly InputImage[] = []): void {
     if (!this.process?.stdin?.writable) {
       this.logger.warn('Cannot send message: subprocess not running', {
         sessionId: this.sessionId,
@@ -1578,7 +1657,7 @@ export class SessionProcess extends EventEmitter {
     // Signal queued state + ensure typing signal file exists for this turn.
     // If the previous turn already called stop() and cleared the typing loop,
     // re-creating the signal file here lets stop() restart the loop for queued turns.
-    if (this.source !== 'api') {
+    if (this.source !== 'api' && !this.runtimeProfile) {
       const typingDir = this.typingDir;
       const typingSignalPath = path.join(typingDir, this.chatId);
       const statusPath = path.join(typingDir, `${this.chatId}.status`);
@@ -1593,7 +1672,7 @@ export class SessionProcess extends EventEmitter {
       ? `${this.pendingInitialPrompt}\n\n${text}`
       : text;
     this.pendingInitialPrompt = undefined;
-    this.process.stdin.write(SessionProcess.toStreamJsonTurn(fullText) + '\n');
+    this.process.stdin.write(SessionProcess.toStreamJsonTurn(fullText, images) + '\n');
   }
 
   /**
@@ -1705,7 +1784,7 @@ export class SessionProcess extends EventEmitter {
   }
 
   /**
-   * Extend Telegram's working state only while a parent session is waiting for
+   * Extend Telegram's working state only while a agent session is waiting for
    * background Agent/Workflow/Monitor work. A bounded expiry (BACKGROUND_AGENT_GRACE_MS,
    * fixed from the dispatch timestamp — not renewed by later activity) releases
    * the state if the dispatch never sends its completion notification within
@@ -1714,7 +1793,7 @@ export class SessionProcess extends EventEmitter {
    * BACKGROUND_AGENT_GRACE_MS.
    */
   retainBackgroundWorkingState(): boolean {
-    if (this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
+    if (this.runtimeProfile || this.source !== 'telegram' || !this.hasLikelyOutstandingBackgroundWork()) return false;
 
     const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
     try {
@@ -1764,7 +1843,7 @@ export class SessionProcess extends EventEmitter {
         }
       }
       this.emit('processingChange', active);
-      if (this.source === 'telegram') {
+      if (this.source === 'telegram' && !this.runtimeProfile) {
         const processingPath = path.join(this.typingDir, `${this.chatId}.processing`);
         try {
           if (active) {
@@ -1871,11 +1950,20 @@ export class SessionProcess extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    if (this.containerAttempt && this.agentConfig.container) {
+      this.managedGroupStopped = await stopContainerProfile(this.agentConfig.container, this.containerAttempt.directory);
+      this.containerAttempt = undefined;
+    }
+    if (this.managedProcessGroup) {
+      const hostStopped = await stopProcessGroup(this.managedProcessGroup);
+      this.managedGroupStopped = this.agentConfig.type === 'app-agent' ? this.managedGroupStopped && hostStopped : hostStopped;
+      if (this.managedGroupStopped) this.managedProcessGroup = undefined;
+    }
     this.resetBackgroundDispatchState();
     await this.restartWatcher?.close();
     this.restartWatcher = null;
     try { fs.rmSync(this.restartSignalPath, { force: true }); } catch {}
-    if (this.source === 'telegram') {
+    if (this.source === 'telegram' && !this.runtimeProfile) {
       try { fs.rmSync(path.join(this.typingDir, `${this.chatId}.processing`), { force: true }); } catch {}
     }
     // mcp-config.json under here holds fully-substituted secrets (channel bot
@@ -1887,6 +1975,10 @@ export class SessionProcess extends EventEmitter {
     // bind-mounts this path) can be alive for up to the 10s graceful-shutdown
     // window immediately after this point, and must not find it gone under it.
     const removeSessionDir = (): void => {
+      if (this.managedMcpConfigPath) {
+        try { fs.rmSync(this.managedMcpConfigPath, { force: true }); } catch {}
+        this.managedMcpConfigPath = undefined;
+      }
       try {
         fs.rmSync(path.join(this.agentConfig.workspace, '.sessions', this.sessionId), { recursive: true, force: true });
       } catch {}

@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { DiscordModule } from '../../mcp/tools/discord/module';
 
 describe('DiscordModule', () => {
@@ -9,6 +12,22 @@ describe('DiscordModule', () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('ignores stale legacy typing files in orchestration; legacy still renews typing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'discord-typing-'));
+    writeFileSync(join(dir, '123'), 'old signal');
+    const request = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('', { status: 200 }));
+    try {
+      const mod = new DiscordModule();
+      process.env.GATEWAY_ORCHESTRATION_ENABLED = 'true';
+      await (mod as any).processTypingSignals(dir, 'fixture');
+      expect(request).not.toHaveBeenCalled();
+      process.env.GATEWAY_ORCHESTRATION_ENABLED = 'false';
+      await (mod as any).processTypingSignals(dir, 'fixture');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0][0]).toBe('https://discord.com/api/v10/channels/123/typing');
+    } finally { request.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
   });
 
   describe('isEnabled', () => {

@@ -224,6 +224,26 @@ export class HistoryDB {
         this.db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${ddlType}`);
       }
     }
+    if (!messageCols.some((c) => c.name === 'operation_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN operation_id TEXT');
+    }
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_operation_id ON messages(operation_id) WHERE operation_id IS NOT NULL');
+  }
+
+  /** Orchestration projection requires a durable acknowledgment. Unlike the legacy
+   * best-effort method, this propagates errors and reconciles ambiguous retries. */
+  insertMessageOnce(operationId: string, msg: HistoryMessage): number {
+    if (!operationId) throw new Error('history operation ID required');
+    const prior = this.db.prepare('SELECT id,chat_id,session_id,source,role,content FROM messages WHERE operation_id=?').get(operationId);
+    if (prior) {
+      if (prior.chat_id !== msg.chatId || prior.session_id !== msg.sessionId || prior.source !== msg.source || prior.role !== msg.role || prior.content !== msg.content) throw new Error('history operation payload conflict');
+      return Number(prior.id);
+    }
+    const result = this.db.prepare(`INSERT INTO messages(chat_id,session_id,source,role,content,sender_name,sender_id,platform_message_id,media_files,image_refs,ts,operation_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      msg.chatId, msg.sessionId, msg.source, msg.role, msg.content, msg.senderName ?? null, msg.senderId ?? null,
+      msg.platformMessageId ?? null, msg.mediaFiles ? JSON.stringify(msg.mediaFiles) : null,
+      msg.imageRefs?.length ? JSON.stringify(msg.imageRefs) : null, msg.ts, operationId);
+    return Number(result.lastInsertRowid);
   }
 
   insertMessage(msg: HistoryMessage): void {
@@ -561,7 +581,7 @@ export class HistoryDB {
     const sql = `
       SELECT id, chat_id, session_id, source, role, content, sender_name, sender_id,
              platform_message_id, media_files, image_refs,
-             replied_to_message_id, replied_to_text, replied_to_user, ts
+             replied_to_message_id, replied_to_text, replied_to_user, ts, operation_id
       FROM messages
       WHERE ${conditions.join(' AND ')}
       ORDER BY ts ${order}, id ${order}
@@ -802,6 +822,8 @@ export class HistoryDB {
     }
     return {
       id: r['id'] as number,
+      ...(typeof r.operation_id === 'string' && r.operation_id.startsWith('input:') ? { inputId: r.operation_id.slice(6) } : {}),
+      ...(typeof r.operation_id === 'string' && r.operation_id.startsWith('response:') ? { responseId: r.operation_id.slice(9) } : {}),
       chatId: r['chat_id'] as string,
       sessionId: r['session_id'] as string,
       source: r['source'] as HistorySource,
