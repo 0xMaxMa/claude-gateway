@@ -10,13 +10,32 @@ Claude Gateway keeps conversations responsive while Claude Code workers execute 
 
 [Documentation](https://0xmaxma.github.io/claude-gateway/) · [Quickstart](https://0xmaxma.github.io/claude-gateway/guide/quickstart.html) · [API reference](https://0xmaxma.github.io/claude-gateway/api/)
 
-## What it does
+## Features
 
-- **Orchestration:** contextual acknowledgements, reusable workers, durable tasks, progress, follow-ups, and cancellation.
-- **Voice:** speech recognition and spoken replies with per-agent models and voices, direct or upstream providers, and audio replay.
-- **Multi-channel:** Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and HTTP/SSE clients.
-- **Persistent agents:** workspace identity, memory, searchable knowledge, skills, and scheduled consolidation.
-- **Self-hosted operations:** authenticated APIs, CLI controls, recurring jobs, Docker apps, and monitoring.
+- 🔥 **Agent orchestration** — keep conversations responsive while reusable workers execute durable tasks, report progress, accept follow-up instructions, and support cancellation. See [orchestration and tasks](https://0xmaxma.github.io/claude-gateway/guide/orchestration.html).
+- 🎙️ **Voice conversations** — speech recognition and spoken replies with per-agent models and voices, direct or upstream providers, live or recorded speech input, and audio replay. See [voice setup](https://0xmaxma.github.io/claude-gateway/guide/voice.html).
+- 🧠 **Skill self-improvement** — agents learn reusable skills from their own work: after a substantive turn a background reviewer creates or updates a skill, hot-reloaded for the next turn. Provenance-guarded (never overwrites human-written skills), capped per day, and audited to `SKILLS_LEARNED.md`. See [`gateway.skillLearning`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-skilllearning)
+- 📚 **Knowledge base (two-lane memory)** — per-agent SQLite/FTS5 searchable archive exposed through `memory_search` / `memory_get` MCP tools, so agents recall notes that don't fit the always-injected core; chunks carry fail-closed provenance and the index is refreshed off the gateway event loop. See [`gateway.knowledge`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-knowledge)
+- 🌙 **Nightly dreaming** — background consolidation of long-term memory: a print-only reviewer proposes ops that a safe applier writes to `MEMORY.md` / `USER.md` (backup, bounded-loss, net-negative when over budget). Deterministic compaction, budget-scaled pruning, and staleness GC keep memory near budget without forgetting — archived entries stay searchable. See [`gateway.dreaming`](https://0xmaxma.github.io/claude-gateway/reference/memory-settings.html#gateway-dreaming)
+- 🤖 **Multi-agent** — run multiple bots from a single gateway, each with isolated sessions
+- 🔌 **Multi-channel MCP** — modular tool system per channel (Telegram, Discord, LINE, Slack, WhatsApp, Cron, Skills, extensible to more)
+- 🧩 **Agent skills** — extensible skill system via SKILL.md files; agents can create, delete, and install skills from URLs at runtime with hot-reload
+- 🎭 **Agent identity** — define personality, tone, and rules via workspace markdown files
+- 📡 **Live status messages** — real-time status updates showing tool usage, thinking, and progress
+- ⌨️ **Typing indicators** — continuous typing animation while the agent is working (Telegram and Discord)
+- 🌊 **Streaming API** — SSE (Server-Sent Events) endpoint for real-time response streaming
+- ↪️ **Auto-forward** — agent text output automatically forwarded to Telegram even without explicit reply tool calls
+- ⏰ **Heartbeat / scheduled tasks** — cron-based proactive messages and recurring tasks via HEARTBEAT.md + REST API; agent jobs deliver output to Telegram, Discord, or both
+- 💬 **Persistent chat history** — two-layer storage: session context (`.jsonl`) + permanent SQLite DB with FTS5 full-text search; survives `/compact` and session eviction
+- 🧹 **Auto-cleanup** — configurable retention policy prunes messages and media files older than N days on a daily schedule
+- 🗄️ **Long-term memory** — persistent memory system across sessions
+- 🔄 **Config auto-migration** — automatic schema migration when config format changes
+- 🔐 **Access control** — allowlist, open, or pairing-based Telegram access policies
+- 🌐 **HTTP API** — REST API with key-based auth for external integrations
+- 🛍️ **App Store** — install, update, and host Docker-compose apps on the gateway; apps get a reverse proxy at `/app/:name/:portName/*`, optional Unix socket bridge for host scripts, and optional AI agent injection
+- ⬆️ **Self-update** — check for newer versions of `claude-gateway` and `claude-code` and trigger an update via a single API call (no SSH or shell access needed), or from the terminal with `claude-gateway update` / `claude-gateway claude update`
+- 💾 **Session persistence** — conversation history saved and restored across restarts
+- 🖥️ **PTY shell (wrap-shell mode)** — optional interactive pseudo-terminal backend (`gateway.headless: false`) for tools that require a real TTY; includes a live browser viewer (xterm.js) and a `/api/v1/sessions/:sessionId/screen` endpoint that returns the visible screen as plain text — agents can poll it to detect hang states, menus, or unexpected output without parsing ANSI escape codes; a `/cli` chat command (Telegram/Discord/LINE) opens the same viewer for a single agent, agent-scoped and without an admin key; app-agents and orchestration always stay headless
 
 ## Get started
 
