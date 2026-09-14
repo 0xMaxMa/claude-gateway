@@ -9,6 +9,10 @@ A self-hosted multi-agent gateway for Claude Code — with agents that improve t
 
 ---
 
+## Documentation
+
+Browse the [documentation guide](website/index.md) for setup, channels, workflows, and operations. To run the standalone searchable website locally, see [website development](website/README.md). Orchestration and voice pages are clearly marked as unreleased PR #465 previews.
+
 ## Features
 
 - 🪄 **Agent Orchestration Engine (enabled by default)** — agents stay responsive while workers execute durable tasks, with provider-neutral voice support. See [configuration and limitations](#gatewayorchestration-and-agent-overrides) and [API protocols](API.md#orchestration-and-live-voice).
