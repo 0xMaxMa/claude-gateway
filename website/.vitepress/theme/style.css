@@ -1,18 +1,18 @@
 /* Restrained color and generous spacing; system fonts keep the site self-contained. */
 :root {
-  --vp-c-brand-1: #426954;
-  --vp-c-brand-2: #527d65;
-  --vp-c-brand-3: #365c47;
-  --vp-c-brand-soft: rgba(66, 105, 84, .12);
+  --vp-c-brand-1: #cc5500;
+  --vp-c-brand-2: #cc5500;
+  --vp-c-brand-3: #f08000;
+  --vp-c-brand-soft: rgba(240, 128, 0, .08);
   --vp-font-family-base: Inter, ui-sans-serif, system-ui, sans-serif;
   --vp-home-hero-name-color: var(--vp-c-text-1);
   --vp-home-hero-image-background-image: none;
 }
 .dark {
-  --vp-c-brand-1: #a4c8ad;
-  --vp-c-brand-2: #b4d6bd;
-  --vp-c-brand-3: #477455;
-  --vp-c-brand-soft: rgba(164, 200, 173, .12);
+  --vp-c-brand-1: #f08000;
+  --vp-c-brand-2: #cc5500;
+  --vp-c-brand-3: #f08000;
+  --vp-c-brand-soft: rgba(240, 128, 0, .08);
 }
 .VPHero .name { letter-spacing: -.045em; }
 .VPHero .text { letter-spacing: -.035em; max-width: 760px; }
