@@ -12,7 +12,7 @@ import { processAppYaml } from '../../../src/apps/compose-generator';
 // These tests fail on the pre-fix docs and pass once `host` is documented.
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
-const API_MD = path.join(REPO_ROOT, 'API.md');
+const API_MD = path.join(REPO_ROOT, 'website', 'api', 'apps.md');
 const SKILL_MD = path.join(
   REPO_ROOT,
   'mcp',
@@ -35,11 +35,11 @@ function extractYamlBlocks(markdown: string): string[] {
 }
 
 describe('app.yaml authoring docs — required port host field', () => {
-  it('every app.yaml example in API.md is accepted by the real validator', () => {
+  it('every app.yaml example in the website API docs is accepted by the real validator', () => {
     const md = fs.readFileSync(API_MD, 'utf-8');
     // Validate EVERY manifest-style block (declares both a top-level
     // `apiVersion:` and a concrete `container:` port), not just the first — so
-    // a second host-less example added to API.md later is also caught.
+    // a second host-less example added to the API docs later is also caught.
     const examples = extractYamlBlocks(md).filter(
       (b) => b.includes('apiVersion:') && b.includes('container:'),
     );

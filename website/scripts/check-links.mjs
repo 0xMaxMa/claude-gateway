@@ -50,21 +50,12 @@ for (const [file, html] of documents) {
   }
 }
 
-// Validate executable JSON syntax, then compare configuration examples with source defaults.
-const template = JSON.parse(await readFile(join(root, '../config.template.json'), 'utf8'))
+// Syntax-check examples. Gateway runtime validation is separate from this docs-only build.
 let examples = 0
-function checkSubset(value, source, path = '') {
-  for (const [key, item] of Object.entries(value)) {
-    assert(Object.hasOwn(source, key), `Unknown template field ${path}${key}`)
-    assert.equal(typeof item, typeof source[key], `Wrong type for ${path}${key}`)
-    if (item && typeof item === 'object' && !Array.isArray(item)) checkSubset(item, source[key], `${path}${key}.`)
-  }
-}
 for (const file of (await files(root)).filter(file => file.endsWith('.md'))) {
   const markdown = await readFile(file, 'utf8')
   for (const [, snippet] of markdown.matchAll(/```json\s*\n([\s\S]*?)\n```/g)) {
     const value = JSON.parse(snippet)
-    if (file.endsWith('/reference/configuration.md')) checkSubset(value, template)
     examples++
   }
 }

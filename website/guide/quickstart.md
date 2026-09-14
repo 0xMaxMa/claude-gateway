@@ -23,7 +23,7 @@ claude-gateway gateway start
 
 The gateway runs in the foreground. Keep this terminal open and use another terminal for the following commands. Installation uses Bun to install MCP dependencies. Platforms without a compatible prebuilt `node-pty` binary may need native build tools.
 
-On first start, the gateway creates `~/.claude-gateway/config.json` with an empty agent list and a random admin key. Current main stores the key in that file with mode `0600` and prints only its suffix; the local CLI reads it automatically. An existing configuration is retained.
+On first start, the gateway creates `~/.claude-gateway/config.json` with an empty agent list and a random admin key. The gateway stores the key in that file with mode `0600` and prints only its suffix; the local CLI reads it automatically. An existing configuration is retained.
 
 ```bash
 claude-gateway gateway status
@@ -52,6 +52,6 @@ claude-gateway channels approve --agent assistant --channel telegram --code YOUR
 
 Send “Hello, introduce yourself.” A reply confirms inbound delivery, access approval, model execution, and outbound delivery. If it stays silent, work through [channel checks](./channels.md) and [troubleshooting](./troubleshooting.md).
 
-Next, [run it as a service](./operations.md) or [customize the agent](./agents.md).
+Next, [enable orchestration](./orchestration.md), optionally [configure voice](./voice.md), then [run it as a service](./operations.md) or [customize the agent](./agents.md).
 
-Source: [installation guide](https://github.com/0xMaxMa/claude-gateway/blob/main/README.md#quick-start), [first-run implementation](https://github.com/0xMaxMa/claude-gateway/blob/main/src/config/bootstrap.ts).
+Source: [first-run implementation](https://github.com/0xMaxMa/claude-gateway/blob/b917843/src/config/bootstrap.ts).

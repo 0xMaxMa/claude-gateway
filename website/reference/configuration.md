@@ -4,7 +4,7 @@ The default configuration is `~/.claude-gateway/config.json`. Set `GATEWAY_CONFI
 
 ## Start from generated configuration
 
-First boot creates a valid empty-agent configuration. Use the agent wizard to add required workspace and connection fields. The repository's [config.template.json](https://github.com/0xMaxMa/claude-gateway/blob/main/config.template.json) is the complete template; it includes migration metadata and placeholder credentials, so do not overwrite a working configuration with it blindly.
+First boot creates a valid empty-agent configuration. Use the agent wizard to add required workspace and connection fields. The repository's [config.template.json](https://github.com/0xMaxMa/claude-gateway/blob/b917843/config.template.json) is a starting template; it includes migration metadata and placeholder credentials, so do not overwrite a working configuration with it blindly.
 
 The following is a **partial configuration**. Merge the shown fields into the existing `gateway` object while retaining your agents and keys:
 
@@ -48,4 +48,25 @@ Environment placeholders use `${VARIABLE_NAME}` syntax. Keep actual values in th
 
 Run `claude-gateway doctor` after changes, then verify the affected capability. Config migration adds new defaults and backs up the previous configuration; preserve those backups when upgrading. Some configuration changes hot-reload, while operations that replace installed code require a restart.
 
-See the [full configuration reference](https://github.com/0xMaxMa/claude-gateway/blob/main/README.md#configuration-reference) for optional fields. `gateway.orchestration` and `agents[].voice` described in the preview are **unreleased PR #465 settings**, absent from main's template.
+Continue with [gateway settings](./gateway-settings.md), [memory and knowledge settings](./memory-settings.md), [orchestration settings](./orchestration-settings.md), or [voice configuration](../guide/voice.md).
+
+## Enable orchestration
+
+`gateway.orchestration` is a single boolean, applying to every agent and channel. Per-agent `orchestration` holds tuning, not a second enable switch. Voice settings belong in `agents[].voice`. Enabling orchestration normalizes and persists `gateway.headless: true`. Linux is required for its process supervisor.
+
+```json
+{
+  "gateway": { "orchestration": true, "headless": true }
+}
+```
+
+For a new deployment, create the agent first using the wizard, then merge this block into the generated configuration. Use [voice setup](../guide/voice.md) to configure speech separately. `gateway.orchestration: false` retains the legacy conversation path and hides orchestration-only commands.
+
+## Applying changes
+
+- The config watcher reloads saved `config.json` changes. Agent changes can replace sessions; finish or coordinate active work first.
+- Changes to `~/.claude-gateway/.env` require a process restart. Per-agent environment files are loaded before config reload, but inherited variables can take precedence.
+- Voice settings changes apply to new voice connections and later replies; reconnect a live voice session to use the new settings consistently.
+- Code updates require a matching gateway/MCP deployment and restart; reloading JSON does not load new JavaScript.
+
+Do not copy an entire example over an existing config: this can discard agent entries, credentials, and unrelated settings. The API offers scoped updates to individual resources.

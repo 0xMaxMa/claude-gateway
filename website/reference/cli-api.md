@@ -36,7 +36,7 @@ curl --fail http://127.0.0.1:10850/api/v1/agents/assistant/messages \
   -d '{"message":"Introduce yourself in one sentence.","chat_id":"example-app"}'
 ```
 
-Save the returned session identifier if you need to continue that session; send it as `session_id` with the same `chat_id`. An unknown session ID returns `404`, rather than silently creating a different session. Add `"stream": true` and use `curl -N` for SSE; consume error events as well as text and completion events.
+Save the returned session identifier if you need to continue that session; send it as `session_id` with the same `chat_id`. An unknown session ID returns `404`, rather than silently creating a different session. Add `"stream": true` and use `curl -N` for SSE; consume error events as well as text and completion events. When `orchestration_enabled` is true, an acknowledgement can precede task completion. Continue observing [session activity](/api/orchestration#session-activity) and history for the eventual result.
 
 ## Find the right surface
 
@@ -45,8 +45,8 @@ Save the returned session identifier if you need to continue that session; send 
 | Agents and messages | `/api/v1/agents` |
 | Available models | `/api/v1/models` |
 | Session operations | `/api/v1/agents/:agentId/sessions` |
-| Cron jobs | `/v1/crons` |
-| App installation jobs | `/v1/apps` |
+| Cron jobs | `/api/v1/crons` |
+| App installation jobs | `/api/v1/apps` |
 | Generated route metadata | `/api/v1/_meta/routes` |
 
-The `/api/v1` and `/v1` prefixes vary by surface; use the documented route exactly. For full schemas, SSE events, error codes, and authorization rules, use [API.md](https://github.com/0xMaxMa/claude-gateway/blob/main/API.md). No API behavior is changed by this documentation site.
+The gateway mounts router-local `/v1/...` paths under `/api`, so public URLs use `/api/v1/...`. Root endpoints such as `/health` and `/dashboard` retain their own paths. Use the [HTTP API reference](/api/) for complete schemas, SSE events, error codes and authorization rules, including [tasks](/api/tasks), [voice](/api/voice), [apps](/api/apps) and [connectors](/api/connectors).

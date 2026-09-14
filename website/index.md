@@ -2,18 +2,24 @@
 layout: home
 hero:
   name: Claude Gateway
-  text: A home for your agents.
-  tagline: Connect Claude Code to your conversations, persistent knowledge, and everyday workflows. Self-hosted and built around your workspace.
+  text: Orchestrator. Voice. Multi‑channel.
+  tagline: A self-hosted orchestration, voice, and multi-channel platform for Claude Code. Claude Code inside — conversations, workers, tools, and persistent knowledge in one gateway.
   actions:
     - theme: brand
       text: Start your gateway
       link: /guide/quickstart
     - theme: alt
       text: Explore the API
-      link: /reference/cli-api
+      link: /api/
 features:
-  - title: One gateway, many conversations
-    details: Give each agent its own identity and workspace. Connect chat channels and keep sessions across restarts.
+  - title: Orchestrate work
+    details: Keep the conversation responsive while Claude Code workers run tasks, report progress, and handle follow-up instructions.
+    link: /guide/orchestration
+  - title: Talk naturally
+    details: Add speech recognition and spoken replies with per-agent voices, connected providers, and reusable audio playback.
+    link: /guide/voice
+  - title: Connect your channels
+    details: Reach agents through Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and your own API clients.
     link: /guide/channels
   - title: Knowledge that stays with you
     details: Combine focused core memory with a searchable archive, reusable skills, and scheduled consolidation.
@@ -21,7 +27,14 @@ features:
   - title: Workflows you can operate
     details: Schedule recurring jobs, host apps, inspect logs, and integrate through a local CLI or authenticated API.
     link: /guide/operations
+  - title: Claude Code runtime
+    details: Run agents and workers through Claude Code, with explicit tool profiles, host workspace policies, and isolated app containers.
+    link: /reference/architecture
 ---
+
+## Claude Code inside
+
+Claude Code runs the conversation agent and its workers. Claude Gateway coordinates their work, routes messages and tool activity across channels, manages speech, and preserves task results and knowledge. Host workers can handle research, browser actions, files, services, or code; installed app-agents retain their container boundary.
 
 ## Choose your next step
 
@@ -32,8 +45,7 @@ features:
 | Define an agent's behavior | [Agents and sessions](./guide/agents.md) |
 | Build an integration | [CLI and HTTP API](./reference/cli-api.md) |
 | Diagnose a running gateway | [Troubleshooting](./guide/troubleshooting.md) |
-| Evaluate delegated tasks or voice | [Unreleased orchestration preview](./preview/orchestration.md) |
+| Run tasks while staying in conversation | [Orchestration](./guide/orchestration.md) |
+| Add speech input and output | [Voice](./guide/voice.md) |
 
-::: info Version scope
-The guide describes repository `main` at `650dc67` (package version **1.8.14**). The separately marked preview pages describe **unreleased PR #465**, not features shipped on main. Check your installed version with `claude-gateway version`.
-:::
+This documentation covers the Agent Orchestration Engine, per-agent voice, and the gateway features alongside it. Check your installed version with `claude-gateway version`.

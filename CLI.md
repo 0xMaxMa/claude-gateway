@@ -1,7 +1,7 @@
 # Claude Gateway — CLI Reference
 
 > **Auto-generated from the route manifest** (`scripts/gen-cli.ts`). Do not edit by hand.
-> Every command is a thin client over the HTTP API; see `API.md` for the raw HTTP reference.
+> See the [HTTP API reference](https://0xmaxma.github.io/claude-gateway/api/) for integration protocols.
 
 The `claude-gateway` binary accepts friendly `<noun> <verb>` subcommands.
 
@@ -160,7 +160,7 @@ never mistaken for one.
 | `claude-gateway app uninstall <name> [--yes]` | Remove an app's containers and installed files (keeps backups) |
 | `claude-gateway app install <source> [--version <v>] [--commit <sha>] [--env KEY=VALUE,...] [--env-file <path>] [--ports NAME=PORT,...] [--wait]` | Install an app |
 
-A thin client over `/v1/apps` (see API.md's App Store section for the full HTTP reference) — every
+A thin client over `/v1/apps` (see the [Apps API](https://0xmaxma.github.io/claude-gateway/api/apps.html) for the full HTTP reference) — every
 action is the same admin-gated call the dashboard's App Store UI makes, so there is only one
 authorization/behavior path to keep correct.
 

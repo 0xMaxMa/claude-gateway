@@ -1,16 +1,12 @@
 # Orchestration and tasks
 
-::: warning Unreleased · PR #465
-This page documents the implementation under review in [PR #465](https://github.com/0xMaxMa/claude-gateway/pull/465). It is **not shipped on main**. Preview configuration, commands, and behavior may change before merge. Use a separate evaluation environment and keep gateway and MCP code on the same revision.
-:::
-
 ## What changes
 
 A managed conversation agent handles the conversation and delegates substantial work to workers. Work has a persistent task record, so you can inspect progress, results, and cancellation independently of a reply.
 
-The preview uses one boolean `gateway.orchestration` switch for all agents and connected channels. Per-agent `orchestration` contains conversation/task tuning. Omitted configuration uses legacy mode. Enabling orchestration sets and saves `gateway.headless: true`; interactive PTY mode is unsupported. The current process supervisor requires Linux; other platforms reject orchestration with `UNSUPPORTED_PROCESS_SUPERVISOR`.
+Orchestration uses one boolean `gateway.orchestration` switch for all agents and connected channels. Per-agent `orchestration` contains conversation/task tuning. Omitted configuration uses legacy mode. Enabling orchestration sets and saves `gateway.headless: true`; interactive PTY mode is unsupported. The current process supervisor requires Linux; other platforms reject orchestration with `UNSUPPORTED_PROCESS_SUPERVISOR`.
 
-In an evaluation configuration, retain all existing required fields and set `gateway.orchestration` to `true`. Check the [PR files](https://github.com/0xMaxMa/claude-gateway/pull/465/files) for the current template before tuning worker limits. Do not copy preview fields into a main installation expecting them to activate tasks.
+In your configuration, retain all existing required fields and set `gateway.orchestration` to `true`. See [orchestration settings](../reference/orchestration-settings.md) before tuning worker limits.
 
 ## Conversation intake
 
@@ -20,7 +16,7 @@ Executable work receives a contextual acknowledgement before task creation. Amen
 
 ## Inspect actual work
 
-After asking an agent to perform a bounded task, inspect it from the same authorized conversation. In supported private chats, `/tasks` opens task controls. Preview CLI equivalents are:
+After asking an agent to perform a bounded task, inspect it from the same authorized conversation. In supported private chats, `/tasks` opens task controls. CLI equivalents are:
 
 ```bash
 claude-gateway tasks list --agent assistant --session SESSION_ID
@@ -28,7 +24,7 @@ claude-gateway tasks show TASK_ID --agent assistant --session SESSION_ID
 claude-gateway tasks watch TASK_ID --agent assistant --session SESSION_ID
 ```
 
-Replace the IDs with real identifiers from your evaluation session. The principal must belong to the session. `tasks list --all` includes finished work; pagination uses zero-based `--page` and `--page-size` from 1 to 100 (default 10). Ctrl+C stops watching only.
+Replace the IDs with real identifiers from your session. The principal must belong to the session. `tasks list --all` includes finished work; pagination uses zero-based `--page` and `--page-size` from 1 to 100 (default 10). Ctrl+C stops watching only.
 
 Confirm success from the retained result and relevant files or checks. CPU/I/O movement is evidence of process activity, not proof of useful progress or passing tests. A tool marked `returned` only means a result arrived.
 
@@ -44,8 +40,8 @@ Cancellation preserves files and prior side effects. Before retrying interrupted
 
 ## Understand time limits
 
-The preview's `tasks.idleTimeoutMs` defaults to 300000 and marks quiet workers for inspection. It does not terminate them for silence alone. `tasks.maxDurationMs: 0` means no total deadline; a positive value is an explicit hard deadline. Startup and first-response budgets remain bounded.
+The `tasks.idleTimeoutMs` defaults to 300000 and marks quiet workers for inspection. It does not terminate them for silence alone. `tasks.maxDurationMs: 0` means no total deadline; a positive value is an explicit hard deadline. Startup and first-response budgets remain bounded.
 
 `ORCHESTRATION_DISABLED` indicates legacy mode. `PROFILE_INVENTORY_MISMATCH` indicates a subprocess exposed tools outside its profile: restore a consistent gateway/MCP revision and retain the inventory check.
 
-The preview covers text orchestration across Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and API conversations. WeChat staged attachments are unsupported. Voice channel support is narrower; see [voice](./voice.md).
+Orchestration covers text orchestration across Telegram, Discord, LINE, Slack, WhatsApp, WeChat, and API conversations. WeChat staged attachments are unsupported. Voice channel support is narrower; see [voice](./voice.md).
