@@ -166,3 +166,10 @@ HTTP phases apply to adapters using the shared HTTP helper. They do not identify
 The current Gemini adapter waits for the full provider JSON/audio result before yielding transport chunks. This explains why text can arrive well before audio. It describes the gateway implementation, not a universal restriction of the Gemini service. The gateway does not automatically retry a failed synthesis and risk duplicate or overlapping audio.
 
 The diagnostic payload contains metadata, not transcript text, audio, URLs or provider credentials. See [voice API](../api/voice.md) for error fields, ticket authentication, replay and client reconnect behavior. Static `allowedOrigins` configuration is obsolete; live voice uses authenticated tickets bound to the initiating origin.
+
+
+## Managed voice credits
+
+Select `managed:elevenlabs` or `managed:paxalabs` with a model from the authenticated provider service’s managed catalog. These routes use its daily voice wallet; direct providers and `upstream:<provider>` BYOK routes keep their own billing. There is no automatic switch between payers.
+
+When managed credits run out, channels quietly skip voice transcription and synthesis while text chat remains available. Saved voice preferences stay unchanged; a subsequent request checks the wallet again after reset. Browser clients should pause voice on `MANAGED_VOICE_QUOTA_EXHAUSTED` until credits become available. An unavailable wallet is a separate retryable error, not evidence that credits are exhausted. See the [Voice API](../api/voice.md#managed-voice-wallet-and-startup-recovery).
