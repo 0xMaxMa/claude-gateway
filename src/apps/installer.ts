@@ -1491,6 +1491,7 @@ export class AppInstaller {
    */
   async restoreRunningApps(
     pending?: AppEntry[],
+    onRestored?: (entry: AppEntry) => Promise<void>,
   ): Promise<{ attempted: number; failures: Array<{ app: string; error: string }> }> {
     const running = pending ?? (await this.markRestorePending());
     const failures: Array<{ app: string; error: string }> = [];
@@ -1517,6 +1518,7 @@ export class AppInstaller {
         try {
           await this.composeUpAsync(entry.name, entry.installPath);
           this.restoreFailures.delete(entry.name);
+          await onRestored?.(entry);
         } catch (err) {
           const error = (err as Error).message;
           failures.push({ app: entry.name, error });

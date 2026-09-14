@@ -130,6 +130,68 @@ describe('connectors-router — custom connectors', () => {
     return cfgPath;
   }
 
+  it('manages resources using stored credentials and requires admin access', async () => {
+    const app = makeApp(tmpConfig());
+    const added = await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey).send({
+      label: 'Browser resources', resourcesPath: '/v1/grants', defaultEnabled: false,
+      config: { type: 'http', url: 'https://relay.example/mcp', headers: { Authorization: 'Bearer {access_token}' } },
+      secrets: { access_token: 'resource-test-secret' },
+    });
+    expect(added.status).toBe(200);
+    const id = added.body.id;
+    await request(app).patch(`/api/v1/connectors/${id}/management`).set('X-Api-Key', scopedKey).send({ resourcesPath: '/other' }).expect(403);
+    await request(app).patch(`/api/v1/connectors/${id}/management`).set('X-Api-Key', adminKey).send({ resourcesPath: '/v2/grants' }).expect(200);
+    expect((await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey)).body.connectors[0].resourcesPath).toBe('/v2/grants');
+    await request(app).patch(`/api/v1/connectors/${id}/management`).set('X-Api-Key', adminKey).send({ resourcesPath: '/v1/grants' }).expect(200);
+    const remote = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({ grants: [{ id: 'grant-1' }] })));
+    try {
+      expect((await request(app).get(`/api/v1/connectors/${id}/resources`).set('X-Api-Key', scopedKey)).status).toBe(403);
+      expect(remote).not.toHaveBeenCalled();
+      const listed = await request(app).get(`/api/v1/connectors/${id}/resources`).set('X-Api-Key', adminKey);
+      expect(listed.body).toEqual({ grants: [{ id: 'grant-1' }] });
+      expect(remote).toHaveBeenCalledWith('https://relay.example/v1/grants', expect.objectContaining({ headers: { Authorization: 'Bearer resource-test-secret' }, redirect: 'error' }));
+      remote.mockResolvedValueOnce(new Response('{"ok":true}'));
+      expect((await request(app).delete(`/api/v1/connectors/${id}/resources/grant-1`).set('X-Api-Key', adminKey)).status).toBe(200);
+      expect(remote).toHaveBeenLastCalledWith('https://relay.example/v1/grants/grant-1', expect.objectContaining({ method: 'DELETE' }));
+      await request(app).delete(`/api/v1/connectors/${id}?remove=true`).set('X-Api-Key', adminKey).expect(200);
+      expect((await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey)).body.connectors).toEqual([]);
+    } finally { remote.mockRestore(); }
+  });
+
+  it('rejects resource paths that could change the configured origin or traverse it', async () => {
+    const app = makeApp(tmpConfig());
+    for (const resourcesPath of ['//evil.example', '/../secret', '/v1/%2e%2e', '/v1/grants?url=evil']) {
+      await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+        .send({ label: 'Invalid', resourcesPath, config: { url: 'https://relay.example/mcp' } }).expect(400);
+    }
+  });
+
+  it('advertises and persists per-connector opt-in without granting every agent access', async () => {
+    const cfgPath = tmpConfig();
+    const app = makeApp(cfgPath);
+    const before = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(before.body.capabilities.perConnectorDefaults).toBe(true);
+    const added = await request(app).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+      .send({ label: 'Remote browser', config: { type: 'http', url: 'https://browser.example/mcp' }, defaultEnabled: false });
+    expect(added.status).toBe(200);
+    expect(added.body.defaultEnabled).toBe(false);
+    const entries = JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors;
+    const { resolveEnabledConnectors } = require('../../src/connectors/resolve');
+    expect(resolveEnabledConnectors({}, entries)).toEqual({});
+    const listed = await request(app).get('/api/v1/connectors').set('X-Api-Key', adminKey);
+    expect(listed.body.connectors[0].defaultEnabled).toBe(false);
+    const status = await request(app).get('/api/v1/connectors/remote-browser/status').set('X-Api-Key', adminKey);
+    expect(status.body.defaultEnabled).toBe(false);
+  });
+
+  it('rejects non-boolean connector defaults before storing configuration', async () => {
+    const cfgPath = tmpConfig();
+    const response = await request(makeApp(cfgPath)).post('/api/v1/connectors/custom').set('X-Api-Key', adminKey)
+      .send({ label: 'Browser', config: { type: 'http', url: 'https://browser.example/mcp' }, defaultEnabled: 'false' });
+    expect(response.status).toBe(400);
+    expect(JSON.parse(fs.readFileSync(cfgPath, 'utf8')).gateway.customConnectors).toBeUndefined();
+  });
+
   it('non-admin cannot add a custom connector', async () => {
     const res = await request(makeApp(tmpConfig()))
       .post('/api/v1/connectors/custom')

@@ -159,7 +159,7 @@ async function callGetpodBrowser(
 const browserToolDefs: McpToolDefinition[] = [
   {
     name: 'browser_create_session',
-    description: 'Create or resume a browser session. Returns session status.',
+    description: 'Create or resume GetPod Cloud Browser, NOT the user Chrome or Remote Browser connector. Use only when Cloud Browser is selected, or no Remote Browser is connected for a generic browser request. Returns session status.',
     inputSchema: {
       type: 'object',
       properties: {

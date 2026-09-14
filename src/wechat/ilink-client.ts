@@ -99,6 +99,7 @@ export interface ILinkUpdate {
   image?: ILinkImageRef;
   /** Present when this message carries an inbound file (item type 4, e.g. a PDF). Download+decrypt via `downloadWeixinImage()`, same as an image. */
   file?: ILinkFileRef;
+  reply?: {messageId?:string;text?:string;image?:ILinkImageRef;file?:ILinkFileRef};
 }
 
 /** Resolved download target for an inbound image, from `resolveWeixinImageRef()`. */
@@ -312,6 +313,7 @@ interface GetQrcodeStatusResponse {
 }
 
 interface WeixinMessageItem {
+  ref_msg?: {svr_id?:string;title?:string;message_item?:WeixinMessageItem};
   type: number; // 1=text, 2=image, 3=voice, 4=file, 5=video, 11/12=tool-call
   text_item?: { text: string };
   /**
@@ -372,6 +374,16 @@ interface SendMessageResponse {
 /** Extract the first text item's body — image items are handled separately by resolveWeixinImageRef; voice/file/video are still ignored. */
 function textFromItems(items: WeixinMessageItem[] | undefined): string | undefined {
   return items?.find((i) => i.type === 1)?.text_item?.text;
+}
+
+/** Preserve the immediate quote only; nested quotes are not fresh user instructions. */
+export function resolveWeixinReply(items: WeixinMessageItem[] | undefined): ILinkUpdate['reply'] {
+  const ref=items?.find(item=>item.ref_msg)?.ref_msg;if(!ref)return;
+  const item=ref.message_item;
+  let image: ILinkImageRef|undefined,file:ILinkFileRef|undefined;
+  try { image=resolveWeixinImageRef(item?[item]:[]); } catch { /* Existing media URL guard applies. */ }
+  try { file=resolveWeixinFileRef(item?[item]:[]); } catch { /* Existing media URL guard applies. */ }
+  return {messageId:ref.svr_id===undefined?undefined:String(ref.svr_id),text:item?.text_item?.text??ref.title,image,file};
 }
 
 /**
@@ -676,6 +688,7 @@ export function createILinkClient(baseUrl?: string, botAgent?: string): ILinkCli
             id: m.message_id,
             fromId: m.from_user_id,
             text: textFromItems(m.item_list),
+            reply: resolveWeixinReply(m.item_list),
             timestamp: m.create_time_ms,
             contextToken: m.context_token,
             image,

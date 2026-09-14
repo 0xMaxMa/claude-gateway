@@ -474,3 +474,17 @@ describe('cli http-client request body deadline', () => {
     expect(onFallback).not.toHaveBeenCalled();
   });
 });
+
+
+test('external cancellation aborts the transport without retrying another gateway address', async () => {
+  const saved = global.fetch, controller = new AbortController(), fallback = jest.fn();
+  global.fetch = jest.fn((_url, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(Object.assign(Error('aborted'), { name: 'AbortError' })));
+  })) as unknown as typeof fetch;
+  try {
+    const pending = request({ method: 'GET', path: '/v1/tasks', baseUrl: 'http://fixture', fallbackBaseUrl: 'http://other', signal: controller.signal, onFallback: fallback });
+    controller.abort();
+    await expect(pending).rejects.toThrow('cancelled');
+    expect(global.fetch).toHaveBeenCalledTimes(1);expect(fallback).not.toHaveBeenCalled();
+  } finally {global.fetch = saved;}
+});

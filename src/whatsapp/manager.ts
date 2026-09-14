@@ -544,7 +544,7 @@ export class WhatsAppManager {
         }
       }
 
-      let content = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
+      let content = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? msg.message?.imageMessage?.caption ?? msg.message?.documentMessage?.caption ?? msg.message?.videoMessage?.caption ?? '';
       const meta: Record<string, string> = {
         source: 'whatsapp',
         chat_id: resolved.conversationId,
@@ -645,6 +645,28 @@ export class WhatsAppManager {
             error: (err as Error).message,
           });
         }
+      }
+
+      if (this.agentConfig.orchestration?.enabled) {
+        const stage = async (message: WAMessage, body: NonNullable<WAMessage['message']>, quoted: boolean) => {
+          const document=body.documentMessage, audio=body.audioMessage, video=body.videoMessage, image=body.imageMessage;
+          if(!document&&!audio&&!video&&!(quoted&&image))return;
+          try {
+            const stream=await this.baileys!.downloadMediaMessage(message,'stream',{options:{timeout:30000,signal:AbortSignal.timeout(30000)}});
+            const chunks: Buffer[]=[];let size=0;
+            for await(const chunk of stream){const bytes=Buffer.from(chunk);size+=bytes.length;if(size>MediaStore.maxUploadBytes){stream.destroy();throw new Error('Attachment exceeds limit');}chunks.push(bytes);}
+            const data=Buffer.concat(chunks);if(!data.length)throw new Error('Empty attachment');
+            const ext=document?path.extname(document.fileName??'').replace(/[^A-Za-z0-9.]/g,'').slice(0,12)||'.bin':audio?'.ogg':video?'.mp4':'.'+sniffImageExt(data);
+            const dest=path.join(os.tmpdir(),`whatsapp-media-${sanitizeFilenameId(message.key?.id)}-${Date.now()}${ext}`);
+            fs.writeFileSync(dest,data,{mode:0o600});
+            const items=JSON.parse(meta.attachments_json??'[]') as Array<unknown>;
+            if(!items.length&&meta.image_path)items.push({path:meta.image_path});
+            items.push({path:dest,name:document?.fileName,quoted});meta.attachments_json=JSON.stringify(items);meta.media_ephemeral='1';
+            if(!quoted){meta.image_path=dest;meta.attachment_name=document?.fileName??'';if(audio){meta.attachment_kind='voice';meta.media_type='audio';}else meta.attachment_kind='document';}
+          } catch { meta.attachment_error='An attached or quoted file could not be downloaded. Do not claim to have read it.'; }
+        };
+        if(msg.message)await stage(msg,msg.message,false);
+        if(quotedCtx?.quotedMessage)await stage({key:{remoteJid:msg.key?.remoteJid,id:quotedCtx.stanzaId,participant:quotedCtx.participant},message:quotedCtx.quotedMessage} as WAMessage,quotedCtx.quotedMessage as NonNullable<WAMessage['message']>,true);
       }
 
       try {

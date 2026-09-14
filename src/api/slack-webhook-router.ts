@@ -60,6 +60,8 @@ async function downloadSlackImage(
   botToken: string,
   fileUrl: string,
   fileId?: string,
+  audioMime?: string,
+  fileName?: string,
 ): Promise<string | null> {
   // Defence in depth: the signature check upstream already guarantees the event
   // (and thus `url_private`) is authentic Slack data, but never send the bot
@@ -68,7 +70,9 @@ async function downloadSlackImage(
   // shape, this stops the token from leaking to an attacker-chosen host.
   let host: string;
   try {
-    host = new URL(fileUrl).hostname;
+    const parsed=new URL(fileUrl);
+    if(parsed.protocol!=='https:'||parsed.username||parsed.password)throw Error('invalid file url');
+    host = parsed.hostname;
   } catch {
     throw new Error('invalid file url');
   }
@@ -76,7 +80,7 @@ async function downloadSlackImage(
     throw new Error(`refusing to send bot token to non-Slack host: ${host}`);
   }
 
-  const res = await fetch(fileUrl, { headers: { Authorization: `Bearer ${botToken}` } });
+  const res = await fetch(fileUrl, { headers: { Authorization: `Bearer ${botToken}` },redirect:'error',signal:AbortSignal.timeout(30000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
   // Cheap early reject on the declared length, then enforce the cap again while
@@ -106,8 +110,8 @@ async function downloadSlackImage(
   // Include the Slack file id (like LINE's `line-img-${messageId}-…`) so two
   // events landing in the same millisecond on a shared tmpdir can't collide.
   const suffix = fileId ? `${fileId}-${Date.now()}` : `${Date.now()}`;
-  const dest = path.join(os.tmpdir(), `slack-img-${suffix}.${sniffImageExt(buf)}`);
-  fs.writeFileSync(dest, buf);
+  const dest = path.join(os.tmpdir(), `slack-img-${suffix.replace(/[^A-Za-z0-9-]/g,'')}.${fileName?path.extname(fileName).replace(/[^A-Za-z0-9.]/g,'').slice(1,12)||'bin':audioMime?({'audio/mpeg':'mp3','audio/mp4':'m4a','audio/ogg':'ogg','audio/wav':'wav','audio/webm':'webm'} as Record<string,string>)[audioMime]??'audio':sniffImageExt(buf)}`);
+  fs.writeFileSync(dest, buf,{mode:0o600});
   return dest;
 }
 
@@ -139,8 +143,21 @@ interface SlackEventFile {
   id?: string;
   name?: string;
   mimetype?: string;
+  subtype?: string;
+  media_display_type?: string;
+  url_private_download?: string;
   /** Private download URL — needs the bot token as a bearer, not publicly fetchable. */
   url_private?: string;
+}
+
+function isSlackAudio(file:SlackEventFile):boolean {
+  return !!(file.mimetype?.startsWith('audio/')||file.subtype==='slack_audio'||file.media_display_type==='audio');
+}
+function slackAudioMime(file:SlackEventFile):string|undefined {
+  if(!isSlackAudio(file))return;
+  if(file.mimetype==='video/mp4')return 'audio/mp4';
+  if(file.mimetype==='video/webm')return 'audio/webm';
+  return file.mimetype?.startsWith('audio/')?file.mimetype:'audio/mp4';
 }
 
 interface SlackEvent {
@@ -203,7 +220,7 @@ export function normalizeSlackEvent(
     ts: event.event_ts ?? event.ts ?? '',
     slack_chat_type: r.kind, // 'user' | 'group'
   };
-  if (event.thread_ts) meta.thread_ts = event.thread_ts;
+  if (event.thread_ts) { meta.thread_ts = event.thread_ts; if(event.thread_ts !== event.ts)meta.replied_message_id=event.thread_ts; }
 
   return { content: stripBotMention(event.text ?? '', botUserId), meta };
 }
@@ -304,10 +321,30 @@ export function createSlackWebhookHandler(
 
     let payload: Record<string, unknown>;
     try {
-      payload = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
+      if(req.header('content-type')?.includes('application/x-www-form-urlencoded')){
+        const form=new URLSearchParams(buf.toString('utf8'));
+        payload=form.has('payload')?JSON.parse(form.get('payload')!):{...Object.fromEntries(form),type:'slash_command'};
+      }else payload = JSON.parse(buf.toString('utf8')) as Record<string, unknown>;
     } catch (err) {
       logger.warn('Slack webhook: bad JSON', { error: (err as Error).message });
       res.status(400).json({ error: 'bad JSON' });
+      return;
+    }
+
+    if(payload.type==='block_actions'||payload.type==='slash_command'){
+      const slash=payload.type==='slash_command',user=payload.user as {id?:string}|undefined,channel=payload.channel as {id?:string}|undefined;
+      const chatId=slash?String(payload.channel_id??''):channel?.id??'',userId=slash?String(payload.user_id??''):user?.id??'';
+      const actions=payload.actions as Array<{value?:string;action_id?:string}>|undefined;
+      const data=actions?.[0]?.value??actions?.[0]?.action_id??'';
+      const command=String(payload.command??'');
+      if(slash?!['/session','/sessions','/voice','/voices','/tasks','/stop','/help'].includes(command):!/^orch:[a-f0-9-]{36}$/.test(data)){res.status(200).json({text:'Unknown command.'});return;}
+      const resolved={conversationId:chatId,senderId:userId,kind:chatId.startsWith('D')?'user' as const:'group' as const};
+      if(!userId||!chatId||!isResolvedSourceAllowed(cfg,resolved)){res.status(200).json({response_type:'ephemeral',text:'Not authorized.'});return;}
+      const message=payload.message as {ts?:string;thread_ts?:string}|undefined;
+      res.status(200).end(); // Slack requires acknowledgement before catalog/network work.
+      try{
+        await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`,{method:'POST',headers:{'Content-Type':'application/json'},signal:AbortSignal.timeout(30000),body:JSON.stringify({content:slash?`${command} ${String(payload.text??'')}`.trim():`/orch ${data.slice(5)}`,meta:{source:'slack',chat_id:chatId,user_id:userId,slack_chat_type:resolved.kind,...(!slash&&message?.ts?{control_message_id:message.ts}:{}),...(message?.thread_ts?{thread_ts:message.thread_ts}:{})}})});
+      }catch{logger.warn('Slack control callback unavailable');}
       return;
     }
 
@@ -318,12 +355,14 @@ export function createSlackWebhookHandler(
       return;
     }
 
-    // Ack immediately (Slack retries if we don't respond within ~3s) — process after.
-    res.status(200).json({ ok: true });
-
+    // Orchestrated conversations retain durable admission while draining after opt-out.
+    const orchestrationConfig = runner.getAgentConfig().orchestration;
+    const durableIngress = runner.requiresDurableChannelIngress?.('slack') ?? (orchestrationConfig?.enabled && (orchestrationConfig.channels ?? ['api']).includes('slack'));
+    if (!durableIngress) res.status(200).json({ ok: true });
+    try {
     if (payload.type !== 'event_callback') return;
     const eventId = typeof payload.event_id === 'string' ? payload.event_id : '';
-    if (eventId && isDuplicateSlackEvent(eventId)) {
+    if (!durableIngress && eventId && isDuplicateSlackEvent(eventId)) {
       logger.debug('Slack webhook: duplicate event_id (Slack retry), skipping', { eventId });
       return;
     }
@@ -437,32 +476,50 @@ export function createSlackWebhookHandler(
     // LINE uses, so the runner persists it to MediaStore and tells the agent to
     // Read it. Best-effort: a failure only logs, the text turn still forwards.
     // Scope is images only; other file types are left alone for now.
-    const imageFile = event.files?.find(
-      (f) => typeof f.mimetype === 'string' && f.mimetype.startsWith('image/') && f.url_private,
-    );
-    if (token && imageFile?.url_private) {
+    const managed = !!(orchestrationConfig?.enabled && (orchestrationConfig.channels??['api']).includes('slack'));
+    let quoted: SlackEvent | undefined;
+    if(managed && token && norm.meta.replied_message_id){
+      try{
+        const response=await new SlackClient({botToken:token,logDir,apiBase:opts.apiBase}).threadRoot(resolved.conversationId,norm.meta.replied_message_id);
+        const messages=response.ok&&Array.isArray(response.messages)?response.messages as SlackEvent[]:[];
+        quoted=messages.find(message=>message.ts===norm.meta.replied_message_id);
+        if(quoted){norm.meta.replied_text=quoted.text??'';norm.meta.replied_user=quoted.user??quoted.bot_id??'';}
+      }catch{/* ID-only quote is resolved from scoped local history when possible. */}
+    }
+    const files = (event.files??[]).filter(f => (managed || f.mimetype?.startsWith('image/')) && (f.url_private_download||f.url_private)).slice(0,managed?10:1);
+    const quotedFiles=(quoted?.files??[]).filter(f=>f.url_private_download||f.url_private).slice(0,10);
+    const staged: Array<{path:string;name?:string;kind:string;quoted?:boolean}> = [];
+    if (token) for (const file of [...files,...quotedFiles]) {
       try {
-        const imgPath = await downloadSlackImage(token, imageFile.url_private, imageFile.id);
-        if (imgPath) norm.meta.image_path = imgPath;
-      } catch (err) {
-        logger.warn('Slack webhook: image download failed', {
-          fileId: imageFile.id,
-          error: (err as Error).message,
-        });
+        const mediaPath = await downloadSlackImage(token,file.url_private_download??file.url_private!,file.id,slackAudioMime(file),!file.mimetype?.startsWith('image/')&&!isSlackAudio(file)?file.name??'attachment.bin':undefined);
+        if (mediaPath) staged.push({path:mediaPath,name:file.name,quoted:quotedFiles.includes(file),kind:isSlackAudio(file)?'audio':file.mimetype?.startsWith('image/')?'image':'file'});
+      } catch {
+        norm.meta.attachment_error='One or more attached files could not be downloaded. Do not claim to have read them.';
+        logger.warn('Slack webhook: attachment download failed',{fileId:file.id});
       }
+    }
+    if (staged.length) {
+      norm.meta.image_path=staged[0].path; norm.meta.media_ephemeral='1';
+      if(managed)norm.meta.attachments_json=JSON.stringify(staged);
+      norm.meta.attachment_name=staged[0].name??'';
+      if(!staged[0].quoted&&staged[0].kind==='audio'){norm.meta.media_type='audio';norm.meta.attachment_kind='voice';if(!norm.content)norm.content='(voice message)';}
+      else if(staged[0].kind==='file'){norm.meta.media_type='file';norm.meta.attachment_kind='document';if(!norm.content)norm.content='(file attachment)';}
     }
 
     try {
-      await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`, {
+      const forwarded = await fetch(`http://127.0.0.1:${runner.getCallbackPort()}/channel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(norm),
       });
+      if (durableIngress && !forwarded.ok) throw new Error('Durable input admission failed');
     } catch (err) {
+      if (durableIngress && !res.headersSent) res.status(503).json({ error: 'Input admission unavailable' });
       logger.error('Slack webhook: failed to forward to callback', {
         error: (err as Error).message,
       });
     }
+    } finally { if (!res.headersSent) res.status(200).json({ ok: true }); }
   };
 
   return { verify, handlePost };

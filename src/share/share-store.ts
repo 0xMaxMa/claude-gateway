@@ -95,9 +95,9 @@ export function detectImageMime(header: Buffer): 'image/png' | 'image/jpeg' | 'i
  * safe: an `image` share whose file became a PDF still 404s, and an `any` share
  * whose file became HTML still 404s.
  */
-export type ShareAllowKind = 'image' | 'any';
+export type ShareAllowKind = 'image' | 'any' | 'audio';
 
-export const SHARE_ALLOW_KINDS: readonly ShareAllowKind[] = ['image', 'any'];
+export const SHARE_ALLOW_KINDS: readonly ShareAllowKind[] = ['image', 'any', 'audio'];
 
 export function isShareAllowKind(v: unknown): v is ShareAllowKind {
   return typeof v === 'string' && (SHARE_ALLOW_KINDS as readonly string[]).includes(v);
@@ -122,9 +122,17 @@ export function detectShareMime(header: Buffer): string | null {
   return detectImageMime(header) ?? (isPdf(header) ? 'application/pdf' : null);
 }
 
+/** Only explicit audio shares may serve MP3 or M4A, never arbitrary binary uploads. */
+export function detectAudioMime(header: Buffer): 'audio/mpeg' | 'audio/mp4' | null {
+  if(header.length>=12&&header.readUInt32BE(0)>=12&&header.subarray(4,8).toString()==='ftyp'&&header.subarray(8,12).toString()==='M4A ')return 'audio/mp4';
+  if(header.length>=10&&header.subarray(0,3).toString()==='ID3'&&[2,3,4].includes(header[3])&&Array.from(header.subarray(6,10)).every(v=>v<128))return 'audio/mpeg';
+  if(header.length>=4&&header[0]===255&&(header[1]&224)===224&&((header[1]>>3)&3)!==1&&((header[1]>>1)&3)===1&&(header[2]>>4)>0&&(header[2]>>4)<15&&((header[2]>>2)&3)!==3)return 'audio/mpeg';
+  return null;
+}
+
 /** Pick the sniffer that matches a share's allow-kind. */
 export function mimeDetectorFor(allow: ShareAllowKind): (header: Buffer) => string | null {
-  return allow === 'any' ? detectShareMime : detectImageMime;
+  return allow === 'audio' ? detectAudioMime : allow === 'any' ? detectShareMime : detectImageMime;
 }
 
 export type ValidatedShareFile = {

@@ -331,6 +331,19 @@ describe('resolve', () => {
     ).toEqual({});
   });
 
+  it('a private connector requires per-agent opt-in without widening gateway defaults', () => {
+    const { resolveEnabledConnectors, listConnectorStatus } = require('../../src/connectors/resolve');
+    const config = { type: 'http', url: 'https://browser.example/mcp' };
+    const connectors = { browser: { label: 'Browser', config, secretNames: [], credentialOwner: 'none', defaultEnabled: false } };
+    expect(resolveEnabledConnectors({}, connectors)).toEqual({});
+    expect(resolveEnabledConnectors({ connectors: { browser: { enabled: true } } }, connectors)).toEqual({ browser: config });
+    expect(resolveEnabledConnectors({ connectors: { browser: { enabled: false } } }, connectors)).toEqual({});
+    expect(listConnectorStatus(connectors)[0].defaultEnabled).toBe(false);
+    connectors.browser.defaultEnabled = true;
+    expect(resolveEnabledConnectors({}, connectors, false)).toEqual({});
+    expect(resolveEnabledConnectors({}, connectors)).toEqual({ browser: config });
+  });
+
   // Regression: the per-connector secrets map was a plain `{}`, so every
   // Object.prototype member was already "present" in it. substitutePlaceholders
   // does `secrets[name] ?? ''`, so a pasted config containing {constructor} or

@@ -132,6 +132,8 @@ describe('WhatsAppManager', () => {
     mockMakeWASocket.mockClear();
     mockUseMultiFileAuthState.mockClear();
     mockSaveCreds.mockClear();
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockImplementation(async()=>Buffer.from('fake-jpeg-bytes'));
     mockOptimizeImageFile.mockClear();
     mockOptimizeImageFile.mockImplementation(async (p: string) => p);
     fetchCalls = [];
@@ -468,6 +470,18 @@ describe('WhatsAppManager', () => {
       });
       await new Promise((r) => setImmediate(r));
       expect(fetchCalls).toHaveLength(1);
+    });
+
+    it('orchestration downloads a document and its quoted document with original filenames',async()=>{
+      agentConfig.whatsapp={accounts:[{id:'default',dmPolicy:'open'}]};agentConfig.orchestration={enabled:true};
+      mockDownloadMediaMessage.mockImplementation(async()=>require('stream').Readable.from([Buffer.from('%PDF-fixture')]));
+      await open();
+      listenerFor('messages.upsert')({type:'notify',messages:[{key:{remoteJid:'66811110000@s.whatsapp.net',id:'document'},message:{documentMessage:{fileName:'report.pdf',caption:'Compare these',contextInfo:{stanzaId:'old',quotedMessage:{documentMessage:{fileName:'old.pdf',caption:'Earlier file'}}}}}}]});
+      await waitUntil(()=>fetchCalls.length>0);
+      const body=fetchCalls[0].body as {content:string;meta:Record<string,string>};
+      expect(body.content).toBe('Compare these');expect(body.meta.replied_text).toBe('Earlier file');
+      const files=JSON.parse(body.meta.attachments_json);expect(files.map((f:any)=>f.name)).toEqual(['report.pdf','old.pdf']);expect(files[1].quoted).toBe(true);
+      for(const file of files)fs.rmSync(file.path,{force:true});
     });
 
     it('an inbound image is downloaded, sniffed, and set as meta.image_path', async () => {
